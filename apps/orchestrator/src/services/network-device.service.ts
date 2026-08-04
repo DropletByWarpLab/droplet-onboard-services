@@ -170,13 +170,39 @@ export function createNetworkDeviceService(
         ? { groups: { some: { id: opts.groupId } } }
         : undefined;
 
-      const [rows, snap] = await Promise.all([
+      const [rows, snap, infraAps] = await Promise.all([
         prisma.networkDevice.findMany({
           where,
           include: { groups: true },
         }),
         liveSnapshot().catch(() => ({ leases: [], wirelessClients: [] })),
+        // WARP-1712: our own flashed access points are INFRASTRUCTURE, not
+        // clients. They take a DHCP lease like anything else, so the
+        // reconciler rightly creates a NetworkDevice row for them — but
+        // rendering that row in the devices grid puts the same hardware in
+        // two places, where an operator can rename it in one and be confused
+        // by the other. The Coverage Extenders panel owns them; this list
+        // hides them.
+        //
+        // Scoped to DROPLET_IMAGE on purpose: those are the APs Droplet
+        // provisions and fully controls, so the extenders panel really is a
+        // complete home for them. A UNIFI / EASYMESH AP is third-party gear
+        // the operator may legitimately want to see, block or group as a
+        // network device, so those rows stay visible.
+        prisma.apDevice.findMany({
+          where: { backend: "DROPLET_IMAGE" },
+          select: { mac: true },
+        }),
       ]);
+
+      // Both tables store canonical MACs (every ingress goes through
+      // `normalizeMac`), but re-normalise anyway so a row written by an
+      // older/looser path can't slip the filter on case or separators.
+      const infraMacs = new Set<string>();
+      for (const ap of infraAps) {
+        const mac = safeNormalize(ap.mac);
+        if (mac) infraMacs.add(mac);
+      }
 
       // Build a MAC -> signal lookup from wireless clients (normalized).
       const signalByMac = new Map<string, number | undefined>();
@@ -186,20 +212,22 @@ export function createNetworkDeviceService(
       }
 
       const now = Date.now();
-      const enriched = rows.map((row) => {
-        const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
-        const signal = signalByMac.get(row.mac);
-        return {
-          ...row,
-          // WARP-106: computed display flag. `lastAppliedBlocked` is the
-          // ticker-authored source of truth; fall back to `manualBlock`
-          // (user intent) before the ticker has ever run. There is no
-          // reconciler-authored `isBlocked` column anymore.
-          isBlocked: row.lastAppliedBlocked ?? row.manualBlock,
-          online,
-          signal,
-        };
-      });
+      const enriched = rows
+        .filter((row) => !infraMacs.has(row.mac))
+        .map((row) => {
+          const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
+          const signal = signalByMac.get(row.mac);
+          return {
+            ...row,
+            // WARP-106: computed display flag. `lastAppliedBlocked` is the
+            // ticker-authored source of truth; fall back to `manualBlock`
+            // (user intent) before the ticker has ever run. There is no
+            // reconciler-authored `isBlocked` column anymore.
+            isBlocked: row.lastAppliedBlocked ?? row.manualBlock,
+            online,
+            signal,
+          };
+        });
 
       return opts.onlineOnly ? enriched.filter((d) => d.online) : enriched;
     }),

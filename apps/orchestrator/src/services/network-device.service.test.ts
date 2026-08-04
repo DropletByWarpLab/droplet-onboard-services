@@ -64,6 +64,8 @@ function makePrismaMock() {
   const devices = new Map<string, DeviceRow>();
   const groups = new Map<string, GroupRow>();
   const presence: PresenceRow[] = [];
+  // WARP-1712: ApDevice rows, keyed by canonical MAC.
+  const apDevices = new Map<string, { mac: string; backend: string }>();
 
   function hydrateDevice(row: DeviceRow, include?: any): any {
     const out: any = { ...row };
@@ -114,6 +116,19 @@ function makePrismaMock() {
       if (!row) throw new Error("not found");
       devices.delete(where.mac);
       return row;
+    }),
+  };
+
+  // WARP-1712: `listDevices` reads the AP table so our own flashed access
+  // points are hidden from the client-devices grid (they belong to the
+  // Coverage Extenders panel). Seed rows via `apDevices` in a test.
+  const apDevice = {
+    findMany: vi.fn(async (args: any = {}) => {
+      let rows = Array.from(apDevices.values());
+      if (args.where?.backend) {
+        rows = rows.filter((r) => r.backend === args.where.backend);
+      }
+      return rows.map((r) => ({ ...r }));
     }),
   };
 
@@ -182,10 +197,11 @@ function makePrismaMock() {
   };
 
   return {
-    prisma: { networkDevice, deviceGroup } as any,
+    prisma: { networkDevice, deviceGroup, apDevice } as any,
     devices,
     groups,
     presence,
+    apDevices,
   };
 }
 
@@ -211,6 +227,7 @@ describe("network-device.service", () => {
   let devices: ReturnType<typeof makePrismaMock>["devices"];
   let groups: ReturnType<typeof makePrismaMock>["groups"];
   let presence: ReturnType<typeof makePrismaMock>["presence"];
+  let apDevices: ReturnType<typeof makePrismaMock>["apDevices"];
   let svc: ReturnType<typeof createNetworkDeviceService>;
   let snapshot: {
     leases: Array<{ mac: string; ip: string; hostname?: string }>;
@@ -223,6 +240,7 @@ describe("network-device.service", () => {
     devices = mock.devices;
     groups = mock.groups;
     presence = mock.presence;
+    apDevices = mock.apDevices;
     snapshot = { leases: [], wirelessClients: [] };
     // Pass the no-op cache explicitly so these tests keep observing the
     // direct Prisma-backed behavior they were written against. The
@@ -319,6 +337,73 @@ describe("network-device.service", () => {
       expect(by.get("AA:BB:CC:DD:EE:02")!.isBlocked).toBe(true);
       // ticker is source of truth — applied=false overrides stale intent.
       expect(by.get("AA:BB:CC:DD:EE:03")!.isBlocked).toBe(false);
+    });
+
+    /**
+     * WARP-1712 — our own flashed APs are infrastructure, not clients. They
+     * take a DHCP lease like anything else so the reconciler creates a
+     * NetworkDevice row for them, but the Coverage Extenders panel owns them;
+     * showing the same hardware in both places lets an operator rename it in
+     * one and be confused by the other.
+     */
+    describe("Droplet AP dedupe", () => {
+      it("hides a DROPLET_IMAGE access point from the devices list", async () => {
+        devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
+        devices.set("AA:BB:CC:DD:EE:A0", makeDevice({ mac: "AA:BB:CC:DD:EE:A0" }));
+        apDevices.set("AA:BB:CC:DD:EE:A0", {
+          mac: "AA:BB:CC:DD:EE:A0",
+          backend: "DROPLET_IMAGE",
+        });
+
+        const list = await svc.listDevices();
+        expect(list.map((d: any) => d.mac)).toEqual(["AA:BB:CC:DD:EE:01"]);
+      });
+
+      it("normalises case and separators before matching", async () => {
+        devices.set("AA:BB:CC:DD:EE:AB", makeDevice({ mac: "AA:BB:CC:DD:EE:AB" }));
+        // A row written by a looser path — lowercase, dash-separated.
+        apDevices.set("legacy", {
+          mac: "aa-bb-cc-dd-ee-ab",
+          backend: "DROPLET_IMAGE",
+        });
+
+        const list = await svc.listDevices();
+        expect(list).toHaveLength(0);
+      });
+
+      it("keeps third-party (UniFi / EasyMesh) APs visible as devices", async () => {
+        // Not ours to fully control, so the operator may legitimately want to
+        // see, block or group them — the explicit backend filter is the gate.
+        devices.set("AA:BB:CC:DD:EE:C1", makeDevice({ mac: "AA:BB:CC:DD:EE:C1" }));
+        apDevices.set("AA:BB:CC:DD:EE:C1", {
+          mac: "AA:BB:CC:DD:EE:C1",
+          backend: "UNIFI",
+        });
+
+        const list = await svc.listDevices();
+        expect(list.map((d: any) => d.mac)).toEqual(["AA:BB:CC:DD:EE:C1"]);
+      });
+
+      it("hides the AP under onlineOnly and groupId filters too", async () => {
+        devices.set("AA:BB:CC:DD:EE:A0", makeDevice({
+          mac: "AA:BB:CC:DD:EE:A0",
+          lastSeen: new Date(),
+          groupIds: ["grp-a"],
+        }));
+        apDevices.set("AA:BB:CC:DD:EE:A0", {
+          mac: "AA:BB:CC:DD:EE:A0",
+          backend: "DROPLET_IMAGE",
+        });
+
+        expect(await svc.listDevices({ onlineOnly: true })).toHaveLength(0);
+        expect(await svc.listDevices({ groupId: "grp-a" })).toHaveLength(0);
+      });
+
+      it("leaves the list untouched when no APs are onboarded", async () => {
+        devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
+        const list = await svc.listDevices();
+        expect(list).toHaveLength(1);
+      });
     });
   });
 

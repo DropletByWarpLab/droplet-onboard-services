@@ -63,6 +63,14 @@ vi.mock("../services/ap-onboard.service.js", () => {
     ApOnboardError,
     getBandSteering: vi.fn().mockResolvedValue({ supported: true, enabled: true }),
     setBandSteering: vi.fn().mockResolvedValue({ operationId: "op-bs" }),
+    // WARP-1712: also imported by network-wifi.routes.ts.
+    getApWifi: vi.fn().mockResolvedValue({
+      supported: false, ssid: null, fiveGhzSsid: null, key: null,
+      encryption: null, bandSteering: null, apCount: 0, inSync: true,
+    }),
+    setApWifi: vi
+      .fn()
+      .mockResolvedValue({ operationId: null, ssid: null, fiveGhzSsid: null }),
   };
 });
 

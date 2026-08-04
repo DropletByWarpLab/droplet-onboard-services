@@ -21,6 +21,8 @@ import {
   ApOnboardError,
   getBandSteering,
   setBandSteering,
+  getApWifi,
+  setApWifi,
 } from "../services/ap-onboard.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
@@ -290,6 +292,115 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
 
       const op = await setBandSteering(prisma, enabled);
       res.json({ status: "ok", enabled, tier: result.tier, operationId: op.operationId });
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  });
+
+  // WARP-1712: the ACCESS POINT's own network name + passphrase, so the
+  // Network tab drives the AP as well as the router.
+  //
+  // owner/admin ONLY on the READ — unlike the band-steering read, the body
+  // carries the live Wi-Fi passphrase so the dashboard can reveal it instead
+  // of sending someone to ssh. Same posture as GET /network/wifi/guest, which
+  // carries the guest PSK for the join QR.
+  //
+  // Nothing is cached: the service dials the AP every time, so this response
+  // and the Coverage Extenders card can never drift apart.
+  router.get("/network/wifi/ap", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      res.json(await getApWifi(prisma));
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  });
+
+  // WARP-1712: write. owner/admin only, and the tier follows the ROUTER's
+  // established split rather than inventing a new posture:
+  //   * name only     → `set_ap_wifi_ssid`     — Tier 1, applies immediately
+  //                      (matches `set_ssid`, the setup-wizard contract);
+  //   * password (±name) → `set_ap_wifi_password` — Tier 2, confirm first
+  //                      (matches `set_wifi_password` — every device on the
+  //                      AP has to re-authenticate with a new secret).
+  // A save carrying both is evaluated at the stronger of the two, so the
+  // confirm always covers the whole change.
+  //
+  // No MCP principal: there is no AP-Wi-Fi tool, and renaming the household
+  // network is a deliberate admin action, not an AI-driven one.
+  router.put("/network/wifi/ap", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { ssid, key } = req.body ?? {};
+      if (ssid !== undefined && typeof ssid !== "string") {
+        return res.status(400).json({ error: "`ssid` must be a string" });
+      }
+      if (key !== undefined && typeof key !== "string") {
+        return res.status(400).json({ error: "`key` must be a string" });
+      }
+      if (ssid === undefined && key === undefined) {
+        return res
+          .status(400)
+          .json({ error: "Provide a network name and/or password — nothing to change." });
+      }
+      // Mirror services/routing/main.py `_validate_ap_wireless` so the box
+      // never sees a payload its hostapd would reject. SSID is capped in
+      // BYTES — the 802.11 element is 32 octets.
+      if (ssid !== undefined) {
+        const bytes = Buffer.byteLength(ssid, "utf8");
+        if (bytes < 1 || bytes > 32) {
+          return res
+            .status(400)
+            .json({ error: "Network name (SSID) must be 1–32 bytes." });
+        }
+      }
+      if (key !== undefined && (key.length < 8 || key.length > 63)) {
+        return res
+          .status(400)
+          .json({ error: "Wi-Fi password must be 8–63 characters." });
+      }
+
+      const operation = key !== undefined ? "set_ap_wifi_password" : "set_ap_wifi_ssid";
+      const userId = req.user?.id;
+      // The params ride the pending-confirmation record, because the Tier-2
+      // confirm executes in a SEPARATE request and the dispatcher in
+      // network-status.routes.ts replays them — exactly how set_wifi_password
+      // and create_guest_network already carry their secrets.
+      const result = await evaluateNetworkCommand(
+        prisma,
+        "wireless.ap",
+        operation,
+        { ssid, key },
+        userId,
+      );
+
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          operation,
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
+
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+
+      const op = await setApWifi(prisma, { ssid, key });
+      res.json({
+        status: "ok",
+        tier: result.tier,
+        ssid: op.ssid,
+        fiveGhzSsid: op.fiveGhzSsid,
+        operationId: op.operationId,
+      });
     } catch (err) {
       if (err instanceof ApOnboardError) {
         return res.status(err.status).json({ error: err.message, code: err.code });

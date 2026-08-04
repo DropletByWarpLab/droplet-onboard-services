@@ -49,6 +49,15 @@ const TIER_2_OPERATIONS = new Set([
   // across every ONLINE Droplet-image AP at once, so the blast radius is the
   // whole household, not one device.
   "set_ap_band_steering",
+  // WARP-1712 — changing the ACCESS POINT's passphrase, mirroring
+  // `set_wifi_password` on the router: the radios restart and every device on
+  // the extender has to re-authenticate with the new secret, across every
+  // ONLINE Droplet-image AP at once. Its sibling `set_ap_wifi_ssid` is
+  // deliberately absent from this set: an SSID-only change matches the
+  // router's Tier-1 `set_ssid` (same blast radius, same setup-wizard
+  // contract). The route picks whichever operation the payload warrants, so a
+  // save that carries a new password is always confirmed.
+  "set_ap_wifi_password",
   "create_firewall_zone",
   "add_firewall_rule",
   // Rewriting a zone's default input/output/forward policy can sever the
@@ -135,6 +144,8 @@ const BLAST_RADIUS_REASON: Record<string, string> = {
     "Restarting networking briefly drops every interface and reconnects each device — this dashboard included — for a few seconds.",
   set_ap_band_steering:
     "This renames your 5 GHz Wi-Fi network on every access point at once. Devices connected to it will drop and won't come back on their own — you'll need to reconnect each one to the new name.",
+  set_ap_wifi_password:
+    "This changes the Wi-Fi password on your access point. Every device connected to it will drop and won't come back on their own — you'll need to reconnect each one with the new password.",
 };
 
 /** Rate limit for network commands: max per entity per minute. */
