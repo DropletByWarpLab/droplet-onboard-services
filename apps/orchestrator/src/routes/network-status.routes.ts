@@ -53,6 +53,9 @@ import {
   getNetworkAuditLog,
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
+// WARP-1703 — band steering is Tier 2, so its write executes on the confirm
+// path rather than in the PUT handler.
+import { setBandSteering } from "../services/ap-onboard.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -754,6 +757,13 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         case "set_upnp":
           // Tier-2 confirm for POST /network/upnp.
           writeResult = await setUpnp(params?.enabled as boolean);
+          break;
+        case "set_ap_band_steering":
+          // WARP-1703 — Tier-2 confirm for PUT /network/wifi/band-steering.
+          // This is where the 5 GHz SSID rename actually fires, and where the
+          // service's honest 422 (AP_BAND_STEERING_UNAVAILABLE) surfaces: the
+          // PUT only mints the token, so nothing reaches the APs until here.
+          writeResult = await setBandSteering(prisma, params?.enabled as boolean);
           break;
         case "set_dhcp_pool":
           // Tier-2 confirm for POST /network/dhcp/pool. The route validated the

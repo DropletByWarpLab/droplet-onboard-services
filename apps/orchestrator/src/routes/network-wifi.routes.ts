@@ -252,9 +252,13 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     }
   });
 
-  // WARP-1703: band-steering write — owner/admin only, Tier 1
-  // (set_ap_band_steering, same posture as set_channel: reversible, drops no
-  // household device permanently — a steered client just re-picks its band).
+  // WARP-1703: band-steering write — owner/admin only, Tier 2
+  // (set_ap_band_steering, classified in network-safety-rules.ts). NOT
+  // set_channel-shaped: the AP applier renames the 5 GHz SSID to `<ssid>-5g`
+  // when steering is off, so flipping this drops every 5 GHz client onto a
+  // network name that no longer exists and each one must be reconnected by
+  // hand — and the write fans out to every ONLINE AP at once. Confirmation is
+  // required, same as set_wifi_password / create_guest_network.
   // No MCP principal: there is no band-steering tool yet; this is a
   // deliberate household-admin toggle in the dashboard.
   router.put("/network/wifi/band-steering", requireRole("owner", "admin"), async (req, res, next) => {
@@ -268,6 +272,17 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       const result = await evaluateNetworkCommand(
         prisma, "wireless.band_steering", "set_ap_band_steering", { enabled }, userId
       );
+
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          operation: "set_ap_band_steering",
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
 
       if ("blocked" in result && result.blocked) {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });

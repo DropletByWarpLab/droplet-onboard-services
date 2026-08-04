@@ -15,9 +15,15 @@ vi.mock("@/lib/api", () => ({
   fetchBandSteering: vi.fn(),
   setBandSteering: vi.fn(),
   fetchNetworkOperation: vi.fn(),
+  confirmNetworkCommand: vi.fn(),
 }));
 
-import { fetchBandSteering, setBandSteering } from "@/lib/api";
+import {
+  fetchBandSteering,
+  setBandSteering,
+  fetchNetworkOperation,
+  confirmNetworkCommand,
+} from "@/lib/api";
 import { BandSteeringCard } from "../BandSteeringCard";
 
 function renderCard() {
@@ -96,23 +102,41 @@ describe("BandSteeringCard write path", () => {
     expect(setBandSteering).toHaveBeenCalledWith(true);
   });
 
-  it("a successful Tier-1 write dispatches immediately and refreshes", async () => {
+  // WARP-1703 review: the write is Tier 2 (flipping it renames the 5 GHz SSID
+  // and drops every device on that band), so the orchestrator answers 202 and
+  // the card must complete the two-step before anything reaches the APs.
+  it("a Tier-2 write confirms the token, then polls the operation", async () => {
     (fetchBandSteering as ReturnType<typeof vi.fn>).mockResolvedValue({
       supported: true,
       enabled: false,
     });
     (setBandSteering as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: "ok",
-      enabled: true,
-      tier: 1,
-      operationId: null,
+      status: "confirmation_required",
+      operation: "set_ap_band_steering",
+      tier: 2,
+      confirmationToken: "tok-bs",
+      expiresIn: 60,
+    });
+    (confirmNetworkCommand as ReturnType<typeof vi.fn>).mockResolvedValue({
+      operationId: "op-bs",
+    });
+    (fetchNetworkOperation as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: "applied",
     });
     renderCard();
     await waitFor(() => expect(screen.getByRole("switch")).toBeTruthy());
 
     fireEvent.click(screen.getByRole("switch"));
 
-    await waitFor(() => expect(setBandSteering).toHaveBeenCalledWith(true));
+    await waitFor(() =>
+      expect(confirmNetworkCommand).toHaveBeenCalledWith(
+        "tok-bs",
+        "set_ap_band_steering",
+      ),
+    );
+    await waitFor(() =>
+      expect(fetchNetworkOperation).toHaveBeenCalledWith("op-bs"),
+    );
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

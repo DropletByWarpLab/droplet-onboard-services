@@ -4,6 +4,7 @@ import { useState } from "react";
 import useSWR from "swr";
 import { RadioTower, AlertTriangle } from "lucide-react";
 import {
+  confirmNetworkCommand,
   fetchBandSteering,
   fetchNetworkOperation,
   setBandSteering,
@@ -17,12 +18,17 @@ import { ToggleSwitch } from "@/components/smart-home/ToggleSwitch";
  * The external Droplet AP's 802.11k/v steering master switch
  * (`droplet.wifi.band_steering`): on, the AP unifies its bands under one
  * network name and nudges each device to the best band; off, the bands stay
- * split and devices park where they first joined. The card reflects the AP's
- * REAL state (GET /api/network/wifi/band-steering): with no approved Droplet
- * AP online it shows a calm read-only "not available" line rather than a fake
- * toggle (the UpnpCard honesty contract). Toggling is Tier 1 — it applies
- * immediately and the card polls the routing operation for the
- * apply-vs-rollback outcome.
+ * split and the 5 GHz band takes a separate `-5g` name. The card reflects the
+ * AP's REAL state (GET /api/network/wifi/band-steering): with no approved
+ * Droplet AP online it shows a calm read-only "not available" line rather than
+ * a fake toggle (the UpnpCard honesty contract).
+ *
+ * Toggling is **Tier 2**, because that `-5g` rename is a network-IDENTITY
+ * change: every device on the 5 GHz band drops and has to be reconnected by
+ * hand to a name that didn't exist a moment ago, across every online AP at
+ * once. So the orchestrator answers 202 + a token and this card confirms
+ * before applying — the same two-step UpnpCard uses — then polls the routing
+ * operation for the apply-vs-rollback outcome.
  */
 export function BandSteeringCard() {
   const { data, isLoading, mutate } = useSWR<BandSteeringStatus>(
@@ -58,7 +64,19 @@ export function BandSteeringCard() {
     setError(null);
     try {
       const result = await setBandSteering(next);
-      if (result.operationId) await pollOperation(result.operationId);
+      if (
+        result.status === "confirmation_required" &&
+        result.confirmationToken &&
+        result.operation
+      ) {
+        const { operationId } = await confirmNetworkCommand(
+          result.confirmationToken,
+          result.operation,
+        );
+        if (operationId) await pollOperation(operationId);
+      } else if (result.operationId) {
+        await pollOperation(result.operationId);
+      }
       await mutate();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't update band steering.");

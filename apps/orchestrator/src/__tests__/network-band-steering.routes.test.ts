@@ -1,12 +1,18 @@
 /**
  * WARP-1703 — band-steering route ↔ safety-tier contract (anti-drift).
  *
- * The write is deliberately Tier 1 (same posture as set_channel: reversible,
- * no permanent device drop — a steered client just re-picks its band), so the
- * route must dispatch immediately (never a 202 confirm arm). These pin that
- * from both ends — the operation string classifies to Tier 1, and the route
- * dispatches the service write on the same request — plus the read's honesty
- * envelope, body validation, RBAC, and the 422 unavailable pass-through.
+ * The write is Tier 2, NOT set_channel-shaped. The AP-side applier
+ * (droplet-edge-router `/etc/init.d/droplet-band-steer`) points
+ * `wireless.default_radio1.ssid` at the 2.4 GHz SSID when steering is on and
+ * at `<ssid>-5g` when it is off, so a flip RENAMES the 5 GHz network: every
+ * device on that band drops and must be reconnected by hand — and the
+ * orchestrator fans the write across every ONLINE AP at once. That is the
+ * create_guest_network / set_wifi_password cost, not the set_channel one.
+ *
+ * These pin it from both ends — the operation string classifies to Tier 2
+ * with confirmation, and the route answers 202 + token WITHOUT dispatching —
+ * plus the read's honesty envelope, body validation, RBAC, and the 422
+ * unavailable pass-through.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -106,11 +112,19 @@ beforeEach(() => {
   setBandSteering.mockResolvedValue({ operationId: "op-bs" });
 });
 
-describe("set_ap_band_steering classifies to Tier 1", () => {
-  it("auto-executes — no confirmation arm", () => {
+describe("set_ap_band_steering classifies to Tier 2", () => {
+  it("requires confirmation — it renames the 5 GHz SSID", () => {
     const c = classifyNetworkCommand("set_ap_band_steering");
-    expect(c.tier).toBe(1);
-    expect(c.requiresConfirmation).toBe(false);
+    expect(c.tier).toBe(2);
+    expect(c.requiresConfirmation).toBe(true);
+  });
+
+  it("carries blast-radius copy that names the reconnect cost", () => {
+    const c = classifyNetworkCommand("set_ap_band_steering");
+    // Not the generic "requires confirmation" fallback — the household has to
+    // be told devices drop and won't come back on their own.
+    expect(c.reason).toMatch(/reconnect/i);
+    expect(c.reason).not.toMatch(/^Network operation/);
   });
 });
 
@@ -133,20 +147,20 @@ describe("GET /api/network/wifi/band-steering", () => {
 });
 
 describe("PUT /api/network/wifi/band-steering", () => {
-  it("Tier 1: dispatches immediately — 200 with operationId, never a 202", async () => {
+  it("Tier 2: answers 202 + token and does NOT dispatch the write", async () => {
     const res = await request(buildApp())
       .put("/api/network/wifi/band-steering")
       .send({ enabled: false });
 
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      status: "ok",
-      enabled: false,
-      tier: 1,
-      operationId: "op-bs",
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      status: "confirmation_required",
+      operation: "set_ap_band_steering",
+      tier: 2,
     });
-    expect(setBandSteering).toHaveBeenCalledOnce();
-    expect(setBandSteering).toHaveBeenCalledWith(expect.anything(), false);
+    expect(res.body.confirmationToken).toBeTruthy();
+    // The load-bearing assertion: the SSID rename must not have happened yet.
+    expect(setBandSteering).not.toHaveBeenCalled();
   });
 
   it("rejects a non-boolean enabled with 400 and never dispatches", async () => {
@@ -173,14 +187,21 @@ describe("PUT /api/network/wifi/band-steering", () => {
     expect(setBandSteering).not.toHaveBeenCalled();
   });
 
-  it("admits an admin", async () => {
+  it("admits an admin (202, same confirm arm as the owner)", async () => {
     const res = await request(buildAppAsRole("admin"))
       .put("/api/network/wifi/band-steering")
       .send({ enabled: true });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe("confirmation_required");
   });
 
-  it("surfaces the service's honest 422 (AP_BAND_STEERING_UNAVAILABLE) verbatim", async () => {
+  // The service's honest 422 (AP_BAND_STEERING_UNAVAILABLE) no longer surfaces
+  // here: under Tier 2 the PUT only mints a token and never touches the APs,
+  // so an unavailable AP can only be discovered on the confirm path — which is
+  // where setBandSteering now runs (network-status.routes.ts). Pinning that the
+  // PUT stays 202 even when the service would reject is what stops someone
+  // "fixing" the tier by moving the dispatch back into this handler.
+  it("still answers 202 — never pre-dispatches to discover a 422", async () => {
     setBandSteering.mockRejectedValue(
       new ApOnboardError(
         "Band steering isn't available — no approved Droplet access point is online.",
@@ -191,8 +212,7 @@ describe("PUT /api/network/wifi/band-steering", () => {
     const res = await request(buildApp())
       .put("/api/network/wifi/band-steering")
       .send({ enabled: true });
-    expect(res.status).toBe(422);
-    expect(res.body.code).toBe("AP_BAND_STEERING_UNAVAILABLE");
-    expect(res.body.error).toMatch(/no approved droplet access point/i);
+    expect(res.status).toBe(202);
+    expect(setBandSteering).not.toHaveBeenCalled();
   });
 });

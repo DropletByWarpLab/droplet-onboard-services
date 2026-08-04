@@ -38,6 +38,17 @@ const TIER_2_OPERATIONS = new Set([
   "set_hostname",
   // UPnP/NAT-PMP automatic port opening — a firewall-class exposure change.
   "set_upnp",
+  // WARP-1703 — band steering is an SSID-IDENTITY change, not a frequency
+  // one, so it belongs beside set_wifi_password rather than set_channel.
+  // The AP-side applier (droplet-edge-router `/etc/init.d/droplet-band-steer`)
+  // sets `wireless.default_radio1.ssid` to the 2.4 GHz SSID when ON and to
+  // `<ssid>-5g` when OFF. Flipping it therefore RENAMES the 5 GHz network:
+  // every client associated on that band drops and has to be reconnected by
+  // hand to a differently-named SSID — the same "re-auth every device" cost
+  // that put create_guest_network here. And the orchestrator fans the write
+  // across every ONLINE Droplet-image AP at once, so the blast radius is the
+  // whole household, not one device.
+  "set_ap_band_steering",
   "create_firewall_zone",
   "add_firewall_rule",
   // Rewriting a zone's default input/output/forward policy can sever the
@@ -122,6 +133,8 @@ const BLAST_RADIUS_REASON: Record<string, string> = {
     "Editing a network interface can disconnect devices on it. If it's the interface this dashboard is on, you could lose your connection until it reverts.",
   restart_network:
     "Restarting networking briefly drops every interface and reconnects each device — this dashboard included — for a few seconds.",
+  set_ap_band_steering:
+    "This renames your 5 GHz Wi-Fi network on every access point at once. Devices connected to it will drop and won't come back on their own — you'll need to reconnect each one to the new name.",
 };
 
 /** Rate limit for network commands: max per entity per minute. */
