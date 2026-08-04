@@ -5,7 +5,11 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["src/**/*.test.ts"],
-    setupFiles: ["src/__tests__/setup.ts"],
+    setupFiles: [
+      "src/__tests__/setup.ts",
+      // WARP-1690 — makes supertest bind the loopback address it dials.
+      "src/__tests__/supertest-loopback.setup.ts",
+    ],
     testTimeout: 10000,
     // WARP-1584 — child processes, not worker threads.
     //
