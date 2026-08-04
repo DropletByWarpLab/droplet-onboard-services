@@ -74,6 +74,10 @@ def _isolated_reconnect_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
         raise ConnectionLost("test double: no real OpenWrt router in the test suite")
 
     monkeypatch.setattr(main, "DropletRouter", _fails_fast)
+    # WARP-1673: the failure-kind classifier is process-global on main, same as
+    # `router_instance` — reset it so an auth-failure test can never leak the
+    # typed 502 into a neighbour expecting the plain 503.
+    monkeypatch.setattr(main, "_last_connect_failure", None)
     monkeypatch.setattr(
         main,
         "reconnect_coordinator",

@@ -35,8 +35,13 @@ describe("MaintenanceCards owner-only honest informational surface", () => {
     useAuthMock.mockReturnValue({ user: { role: "owner" } });
     render(<MaintenanceCards />);
     expect(screen.getByText("Firmware")).toBeTruthy();
+    // WARP-1676 (ADR-033): the copy must stay true on BOTH shapes — appliance
+    // updates on the all-in-one, external router tooling on edge-router.
     expect(
-      screen.getByText(/ship with appliance updates/i),
+      screen.getByText(/ships with appliance updates/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/isn't managed from this page/i),
     ).toBeTruthy();
     expect(screen.getByText("Factory reset")).toBeTruthy();
     expect(

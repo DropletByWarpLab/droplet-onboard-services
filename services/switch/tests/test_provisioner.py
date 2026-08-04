@@ -1,7 +1,7 @@
 """Unit tests for the bring-up provisioner (ADR-018 action item 9).
 
 Every test runs against the in-memory FakeSwitchDriver — NO test ever touches
-the live SM8TAT2SA at 192.168.1.77 (it rate-limits + locks the admin account).
+live switch hardware.
 
 Coverage map (mirrors the ticket's required cases):
   - flat-lan no-ops a camera port already on VLAN 1

@@ -23,6 +23,14 @@ interface Props {
   data: ThroughputDay[];
 }
 
+// recharts 3 widened `Tooltip`'s formatter signature: the value arrives as
+// `ValueType | undefined` (number | string | Array<number | string>) rather
+// than the chart's own datum type, so the callback has to narrow it itself.
+// `count` is always numeric, so anything else is a no-data frame → 0.
+function asNumber(v: unknown): number {
+  return typeof v === "number" ? v : Number(v ?? 0) || 0;
+}
+
 export function ThroughputSparkline({ data }: Props) {
   // Densified upstream — assume 7 entries oldest-first. If empty (zero
   // files anywhere), the parent shows the empty-state card instead;
@@ -65,8 +73,11 @@ export function ThroughputSparkline({ data }: Props) {
                 borderRadius: "8px",
                 fontSize: "12px",
               }}
-              formatter={(v: number) => [`${v} files`, "Indexed"]}
-              labelFormatter={(label: string) => label}
+              formatter={(v) => [`${asNumber(v)} files`, "Indexed"]}
+              // recharts 3 types `label` as ReactNode; this stays an identity
+              // passthrough (same as the default) so the day string renders
+              // verbatim.
+              labelFormatter={(label) => label}
             />
             <Area
               type="monotone"

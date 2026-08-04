@@ -38,7 +38,11 @@
  *      ways,
  *      revocations first, each member contained on its own. Converges the
  *      best-effort cascade the role-change post-effects push
- *      (role-mutation-guard.service.ts) after an NC outage.
+ *      (role-mutation-guard.service.ts) after an NC outage. WARP-1558
+ *      makes this the BACKFILL too: it now creates the group when it is
+ *      missing, so an install that never had a member (the .87 box's
+ *      empty group, and every install predating the create-path fix in
+ *      routes/auth-groups.ts) converges on the boot tick.
  *   4. WARP-1526 (pr-reviewer #1229 N1): directoryStatus → NC enable
  *      mirror — re-asserts `enabled=false` for locally DEACTIVATED rows,
  *      so a failed disable-mirror cannot leave a revoked person with live
@@ -61,7 +65,7 @@ import {
   MASK_RO,
   MASK_ADMIN,
 } from "./department-provisioner.service.js";
-import { ncSetUserEnabled } from "./nextcloud.client.js";
+import { ncSetUserEnabled, ncEnsureGroup } from "./nextcloud.client.js";
 import {
   gfListFolders,
   gfAddGroup,
@@ -744,6 +748,23 @@ async function sweepMemberships(
  * provisioning credential and lives outside the local directory.
  * Failure containment matches the sibling sweeps: any NC error is
  * logged and the tick reports zeros; the next tick retries.
+ *
+ * WARP-1558 — this same statelessness is ALSO the backfill.
+ *
+ * Because the expectation is recomputed from `User.role` every tick and
+ * nothing is remembered between ticks, an install that has never had a
+ * single member in `droplet-admins` is indistinguishable, to this sweep,
+ * from one that lost its members to an outage: both are "every operator is
+ * missing", and both converge on the next pass. No migration, no one-shot
+ * script, no upgrade flag — the boot tick (index.ts) backfills legacy
+ * installs like the .87 box, where three admin-tier users faced an empty
+ * group, and the 5-minute cron keeps them converged afterwards. Re-running
+ * it is a no-op once converged.
+ *
+ * What the backfill needed on top of WARP-1526 was the ensure-group step
+ * below: the group is created lazily by the provisioner, so on an install
+ * with no departments it does not exist and every add would have failed
+ * forever. See the comment at that call.
  */
 async function sweepAdminGroupMembership(
   prisma: PrismaClient,
@@ -838,8 +859,40 @@ async function sweepAdminGroupMembership(
   // Then the restorations: an operator NC lost (or never received) is
   // re-added. Per-item containment mirrors sweepMemberships' per-row
   // try/catch — one bad member must not abort the rest of the loop.
-  for (const [key, ncUsername] of expectedByKey) {
-    if (actualKeys.has(key)) continue;
+  const missing = [...expectedByKey].filter(([key]) => !actualKeys.has(key));
+
+  // WARP-1558 — the group has to EXIST before anyone can be added to it.
+  //
+  // `droplet-admins` is created lazily, by `provisionDepartment`. A box that
+  // has never provisioned a department therefore has no such group, and
+  // `ncAddUserToGroup` answers OCS statuscode 102 → NextcloudGroupNotFoundError
+  // for every operator, every tick, forever: the sweep would report
+  // `adminGroupFailed` in perpetuity and Tier-1 see-all would never switch on.
+  // `ncListGroupMembers` cannot distinguish the two cases either — it returns
+  // `[]` for "empty" and for "no such group" alike (404 → []), which is exactly
+  // the shape the .87 box presented.
+  //
+  // So: ensure once, and only when there is actually someone to add. On a
+  // converged box `missing` is empty and this costs nothing; on the first tick
+  // after an upgrade (or on a fresh install) it is what makes the backfill
+  // below able to land. `ncEnsureGroup` is idempotent — OCS 100 (created) and
+  // 102 (already exists) both resolve.
+  //
+  // Best-effort, matching the sweep's containment posture: if the ensure
+  // fails, the adds below fail on their own, are counted in `failed`, and the
+  // next tick retries. It must never abort the removals that already ran.
+  if (missing.length > 0) {
+    try {
+      await ncEnsureGroup(DROPLET_ADMINS_GROUP);
+    } catch (err) {
+      logger.error(
+        { err, group: DROPLET_ADMINS_GROUP },
+        "admin-group sweep: ensuring droplet-admins exists failed (adds below will report the failure; next tick retries)",
+      );
+    }
+  }
+
+  for (const [, ncUsername] of missing) {
     try {
       await ncAddUserToGroup(adminToken, ncUsername, DROPLET_ADMINS_GROUP);
       added += 1;

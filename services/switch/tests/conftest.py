@@ -12,9 +12,9 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("SWITCH_HOST", "127.0.0.1")
-os.environ.setdefault("SWITCH_PORT", "443")
-os.environ.setdefault("SWITCH_DRIVER", "lantronix")
-os.environ.setdefault("SWITCH_USERNAME", "admin")
+os.environ.setdefault("SWITCH_PORT", "80")
+os.environ.setdefault("SWITCH_DRIVER", "openwrt")
+os.environ.setdefault("SWITCH_USERNAME", "droplet-ai")
 os.environ.setdefault("SWITCH_PASSWORD", "pytest-fake-pw")
 os.environ.setdefault("SERVICE_SECRET", "pytest-fake-secret")
 os.environ.setdefault("ROUTING_SERVICE_TOKEN", "pytest-fake-routing-token")

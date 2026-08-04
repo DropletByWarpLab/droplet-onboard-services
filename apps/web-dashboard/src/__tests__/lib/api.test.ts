@@ -13,7 +13,9 @@ import {
   listProviderKeys,
   deleteProviderKey,
   fetchNetworkOperation,
+  uploadFiles,
 } from "@/lib/api";
+import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 
 describe("API client", () => {
   beforeEach(() => {
@@ -156,6 +158,72 @@ describe("API client", () => {
       await expect(fetchNetworkOperation("op-err")).rejects.toThrow(
         "Failed to fetch operation: 500",
       );
+    });
+  });
+
+  // WARP-1666 — a 36-file selection used to go out as ONE request at a server
+  // that accepts MAX_FILES_PER_UPLOAD, which rejected the whole thing (and
+  // blamed the field name). Batching is what makes a folder-sized selection
+  // work at all, so these tests pin the batch boundary and the partial-failure
+  // contract the Files page relies on.
+  describe("uploadFiles", () => {
+    const makeFiles = (n: number) =>
+      Array.from({ length: n }, (_, i) => new File([`x${i}`], `f${i}.txt`));
+
+    const okResponse = () => ({ ok: true, text: () => Promise.resolve("") });
+
+    it("splits a selection larger than the server cap into sequential batches", async () => {
+      mockFetch.mockResolvedValue(okResponse());
+
+      await uploadFiles("/Personal", makeFiles(36));
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const perRequest = mockFetch.mock.calls.map(
+        ([, init]) => (init.body as FormData).getAll("files").length,
+      );
+      expect(perRequest).toEqual([
+        MAX_FILES_PER_UPLOAD,
+        36 - MAX_FILES_PER_UPLOAD,
+      ]);
+    });
+
+    it("sends exactly one request when the selection fits in a single batch", async () => {
+      mockFetch.mockResolvedValue(okResponse());
+
+      await uploadFiles("/Personal", makeFiles(MAX_FILES_PER_UPLOAD));
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports how many files landed when a later batch fails", async () => {
+      mockFetch.mockResolvedValueOnce(okResponse()).mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("boom"),
+      });
+
+      // The first batch is NOT rolled back — it stays on the box, and the
+      // caller is told exactly how much made it so it can say so.
+      await expect(
+        uploadFiles("/Personal", makeFiles(36)),
+      ).rejects.toMatchObject({
+        name: "UploadBatchError",
+        uploaded: MAX_FILES_PER_UPLOAD,
+        total: 36,
+      });
+    });
+
+    it("reports zero uploaded when the very first batch fails", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("boom"),
+      });
+
+      await expect(
+        uploadFiles("/Personal", makeFiles(36)),
+      ).rejects.toMatchObject({ uploaded: 0, total: 36 });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 });

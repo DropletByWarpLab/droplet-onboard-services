@@ -138,8 +138,8 @@ installs all three when single-box mode is active:
    detection skipped). `/usr/local/sbin/droplet-openwrt-attach` +
    `droplet-openwrt-attach.service`.
 
-2. **br-lan host DHCP + Lantronix route** — dedicated dnsmasq on the
-   host's `br-lan` so the Lantronix switch + downstream cameras get IPs,
+2. **br-lan host DHCP + managed-switch route** — dedicated dnsmasq on the
+   host's `br-lan` so the managed switch + downstream cameras get IPs,
    plus a `/32` route to the switch's mgmt IP.
    `/usr/local/sbin/droplet-host-net` + `droplet-host-net.service`.
 
