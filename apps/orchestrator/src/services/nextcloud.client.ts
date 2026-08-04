@@ -161,6 +161,33 @@ export async function ncDownloadFile(
 }
 
 /**
+ * Fetch a file from WebDAV and return the raw upstream Response, so callers can
+ * relay status + headers — needed for inline content serving with Range/206
+ * support (the dashboard citation viewers). Forwards an optional `Range`
+ * header. Returns null on 404.
+ */
+export async function ncFetchFileResponse(
+  token: string,
+  user: string,
+  path: string,
+  rangeHeader?: string | null
+): Promise<Response | null> {
+  const url = webdavUrl(user, path);
+  const headers: Record<string, string> = { ...davHeaders(token) };
+  if (rangeHeader) headers["Range"] = rangeHeader;
+
+  const resp = await fetch(url, { headers });
+
+  if (resp.status === 404) return null;
+  // 416 is the upstream's verdict on the caller's Range header, not a fault —
+  // relay it rather than turning a bad client request into a 5xx.
+  if (!resp.ok && resp.status !== 416) {
+    throw new Error(`WebDAV GET failed: ${resp.status}`);
+  }
+  return resp;
+}
+
+/**
  * WARP-1682 — what a DELETE actually accomplished. Both values are SUCCESS;
  * they differ only in whether this call is the one that removed the resource,
  * which callers may want for logging but never for error handling.
