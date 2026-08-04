@@ -25,9 +25,26 @@
  *   - and the non-streaming path (no `chatStream`, or no `onEvent`) is
  *     byte-for-byte the blocking behaviour, incl. the `chat()` fallback when
  *     the streaming transport throws.
+ *
+ * WARP-1602 adds the channel-discipline contract on top:
+ *
+ *   - a turn that ADVERTISED tools holds its content until its stop reason is
+ *     known — released as the answer on a terminal turn, quarantined into the
+ *     reasoning stream on a tool-call one, so analysis is never emitted as
+ *     `content_delta` nor persisted as `content`;
+ *   - a turn with ZERO tools cannot end in tool_calls, so it keeps streaming
+ *     token-by-token (the WARP-1442 win, unchanged);
+ *   - every intermediate step's thinking lands in `reasoningSteps` /
+ *     `message.reasoning` with its per-step boundary intact;
+ *   - the summed content_delta equals the persisted `message.content` on
+ *     MULTI-iteration turns too, not just single ones.
  */
 import { describe, it, expect, vi } from "vitest";
-import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import {
+  runAgent,
+  REASONING_STEP_SEPARATOR,
+  type AgentDeps,
+} from "../services/llm-agent.service.js";
 import type { ChatStreamChunk } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 
@@ -477,36 +494,36 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
     expect(result.error).toBe("client_aborted");
   });
 
-  // -- KNOWN DIVERGENCE (WARP-1442 follow-up): content + tool_calls same turn --
+  // -- WARP-1602: content + tool_calls in the SAME turn is QUARANTINED --------
   //
-  // Documents (does not endorse) the one back-compat gap in the streaming path.
-  // When a model streams visible content AND THEN tool_calls in the SAME turn,
-  // the emitter puts the preamble on the wire as content_delta as it arrives,
-  // but the blocking path SUPPRESSES that preamble (a tool-call turn content is
-  // pushed into messages as loop context, never emitted or persisted as the
-  // answer). So the summed deltas the client renders EXCEED the persisted final
-  // content; a reload heals it.
+  // This block replaces the WARP-1442-era "KNOWN DIVERGENCE" test, whose two
+  // stated premises were both false and are deleted rather than re-pinned:
   //
-  // Ships anyway: UNREACHABLE on the shipped path. The gpt-oss harmony format
-  // puts tool calls on the commentary channel with an EMPTY final channel, so no
-  // delta.content is produced on a tool-call turn (see the "accumulates BY
-  // INDEX" test: its tool-call chunks carry no content). It diverges only for
-  // hypothetical non-harmony models that interleave a preamble with tool_calls.
+  //   (a) "UNREACHABLE on the shipped path — gpt-oss puts tool calls on the
+  //       commentary channel with an EMPTY final channel." A live row on the
+  //       .87 box (gpt-oss:20b via ollama) carries multiple per-iteration
+  //       analysis fragments concatenated into ChatMessage.content, so
+  //       delta.content IS produced on tool-call turns. Harmony also documents
+  //       preambles as an EXPECTED output class before a tool call, so
+  //       content-then-tool_calls is normal model behaviour, not a hypothetical.
+  //   (b) "a reload heals it." A reload re-reads the persisted column, which is
+  //       where the polluted text lives — the reload showed the SAME fused text.
   //
-  // No clean guard: matching the blocking suppression means holding ALL content
-  // until the turn is known non-tool, but a turn is only known non-tool at its
-  // terminal chunk, so buffer-until-terminal defeats progressive streaming for
-  // the COMMON (pure-content) turn, regressing the shipped gpt-oss path. Product
-  // call deferred to the WARP-1442 follow-up; this pins CURRENT behaviour so a
-  // future change is a conscious, reviewed decision, not silent drift.
-  it("KNOWN DIVERGENCE: streams a content preamble that precedes tool_calls in the same turn (blocking suppresses it)", async () => {
+  // The fix: a turn that advertised tools holds its content until its stop
+  // reason is known, then either releases it (terminal answer) or quarantines
+  // it into the reasoning stream (tool-call turn). The old objection — "a turn
+  // is only known non-tool at its terminal chunk, so buffering regresses the
+  // common turn" — is answered by scoping the hold to tool-ADVERTISING turns:
+  // a zero-tool iteration cannot produce tool_calls, so it still streams
+  // token-by-token (pinned by the very first test in this file).
+  it("quarantines a preamble that precedes tool_calls: never content_delta, captured as reasoning", async () => {
     const callTool = vi.fn().mockResolvedValueOnce({
       content: [{ type: "text", text: JSON.stringify({ devices: [] }) }],
       isError: false,
     });
     const chatStream = vi
       .fn()
-      // iteration 1: a VISIBLE preamble, then a tool call, in one turn.
+      // iteration 1: a content preamble, then a tool call, in one turn.
       .mockReturnValueOnce(
         streamOf([
           { choices: [{ delta: { content: "Let me check the network. " } }] },
@@ -545,29 +562,610 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
     const result = await runAgent(deps, {
       model: "gpt-oss:20b",
       messages: [{ role: "user", content: "show devices" }],
+      captureReasoning: true,
     });
 
     // The tool still dispatches and the loop iterates: the tool path is intact.
     expect(callTool).toHaveBeenCalledWith("list_network_devices", {}, undefined);
     expect(result.stop_reason).toBe("model_done");
 
-    // The preamble WAS streamed as content_delta, BEFORE the tool_call event.
-    const preambleIdx = events.findIndex(
-      (e) => e.type === "content_delta" && e.text === "Let me check the network.",
-    );
-    const toolCallIdx = events.findIndex((e) => e.type === "tool_call");
-    expect(preambleIdx).toBeGreaterThanOrEqual(0);
-    expect(preambleIdx).toBeLessThan(toolCallIdx);
-
-    // THE DIVERGENCE: summed content_delta INCLUDES the preamble, but the
-    // persisted answer is the terminal turn ONLY.
+    // THE FIX: the preamble never reaches the wire as answer text…
     const streamed = events
       .filter((e) => e.type === "content_delta")
       .map((e) => (e.type === "content_delta" ? e.text : ""))
       .join("");
-    expect(streamed).toBe("Let me check the network.No devices found.");
+    expect(streamed).not.toContain("Let me check the network");
+    // …the streamed answer now equals the persisted one EXACTLY (the
+    // divergence this file used to document is gone)…
+    expect(streamed).toBe("No devices found.");
     expect(result.message.content).toBe("No devices found.");
-    expect(streamed).not.toBe(result.message.content);
+    expect(streamed).toBe(result.message.content);
+
+    // …and it is not discarded either: it is this step's reasoning, on the
+    // wire as a reasoning_step BEFORE the tool_call chip, and persisted.
+    const stepIdx = events.findIndex(
+      (e) => e.type === "reasoning_step" && e.text === "Let me check the network.",
+    );
+    const toolCallIdx = events.findIndex((e) => e.type === "tool_call");
+    expect(stepIdx).toBeGreaterThanOrEqual(0);
+    expect(stepIdx).toBeLessThan(toolCallIdx);
+    expect(result.message.reasoning).toBe("Let me check the network.");
+    expect(result.reasoningSteps).toEqual(["Let me check the network."]);
+  });
+
+  it("the live .87 shape: multi-iteration analysis never fuses into the answer, and reasoning is populated per step", async () => {
+    // Reproduces the failing row: three iterations, each emitting its analysis
+    // on delta.content, whose concatenation used to BE the persisted answer
+    // ("…list files.Let's read csv.You spent €6 240…") with reasoning NULL.
+    const callTool = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: JSON.stringify({ files: [] }) }],
+      isError: false,
+    });
+    const toolChunk = (id: string, name: string) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              { index: 0, id, type: "function" as const, function: { name, arguments: "{}" } },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    });
+    const chatStream = vi
+      .fn()
+      .mockReturnValueOnce(
+        streamOf([
+          {
+            choices: [
+              {
+                delta: {
+                  content:
+                    'We need to answer "how much money did I spent in June?" ' +
+                    "Likely refers to expenses. Let's look at Invoices folder: list files.",
+                },
+              },
+            ],
+          },
+          toolChunk("c1", "list_files"),
+        ]),
+      )
+      .mockReturnValueOnce(
+        streamOf([
+          { choices: [{ delta: { content: "Let's read csv." } }] },
+          toolChunk("c2", "read_file"),
+        ]),
+      )
+      .mockReturnValueOnce(
+        streamOf(contentChunks(["You spent 6,240 EUR in June 2026."])),
+      );
+
+    const { deps, events } = collectingDeps(chatStream, {
+      callTool,
+      tools: [
+        { name: "list_files", description: "...", inputSchema: { type: "object", properties: {} } },
+        { name: "read_file", description: "...", inputSchema: { type: "object", properties: {} } },
+      ],
+    });
+    const result = await runAgent(deps, {
+      model: "gpt-oss:20b",
+      messages: [{ role: "user", content: "how much money did I spend in June?" }],
+      captureReasoning: true,
+    });
+
+    expect(result.iterations).toBe(3);
+    // The answer is the terminal turn ALONE — no analysis, no run-on join.
+    expect(result.message.content).toBe("You spent 6,240 EUR in June 2026.");
+    expect(result.message.content).not.toContain("We need to answer");
+    expect(result.message.content).not.toContain("Let's read csv");
+    // What the client rendered is byte-identical to what was persisted.
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe(result.message.content);
+
+    // The reasoning column is no longer NULL, and the per-step boundaries
+    // survive flattening (WARP-1605 splits on REASONING_STEP_SEPARATOR).
+    expect(result.reasoningSteps).toHaveLength(2);
+    expect(result.reasoningSteps![0]).toContain("We need to answer");
+    expect(result.reasoningSteps![1]).toBe("Let's read csv.");
+    expect(result.message.reasoning).toBe(
+      result.reasoningSteps!.join(REASONING_STEP_SEPARATOR),
+    );
+    expect(result.message.reasoning!.split(REASONING_STEP_SEPARATOR)).toHaveLength(2);
+
+    // A clean answer trips no leak heuristic.
+    expect(result.pollutedDiagnostics).toBeUndefined();
+  });
+
+  it("folds the gpt-oss reasoning channel of an INTERMEDIATE turn into the trace", async () => {
+    // The reasoning channel on a tool-call turn used to be dropped on the
+    // floor by both transports (WARP-495 parsed only the terminal turn).
+    const callTool = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "{}" }],
+      isError: false,
+    });
+    const chatStream = vi
+      .fn()
+      .mockReturnValueOnce(
+        streamOf([
+          { choices: [{ delta: { reasoning_content: "The invoices live in /Finance." } }] },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "c1",
+                      type: "function",
+                      function: { name: "list_files", arguments: "{}" },
+                    },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+          },
+        ]),
+      )
+      .mockReturnValueOnce(streamOf(contentChunks(["Two invoices."])));
+
+    const { deps, events } = collectingDeps(chatStream, {
+      callTool,
+      tools: [
+        { name: "list_files", description: "...", inputSchema: { type: "object", properties: {} } },
+      ],
+    });
+    const result = await runAgent(deps, {
+      model: "gpt-oss:20b",
+      messages: [{ role: "user", content: "list invoices" }],
+      captureReasoning: true,
+    });
+
+    expect(result.message.content).toBe("Two invoices.");
+    expect(result.reasoningSteps).toEqual(["The invoices live in /Finance."]);
+    expect(
+      events.some(
+        (e) => e.type === "reasoning_step" && e.text === "The invoices live in /Finance.",
+      ),
+    ).toBe(true);
+  });
+
+  it("suppresses intermediate reasoning on the wire when captureReasoning is false, but still persists it", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "{}" }],
+      isError: false,
+    });
+    const chatStream = vi
+      .fn()
+      .mockReturnValueOnce(
+        streamOf([
+          { choices: [{ delta: { content: "Checking the folder first." } }] },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "c1",
+                      type: "function",
+                      function: { name: "list_files", arguments: "{}" },
+                    },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+          },
+        ]),
+      )
+      .mockReturnValueOnce(streamOf(contentChunks(["Done."])));
+
+    const { deps, events } = collectingDeps(chatStream, {
+      callTool,
+      tools: [
+        { name: "list_files", description: "...", inputSchema: { type: "object", properties: {} } },
+      ],
+    });
+    const result = await runAgent(deps, {
+      model: "gpt-oss:20b",
+      messages: [{ role: "user", content: "list invoices" }],
+      captureReasoning: false,
+    });
+
+    expect(events.some((e) => e.type === "reasoning_step")).toBe(false);
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("Done.");
+    expect(result.message.content).toBe("Done.");
+    expect(result.message.reasoning).toBe("Checking the folder first.");
+  });
+
+  it("attributes an answer that still opens with analysis prose (polluted-turn diagnostics)", async () => {
+    // The inverse of WARP-1479's blank-turn attribution: a NON-empty answer
+    // that is chain-of-thought must not score as healthy. Diagnostics only —
+    // the answer itself is passed through untouched.
+    const { deps } = collectingDeps(() =>
+      streamOf(
+        contentChunks([
+          "We need to answer how much was spent. Let's look at Invoices: " +
+            "list files.Let's read csv.You spent 6,240 EUR.",
+        ]),
+      ),
+    );
+    const result = await runAgent(deps, REQ);
+
+    expect(result.pollutedDiagnostics).toBeDefined();
+    expect(result.pollutedDiagnostics!.markers).toContain("first_person_plan");
+    expect(result.pollutedDiagnostics!.markers).toContain("step_join_run_on");
+    expect(result.pollutedDiagnostics!.transport).toBe("streaming");
+    // Never a filter: the visible answer is unchanged.
+    expect(result.message.content).toContain("You spent 6,240 EUR.");
+  });
+
+  it("leaves a healthy answer with no polluted diagnostics", async () => {
+    const { deps } = collectingDeps(() =>
+      streamOf(contentChunks(["You spent 6,240 EUR in June 2026."])),
+    );
+    const result = await runAgent(deps, REQ);
+    expect(result.pollutedDiagnostics).toBeUndefined();
+  });
+});
+
+// -- Teardown on a DEFERRED turn (WARP-1602 review B1/B2/B3) ------------------
+//
+// The two teardown paths — client abort (Stop) and mid-stream transport death —
+// leave `consumeChatStream` by THROWING, which skipped `settle()` and therefore
+// dropped the emitter's buffer. On a NON-deferred turn that cost nothing (the
+// content had already streamed token-by-token), which is exactly why the
+// original tests for both paths — running with the default `tools: []`, i.e.
+// `deferContent === false` — stayed green while the deferred path lost 100% of
+// the answer: nothing had ever reached the wire, so the buffer WAS the answer.
+//
+// Every test below therefore advertises a tool, which is the only thing that
+// turns deferral on.
+const DEFER_TOOLS = [
+  {
+    name: "list_files",
+    description: "...",
+    inputSchema: { type: "object", properties: {} },
+  },
+];
+
+/** A tool-call chunk, the shape that makes a turn a tool-call turn. */
+function toolCallChunk(id: string, name: string): ChatStreamChunk {
+  return {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id,
+              type: "function" as const,
+              function: { name, arguments: "{}" },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+}
+
+describe("runAgent — teardown on a DEFERRED turn keeps the partial answer", () => {
+  it("Stop mid-answer on a tool-advertising turn keeps the partial (B1)", async () => {
+    // The live shape: the user asks, the agent advertises tools, the terminal
+    // turn starts answering, and the user hits Stop 3 chunks in. Because the
+    // turn advertised tools its content is DEFERRED, so at the moment of the
+    // abort not one byte has reached the client. Before the fix this returned
+    // content:"" and emitted zero content_delta — blank screen, empty row.
+    const controller = new AbortController();
+    let tornDown = false;
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      try {
+        yield { choices: [{ delta: { content: "You spent " } }] };
+        yield { choices: [{ delta: { content: "6,240 EUR" } }] };
+        controller.abort(); // ← user hits Stop
+        yield { choices: [{ delta: { content: " in June 2026." } }] };
+      } finally {
+        tornDown = true;
+      }
+    }
+    const { deps, events } = collectingDeps(() => gen(), { tools: DEFER_TOOLS });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    // The abort contract is unchanged: upstream torn down, aborted terminal.
+    expect(tornDown).toBe(true);
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("client_aborted");
+
+    // THE FIX: the partial survives, on the wire AND on the result. The route
+    // persists the delta accumulator on an error terminal, so the emission is
+    // what actually saves the DB row.
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("You spent 6,240 EUR");
+    expect(result.message.content).toBe("You spent 6,240 EUR");
+    // WARP-1442's sum invariant holds on the teardown path too.
+    expect(streamed).toBe(result.message.content);
+  });
+
+  it("mid-stream death on a tool-advertising turn keeps the partial (B2)", async () => {
+    // The REAL gpt-oss shape the PR body got wrong: `captureReasoning` is true
+    // (the dashboard always sends it) and reasoning streams fully BEFORE
+    // content, so the first `delta.content` flushes a reasoning_step and sets
+    // `emittedAny` — meaning the blocking fallback does NOT run, contrary to
+    // the claim that "nothing was emitted". The turn is an error turn; what it
+    // must not also be is a BLANK one.
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          { message: { role: "assistant", content: "FULL BLOCKING ANSWER" } },
+        ],
+      }),
+    });
+    async function* dying(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { reasoning_content: "User asks spend." } }] };
+      yield { choices: [{ delta: { content: "You spent 6,240 EUR" } }] };
+      throw new Error("connection reset mid-stream");
+    }
+    const { deps, events } = collectingDeps(() => dying(), {
+      tools: DEFER_TOOLS,
+    });
+    (deps.aiGateway as unknown as { chat: typeof chat }).chat = chat;
+    const result = await runAgent(deps, { ...REQ, captureReasoning: true });
+
+    // Pins the corrected claim: reasoning on the wire suppresses the fallback.
+    expect(chat).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("stream_interrupted");
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("You spent 6,240 EUR");
+    expect(streamed).not.toContain("FULL BLOCKING");
+    expect(result.message.content).toBe("You spent 6,240 EUR");
+    // The turn still ends with an honest `done` error frame.
+    const done = events.find((e) => e.type === "done");
+    expect(done && done.type === "done" && done.stop_reason).toBe("error");
+  });
+
+  it("keeps the partial when the signal flips between the throw and the catch (WARP-1660)", async () => {
+    // The narrow race between the two carriers. `consumeChatStream` classifies
+    // the failure with the signal it sees AT THAT MOMENT — not aborted, so it
+    // throws AgentStreamPartialError. The disconnect lands in the async gap
+    // before `runAgent`'s catch re-reads `req.signal`, which now says aborted
+    // and takes the abort branch — with an AgentStreamPartialError in hand.
+    // Reading `.partial` off only one carrier there threw away an answer the
+    // salvage machinery had ALREADY recovered: blank row, empty persist, the
+    // exact outcome WARP-1602 exists to prevent.
+    //
+    // The abort is fired from `onEvent`, which is the real window: `settle()`
+    // releases the salvaged partial as content_delta from INSIDE the
+    // AgentStreamPartialError constructor argument — i.e. strictly after the
+    // consumer's `signal?.aborted` check and strictly before runAgent's.
+    const controller = new AbortController();
+    const chat = vi.fn();
+    async function* dying(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { reasoning_content: "User asks spend." } }] };
+      yield { choices: [{ delta: { content: "You spent 6,240 EUR" } }] };
+      throw new Error("connection reset mid-stream");
+    }
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue(DEFER_TOOLS),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat, chatStream: () => dying() } as never,
+      onEvent: (e: SSEEvent) => {
+        events.push(e);
+        // The client goes away exactly as the salvaged partial hits the wire.
+        if (e.type === "content_delta") controller.abort();
+      },
+    };
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    // The signal won the race, so this is reported as the abort terminal…
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("client_aborted");
+    // …and the partial that AgentStreamPartialError was carrying survives it.
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("You spent 6,240 EUR");
+    expect(result.message.content).toBe("You spent 6,240 EUR");
+    // WARP-1442's sum invariant: the wire and the persisted row agree.
+    expect(streamed).toBe(result.message.content);
+    // Salvage never re-infers — the blocking path stays untouched.
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it("does NOT release buffered analysis as the answer when tool calls landed", async () => {
+    // The guarantee this PR exists for must survive teardown: if tool-call
+    // fragments already arrived, the buffered `delta.content` is harmony
+    // analysis, not an answer. Salvaging must not become a back door that puts
+    // it on the wire — it goes to the reasoning trace instead.
+    const controller = new AbortController();
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      yield {
+        choices: [
+          { delta: { content: "We need to answer this. Let's list files." } },
+        ],
+      };
+      yield toolCallChunk("c1", "list_files");
+      controller.abort(); // dies after the tool call, before dispatch
+      yield { choices: [{ delta: { content: "unreachable" } }] };
+    }
+    const { deps, events } = collectingDeps(() => gen(), { tools: DEFER_TOOLS });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    expect(result.error).toBe("client_aborted");
+    // Zero content_delta: analysis never reaches the wire as answer text.
+    expect(events.filter((e) => e.type === "content_delta")).toHaveLength(0);
+    expect(result.message.content).toBe("");
+    // …but it is not discarded either — it is this step's reasoning.
+    expect(result.message.reasoning).toContain("Let's list files.");
+    expect(result.reasoningSteps).toEqual([
+      "We need to answer this. Let's list files.",
+    ]);
+  });
+
+  it("keeps earlier iterations' reasoning when a later turn is torn down", async () => {
+    // `iteration_limit` already kept `reasoningSteps`; the two teardown
+    // terminals dropped them, so a Stop on iteration 2 also erased iteration
+    // 1's thinking. All three terminals now agree.
+    const callTool = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "[]" }],
+      isError: false,
+    });
+    const controller = new AbortController();
+    async function* dyingSecond(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "Now the answer: 6,240" } }] };
+      controller.abort();
+      yield { choices: [{ delta: { content: " EUR" } }] };
+    }
+    const chatStream = vi
+      .fn()
+      .mockReturnValueOnce(
+        streamOf([
+          { choices: [{ delta: { content: "Let's list the invoices." } }] },
+          toolCallChunk("c1", "list_files"),
+        ]),
+      )
+      .mockReturnValueOnce(dyingSecond());
+    const { deps } = collectingDeps(chatStream, {
+      callTool,
+      tools: DEFER_TOOLS,
+    });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    expect(result.error).toBe("client_aborted");
+    expect(result.message.content).toBe("Now the answer: 6,240");
+    // Iteration 1's quarantined analysis is still there.
+    expect(result.reasoningSteps).toEqual(["Let's list the invoices."]);
+    expect(result.message.reasoning).toContain("Let's list the invoices.");
+  });
+
+  // -- The teardown flush must release the STABLE view, not the raw buffer ----
+  //
+  // `settle()` calls `flush(final)`, and `final: true` means "the stream
+  // finished, so the whole buffer is stable". A teardown is exactly the case
+  // where it did NOT finish, so passing `true` there released the volatile tail
+  // that `stableStreamedContent` exists to hold back. Both shapes below reached
+  // the wire AND the persisted row; the harmony one is a WARP-1331 contract
+  // violation, since WARP-1331 strips only the COMPLETE token.
+  //
+  // This is teardown-specific: on a completed stream the same buffers are
+  // released whole and correct, which the two "still releases" cases pin.
+  it("does NOT release a half-written harmony citation token on teardown", async () => {
+    const controller = new AbortController();
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "Total is 6,240 EUR" } }] };
+      yield { choices: [{ delta: { content: " 【3†source=inv" } }] };
+      controller.abort();
+      yield { choices: [{ delta: { content: "oice.pdf】" } }] };
+    }
+    const { deps, events } = collectingDeps(() => gen(), {
+      tools: DEFER_TOOLS,
+    });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("Total is 6,240 EUR");
+    expect(streamed).not.toContain("【");
+    expect(result.message.content).toBe("Total is 6,240 EUR");
+    expect(result.message.content).not.toContain("【");
+    // The WARP-1442 sum invariant still binds the wire to the persisted row.
+    expect(streamed).toBe(result.message.content);
+  });
+
+  it("does NOT release a partial <reasoning> open tag on teardown", async () => {
+    const controller = new AbortController();
+    async function* gen(): AsyncGenerator<ChatStreamChunk> {
+      yield { choices: [{ delta: { content: "The answer is 42" } }] };
+      yield { choices: [{ delta: { content: " <reas" } }] };
+      controller.abort();
+      yield { choices: [{ delta: { content: "oning>why</reasoning>" } }] };
+    }
+    const { deps, events } = collectingDeps(() => gen(), {
+      tools: DEFER_TOOLS,
+    });
+    const result = await runAgent(deps, {
+      ...REQ,
+      signal: controller.signal,
+      captureReasoning: true,
+    });
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(streamed).toBe("The answer is 42");
+    expect(streamed).not.toContain("<reas");
+    expect(result.message.content).toBe("The answer is 42");
+    expect(result.message.content).not.toContain("<reas");
+    expect(streamed).toBe(result.message.content);
+  });
+
+  it("still releases a COMPLETE harmony token when the stream finishes normally", async () => {
+    // The other side of the guard: holding the tail back is conditional on the
+    // teardown, so a turn that actually finished is unaffected (WARP-1331
+    // strips the complete token, leaving the clean answer).
+    const { deps, events } = collectingDeps(
+      () =>
+        streamOf([
+          { choices: [{ delta: { content: "Total is 6,240 EUR" } }] },
+          { choices: [{ delta: { content: " 【3†source=invoice.pdf】" } }] },
+        ]),
+      { tools: DEFER_TOOLS },
+    );
+    const result = await runAgent(deps, { ...REQ, captureReasoning: true });
+
+    const streamed = events
+      .filter((e) => e.type === "content_delta")
+      .map((e) => (e.type === "content_delta" ? e.text : ""))
+      .join("");
+    expect(result.stop_reason).not.toBe("error");
+    expect(result.message.content).toBe("Total is 6,240 EUR");
+    expect(streamed).toBe(result.message.content);
   });
 });
 

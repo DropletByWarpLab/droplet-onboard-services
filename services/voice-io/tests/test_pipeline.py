@@ -3261,3 +3261,163 @@ class TestFlatlineGainCompensation:
         pipe.set_input_gain(4.0)
         pipe._on_frame(_audio_frame(self.QUIET_CHAIN_AMPLITUDE))
         assert pipe.status().last_audio_at is not None
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-1619 — stop() must not claim a join it did not get
+# ────────────────────────────────────────────────────────────────────
+#
+# The capture loop only re-checks `_shutdown` BETWEEN frames, and
+# `_on_frame` runs the whole turn (LLM reply → TTS synthesize →
+# `_play_pcm`, documented blocking) on that same thread. So a stop()
+# issued mid-turn can hit its join timeout while the worker is still
+# inside `with stream_cm as stream:` — i.e. with the exclusive mic
+# InputStream STILL OPEN.
+#
+# To be precise about what that window is: no NEW audio is processed
+# (the loop exits before the next `_on_frame`), so it is "the device is
+# still held and the box is still speaking", not "it is still listening
+# to you". What made it dangerous was that stop() cleared `_thread`
+# unconditionally, destroying the only evidence that the worker — and
+# the device — was still live. Everything downstream (the endpoint's
+# 200, a re-enable opening a SECOND InputStream on an exclusive device)
+# followed from that lost fact.
+
+
+class _HeldStream:
+    """InputStream stub that tracks its REAL open/closed state.
+
+    Reads silence forever; the pipeline's own `_shutdown` check is what
+    ends the session, which is exactly the code path under test.
+    """
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def read(self, n):
+        # A hair of sleep so the loop doesn't busy-spin a core while the
+        # test drives it.
+        time.sleep(0.001)
+        return _silence_frame().reshape(-1, 1), False
+
+
+class _HeldSoundDevice:
+    """Mock sounddevice handing out `_HeldStream`s, counting opens and
+    the process-wide PortAudio reset hooks."""
+
+    def __init__(self) -> None:
+        self.streams: list[_HeldStream] = []
+        self.terminate_calls = 0
+        self.initialize_calls = 0
+
+    def _terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def _initialize(self) -> None:
+        self.initialize_calls += 1
+
+    def query_devices(self, index=None):
+        return {"max_input_channels": 1}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        stream = _HeldStream()
+        self.streams.append(stream)
+        return stream
+
+
+class _TurnBlockingDetector(WakeWordDetector):
+    """Blocks inside predict() to stand in for a turn in progress.
+
+    The real blocker is `_play_pcm`, several frames deeper. What matters
+    for stop() is the POSITION, which is identical: on the capture
+    thread, inside `_on_frame`, after `stream.read()`, with the
+    InputStream open and the `_shutdown` re-check still one frame away.
+    """
+
+    def __init__(self) -> None:
+        self.in_turn = threading.Event()
+        self.finish_turn = threading.Event()
+
+    @property
+    def model_name(self) -> str:
+        return "turn-blocking"
+
+    @property
+    def loaded(self) -> bool:
+        return True
+
+    def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
+        self.in_turn.set()
+        # Bounded so a broken test fails instead of hanging the suite.
+        self.finish_turn.wait(timeout=30.0)
+        return {}
+
+
+class TestStopReportsTheJoin:
+    def test_stop_returns_true_when_the_worker_really_exits(self):
+        fake_sd = _HeldSoundDevice()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            sd_module=fake_sd,
+            upstream_probe_interval_s=0.0,
+        )
+        pipe.start()
+        # Wait for the stream to actually open before stopping.
+        deadline = time.time() + 5.0
+        while not fake_sd.streams and time.time() < deadline:
+            time.sleep(0.005)
+        assert fake_sd.streams, "the worker never opened a stream"
+
+        assert pipe.stop(timeout=5.0) is True
+        assert pipe.running is False
+        # The OS-level fact, not a module reference: the stream closed.
+        assert fake_sd.streams[0].closed is True
+
+    def test_stop_returns_false_and_stays_running_on_a_timed_out_join(self):
+        detector = _TurnBlockingDetector()
+        fake_sd = _HeldSoundDevice()
+        pipe = WakePipeline(
+            detector=detector,
+            input_device_index=0,
+            sd_module=fake_sd,
+            upstream_probe_interval_s=0.0,
+        )
+        pipe.start()
+        assert detector.in_turn.wait(timeout=5.0), "the turn never started"
+        try:
+            # The turn outlives the join budget — this is the reported bug.
+            assert pipe.stop(timeout=0.2) is False
+            # …and the pipeline says so, because the mic really IS held:
+            # the stream the worker is sitting inside is still open.
+            assert pipe.running is True
+            assert fake_sd.streams[0].closed is False
+        finally:
+            detector.finish_turn.set()
+        # Once the turn ends, the worker leaves and the device is freed.
+        assert pipe.stop(timeout=5.0) is True
+        assert pipe.running is False
+        assert fake_sd.streams[0].closed is True
+
+    def test_stop_stays_idempotent(self):
+        fake_sd = _HeldSoundDevice()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            sd_module=fake_sd,
+            upstream_probe_interval_s=0.0,
+        )
+        pipe.start()
+        assert pipe.stop(timeout=5.0) is True
+        # A second stop on an already-stopped pipeline is a no-op that
+        # still reports success — nothing is holding anything.
+        assert pipe.stop(timeout=5.0) is True
+        assert pipe.running is False
+        assert pipe.status().state == "idle"

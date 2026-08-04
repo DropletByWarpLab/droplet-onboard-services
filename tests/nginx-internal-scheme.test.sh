@@ -63,10 +63,17 @@ if grep -qE 'include[[:space:]]+/etc/nginx/internal-scheme\.active\.conf;' "$con
 else
   fail "nginx.conf include/scheme-leg count wrong (got $scheme_legs \$internal_scheme legs, want 3)"
 fi
+# WARP-1686: the docserver leg moved out of nginx.conf into the DOCS_ENGINE
+# variant pair (docs-engine.{collabora,onlyoffice}.conf — selected at container
+# start, same pattern as internal-scheme itself). The invariant is unchanged —
+# every user-plane leg stays literal http:// — so the docserver assertion now
+# points at BOTH variants (collabora keeps the /docs prefix ⇒ no trailing
+# slash on its proxy_pass; onlyoffice strips ⇒ trailing slash).
 if grep -qE 'proxy_pass[[:space:]]+http://\$upstream_nextcloud/;' "$conf" \
-   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver/;' "$conf" \
-   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_web_dashboard;' "$conf"; then
-  pass "user-plane legs (nextcloud, docserver, web-dashboard) stay literal http://"
+   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_web_dashboard;' "$conf" \
+   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver;' "$NGINX_DIR/docs-engine.collabora.conf" \
+   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver/;' "$NGINX_DIR/docs-engine.onlyoffice.conf"; then
+  pass "user-plane legs (nextcloud, web-dashboard, both docs-engine variants) stay literal http://"
 else
   fail "a user-plane leg was moved off literal http:// (out of mTLS scope)"
 fi

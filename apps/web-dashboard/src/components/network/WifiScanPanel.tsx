@@ -58,16 +58,16 @@ export function WifiScanPanel() {
   const unsupported = state.kind === "unsupported";
 
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="type-headline text-label-primary">Nearby Networks</h3>
+        <h3 className="type-headline text-[color:var(--text)]">Nearby Networks</h3>
         {/* When scanning is unsupported on this radio, re-running can't help —
             remove the control rather than leave a dead, disabled button. */}
         {!unsupported && (
           <button
             onClick={handleScan}
             disabled={scanning}
-            className="dp-btn-secondary flex items-center gap-2 text-sm"
+            className="btn ghost sm"
           >
             <Signal size={14} className={scanning ? "animate-pulse" : ""} />
             {scanning ? "Scanning…" : "Scan"}
@@ -80,15 +80,15 @@ export function WifiScanPanel() {
         // that's broadcasting its own Wi-Fi. role="status" (not "alert"), muted
         // tone — mirrors how the page treats the DISABLED router state.
         <div role="status" className="flex flex-col items-center text-center py-8">
-          <WifiOff size={28} className="text-label-quaternary mb-3" aria-hidden="true" />
-          <p className="type-subheadline text-label-secondary max-w-sm">{state.message}</p>
+          <WifiOff size={28} className="text-[color:var(--text-faint)] mb-3" aria-hidden="true" />
+          <p className="type-subheadline text-[color:var(--text-muted)] max-w-sm">{state.message}</p>
         </div>
       ) : state.kind === "results" && state.networks.length > 0 ? (
         <div className="space-y-2">
           {state.networks.map((network, i) => (
             <div
               key={`${network.bssid}-${i}`}
-              className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
+              className="flex items-center justify-between px-3 py-2 rounded-sm bg-[var(--inset)]"
             >
               <div className="flex items-center gap-3">
                 <Wifi
@@ -103,26 +103,26 @@ export function WifiScanPanel() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="type-subheadline text-label-primary">
+                  <p className="type-subheadline text-[color:var(--text)]">
                     {network.ssid || "(Hidden)"}
                   </p>
-                  <p className="type-caption-2 text-label-tertiary">
+                  <p className="type-caption-2 text-[color:var(--text-muted)]">
                     Ch {network.channel} | {network.encryption.enabled ? "Encrypted" : "Open"}
                   </p>
                 </div>
               </div>
-              <span className="type-caption-1 text-label-tertiary">{network.signal} dBm</span>
+              <span className="type-caption-1 text-[color:var(--text-muted)]">{network.signal} dBm</span>
             </div>
           ))}
         </div>
       ) : state.kind === "results" ? (
-        <p className="type-subheadline text-label-tertiary">No networks found.</p>
+        <p className="type-subheadline text-[color:var(--text-muted)]">No networks found.</p>
       ) : state.kind === "error" ? (
-        <p role="status" className="type-subheadline text-label-tertiary">
+        <p role="status" className="type-subheadline text-[color:var(--text-muted)]">
           We couldn&apos;t scan just now. Please try again.
         </p>
       ) : (
-        <p className="type-subheadline text-label-tertiary">
+        <p className="type-subheadline text-[color:var(--text-muted)]">
           Click Scan to search for nearby WiFi networks.
         </p>
       )}

@@ -49,7 +49,7 @@ export function DeviceGridSection({ group, devices, onOpen, onError }: Props) {
       <button
         type="button"
         onClick={toggle}
-        className="flex items-center gap-2 mb-3 text-label-primary"
+        className="flex items-center gap-2 mb-3 text-[color:var(--text)]"
         aria-expanded={expanded}
       >
         <ChevronRight
@@ -59,7 +59,7 @@ export function DeviceGridSection({ group, devices, onOpen, onError }: Props) {
         <h2 id={`section-${group.id}`} className="type-title-3">
           {group.name}
         </h2>
-        <span className="type-footnote text-label-tertiary">{devices.length}</span>
+        <span className="type-footnote text-[color:var(--text-muted)]">{devices.length}</span>
       </button>
       {expanded && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

@@ -72,7 +72,10 @@ export function ScheduleHeatmap({ windows }: Props) {
     <div
       role="img"
       aria-label="Schedule heatmap: hours blocked across the week"
-      className="dp-card p-3"
+      // `.card` bakes in 18px; the 7×24 grid wants its original 12px so the
+      // cells keep their density (the shell's own padding override idiom).
+      className="card"
+      style={{ padding: "12px" }}
     >
       {/* Hour ticks */}
       <div className="grid grid-cols-[32px_repeat(24,1fr)] gap-0.5 mb-1">
@@ -80,7 +83,7 @@ export function ScheduleHeatmap({ windows }: Props) {
         {Array.from({ length: 24 }, (_, h) => (
           <div
             key={h}
-            className="type-caption-2 text-label-tertiary text-center"
+            className="type-caption-2 text-[color:var(--text-muted)] text-center"
             aria-hidden="true"
           >
             {h === 0 || h === 6 || h === 12 || h === 18 ? h : ""}
@@ -94,17 +97,22 @@ export function ScheduleHeatmap({ windows }: Props) {
           key={day}
           className="grid grid-cols-[32px_repeat(24,1fr)] gap-0.5 mb-0.5"
         >
-          <div className="type-caption-2 text-label-secondary">{name}</div>
+          <div className="type-caption-2 text-[color:var(--text-muted)]">
+            {name}
+          </div>
           {Array.from({ length: 24 }, (_, hour) => {
             const overlap = matrix[day][hour];
+            // The overlap ramp is a density read, not a state signal — it
+            // stays on the brand ink. `--brand` is a hex custom property, so
+            // the old `/30`-style alpha becomes an explicit `color-mix`.
             const opacityClass =
               overlap === 0
-                ? "bg-surface-secondary"
+                ? "bg-[var(--inset)]"
                 : overlap === 1
-                  ? "bg-accent/30"
+                  ? "bg-[color-mix(in_srgb,var(--brand)_30%,transparent)]"
                   : overlap === 2
-                    ? "bg-accent/55"
-                    : "bg-accent/80";
+                    ? "bg-[color-mix(in_srgb,var(--brand)_55%,transparent)]"
+                    : "bg-[color-mix(in_srgb,var(--brand)_80%,transparent)]";
             return (
               <div
                 key={hour}

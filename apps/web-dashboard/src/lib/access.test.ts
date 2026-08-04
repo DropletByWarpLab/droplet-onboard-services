@@ -72,6 +72,7 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
         "network",
         "projects",
         "smart_home",
+        "team_chat",
         "voice",
       ].sort(),
     );

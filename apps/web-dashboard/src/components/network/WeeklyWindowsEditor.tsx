@@ -77,7 +77,10 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
             key={w.id ?? `new-${idx}`}
             role="group"
             aria-label={`Window ${idx + 1}`}
-            className="dp-card p-3 space-y-2"
+            // `.card` bakes in 18px; these repeat per window, so keep the
+            // original 12px density (the shell's own padding override idiom).
+            className="card space-y-2"
+            style={{ padding: "12px" }}
           >
             {/* Day checkboxes */}
             <div className="flex flex-wrap gap-3">
@@ -89,7 +92,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
                   <label
                     key={dayIdx}
                     htmlFor={inputId}
-                    className="type-caption-1 text-label-secondary flex items-center gap-1 cursor-pointer"
+                    className="type-caption-1 text-[color:var(--text-muted)] flex items-center gap-1 cursor-pointer"
                   >
                     <input
                       id={inputId}
@@ -106,7 +109,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
 
             {/* Time range */}
             <div className="flex items-center gap-2">
-              <label className="type-caption-1 text-label-secondary flex items-center gap-2">
+              <label className="type-caption-1 text-[color:var(--text-muted)] flex items-center gap-2">
                 Start
                 <input
                   type="time"
@@ -115,10 +118,10 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
                     updateAt(idx, { startMin: hhmmToMinutes(e.target.value) })
                   }
                   aria-label={`Window ${idx + 1} start`}
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] focus:border-[var(--brand)]"
                 />
               </label>
-              <label className="type-caption-1 text-label-secondary flex items-center gap-2">
+              <label className="type-caption-1 text-[color:var(--text-muted)] flex items-center gap-2">
                 End
                 <input
                   type="time"
@@ -127,7 +130,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
                     updateAt(idx, { endMin: hhmmToMinutes(e.target.value) })
                   }
                   aria-label={`Window ${idx + 1} end`}
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] focus:border-[var(--brand)]"
                 />
               </label>
               <div className="flex-1" />
@@ -136,7 +139,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
                 onClick={() => removeAt(idx)}
                 disabled={value.length <= 1}
                 aria-label={`Remove window ${idx + 1}`}
-                className="dp-btn-secondary text-sm disabled:opacity-40"
+                className="btn sm"
               >
                 Remove
               </button>
@@ -148,7 +151,9 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
               </p>
             )}
             {wrapsMidnight && (
-              <p className="type-caption-2 text-label-tertiary">Ends next day</p>
+              <p className="type-caption-2 text-[color:var(--text-muted)]">
+                Ends next day
+              </p>
             )}
           </div>
         );
@@ -158,7 +163,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
         type="button"
         onClick={addWindow}
         disabled={value.length >= MAX_WINDOWS}
-        className="dp-btn-secondary text-sm disabled:opacity-40"
+        className="btn sm"
       >
         + Add window
       </button>
