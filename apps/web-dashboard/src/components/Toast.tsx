@@ -79,13 +79,19 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
       {/* Toast region — landmark for screen readers + aria-live polite so
           additions are announced. role="alert" is set per-toast for errors
-          to upgrade them to assertive. */}
+          to upgrade them to assertive.
+
+          Mobile: clear the 56px bottom tab bar (+ safe-area) the way
+          HelpLauncher does, so a toast never covers navigation or lands in
+          the home-indicator strip. Inset left as well — `max-w-sm` (384px)
+          is wider than a 375px viewport, so a right-anchored toast used to
+          overflow the screen edge and clip its own text. */}
       <div
         role="region"
         aria-live="polite"
         aria-atomic="false"
         aria-label="Notifications"
-        className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 max-w-sm"
+        className="fixed inset-x-4 bottom-[calc(72px+env(safe-area-inset-bottom))] z-[100] flex flex-col gap-2 sm:left-auto sm:right-6 sm:max-w-sm lg:bottom-6"
       >
         {toasts.length >= 3 && (
           <div className="flex justify-end">

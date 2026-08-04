@@ -1309,13 +1309,12 @@ export default function FilesPage() {
               if (e.key === "Escape") setShowNewFolder(false);
             }}
             placeholder="Folder name..."
-            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)]"
+            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-input)",
               color: "var(--text)",
-              fontSize: "13.5px",
             }}
           />
           <button onClick={handleCreateFolder} className="btn primary" type="button">
@@ -1404,7 +1403,13 @@ export default function FilesPage() {
         </div>
       )}
 
-      <div className="flex gap-6">
+      {/*
+        Stacks on mobile so the detail panel below can render there at all.
+        FileRow's single-click on a file "opens the info sidebar — the
+        primary affordance for them", but that sidebar was `hidden lg:block`,
+        so on a phone tapping a file produced no visible response.
+      */}
+      <div className="flex flex-col lg:flex-row gap-6">
         {/* File list */}
         <div className="flex-1 min-w-0">
           <UploadZone onUpload={handleUpload} disabled={isReaderSpace}>
@@ -1502,8 +1507,8 @@ export default function FilesPage() {
 
         {/* Detail panel */}
         {selectedFile && !selectedFile.isDirectory && (
-          <div className="hidden lg:block w-72 flex-shrink-0">
-            <div className="card sticky top-6 space-y-4">
+          <div className="w-full lg:w-72 lg:flex-shrink-0">
+            <div className="card lg:sticky lg:top-6 space-y-4">
               <div className="flex items-center justify-between gap-2">
                 <h3
                   className="type-headline truncate flex-1"

@@ -964,13 +964,12 @@ function DriveCard({
                   if (e.key === "Enter") save();
                   if (e.key === "Escape") cancelEdit();
                 }}
-                className="min-w-0 flex-1 outline-none"
+                className="min-w-0 flex-1 outline-none text-[16px] lg:text-[13.5px]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
                   borderRadius: "var(--radius-input)",
                   color: "var(--text)",
-                  fontSize: "13.5px",
                   fontWeight: 500,
                   padding: "6px 10px",
                 }}
@@ -1296,13 +1295,12 @@ function PoolCard({
                   if (e.key === "Enter") save();
                   if (e.key === "Escape") cancelEdit();
                 }}
-                className="min-w-0 flex-1 outline-none"
+                className="min-w-0 flex-1 outline-none text-[16px] lg:text-[13.5px]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
                   borderRadius: "var(--radius-input)",
                   color: "var(--text)",
-                  fontSize: "13.5px",
                   fontWeight: 500,
                   padding: "6px 10px",
                 }}

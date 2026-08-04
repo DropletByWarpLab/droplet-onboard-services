@@ -371,7 +371,7 @@ export function ScheduleEditorModal({
         {toast && (
           <div
             role="alert"
-            className="fixed bottom-4 right-4 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
+            className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 lg:bottom-4 z-50 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
           >
             <span>{toast}</span>
             <button

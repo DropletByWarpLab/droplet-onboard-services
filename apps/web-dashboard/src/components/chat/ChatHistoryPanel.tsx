@@ -403,7 +403,7 @@ export function ChatHistoryPanel({
               })}
               {newProjectDraft !== null && (
                 <input
-                  className="conv-search !m-0 !h-9 w-full px-3 text-[13px]"
+                  className="conv-search !m-0 !h-9 w-full px-3 text-[16px] lg:text-[13px]"
                   autoFocus
                   value={newProjectDraft}
                   onChange={(e) => setNewProjectDraft(e.target.value)}
