@@ -21,7 +21,7 @@ import hmac
 import os
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -79,6 +79,7 @@ from schemas import (
     ApApproveRequest,
     ApTestSeedRequest,
     ApBandSteeringRequest,
+    ApWirelessRequest,
 )
 import re
 
@@ -2242,6 +2243,358 @@ def _write_ap_band_steering(host: str, enabled: bool) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# WARP-1712 — the AP's OWN network name + passphrase, read and written live.
+# ---------------------------------------------------------------------------
+#
+# THE SOURCE-OF-TRUTH CONTRACT (read this before touching anything below).
+#
+# The AP is authoritative for its own radios. This service NEVER caches an
+# SSID: every read dials the AP and reports what its uci actually says, and
+# every write goes to the AP's uci. There is no orchestrator-side copy of the
+# network name that could drift (`ApDevice.approvedSsid` is an APPROVAL-TIME
+# audit column and is deliberately not used for display).
+#
+# THE BAND-STEERING INTERACTION. The Droplet AP image ships an applier,
+# `/etc/init.d/droplet-band-steer` (droplet-edge-router PR #5), with a procd
+# reload trigger. On every reload it DERIVES the 5 GHz interface from the
+# 2.4 GHz one:
+#
+#     droplet.wifi.band_steering = '1'  →  default_radio1.ssid = <ssid>
+#     droplet.wifi.band_steering = '0'  →  default_radio1.ssid = <ssid>-5g
+#
+# (the key is copied verbatim either way). So `default_radio0` — resolved by
+# `_ap_primary_iface` — is the ONE section this service may author. Writing
+# `default_radio1` ourselves would be authoring a value the applier
+# recomputes on the next reload: a race whose winner depends on ordering, and
+# a second place for the household's network name to live. We refuse to do
+# it. `uci apply` (inside `safe_apply`) fires the AP's reload triggers, which
+# is what re-derives radio1 and brings the radios back up — the routing
+# service issues no `wifi up` of its own.
+#
+# The one exception is a PRE-SUBSTRATE image (no `droplet.wifi` section, so
+# `_get_band_steering_value` returns None): nothing on that AP derives
+# anything, so every wifi-iface has to be written directly — which is exactly
+# what the WARP-1675 approval push (`_push_ap_wireless`) already does.
+#
+# `_derived_five_ghz_ssid` mirrors the applier's rule for DISPLAY ONLY, so the
+# dashboard can tell an operator what their 5 GHz network will be called
+# without a second round trip. It is never used to author a uci value.
+
+_AP_PRIMARY_RADIO = "radio0"
+_AP_PRIMARY_IFACE_FALLBACK = "default_radio0"
+_AP_FIVE_GHZ_SSID_SUFFIX = "-5g"
+
+# WPA2-PSK limits, same as ApApproveRequest / SetSsidRequest. SSID is capped in
+# BYTES (802.11 SSID element is 32 octets) — a 32-CHARACTER name with any
+# non-ASCII in it overflows the element and hostapd refuses the config, which
+# on a commit would down the radios. Refuse it here instead.
+_AP_SSID_MAX_BYTES = 32
+_AP_KEY_MIN_LEN = 8
+_AP_KEY_MAX_LEN = 63
+
+_AP_WIRELESS_UNAVAILABLE = {
+    "code": "AP_WIRELESS_UNAVAILABLE",
+    "message": (
+        "The network name can't be changed on this access point — it needs an "
+        "approved Droplet AP that reports its own wireless configuration."
+    ),
+}
+
+
+def _ap_wireless_sections(dev) -> tuple[dict, dict]:
+    """Split a connected AP's `wireless` config into (radios, interfaces).
+
+    One `uci get wireless` round trip rather than two type-filtered reads —
+    the per-radio band/channel/htmode live on the `wifi-device` sections and
+    the ssid/key/encryption on the `wifi-iface` sections, and the card needs
+    both joined.
+    """
+    envelope = dev.uci.get("wireless") or {}
+    values = envelope.get("values", {}) if isinstance(envelope, dict) else {}
+    radios: dict[str, dict] = {}
+    ifaces: dict[str, dict] = {}
+    if isinstance(values, dict):
+        for name, section in values.items():
+            if not isinstance(section, dict):
+                continue
+            if section.get(".type") == "wifi-device":
+                radios[name] = section
+            elif section.get(".type") == "wifi-iface":
+                ifaces[name] = section
+    return radios, ifaces
+
+
+def _ap_primary_iface(ifaces: dict) -> Optional[str]:
+    """The wifi-iface section that owns the household's network name.
+
+    Must stay in lock-step with the AP-side applier, which reads
+    `wireless.default_radio0`. Resolved by the radio it is attached to
+    (`device == 'radio0'`) so a renamed section still lands correctly, then by
+    the applier's literal section name, then — last resort, an image whose
+    sections we don't recognise at all — the first interface uci reports.
+    """
+    for name, section in ifaces.items():
+        if section.get("device") == _AP_PRIMARY_RADIO:
+            return name
+    if _AP_PRIMARY_IFACE_FALLBACK in ifaces:
+        return _AP_PRIMARY_IFACE_FALLBACK
+    return next(iter(ifaces), None)
+
+
+def _derived_five_ghz_ssid(ssid: str, band_steering: Optional[bool]) -> Optional[str]:
+    """What the AP's applier will name the 5 GHz network. DISPLAY ONLY.
+
+    Mirrors `/etc/init.d/droplet-band-steer`. None when the AP carries no
+    applier (pre-substrate image) — there is nothing to derive, because every
+    interface is written directly on that shape.
+    """
+    if band_steering is None:
+        return None
+    return ssid if band_steering else f"{ssid}{_AP_FIVE_GHZ_SSID_SUFFIX}"
+
+
+def _validate_ap_wireless(req: ApWirelessRequest) -> tuple[Optional[str], Optional[str]]:
+    """Refuse a payload the AP's hostapd would reject, BEFORE dialing out.
+
+    A commit that hostapd refuses leaves the radios down until someone
+    physically recovers the AP, so an out-of-range name/passphrase is a 400
+    here and no connection is ever opened. Raises HTTPException(400); returns
+    the (ssid, key) to write otherwise.
+    """
+    ssid = req.ssid
+    key = req.key
+    if ssid is None and key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide 'ssid' and/or 'key' — nothing to change.",
+        )
+    if ssid is not None:
+        # Bytes, not characters — see _AP_SSID_MAX_BYTES.
+        length = len(ssid.encode("utf-8"))
+        if length < 1 or length > _AP_SSID_MAX_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Network name (SSID) must be 1-{_AP_SSID_MAX_BYTES} bytes; "
+                    f"got {length}."
+                ),
+            )
+    if key is not None and not (_AP_KEY_MIN_LEN <= len(key) <= _AP_KEY_MAX_LEN):
+        # Never echo the passphrase back — only its length.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Wi-Fi password must be {_AP_KEY_MIN_LEN}-{_AP_KEY_MAX_LEN} "
+                f"characters; got {len(key)}."
+            ),
+        )
+    return ssid, key
+
+
+def _ap_live_overlay(dev, ifaces: dict) -> tuple[dict, dict]:
+    """Best-effort live state off an already-connected AP: (per-iface, device).
+
+    Reuses the ubus surfaces the droplet-ai ACL already grants — no new
+    AP-side endpoint. `network.wireless status` for link state + the kernel
+    ifname, `iwinfo info`/`assoclist` for the real channel/width/client count,
+    `system board`/`info` for model/firmware/uptime.
+
+    UbusError is swallowed per-surface: an AP whose ACL is narrower than ours
+    still gets an honest config read with the live fields reported as None,
+    which is strictly better than 502-ing a page that could have rendered.
+    ConnectionLost deliberately propagates — a connection that dropped
+    mid-read makes the WHOLE answer untrustworthy, so the caller classifies it
+    as AP_UNREACHABLE.
+    """
+    per_iface: dict[str, dict] = {}
+    device: dict[str, Any] = {
+        "model": None,
+        "firmware": None,
+        "hostname": None,
+        "uptime_seconds": None,
+    }
+
+    status: dict = {}
+    try:
+        status = dev.wireless.status() or {}
+    except UbusError:
+        logger.debug("AP live overlay: wireless status unavailable", exc_info=True)
+
+    # netifd's status is keyed by radio; each radio carries the wifi-iface
+    # sections it brought up, with the kernel ifname iwinfo needs.
+    ifname_by_section: dict[str, str] = {}
+    up_by_section: dict[str, bool] = {}
+    if isinstance(status, dict):
+        for radio_state in status.values():
+            if not isinstance(radio_state, dict):
+                continue
+            radio_up = bool(radio_state.get("up"))
+            for entry in radio_state.get("interfaces", []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                section = entry.get("section")
+                if not section:
+                    continue
+                if entry.get("ifname"):
+                    ifname_by_section[section] = entry["ifname"]
+                up_by_section[section] = radio_up
+
+    for section in ifaces:
+        ifname = ifname_by_section.get(section)
+        info: dict = {}
+        clients: Optional[int] = None
+        if ifname:
+            try:
+                info = dev.wireless.radio_info(device=ifname) or {}
+            except UbusError:
+                logger.debug("AP live overlay: iwinfo info failed", exc_info=True)
+            try:
+                clients = len(dev.wireless.connected_clients(device=ifname) or [])
+            except UbusError:
+                logger.debug("AP live overlay: iwinfo assoclist failed", exc_info=True)
+        per_iface[section] = {
+            "ifname": ifname,
+            "up": up_by_section.get(section),
+            "live_channel": info.get("channel"),
+            "live_htmode": info.get("htmode"),
+            "clients": clients,
+        }
+
+    try:
+        board = dev.system.board_info() or {}
+        device["model"] = board.get("model")
+        device["hostname"] = board.get("hostname")
+        release = board.get("release")
+        if isinstance(release, dict):
+            device["firmware"] = release.get("description") or release.get("version")
+    except UbusError:
+        logger.debug("AP live overlay: system board failed", exc_info=True)
+    try:
+        device["uptime_seconds"] = dev.system.uptime_seconds()
+    except UbusError:
+        logger.debug("AP live overlay: system info failed", exc_info=True)
+
+    return per_iface, device
+
+
+def _shape_ap_wireless(dev) -> Optional[dict]:
+    """Build the live wireless snapshot off an already-connected AP.
+
+    None = honest "unsupported": the AP reports no wifi-iface sections at all,
+    so there is no network name to show or change on it.
+    """
+    radios, ifaces = _ap_wireless_sections(dev)
+    if not ifaces:
+        return None
+    band_steering = _get_band_steering_value(dev)
+    primary = _ap_primary_iface(ifaces)
+    live, device = _ap_live_overlay(dev, ifaces)
+
+    shaped = []
+    for section in sorted(ifaces):
+        iface = ifaces[section]
+        radio_name = iface.get("device")
+        radio = radios.get(radio_name, {}) if isinstance(radio_name, str) else {}
+        overlay = live.get(section, {})
+        shaped.append({
+            "section": section,
+            "radio": radio_name,
+            "band": radio.get("band"),
+            "ssid": iface.get("ssid"),
+            "encryption": iface.get("encryption"),
+            # Configured channel ('auto' is a legal uci value); the live
+            # channel iwinfo reports is separate and may differ.
+            "channel": radio.get("channel"),
+            "htmode": radio.get("htmode"),
+            # uci omits `disabled` when the radio is enabled — absence means
+            # "not disabled", which is a documented uci default, not a guess.
+            "disabled": str(iface.get("disabled", "0")) == "1",
+            "primary": section == primary,
+            "ifname": overlay.get("ifname"),
+            "up": overlay.get("up"),
+            "live_channel": overlay.get("live_channel"),
+            "live_htmode": overlay.get("live_htmode"),
+            "clients": overlay.get("clients"),
+        })
+
+    primary_iface = ifaces.get(primary, {}) if primary else {}
+    ssid = primary_iface.get("ssid")
+    return {
+        "supported": True,
+        "band_steering": band_steering,
+        "primary_section": primary,
+        "ssid": ssid,
+        # The live passphrase, so an operator can read it off the dashboard
+        # instead of ssh-ing to the AP. The AP mints a per-unit one at first
+        # boot (/etc/droplet/wifi-psk). Gated owner/admin one layer up, same
+        # posture as the guest-network PSK.
+        "key": primary_iface.get("key"),
+        "encryption": primary_iface.get("encryption"),
+        "five_ghz_ssid": _derived_five_ghz_ssid(ssid, band_steering) if ssid else None,
+        "radios": shaped,
+        "device": device,
+    }
+
+
+def _read_ap_wireless(host: str) -> Optional[dict]:
+    """Dial the AP and snapshot its wireless state. None = unsupported."""
+    return _shape_ap_wireless(_connect_ap(host))
+
+
+def _write_ap_wireless(host: str, ssid: Optional[str], key: Optional[str]) -> Optional[dict]:
+    """Dial the AP and set the household network name / passphrase.
+
+    Writes ONLY the primary (2.4 GHz) wifi-iface when the AP carries the
+    band-steering applier — see the contract at the top of this block; the
+    applier derives the 5 GHz interface on the reload `uci apply` triggers.
+    A pre-substrate image has no applier, so every interface is written
+    directly (the WARP-1675 approval-push shape).
+
+    Returns the post-write snapshot, or None (having written nothing) when the
+    AP exposes no wireless sections — the caller surfaces the honest 422.
+    """
+    dev = _connect_ap(host)
+    _radios, ifaces = _ap_wireless_sections(dev)
+    if not ifaces:
+        return None
+    band_steering = _get_band_steering_value(dev)
+    primary = _ap_primary_iface(ifaces)
+
+    values: dict[str, str] = {}
+    if ssid is not None:
+        values["ssid"] = ssid
+    if key is not None:
+        values["key"] = key
+
+    if band_steering is None:
+        # No applier on this image — nothing derives the other interfaces.
+        targets = sorted(ifaces)
+    else:
+        targets = [primary] if primary else []
+    if not targets:
+        return None
+
+    with dev.safe_apply(timeout=60):
+        for section in targets:
+            dev.uci.set("wireless", section, values)
+
+    # Report the intent, not a re-read: the AP's radios are mid-reload right
+    # after apply, and a read raced against that would show pre-reload values.
+    # The dashboard revalidates once the operation lands.
+    effective_ssid = ssid if ssid is not None else ifaces.get(primary, {}).get("ssid")
+    return {
+        "sections_written": targets,
+        "band_steering": band_steering,
+        "ssid": effective_ssid,
+        "five_ghz_ssid": (
+            _derived_five_ghz_ssid(effective_ssid, band_steering)
+            if effective_ssid
+            else None
+        ),
+    }
+
+
 @app.get("/aps/discovered")
 def aps_discovered():
     """Return the live mDNS discovery snapshot.
@@ -2454,6 +2807,132 @@ def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request
             "mac": canonical,
             "enabled": req.enabled,
             "ap_detail": f"AP at {ap_ip} band steering {'on' if req.enabled else 'off'}",
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}/wireless")
+def aps_wireless_get(mac: str):
+    """Read the AP's LIVE wireless state (WARP-1712).
+
+    The AP is authoritative for its own radios — this dials it and reports
+    what its uci actually says, so nothing upstream can serve a stale network
+    name. Returns the per-radio detail an operator needs (band, channel,
+    width, link state, associated clients) plus the model/firmware/uptime, all
+    off ubus surfaces the droplet-ai ACL already grants.
+
+    Honesty contract (the band-steering / UPnP pattern): `supported` is False —
+    never an error — when no AP credential is provisioned or the AP reports no
+    wireless sections. Reachability problems on a *configured* AP are typed
+    502s (AP_AUTH / AP_UNREACHABLE).
+
+    The response carries the live passphrase. That is deliberate (an operator
+    should not need ssh to read their own Wi-Fi password) and is why the
+    orchestrator gates this read to owner/admin, same posture as the
+    guest-network PSK read.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock).
+        if hasattr(ap, "get_ap_wireless"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            return {**ap.get_ap_wireless(canonical), "ap_detail": "mock AP"}
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "ap_detail": "no AP credential configured",
+                "radios": [],
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            state = _read_ap_wireless(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if state is None:
+            return {
+                "supported": False,
+                "ap_detail": f"AP at {ap_ip} reports no wireless interfaces",
+                "radios": [],
+            }
+        return {**state, "ap_detail": f"AP at {ap_ip}"}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.put("/aps/{mac}/wireless")
+def aps_wireless_put(mac: str, req: ApWirelessRequest, request: Request):
+    """Set the AP's network name / passphrase (WARP-1712).
+
+    Validation runs BEFORE any dial-out: an SSID or passphrase hostapd would
+    reject is a 400 that pushes nothing, because a rejected commit leaves the
+    AP's radios down. Beyond that the write targets ONLY the primary
+    (2.4 GHz) interface when the AP carries the band-steering applier — the
+    applier derives the 5 GHz interface on the reload that `uci apply` fires.
+    See the contract block above `_ap_primary_iface`.
+
+    Mirrors the band-steering PUT's honesty: a shape that can't do this
+    answers 422 AP_WIRELESS_UNAVAILABLE, never a pretend-success.
+    """
+    canonical = _validate_mac(mac)
+    # Raises 400 before anything is connected to or written.
+    ssid, key = _validate_ap_wireless(req)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock).
+        if hasattr(ap, "set_ap_wireless"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            result = ap.set_ap_wireless(canonical, ssid, key)
+            return {
+                "status": "ok",
+                "mac": canonical,
+                **result,
+                "ap_detail": "mock AP",
+                "operation_id": getattr(request.state, "operation_id", None),
+            }
+
+        if not AP_PASSWORD:
+            # Never pretend to rename a network on an AP we can't configure.
+            return JSONResponse(status_code=422, content=_AP_WIRELESS_UNAVAILABLE)
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to configure — "
+                    "is it online? The change is retryable."
+                ),
+            })
+        try:
+            written = _write_ap_wireless(ap_ip, ssid, key)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if written is None:
+            return JSONResponse(status_code=422, content=_AP_WIRELESS_UNAVAILABLE)
+        return {
+            "status": "ok",
+            "mac": canonical,
+            **written,
+            "ap_detail": f"AP at {ap_ip} wireless updated",
             "operation_id": getattr(request.state, "operation_id", None),
         }
     except (ConnectionLost, UbusError) as exc:
