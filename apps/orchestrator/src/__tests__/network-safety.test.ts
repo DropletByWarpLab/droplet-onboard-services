@@ -11,6 +11,7 @@ import {
   evaluateNetworkCommand,
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
+import { REDACTION_PLACEHOLDER } from "../lib/log-redaction.js";
 
 // WARP-181: spy on the signed activity emitter so logNetworkCommand's
 // actor derivation runs under assertion (the real recorder singleton is
@@ -411,5 +412,121 @@ describe("logNetworkCommand actor derivation (WARP-181)", () => {
     expect(row.actor).toEqual({ type: "user", id: "uuid-owner" });
     expect(row.refs.confirmed).toBe(true);
     expect(row.refs.blocked).toBe(false);
+  });
+});
+
+describe("audit-log secret redaction (WARP-1718)", () => {
+  let prisma: ReturnType<typeof createMockPrisma>;
+
+  beforeEach(() => {
+    prisma = createMockPrisma();
+    recordActivityMock.mockClear();
+  });
+
+  /** The `data` payload of the most recent commandAuditLog.create call. */
+  function lastAuditData(): Record<string, any> {
+    const calls = (prisma as any).commandAuditLog.create.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][0].data;
+  }
+
+  const PLANTED = "hunter2-household-psk";
+
+  it("set_wifi_password writes NO plaintext passphrase to the audit log", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "wireless.password",
+      "set_wifi_password",
+      { iface_section: "default_radio0", password: PLANTED },
+      "uuid-owner",
+    );
+
+    const row = lastAuditData();
+    // The whole row, serialized — nothing anywhere in it may carry the PSK.
+    expect(JSON.stringify(row)).not.toContain(PLANTED);
+    // …but the key is still there, so the audit shows a passphrase WAS set,
+    // and the non-secret context stays readable.
+    expect(row.data).toEqual({
+      iface_section: "default_radio0",
+      password: REDACTION_PLACEHOLDER,
+    });
+    expect(row.service).toBe("set_wifi_password");
+    expect(row.tier).toBe(2);
+  });
+
+  it("the signed activity row carries no passphrase either", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "wireless.password",
+      "set_wifi_password",
+      { iface_section: "default_radio0", password: PLANTED },
+      "uuid-owner",
+    );
+
+    expect(recordActivityMock).toHaveBeenCalled();
+    const activityRow =
+      recordActivityMock.mock.calls[recordActivityMock.mock.calls.length - 1]![0];
+    expect(JSON.stringify(activityRow)).not.toContain(PLANTED);
+    // refs deliberately carries no params at all — assert that stays true.
+    expect(activityRow.refs).not.toHaveProperty("data");
+    expect(activityRow.refs).not.toHaveProperty("password");
+  });
+
+  it("create_guest_network redacts the PSK but keeps ssid/radio/network", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "wireless.guest",
+      "create_guest_network",
+      { radio: "radio3", ssid: "Droplet Guest", password: PLANTED, network: "guest" },
+      "uuid-owner",
+    );
+
+    const row = lastAuditData();
+    expect(JSON.stringify(row)).not.toContain(PLANTED);
+    expect(row.data).toEqual({
+      radio: "radio3",
+      ssid: "Droplet Guest",
+      password: REDACTION_PLACEHOLDER,
+      network: "guest",
+    });
+  });
+
+  it("the Tier-2 CONFIRM leg is redacted too, not just the evaluate leg", async () => {
+    // The confirm replays the pending record's params — which are the RAW
+    // ones by design (the dispatcher needs them) — through the same logger.
+    const minted = await evaluateNetworkCommand(
+      prisma,
+      "wireless.password",
+      "set_wifi_password",
+      { iface_section: "default_radio0", password: PLANTED },
+      "uuid-owner",
+    );
+    const token = (minted as any).confirmationToken as string;
+
+    const result = await confirmNetworkCommand(prisma, token, "uuid-owner", {
+      operation: "set_wifi_password",
+    });
+
+    // The confirm still hands the REAL params back to the caller, so the
+    // dispatcher can actually apply the change…
+    expect(result.confirmed).toBe(true);
+    expect((result as any).params.password).toBe(PLANTED);
+
+    // …while the audit row it wrote carries none of it.
+    const row = lastAuditData();
+    expect(row.confirmed).toBe(true);
+    expect(JSON.stringify(row)).not.toContain(PLANTED);
+    expect(row.data.password).toBe(REDACTION_PLACEHOLDER);
+  });
+
+  it("a params-free op still audits cleanly (no redaction regression)", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "firewall.block.aa:bb:cc:dd:ee:11",
+      "block_device",
+      { mac: "aa:bb:cc:dd:ee:11" },
+      "uuid-owner",
+    );
+    expect(lastAuditData().data).toEqual({ mac: "aa:bb:cc:dd:ee:11" });
   });
 });
