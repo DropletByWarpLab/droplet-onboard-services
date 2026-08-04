@@ -21,6 +21,7 @@ import {
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import { createLogger } from "../lib/logger.js";
+import { redactSecretParams } from "../lib/log-redaction.js";
 
 const logger = createLogger("network-safety");
 
@@ -375,6 +376,17 @@ async function logNetworkCommand(
     reason?: string;
   }
 ): Promise<void> {
+  // WARP-1718: redact ONCE, up front, so no writer below can reach the raw
+  // params. Several Tier-2 ops carry household secrets in `data` —
+  // set_wifi_password `{iface_section, password}`, create_guest_network
+  // `{radio, ssid, password, network}`, and camera_subnet_setup, which
+  // forwards `req.body` wholesale. Those params legitimately ride the
+  // in-memory pending-confirmation record (the Tier-2 confirm runs in a
+  // separate request and the network-status dispatcher replays them), so the
+  // LOGGING boundary is the only correct place to strip them. The key stays
+  // put with a placeholder value: the audit still shows a secret was set.
+  const safeData = redactSecretParams(entry.data);
+
   try {
     await prisma.commandAuditLog.create({
       data: {
@@ -382,7 +394,7 @@ async function logNetworkCommand(
         entityId: entry.entityId,
         domain: entry.domain,
         service: entry.service,
-        data: entry.data ? JSON.parse(JSON.stringify(entry.data)) : undefined,
+        data: safeData ? JSON.parse(JSON.stringify(safeData)) : undefined,
         tier: entry.tier,
         confirmed: entry.confirmed,
         blocked: entry.blocked,
@@ -428,6 +440,11 @@ async function logNetworkCommand(
         ? `Network ${entry.service}`
         : `Network ${entry.service} pending`,
     sub: `tier ${entry.tier} • ${entry.entityId}`,
+    // WARP-1718: `refs` deliberately carries NO command params. The signed
+    // activity chain is append-only and tamper-evident — a secret written
+    // here cannot be rewritten out later without breaking the chain. If a
+    // future change needs params on the row, pass `safeData`, never
+    // `entry.data`.
     refs: {
       entityId: entry.entityId,
       domain: entry.domain,

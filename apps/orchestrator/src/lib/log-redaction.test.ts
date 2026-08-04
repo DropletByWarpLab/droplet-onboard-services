@@ -9,7 +9,11 @@
  * they never survive the scrub.
  */
 import { describe, it, expect } from "vitest";
-import { redactSecrets, REDACTION_PLACEHOLDER } from "./log-redaction.js";
+import {
+  redactSecrets,
+  redactSecretParams,
+  REDACTION_PLACEHOLDER,
+} from "./log-redaction.js";
 
 describe("redactSecrets", () => {
   it("redacts an Authorization: Bearer token", () => {
@@ -198,5 +202,119 @@ describe("redactSecrets", () => {
   it("handles empty / whitespace input without throwing", () => {
     expect(redactSecrets("")).toBe("");
     expect(redactSecrets("   \n  ")).toBe("   \n  ");
+  });
+});
+
+/**
+ * WARP-1718 — structured (object) redaction for audit params.
+ *
+ * `redactSecretParams()` is the scrub standing between a Tier-2 network
+ * command's raw params and `CommandAuditLog.data`. Same posture as the text
+ * scrub above: PLANT a known passphrase, assert it never survives — while the
+ * non-secret context that makes an audit row useful stays readable.
+ */
+describe("redactSecretParams", () => {
+  it("redacts a password but keeps the key and its non-secret siblings", () => {
+    const out = redactSecretParams({
+      iface_section: "default_radio0",
+      password: "hunter2-household-psk",
+    });
+
+    expect(out).toEqual({
+      iface_section: "default_radio0",
+      password: REDACTION_PLACEHOLDER,
+    });
+    // The key survives: the audit still proves a passphrase WAS set.
+    expect(Object.keys(out)).toContain("password");
+    expect(JSON.stringify(out)).not.toContain("hunter2-household-psk");
+  });
+
+  it("redacts create_guest_network's PSK but leaves ssid/radio/network legible", () => {
+    const out = redactSecretParams({
+      radio: "radio3",
+      ssid: "Droplet Guest",
+      password: "guest-psk-do-not-leak",
+      network: "guest",
+    });
+
+    expect(out).toEqual({
+      radio: "radio3",
+      ssid: "Droplet Guest",
+      password: REDACTION_PLACEHOLDER,
+      network: "guest",
+    });
+  });
+
+  it("redacts the WARP-1712 AP shape `{ssid, key}` on the `key` param", () => {
+    const out = redactSecretParams({ ssid: "Droplet", key: "ap-psk-do-not-leak" });
+    expect(out).toEqual({ ssid: "Droplet", key: REDACTION_PLACEHOLDER });
+  });
+
+  it("leaves an absent secret absent rather than implying one was set", () => {
+    // WARP-1712 SSID-only edit: `key` is undefined and the op is
+    // set_ap_wifi_ssid — a placeholder here would be a lie.
+    const out = redactSecretParams({ ssid: "Droplet", key: undefined });
+    expect(out).toEqual({ ssid: "Droplet", key: undefined });
+    expect(out.key).toBeUndefined();
+    expect(redactSecretParams({ psk: null })).toEqual({ psk: null });
+  });
+
+  it("covers the other secret-bearing key spellings", () => {
+    const out = redactSecretParams({
+      encryption_key: "ek",
+      psk: "p",
+      secret: "s",
+      token: "t",
+      wpa_passphrase: "w",
+      SSID: "not-a-secret",
+    });
+    expect(out).toEqual({
+      encryption_key: REDACTION_PLACEHOLDER,
+      psk: REDACTION_PLACEHOLDER,
+      secret: REDACTION_PLACEHOLDER,
+      token: REDACTION_PLACEHOLDER,
+      wpa_passphrase: REDACTION_PLACEHOLDER,
+      SSID: "not-a-secret",
+    });
+  });
+
+  it("keeps a public key / key id (the SAFE_KEY carve-out)", () => {
+    const out = redactSecretParams({ public_key: "pk-not-secret", key_id: "kid-7" });
+    expect(out).toEqual({ public_key: "pk-not-secret", key_id: "kid-7" });
+  });
+
+  it("redacts nested objects and arrays, not just top-level keys", () => {
+    const out = redactSecretParams({
+      networks: [{ ssid: "a", password: "nested-psk-leak" }],
+      wan: { pppoe: { username: "u", password: "deep-psk-leak" } },
+    });
+    expect(JSON.stringify(out)).not.toContain("nested-psk-leak");
+    expect(JSON.stringify(out)).not.toContain("deep-psk-leak");
+    expect((out.networks as any[])[0].ssid).toBe("a");
+    expect((out.wan as any).pppoe.username).toBe("u");
+  });
+
+  it("catches a secret embedded in a value under a harmless key", () => {
+    // camera_subnet_setup forwards req.body wholesale — the key name gives
+    // no hint, so the text scrub still has to run over string values.
+    const out = redactSecretParams({ upstream: "redis://:sup3rsecret@cache:6379" });
+    expect(JSON.stringify(out)).not.toContain("sup3rsecret");
+  });
+
+  it("does not mutate its input", () => {
+    const input = { password: "original-psk" };
+    redactSecretParams(input);
+    expect(input.password).toBe("original-psk");
+  });
+
+  it("terminates on a cyclic object instead of spinning", () => {
+    const cyclic: Record<string, unknown> = { ssid: "a" };
+    cyclic.self = cyclic;
+    expect(() => redactSecretParams(cyclic)).not.toThrow();
+  });
+
+  it("passes through undefined / primitives untouched", () => {
+    expect(redactSecretParams(undefined)).toBeUndefined();
+    expect(redactSecretParams({})).toEqual({});
   });
 });
