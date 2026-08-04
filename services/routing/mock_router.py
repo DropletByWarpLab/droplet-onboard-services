@@ -491,6 +491,10 @@ class _MockAp:
         # Track which MACs have been decommissioned so /aps/{mac} reports
         # the right state after the row has been cleared from `_pushed`.
         self._decommissioned: set[str] = set()
+        # WARP-1703: per-MAC band-steering flag mirroring the AP image's
+        # `droplet.wifi.band_steering` master switch. Absent = the substrate
+        # default (ON) — same semantics as an unset uci option.
+        self._band_steering: dict[str, bool] = {}
 
     @staticmethod
     def iface_section_for_mac(mac: str) -> str:
@@ -576,6 +580,18 @@ class _MockAp:
         self._pushed.pop(canonical, None)
         self._decommissioned.add(canonical)
         logger.info("mock: AP remove_wireless_config mac=%s — no-op", canonical)
+
+    def get_band_steering(self, mac: str) -> bool:
+        """WARP-1703: the AP image's `droplet.wifi.band_steering` master
+        switch. Defaults ON — same as the substrate's unset-option default."""
+        return self._band_steering.get(mac.upper(), True)
+
+    def set_band_steering(self, mac: str, enabled: bool) -> None:
+        canonical = mac.upper()
+        self._band_steering[canonical] = bool(enabled)
+        logger.info(
+            "mock: AP set_band_steering mac=%s enabled=%s — no-op", canonical, enabled
+        )
 
 
 class _MockUci:

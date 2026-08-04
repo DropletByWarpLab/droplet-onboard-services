@@ -78,6 +78,7 @@ from schemas import (
     VpnPeerDeleteRequest,
     ApApproveRequest,
     ApTestSeedRequest,
+    ApBandSteeringRequest,
 )
 import re
 
@@ -2103,6 +2104,22 @@ def _discovered_ap_ip(ap, canonical: str) -> Optional[str]:
     return None
 
 
+def _connect_ap(host: str):
+    """Dial the EXTERNAL AP's rpcd as `droplet-ai` (AP_* config above).
+
+    Single construction point for every AP-direct call (`_push_ap_wireless`,
+    band steering) so the credential/port wiring can't drift between them.
+    Raises ConnectionLost / UbusError for the caller to classify.
+    """
+    return DropletRouter(
+        host=host,
+        port=AP_PORT,
+        username=AP_USERNAME,
+        password=AP_PASSWORD,
+        auto_login=True,
+    )
+
+
 def _push_ap_wireless(
     host: str,
     *,
@@ -2120,13 +2137,7 @@ def _push_ap_wireless(
     safe_apply so a push that breaks the AP's management path auto-rolls back.
     Raises ConnectionLost / UbusError for the caller to classify.
     """
-    dev = DropletRouter(
-        host=host,
-        port=AP_PORT,
-        username=AP_USERNAME,
-        password=AP_PASSWORD,
-        auto_login=True,
-    )
+    dev = _connect_ap(host)
     envelope = dev.uci.get("wireless", type="wifi-iface") or {}
     sections = envelope.get("values", {}) if isinstance(envelope, dict) else {}
     values: dict[str, str] = {"disabled": "0" if enable else "1"}
@@ -2167,6 +2178,68 @@ def _classify_ap_push_error(exc: Exception, host: str) -> HTTPException:
             "approval is retryable once the AP is reachable."
         ),
     })
+
+
+# WARP-1703 — the AP image's band-steering master switch (droplet-edge-router
+# PR #5): uci `droplet.wifi.band_steering` ('1'/'0', default '1'). Committing
+# the option fires the AP's own procd reload trigger, which unifies/splits the
+# SSIDs and starts/stops dawn — the routing service never touches the AP's
+# wireless sections on this path. The droplet-ai ACL grants uci read/write on
+# the 'droplet' config, so no extra privileges are needed.
+_AP_BAND_STEERING_CONFIG = "droplet"
+_AP_BAND_STEERING_SECTION = "wifi"
+_AP_BAND_STEERING_OPTION = "band_steering"
+
+
+def _get_band_steering_value(dev) -> Optional[bool]:
+    """Read `droplet.wifi.band_steering` off an already-connected AP device.
+
+    None = the AP image doesn't carry the droplet.wifi substrate (an image
+    that predates droplet-edge-router PR #5) — honest "unsupported", never an
+    error. ubus code 4 (NOT_FOUND) / 5 (NO_DATA) mean the config or section is
+    missing; any other UbusError propagates for the caller to classify.
+    """
+    try:
+        envelope = dev.uci.get(
+            _AP_BAND_STEERING_CONFIG, section=_AP_BAND_STEERING_SECTION
+        )
+    except UbusError as exc:
+        if exc.code in (4, 5):
+            return None
+        raise
+    values = envelope.get("values", {}) if isinstance(envelope, dict) else {}
+    if not isinstance(values, dict) or not values:
+        return None
+    # The substrate default is ON — an unset option means steering is active.
+    return str(values.get(_AP_BAND_STEERING_OPTION, "1")) == "1"
+
+
+def _read_ap_band_steering(host: str) -> Optional[bool]:
+    """Dial the AP and read its band-steering state. None = unsupported."""
+    return _get_band_steering_value(_connect_ap(host))
+
+
+def _write_ap_band_steering(host: str, enabled: bool) -> bool:
+    """Dial the AP and set `droplet.wifi.band_steering`.
+
+    Returns False (without writing) when the AP image doesn't carry the
+    substrate — the caller surfaces the honest 422. The write runs under the
+    AP's own safe_apply: set + apply(rollback) + connectivity probe + confirm,
+    so a commit that somehow breaks the AP's management path auto-rolls back.
+    The apply also commits the staged option, which is what fires the AP's
+    procd reload trigger (set+commit is the substrate contract; apply's
+    rollback arm is belt-and-braces on top).
+    """
+    dev = _connect_ap(host)
+    if _get_band_steering_value(dev) is None:
+        return False
+    with dev.safe_apply(timeout=60):
+        dev.uci.set(
+            _AP_BAND_STEERING_CONFIG,
+            _AP_BAND_STEERING_SECTION,
+            {_AP_BAND_STEERING_OPTION: "1" if enabled else "0"},
+        )
+    return True
 
 
 @app.get("/aps/discovered")
@@ -2250,6 +2323,139 @@ def aps_test_seed(req: ApTestSeedRequest):
             hostname=req.hostname,
         )
         return {"status": "ok", "mac": req.mac.upper()}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+_AP_BAND_STEERING_UNAVAILABLE = {
+    "code": "AP_BAND_STEERING_UNAVAILABLE",
+    "message": (
+        "Band steering isn't available on this access point — it needs an "
+        "approved Droplet AP running an image with the droplet.wifi substrate."
+    ),
+}
+
+
+@app.get("/aps/{mac}/band-steering")
+def aps_band_steering_get(mac: str):
+    """Read the AP's band-steering master switch (WARP-1703).
+
+    Honesty contract (the UPnP pattern): `supported` is False — never an
+    error — when no AP credential is provisioned (single-box / legacy shapes)
+    or when the AP's image predates the droplet.wifi substrate. Reachability
+    problems on a *configured* AP are typed 502s (AP_AUTH / AP_UNREACHABLE),
+    same classification as the approval push.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock) — the in-memory _MockAp keeps
+        # a per-MAC band-steering flag so dashboard dev can drive the toggle
+        # without a real AP.
+        if hasattr(ap, "get_band_steering"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            return {
+                "supported": True,
+                "enabled": ap.get_band_steering(canonical),
+                "ap_detail": "mock AP",
+            }
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "enabled": False,
+                "ap_detail": "no AP credential configured",
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            state = _read_ap_band_steering(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if state is None:
+            return {
+                "supported": False,
+                "enabled": False,
+                "ap_detail": (
+                    f"AP at {ap_ip} doesn't expose band steering — its image "
+                    "predates the droplet.wifi substrate"
+                ),
+            }
+        return {
+            "supported": True,
+            "enabled": state,
+            "ap_detail": f"AP at {ap_ip}",
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.put("/aps/{mac}/band-steering")
+def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request):
+    """Toggle the AP's band-steering master switch (WARP-1703).
+
+    Sets `droplet.wifi.band_steering` over the AP's rpcd; the commit fires
+    the AP's own procd reload trigger which unifies/splits the SSIDs and
+    starts/stops dawn. Mirrors POST /upnp's honesty: a shape that can't do
+    this answers 422 AP_BAND_STEERING_UNAVAILABLE, never a pretend-success.
+    The Operation-Id is mirrored into the body like aps_approve — some
+    proxies strip non-standard response headers.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock).
+        if hasattr(ap, "set_band_steering"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            ap.set_band_steering(canonical, req.enabled)
+            return {
+                "status": "ok",
+                "mac": canonical,
+                "enabled": req.enabled,
+                "ap_detail": "mock AP",
+                "operation_id": getattr(request.state, "operation_id", None),
+            }
+
+        if not AP_PASSWORD:
+            # Never pretend to toggle steering on an AP we can't configure.
+            return JSONResponse(status_code=422, content=_AP_BAND_STEERING_UNAVAILABLE)
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to configure — "
+                    "is it online? The change is retryable."
+                ),
+            })
+        try:
+            written = _write_ap_band_steering(ap_ip, req.enabled)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if not written:
+            return JSONResponse(status_code=422, content=_AP_BAND_STEERING_UNAVAILABLE)
+        return {
+            "status": "ok",
+            "mac": canonical,
+            "enabled": req.enabled,
+            "ap_detail": f"AP at {ap_ip} band steering {'on' if req.enabled else 'off'}",
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

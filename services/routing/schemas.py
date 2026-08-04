@@ -589,6 +589,18 @@ class ApTestSeedRequest(BaseModel):
     hostname: Optional[str] = None
 
 
+class ApBandSteeringRequest(BaseModel):
+    """Toggle the external AP's band-steering master switch (WARP-1703).
+
+    Maps 1:1 onto the AP image's `droplet.wifi.band_steering` uci option
+    (droplet-edge-router PR #5): '1' unifies the SSIDs + runs dawn (802.11k/v
+    steering), '0' splits them and stops dawn. The AP's own procd reload
+    trigger re-applies on commit — the routing service only sets + commits.
+    """
+
+    enabled: bool = Field(..., description="Enable 802.11k/v band steering on the AP")
+
+
 # --- Response models ---
 
 class HealthResponse(BaseModel):
