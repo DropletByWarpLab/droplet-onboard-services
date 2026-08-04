@@ -224,7 +224,7 @@ jobs:
       # on every push to main. Best-effort — a cold cache only slows the run.
       - name: Log in to GHCR (layer cache, read-only)
         if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.5.2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
