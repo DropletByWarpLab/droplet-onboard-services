@@ -2564,6 +2564,53 @@ def _ap_mode_ifnames(dev) -> list[str]:
     return names
 
 
+def _read_ap_wireless(host: str) -> Optional[dict]:
+    """The AP's own broadcast Wi-Fi config — ssid/key/encryption (WARP-1714).
+
+    On the edge-router shape the router runs NO AP-mode interface (the Pi's
+    radio0 reports ``interfaces: []`` and its uci carries only a disabled
+    ``ssid='OpenWrt'`` placeholder), so the household's real Wi-Fi name and
+    password live on the standalone AP. Reading the router alone can only
+    answer "nothing configured", which is why the dashboard's Wi-Fi card came
+    up blank on this shape.
+
+    Returns ``None`` when the AP exposes no AP-mode interface with an SSID —
+    an honest "nothing to report", never a fabricated default. Raises
+    ConnectionLost / UbusError for the caller to classify.
+    """
+    dev = _connect_ap(host)
+    status = dev.wireless.status()
+    if not isinstance(status, dict):
+        return None
+    for radio in status.values():
+        if not isinstance(radio, dict):
+            continue
+        for iface in radio.get("interfaces") or []:
+            if not isinstance(iface, dict):
+                continue
+            cfg = iface.get("config") or {}
+            if not isinstance(cfg, dict):
+                continue
+            if str(cfg.get("mode", "")).lower() != "ap":
+                continue
+            # Guest Wi-Fi has its own card; surfacing its PSK as the household
+            # password would be actively misleading.
+            network = cfg.get("network")
+            names = network if isinstance(network, list) else str(network or "").split()
+            if "guest" in names:
+                continue
+            ssid = cfg.get("ssid")
+            if not ssid:
+                continue
+            return {
+                "ssid": str(ssid),
+                "key": str(cfg.get("key", "") or ""),
+                "encryption": str(cfg.get("encryption", "") or ""),
+                "section": str(iface.get("section", "") or ""),
+            }
+    return None
+
+
 def _read_ap_clients(host: str) -> list[dict]:
     """Stations currently associated to the EXTERNAL AP's own radios.
 
@@ -2869,6 +2916,61 @@ def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request
             "enabled": req.enabled,
             "ap_detail": f"AP at {ap_ip} band steering {'on' if req.enabled else 'off'}",
             "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}/wireless")
+def aps_wireless(mac: str):
+    """The AP's broadcast SSID + key (WARP-1714).
+
+    Same honesty contract as band-steering. `supported: false` when no AP
+    credential is provisioned — which is the state the lab box is in today
+    (`docker/secrets/ap_openwrt_password` is empty), so the caller can say WHY
+    it can't show the Wi-Fi instead of rendering blank fields that read as
+    "no Wi-Fi configured".
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface (ROUTING_MODE=mock): approve pushes into `_pushed`.
+        if hasattr(ap, "pushed_config"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            cfg = ap.pushed_config(canonical)
+            return {
+                "supported": True,
+                "wireless": cfg,
+                "ap_detail": "mock AP",
+            }
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "wireless": None,
+                "ap_detail": "no AP credential configured",
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            cfg = _read_ap_wireless(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        return {
+            "supported": True,
+            "wireless": cfg,
+            "ap_detail": f"AP at {ap_ip}",
         }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

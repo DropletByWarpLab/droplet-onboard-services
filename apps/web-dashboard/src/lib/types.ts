@@ -2089,6 +2089,20 @@ export interface ConnectedDevice {
   txRate?: number;
 }
 
+/**
+ * WARP-1714 — GET /api/network/wifi/current. `source: null` means we could not
+ * read the Wi-Fi (and `detail` says why), which is deliberately distinct from
+ * a successfully-read network that happens to have no PSK.
+ */
+export interface CurrentWifi {
+  ssid: string | null;
+  key: string | null;
+  source: "router" | "ap" | null;
+  detail: string;
+  section: string | null;
+  radio: string | null;
+}
+
 export interface WirelessScanResult {
   ssid: string;
   bssid: string;
