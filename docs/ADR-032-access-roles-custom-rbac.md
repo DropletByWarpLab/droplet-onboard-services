@@ -6,7 +6,8 @@
 - **Deciders:** Stefan Cruceru (founder); grounded by two read-only research agents against real code
 - **Source briefs:** `ACCESS-AND-ROLES-ARCHITECTURE-BRIEF.md` (long-form architecture; its §1 carries the full file:line ground-truth audit) and `ACCESS-AND-ROLES-ADMIN-PANEL-DESIGN-BRIEF.md` + `access-roles-prototype.html` (UI spec), all in the `warp-lab-engineering-handbook` repo. This ADR is the terse in-repo record; the brief is the long form.
 - **Amends:** ADR-004 (per-route guard catalog — ERP read floor, Decision §6; the note is operationalized in `ADR-004-rbac-per-route-guards.md` by T10/WARP-1534)
-- **Relates:** ADR-029 (rows-not-enums precedent, two-layer enforcement shape, `NcSyncState` reconciler convergence; owns per-library Files rights), ADR-013 (Nextcloud is a write-only projection), WARP-455/WARP-481 (Scope axis — middleware seam reused, enum untouched), WARP-1273 (`Group`/`GroupMembership` stay deprecated), WARP-1306/WARP-1368 (App-Modules registry), WARP-116 (session revocation), WARP-248 (ABAC — later)
+- **Self-amended:** §3 + §7 + Consequences (O-5, 2026-07-27 — the byte-layer admin see-all floor; `admin` is an unconditional see-all tier and Admin-based roles cannot narrow file visibility. Pending founder countersign, see §Decisions)
+- **Relates:** ADR-029 (rows-not-enums precedent, two-layer enforcement shape, `NcSyncState` reconciler convergence; owns per-library Files rights — **and governs admin see-all outright, §7/O-5**), ADR-013 (Nextcloud is a write-only projection), WARP-455/WARP-481 (Scope axis — middleware seam reused, enum untouched), WARP-1273 (`Group`/`GroupMembership` stay deprecated), WARP-1306/WARP-1368 (App-Modules registry), WARP-116 (session revocation), WARP-248 (ABAC — later)
 
 ## Context
 
@@ -140,6 +141,8 @@ effectiveAccess(userId) = {
 
 Only **`owner`** bypasses layer 2. **Admins do not** — narrowing Admin-based roles is the point of Admin-based custom roles; `requireScope`'s owner/admin short-circuit is deliberately **not** copied into this layer. `service` principals keep their dedicated paths (`requireRoleOrService`), untouched.
 
+**Scope of that sentence: this layer only.** "Layer 2" is the application plane — features, action levels, tool domains, connectors — every axis the resolver above actually returns. It is *not* a claim about file bytes. Department-library visibility is enforced in Nextcloud, by `droplet-admins` group membership at mask 31 on every groupfolder, reached with the person's **own NC token on a path that never enters the orchestrator**. No grant in this ADR can narrow it, because no request arrives here to narrow. See **§7**, which states the floor explicitly rather than leaving it to be inferred from ADR-029.
+
 Per-axis wiring:
 
 - **(a) features/nav:** `GET /api/modules` grows a per-user effective view (workspace ∩ role); all three nav surfaces inherit through the existing gated `visibleItems` list. Server-side, a new `requireFeatureAccess(moduleId, minLevel)` registers **beside** `requireRole` on module route groups, 404-consistent with `requireModuleEnabled`. The three known nav-gate gaps (child `requiresModule` no-op, ungated Integrations item, fail-open client hook) are fixed while wiring (T4) — the server gate stays the boundary.
@@ -186,6 +189,27 @@ Per-axis wiring:
 
 Resolution O-2 amends the ADR-004 per-route guard catalog for the ERP connector surface: **reads become family-and-up *with* a per-role connector grant** — what makes a "Reception" role useful — where `erp.ts:62-63` at `dc625ca0` has owner/admin today (the ADR-004 catalog predates the ERP surface and is silent; T10 adds its first ERP rows); the file's header comment always intended family reads, and the header's intent wins, gated through the grant. **Writes stay admin-tier**, under connection-level `writeEnabled` and the staged-outbox human confirm, and **Read & write grants are only selectable on Admin-based roles** (floor honesty: a Family-based role caps at Read). T10 (WARP-1534) operationalizes this note in `ADR-004-rbac-per-route-guards.md` itself, alongside the E2E pass; T6 (WARP-1530) is the code change.
 
+### 7. ADR-029 reconciliation (O-5 — the byte-layer admin see-all floor)
+
+§3 says Admins do not bypass layer 2. ADR-029 §Tier-1 says `droplet-admins` membership puts **every** department library in an admin's space list, at mask 31, with "zero special code paths". Read side by side, those look contradictory, and WARP-1558 (the sweep that backfills `droplet-admins` membership from role tier) could not be implemented without knowing which one governs.
+
+**Resolution: `admin` is an unconditional see-all tier at the byte layer.** ADR-029 governs; `droplet-admins` membership follows role tier and nothing else. There is no per-role, per-department, or per-library narrowing of it, and none is planned.
+
+The two statements were never in conflict once the *plane* is named — they are enforced in different systems, and only one of them is reachable from here:
+
+| | Layer 2 (this ADR) | Byte layer (ADR-029) |
+|---|---|---|
+| Enforced by | `effectiveAccess` + route guards, in the orchestrator | Nextcloud groupfolder ACLs |
+| Reached with | an orchestrator session | the person's **own NC token** |
+| Admin narrowable | **yes** — that is the point of Admin-based roles | **no** — membership is `admin` tier, full stop |
+| Audit | route-level | ActivityRow per non-member dept entry (see-all is loud) |
+
+A custom role can therefore take an Admin-based person's *Files feature* away — they lose the Files surface, its routes, and its tool domains. It cannot take their *files* away: the groupfolder is still mounted in their Nextcloud, and any client speaking WebDAV with their own credentials still reads it.
+
+**This is the load-bearing consequence, and it must be said plainly rather than discovered:** an "Admin (HR only)" custom role does **not** prevent that person from reading Finance's library. If someone must not see a department's files, they must not be `admin` tier — narrow by tier first, and use a Family-based role with department rights (ADR-029's `dept-<slug>` groups) for scoped access. Alternative (a) — making `droplet-admins` membership narrowable per role — was rejected: it would fork the invariant the ADR-029 reconciler maintains ("`droplet-admins` on every groupfolder"), give the sweep a predicate with no single source of truth, and buy a guarantee the byte layer still would not keep, since NC would happily serve the un-narrowed mount.
+
+Operationally this is what WARP-1558 implements: role tier is truth, the reconciler converges membership both directions, and a demoted ex-admin comes **out** of the group on the next tick.
+
 ## Alternatives considered
 
 - **Extending the `Role` or `Scope` pgEnums** — both migration-gated and TS-duplicated; rows are the ADR-029 precedent. The Scope axis keeps its own WARP-481 journey; this feature reuses its middleware seam, not its enum.
@@ -211,6 +235,7 @@ Resolution O-2 amends the ADR-004 per-route guard catalog for the ERP connector 
 - DB-read-per-request resolution (no cache) is a deliberate v1 simplicity trade at tens-of-users box scale; caching is a measured later change.
 - `AccessRoleToolGrant.domain` is TEXT against a TS-only union — write-time validation lives in the service (T5), not the DB.
 - The UI shipped contract-first (T8 review-ready before T3/T4 exist): against a live box it renders honest error/empty states until T3/T4 land, and the #1224 alignment list is a real reconciliation obligation on T3, not optional.
+- **Admin-based custom roles cannot narrow file visibility** (O-5, §7). Grants stop at the application plane; `droplet-admins` mounts every department library in the person's Nextcloud regardless. "Admin (HR only)" is a real role a customer will try to build, and it does not do what its name implies — the admin panel needs to say so at the point of role creation, not leave it to this ADR. Narrowing by tier is the only answer that holds.
 
 ## Rollout — epic WARP-1522 (build state at landing, `main` @ `dc625ca0`, 2026-07-25)
 
@@ -273,6 +298,14 @@ act cannot be acted AS.
 | O-2 | ERP floor | Reads **family-and-up with a connector grant**; writes stay admin-tier + `writeEnabled` + outbox confirm; Read & write grants only on Admin-based roles. Also resolves the `erp.ts` header-vs-code discrepancy — the header's intent wins, gated through the grant. Amends ADR-004 (Decision §6). |
 | O-3 | Exceptions | **Ship in v1, feature-axis only** (`UserAccessException`); tool/connector exceptions deferred to v2. |
 | O-4 | Ticket filing | **T1–T10 filed under WARP-1522** on 2026-07-24 (T0 = WARP-1523, filed earlier); keys stamped in §Rollout. |
+
+**O-5 — admin see-all vs. Admin-role narrowing** (raised by WARP-1558/WARP-1636; decided by **Romain, 2026-07-27**)
+
+| # | Decision | Resolution |
+|---|---|---|
+| O-5 | Does §3's "Admins do not bypass layer 2" narrow `droplet-admins` file visibility? | **No — `admin` is an unconditional see-all tier at the byte layer.** ADR-029 governs; membership follows role tier with no per-role or per-department narrowing. §3 is scoped to the application plane, which is the only plane a request reaches. Amends this ADR (§3 clarified, §7 added); ADR-029 unchanged and now cross-referenced. Rejected alternative: making membership narrowable, which would fork the ADR-029 reconciler invariant and still not bind Nextcloud. See §7 for the customer-visible consequence. |
+
+> ⚠️ **Ratification status.** O-1..O-4 carry founder ratification (Stefan Cruceru, 2026-07-24). O-5 was decided by Romain on 2026-07-27 to unblock WARP-1558 and has **not** been countersigned by the founder. It is consistent with ADR-029, on which Romain is a named decider, but ADR-032 is Stefan's ADR — this row should be confirmed at the next review pass.
 
 ## References
 

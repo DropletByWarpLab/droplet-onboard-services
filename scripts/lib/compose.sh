@@ -292,7 +292,8 @@ prepare_and_build() {
 # Nextcloud Droplet provisioning reconcile (WARP-990)
 # =============================================================================
 # docker/nextcloud-init.sh (household group + "Household" group folder +
-# OnlyOffice connector — WARP-883/882) is mounted into the nextcloud container
+# document-engine connector + viewer apps/previews — WARP-883/882/1686) is
+# mounted into the nextcloud container
 # as the official image's post-installation hook:
 #   /docker-entrypoint-hooks.d/post-installation/init-droplet.sh
 # The image fires post-installation hooks ONLY on the single boot that performs

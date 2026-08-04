@@ -192,13 +192,19 @@ fi
 if [ -f "$ENV_EXAMPLE" ]; then
   # A valid placeholder is either the literal `change-me` OR an EMPTY value
   # (`KEY=` with nothing after). Empty is the SAFEST placeholder — it can never
-  # be a forgeable real secret. Only ONLYOFFICE_JWT_SECRET is explicitly
-  # permitted to ship empty (the orchestrator/connector treat empty as "feature
-  # off" so an un-provisioned box fails safe rather than running on a shared
-  # default). All other secrets must use `change-me` as their placeholder.
+  # be a forgeable real secret. Only TWO keys are explicitly permitted to ship
+  # empty, because for both the empty string IS the designed fail-safe state,
+  # not a placeholder to fill in:
+  #   * ONLYOFFICE_JWT_SECRET — empty ⇒ the orchestrator treats the doc-server
+  #     as unavailable and no document-access JWT is ever signed (WARP-882).
+  #   * AP_OPENWRT_PASSWORD — blank ⇒ "no external AP" (WARP-1675/WARP-1676);
+  #     a `change-me` literal here would read as a real operator-supplied AP
+  #     password and break the blank-means-off contract in
+  #     scripts/lib/secrets.sh::sync_ap_password_secret + services/routing.
+  # All other secrets must use `change-me` as their placeholder.
   PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" \
     | grep -v 'change-me' \
-    | grep -vE '^ONLYOFFICE_JWT_SECRET=[[:space:]]*$' \
+    | grep -vE '^(ONLYOFFICE_JWT_SECRET|AP_OPENWRT_PASSWORD)=[[:space:]]*$' \
     | grep -v '^#' || true)
   if [ -z "$PASSWORD_LINES" ]; then
     pass ".env.example: all secrets use 'change-me' or empty placeholder"

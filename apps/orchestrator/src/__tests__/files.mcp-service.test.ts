@@ -59,6 +59,10 @@ vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn().mockResolvedValue(null),
   cacheSet: vi.fn().mockResolvedValue(undefined),
   cacheDel: vi.fn().mockResolvedValue(undefined),
+  // WARP-1682: invalidateListing falls back to a prefix sweep when the
+  // caller's ACL tag cannot be resolved, which is the state these stubs put
+  // it in — the double has to carry the whole module surface it exercises.
+  invalidatePrefix: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("../services/mqtt.service.js", () => ({

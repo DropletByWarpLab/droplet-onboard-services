@@ -7,10 +7,11 @@
  * panel (layout, type, spacing, status chips, the PoE bars) is plain
  * utilities + design tokens on the components themselves.
  *
- * Tokens only — no literal hex. The PoE-bar gradient uses var(--color-accent)
- * (violet #6d28d9 live); the design's stale #6366f1 indigo is intentionally
- * dropped. The dark jack body is a fixed metallic ramp (physical hardware
- * reads the same in light + dark), expressed against the design's gradient.
+ * Tokens only — no literal hex. The surviving colors here are the SEMANTIC
+ * port-state signals (link green, PoE orange, disabled red), which stay on the
+ * system ramp per WARP-1066/WARP-1085. The dark jack body is a fixed metallic
+ * ramp (physical hardware reads the same in light + dark), expressed against
+ * the design's gradient.
  */
 
 /* ── RJ45 / SFP jack ─────────────────────────────────────────────── */
@@ -83,12 +84,8 @@
 }
 
 /* ── PoE meter fills ─────────────────────────────────────────────── */
-.poeBudgetFill {
-  display: block;
-  height: 100%;
-  border-radius: 9999px;
-  background: linear-gradient(90deg, var(--color-system-green), var(--color-accent));
-}
+/* The header budget bar is the shell `.meter` primitive now (WARP-1085) —
+ * only the per-port mini draw bar still needs a bespoke fill. */
 .poeMiniFill {
   display: block;
   height: 100%;

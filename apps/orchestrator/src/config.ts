@@ -214,6 +214,12 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
+  // NEXTCLOUD_PUBLIC_PATH — browser-facing path the gateway fronts Nextcloud
+  //   on (nginx `location /nextcloud/`). Used for URLs the dashboard's
+  //   browser actually loads (the doc-editor iframe) — NEXTCLOUD_URL above is
+  //   the compose-internal address (http://nextcloud:80), which a browser can
+  //   never resolve (WARP-1686 fix to the WARP-882 editorUrl host).
+  NEXTCLOUD_PUBLIC_PATH: z.string().default("/nextcloud"),
 
   // WARP-883 (ADR-027 WS-5) — name of the shared "Household" group folder
   // (Nextcloud `groupfolders` app). The groupfolders app mounts this folder
@@ -693,9 +699,10 @@ const envSchema = z.object({
 
   // --- Document server (WARP-882 / WS-4 — in-browser editing + co-authoring) ---
   // The Droplet integrates an OnlyOffice Document Server (the ENGINE) via the
-  // Nextcloud `onlyoffice` connector over a WOPI-style handshake. The engine is
-  // a CONFIG choice, not a code dependency (docserver.client.ts stays
-  // engine-agnostic), so swapping it needs only these vars.
+  // Nextcloud connector app (`richdocuments` for collabora, `onlyoffice` for
+  // onlyoffice) over a WOPI-style handshake. The engine is a CONFIG choice,
+  // not a code dependency (docserver.client.ts stays engine-agnostic), so
+  // swapping it needs only these vars (WARP-1686 / ADR-034).
   //
   // DOCS_INTERNAL_URL — internal (compose-network) base URL of the Document
   //   Server, e.g. http://docserver. EMPTY default = the engine is UNAVAILABLE:
@@ -717,6 +724,17 @@ const envSchema = z.object({
     .string()
     .default("1")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  // DOCS_ENGINE — WHICH document engine runs behind the `docs` profile
+  //   (WARP-1686 / ADR-034). Drives the engine-specific health-probe shape +
+  //   the connector editor URL in docserver.client.ts; compose runs the
+  //   matching image via DOCS_ENGINE_IMAGE and the gateway selects the /docs/
+  //   proxy variant from the same knob (docker/nginx/docs-engine.*.conf) —
+  //   scripts/lib/single-box.sh writes the trio together.
+  //     collabora  (default) — Collabora CODE (LibreOffice technology, no
+  //                licensing fee; connector app `richdocuments`).
+  //     onlyoffice — OnlyOffice DS CE (connector app `onlyoffice`; kept for
+  //                a future OEM-licensed SKU).
+  DOCS_ENGINE: z.enum(["collabora", "onlyoffice"]).default("collabora"),
   // DOCS_EDITOR_PUBLIC_PATH — public path the gateway fronts the Document
   //   Server on (nginx `location /docs/`). Used to build browser-facing URLs;
   //   the WebSocket co-authoring channel rides this path.
