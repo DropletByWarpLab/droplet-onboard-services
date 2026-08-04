@@ -2069,16 +2069,50 @@ def _get_ap_namespace(router):
     return router.ap
 
 
-def _router_has_ap_radios(router) -> bool:
-    """False only when the router POSITIVELY reports zero wireless radios
-    (`network.wireless status` → {} — the radio-less Pi edge router). Any
-    probe failure fails OPEN to True so the historical router-side staging
-    path is never skipped on a transient read error."""
+def _router_side_staging_allowed(router) -> bool:
+    """May AP approval/decommission stage a `wifi-iface` on the ROUTER?
+
+    WARP-1721. The previous check (`bool(wireless.status())`) counted a bare
+    radio envelope as "router has AP radios" — and the real Pi edge router
+    answers exactly that: `{"radio0": {"up": true, "disabled": false,
+    "interfaces": []}}` (the `disabled='1'` lives on the wifi-IFACE, not the
+    wifi-DEVICE, so netifd reports the radio as up with nothing on it).
+    Staging a wifi-iface onto that radio puts an ON-BOX AP on the air —
+    the exact thing ADR-033 §3 codifies as forbidden ("onboard radios are
+    never APs"). Verified live 2026-08-04.
+
+    Two rules, checked in order:
+
+    1. SHAPE RULE, deterministic: an AP credential being provisioned is the
+       shape signal this service already keys every AP-direct path on
+       ("Without one (single-box / legacy shapes) the router-side staging
+       remains the whole story" — the WARP-1675 contract). With a credential,
+       approval configures the AP itself and the router NEVER hosts an AP.
+       No probe, no fail-open, no way for a transient error to flip it.
+
+    2. LEGACY PROBE, only without a credential: stage only when the router
+       demonstrably SERVES wireless — a radio with at least one active
+       interface (real netifd shape) or an inline ssid (the historical
+       status shape). A radio that is merely up-with-nothing-on-it is not
+       a serving radio; staging onto it is either dead uci (radio disabled)
+       or an accidental on-box AP (radio enabled) — both correctly skipped.
+       Probe FAILURES still fail open here, unchanged: on single-box the
+       router-side write IS the approval, and skipping it on a transient
+       read error would turn the approval into a silent no-op.
+    """
+    if AP_PASSWORD:
+        return False
     try:
         wireless = getattr(router, "wireless", None)
         if wireless is None or not hasattr(wireless, "status"):
             return True
-        return bool(wireless.status())
+        status = wireless.status()
+        if not isinstance(status, dict) or not status:
+            return False
+        for radio in status.values():
+            if isinstance(radio, dict) and (radio.get("interfaces") or radio.get("ssid")):
+                return True
+        return False
     except (ConnectionLost, UbusError):
         return True
 
@@ -3089,10 +3123,11 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
         from droplet_openwrt_sdk import ApApi
         iface_section = ApApi.iface_section_for_mac(canonical)
 
-        # WARP-1675: staging a wifi-iface on a router that HAS no AP radios
-        # (the Pi edge router) would leave a dead uci section that configures
-        # nothing — skip it and rely on the AP-direct push below.
-        router_staged = _router_has_ap_radios(r)
+        # WARP-1675/WARP-1721: router-side wifi-iface staging happens ONLY on
+        # legacy shapes where the router itself serves wireless. With an AP
+        # credential (edge-router shape) the AP-direct push below is the whole
+        # approval, and staging the router would put an on-box AP on the air.
+        router_staged = _router_side_staging_allowed(r)
         if router_staged:
             with r.safe_apply(timeout=60):
                 # Mock router's `push_wireless_config` takes the MAC so it
@@ -3120,8 +3155,10 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
                     )
         else:
             logger.info(
-                "router reports no AP radios (edge-router shape) — skipping "
-                "router-side wifi-iface staging for %s", canonical,
+                "router-side wifi-iface staging skipped for %s (%s)",
+                canonical,
+                "AP credential provisioned — approval is AP-direct"
+                if AP_PASSWORD else "router serves no wireless",
             )
 
         # WARP-1675: configure the AP ITSELF when an AP credential is
@@ -3197,10 +3234,13 @@ def aps_decommission(mac: str, request: Request):
         from droplet_openwrt_sdk import ApApi
         iface_section = ApApi.iface_section_for_mac(canonical)
 
-        # WARP-1675: mirror approve's radio gating — there is nothing staged
-        # on a radio-less router to remove, and safe_apply with zero pending
-        # changes returns NO_DATA.
-        if _router_has_ap_radios(r):
+        # WARP-1675/WARP-1721: mirror approve's gating — on shapes where
+        # approve never staged the router, there is nothing to remove (and
+        # safe_apply with zero pending changes returns NO_DATA). Known edge,
+        # accepted: a router-side section staged on a LEGACY shape before an
+        # AP credential was provisioned is skipped here and stays as inert
+        # uci until the ADR-035 migration deletes the router-side path.
+        if _router_side_staging_allowed(r):
             with r.safe_apply(timeout=60):
                 if hasattr(ap, "discovered"):
                     ap.remove_wireless_config(canonical)
