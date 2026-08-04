@@ -70,6 +70,9 @@ vi.mock("../services/ap-onboard.service.js", () => ({
   decommissionAp: vi.fn(),
   ApOnboardError: class ApOnboardError extends Error {},
   DISCOVERED_AP_LRU_CAP: 25,
+  // WARP-1703: imported by network-wifi.routes.ts.
+  getBandSteering: vi.fn().mockResolvedValue({ supported: false, enabled: false }),
+  setBandSteering: vi.fn().mockResolvedValue({ operationId: null }),
 }));
 
 import { registerStatusRoutes, type StatusDeps } from "../routes/network-status.routes.js";

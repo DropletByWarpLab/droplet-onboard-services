@@ -36,6 +36,7 @@ import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { InterfacesTable } from "@/components/network/InterfacesTable";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
+import { BandSteeringCard } from "@/components/network/BandSteeringCard";
 import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
@@ -776,6 +777,11 @@ function WifiTab() {
           enable/disable toggle; every chip is a real iwinfo field or "not
           reported". */}
       <RadioDetailCard />
+
+      {/* WARP-1703: the external Droplet AP's 802.11k/v band-steering master
+          switch. Honest unavailable state when no approved Droplet AP is
+          online — same no-fake-toggle contract as UpnpCard. */}
+      <BandSteeringCard />
 
       {/* Guest Wi-Fi — an isolated visitor network (own SSID + firewall zone). */}
       <GuestWifiCard />

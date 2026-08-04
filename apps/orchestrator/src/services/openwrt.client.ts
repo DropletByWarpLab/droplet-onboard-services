@@ -1238,6 +1238,38 @@ export async function decommissionAp(opts: { mac: string }): Promise<ApDecommiss
   return res.json() as Promise<ApDecommissionResponse>;
 }
 
+/**
+ * WARP-1703: the AP image's band-steering master switch
+ * (`droplet.wifi.band_steering`). `supported: false` is the honest
+ * "can't do it on this shape" answer — no AP credential provisioned, or the
+ * AP's image predates the droplet.wifi substrate — never an error.
+ */
+export type ApBandSteering = {
+  supported: boolean;
+  enabled: boolean;
+  ap_detail?: string;
+};
+
+export async function getApBandSteering(opts: { mac: string }): Promise<ApBandSteering> {
+  return routingFetchJson<ApBandSteering>(
+    `/aps/${encodeURIComponent(opts.mac)}/band-steering`,
+    { label: "AP band steering" },
+  );
+}
+
+export async function setApBandSteering(opts: {
+  mac: string;
+  enabled: boolean;
+}): Promise<WriteResult> {
+  const res = await routingFetch(`/aps/${encodeURIComponent(opts.mac)}/band-steering`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: opts.enabled }),
+    label: "AP band steering write",
+  });
+  return opFrom(res);
+}
+
 /** Test-only seam — only available when routing is in ROUTING_MODE=mock. */
 export async function seedDiscoveredAp(opts: {
   mac: string;
