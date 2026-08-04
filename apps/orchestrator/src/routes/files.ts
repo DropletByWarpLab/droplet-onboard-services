@@ -1018,15 +1018,16 @@ export function createFilesRouter(
   // ════════════════════════════════════════════════════════════════════
   // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
   // ════════════════════════════════════════════════════════════════════
-  // The configured engine (OnlyOffice Document Server CE today; an OEM/
-  // commercial license is required before GA — see docs/ADR-021 `docs`
-  // profile + the docserver.client.ts header) is reached via the Nextcloud
-  // `onlyoffice` connector over a WOPI-style handshake. The orchestrator stays
-  // engine-agnostic: it only mints sessions + reports status.
+  // The configured engine (Collabora CODE by default — LibreOffice technology,
+  // no licensing fee; OnlyOffice DS CE via DOCS_ENGINE=onlyoffice, which
+  // requires an OEM license before GA — see ADR-034 + the docserver.client.ts
+  // header) is reached via its Nextcloud connector app over a WOPI-style
+  // handshake. The orchestrator stays engine-agnostic: it only mints sessions
+  // + reports status.
 
   // The engine identifier surfaced on /files/docs/status. Config drives the
   // actual engine; this string is informational for the dashboard.
-  const DOCS_ENGINE = "onlyoffice";
+  const DOCS_ENGINE = config.DOCS_ENGINE;
 
   // 10s-cached doc-server readiness so the dashboard can gate the "Edit" entry
   // without hammering the engine's health endpoint on every files-page load.
