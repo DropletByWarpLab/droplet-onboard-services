@@ -13,7 +13,7 @@ export function DeviceSparkline({ days, size = "sm" }: Props) {
       {bars.map((m, i) => (
         <div
           key={i}
-          className="bg-accent/60 rounded-sm w-[3px]"
+          className="bg-[color-mix(in_srgb,var(--brand)_60%,transparent)] rounded-sm w-[3px]"
           data-testid="sparkline-bar"
           style={{ height: `${Math.max(1, (m / 1440) * h)}px` }}
         />

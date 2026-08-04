@@ -23,7 +23,7 @@ import {
 } from "./access-catalog.js";
 
 describe("access-catalog — module vocabulary", () => {
-  it("gates the 11 non-core ModuleIds; chat is the always-on module at act", () => {
+  it("gates the 12 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -36,6 +36,7 @@ describe("access-catalog — module vocabulary", () => {
         "network",
         "projects",
         "smart_home",
+        "team_chat",
         "voice",
       ].sort(),
     );
@@ -45,12 +46,15 @@ describe("access-catalog — module vocabulary", () => {
 });
 
 describe("access-catalog — §9 floor ceilings per tier", () => {
-  it("guest ceiling is view everywhere except voice (act un-floored)", () => {
+  it("guest ceiling is view everywhere except voice + team_chat (act un-floored)", () => {
     expect(maxLevelFor("guest", "files")).toBe("view");
     expect(maxLevelFor("guest", "cameras")).toBe("view");
     expect(maxLevelFor("guest", "network")).toBe("view");
     expect(maxLevelFor("guest", "managed_switch")).toBe("view");
     expect(maxLevelFor("guest", "voice")).toBe("act");
+    // WARP-1683: requireRole on /api/team-chat admits guests, so the §9
+    // ceiling matches — a guest may read and send messages.
+    expect(maxLevelFor("guest", "team_chat")).toBe("act");
   });
 
   it("family ceiling is manage on ordinary features, view on network + switch", () => {
@@ -62,10 +66,14 @@ describe("access-catalog — §9 floor ceilings per tier", () => {
     expect(maxLevelFor("family", "managed_switch")).toBe("view");
   });
 
-  it("admin (and owner) ceiling is manage everywhere", () => {
+  it("admin (and owner) ceiling is each module's own top level (manage everywhere except team_chat)", () => {
     for (const moduleId of GATEABLE_MODULE_IDS) {
-      expect(maxLevelFor("admin", moduleId)).toBe("manage");
-      expect(maxLevelFor("owner", moduleId)).toBe("manage");
+      // WARP-1683: team_chat tops out at `act` BY DESIGN — v1 has no admin
+      // surface, and a `manage` level that gates nothing would be a lie in
+      // the roles UI. Every other module still ceilings at manage.
+      const top = moduleId === "team_chat" ? "act" : "manage";
+      expect(maxLevelFor("admin", moduleId), moduleId).toBe(top);
+      expect(maxLevelFor("owner", moduleId), moduleId).toBe(top);
     }
   });
 

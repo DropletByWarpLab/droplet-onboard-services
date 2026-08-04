@@ -2,6 +2,8 @@ import { Router, Request, Response, NextFunction } from "express";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
 import { PrismaClient, type DepartmentRight } from "@prisma/client";
@@ -10,6 +12,7 @@ import {
   ncListFiles,
   ncUploadFile,
   ncDownloadFile,
+  ncFetchFileResponse,
   ncDeleteFile,
   ncCreateDirectory,
   ncListShares,
@@ -44,7 +47,12 @@ import {
   type SendOptions as EmailSendOptions,
 } from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
-import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  invalidatePrefix,
+} from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import {
   ncMintEditorSession,
@@ -57,6 +65,12 @@ import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { isPathUnderUser } from "../services/brain-memory.service.js";
+import {
+  classifyFileContentId,
+  contentTypeForFilename,
+  parseRangeHeader,
+} from "../lib/file-content.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
@@ -929,10 +943,24 @@ export function createFilesRouter(
    * Invalidate the listing cache for one already-resolved (space, path).
    *
    * WARP-1556: goes through `listCacheKey` so the del names exactly the key
-   * the read wrote. A null key means the caller's ACL tag or the space
-   * couldn't be resolved — there is nothing to name, and nothing readable
-   * either (the read path bypasses the cache in that state), so skipping is
-   * correct.
+   * the read wrote.
+   *
+   * WARP-1682 — a null key must NOT mean "skip". The original reasoning was
+   * that there is "nothing readable either, since the read path bypasses the
+   * cache in that state", but that treats a PER-REQUEST condition as durable
+   * state. `aclCacheTag` returns null whenever `visibleDeptsForCaller` fails
+   * to resolve, which it does on any transient Prisma hiccup (it swallows the
+   * throw and reports `resolved: false`). The entry we are trying to drop was
+   * written by an EARLIER request whose ACL walk DID resolve — so a live key
+   * exists, and skipping the del pins the pre-write listing for the rest of
+   * CACHE_TTL. On a delete that means the file the user just removed is served
+   * back to them until the entry expires.
+   *
+   * Fallback: sweep every listing entry for this user. It is broader than the
+   * one key we wanted — a cache miss on the user's other directories — but
+   * over-invalidating a cache is always safe, and this only runs on the rare
+   * unresolved-visibility path. The trailing ":" keeps the prefix from
+   * matching a different user whose name merely starts the same way.
    */
   async function invalidateListing(
     req: Request,
@@ -940,7 +968,11 @@ export function createFilesRouter(
     target: SpacedPath,
   ): Promise<void> {
     const key = await listCacheKey(req, user, target);
-    if (key) await cacheDel(key);
+    if (key) {
+      await cacheDel(key);
+      return;
+    }
+    await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
   }
 
   /**
@@ -1018,15 +1050,16 @@ export function createFilesRouter(
   // ════════════════════════════════════════════════════════════════════
   // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
   // ════════════════════════════════════════════════════════════════════
-  // The configured engine (OnlyOffice Document Server CE today; an OEM/
-  // commercial license is required before GA — see docs/ADR-021 `docs`
-  // profile + the docserver.client.ts header) is reached via the Nextcloud
-  // `onlyoffice` connector over a WOPI-style handshake. The orchestrator stays
-  // engine-agnostic: it only mints sessions + reports status.
+  // The configured engine (Collabora CODE by default — LibreOffice technology,
+  // no licensing fee; OnlyOffice DS CE via DOCS_ENGINE=onlyoffice, which
+  // requires an OEM license before GA — see ADR-034 + the docserver.client.ts
+  // header) is reached via its Nextcloud connector app over a WOPI-style
+  // handshake. The orchestrator stays engine-agnostic: it only mints sessions
+  // + reports status.
 
   // The engine identifier surfaced on /files/docs/status. Config drives the
   // actual engine; this string is informational for the dashboard.
-  const DOCS_ENGINE = "onlyoffice";
+  const DOCS_ENGINE = config.DOCS_ENGINE;
 
   // 10s-cached doc-server readiness so the dashboard can gate the "Edit" entry
   // without hammering the engine's health endpoint on every files-page load.
@@ -2132,10 +2165,22 @@ export function createFilesRouter(
       const filePath = await rootForSpace(prisma, space, rawPath);
 
       const user = getUser(req);
-      await ncDeleteFile(await getToken(req), user, filePath);
-
       const parentPath = path.posix.dirname(filePath) || "/";
-      await invalidateListing(req, user, { space, path: parentPath });
+
+      // WARP-1682: invalidate the parent listing whether or not the WebDAV
+      // call succeeded. A FAILED delete is precisely when the cached listing
+      // is least trustworthy — `runBulk` below documents Nextcloud's trashbin
+      // race, where a request can 500 while the file "ends up half-moved
+      // (trash entry created but source not unlinked)". Skipping the del on
+      // the throw path left that half-applied state readable out of Redis for
+      // the rest of CACHE_TTL, which is how a delete that errored could still
+      // show the file until a page reload. `bulk-delete` already invalidates
+      // unconditionally; this matches it.
+      try {
+        await ncDeleteFile(await getToken(req), user, filePath);
+      } finally {
+        await invalidateListing(req, user, { space, path: parentPath });
+      }
 
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });
@@ -3711,6 +3756,146 @@ export function createFilesRouter(
       });
     } catch (err) {
       next(err);
+    }
+  });
+
+  // ── GET /api/files/:id/content — inline content for the citation viewers ──
+  //
+  // `apps/web-dashboard/src/components/citations/PdfCitation.tsx` and
+  // `MediaCitation.tsx` both load their preview from
+  // `/api/files/${encodeURIComponent(hit.fileId)}/content` (PDFs append the
+  // `#page=N` fragment). `hit.fileId` is polymorphic — the producers set it to
+  // a numeric Nextcloud file id, a "/"-prefixed home-relative path, or a
+  // brain-memory item id (`SearchTab.tsx`: `hit.ncFileId ? String(hit.ncFileId)
+  // : hit.path`; `ChatMessage.tsx`: `c.brainItemId ? String(c.brainItemId) :
+  // c.path`) — so `classifyFileContentId` dispatches on shape.
+  //
+  // Served INLINE (never as an attachment) with a best-effort Content-Type and
+  // HTTP Range support, so `<iframe>`/`<video>` can render and seek.
+  //
+  // Registered LAST so the static sibling routes above (`/files/search/content`
+  // in particular, which `:id` would otherwise shadow) keep winning.
+  router.get("/files/:id/content", async (req, res, next) => {
+    try {
+      const classified = classifyFileContentId(req.params.id);
+
+      // ── Brain-memory item: original bytes on local disk ──
+      // Ownership + zip-slip posture mirrors
+      // `GET /api/files/brain/:itemId/download` in files-brain.ts: the owner
+      // key is `req.user.id` (what BrainMemoryItem.userId stores), a
+      // cross-user hit 404s rather than 403s (no existence leak), and a
+      // storagePath outside the user's tree is refused, never served.
+      if (classified.kind === "brain") {
+        const userId = (req as Request & { user?: { id?: string } }).user?.id;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const item = await prisma.brainMemoryItem.findUnique({
+          where: { id: classified.itemId },
+        });
+        if (
+          !item ||
+          item.userId !== userId ||
+          !item.storagePath ||
+          !isPathUnderUser(userId, item.storagePath)
+        ) {
+          res.status(404).json({ error: "not_found" });
+          return;
+        }
+
+        let size: number;
+        try {
+          size = (await stat(item.storagePath)).size;
+        } catch {
+          res.status(404).json({ error: "not_found" });
+          return;
+        }
+
+        res.setHeader(
+          "Content-Type",
+          item.mimeType ?? contentTypeForFilename(item.filename),
+        );
+        res.setHeader("Content-Disposition", "inline");
+        res.setHeader("Accept-Ranges", "bytes");
+
+        const range = parseRangeHeader(req.header("range"), size);
+        if (range && "unsatisfiable" in range) {
+          res.setHeader("Content-Range", `bytes */${size}`);
+          res.status(416).end();
+          return;
+        }
+        if (range) {
+          res.status(206);
+          res.setHeader(
+            "Content-Range",
+            `bytes ${range.start}-${range.end}/${size}`,
+          );
+          res.setHeader("Content-Length", String(range.end - range.start + 1));
+          createReadStream(item.storagePath, {
+            start: range.start,
+            end: range.end,
+          }).pipe(res);
+        } else {
+          res.setHeader("Content-Length", String(size));
+          createReadStream(item.storagePath).pipe(res);
+        }
+        return;
+      }
+
+      // ── Nextcloud-backed: a numeric ncFileId (resolve to a path via the
+      // content index) or an already-explicit path. Authorization is the
+      // caller's own NC token against the caller's own home — a path lifted
+      // from someone else's index simply doesn't resolve there.
+      let ncPath: string | null;
+      if (classified.kind === "ncfile") {
+        const chunk = await prisma.fileContentChunk.findFirst({
+          where: { ncFileId: classified.ncFileId },
+          select: { path: true },
+        });
+        ncPath = chunk?.path ?? null;
+      } else {
+        ncPath = classified.path;
+      }
+      if (!ncPath) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+
+      const upstream = await ncFetchFileResponse(
+        await getToken(req),
+        getUser(req),
+        ncPath,
+        req.header("range"),
+      );
+      if (!upstream) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+
+      // 200, or 206/416 when WebDAV ruled on the forwarded Range.
+      res.status(upstream.status);
+      res.setHeader(
+        "Content-Type",
+        contentTypeForFilename(path.basename(ncPath)),
+      );
+      res.setHeader("Content-Disposition", "inline");
+      res.setHeader(
+        "Accept-Ranges",
+        upstream.headers.get("accept-ranges") ?? "bytes",
+      );
+      const contentRange = upstream.headers.get("content-range");
+      if (contentRange) res.setHeader("Content-Range", contentRange);
+      const contentLength = upstream.headers.get("content-length");
+      if (contentLength) res.setHeader("Content-Length", contentLength);
+
+      if (!upstream.body) {
+        res.end();
+        return;
+      }
+      Readable.fromWeb(upstream.body as never).pipe(res);
+    } catch (err) {
+      handleFileError(err, res, next);
     }
   });
 

@@ -137,41 +137,30 @@ $OCC group:adduser "$HOUSEHOLD_GROUP" "$ADMIN_USER" || true
 
 echo "[droplet] WARP-883: shared space provisioning complete"
 
-# ── WARP-882 / WS-4 — OnlyOffice connector (in-browser editing + co-authoring) ──
+# ── WARP-882 / WARP-1686 — document-engine connector (in-browser viewing/editing) ──
 #
-# Enable + configure the Nextcloud `onlyoffice` connector app so it drives the
-# Document Server over a WOPI-style handshake. Idempotent: `occ app:install`
-# enables the app, and `occ config:app:set` overwrites on re-run, so a reflash
-# reconciles cleanly. We only configure when DOCS_ENABLED is on AND a JWT secret
-# is present (fail-safe: a small box that dropped the engine — or any box whose
-# JWT secret is empty — skips the connector rather than wiring it to a
-# non-existent engine OR to a forgeable empty/default JWT secret).
-#
-# URLs:
-#   DocumentServerUrl         — browser-facing engine path, fronted by the
-#                               gateway at /docs/ (see docker/nginx/nginx.conf).
-#   DocumentServerInternalUrl — compose-network address the connector reaches
-#                               the engine on directly (no gateway hop).
-#   StorageUrl                — how the engine calls BACK into Nextcloud.
-# The shared `jwt_secret` is the same value the engine + orchestrator verify.
-#
-# LICENSE: built/tested against OnlyOffice Document Server Community Edition
-# (AGPLv3); an OnlyOffice OEM/commercial license is required before GA. No
-# license enforcement here — the engine is config-driven (engine-agnostic WOPI).
+# Wire the Nextcloud connector app for the CONFIGURED engine (DOCS_ENGINE):
+#   * collabora (default) — `richdocuments` (Nextcloud Office) driving
+#     Collabora CODE (LibreOffice technology). NO licensing fee (ADR-034:
+#     MPLv2 core, free binaries) — this is why it is the default.
+#   * onlyoffice — the original WARP-882 `onlyoffice` connector wiring,
+#     preserved verbatim for a future OEM-licensed SKU (AGPLv3 CE otherwise).
+# Idempotent: `occ app:install` enables the app and `occ config:*:set`
+# overwrites on re-run, so the WARP-990 every-boot reconcile converges an
+# EXISTING box onto the configured engine without a reflash.
 #
 # DOCS_ENABLED defaults to 1 (default-ON on the 32 GB box; ≤8 GB boxes drop the
 # engine and set DOCS_ENABLED=0 — see scripts/lib/single-box.sh). An explicit
-# "0"/"false" means the box dropped the engine, so the connector stays unwired.
+# "0"/"false" means the box dropped the engine, so no connector gets wired.
 #
-# CONNECTOR-BOOTSTRAP RESILIENCE (reflash bug): `occ app:install onlyoffice`
-# reaches the Nextcloud appstore, and on a real first boot the appstore/DNS is
-# not yet settled — a single attempt fails. Under `set -euo pipefail` that
-# failure, followed by a bare `occ app:enable`, aborted the WHOLE post-install
-# hook before any `config:app:set` ran, leaving the connector unconfigured. We
-# therefore (1) RETRY the install in a bounded loop so it waits the appstore
-# out, (2) NEVER let a final failure abort the hook (the `if` consumes the
-# non-zero exit; we log a warning to reconcile on the next boot), and (3) run
-# the 5 `config:app:set` lines ONLY after a confirmed-installed connector.
+# CONNECTOR-BOOTSTRAP RESILIENCE (the WARP-990/#691 reflash bug): `occ
+# app:install` reaches the Nextcloud appstore, and on a real first boot the
+# appstore/DNS is not yet settled — a single attempt fails, and under
+# `set -euo pipefail` an unguarded failure aborts the WHOLE post-install hook.
+# `nc_app_install` below therefore (1) RETRIES in a bounded loop, (2) NEVER
+# lets a final failure abort the hook (callers consume the non-zero exit in an
+# `if`; we WARN and reconcile on the next boot), and (3) callers apply config
+# ONLY after a confirmed-installed app.
 #
 # All occ calls in this block run as the www-data user (uid 33) — config.php is
 # owned by 33, not root, and the post-installation hook runs in the entrypoint's
@@ -181,8 +170,8 @@ echo "[droplet] WARP-883: shared space provisioning complete"
 DOCS_ENABLED_NORM="$(printf '%s' "${DOCS_ENABLED:-1}" | tr '[:upper:]' '[:lower:]')"
 
 # Run occ as the www-data user (uid 33), matching config.php's owner. Wrapped so
-# the OnlyOffice block never executes occ as root (owner-check abort). Falls back
-# to the plain runner when `su` to www-data isn't possible (non-fatal best-effort).
+# this block never executes occ as root (owner-check abort). Falls back to the
+# plain runner when `su` to www-data isn't possible (non-fatal best-effort).
 occ_www() {
   if su -p -s /bin/sh www-data -c 'true' 2>/dev/null; then
     su -p -s /bin/sh www-data -c '"$0" "$@"' -- $OCC "$@"
@@ -191,61 +180,149 @@ occ_www() {
   fi
 }
 
-if { [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; } \
-   && [ -n "${ONLYOFFICE_JWT_SECRET:-}" ]; then
-  # Connector wiring must not abort shared-space provisioning above; the whole
-  # block is isolated so a missing/incompatible onlyoffice app on a box that
-  # enabled the engine doesn't take down the post-install hook (set -e).
-
-  # 1. Resilient, bounded-retry install (waits out appstore/DNS settling on a
-  #    real first boot). `app:install` ALSO enables the app, so there is no bare
-  #    `app:enable` to abort the hook. The `if` consumes the non-zero exit of the
-  #    final attempt so `set -e` never fires; on exhaustion we WARN and skip
-  #    config (the connector reconciles on the next boot's idempotent re-run).
-  onlyoffice_installed=0
-  install_tries="${ONLYOFFICE_INSTALL_TRIES:-10}"
-  install_interval="${ONLYOFFICE_INSTALL_INTERVAL:-6}"
-  i=0
-  while [ "$i" -lt "$install_tries" ]; do
+# nc_app_install <app> [tries] [interval] — bounded-retry appstore install
+# (the WARP-882/WARP-990 resilience pattern, generalized for every app this
+# hook provisions). `app:install` is idempotent (exit 0 when already
+# installed), so a reflash short-circuits on the first attempt. Defence in
+# depth: an app that is PRESENT but unhappy on `app:install` (e.g. "already
+# installed" reported as an error) is enabled and treated as installed so a
+# reflash still (re)applies config. Returns non-zero only after exhausting
+# the retries — callers MUST consume that in an `if` (set -e).
+nc_app_install() {
+  local app="$1"
+  local tries="${2:-${NC_APP_INSTALL_TRIES:-10}}"
+  local interval="${3:-${NC_APP_INSTALL_INTERVAL:-6}}"
+  local i=0
+  while [ "$i" -lt "$tries" ]; do
     i=$((i + 1))
-    # `app:install` is idempotent: on a box that already has the connector it
-    # exits 0 (already installed/enabled), so a reflash short-circuits the loop
-    # on the first attempt.
-    if occ_www app:install onlyoffice >/dev/null 2>&1; then
-      onlyoffice_installed=1
-      break
+    if occ_www app:install "$app" >/dev/null 2>&1; then
+      return 0
     fi
-    # Defence in depth: the app may already be present (install reports an error
-    # like "already installed") — treat a present app as installed so we still
-    # (re)apply config on a reflash even if `app:install` is unhappy.
-    if occ_www app:list 2>/dev/null | grep -q 'onlyoffice'; then
-      occ_www app:enable onlyoffice >/dev/null 2>&1 \
-        || echo "[droplet] WARP-882: warning — app:enable onlyoffice failed; connector present but may stay disabled until manually enabled" >&2
-      onlyoffice_installed=1
-      break
+    if occ_www app:list 2>/dev/null | grep -q "$app"; then
+      occ_www app:enable "$app" >/dev/null 2>&1 \
+        || echo "[droplet] WARP-1686: warning — app:enable $app failed; app present but may stay disabled until manually enabled" >&2
+      return 0
     fi
-    echo "[droplet] WARP-882: onlyoffice connector install attempt ${i}/${install_tries} failed (appstore not ready?) — retrying in ${install_interval}s" >&2
-    sleep "$install_interval"
+    echo "[droplet] WARP-1686: $app install attempt ${i}/${tries} failed (appstore not ready?) — retrying in ${interval}s" >&2
+    sleep "$interval"
   done
+  return 1
+}
 
-  # 2. Configure ONLY after a confirmed-installed connector. Each `config:app:set`
-  #    is an idempotent overwrite, so a reflash reconciles cleanly; `|| true`
-  #    keeps a single transient failure from aborting the block.
-  if [ "$onlyoffice_installed" = 1 ]; then
-    occ_www config:app:set onlyoffice DocumentServerUrl \
-      --value="/docs/" || true
-    occ_www config:app:set onlyoffice DocumentServerInternalUrl \
-      --value="http://docserver/" || true
-    occ_www config:app:set onlyoffice StorageUrl \
-      --value="http://nextcloud/" || true
-    occ_www config:app:set onlyoffice jwt_secret \
-      --value="${ONLYOFFICE_JWT_SECRET}" || true
-    occ_www config:app:set onlyoffice jwt_header \
-      --value="Authorization" || true
-    echo "[droplet] WARP-882: OnlyOffice connector configured (doc-server default-on)"
-  else
-    echo "nextcloud-init: OnlyOffice connector install did NOT complete after ${install_tries} attempts (appstore unreachable?) — leaving it unconfigured; the next boot's idempotent re-run will reconcile it" >&2
-  fi
+if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
+  # Connector wiring must not abort shared-space provisioning above; every
+  # step is isolated (`if` + `|| true`) so a missing/incompatible connector
+  # app never takes down the post-install hook (set -e).
+  case "${DOCS_ENGINE:-collabora}" in
+    onlyoffice)
+      # WARP-882 wiring, preserved. Only configured when a JWT secret is
+      # present (fail-safe: an empty secret would be a forgeable HS256 key,
+      # so the connector stays unwired rather than trusting it).
+      #   DocumentServerUrl         — browser-facing engine path (gateway /docs/).
+      #   DocumentServerInternalUrl — compose-network address, no gateway hop.
+      #   StorageUrl                — how the engine calls BACK into Nextcloud.
+      if [ -n "${ONLYOFFICE_JWT_SECRET:-}" ]; then
+        if nc_app_install onlyoffice "${ONLYOFFICE_INSTALL_TRIES:-10}" "${ONLYOFFICE_INSTALL_INTERVAL:-6}"; then
+          occ_www config:app:set onlyoffice DocumentServerUrl \
+            --value="/docs/" || true
+          occ_www config:app:set onlyoffice DocumentServerInternalUrl \
+            --value="http://docserver/" || true
+          occ_www config:app:set onlyoffice StorageUrl \
+            --value="http://nextcloud/" || true
+          occ_www config:app:set onlyoffice jwt_secret \
+            --value="${ONLYOFFICE_JWT_SECRET}" || true
+          occ_www config:app:set onlyoffice jwt_header \
+            --value="Authorization" || true
+          echo "[droplet] WARP-882: OnlyOffice connector configured (DOCS_ENGINE=onlyoffice)"
+        else
+          echo "nextcloud-init: OnlyOffice connector install did NOT complete (appstore unreachable?) — leaving it unconfigured; the next boot's idempotent re-run will reconcile it" >&2
+        fi
+      else
+        echo "nextcloud-init: OnlyOffice connector NOT configured (jwt secret empty — fail-safe)" >&2
+      fi
+      ;;
+    *)
+      # collabora (default) — Nextcloud Office (`richdocuments`) → Collabora
+      # CODE. URL split (all overridable for non-standard topologies):
+      #   wopi_url          — where NEXTCLOUD reaches the engine server-side
+      #                       (discovery, convert-to). Compose-internal; the
+      #                       :9980/docs suffix matches coolwsd's port +
+      #                       net.service_root (docker-compose.yml).
+      #   public_wopi_url   — where the BROWSER loads the editor from. A
+      #                       RELATIVE "/docs" keeps the editor same-origin
+      #                       with whatever hostname the user browsed in on
+      #                       (FQDN, droplet-ai.local, .lan) — no cross-origin
+      #                       iframe, no cert coupling, works pre-issuance.
+      #                       richdocuments consumes the value verbatim
+      #                       (rtrim only), so a path-relative base is safe.
+      #   wopi_callback_url — where the ENGINE calls back into Nextcloud
+      #                       (WOPI CheckFileInfo/GetFile/PutFile). Pinned to
+      #                       the compose-internal Nextcloud so the callback
+      #                       rides the docker network regardless of browser
+      #                       origin — and matches the engine's aliasgroup1
+      #                       allowlist exactly (docker-compose.yml).
+      # allow_local_remote_servers: Nextcloud's HTTP client refuses
+      # private/local hosts by default; the wopi_url discovery fetch needs it
+      # on a compose network. Appliance-internal, documented posture.
+      # No JWT gate here — Collabora's trust model is the aliasgroup
+      # allowlist + WOPI proof keys, not a shared HS256 secret.
+      if nc_app_install richdocuments; then
+        occ_www config:app:set richdocuments wopi_url \
+          --value="${RICHDOCUMENTS_WOPI_URL:-http://docserver:9980/docs}" || true
+        occ_www config:app:set richdocuments public_wopi_url \
+          --value="${RICHDOCUMENTS_PUBLIC_WOPI_URL:-/docs}" || true
+        occ_www config:app:set richdocuments wopi_callback_url \
+          --value="${RICHDOCUMENTS_CALLBACK_URL:-http://nextcloud/}" || true
+        occ_www config:system:set allow_local_remote_servers --value=true --type=boolean || true
+        # Re-fetch discovery so a config change applies now, not on TTL expiry.
+        occ_www richdocuments:activate-config >/dev/null 2>&1 \
+          || echo "[droplet] WARP-1686: richdocuments:activate-config failed (engine still starting?) — discovery refreshes on the next reconcile" >&2
+        echo "[droplet] WARP-1686: Nextcloud Office connector configured (richdocuments → Collabora CODE)"
+      else
+        echo "nextcloud-init: richdocuments connector install did NOT complete (appstore unreachable?) — leaving it unconfigured; the next boot's idempotent re-run will reconcile it" >&2
+      fi
+      ;;
+  esac
 else
-  echo "nextcloud-init: OnlyOffice connector NOT configured (DOCS_ENABLED='${DOCS_ENABLED:-1}', jwt secret $( [ -n "${ONLYOFFICE_JWT_SECRET:-}" ] && echo set || echo empty ))" >&2
+  echo "nextcloud-init: document-engine connector NOT configured (DOCS_ENABLED='${DOCS_ENABLED:-1}')" >&2
 fi
+
+# ── WARP-1686 — viewer apps: DICOM (X-rays) + 3D models ──
+#
+# Free, engine-independent Nextcloud apps that widen what Files can open
+# in-browser (the "view all document types" half of WARP-1686):
+#   * dicomviewer         — OHIF-based DICOM viewer (AGPL-3.0; NC 28–32):
+#                           .dcm X-rays/scans, 2D/3D/MPR.
+#   * files_3dmodelviewer — 3D model viewer (free; NC 24–34): STL/OBJ/glTF —
+#                           the 3D-CAD exchange formats.
+# Both are pure PHP/JS apps (no engine, no extra container, no RAM gate), so
+# they install unconditionally. Best-effort with the same bounded-retry +
+# never-fatal posture as the connector: a miss reconciles on the next boot.
+if nc_app_install dicomviewer; then
+  echo "[droplet] WARP-1686: DICOM viewer installed (.dcm X-ray/scan viewing)"
+else
+  echo "nextcloud-init: dicomviewer install did NOT complete — .dcm viewing reconciles on the next boot's idempotent re-run" >&2
+fi
+if nc_app_install files_3dmodelviewer; then
+  echo "[droplet] WARP-1686: 3D model viewer installed (STL/OBJ/glTF viewing)"
+else
+  echo "nextcloud-init: files_3dmodelviewer install did NOT complete — 3D viewing reconciles on the next boot's idempotent re-run" >&2
+fi
+
+# ── WARP-1686 — preview providers: widen image coverage (TIFF/HEIC/SVG) ──
+#
+# Nextcloud enables a conservative provider set by default; scanned documents
+# and X-ray exports are frequently TIFF, and phone photos HEIC. Setting
+# `enabledPreviewProviders` REPLACES the built-in default set, so the default
+# providers are re-listed first and the three additions follow. The list is an
+# ARRAY system value — config:system:set writes one indexed entry per call,
+# and re-running overwrites the same indices (idempotent). A provider whose
+# imagick delegate is missing simply yields no preview for that type — never
+# an error. These previews feed BOTH the Nextcloud UI and the dashboard's
+# thumbnail proxy (files.ts → ncFetchThumbnail).
+pv_i=0
+for pv in PNG JPEG GIF BMP XBitmap MP3 TXT MarkDown OpenDocument Krita TIFF HEIC SVG; do
+  occ_www config:system:set enabledPreviewProviders "$pv_i" --value "OC\\Preview\\${pv}" || true
+  pv_i=$((pv_i + 1))
+done
+echo "[droplet] WARP-1686: preview providers set (defaults + TIFF/HEIC/SVG)"

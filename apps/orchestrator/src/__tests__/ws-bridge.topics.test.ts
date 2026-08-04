@@ -47,12 +47,12 @@ async function connectOnce(user: {
 
   const server: HttpServer = createServer();
   attachWsBridge(server);
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("No address");
 
-  const ws = new WebSocket(`ws://localhost:${addr.port}/api/ws/events`);
+  const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/api/ws/events`);
   await once(ws, "open");
   // Let the connection handler finish registering subscriptions.
   await new Promise((r) => setImmediate(r));

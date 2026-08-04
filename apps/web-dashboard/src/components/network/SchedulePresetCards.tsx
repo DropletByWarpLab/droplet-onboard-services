@@ -34,19 +34,19 @@ export function SchedulePresetCards({ onUseRecurring, onUseOverride }: Props) {
             <div
               key={preset.id}
               data-testid={`preset-card-${preset.id}`}
-              className="dp-card p-4 flex flex-col gap-2"
+              className="card flex flex-col gap-2"
             >
               <div className="flex items-center gap-2">
                 <Icon
-                  className="w-5 h-5 text-label-secondary"
+                  className="w-5 h-5 text-[color:var(--text-muted)]"
                   aria-hidden="true"
                   data-testid={`preset-icon-${preset.id}`}
                 />
-                <span className="type-headline text-label-primary">
+                <span className="type-headline text-[color:var(--text)]">
                   {preset.name}
                 </span>
               </div>
-              <p className="type-footnote text-label-secondary">
+              <p className="type-footnote text-[color:var(--text-muted)]">
                 {preset.description}
               </p>
               <div className="pt-1">
@@ -56,7 +56,7 @@ export function SchedulePresetCards({ onUseRecurring, onUseOverride }: Props) {
                     if (preset.kind === "recurring") onUseRecurring(preset);
                     else onUseOverride(preset);
                   }}
-                  className="dp-btn-secondary text-sm"
+                  className="btn sm"
                 >
                   Use preset
                 </button>

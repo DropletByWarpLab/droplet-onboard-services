@@ -53,9 +53,9 @@ export function IconPicker({ value, onSelect }: Props) {
             aria-label={name}
             data-icon={name}
             onClick={() => onSelect(name)}
-            className={`p-2 rounded-lg transition ${selected ? "ring-2 ring-accent" : "hover:bg-surface-secondary"}`}
+            className={`p-2 rounded-lg transition ${selected ? "ring-2 ring-[var(--brand)]" : "hover:bg-[var(--hover)]"}`}
           >
-            <IconComp className="w-6 h-6 text-label-primary mx-auto" aria-hidden="true" />
+            <IconComp className="w-6 h-6 text-[color:var(--text)] mx-auto" aria-hidden="true" />
           </button>
         );
       })}

@@ -46,6 +46,15 @@ function formatBytesShort(b: number): string {
   return `${(b / 1024 / 1024 / 1024).toFixed(1)}G`;
 }
 
+// recharts 3 widened `Tooltip`'s formatter signature: the value arrives as
+// `ValueType | undefined` (number | string | Array<number | string>) rather
+// than the chart's own datum type, so the callback has to narrow it itself.
+// Every series feeding these tooltips is numeric, so anything else is a
+// no-data frame and formats as zero.
+function asNumber(v: unknown): number {
+  return typeof v === "number" ? v : Number(v ?? 0) || 0;
+}
+
 function formatBytesLong(b: number): string {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
@@ -108,7 +117,7 @@ export function BytesBySource({ data }: Props) {
                 borderRadius: "8px",
                 fontSize: "12px",
               }}
-              formatter={(v: number) => [formatBytesLong(v), "Bytes"]}
+              formatter={(v) => [formatBytesLong(asNumber(v)), "Bytes"]}
             />
             <Bar dataKey="bytes" radius={[0, 6, 6, 0]}>
               {labelled.map((d) => (

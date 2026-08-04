@@ -10,7 +10,13 @@ Contract pinned here:
     idempotent both directions, and never needs working audio hardware —
     a pipeline that can't start still answers 200 `{"enabled": true}`;
   - turning off drops the pipeline, which closes the exclusive mic
-    stream — that is the kill-switch guarantee, not a mute;
+    stream — that is the kill-switch guarantee, not a mute, and
+    TestRealPipelineKillSwitch checks it against a REAL WakePipeline's
+    actual stream state rather than against `_pipeline is None`
+    (WARP-1619);
+  - when the worker is mid-turn and outlives its join, the disable says
+    so (`mic_released: false`) and a re-enable waits for the device
+    instead of opening a second stream on it;
   - and every OTHER path that opens the mic (the two wizards' capture
     endpoints) refuses with 409 while off, so "no audio is captured" is
     true of the box rather than of the dashboard that gates it;
@@ -23,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -34,7 +41,7 @@ import main
 from voice.enabled import VoiceEnabledStore
 from voice.pipeline import WakePipeline
 from voice.speaker_id import REQUIRED_LINES, EnrollmentSessions
-from voice.wake import DisabledWakeWordDetector
+from voice.wake import WAKE_FRAME_SAMPLES, DisabledWakeWordDetector
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +58,7 @@ def _pinned_globals(monkeypatch):
     teardown restores them and no test can leak a pipeline (or a rebuilt
     client) into the next one."""
     monkeypatch.setattr(main, "_pipeline", None)
+    monkeypatch.setattr(main, "_draining_pipeline", None)
     monkeypatch.setattr(main, "_persona_fetcher", None)
     monkeypatch.setattr(main, "_activity_reporter", None)
     monkeypatch.setattr(main, "_llm", None)
@@ -127,9 +135,16 @@ class _FakePipeline:
         self.stops = 0
         self.flag_when_stopped: list[bool] = []
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
         self.stops += 1
         self.flag_when_stopped.append(VoiceEnabledStore().load())
+        # Matches the real contract (WARP-1619): True == the worker
+        # actually exited, so the mic device is free.
+        return True
+
+    @property
+    def running(self) -> bool:
+        return False
 
 
 @dataclass
@@ -217,7 +232,9 @@ class TestToggleEndpoint:
         monkeypatch.setattr(main, "_pipeline", pipe)
         resp = client.post("/voice/enabled", json={"enabled": False})
         assert resp.status_code == 200
-        assert resp.json() == {"enabled": False}
+        # WARP-1619 — `mic_released` is part of the wire shape now:
+        # `enabled: false` alone never proves the device is free.
+        assert resp.json() == {"enabled": False, "mic_released": True}
         assert pipe.stops == 1
         # The kill-switch guarantee: nothing holds the mic afterwards.
         assert main._pipeline is None
@@ -235,7 +252,7 @@ class TestToggleEndpoint:
         first = client.post("/voice/enabled", json={"enabled": False})
         second = client.post("/voice/enabled", json={"enabled": False})
         assert first.status_code == second.status_code == 200
-        assert second.json() == {"enabled": False}
+        assert second.json() == {"enabled": False, "mic_released": True}
         assert VoiceEnabledStore().load() is False
 
     def test_enable_starts_a_pipeline(self, client, stub_pipeline_deps):
@@ -243,7 +260,7 @@ class TestToggleEndpoint:
         resp = client.post("/voice/enabled", json={"enabled": True})
         try:
             assert resp.status_code == 200
-            assert resp.json() == {"enabled": True}
+            assert resp.json() == {"enabled": True, "mic_released": True}
             assert main._pipeline is not None
             assert VoiceEnabledStore().load() is True
         finally:
@@ -274,7 +291,7 @@ class TestToggleEndpoint:
         # The switch must be flippable on exactly the boxes whose audio
         # is broken — otherwise it can't be turned back on at all.
         assert resp.status_code == 200
-        assert resp.json() == {"enabled": True}
+        assert resp.json() == {"enabled": True, "mic_released": True}
         assert main._pipeline is None
         assert VoiceEnabledStore().load() is True
         # ...and the box then looks exactly like a mic-less boot.
@@ -500,7 +517,7 @@ class TestToggleEndpoint:
         try:
             resp = client.post("/voice/enabled", json={"enabled": enabled})
             assert resp.status_code == 200
-            assert resp.json() == {"enabled": enabled}
+            assert resp.json() == {"enabled": enabled, "mic_released": True}
         finally:
             if main._pipeline is not None:
                 main._pipeline.stop()
@@ -734,3 +751,220 @@ class TestBootGate:
         monkeypatch.setattr(main, "_build_and_start_pipeline", lambda: calls.append(1))
         asyncio.run(main.startup())  # the next container start
         assert calls == []
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-1619 — the kill-switch guarantee, tested against a REAL pipeline
+# ────────────────────────────────────────────────────────────────────
+#
+# Every test above injects a `_FakePipeline` whose stop() increments a
+# counter, and pins the guarantee as `main._pipeline is None`. A None
+# module reference is not evidence that the OS stream closed. These
+# tests drive the REAL `WakePipeline` through the REAL disable path with
+# a fake sounddevice, and assert on the STREAM'S OWN closed state.
+#
+# The window they pin: `_on_frame` runs the whole turn (LLM → TTS →
+# `_play_pcm`, blocking) on the capture thread, which only re-checks
+# `_shutdown` BETWEEN frames. A stop() issued mid-turn — the single most
+# likely activation path for this control, since the admin usually hits
+# it BECAUSE the box is talking — can hit its join timeout with the
+# exclusive InputStream still open. No NEW audio is processed in that
+# window (the loop exits before the next `_on_frame`), so the honest
+# statement is "the device is still held and the box is still speaking",
+# not "it is still listening to you".
+
+
+class _HeldStream:
+    """InputStream stub that tracks its REAL open/closed state."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def read(self, n):
+        import time as _time
+
+        _time.sleep(0.001)
+        return np.zeros(WAKE_FRAME_SAMPLES, dtype=np.int16).reshape(-1, 1), False
+
+
+class _HeldSoundDevice:
+    """Mock sounddevice handing out `_HeldStream`s. Counts opens, and the
+    process-wide PortAudio reset hooks that the failed-open recovery path
+    would fire against a still-open stream."""
+
+    def __init__(self) -> None:
+        self.streams: list[_HeldStream] = []
+        self.terminate_calls = 0
+        self.initialize_calls = 0
+
+    def _terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def _initialize(self) -> None:
+        self.initialize_calls += 1
+
+    def query_devices(self, index=None):
+        return {"max_input_channels": 1}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        stream = _HeldStream()
+        self.streams.append(stream)
+        return stream
+
+
+class _TurnBlockingDetector:
+    """Blocks inside predict() to stand in for a turn in progress — same
+    thread, same position in the capture loop as the real LLM → TTS →
+    `_play_pcm` chain, which is what stop() has to survive."""
+
+    def __init__(self) -> None:
+        self.in_turn = threading.Event()
+        self.finish_turn = threading.Event()
+
+    @property
+    def model_name(self) -> str:
+        return "turn-blocking"
+
+    @property
+    def loaded(self) -> bool:
+        return True
+
+    def reset(self) -> None:
+        return None
+
+    def predict(self, audio_frame):
+        self.in_turn.set()
+        # Bounded so a broken test fails instead of hanging the suite.
+        self.finish_turn.wait(timeout=30.0)
+        return {}
+
+
+@pytest.fixture
+def quick_join(monkeypatch):
+    """Shrink both join budgets so the timed-out-join tests cost
+    milliseconds instead of the production 5 s + 5 s."""
+    monkeypatch.setattr(main, "_STOP_JOIN_TIMEOUT_S", 0.2, raising=False)
+    monkeypatch.setattr(main, "_DRAIN_JOIN_TIMEOUT_S", 0.2, raising=False)
+
+
+def _live_pipeline(detector, fake_sd) -> WakePipeline:
+    """A REAL WakePipeline, listening on a fake device, installed as the
+    module global the disable path tears down."""
+    pipe = WakePipeline(
+        detector=detector,
+        input_device_index=0,
+        sd_module=fake_sd,
+        upstream_probe_interval_s=0.0,
+    )
+    pipe.start()
+    return pipe
+
+
+class TestRealPipelineKillSwitch:
+    def test_disable_closes_the_actual_mic_stream(self, client, monkeypatch):
+        # The guarantee the suite has been asserting with `_pipeline is
+        # None`, finally checked against the device: after a disable the
+        # InputStream itself is CLOSED.
+        fake_sd = _HeldSoundDevice()
+        pipe = _live_pipeline(DisabledWakeWordDetector(), fake_sd)
+        monkeypatch.setattr(main, "_pipeline", pipe)
+        try:
+            deadline = time.time() + 5.0
+            while not fake_sd.streams and time.time() < deadline:
+                time.sleep(0.005)
+            assert fake_sd.streams, "the worker never opened a stream"
+
+            resp = client.post("/voice/enabled", json={"enabled": False})
+            assert resp.status_code == 200
+            assert resp.json()["enabled"] is False
+            # Honest: the device really was released before we answered.
+            assert resp.json()["mic_released"] is True
+            assert main._pipeline is None
+            assert fake_sd.streams[0].closed is True
+        finally:
+            pipe.stop(timeout=5.0)
+
+    def test_disable_mid_turn_admits_the_mic_is_still_held(
+        self, client, monkeypatch, quick_join,
+    ):
+        # The reported bug: the join times out, yet the endpoint answered
+        # 200 {"enabled": false} with no hint that the exclusive device
+        # was still open — under a dashboard hero that reads verbatim
+        # "the wake word does nothing and no audio is captured".
+        detector = _TurnBlockingDetector()
+        fake_sd = _HeldSoundDevice()
+        pipe = _live_pipeline(detector, fake_sd)
+        monkeypatch.setattr(main, "_pipeline", pipe)
+        try:
+            assert detector.in_turn.wait(timeout=5.0), "the turn never started"
+
+            resp = client.post("/voice/enabled", json={"enabled": False})
+            assert resp.status_code == 200
+            # The switch is genuinely off — the flag is persisted and the
+            # module reference is dropped, exactly as before.
+            assert resp.json()["enabled"] is False
+            assert main._pipeline is None
+            assert VoiceEnabledStore().load() is False
+            # …but the box does NOT claim the device was released, and
+            # the stream proves why: it is still open.
+            assert resp.json()["mic_released"] is False
+            assert fake_sd.streams[0].closed is False
+        finally:
+            detector.finish_turn.set()
+            pipe.stop(timeout=5.0)
+        # The turn ends, the worker leaves, the device is freed.
+        assert fake_sd.streams[0].closed is True
+
+    def test_a_re_enable_mid_drain_opens_no_second_stream(
+        self, client, monkeypatch, quick_join, stub_pipeline_deps,
+    ):
+        # The dangerous second-order consequence. With `_pipeline` None,
+        # a quick re-enable used to call `_build_and_start_pipeline()` and
+        # open a SECOND InputStream while the old worker still held the
+        # exclusive ALSA device → EBUSY → _DeviceError → the supervisor
+        # parks in no_mic (the red hardware-fault panel after an off→on
+        # toggle). Worse, that recovery runs `_refresh_audio_enumeration`
+        # → sd._terminate()/_initialize(): a PROCESS-WIDE PortAudio reset
+        # while another stream is still open.
+        detector = _TurnBlockingDetector()
+        fake_sd = _HeldSoundDevice()
+        pipe = _live_pipeline(detector, fake_sd)
+        monkeypatch.setattr(main, "_pipeline", pipe)
+        try:
+            assert detector.in_turn.wait(timeout=5.0), "the turn never started"
+            off = client.post("/voice/enabled", json={"enabled": False})
+            assert off.json()["mic_released"] is False
+
+            # Re-enable while the old worker is still mid-turn.
+            on = client.post("/voice/enabled", json={"enabled": True})
+            assert on.status_code == 200
+            assert on.json()["enabled"] is True
+            # No second pipeline was built on top of the live one…
+            assert main._pipeline is None
+            # …no second stream was opened on the exclusive device…
+            assert len(fake_sd.streams) == 1
+            assert fake_sd.streams[0].closed is False
+            # …and no process-wide PortAudio reset fired against it.
+            assert fake_sd.terminate_calls == 0
+            assert fake_sd.initialize_calls == 0
+        finally:
+            detector.finish_turn.set()
+            pipe.stop(timeout=5.0)
+
+        # Not a permanent lockout: once the old worker is gone, the next
+        # enable builds normally.
+        assert fake_sd.streams[0].closed is True
+        again = client.post("/voice/enabled", json={"enabled": True})
+        assert again.status_code == 200
+        try:
+            assert main._pipeline is not None
+        finally:
+            if main._pipeline is not None:
+                main._pipeline.stop(timeout=5.0)

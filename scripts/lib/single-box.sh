@@ -378,8 +378,9 @@ EOF
 
   # --- Migrate from the pre-rename service name if present (WARP-445) -----
   # This block is the only code in scripts/ that still OPERATES on the
-  # legacy `droplet-poc-host-net` name (the de-poc rename itself landed in
-  # PR #676): a box provisioned BEFORE the rename still runs the old unit,
+  # legacy `droplet-poc-host-net` name (the rename to `droplet-host-net`
+  # itself landed in PR #676): a box provisioned BEFORE the rename still
+  # runs the old unit,
   # and the only way to retire it is to name it here. ship-check's
   # lifecycle-naming check grandfathers exactly this token for that reason
   # (its allowlist + hint text are the only other mentions). Delete this
@@ -632,9 +633,10 @@ configure_single_box_env() {
     esac
   fi
 
-  # OnlyOffice Document Server (`docs` profile, WARP-882 / ADR-027 WS-4) — RAM
-  # GATED. The engine is OnlyOffice CE (~2 GB always-on image), so it is
-  # DEFAULT-ON on a roomy box and DROPPED on a small one:
+  # Document engine (`docs` profile, WARP-882 / WARP-1686 / ADR-027 WS-4) —
+  # RAM GATED. The engine (Collabora CODE by default per ADR-034 — no
+  # licensing fee; OnlyOffice CE via DOCS_ENGINE=onlyoffice) is a ~2 GB
+  # always-on image, so it is DEFAULT-ON on a roomy box, DROPPED on a small one:
   #   * total RAM > SINGLE_BOX_DOCS_MIN_GIB (default 8 GiB) → the 32 GB / 16 GB
   #     single-box ABSORBS the engine comfortably: merge `docs` into
   #     COMPOSE_PROFILES (idempotent, no duplicate) and set DOCS_ENABLED=1.
@@ -643,10 +645,11 @@ configure_single_box_env() {
   # RAM is read the same way as scripts/lib/preflight.sh (MemTotal kB / 1048576).
   # If /proc/meminfo is unreadable (non-Linux dev), we DROP docs (conservative —
   # don't bring up a 2 GB engine on an unsized host). The ONLYOFFICE_JWT_SECRET
-  # the connector + engine need is generated unconditionally by
-  # scripts/lib/secrets.sh::generate_env (openssl rand -hex 32), which runs
-  # BEFORE this on every setup — so the docs path always has a strong secret.
-  local docs_min_gib mem_kb mem_gb docs_enabled_val
+  # (used by the onlyoffice engine + the orchestrator's editor session tokens)
+  # is generated unconditionally by scripts/lib/secrets.sh::generate_env
+  # (openssl rand -hex 32), which runs BEFORE this on every setup — so the
+  # docs path always has a strong secret regardless of engine.
+  local docs_min_gib mem_kb mem_gb docs_enabled_val docs_engine
   docs_min_gib="${SINGLE_BOX_DOCS_MIN_GIB:-8}"
   mem_gb=0
   if [ -r /proc/meminfo ]; then
@@ -663,7 +666,7 @@ configure_single_box_env() {
       *)        merged_profiles="${merged_profiles},docs" ;;
     esac
     docs_enabled_val=1
-    log_info "OnlyOffice doc-server: ON (${mem_gb} GiB > ${docs_min_gib} GiB threshold) — \`docs\` profile + DOCS_ENABLED=1"
+    log_info "Document engine: ON (${mem_gb} GiB > ${docs_min_gib} GiB threshold) — \`docs\` profile + DOCS_ENABLED=1"
   else
     # Drop `docs` if a previous run / lib/compose.sh added it; reclaim the engine.
     local stripped_profiles="" p
@@ -676,7 +679,7 @@ configure_single_box_env() {
     IFS="$IFS_SAVE"
     merged_profiles="$stripped_profiles"
     docs_enabled_val=0
-    log_info "OnlyOffice doc-server: OFF (${mem_gb} GiB ≤ ${docs_min_gib} GiB threshold) — dropped \`docs\`, DOCS_ENABLED=0"
+    log_info "Document engine: OFF (${mem_gb} GiB ≤ ${docs_min_gib} GiB threshold) — dropped \`docs\`, DOCS_ENABLED=0"
   fi
 
   # --- Descriptive header block: surgical replace (WARP-444) ---------------
@@ -734,12 +737,18 @@ configure_single_box_env() {
 #                        `eval` by DEFAULT so the rag-eval (RAGAS) service runs
 #                        and /api/admin/rag-eval/* works out-of-the-box
 #                        (bug #15); set RAG_EVAL_DISABLED=1 to pause runs.
-#                        `docs` (OnlyOffice doc-server, WARP-882) is RAM-GATED:
-#                        merged in + DOCS_ENABLED=1 when total RAM > 8 GiB (the
-#                        32 GB / 16 GB box), dropped + DOCS_ENABLED=0 on a ≤8 GB
-#                        box. Override the threshold with SINGLE_BOX_DOCS_MIN_GIB.
-#   DOCS_ENABLED         OnlyOffice doc-server master switch (RAM-gated above).
-#   DOCS_INTERNAL_URL    compose-network engine URL the orchestrator health-probes.
+#                        `docs` (document engine, WARP-882/WARP-1686) is
+#                        RAM-GATED: merged in + DOCS_ENABLED=1 when total RAM >
+#                        8 GiB (the 32 GB / 16 GB box), dropped + DOCS_ENABLED=0
+#                        on a ≤8 GB box. Threshold: SINGLE_BOX_DOCS_MIN_GIB.
+#   DOCS_ENABLED         document-engine master switch (RAM-gated above).
+#   DOCS_ENGINE          which engine: collabora (default — Collabora CODE,
+#                        LibreOffice, no licensing fee, ADR-034) or onlyoffice
+#                        (kept for a future OEM-licensed SKU).
+#   DOCS_ENGINE_IMAGE    engine image; written together with DOCS_ENGINE.
+#   DOCS_INTERNAL_URL    compose-network engine URL the orchestrator
+#                        health-probes (engine-dependent: coolwsd
+#                        :9980/docs vs OnlyOffice :80).
 #   FRIGATE_RENDER_NODE  DETECTED from /dev/dri (WARP-1680): the second render
 #                        node when the host has two (leaving the dGPU for
 #                        Ollama), otherwise the only one. Never assumed —
@@ -787,12 +796,36 @@ EOF
   fi
 
   upsert_env COMPOSE_PROFILES    "$merged_profiles"
-  # OnlyOffice doc-server master switch + internal URL, RAM-gated above. The
+  # Document-engine master switch + internal URL, RAM-gated above. The
   # orchestrator reads DOCS_ENABLED (explicit, never inferred from absence) and
   # probes DOCS_INTERNAL_URL for the engine's health; on a small box DOCS_ENABLED=0
   # makes /files/docs/status report "unavailable" and the editor degrade cleanly.
   upsert_env DOCS_ENABLED        "$docs_enabled_val"
-  upsert_env DOCS_INTERNAL_URL   http://docserver
+  # WARP-1686 (ADR-034): engine-selectable document server. DOCS_ENGINE picks
+  # the engine; the compose image + the orchestrator's internal probe URL MUST
+  # track it (coolwsd listens on :9980 under net.service_root=/docs; OnlyOffice
+  # listens on :80 at its root), so all three are written together and never
+  # diverge. An existing .env's DOCS_ENGINE (operator choice) is respected —
+  # a shell-env override wins for a supervised one-off run.
+  docs_engine="${DOCS_ENGINE:-}"
+  if [ -z "$docs_engine" ] && [ -f "$env_target" ]; then
+    docs_engine="$({ grep -E '^DOCS_ENGINE=' "$env_target" || true; } | tail -1 | cut -d= -f2-)"
+  fi
+  docs_engine="${docs_engine:-collabora}"
+  case "$docs_engine" in
+    onlyoffice)
+      upsert_env DOCS_ENGINE        onlyoffice
+      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2"
+      upsert_env DOCS_INTERNAL_URL  http://docserver
+      log_info "Document engine: onlyoffice (OEM-licensed SKU posture — AGPLv3 CE otherwise)"
+      ;;
+    *)
+      upsert_env DOCS_ENGINE        collabora
+      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1"
+      upsert_env DOCS_INTERNAL_URL  "http://docserver:9980/docs"
+      log_info "Document engine: collabora (Collabora CODE — LibreOffice, no licensing fee)"
+      ;;
+  esac
   # WARP-1680: DETECT the render node — never assume a two-GPU layout.
   # This was hardcoded to renderD129 on the theory that the dGPU (renderD128)
   # is reserved for Ollama. On a box whose GPU is a single AMD Raphael iGPU

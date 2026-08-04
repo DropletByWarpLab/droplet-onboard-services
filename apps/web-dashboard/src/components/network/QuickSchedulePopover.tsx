@@ -110,10 +110,14 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
       role="dialog"
       aria-label="Apply quick schedule"
       onClick={(e) => e.stopPropagation()}
-      className="absolute z-50 w-[280px] bg-surface-primary border border-separator rounded-lg shadow-xl p-3"
+      // `.card absolute` — the shell's card out-specifies Tailwind's position
+      // utility, which is what the `.card.absolute` rule exists for. Padding
+      // is pinned to the original 12px (the card's own default is 18px).
+      className="card absolute z-50 w-[280px] shadow-xl"
+      style={{ padding: "12px" }}
     >
-      <p className="type-headline text-label-primary">Apply Bedtime?</p>
-      <p className="type-footnote text-label-secondary mt-1">
+      <p className="type-headline text-[color:var(--text)]">Apply Bedtime?</p>
+      <p className="type-footnote text-[color:var(--text-muted)] mt-1">
         Sun–Thu 9pm–7am, Fri–Sat 11pm–8am
       </p>
 
@@ -124,7 +128,7 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
             e.stopPropagation();
             handleCustomize();
           }}
-          className="dp-btn-secondary text-sm"
+          className="btn sm"
         >
           Customize
         </button>
@@ -135,7 +139,7 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
             void handleApply();
           }}
           disabled={saving}
-          className="dp-btn-primary text-sm disabled:opacity-50"
+          className="btn primary sm"
         >
           {saving ? "Applying…" : "Apply"}
         </button>

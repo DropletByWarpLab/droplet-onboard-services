@@ -23,6 +23,19 @@ import type { NetworkCommandResult } from "@/lib/types";
 const TARGETS = ["ACCEPT", "REJECT", "DROP"] as const;
 type Target = (typeof TARGETS)[number];
 
+/* Indigo input idiom, verbatim from the converted Settings / Users surfaces
+   (WARP-1090 / WARP-1080): utilities for layout + focus, inline style for the
+   four themeable values. Hoisted here only because this form packs six
+   controls onto single JSX lines. */
+const INPUT_CLASS =
+  "w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors";
+const INPUT_STYLE = {
+  background: "var(--surface)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--radius-input)",
+  color: "var(--text)",
+} as const;
+
 async function pollOperation(operationId: string): Promise<void> {
   const deadline = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error("Timed out waiting for the router.")), 70_000),
@@ -120,46 +133,46 @@ export function FirewallRuleForm({ zones, onApplied }: { zones: string[]; onAppl
 
   return (
     <div className="card">
-      <h3 className="type-headline text-label-primary mb-3 flex items-center gap-2">
+      <h3 className="type-headline text-[color:var(--text)] mb-3 flex items-center gap-2">
         <Plus size={16} /> Add firewall rule
       </h3>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <label className="type-caption-1 text-label-secondary">
+        <label className="type-caption-1 text-[color:var(--text-muted)]">
           Name
-          <input className="dp-input mt-1" value={name} onChange={(e) => setName(e.target.value)} maxLength={63} placeholder="Allow-NAS" />
+          <input className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={name} onChange={(e) => setName(e.target.value)} maxLength={63} placeholder="Allow-NAS" />
         </label>
-        <label className="type-caption-1 text-label-secondary">
+        <label className="type-caption-1 text-[color:var(--text-muted)]">
           From
-          <select className="dp-input mt-1" value={src} onChange={(e) => setSrc(e.target.value)}>
+          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={src} onChange={(e) => setSrc(e.target.value)}>
             {zoneOpts.map((z) => <option key={z} value={z}>{z}</option>)}
           </select>
         </label>
-        <label className="type-caption-1 text-label-secondary">
+        <label className="type-caption-1 text-[color:var(--text-muted)]">
           To
-          <select className="dp-input mt-1" value={dest} onChange={(e) => setDest(e.target.value)}>
+          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={dest} onChange={(e) => setDest(e.target.value)}>
             {zoneOpts.map((z) => <option key={z} value={z}>{z}</option>)}
           </select>
         </label>
-        <label className="type-caption-1 text-label-secondary">
+        <label className="type-caption-1 text-[color:var(--text-muted)]">
           Protocol
-          <select className="dp-input mt-1" value={proto} onChange={(e) => setProto(e.target.value)}>
+          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={proto} onChange={(e) => setProto(e.target.value)}>
             <option value="tcp">TCP</option>
             <option value="udp">UDP</option>
             <option value="tcpudp">TCP + UDP</option>
           </select>
         </label>
-        <label className="type-caption-1 text-label-secondary">
+        <label className="type-caption-1 text-[color:var(--text-muted)]">
           Dest port
-          <input className="dp-input mt-1 font-mono" value={destPort} onChange={(e) => setDestPort(e.target.value)} placeholder="443 or 8000-8100" />
+          <input className={`${INPUT_CLASS} mt-1 font-mono`} style={INPUT_STYLE} value={destPort} onChange={(e) => setDestPort(e.target.value)} placeholder="443 or 8000-8100" />
         </label>
-        <label className="type-caption-1 text-label-secondary">
+        <label className="type-caption-1 text-[color:var(--text-muted)]">
           Action
-          <select className="dp-input mt-1" value={target} onChange={(e) => setTarget(e.target.value as Target)}>
+          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={target} onChange={(e) => setTarget(e.target.value as Target)}>
             {TARGETS.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </label>
       </div>
-      <button ref={submitRef} type="button" onClick={handleSubmit} disabled={status.kind === "saving"} className="dp-btn-primary mt-3 flex items-center gap-2">
+      <button ref={submitRef} type="button" onClick={handleSubmit} disabled={status.kind === "saving"} className="btn primary mt-3">
         {status.kind === "saving" && <Loader2 size={16} className="animate-spin" />}
         Add rule
       </button>
@@ -254,12 +267,13 @@ export function ZonePolicyEditor({
         Edit
       </button>
       {open && (
-        <div className="mt-2 flex flex-wrap items-end gap-2 bg-surface-secondary/50 rounded-lg p-2">
+        <div className="mt-2 flex flex-wrap items-end gap-2 bg-[var(--inset)] rounded-lg p-2">
           {(["input", "output", "forward"] as const).map((k) => (
-            <label key={k} className="type-caption-2 text-label-tertiary capitalize">
+            <label key={k} className="type-caption-2 text-[color:var(--text-muted)] capitalize">
               {k}
               <select
-                className="dp-input mt-0.5 block"
+                className={`${INPUT_CLASS} mt-0.5 block`}
+                style={INPUT_STYLE}
                 value={policy[k]}
                 onChange={(e) => setPolicy((p) => ({ ...p, [k]: e.target.value as Target }))}
                 aria-label={`${zone} ${k} policy`}
@@ -268,7 +282,7 @@ export function ZonePolicyEditor({
               </select>
             </label>
           ))}
-          <button type="button" className="dp-btn-primary sm" onClick={handleSave} disabled={status.kind === "saving"}>
+          <button type="button" className="btn primary sm" onClick={handleSave} disabled={status.kind === "saving"}>
             {status.kind === "saving" ? <Loader2 size={14} className="animate-spin" /> : "Save"}
           </button>
           {status.kind === "error" && (

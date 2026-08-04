@@ -55,23 +55,28 @@ export function SchedulesTab() {
       {/* Schedules list */}
       <section aria-labelledby="schedules-heading" className="space-y-3">
         <div className="flex items-center justify-between">
-          <h2 id="schedules-heading" className="type-title-3 text-label-primary">
+          <h2
+            id="schedules-heading"
+            className="type-title-3 text-[color:var(--text)]"
+          >
             Schedules
           </h2>
           <button
             type="button"
             onClick={() => setEditorOpenFor({ mode: "new" })}
-            className="dp-btn-primary"
+            className="btn primary"
           >
             + New schedule
           </button>
         </div>
         {isLoading ? (
-          <div className="dp-card p-4 text-label-tertiary">Loading…</div>
+          <div className="card text-[color:var(--text-muted)]">Loading…</div>
         ) : schedules.length === 0 ? (
-          <div className="dp-card p-6 text-center">
-            <p className="type-headline text-label-primary">No schedules yet</p>
-            <p className="type-footnote text-label-tertiary mt-1">
+          <div className="card text-center">
+            <p className="type-headline text-[color:var(--text)]">
+              No schedules yet
+            </p>
+            <p className="type-footnote text-[color:var(--text-muted)] mt-1">
               Pick a preset above, or create a custom schedule.
             </p>
           </div>
