@@ -141,6 +141,14 @@ captures. So nothing running on this Droplet reads audio while voice is off.
 The supportable claim is "no software on the box is capturing audio", not
 "the microphone is disconnected".
 
+One timing caveat on that claim (WARP-1619). A turn runs to completion on the
+capture thread — LLM reply, then TTS, then blocking playback — and the loop
+only re-checks the shutdown flag between frames. Switch voice off mid-reply and
+the box stops reading new audio immediately, but finishes the sentence aloud
+and holds the mic device until it does. The disable response reports this as
+`mic_released: false`; while it is outstanding, turning voice back on waits for
+the device rather than opening a second stream on it.
+
 ## Current limitations (all confirmed in code)
 
 1. Disable is software-only (WARP-1599) — POST `/voice/enabled` persists an
