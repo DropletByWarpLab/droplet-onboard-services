@@ -1029,6 +1029,28 @@ function escapeXml(s: string): string {
 }
 
 /**
+ * Encode a username for the `<d:href>` scope of a WebDAV SEARCH body.
+ *
+ * The href is a URL path that lives inside an XML document, so the value
+ * crosses TWO encoding layers and the order is load-bearing:
+ *
+ *   1. percent-encode — the username is one path segment of a URI reference.
+ *      Without this a space, `#`, `?`, or `%` addresses a DIFFERENT scope than
+ *      intended (the same defect class as `webdavUrl`).
+ *   2. XML-escape — the percent-encoded result is then serialized as element
+ *      text, so any remaining XML metacharacter must become an entity.
+ *
+ * Do NOT swap these. Escaping first turns `&` into `&amp;`, which encoding then
+ * mangles into `%26amp%3B`; the server percent-decodes that back to the literal
+ * text `&amp;` and resolves the wrong scope. Percent-encoding happens to consume
+ * every XML metacharacter, so step 2 is a no-op for today's encoder — keep it
+ * anyway: it is what makes the layering hold if the encoder is ever loosened.
+ */
+function davScopeUser(user: string): string {
+  return escapeXml(encodeURIComponent(user));
+}
+
+/**
  * Toggle the favorite flag on a file or directory.
  * Uses PROPPATCH to set oc:favorite to 1 or 0.
  */
@@ -1144,7 +1166,7 @@ export async function ncSearchFiles(
     </d:select>
     <d:from>
       <d:scope>
-        <d:href>/files/${user}</d:href>
+        <d:href>/files/${davScopeUser(user)}</d:href>
         <d:depth>infinity</d:depth>
       </d:scope>
     </d:from>
@@ -1192,7 +1214,7 @@ export async function ncListRecents(
     </d:select>
     <d:from>
       <d:scope>
-        <d:href>/files/${user}</d:href>
+        <d:href>/files/${davScopeUser(user)}</d:href>
         <d:depth>infinity</d:depth>
       </d:scope>
     </d:from>

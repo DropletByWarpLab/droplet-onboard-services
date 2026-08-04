@@ -500,6 +500,20 @@ describe("nextcloud.client — search and recents", () => {
   </d:response>
 </d:multistatus>`;
 
+  /**
+   * The `<d:href>` SEARCH scope is a URL path embedded in an XML document, so a
+   * username has to survive BOTH layers: percent-encoding first (it is one path
+   * segment) and XML escaping second. `[user, expected encoded segment]`.
+   */
+  const scopeUserCases: Array<[string, string]> = [
+    ["a&b", "a%26b"],
+    ["a<b", "a%3Cb"],
+    ["a>b", "a%3Eb"],
+    ["bob smith", "bob%20smith"],
+    ["tag#1", "tag%231"],
+    ["100%done", "100%25done"],
+  ];
+
   describe("ncSearchFiles", () => {
     it("issues SEARCH with basicsearch wrapping a LIKE pattern", async () => {
       const fetchMock = vi
@@ -557,6 +571,26 @@ describe("nextcloud.client — search and recents", () => {
 
       expect(fetchMock.mock.calls[0][1].body).toContain("<d:nresults>5</d:nresults>");
     });
+
+    it.each(scopeUserCases)(
+      "percent-encodes then XML-escapes the username %j in the search scope href",
+      async (user, encoded) => {
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+        global.fetch = fetchMock as unknown as typeof fetch;
+
+        await ncSearchFiles("token", user, { query: "q" });
+
+        const body = fetchMock.mock.calls[0][1].body as string;
+        expect(body).toContain(`<d:href>/files/${encoded}</d:href>`);
+        // The raw username must never reach the document — that is either an
+        // XML injection (`&`, `<`, `>`) or a wrong-scope address (` `, `#`, `%`).
+        expect(body).not.toContain(`/files/${user}`);
+        // Encode-then-escape, not escape-then-encode: the latter yields `%26amp%3B`.
+        expect(body).not.toContain("amp%3B");
+      }
+    );
   });
 
   describe("ncListRecents", () => {
@@ -605,6 +639,23 @@ describe("nextcloud.client — search and recents", () => {
       expect(items[0].name).toBe("newer.txt");
       expect(items[1].name).toBe("older.txt");
     });
+
+    it.each(scopeUserCases)(
+      "percent-encodes then XML-escapes the username %j in the recents scope href",
+      async (user, encoded) => {
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+        global.fetch = fetchMock as unknown as typeof fetch;
+
+        await ncListRecents("token", user, 10);
+
+        const body = fetchMock.mock.calls[0][1].body as string;
+        expect(body).toContain(`<d:href>/files/${encoded}</d:href>`);
+        expect(body).not.toContain(`/files/${user}`);
+        expect(body).not.toContain("amp%3B");
+      }
+    );
   });
 });
 
