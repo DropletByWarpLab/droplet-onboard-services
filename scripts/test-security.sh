@@ -192,13 +192,23 @@ fi
 if [ -f "$ENV_EXAMPLE" ]; then
   # A valid placeholder is either the literal `change-me` OR an EMPTY value
   # (`KEY=` with nothing after). Empty is the SAFEST placeholder — it can never
-  # be a forgeable real secret. Only ONLYOFFICE_JWT_SECRET is explicitly
-  # permitted to ship empty (the orchestrator/connector treat empty as "feature
-  # off" so an un-provisioned box fails safe rather than running on a shared
-  # default). All other secrets must use `change-me` as their placeholder.
+  # be a forgeable real secret. Empty is permitted only for the secrets named
+  # below, each of which treats empty as "feature off" so an un-provisioned box
+  # fails safe rather than running on a shared default:
+  #   ONLYOFFICE_JWT_SECRET — orchestrator/connector skip the docs feature.
+  #   AP_OPENWRT_PASSWORD   — "no external AP configured"; AP-direct config is
+  #     skipped, never failed (services/routing/main.py). `change-me` would be
+  #     WRONG here: it is truthy, so the routing service would try to
+  #     authenticate to a nonexistent AP and secrets.sh would write the literal
+  #     into /run/secrets/ap_openwrt_password.
+  # The list is deliberately explicit rather than a blanket "empty is fine" —
+  # a NEW secret that ships empty by accident must fail this check and be added
+  # here on purpose, with a reason.
+  # All other secrets must use `change-me` as their placeholder.
   PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" \
     | grep -v 'change-me' \
     | grep -vE '^ONLYOFFICE_JWT_SECRET=[[:space:]]*$' \
+    | grep -vE '^AP_OPENWRT_PASSWORD=[[:space:]]*$' \
     | grep -v '^#' || true)
   if [ -z "$PASSWORD_LINES" ]; then
     pass ".env.example: all secrets use 'change-me' or empty placeholder"
