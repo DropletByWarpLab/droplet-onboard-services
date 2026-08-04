@@ -89,9 +89,12 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
     // (router.push('/network?tab=schedules#schedule-<id>')) can scroll this
     // row into view once the Schedules tab mounts. scroll-mt-20 (80px) keeps
     // the row clear of the 56px sticky page top bar when scrolled to the top.
-    <li id={`schedule-${schedule.id}`} className="dp-card p-4 scroll-mt-20">
+    <li id={`schedule-${schedule.id}`} className="card scroll-mt-20">
       <div className="flex items-start gap-3">
-        {/* Enabled toggle */}
+        {/* Enabled toggle. `.sw` / `.ball` are the shell's toggle primitive —
+            same button + span structure as before, so this stays a class swap.
+            The knob colour comes from `--on-brand` (WARP-1358 contrast), which
+            is why the old hardcoded `bg-white` goes away. */}
         <button
           type="button"
           role="switch"
@@ -99,16 +102,9 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
           aria-label={`Toggle ${schedule.name}`}
           onClick={handleToggle}
           disabled={toggleBusy}
-          className={`mt-1 w-10 h-6 rounded-full relative transition-colors ${
-            schedule.enabled ? "bg-accent" : "bg-surface-secondary"
-          }`}
+          className={`mt-1 sw${schedule.enabled ? " on" : ""}`}
         >
-          <span
-            className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-              schedule.enabled ? "translate-x-4" : ""
-            }`}
-            aria-hidden="true"
-          />
+          <span className="ball" aria-hidden="true" />
         </button>
 
         <div className="flex-1 min-w-0">
@@ -129,13 +125,13 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
                 }}
                 autoFocus
                 aria-label="Schedule name"
-                className="dp-input type-headline"
+                className="type-headline w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] placeholder:text-[color:var(--text-muted)] focus:border-[var(--brand)]"
               />
             ) : (
               <button
                 type="button"
                 onClick={() => setEditingName(true)}
-                className="type-headline text-label-primary text-left hover:text-accent"
+                className="type-headline text-[color:var(--text)] text-left hover:text-[color:var(--brand)]"
               >
                 {schedule.name}
               </button>
@@ -151,13 +147,13 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
 
           {/* Subject badge */}
           <div className="mt-1">
-            <span className="inline-flex items-center gap-1 type-caption-1 px-2 py-0.5 rounded bg-surface-secondary text-label-secondary">
+            <span className="inline-flex items-center gap-1 type-caption-1 px-2 py-0.5 rounded bg-[var(--card-inner)] text-[color:var(--text-muted)]">
               {subjectLabel} ({subjectKind})
             </span>
           </div>
 
           {/* Windows summary */}
-          <p className="mt-2 type-subheadline text-label-secondary">
+          <p className="mt-2 type-subheadline text-[color:var(--text-muted)]">
             {schedule.windows.length > 0
               ? schedule.windows.map((w) => formatWindow(w)).join(" · ")
               : "No windows"}
@@ -165,7 +161,7 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
 
           {/* Transition meta */}
           {(schedule.nextTransitionAt || schedule.lastFiredAt) && (
-            <p className="mt-1 type-caption-2 text-label-tertiary">
+            <p className="mt-1 type-caption-2 text-[color:var(--text-muted)]">
               {schedule.nextTransitionAt && (
                 <>next transition {formatRelativeTime(schedule.nextTransitionAt)}</>
               )}
@@ -182,24 +178,26 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
           <button
             type="button"
             onClick={onEdit}
-            className="dp-btn-secondary text-sm"
+            className="btn sm"
           >
             Edit
           </button>
           {confirmDelete ? (
             <div className="flex items-center gap-2">
-              <span className="type-caption-1 text-label-secondary">Delete?</span>
+              <span className="type-caption-1 text-[color:var(--text-muted)]">
+                Delete?
+              </span>
               <button
                 type="button"
                 onClick={handleDelete}
-                className="dp-btn-primary text-sm"
+                className="btn primary sm"
               >
                 Yes
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmDelete(false)}
-                className="dp-btn-secondary text-sm"
+                className="btn sm"
               >
                 No
               </button>
@@ -208,7 +206,7 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
             <button
               type="button"
               onClick={() => setConfirmDelete(true)}
-              className="dp-btn-secondary text-sm"
+              className="btn sm"
             >
               Delete
             </button>
