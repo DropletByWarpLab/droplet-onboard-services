@@ -1824,6 +1824,10 @@ function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
     const sizeMatch = block.match(/<d:getcontentlength>(\d+)<\/d:getcontentlength>/i);
     const mtimeMatch = block.match(/<d:getlastmodified>([^<]+)<\/d:getlastmodified>/i);
     const typeMatch = block.match(/<d:getcontenttype>([^<]+)<\/d:getcontenttype>/i);
+    // WARP-1683: every PROPFIND body here already requests <oc:fileid/>;
+    // surface it (previously parsed-and-dropped) so pickers can address a
+    // file by the stable id the registry gate keys on.
+    const fileIdMatch = block.match(/<oc:fileid>(\d+)<\/oc:fileid>/i);
 
     entries.push({
       name,
@@ -1832,6 +1836,7 @@ function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
       size: sizeMatch ? parseInt(sizeMatch[1], 10) : 0,
       mimeType: isCollection ? null : (typeMatch?.[1] ?? "application/octet-stream"),
       modifiedAt: mtimeMatch ? new Date(mtimeMatch[1]).toISOString() : new Date().toISOString(),
+      ...(fileIdMatch ? { ncFileId: parseInt(fileIdMatch[1], 10) } : {}),
     });
   }
 
