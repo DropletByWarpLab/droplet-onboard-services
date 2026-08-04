@@ -374,7 +374,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       {toast && (
         <div
           role="alert"
-          className="fixed bottom-4 right-4 bg-system-red text-white px-3 py-2 rounded shadow"
+          className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 lg:bottom-4 z-50 bg-system-red text-white px-3 py-2 rounded shadow"
         >
           {toast}
           <button
