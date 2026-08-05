@@ -116,12 +116,37 @@ These are not in tension: observation answers "what is", intent answers "what sh
 - [x] WARP-1720 — umdns duplicate-key decode fix (merged `149500ba`, deployed to lab box, AP discovered)
 - [x] AP credential enrolled on lab box + `AP_OPENWRT_PASSWORD` in both `.env` files (deploy fix, 2026-08-04)
 - [x] WARP-1721 — approval gate fails closed on the edge-router shape (merged `ce5667bc`, #1407; `_router_has_ap_radios` → `_router_side_staging_allowed`; approval freeze lifted)
-- [ ] Switch driver `safe_apply` parity + staged-revert (ticket needed)
-- [ ] AP image identity fixes: macaddr_base derivation, board.json bypass, DHCP client-ID pin (ticket needed, droplet-edge-router)
-- [ ] Pi keep.d `/etc/droplet` (ticket needed, droplet-edge-router)
-- [ ] `bridge.fdb` rpcd plugin + ACL + `SwitchDriver.get_fdb()` (supersedes the ACL-only framing of WARP-1717)
-- [ ] NetworkNode / NodeIdentity / TopologyEdge migration + topology-identity service (ticket needed)
+- [x] WARP-1730 — switch driver `safe_apply` parity + PYNET-005 staged-revert (merged `1003493f`, #1408; verified live on the lab switch against an unused PoE port: apply→probe→confirm, zero staged leftovers)
+- [x] WARP-1729 — AP identity fixes: macaddr_base derived from the eth0 anchor, board.json bypassed, DHCP client-ID pinned (merged `14b4c6e`; kernel and hostapd now agree on both radios, one lease)
+- [x] WARP-1728 — Pi keep.d `/etc/droplet`, DHCP reservation for the AP, switch domain record, and `_droplet-router._tcp` (merged `c7de8a9`; router advert confirmed visible from the AP)
+- [x] WARP-1734 — `bridge.fdb` rpcd ucode plugin + ACL grant (edge-router `b3b0c18`, #15) and `SwitchDriver.get_fdb()` + `port_powers()` + the hard PoE refusal (`15f8d010`, #1411). Supersedes the ACL-only framing of WARP-1717. Verified on the rack: cutting lan2 is refused by name; lan5 still toggles.
+- [x] WARP-1731 — `FabricApi.browse_members()` + `GET /fabric/members` (merged `bce6ed6f`, #1409; all three members returned live, router synthesized when its own advert is absent from its own browse)
+- [ ] WARP-1732 — FabricMember persistence: orchestrator table + reconciler + read API (in progress)
+- [ ] NetworkNode / NodeIdentity / TopologyEdge migration + topology-identity service (ticket needed — WARP-1732 is its first increment)
 - [ ] NetworkIntent + converger for `wifi.primary`; delete router-side SSID path on this shape (ticket needed)
 - [ ] Enrollment broker (ADR-033 item 8; extends WARP-1474 substrate) + `setup.sh` shape detection (ADR-033 item 7)
 - [ ] Phase-0 pinned HTTPS across all three devices (ticket needed)
-- [ ] `_droplet-router._tcp` + DHCP reservations at enrollment (ticket needed, both repos)
+
+### Progress note (2026-08-05)
+
+**Stage 1 (fix-first) and stage 2 (pin identity) are complete**, and every item
+was verified against the live rack rather than accepted from a test suite. The
+fabric now discovers all three devices, addresses them by reservation and
+stable name, cannot strand the switch on a bad write, and refuses to cut power
+to a device it can see. Stages 3–7 (topology graph persistence, intent
+convergence, enrollment, transport, mutual recognition) remain.
+
+Two findings from this work belong in the record because they constrain later
+stages:
+
+- **Wi-Fi 7 is not reachable on the NWA50BE** (WARP-1736). `mlo_capable=0` is
+  not a tunable we are declining — with it the driver advertises zero EHT
+  capability, and enabling MLO panics the kernel. The 1.6 firmware that would
+  support it was tested on hardware and does not exist for this board's
+  1-Pebble topology. Nothing customer-facing may claim 802.11be for this SKU
+  until that is resolved, and it should be decided alongside the `_aladdin`
+  sourcing question.
+- **A userspace self-heal guard cannot cover a kernel panic.** The AP's
+  management deadman runs from `rc.local` and is therefore blind to the entire
+  class of failure that firmware and driver changes produce. Any stage that
+  touches either must be treated as console-required, or guarded at U-Boot.
