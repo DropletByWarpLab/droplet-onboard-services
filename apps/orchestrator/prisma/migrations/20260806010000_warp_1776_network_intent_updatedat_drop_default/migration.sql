@@ -1,0 +1,54 @@
+-- WARP-1776 — close the `updatedAt` drift WARP-1761 opened on `NetworkIntent`
+-- and `DeviceIntentState`.
+--
+-- WHAT WAS WRONG
+-- --------------
+-- 20260806000000_warp_1761_network_intent creates both tables with
+--
+--     "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+--
+-- while schema.prisma declares both fields `updatedAt DateTime @updatedAt`.
+-- `@updatedAt` is maintained by the Prisma CLIENT on every write; it does not
+-- ask for — and Prisma does not emit — a database default. So the migration
+-- set and the datamodel described two different databases, and
+-- scripts/check-schema-drift.sh (WARP-1542) reddened main on the very next
+-- push with two new statements over its documented 26-line baseline:
+--
+--     ALTER TABLE "DeviceIntentState" ALTER COLUMN "updatedAt" DROP DEFAULT;
+--     ALTER TABLE "NetworkIntent"     ALTER COLUMN "updatedAt" DROP DEFAULT;
+--
+-- This migration is exactly that delta, so the replayed migration set and the
+-- datamodel agree again and the diff returns to its documented 26 lines.
+--
+-- WHY A FORWARD MIGRATION INSTEAD OF EDITING 20260806000000
+-- ---------------------------------------------------------
+-- 20260806000000 is already merged to main and may already be applied on an
+-- appliance. Prisma stores a checksum of every applied migration in
+-- `_prisma_migrations`; editing a migration that has already run makes
+-- `migrate deploy` abort with P3005/P3006 on that box. A forward migration is
+-- checksum-safe, and it closes the drift just as completely, because the gate
+-- replays the WHOLE migration set into an empty shadow database — it grades
+-- the end state, not any single file.
+--
+-- BEHAVIOUR CHANGE: none in practice. Every write to these tables goes through
+-- the Prisma client, which has always sent an explicit `updatedAt`; the
+-- database default was dead weight that no INSERT ever fell back on. Both
+-- columns stay NOT NULL, so a hand-written INSERT that omits `updatedAt` now
+-- fails loudly instead of silently recording a timestamp the client never
+-- chose — which is the intended contract for an `@updatedAt` column.
+--
+-- SCOPE: deliberately ONLY the two WARP-1761 tables. `BusinessProfile` and
+-- `TlsCert` carry the identical `updatedAt` default and are LEFT ALONE — they
+-- are documented entries in prisma/schema-drift-baseline.sql, and closing
+-- baseline drift here would fail the same gate from the other side with its
+-- "the drift SHRANK" message. Closing those is a separate, deliberate
+-- re-baselining change.
+--
+-- RE-RUNNABLE: no guard is needed. Postgres treats `ALTER COLUMN ... DROP
+-- DEFAULT` on a column that has no default as a successful no-op (unlike ADD
+-- COLUMN / CREATE TABLE, which is why the neighbouring migrations carry
+-- `IF NOT EXISTS` and this one does not). Running this file twice is safe.
+
+ALTER TABLE "NetworkIntent"     ALTER COLUMN "updatedAt" DROP DEFAULT;
+
+ALTER TABLE "DeviceIntentState" ALTER COLUMN "updatedAt" DROP DEFAULT;

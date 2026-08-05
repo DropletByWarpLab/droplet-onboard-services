@@ -38,6 +38,7 @@ import { runBusinessReviewCheck } from "./services/business-review-nudge.service
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { startFabricMemberReconciler } from "./services/fabric-member-reconciler.js";
+import { startWifiIntentConverger } from "./services/wifi-intent-converger.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import {
   reconcileDepartments,
@@ -622,6 +623,25 @@ async function main() {
     // observational: it upserts FabricMember rows, never deletes one, and
     // never writes to a device — ApDevice above keeps owning AP lifecycle.
     startFabricMemberReconciler(
+      cronRuntime,
+      prisma,
+      openwrt,
+      apDiscoveryIntervalMs,
+    );
+
+    // WARP-1761 (ADR-035 §1/§7): converge `wifi.primary`. Rides the SAME
+    // cadence as the two sweeps above — the tick is one read per approved
+    // AP, the identical hop `GET /network/wifi/ap` already makes on every
+    // dashboard poll, so a third interval would buy nothing but a third knob
+    // to drift. No new env var.
+    //
+    // Its OWN advisory lock key, so it is its own single scheduler and
+    // cannot serialise behind (or double-fire with) AP discovery or the
+    // fabric reconciler. It writes ONE domain to ONE role: `wifi.primary`,
+    // to fabric members with role='ap' that ADR-005 has approved and ADR-024
+    // marks DROPLET_IMAGE. It never deletes a row, never writes intent, and
+    // holds no passphrase to push.
+    startWifiIntentConverger(
       cronRuntime,
       prisma,
       openwrt,

@@ -415,7 +415,9 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      const op = await setApWifi(prisma, { ssid, key });
+      // WARP-1761: `userId` rides along as the intent's `writtenBy` — audit
+      // only, nothing branches on it. The response below is unchanged.
+      const op = await setApWifi(prisma, { ssid, key }, userId);
       res.json({
         status: "ok",
         tier: result.tier,
