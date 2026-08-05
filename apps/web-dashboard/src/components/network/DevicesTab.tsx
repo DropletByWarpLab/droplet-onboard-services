@@ -93,7 +93,16 @@ export function DevicesTab() {
   const hasMatches =
     groupsWithMembers.length > 0 || ungrouped.length > 0 || infrastructure.length > 0;
 
-  const isLoading = !devicesSwr.data && devicesSwr.isLoading;
+  // WARP-1726: "still loading" has to cover the whole window before the first
+  // response lands, not just SWR's `isLoading` — which is true for the FIRST
+  // request of a key only. A cold load that failed (a 401 while the access
+  // token was being rotated) and is now retrying reports isLoading:false with
+  // no data, which read as "loaded, and there are zero devices" and put the
+  // "your router hasn't seen any devices yet" card in front of a household
+  // full of devices. A failed load that has SETTLED still falls through to
+  // that card, which carries the Retry affordance for exactly this case.
+  const isLoading =
+    devicesSwr.data === undefined && (devicesSwr.isLoading || devicesSwr.isValidating);
 
   return (
     <div>
@@ -158,8 +167,19 @@ export function DevicesTab() {
       </div>
 
       {isLoading && (
-        <div className="flex items-center justify-center py-12 text-[color:var(--text-muted)]">
-          <Loader2 size={20} className="animate-spin mr-2" />
+        // WARP-1726: reserve the height instead of letting the tab shrink to a
+        // spinner. A cold load left the page a few hundred pixels tall, so the
+        // browser clamped the restored scroll offset to the bottom of it and
+        // the user landed at the end of a list that had not arrived yet.
+        // Fixed-height loading states are the house convention here (see
+        // app/network/page.tsx NetworkPageSkeleton).
+        <div
+          role="status"
+          aria-label="Loading devices"
+          className="flex items-center justify-center text-[color:var(--text-muted)]"
+          style={{ minHeight: 300 }}
+        >
+          <Loader2 size={20} className="animate-spin mr-2" aria-hidden="true" />
           <span className="type-subheadline">Loading devices…</span>
         </div>
       )}
