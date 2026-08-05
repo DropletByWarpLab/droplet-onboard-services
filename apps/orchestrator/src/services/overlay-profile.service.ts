@@ -113,6 +113,14 @@ export interface ProvisionOverlayPeerInput {
   /** Provenance stamped onto the peer row (who linked which QR). */
   linkTokenId: string;
   linkTokenEnrolledBy: string | null;
+  /**
+   * When the owner originally approved this enrollment. Defaults to `now`,
+   * which is right for a first provision. A RETRY (re-approve of an already-
+   * approved row) passes the original so the audit trail keeps saying when the
+   * device was actually linked, rather than being rewritten by every recovery
+   * attempt. Distinct from `lastSessionAt`, which a retry SHOULD refresh.
+   */
+  enrolledAt?: Date;
 }
 
 export interface ProvisionOverlayPeerDeps {
@@ -181,7 +189,7 @@ export async function provisionOverlayPeer(
     linkTokenId: input.linkTokenId,
     linkTokenLabel: input.label,
     linkTokenEnrolledBy: input.linkTokenEnrolledBy,
-    enrolledAt: now,
+    enrolledAt: input.enrolledAt ?? now,
   };
 
   if (existing) {

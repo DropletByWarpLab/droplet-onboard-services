@@ -160,8 +160,15 @@ function createPrismaMock() {
       return out;
     }),
     count: vi.fn(async ({ where }: any = {}) => rows.filter((r) => matchWhere(r, where)).length),
+    // Prisma resolves `where` on ANY unique field, not just `id` —
+    // VpnPeer.publicKey is @unique and the provisioning path updates by it.
+    // Keying this double on `id` alone made such an update silently blow up on
+    // `Object.assign(undefined, …)`; throwing on a miss (as Prisma does, P2025)
+    // keeps a wrong `where` loud instead of mysterious.
     update: vi.fn(async ({ where, data }: any) => {
-      const row = rows.find((r) => r.id === where.id);
+      const [k, v] = Object.entries(where)[0] as any;
+      const row = rows.find((r) => r[k] === v);
+      if (!row) throw new Error(`${prefix}.update: no row where ${k}=${v}`);
       Object.assign(row, data);
       return row;
     }),
@@ -601,6 +608,88 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
     expect(overlayEnroll).toHaveBeenCalledTimes(1);
   });
 
+  // ── re-approve is the RECOVERY path for a failed provision ──
+  describe("re-approve retries provisioning (the only recovery a box has)", () => {
+    // Provision failure leaves the row 'approved' with no peer, and /profile
+    // 503s. The connect tick that would otherwise self-heal is behind
+    // OVERLAY_CONNECT_ENABLED, which defaults false and appears in no
+    // deployment artifact — so on a shipping box re-approve is the ONLY way
+    // out. It must actually retry, not short-circuit to a no-op.
+    it("recovers a device stuck approved-with-no-peer, still without a second vouch", async () => {
+      const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-9" }));
+      const { app, prisma } = buildApp({ overlayEnroll });
+      const pendingId = await stage(app);
+
+      installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+      const first = await approve(app, pendingId);
+      expect(first.status).toBe(200);
+      expect(first.body.tunnel_ready).toBe(false);
+      // The row write precedes the router install, so model the harsher shape
+      // the finding describes: approved, and no peer row at all.
+      prisma._vpnPeers.length = 0;
+
+      const second = await approve(app, pendingId);
+      expect(second.status).toBe(200);
+      expect(second.body.tunnel_ready).toBe(true);
+      // The vouch is NOT idempotent — the retry must never re-fire it.
+      expect(overlayEnroll).toHaveBeenCalledTimes(1);
+
+      const peer = prisma._vpnPeers.find(
+        (p: any) => p.publicKey === VALID_WG_KEY,
+      );
+      expect(peer).toBeDefined();
+      expect(peer.status).toBe("active");
+      expect(peer.kind).toBe("overlay");
+    });
+
+    // The first approve returns tunnel_ready; a re-approve that omitted it left
+    // any UI reading `undefined` even when the tunnel was fine.
+    it("reports tunnel_ready on re-approve, same contract as the first approve", async () => {
+      const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-9" }));
+      const { app } = buildApp({ overlayEnroll });
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      const second = await approve(app, pendingId);
+      expect(second.body).toEqual({
+        state: "approved",
+        device_id: "hq-dev-9",
+        tunnel_ready: true,
+      });
+    });
+
+    it("still reports tunnel_ready:false when the retry itself fails", async () => {
+      const { app, prisma } = buildApp();
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      prisma._vpnPeers.length = 0;
+      installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+      const second = await approve(app, pendingId);
+      expect(second.status).toBe(200);
+      expect(second.body.tunnel_ready).toBe(false);
+      expect(prisma._pendings[0].state).toBe("approved");
+    });
+
+    // A retry must not rewrite who linked the QR or when — that is the audit
+    // trail. It SHOULD restart the idle clock, since the owner just asserted
+    // the device should work.
+    it("preserves enrolment provenance but refreshes the idle clock", async () => {
+      let clock = new Date("2026-08-05T00:00:00.000Z");
+      const { app, prisma } = buildApp({ now: () => clock });
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      const enrolledAt = prisma._vpnPeers[0].enrolledAt;
+      const enrolledBy = prisma._vpnPeers[0].linkTokenEnrolledBy;
+
+      clock = new Date(clock.getTime() + 6 * 3_600_000);
+      await approve(app, pendingId);
+
+      const peer = prisma._vpnPeers[0];
+      expect(peer.enrolledAt).toEqual(enrolledAt);
+      expect(peer.linkTokenEnrolledBy).toBe(enrolledBy);
+      expect(peer.lastSessionAt).toEqual(clock);
+    });
+  });
+
   it("a claim that loses the race (count===0) gets a clean 409 and does NOT vouch", async () => {
     // Deterministically simulate the losing concurrent approver: the row still
     // reads 'pending' at findUnique, but the atomic pending→approving claim
@@ -943,6 +1032,12 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     expect(res.status).toBe(503);
     expect(res.body.error).toBe("tunnel_not_ready");
     expect(res.body.message).not.toMatch(/[a-z]+_[a-z]+/);
+    // Nothing retries this on its own: the connect tick that could self-heal is
+    // behind OVERLAY_CONNECT_ENABLED (default false, in no deployment
+    // artifact). "Try again in a moment" would promise progress that never
+    // comes; the copy must name the action that DOES recover it — re-approval.
+    expect(res.body.message).not.toMatch(/in a moment/i);
+    expect(res.body.message).toMatch(/approv/i);
   });
 });
 

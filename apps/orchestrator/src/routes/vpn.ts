@@ -389,6 +389,78 @@ export function createVpnRouter(
       next();
     };
 
+  // Declared here rather than at its route because provisionApprovedPeer below
+  // audits against it and both approve paths share that helper.
+  const ROUTE_APPROVE = "/vpn/overlay/pending-enrollments/:id/approve";
+
+  /**
+   * WARP-1757 — make the box ready to accept an approved device's handshake.
+   *
+   * Shared by BOTH approve paths so they cannot drift: the first approval (just
+   * after the HQ vouch) and a re-approval of an already-'approved' row, which
+   * is a pure retry that never touches the vouch. Returns `null` on failure —
+   * the caller reports `tunnel_ready:false` rather than throwing, because a
+   * failed provision must never roll a vouched enrollment back.
+   *
+   * The routing sidecar is the only fallible collaborator here; every failure
+   * mode is transient-ish (wg0 setup, IP allocation, peer install), which is
+   * what makes a retry the right recovery instead of a rollback.
+   */
+  const provisionApprovedPeer = async (
+    req: Request,
+    pending: {
+      id: string;
+      wgPublicKey: string;
+      label: string;
+      linkTokenId: string;
+    },
+    provenance: {
+      linkTokenEnrolledBy: string | null;
+      /** Original approval time; omitted on a first provision. */
+      enrolledAt?: Date;
+      /** HQ device ref, for the failure audit. Absent on a retry. */
+      deviceId?: string | null;
+    },
+  ): Promise<ProvisionedOverlayPeer | null> => {
+    try {
+      return await provisionOverlayPeer(
+        {
+          prisma,
+          router: overlayRouter,
+          allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
+          config: {
+            listenPort: config.WIREGUARD_LISTEN_PORT,
+            serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+            vpnInterface: "wg0",
+            keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+          },
+          now,
+        },
+        {
+          wgPublicKey: pending.wgPublicKey,
+          label: pending.label,
+          linkTokenId: pending.linkTokenId,
+          linkTokenEnrolledBy: provenance.linkTokenEnrolledBy,
+          enrolledAt: provenance.enrolledAt,
+        },
+      );
+    } catch (provisionErr) {
+      logger.error(
+        { err: provisionErr, pendingId: pending.id },
+        "overlay approve: peer provisioning failed — device is approved but cannot connect yet",
+      );
+      audit({
+        event: "overlay_enroll_provision_failed",
+        method: req.method,
+        route: ROUTE_APPROVE,
+        status: 200,
+        clientId: req.user?.id ?? "unknown",
+        refs: { pending_id: pending.id, device_id: provenance.deviceId ?? null },
+      });
+      return null;
+    }
+  };
+
   // ── POST /api/vpn/overlay/devices ──
   // WARP-1385 (ADR-030) — enroll an owner device into the direct-punch overlay.
   // Owner/admin only: the box signs a grant over the client's key material and
@@ -761,10 +833,17 @@ export function createVpnRouter(
           where: { publicKey: pending.wgPublicKey, status: "active" },
         });
         if (!peer) {
+          // NOT a "wait and it'll sort itself out" state. Nothing retries this
+          // on the device's behalf: approve-time provisioning already failed,
+          // and the connect tick that could self-heal the peer is behind
+          // OVERLAY_CONNECT_ENABLED — default false, and set in no deployment
+          // artifact. The one thing that DOES fix it is the owner approving the
+          // device again, which re-runs provisioning (and only provisioning).
+          // Say that, rather than promising a retry that will never happen.
           return res.status(503).json({
             error: "tunnel_not_ready",
             message:
-              "This device is approved, but the Droplet hasn't finished setting up its tunnel. Try again in a moment.",
+              "This device is approved, but the Droplet couldn't finish setting up its tunnel. Ask the Droplet's owner to approve this device again — that retries the setup.",
           });
         }
         // The server public key comes from the interface itself. vpnSetup is a
@@ -841,7 +920,7 @@ export function createVpnRouter(
   );
 
   // ── POST /api/vpn/overlay/pending-enrollments/:id/approve ── (owner).
-  const ROUTE_APPROVE = "/vpn/overlay/pending-enrollments/:id/approve";
+  // ROUTE_APPROVE is declared above, next to provisionApprovedPeer.
   router.post(
     ROUTE_APPROVE,
     requireRole("owner", "admin"),
@@ -856,9 +935,32 @@ export function createVpnRouter(
         }
         if (pending.state === "approved") {
           // Idempotent re-approve — return the recorded HQ device ref.
-          return res
-            .status(200)
-            .json({ state: "approved", device_id: pending.hqDeviceRef ?? null });
+          //
+          // The vouch is NOT re-fired: it is not idempotent, HQ already knows
+          // this device, and preventing a second one is the entire reason this
+          // branch short-circuits ahead of the claim. Provisioning is a
+          // different matter — it is idempotent by construction (setup() is a
+          // no-op on an existing wg0, an existing row's address is reused, and
+          // the router-side install is a refresh), and re-approval is the ONLY
+          // recovery a shipping box has when the first attempt failed: the row
+          // stays 'approved' with no usable peer, /profile 503s, and the
+          // connect tick that could self-heal is behind
+          // OVERLAY_CONNECT_ENABLED (default false, in no deployment
+          // artifact). So retry the provisioning half only.
+          //
+          // The original approver + enrolment time are passed back in so a
+          // retry repairs the tunnel without rewriting the audit trail.
+          const retried = await provisionApprovedPeer(req, pending, {
+            linkTokenEnrolledBy: pending.approvedBy ?? req.user?.id ?? null,
+            enrolledAt: pending.enrolledAt ?? undefined,
+          });
+          return res.status(200).json({
+            state: "approved",
+            device_id: pending.hqDeviceRef ?? null,
+            // Same field the first approve returns — a client polling this must
+            // not see `undefined` on the retry that actually fixed things.
+            tunnel_ready: retried !== null,
+          });
         }
         if (pending.state !== "pending") {
           // 'approving' (a concurrent approver already holds the claim),
@@ -1001,48 +1103,17 @@ export function createVpnRouter(
         // Provisioning failure does NOT roll the enrollment back. The HQ vouch
         // already succeeded and is not idempotent — compensating to 'pending'
         // would invite a second vouch for a device HQ already knows. The row
-        // stays 'approved' and the profile fetch reports honestly that the
-        // tunnel isn't ready yet; the owner can re-approve to retry, and the
-        // connect tick still self-heals the peer if it is enabled.
-        let provisioned: ProvisionedOverlayPeer | null = null;
-        try {
-          provisioned = await provisionOverlayPeer(
-            {
-              prisma,
-              router: overlayRouter,
-              allocateIp: () =>
-                allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
-              config: {
-                listenPort: config.WIREGUARD_LISTEN_PORT,
-                serverAddress: serverAddressFromSubnet(
-                  config.WIREGUARD_VPN_SUBNET,
-                ),
-                vpnInterface: "wg0",
-                keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
-              },
-              now,
-            },
-            {
-              wgPublicKey: pending.wgPublicKey,
-              label: pending.label,
-              linkTokenId: pending.linkTokenId,
-              linkTokenEnrolledBy: req.user?.id ?? null,
-            },
-          );
-        } catch (provisionErr) {
-          logger.error(
-            { err: provisionErr, pendingId: pending.id },
-            "overlay approve: vouch succeeded but peer provisioning failed — device is approved but cannot connect yet",
-          );
-          audit({
-            event: "overlay_enroll_provision_failed",
-            method: req.method,
-            route: ROUTE_APPROVE,
-            status: 200,
-            clientId,
-            refs: { pending_id: pending.id, device_id: deviceId },
-          });
-        }
+        // stays 'approved', the response says tunnel_ready:false, and /profile
+        // reports honestly that the tunnel isn't ready. Recovery is an explicit
+        // owner action: re-approving an already-'approved' row re-runs THIS
+        // provisioning and nothing else (see the idempotent branch above), so
+        // the retry never reaches the vouch. Do not assume the connect tick
+        // will self-heal it — that tick is behind OVERLAY_CONNECT_ENABLED,
+        // which defaults false and is set in no deployment artifact.
+        const provisioned = await provisionApprovedPeer(req, pending, {
+          linkTokenEnrolledBy: req.user?.id ?? null,
+          deviceId,
+        });
         // Finalize approving → approved. Guarded on 'approving' so a compensating
         // path (or a manual state change) can't be silently clobbered.
         await prisma.pendingOverlayEnrollment.updateMany({
