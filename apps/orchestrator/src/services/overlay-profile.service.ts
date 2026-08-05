@@ -65,7 +65,10 @@ export interface OverlayProfile {
   /** What the client routes over the tunnel. */
   allowed_ips: string[];
   /** Resolver(s) so `<name>.droplet-us.com` resolves over the tunnel
-   *  (ADR-023 split-horizon). */
+   *  (ADR-023 split-horizon). MUST fall inside {@link allowed_ips} — a resolver
+   *  outside every routed range is queried over the client's default route, so
+   *  the split-horizon name reaches a public resolver and NXDOMAINs while the
+   *  tunnel itself looks perfectly healthy. */
   dns: string[];
   persistent_keepalive: number;
   /** Ordered best-first. A client tries these in turn and keeps the first that
@@ -110,6 +113,14 @@ export interface ProvisionOverlayPeerInput {
   /** Provenance stamped onto the peer row (who linked which QR). */
   linkTokenId: string;
   linkTokenEnrolledBy: string | null;
+  /**
+   * When the owner originally approved this enrollment. Defaults to `now`,
+   * which is right for a first provision. A RETRY (re-approve of an already-
+   * approved row) passes the original so the audit trail keeps saying when the
+   * device was actually linked, rather than being rewritten by every recovery
+   * attempt. Distinct from `lastSessionAt`, which a retry SHOULD refresh.
+   */
+  enrolledAt?: Date;
 }
 
 export interface ProvisionOverlayPeerDeps {
@@ -134,6 +145,13 @@ export interface ProvisionedOverlayPeer {
 /** The synthetic userId overlay peers share — they carry no per-user Nextcloud
  *  identity. Mirrors `OVERLAY_PEER_USER` in overlay-connect.service.ts. */
 const OVERLAY_PEER_USER = "overlay";
+
+/** Overlay peers are remote devices dialling the box from OUTSIDE the home LAN
+ *  — always AWAY mode, exactly like the ones overlay-connect installs. Named so
+ *  the peer row's `mode` and the profile's CIDR+DNS pair can never drift apart:
+ *  {@link buildOverlayProfile} selects BOTH from a single mode, and this is the
+ *  value the row is stamped with. */
+export const OVERLAY_PEER_MODE: VpnPeerMode = "away";
 
 /**
  * Make the box ready to accept this device's handshake, and return what the
@@ -171,7 +189,7 @@ export async function provisionOverlayPeer(
     linkTokenId: input.linkTokenId,
     linkTokenLabel: input.label,
     linkTokenEnrolledBy: input.linkTokenEnrolledBy,
-    enrolledAt: now,
+    enrolledAt: input.enrolledAt ?? now,
   };
 
   if (existing) {
@@ -181,8 +199,12 @@ export async function provisionOverlayPeer(
         assignedIp,
         kind: "overlay",
         status: "active",
-        mode: "away" satisfies VpnPeerMode,
+        mode: OVERLAY_PEER_MODE,
         deviceLabel: input.label,
+        // Non-NULL for the same reason as the create branch below. A revived
+        // row may carry a stale lastSessionAt from a previous life; re-approval
+        // restarts its idle clock rather than leaving it instantly reapable.
+        lastSessionAt: now,
         revokedAt: null,
         ...provenance,
       },
@@ -195,8 +217,17 @@ export async function provisionOverlayPeer(
         publicKey: input.wgPublicKey,
         assignedIp,
         status: "active",
-        mode: "away" satisfies VpnPeerMode,
+        mode: OVERLAY_PEER_MODE,
         kind: "overlay",
+        // INVARIANT (schema.prisma, repo rule 10): kind='overlay' implies a
+        // non-NULL lastSessionAt. The idle-expiry sweep filters on
+        // `kind='overlay' AND status='active' AND lastSessionAt < cutoff`, and
+        // in Postgres `NULL < cutoff` is NULL — a row left NULL here would
+        // never match the sweep, so the peer would live forever with no expiry
+        // path, removable only by a manual DELETE /vpn/peers/:id. Approval is
+        // the honest start of the idle clock: the device now has a full
+        // OVERLAY_PEER_IDLE_EXPIRY_HOURS window to actually connect.
+        lastSessionAt: now,
         ...provenance,
       },
     });
@@ -218,33 +249,66 @@ export async function provisionOverlayPeer(
 export interface BuildOverlayProfileInput {
   assignedIp: string;
   serverPublicKey: string;
-  /** Subnet(s) behind the box the client should route over the tunnel. */
-  lanCidr: string;
+  /**
+   * The peer row's mode. Selects the AllowedIPs+DNS pair as ONE unit — see the
+   * note on {@link buildOverlayProfile}. Overlay peers are always
+   * {@link OVERLAY_PEER_MODE}; `home` is accepted so a row that ever carries it
+   * gets a correct profile instead of a silently crossed one.
+   */
+  mode: VpnPeerMode;
+  /** AWAY pair — `config.WIREGUARD_LAN_CIDR` + `config.WIREGUARD_DNS`. */
+  awayAllowedIps: string;
+  awayDns: string;
+  /** HOME pair — `config.WIREGUARD_HOME_ALLOWED_IPS` +
+   *  `config.WIREGUARD_HOME_DNS`. */
+  homeAllowedIps: string;
+  homeDns: string;
+  /** Appended to AllowedIPs for both modes, as renderPeerConf does. */
   vpnSubnet: string;
-  dns: string;
   keepaliveSeconds: number;
   endpointCandidates: OverlayEndpointCandidate[];
+}
+
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 /**
  * Assemble the wire profile. Pure — every input is resolved by the caller, so
  * this is exhaustively testable and has no opinion about where the box lives.
+ *
+ * The AllowedIPs and the DNS are chosen TOGETHER from `mode`, and that coupling
+ * is the point of the signature. `renderPeerConf` (vpn.service.ts) keeps the
+ * two mode pairs strictly separate — away = `WIREGUARD_LAN_CIDR` +
+ * `WIREGUARD_DNS`, home = `WIREGUARD_HOME_ALLOWED_IPS` + `WIREGUARD_HOME_DNS` —
+ * and taking a loose `lanCidr` + `dns` here made it possible (and, briefly,
+ * actual) to hand a client one mode's subnet with the other mode's resolver.
+ *
+ * That mistake is silent and nasty: on stock defaults it yields AllowedIPs
+ * 192.168.50.0/24 + 10.13.13.0/24 with DNS 192.168.20.1 — a resolver in NEITHER
+ * routed range. WireGuard handshakes, the tunnel looks healthy, and every DNS
+ * query goes out the client's DEFAULT route instead, so the split-horizon name
+ * `<box>.droplet-us.com` hits a public resolver and returns NXDOMAIN. Selecting
+ * both halves from one mode makes that unrepresentable.
  */
 export function buildOverlayProfile(
   input: BuildOverlayProfileInput,
 ): OverlayProfile {
+  const [allowedIps, dns] =
+    input.mode === "home"
+      ? [input.homeAllowedIps, input.homeDns]
+      : [input.awayAllowedIps, input.awayDns];
   return {
     address: `${input.assignedIp}/32`,
     server_public_key: input.serverPublicKey,
-    // The box's LAN plus the overlay subnet — split-tunnel, matching the away
-    // conf renderPeerConf produces. A default route is never issued here: home
-    // mode is split-tunnel by definition and the Android client refuses a
-    // full-tunnel conf outright.
-    allowed_ips: [input.lanCidr, input.vpnSubnet],
-    dns: input.dns
-      .split(",")
-      .map((d) => d.trim())
-      .filter(Boolean),
+    // The mode's box subnet(s) plus the overlay subnet — split-tunnel, matching
+    // the conf renderPeerConf produces for the same mode. A default route is
+    // never issued here: the Android client refuses a full-tunnel conf outright.
+    allowed_ips: [...splitList(allowedIps), input.vpnSubnet],
+    dns: splitList(dns),
     persistent_keepalive: input.keepaliveSeconds,
     endpoint_candidates: [...input.endpointCandidates].sort(
       (a, b) => b.priority - a.priority,

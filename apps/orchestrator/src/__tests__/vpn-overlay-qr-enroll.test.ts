@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
@@ -19,10 +19,18 @@ vi.mock("../config.js", () => ({
     WIREGUARD_HOME_ENDPOINT_HOST: "",
     // WARP-1757 — approval now provisions a real wg0 peer, so the route needs
     // the subnet/CIDR/DNS the profile is assembled from.
-    WIREGUARD_VPN_SUBNET: "10.66.0.0/24",
-    WIREGUARD_LAN_CIDR: "192.168.20.0/24",
+    //
+    // These are the REAL stock defaults (config.ts:423/427/428/441/447), not
+    // convenience values. An earlier revision set WIREGUARD_LAN_CIDR to the
+    // HOME subnet's value, which made the away CIDR and the home resolver agree
+    // by accident and hid a profile that paired away-mode AllowedIPs with the
+    // home-mode resolver. Keeping the two modes on genuinely different subnets
+    // is what makes a crossed pair observable here.
+    WIREGUARD_VPN_SUBNET: "10.13.13.0/24",
+    WIREGUARD_LAN_CIDR: "192.168.50.0/24",
+    WIREGUARD_DNS: "192.168.50.1",
+    WIREGUARD_HOME_ALLOWED_IPS: "192.168.20.0/24",
     WIREGUARD_HOME_DNS: "192.168.20.1",
-    WIREGUARD_DNS: "192.168.20.1",
   },
 }));
 
@@ -79,6 +87,18 @@ import {
 
 const VALID_WG_KEY = "A".repeat(43) + "=";
 const VALID_WG_KEY_2 = "B".repeat(43) + "=";
+
+/** Is `ip` inside `cidr`? Lets the profile assertions check that the resolver
+ *  it advertises is actually ROUTED over the tunnel, rather than just matching
+ *  a literal the test itself supplied. */
+function ipInCidr(ip: string, cidr: string): boolean {
+  const [net, bitsRaw] = cidr.split("/");
+  const bits = Number(bitsRaw);
+  const toInt = (a: string) =>
+    a.split(".").reduce((acc, o) => (acc << 8) + Number(o), 0) >>> 0;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (toInt(ip) & mask) === (toInt(net) & mask);
+}
 
 function p256() {
   const { publicKey, privateKey } = generateKeyPairSync("ec", {
@@ -140,8 +160,15 @@ function createPrismaMock() {
       return out;
     }),
     count: vi.fn(async ({ where }: any = {}) => rows.filter((r) => matchWhere(r, where)).length),
+    // Prisma resolves `where` on ANY unique field, not just `id` —
+    // VpnPeer.publicKey is @unique and the provisioning path updates by it.
+    // Keying this double on `id` alone made such an update silently blow up on
+    // `Object.assign(undefined, …)`; throwing on a miss (as Prisma does, P2025)
+    // keeps a wrong `where` loud instead of mysterious.
     update: vi.fn(async ({ where, data }: any) => {
-      const row = rows.find((r) => r.id === where.id);
+      const [k, v] = Object.entries(where)[0] as any;
+      const row = rows.find((r) => r[k] === v);
+      if (!row) throw new Error(`${prefix}.update: no row where ${k}=${v}`);
       Object.assign(row, data);
       return row;
     }),
@@ -281,6 +308,147 @@ describe("POST /api/vpn/overlay/link-tokens (mint)", () => {
     // The end-state invariant still holds: exactly one available, one expired.
     const states = prisma._linkTokens.map((t: any) => t.state).sort();
     expect(states).toEqual(["available", "expired"]);
+  });
+
+  // ── WARP-1593: `server` is an HTTPS API host, never the WG transport ──
+  describe("the QR's `server` never carries the WireGuard transport address", () => {
+    const savedFqdn = config.DROPLET_PUBLIC_FQDN;
+    const savedWgHost = config.WIREGUARD_ENDPOINT_HOST;
+
+    afterEach(() => {
+      (config as any).DROPLET_PUBLIC_FQDN = savedFqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = savedWgHost;
+    });
+
+    // The bug: with no FQDN the mint fell back to WIREGUARD_ENDPOINT_HOST,
+    // which is a UDP transport address. The phone then aimed an HTTPS POST at
+    // udp/51820 and failed with an opaque connection error.
+    it("refuses to mint (503) rather than advertising `host:51820` as the API host", async () => {
+      const { app, prisma } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example:51820";
+      const res = await mint(app);
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe("remote_access_not_configured");
+      expect(JSON.stringify(res.body)).not.toContain("51820");
+      // And nothing was minted — the owner keeps whatever code they had.
+      expect(prisma._linkTokens).toHaveLength(0);
+    });
+
+    // The refusal must precede the supersession transaction, or asking for a
+    // code on an unconfigured box would destroy a working one.
+    it("does not expire the owner's existing token when it refuses", async () => {
+      const { app, prisma } = buildApp();
+      const first = await mint(app);
+      expect(first.status).toBe(201);
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example:51820";
+      expect((await mint(app)).status).toBe(503);
+      expect(prisma._linkTokens.map((t: any) => t.state)).toEqual(["available"]);
+    });
+
+    it("audits the refusal", async () => {
+      const audit: AuditEntry[] = [];
+      const { app } = buildApp({ audit });
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example:51820";
+      await mint(app);
+      expect(
+        audit.some(
+          (a) => a.event === "overlay_link_mint_refused" && a.status === 503,
+        ),
+      ).toBe(true);
+    });
+
+    // A bare operator-supplied hostname is a legitimate box name, not a
+    // transport address — keep honoring it so this fix isn't a regression.
+    it("still accepts a bare WIREGUARD_ENDPOINT_HOST with no port", async () => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example";
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe("box.example");
+    });
+
+    it("refuses when nothing at all is configured", async () => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "";
+      expect((await mint(app)).status).toBe(503);
+    });
+
+    it("strips an accidental scheme from the FQDN", async () => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "https://d-abc.droplet-us.com/";
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe("d-abc.droplet-us.com");
+    });
+
+    // SEND-BACK — the guard above only ever ran on the WIREGUARD_ENDPOINT_HOST
+    // branch. `DROPLET_PUBLIC_FQDN` is priority 1 and returned BEFORE it, so
+    // every FQDN row here minted a QR carrying a transport address or a path —
+    // the exact thing this function exists to refuse. The table IS the
+    // reproduction, executed, so the two branches can never drift apart again.
+    //
+    // `DROPLET_PUBLIC_FQDN` is not the closed HQ-only channel it looks like:
+    // config.ts declares it `z.string().default("")` with NO shape validation,
+    // and scripts/lib/secrets.sh seeds it into .env as an empty key for an
+    // operator to fill in by hand.
+    it.each([
+      { how: "an FQDN carrying the WG port", fqdn: "box.example:51820", wg: "" },
+      {
+        how: "an FQDN carrying a scheme AND the WG port",
+        fqdn: "https://box.example:51820",
+        wg: "",
+      },
+      { how: "an FQDN carrying a path", fqdn: "box.example/evil", wg: "" },
+      {
+        how: "a WG endpoint host carrying the WG port",
+        fqdn: "",
+        wg: "box.example:51820",
+      },
+      { how: "a WG endpoint host carrying a path", fqdn: "", wg: "box.example/evil" },
+    ])("refuses to mint from $how", async ({ fqdn, wg }) => {
+      const { app, prisma } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = fqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = wg;
+      const res = await mint(app);
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe("remote_access_not_configured");
+      // Nothing about the rejected value may reach the client.
+      expect(JSON.stringify(res.body)).not.toContain("51820");
+      expect(JSON.stringify(res.body)).not.toContain("evil");
+      // And nothing was minted — the owner keeps whatever code they had.
+      expect(prisma._linkTokens).toHaveLength(0);
+    });
+
+    // The guard must stay a scalpel: a legitimate bare host on EITHER branch
+    // still mints, including a bracketed IPv6 literal whose colons belong to
+    // the address rather than to a port.
+    it.each([
+      { how: "a bare FQDN", fqdn: "box.example", wg: "", server: "box.example" },
+      {
+        how: "a bracketed IPv6 FQDN",
+        fqdn: "[2001:db8::1]",
+        wg: "",
+        server: "[2001:db8::1]",
+      },
+      {
+        how: "a bracketed IPv6 WG endpoint host",
+        fqdn: "",
+        wg: "[2001:db8::1]",
+        server: "[2001:db8::1]",
+      },
+    ])("still mints from $how", async ({ fqdn, wg, server }) => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = fqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = wg;
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe(server);
+    });
   });
 });
 
@@ -581,6 +749,88 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
     expect(overlayEnroll).toHaveBeenCalledTimes(1);
   });
 
+  // ── re-approve is the RECOVERY path for a failed provision ──
+  describe("re-approve retries provisioning (the only recovery a box has)", () => {
+    // Provision failure leaves the row 'approved' with no peer, and /profile
+    // 503s. The connect tick that would otherwise self-heal is behind
+    // OVERLAY_CONNECT_ENABLED, which defaults false and appears in no
+    // deployment artifact — so on a shipping box re-approve is the ONLY way
+    // out. It must actually retry, not short-circuit to a no-op.
+    it("recovers a device stuck approved-with-no-peer, still without a second vouch", async () => {
+      const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-9" }));
+      const { app, prisma } = buildApp({ overlayEnroll });
+      const pendingId = await stage(app);
+
+      installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+      const first = await approve(app, pendingId);
+      expect(first.status).toBe(200);
+      expect(first.body.tunnel_ready).toBe(false);
+      // The row write precedes the router install, so model the harsher shape
+      // the finding describes: approved, and no peer row at all.
+      prisma._vpnPeers.length = 0;
+
+      const second = await approve(app, pendingId);
+      expect(second.status).toBe(200);
+      expect(second.body.tunnel_ready).toBe(true);
+      // The vouch is NOT idempotent — the retry must never re-fire it.
+      expect(overlayEnroll).toHaveBeenCalledTimes(1);
+
+      const peer = prisma._vpnPeers.find(
+        (p: any) => p.publicKey === VALID_WG_KEY,
+      );
+      expect(peer).toBeDefined();
+      expect(peer.status).toBe("active");
+      expect(peer.kind).toBe("overlay");
+    });
+
+    // The first approve returns tunnel_ready; a re-approve that omitted it left
+    // any UI reading `undefined` even when the tunnel was fine.
+    it("reports tunnel_ready on re-approve, same contract as the first approve", async () => {
+      const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-9" }));
+      const { app } = buildApp({ overlayEnroll });
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      const second = await approve(app, pendingId);
+      expect(second.body).toEqual({
+        state: "approved",
+        device_id: "hq-dev-9",
+        tunnel_ready: true,
+      });
+    });
+
+    it("still reports tunnel_ready:false when the retry itself fails", async () => {
+      const { app, prisma } = buildApp();
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      prisma._vpnPeers.length = 0;
+      installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+      const second = await approve(app, pendingId);
+      expect(second.status).toBe(200);
+      expect(second.body.tunnel_ready).toBe(false);
+      expect(prisma._pendings[0].state).toBe("approved");
+    });
+
+    // A retry must not rewrite who linked the QR or when — that is the audit
+    // trail. It SHOULD restart the idle clock, since the owner just asserted
+    // the device should work.
+    it("preserves enrolment provenance but refreshes the idle clock", async () => {
+      let clock = new Date("2026-08-05T00:00:00.000Z");
+      const { app, prisma } = buildApp({ now: () => clock });
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      const enrolledAt = prisma._vpnPeers[0].enrolledAt;
+      const enrolledBy = prisma._vpnPeers[0].linkTokenEnrolledBy;
+
+      clock = new Date(clock.getTime() + 6 * 3_600_000);
+      await approve(app, pendingId);
+
+      const peer = prisma._vpnPeers[0];
+      expect(peer.enrolledAt).toEqual(enrolledAt);
+      expect(peer.linkTokenEnrolledBy).toBe(enrolledBy);
+      expect(peer.lastSessionAt).toEqual(clock);
+    });
+  });
+
   it("a claim that loses the race (count===0) gets a clean 409 and does NOT vouch", async () => {
     // Deterministically simulate the losing concurrent approver: the row still
     // reads 'pending' at findUnique, but the atomic pending→approving claim
@@ -706,7 +956,7 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
       expect(peer).toBeDefined();
       expect(peer.kind).toBe("overlay");
       expect(peer.status).toBe("active");
-      expect(peer.assignedIp).toMatch(/^10\.66\.0\.\d+$/);
+      expect(peer.assignedIp).toMatch(/^10\.13\.13\.\d+$/);
 
       // Cryptokey routing: the router-side AllowedIPs must contain exactly the
       // address the client will be told to use. If these disagree, a handshake
@@ -803,11 +1053,39 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     expect(res.body.server_public_key).toBe(
       "SERVERPUBKEY0000000000000000000000000000000=",
     );
-    expect(res.body.allowed_ips).toEqual(["192.168.20.0/24", "10.66.0.0/24"]);
-    expect(res.body.dns).toEqual(["192.168.20.1"]);
+    expect(res.body.allowed_ips).toEqual(["192.168.50.0/24", "10.13.13.0/24"]);
+    expect(res.body.dns).toEqual(["192.168.50.1"]);
     expect(res.body.persistent_keepalive).toBe(25);
     // Split-tunnel by construction — a default route must never be issued.
     expect(res.body.allowed_ips).not.toContain("0.0.0.0/0");
+  });
+
+  // The peer row this flow writes is mode='away', so the profile must carry the
+  // AWAY pair (WIREGUARD_LAN_CIDR + WIREGUARD_DNS) — not the away CIDR with the
+  // HOME resolver. A resolver outside every AllowedIPs entry is sent out the
+  // client's DEFAULT route, so <name>.droplet-us.com reaches a public resolver
+  // and gets NXDOMAIN: the exact failure split-horizon DNS exists to prevent,
+  // on a tunnel that handshakes fine and looks healthy.
+  it("routes the resolver it advertises (DNS inside AllowedIPs)", async () => {
+    const { app, prisma } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(200);
+
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.mode).toBe("away");
+
+    expect(res.body.dns.length).toBeGreaterThan(0);
+    for (const resolver of res.body.dns) {
+      expect(
+        res.body.allowed_ips.some((cidr: string) => ipInCidr(resolver, cidr)),
+      ).toBe(true);
+    }
+    // And explicitly NOT the other mode's resolver.
+    expect(res.body.dns).not.toContain(config.WIREGUARD_HOME_DNS);
   });
 
   // The per-device FQDN is public-NXDOMAIN by design (ADR-023 split-horizon),
@@ -895,6 +1173,12 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     expect(res.status).toBe(503);
     expect(res.body.error).toBe("tunnel_not_ready");
     expect(res.body.message).not.toMatch(/[a-z]+_[a-z]+/);
+    // Nothing retries this on its own: the connect tick that could self-heal is
+    // behind OVERLAY_CONNECT_ENABLED (default false, in no deployment
+    // artifact). "Try again in a moment" would promise progress that never
+    // comes; the copy must name the action that DOES recover it — re-approval.
+    expect(res.body.message).not.toMatch(/in a moment/i);
+    expect(res.body.message).toMatch(/approv/i);
   });
 });
 

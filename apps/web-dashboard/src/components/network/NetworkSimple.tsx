@@ -4,6 +4,7 @@ import useSWR from "swr";
 import { Globe, Cpu, Wifi, ArrowRight, AlertTriangle, Router } from "lucide-react";
 import { fetchApDevices } from "@/lib/api";
 import type { NetworkOverview } from "@/lib/types";
+import { HouseholdWifiCard } from "@/components/network/HouseholdWifiCard";
 
 function fmtUptime(sec: number): string {
   if (!sec || sec <= 0) return "—";
@@ -37,12 +38,20 @@ interface Props {
 }
 
 /** WARP-612: the everyday "is the internet up?" glance for Home installs —
- *  the Droplet Design System's Simple-mode internet hero, device count, and a
- *  read-out of the auto-managed coverage access points (ADR-005: APs
- *  auto-discover + auto band-steer; one approval tap is the only manual gate).
- *  Built on real /api/network + /api/aps data; hardware-agnostic (no NIC/board
- *  names). Wi-Fi name/password, guest Wi-Fi, and camera privacy are a
- *  follow-up (they need the wifi-config + VLAN backends). */
+ *  the Droplet Design System's Simple-mode internet hero, household Wi-Fi,
+ *  device count, and a read-out of the auto-managed coverage access points
+ *  (ADR-005: APs auto-discover + auto band-steer; one approval tap is the only
+ *  manual gate). Built on real /api/network + /api/aps data;
+ *  hardware-agnostic (no NIC/board names).
+ *
+ *  WARP-1733: the Wi-Fi name/password control is no longer that follow-up —
+ *  the backends it waited on shipped (GET /api/network/wifi/current at
+ *  WARP-1714, GET/PUT /api/network/wifi/ap at WARP-1712), and its absence was
+ *  the whole complaint. This is the home persona's view (ADR-002); leaving the
+ *  single most-changed home network setting out of it meant a household could
+ *  only reach it by discovering the Simple/Advanced segmented control and then
+ *  the right tab behind it. Guest Wi-Fi and camera privacy remain Advanced-only
+ *  and out of this ticket's scope. */
 export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
   const wan = overview?.interfaces?.wan;
   // The single-box hands its WAN uplink to the appliance host, so the in-box
@@ -117,6 +126,30 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
         </div>
       </section>
 
+      {/* Household Wi-Fi (WARP-1733) — THE canonical control, the same
+          component the Advanced Wi-Fi tab mounts, not a copy of it: two
+          editable Wi-Fi surfaces is the bug WARP-1723 removed, and copies are
+          free to drift into disagreeing about which radio they write.
+          Rendered directly rather than behind a disclosure or a jump to
+          Advanced — discoverability is the entire point of the ticket, and
+          one more click reproduces the complaint in a new shape.
+          Placement is the design canon's own Simple-mode order — internet
+          hero, primary Wi-Fi (network name + password inline), guest Wi-Fi,
+          camera privacy, connected devices (shared_brain
+          content/brand/handoffs/claude-code-handoff/HANDOFF.md §1 +
+          src/CchPagesNetworkSettings.jsx `NSSimple`). Guest Wi-Fi and camera
+          privacy stay Advanced-only for now, so here that reads: is the
+          internet up, what is my Wi-Fi called, what's on it, and the router.
+          The control brings its own `.card`, so it sits in this column's
+          existing 16px rhythm without a wrapper.
+          `headingLevel="h2"` (WARP-1733 UX review): ShellPage owns the
+          `<h1>Network</h1>`, so this column reads h1 → h2 Internet → this
+          card. The control's default h3 — correct inside the Advanced Wi-Fi
+          tab panel, where it IS a subsection — would claim here that the
+          household Wi-Fi belongs to the Internet hero above it. It's a
+          sibling card, and the outline has to say so. */}
+      <HouseholdWifiCard headingLevel="h2" />
+
       {/* Devices + auto-managed coverage + escape hatch to Advanced */}
       <section className="card">
         <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -146,8 +179,18 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
                 </span>
                 <div>
                   <p className="type-title-3 tabular-nums" style={{ color: "var(--text)" }}>{apsOnline}</p>
+                  {/* "Wi-Fi coverage", not "access point(s)" (WARP-1733 UX
+                      review, item C). On the edge-router shape the Wi-Fi card
+                      16px above says the household network is "broadcast by
+                      your Droplet access point" and is editable — so a
+                      read-only "N access points · auto-managed" right below it
+                      made an owner ask which of the two they had just edited,
+                      and "auto-managed" flatly contradicted the form above.
+                      Dropping the colliding noun keeps the count (still worth
+                      showing) and leaves exactly one thing on this page called
+                      an access point. The Wi-Fi card's own copy is WARP-1752. */}
                   <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
-                    access point{apsOnline === 1 ? "" : "s"} · auto-managed
+                    Wi-Fi coverage · auto-managed
                   </p>
                 </div>
               </div>
