@@ -808,13 +808,23 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     expect(res.body.persistent_keepalive).toBe(25);
     // Split-tunnel by construction — a default route must never be issued.
     expect(res.body.allowed_ips).not.toContain("0.0.0.0/0");
-    // Ordered candidate list, best first.
-    expect(res.body.endpoint_candidates[0]).toEqual({
-      kind: "direct",
-      host: "d-abc.droplet-us.com",
-      port: 51820,
-      priority: 100,
-    });
+  });
+
+  // The per-device FQDN is public-NXDOMAIN by design (ADR-023 split-horizon),
+  // so advertising it as a WireGuard endpoint is the WARP-1391 dead-endpoint
+  // bug. Until WARP-1758 derives real IP-literal candidates, the honest answer
+  // is an empty list — a client can then say it has nowhere to dial, instead of
+  // silently failing against a name it cannot resolve.
+  it("never advertises the split-horizon FQDN as a WireGuard endpoint", async () => {
+    const { app } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(200);
+    expect(res.body.endpoint_candidates).toEqual([]);
+    expect(JSON.stringify(res.body)).not.toContain("droplet-us.com");
   });
 
   it("never returns a private key", async () => {

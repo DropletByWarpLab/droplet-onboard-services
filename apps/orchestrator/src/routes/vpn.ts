@@ -164,25 +164,34 @@ const overlayRouter: OverlayProvisionRouter = {
 /**
  * WARP-1757 — the endpoint candidates a client should try, best first.
  *
- * This is the SHAPE, not yet the intelligence. Today it emits the one endpoint
- * the box already knows (the FQDN / operator override) as a `direct` candidate.
- * WARP-1758 replaces the body with real WAN-placement detection — comparing the
+ * This is the SHAPE, not yet the intelligence, and it deliberately ships EMPTY.
+ *
+ * The tempting placeholder — `resolveEndpointHost()`, i.e. the per-device
+ * `<name>.droplet-us.com` — is exactly the endpoint WARP-1391 found to be dead
+ * by design: that name is public-NXDOMAIN under ADR-023's split-horizon, so a
+ * client off the home LAN cannot resolve it and has no handshake target. It is
+ * the box's HTTPS/API address, not a WireGuard transport address. Emitting it
+ * as a `direct` candidate would re-ship the very bug ADR-031 was written to
+ * replace, so an empty list is the honest answer until real candidates exist.
+ *
+ * A client seeing `endpoint_candidates: []` knows the box has not yet worked
+ * out how it can be reached — which is true.
+ *
+ * WARP-1758 fills this in with real WAN-placement detection: comparing the
  * box's own WAN address against its STUN-reflexive mapping to tell "I am the
  * edge router with a public IP" from "I live in someone else's subnet", adding
  * the LAN candidate, attempting a PCP/NAT-PMP/UPnP port map, and classifying
- * NAT properly instead of by the current port==51820 heuristic.
+ * NAT properly rather than by the current port==51820 heuristic. Every
+ * candidate it emits is an IP-literal transport address, never a name that
+ * only resolves on the LAN.
  *
  * Shipping the ordered-list contract now means clients parse a list from day
- * one and gaining better candidates later is a server-side change only.
+ * one and gaining candidates later is a server-side change only.
  */
 async function resolveOverlayEndpointCandidates(): Promise<
   OverlayEndpointCandidate[]
 > {
-  const host = await resolveEndpointHost();
-  if (!host) return [];
-  return [
-    { kind: "direct", host, port: config.WIREGUARD_LISTEN_PORT, priority: 100 },
-  ];
+  return [];
 }
 
 /**
