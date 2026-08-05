@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import httpx
@@ -11,9 +12,12 @@ import pytest
 import respx
 
 from providers.ollama_local import (
+    _LEGACY_MANAGER_URL_ENV,
+    _MANAGER_URL_ENV,
     _MAX_CONNECTIONS,
     OllamaLocalProvider,
     _LimitsCache,
+    _resolve_manager_url,
     prettify_ollama_name,
 )
 from schemas import ChatMessage, ToolDefinition, ToolFunction
@@ -118,6 +122,125 @@ class TestConnectionPoolSizing:
 
 
 # ---------------------------------------------------------------------------
+# WARP-1748 — INFERENCE_MANAGER_URL, with OLLAMA_MANAGER_URL as a warned shim
+# ---------------------------------------------------------------------------
+
+
+class TestManagerUrlResolution:
+    """These are the tests that prove field boxes survive the rename.
+
+    `OLLAMA_MANAGER_URL` is in the .env of deployed boxes and reaches this
+    process through the ai-gateway's `env_file: ../.env`
+    (docker/docker-compose.yml:979-981). If the fallback ever regresses, the
+    failure is SILENT — the appliance-limits probe stops resolving, outbound
+    concurrency stays pinned at 1, and /ai/readiness reports a permanent
+    "degraded" that nobody investigates for weeks. Hence a case per branch.
+
+    Precedence under test: canonical → legacy (warned) → today's default
+    (None). An explicitly-EMPTY value counts as unset at every step (the
+    compose `${VAR:-}` trap).
+    """
+
+    @staticmethod
+    def _resolve(monkeypatch, canonical: str | None, legacy: str | None) -> str | None:
+        """Resolve with the two vars forced to the given state.
+
+        `None` means "not in the environment at all" — distinct from `""`,
+        which is what compose's `${VAR:-}` actually delivers and which the
+        resolver must treat as unset.
+        """
+        for name, value in ((_MANAGER_URL_ENV, canonical), (_LEGACY_MANAGER_URL_ENV, legacy)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        return _resolve_manager_url()
+
+    @staticmethod
+    def _warnings(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_canonical_name_wins(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://manager:8002", None)
+        assert resolved == "http://manager:8002"
+        # Nothing deprecated is in play — a clean box must not be nagged.
+        assert self._warnings(caplog) == []
+
+    def test_legacy_name_still_works_and_warns(self, monkeypatch, caplog):
+        # THE field-box case: an un-migrated .env carries only the old name.
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, None, "http://legacy-manager:8002")
+        assert resolved == "http://legacy-manager:8002"
+
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1
+        msg = warnings[0]
+        # The warning has to be ACTIONABLE: old name, new name, and the file.
+        assert _LEGACY_MANAGER_URL_ENV in msg
+        assert _MANAGER_URL_ENV in msg
+        assert "DEPRECATED" in msg
+        assert ".env" in msg
+
+    def test_canonical_wins_when_both_set(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://new:8002", "http://old:8002")
+        assert resolved == "http://new:8002"
+
+        # Still warns — two names for one endpoint is how a box ends up
+        # probing a stale manager after a half-finished .env edit.
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1
+        assert _LEGACY_MANAGER_URL_ENV in warnings[0]
+        assert _MANAGER_URL_ENV in warnings[0]
+        # Never leak the configured values into the logs (URLs can carry creds).
+        assert "http://new:8002" not in warnings[0]
+        assert "http://old:8002" not in warnings[0]
+
+    def test_empty_canonical_does_not_shadow_legacy(self, monkeypatch, caplog):
+        # The compose `${VAR:-}` trap: an unset compose variable arrives as ""
+        # (not "absent"). An empty canonical must NOT blank out a field box's
+        # working legacy value — that would be the exact silent breakage the
+        # shim exists to prevent.
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "", "http://legacy-manager:8002")
+        assert resolved == "http://legacy-manager:8002"
+        assert len(self._warnings(caplog)) == 1
+
+    def test_whitespace_only_canonical_does_not_shadow_legacy(self, monkeypatch):
+        # `.env` lines pick up trailing spaces; whitespace is not configuration.
+        assert self._resolve(monkeypatch, "   ", "http://legacy-manager:8002") == (
+            "http://legacy-manager:8002"
+        )
+
+    def test_neither_set_keeps_todays_default(self, monkeypatch, caplog):
+        # Unchanged behavior: no manager wired → None, so _LimitsCache falls
+        # through to the /proxy derivation and then skips the probe (XR-05).
+        with caplog.at_level(logging.WARNING):
+            assert self._resolve(monkeypatch, None, None) is None
+        assert self._warnings(caplog) == []
+
+    def test_both_empty_keeps_todays_default(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert self._resolve(monkeypatch, "", "") is None
+        # An empty legacy value is not a deployment to warn about.
+        assert self._warnings(caplog) == []
+
+    def test_legacy_value_reaches_the_health_url(self, monkeypatch):
+        # End-to-end for the field box: the legacy name must still produce the
+        # manager /health URL the limits probe GETs. Patching the resolved
+        # module constant is how the import-time read is exercised (the
+        # deployed process resolves once at import).
+        import providers.ollama_local as ol
+
+        monkeypatch.setattr(
+            ol, "INFERENCE_MANAGER_URL", self._resolve(monkeypatch, None, "http://legacy:8002")
+        )
+        cache = _LimitsCache("http://ollama:11434")  # direct path, no /proxy
+        assert cache.health_url == "http://legacy:8002/health"
+
+
+# ---------------------------------------------------------------------------
 # _LimitsCache
 # ---------------------------------------------------------------------------
 
@@ -132,17 +255,21 @@ class TestLimitsCache:
         assert cache.health_url == "http://ollama:8002/health"
 
     def test_health_url_none_on_direct_path(self):
-        # XR-05: a direct Ollama URL (no /proxy) with no OLLAMA_MANAGER_URL has
-        # NO manager /health to probe — health_url is None so refresh() skips
-        # the probe instead of 404-ing against Ollama :11434.
+        # XR-05: a direct Ollama URL (no /proxy) with no INFERENCE_MANAGER_URL
+        # has NO manager /health to probe — health_url is None so refresh()
+        # skips the probe instead of 404-ing against Ollama :11434.
         cache = _LimitsCache("http://ollama:11434")
         assert cache.health_url is None
 
     def test_health_url_prefers_explicit_manager_url(self, monkeypatch):
-        # XR-05: OLLAMA_MANAGER_URL decouples /health from the chat URL.
+        # XR-05: the manager URL decouples /health from the chat URL.
+        # WARP-1748 renamed the module constant OLLAMA_MANAGER_URL ->
+        # INFERENCE_MANAGER_URL; the patched attribute moves with it. The
+        # ASSERTION is unchanged — this is a mechanical follow of the rename,
+        # not a behavior edit.
         import providers.ollama_local as ol
 
-        monkeypatch.setattr(ol, "OLLAMA_MANAGER_URL", "http://manager:8002")
+        monkeypatch.setattr(ol, "INFERENCE_MANAGER_URL", "http://manager:8002")
         cache = _LimitsCache("http://ollama:11434")
         assert cache.health_url == "http://manager:8002/health"
 
