@@ -23,8 +23,10 @@ import {
 } from "@/lib/api";
 import type { CurrentWifi } from "@/lib/types";
 
-/** Under the /api/network prefix, so the tab's Refresh sweep covers it. */
-const CURRENT_WIFI_KEY = "/api/network/wifi/current";
+/** Under the /api/network prefix, so the tab's Refresh sweep covers it.
+ *  Exported (WARP-1723) so WifiTab keys its source-split read on the SAME SWR
+ *  entry — shared cache, no second fetch. */
+export const CURRENT_WIFI_KEY = "/api/network/wifi/current";
 
 /**
  * Issue #12 — editable Wi-Fi provisioning for the Network → WiFi tab.

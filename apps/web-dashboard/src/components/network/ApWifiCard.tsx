@@ -29,12 +29,20 @@ import {
  * driven from the Network tab and always in agreement with the Coverage
  * Extenders card.
  *
- * This card is that control, and it is deliberately used in BOTH places. It
- * keys its SWR read on `/api/network/wifi/ap`, so mounting it twice shares
- * one cache entry: the two surfaces literally cannot show different names,
- * and a save in one revalidates the other. Nothing is cached client-side
- * beyond that — the orchestrator dials the AP on every read, so the name here
- * is whatever the AP's uci actually says.
+ * Single-surface contract (WARP-1723): this card is the ONE editable form for
+ * the AP's Wi-Fi, and it mounts only on Network → Wi-Fi — as the household
+ * form itself when /api/network/wifi/current resolves `source: "ap"` (the
+ * edge-router shape, where this Droplet's own radio hosts nothing), or below
+ * the router's form when the household network lives on the router and the AP
+ * is genuinely a second network (see WifiTab). The Coverage Extenders panel
+ * used to mount this same editable card; it now renders a read-only
+ * reflection (ApWifiSummary) that links here. That reflection keys on the
+ * same `/api/network/wifi/ap` SWR read, so the two surfaces still cannot
+ * show different names — WARP-1712's "always in agreement" contract holds
+ * without a second write surface. Don't re-add another editable mount.
+ * Nothing is cached client-side beyond the shared SWR entry — the
+ * orchestrator dials the AP on every read, so the name here is whatever the
+ * AP's uci actually says.
  *
  * Honesty fork (the UpnpCard / BandSteeringCard contract): with no approved
  * Droplet AP online it shows a calm read-only "not available" line, never a

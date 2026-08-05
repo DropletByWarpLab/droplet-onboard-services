@@ -9,11 +9,31 @@
  * Same shape as DeviceGridSection.test.tsx — render with synthetic
  * SWR data via SWRConfig + provider mock.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SWRConfig } from "swr";
-import { CoverageExtendersPanel } from "../CoverageExtendersPanel";
 import type { ApDeviceInfo } from "@/lib/types";
+
+// The setup.ts global next/link mock renders a string template; the panel's
+// read-only Wi-Fi reflection (WARP-1723) carries a real navigation link whose
+// role + href this suite asserts, so re-mock it as a plain <a> (the
+// CitationCard.test.tsx pattern).
+vi.mock("next/link", () => ({
+  default: ({
+    children,
+    href,
+    ...props
+  }: {
+    children: React.ReactNode;
+    href: string;
+  }) => (
+    <a href={href} {...props}>
+      {children}
+    </a>
+  ),
+}));
+
+import { CoverageExtendersPanel } from "../CoverageExtendersPanel";
 
 vi.mock("@/lib/api", () => ({
   fetchApDevices: vi.fn(),
@@ -34,7 +54,7 @@ vi.mock("@/lib/api", () => ({
   confirmNetworkCommand: vi.fn(),
 }));
 
-import { fetchApDevices } from "@/lib/api";
+import { fetchApDevices, fetchApWifi } from "@/lib/api";
 
 function makeAp(overrides: Partial<ApDeviceInfo> = {}): ApDeviceInfo {
   return {
@@ -167,16 +187,63 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
 
   /**
    * WARP-1712 — the founder's ask: the AP belongs to the network, so it lives
-   * in the extender surface AND is controllable there, not just listed.
+   * in the extender surface, not just listed. WARP-1723 tightened HOW: the
+   * household Wi-Fi is editable in exactly ONE place (Network → Wi-Fi), so
+   * this panel reflects the live name read-only and links there instead of
+   * mounting a second editable form.
    */
-  describe("the AP as controllable infrastructure", () => {
-    it("renders the AP Wi-Fi + band-steering controls once one is ONLINE", async () => {
+  describe("the AP as network infrastructure", () => {
+    beforeEach(() => {
+      // Deterministic default regardless of test order — individual tests
+      // override with a reachable AP where they need one.
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: false, ssid: null, fiveGhzSsid: null, key: null,
+        encryption: null, bandSteering: null, apCount: 0, inSync: true,
+      });
+    });
+
+    it("shows a read-only household Wi-Fi reflection + band steering once one is ONLINE", async () => {
       (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
         aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
       });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: true, ssid: "Fotonia Home", fiveGhzSsid: null,
+        key: "correct-horse-psk", encryption: "psk2", bandSteering: true,
+        apCount: 1, inSync: true,
+      });
       renderPanel();
       expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
+      // The live network name the AP broadcasts — never the PSK.
+      expect(await screen.findByText("Fotonia Home")).toBeInTheDocument();
+      expect(screen.queryByText("correct-horse-psk")).not.toBeInTheDocument();
       expect(screen.getByText("Band steering")).toBeInTheDocument();
+    });
+
+    it("has NO editable Wi-Fi form — edits route to the Wi-Fi tab (WARP-1723)", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: true, ssid: "Fotonia Home", fiveGhzSsid: null,
+        key: "correct-horse-psk", encryption: "psk2", bandSteering: true,
+        apCount: 1, inSync: true,
+      });
+      renderPanel();
+      await screen.findByText("Access point Wi-Fi");
+      // No SSID/password inputs, no save button — a second editable surface is
+      // exactly the bug WARP-1723 removed.
+      expect(
+        screen.queryByLabelText("Network name (SSID)"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Wi-Fi password")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Save Wi-Fi settings" }),
+      ).not.toBeInTheDocument();
+      // Instead: a link to the one canonical edit surface.
+      const link = screen.getByRole("link", {
+        name: /change in wi-fi settings/i,
+      });
+      expect(link).toHaveAttribute("href", "/network?tab=wifi");
     });
 
     it("identifies it as Droplet infrastructure, not a generic device", async () => {
