@@ -13,13 +13,20 @@ Data sources (all granted by the switch's droplet-ai ACL):
 - uci get network (bridge-vlan)    → VLANs, per-port PVID/tagging
 - poe info + uci get poe           → PoE status, budget, per-port admin state
 
-Writes go through uci (`uci set/add/delete/commit`) + a runtime reload
-(`poe reload` / `network reload`). The GS1900 image has NO `file exec` grant
-at all, so nothing here shells out. Writes are gated by ``plan_only``
-(default ON): the uci write shapes are built from the committed image config
-and have not yet been confirmed against flashed hardware (the lab unit still
-runs stock firmware — see droplet-edge-router/switch/docs/STATUS.md). Reads
-are exact.
+Writes go through uci with a safe-apply arm (WARP-1730, parity with
+services/routing's ``safe_apply``): stage (`uci set/add/delete`) →
+`uci apply` with a device-side rollback timer → connectivity probe
+(`system board`) → `uci confirm`. If the probe fails, confirm never fires
+and the device reverts itself when the timer expires — a bridge/VLAN write
+that strands the switch's static management address (192.168.9.2) can no
+longer be permanent. If anything fails while changes are still staged, every
+staged config is reverted (rpcd's staging area is SHARED — leftovers would
+be silently committed by the next unrelated apply from any endpoint). The
+GS1900 image has NO `file exec` grant at all, so nothing here shells out.
+Writes are gated by ``plan_only`` (default ON): the uci write shapes are
+built from the committed image config and have not yet been confirmed
+against flashed hardware (the lab unit still runs stock firmware — see
+droplet-edge-router/switch/docs/STATUS.md). Reads are exact.
 
 Port layout (GS1900-10HP): 8x GbE copper PoE (lan1-lan8, 77 W budget) +
 2x SFP (lan9-lan10, no PoE). uci names ports "lanN"; the REST/§7 contract
@@ -33,7 +40,8 @@ import json
 import logging
 import re
 import time
-from typing import Any, Awaitable, Callable, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 
@@ -57,7 +65,15 @@ SFP_PORT_MAX = 10
 
 # ubus wire constants (same values as services/routing's SDK).
 NULL_SESSION = "0" * 32
+UBUS_NO_DATA = 5
 UBUS_PERMISSION_DENIED = 6
+
+# Rollback window for `uci apply` (WARP-1730). Mirrors services/routing
+# ``safe_apply``'s 60s, which matches the WARP-41 confirmation-token TTL —
+# a Tier 2 confirmation token can never outlive the apply window. The switch
+# service has no competing convention (SWITCH_PROVISION_TIMEOUT budgets the
+# whole provisioning reconcile, not a single apply).
+APPLY_ROLLBACK_TIMEOUT_S = 60
 
 # Re-login this many seconds before the rpcd session's own expiry.
 _SESSION_SLACK_S = 30.0
@@ -473,14 +489,88 @@ class OpenWrtSwitchDriver(SwitchDriver):
             entries.append(f"{name}:t" if m.get("tagged") else f"{name}:u*")
         return entries
 
-    async def _apply_network_change(self) -> None:
-        await self._ubus("uci", "commit", {"config": "network"})
+    # ------------------------------------------------------------------
+    # Safe apply (WARP-1730)
+    # ------------------------------------------------------------------
+    async def _revert_staged_changes(self) -> None:
+        """Best-effort sweep of rpcd's uci staging area (PYNET-005 parity with
+        services/routing ``safe_apply``): the staging area is SHARED across
+        endpoints, so a half-staged delta left behind by a failed write would
+        be silently committed by the NEXT unrelated apply from any caller.
+        Enumerate every config with pending deltas and revert each."""
         try:
-            await self._ubus("network", "reload")
+            pending = await self._ubus("uci", "changes")
+            changed = (
+                pending.get("changes", pending) if isinstance(pending, dict) else {}
+            )
+            if not isinstance(changed, dict):
+                changed = {}
+            for config in list(changed):
+                try:
+                    await self._ubus("uci", "revert", {"config": config})
+                except (SwitchAPIError, ConnectionLost):
+                    logger.exception("Safe apply: revert failed for config %s", config)
+        except (SwitchAPIError, ConnectionLost):
+            logger.exception(
+                "Safe apply: could not enumerate staged uci changes for revert"
+            )
+
+    async def _apply_with_rollback(self) -> None:
+        """apply(rollback-armed) → connectivity probe → confirm.
+
+        `uci apply` commits every pending change and reloads the affected
+        services with a device-side rollback timer; if we cannot reach the
+        switch afterwards (the write stranded 192.168.9.2), confirm never
+        fires and the device restores itself when the timer expires.
+        """
+        try:
+            await self._ubus("uci", "apply", {
+                "rollback": True, "timeout": APPLY_ROLLBACK_TIMEOUT_S,
+            })
         except SwitchAPIError as exc:
-            # Committed but not live — surfaced, not hidden: the operator sees
-            # the change apply on the next reload/reboot.
-            logger.warning("network reload denied/failed after uci commit: %s", exc)
+            if exc.code == UBUS_NO_DATA:
+                # Nothing pending: rpcd skips unchanged values server-side
+                # (WARP-987), so a re-post of the current config stages
+                # nothing and apply reports NO_DATA — benign, never a fault.
+                logger.info("Safe apply: no staged changes — nothing to apply.")
+                return
+            await self._revert_staged_changes()
+            raise
+        except BaseException:
+            await self._revert_staged_changes()
+            raise
+        # Probe: the driver's cheapest read that proves the management plane
+        # still answers (same call `is_connected` uses).
+        try:
+            await self._ubus("system", "board")
+        except BaseException as exc:
+            logger.warning(
+                "Safe apply: connectivity probe failed after apply — device "
+                "auto-rollback in %ds: %s", APPLY_ROLLBACK_TIMEOUT_S, exc,
+            )
+            raise
+        try:
+            await self._ubus("uci", "confirm")
+        except BaseException as exc:
+            logger.warning(
+                "Safe apply: confirm failed — device auto-rollback in %ds: %s",
+                APPLY_ROLLBACK_TIMEOUT_S, exc,
+            )
+            raise
+        logger.info("Safe apply: changes applied and confirmed.")
+
+    @asynccontextmanager
+    async def _safe_apply(self) -> AsyncIterator[None]:
+        """Stage uci writes inside this block. On clean exit they are applied
+        with a rollback timer, probed, and confirmed; on ANY exception inside
+        the block every staged config is reverted and the exception re-raised
+        so a half-write cannot linger in rpcd's shared staging area."""
+        try:
+            yield
+        except BaseException:
+            await self._revert_staged_changes()
+            raise
+        await self._apply_with_rollback()
 
     async def create_vlan(self, vlan_id: int, name: str = "") -> None:
         plan = {"op": "create_vlan", "vlan_id": vlan_id, "name": name}
@@ -490,10 +580,10 @@ class OpenWrtSwitchDriver(SwitchDriver):
         values = {"device": "switch", "vlan": str(vlan_id)}
         if name:
             values["name"] = name
-        await self._ubus("uci", "add", {
-            "config": "network", "type": "bridge-vlan", "values": values,
-        })
-        await self._apply_network_change()
+        async with self._safe_apply():
+            await self._ubus("uci", "add", {
+                "config": "network", "type": "bridge-vlan", "values": values,
+            })
         logger.info("Create VLAN %d applied: %s", vlan_id, plan)
 
     async def delete_vlan(self, vlan_id: int) -> None:
@@ -503,8 +593,8 @@ class OpenWrtSwitchDriver(SwitchDriver):
         vlan = await self._vlan_section(vlan_id)
         if vlan is None:
             raise SwitchAPIError(code=404, message=f"VLAN {vlan_id} not found")
-        await self._ubus("uci", "delete", {"config": "network", "section": vlan["_section"]})
-        await self._apply_network_change()
+        async with self._safe_apply():
+            await self._ubus("uci", "delete", {"config": "network", "section": vlan["_section"]})
 
     async def set_vlan_membership(self, vlan_id: int, membership: list[dict]) -> None:
         ports = self._membership_to_uci_ports(membership)
@@ -516,10 +606,10 @@ class OpenWrtSwitchDriver(SwitchDriver):
         vlan = await self._vlan_section(vlan_id)
         if vlan is None:
             raise SwitchAPIError(code=404, message=f"VLAN {vlan_id} not found")
-        await self._ubus("uci", "set", {
-            "config": "network", "section": vlan["_section"], "values": {"ports": ports},
-        })
-        await self._apply_network_change()
+        async with self._safe_apply():
+            await self._ubus("uci", "set", {
+                "config": "network", "section": vlan["_section"], "values": {"ports": ports},
+            })
 
     # ------------------------------------------------------------------
     # PoE
@@ -582,15 +672,19 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 break
         if section_id is None:
             raise SwitchAPIError(code=404, message=f"No uci poe section for port {port}")
-        await self._ubus("uci", "set", {
-            "config": "poe", "section": section_id,
-            "values": {"enable": "1" if enabled else "0"},
-        })
-        await self._ubus("uci", "commit", {"config": "poe"})
+        async with self._safe_apply():
+            await self._ubus("uci", "set", {
+                "config": "poe", "section": section_id,
+                "values": {"enable": "1" if enabled else "0"},
+            })
+        # Belt-and-braces runtime reload: `uci apply` already fires
+        # reload_config, but realtek-poe's reload-trigger coverage is not yet
+        # confirmed against flashed hardware (WARP-1674). Safe after confirm —
+        # the poe daemon cannot strand the management plane.
         try:
             await self._ubus("poe", "reload")
         except SwitchAPIError as exc:
-            logger.warning("poe reload denied/failed after uci commit: %s", exc)
+            logger.warning("poe reload denied/failed after safe apply: %s", exc)
         # Read-back: uci is the admin ground truth (the live `poe info` status
         # lags the reload by a negotiation cycle).
         for entry in await self.get_poe_status():
