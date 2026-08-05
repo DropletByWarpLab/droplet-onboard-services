@@ -292,21 +292,89 @@ describe("provisioned peers are visible to the idle-expiry sweep", () => {
   });
 });
 
+/** Is `ip` inside `cidr`? Used to assert the profile's resolver is actually
+ *  ROUTED — a DNS server outside every AllowedIPs entry is sent out the
+ *  client's default route, which is precisely the split-horizon failure
+ *  (`<name>.droplet-us.com` → public NXDOMAIN) the tunnel exists to prevent. */
+function ipInCidr(ip: string, cidr: string): boolean {
+  const [net, bitsRaw] = cidr.split("/");
+  const bits = Number(bitsRaw);
+  const toInt = (a: string) =>
+    a.split(".").reduce((acc, o) => (acc << 8) + Number(o), 0) >>> 0;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (toInt(ip) & mask) === (toInt(net) & mask);
+}
+
 describe("buildOverlayProfile", () => {
+  // The REAL stock defaults (config.ts:423/427/428/441/447). The two modes are
+  // deliberately different subnets here — an inconsistent pair is only visible
+  // when they are.
+  const STOCK = {
+    vpnSubnet: "10.13.13.0/24",
+    awayAllowedIps: "192.168.50.0/24",
+    awayDns: "192.168.50.1",
+    homeAllowedIps: "192.168.20.0/24",
+    homeDns: "192.168.20.1",
+  };
   const base = {
-    assignedIp: "10.66.0.7",
+    assignedIp: "10.13.13.7",
     serverPublicKey: "SRVPUB=",
-    lanCidr: "192.168.20.0/24",
-    vpnSubnet: "10.66.0.0/24",
-    dns: "192.168.20.1",
+    mode: "away" as const,
+    ...STOCK,
     keepaliveSeconds: 25,
     endpointCandidates: [] as OverlayEndpointCandidate[],
   };
 
   it("addresses the client with a /32 inside the box's allowed range", () => {
     const p = buildOverlayProfile(base);
-    expect(p.address).toBe("10.66.0.7/32");
-    expect(p.allowed_ips).toEqual(["192.168.20.0/24", "10.66.0.0/24"]);
+    expect(p.address).toBe("10.13.13.7/32");
+    expect(p.allowed_ips).toEqual(["192.168.50.0/24", "10.13.13.0/24"]);
+  });
+
+  // The CIDR and the resolver are one unit. renderPeerConf keeps them strictly
+  // paired (vpn.service.ts:278-281): away = LAN_CIDR + DNS, home =
+  // HOME_ALLOWED_IPS + HOME_DNS. Crossing them yields a profile whose resolver
+  // sits in NEITHER routed range, so the client sends DNS out its default route
+  // and the split-horizon FQDN resolves to public NXDOMAIN — a tunnel that
+  // handshakes and still can't reach the box by name.
+  it.each(["away", "home"] as const)(
+    "%s mode routes its OWN resolver (never the other mode's)",
+    (mode) => {
+      const p = buildOverlayProfile({ ...base, mode });
+      expect(p.dns).toHaveLength(1);
+      expect(
+        p.allowed_ips.some((cidr) => ipInCidr(p.dns[0], cidr)),
+      ).toBe(true);
+    },
+  );
+
+  it("pairs away-mode AllowedIPs with the away-mode resolver", () => {
+    const p = buildOverlayProfile({ ...base, mode: "away" });
+    expect(p.allowed_ips).toEqual(["192.168.50.0/24", "10.13.13.0/24"]);
+    expect(p.dns).toEqual(["192.168.50.1"]);
+    expect(p.dns).not.toContain(STOCK.homeDns);
+  });
+
+  it("pairs home-mode AllowedIPs with the home-mode resolver", () => {
+    const p = buildOverlayProfile({ ...base, mode: "home" });
+    expect(p.allowed_ips).toEqual(["192.168.20.0/24", "10.13.13.0/24"]);
+    expect(p.dns).toEqual(["192.168.20.1"]);
+    expect(p.allowed_ips).not.toContain(STOCK.awayAllowedIps);
+  });
+
+  // WIREGUARD_HOME_ALLOWED_IPS is documented comma-separated for a multi-box
+  // LAN; a single joined string would be an invalid AllowedIPs entry.
+  it("splits a multi-CIDR AllowedIPs string into separate entries", () => {
+    const p = buildOverlayProfile({
+      ...base,
+      mode: "home",
+      homeAllowedIps: "192.168.20.0/24, 192.168.21.0/24",
+    });
+    expect(p.allowed_ips).toEqual([
+      "192.168.20.0/24",
+      "192.168.21.0/24",
+      "10.13.13.0/24",
+    ]);
   });
 
   // Split-tunnel is the invariant: the Android client refuses a full-tunnel
@@ -319,13 +387,16 @@ describe("buildOverlayProfile", () => {
   });
 
   it("splits a multi-value DNS string into a list", () => {
-    const p = buildOverlayProfile({ ...base, dns: "192.168.20.1, 192.168.20.2" });
-    expect(p.dns).toEqual(["192.168.20.1", "192.168.20.2"]);
+    const p = buildOverlayProfile({
+      ...base,
+      awayDns: "192.168.50.1, 192.168.50.2",
+    });
+    expect(p.dns).toEqual(["192.168.50.1", "192.168.50.2"]);
   });
 
   it("drops empty DNS entries rather than emitting blanks", () => {
-    const p = buildOverlayProfile({ ...base, dns: "192.168.20.1,, " });
-    expect(p.dns).toEqual(["192.168.20.1"]);
+    const p = buildOverlayProfile({ ...base, awayDns: "192.168.50.1,, " });
+    expect(p.dns).toEqual(["192.168.50.1"]);
   });
 
   // The ordering IS the contract: clients try candidates top-down and keep the

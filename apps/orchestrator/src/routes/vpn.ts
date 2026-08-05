@@ -36,10 +36,12 @@ import {
   renderPeerConf,
   VpnConfigError,
   VpnIpExhaustedError,
+  type VpnPeerMode,
 } from "../services/vpn.service.js";
 import {
   buildOverlayProfile,
   provisionOverlayPeer,
+  OVERLAY_PEER_MODE,
   type OverlayEndpointCandidate,
   type OverlayProvisionRouter,
   type ProvisionedOverlayPeer,
@@ -772,14 +774,21 @@ export function createVpnRouter(
           listenPort: config.WIREGUARD_LISTEN_PORT,
           address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
         });
+        // AllowedIPs and DNS come as a PAIR, selected by the peer row's own
+        // mode — never one mode's subnet with the other's resolver. A resolver
+        // outside every AllowedIPs entry leaves the tunnel up but sends DNS out
+        // the client's default route, so the split-horizon FQDN (ADR-023 §3.4)
+        // resolves to public NXDOMAIN. buildOverlayProfile owns the selection;
+        // the route only supplies both pairs.
         const profile = buildOverlayProfile({
           assignedIp: peer.assignedIp,
           serverPublicKey: setup.public_key,
-          lanCidr: config.WIREGUARD_LAN_CIDR,
+          mode: (peer.mode as VpnPeerMode | undefined) ?? OVERLAY_PEER_MODE,
+          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
+          awayDns: config.WIREGUARD_DNS,
+          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
+          homeDns: config.WIREGUARD_HOME_DNS,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
-          // The split-horizon resolver, so <name>.droplet-us.com resolves over
-          // the tunnel (ADR-023 §3.4) — the same DNS home-mode confs carry.
-          dns: config.WIREGUARD_HOME_DNS,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
           endpointCandidates: await resolveOverlayEndpointCandidates(),
         });

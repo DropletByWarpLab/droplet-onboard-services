@@ -19,10 +19,18 @@ vi.mock("../config.js", () => ({
     WIREGUARD_HOME_ENDPOINT_HOST: "",
     // WARP-1757 — approval now provisions a real wg0 peer, so the route needs
     // the subnet/CIDR/DNS the profile is assembled from.
-    WIREGUARD_VPN_SUBNET: "10.66.0.0/24",
-    WIREGUARD_LAN_CIDR: "192.168.20.0/24",
+    //
+    // These are the REAL stock defaults (config.ts:423/427/428/441/447), not
+    // convenience values. An earlier revision set WIREGUARD_LAN_CIDR to the
+    // HOME subnet's value, which made the away CIDR and the home resolver agree
+    // by accident and hid a profile that paired away-mode AllowedIPs with the
+    // home-mode resolver. Keeping the two modes on genuinely different subnets
+    // is what makes a crossed pair observable here.
+    WIREGUARD_VPN_SUBNET: "10.13.13.0/24",
+    WIREGUARD_LAN_CIDR: "192.168.50.0/24",
+    WIREGUARD_DNS: "192.168.50.1",
+    WIREGUARD_HOME_ALLOWED_IPS: "192.168.20.0/24",
     WIREGUARD_HOME_DNS: "192.168.20.1",
-    WIREGUARD_DNS: "192.168.20.1",
   },
 }));
 
@@ -79,6 +87,18 @@ import {
 
 const VALID_WG_KEY = "A".repeat(43) + "=";
 const VALID_WG_KEY_2 = "B".repeat(43) + "=";
+
+/** Is `ip` inside `cidr`? Lets the profile assertions check that the resolver
+ *  it advertises is actually ROUTED over the tunnel, rather than just matching
+ *  a literal the test itself supplied. */
+function ipInCidr(ip: string, cidr: string): boolean {
+  const [net, bitsRaw] = cidr.split("/");
+  const bits = Number(bitsRaw);
+  const toInt = (a: string) =>
+    a.split(".").reduce((acc, o) => (acc << 8) + Number(o), 0) >>> 0;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (toInt(ip) & mask) === (toInt(net) & mask);
+}
 
 function p256() {
   const { publicKey, privateKey } = generateKeyPairSync("ec", {
@@ -706,7 +726,7 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
       expect(peer).toBeDefined();
       expect(peer.kind).toBe("overlay");
       expect(peer.status).toBe("active");
-      expect(peer.assignedIp).toMatch(/^10\.66\.0\.\d+$/);
+      expect(peer.assignedIp).toMatch(/^10\.13\.13\.\d+$/);
 
       // Cryptokey routing: the router-side AllowedIPs must contain exactly the
       // address the client will be told to use. If these disagree, a handshake
@@ -803,11 +823,39 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     expect(res.body.server_public_key).toBe(
       "SERVERPUBKEY0000000000000000000000000000000=",
     );
-    expect(res.body.allowed_ips).toEqual(["192.168.20.0/24", "10.66.0.0/24"]);
-    expect(res.body.dns).toEqual(["192.168.20.1"]);
+    expect(res.body.allowed_ips).toEqual(["192.168.50.0/24", "10.13.13.0/24"]);
+    expect(res.body.dns).toEqual(["192.168.50.1"]);
     expect(res.body.persistent_keepalive).toBe(25);
     // Split-tunnel by construction — a default route must never be issued.
     expect(res.body.allowed_ips).not.toContain("0.0.0.0/0");
+  });
+
+  // The peer row this flow writes is mode='away', so the profile must carry the
+  // AWAY pair (WIREGUARD_LAN_CIDR + WIREGUARD_DNS) — not the away CIDR with the
+  // HOME resolver. A resolver outside every AllowedIPs entry is sent out the
+  // client's DEFAULT route, so <name>.droplet-us.com reaches a public resolver
+  // and gets NXDOMAIN: the exact failure split-horizon DNS exists to prevent,
+  // on a tunnel that handshakes fine and looks healthy.
+  it("routes the resolver it advertises (DNS inside AllowedIPs)", async () => {
+    const { app, prisma } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(200);
+
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    expect(peer.mode).toBe("away");
+
+    expect(res.body.dns.length).toBeGreaterThan(0);
+    for (const resolver of res.body.dns) {
+      expect(
+        res.body.allowed_ips.some((cidr: string) => ipInCidr(resolver, cidr)),
+      ).toBe(true);
+    }
+    // And explicitly NOT the other mode's resolver.
+    expect(res.body.dns).not.toContain(config.WIREGUARD_HOME_DNS);
   });
 
   // The per-device FQDN is public-NXDOMAIN by design (ADR-023 split-horizon),
