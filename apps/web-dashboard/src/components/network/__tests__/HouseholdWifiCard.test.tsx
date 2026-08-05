@@ -208,11 +208,92 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     expect(
       screen.getByText(/changes the Wi-Fi this Droplet broadcasts itself/i),
     ).toBeInTheDocument();
-    // Above the form it qualifies, not buried under it.
-    const routerForm = screen.getByText(ROUTER_FORM_SUBHEAD);
+    // Above the fields it qualifies, not buried under them. (WARP-1733 UX
+    // review: this assertion used to anchor on the form's SUBHEAD, back when
+    // the notice was a separate card stacked above the whole form. The notice
+    // now sits inside the form's card, below the heading block — so the thing
+    // it must precede is the editable fields, which was always the point.)
+    const ssid = screen.getByLabelText(/^network name/i);
     expect(
-      notice.compareDocumentPosition(routerForm) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
+      notice.compareDocumentPosition(ssid) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeGreaterThan(0);
+  });
+
+  /**
+   * WARP-1733 UX review, item A. The notice used to be its own `.card`, a
+   * SIBLING above the form. Inside the Advanced Wi-Fi tab panel that read
+   * acceptably — it was the first thing in a Wi-Fi-only panel. In Simple mode
+   * the column becomes five identically-styled `.card` siblings at `gap-4`,
+   * with nothing binding the notice to the form it qualifies, so a household
+   * reads it as a standalone page alert rather than a preamble to that form.
+   * One card, one subject.
+   */
+  it("a FAILED source read produces ONE card, not a notice card plus a form card", async () => {
+    mockWifiEndpoints(fetchMock, { current: "error" });
+    const { container } = renderCard();
+
+    const notice = await screen.findByText(FAILED_READ_NOTICE);
+    expect(container.querySelectorAll(".card")).toHaveLength(1);
+    const card = container.querySelector(".card") as HTMLElement;
+    expect(card.contains(notice)).toBe(true);
+    // …and it is the FORM's card it lives in, not a card of its own that
+    // happens to be the only one.
+    expect(card.contains(screen.getByLabelText(/^network name/i))).toBe(true);
+  });
+
+  /**
+   * WARP-1733 UX review, item B. This control is mounted in two places whose
+   * heading trees differ: inside the Advanced Wi-Fi tab panel it is a
+   * subsection (h3), while in Simple mode it is a sibling of the
+   * `<h2>Internet</h2>` hero. The level therefore travels from the mount —
+   * and it has to reach BOTH branches, or the edge-router shape (where the AP
+   * card is the household form) keeps the misnesting.
+   */
+  it("passes the mount's heading level through to whichever form owns the slot", async () => {
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "router" }),
+    });
+    const { unmount } = render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <HouseholdWifiCard headingLevel="h2" />
+      </SWRConfig>,
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: HOUSEHOLD_HEADLINE,
+        level: 2,
+      }),
+    ).toBeInTheDocument();
+    unmount();
+
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "ap" }),
+      apWifi: AP_WIFI_UP,
+    });
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <HouseholdWifiCard headingLevel="h2" />
+      </SWRConfig>,
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: HOUSEHOLD_HEADLINE,
+        level: 2,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("defaults to h3 — the Advanced tab panel's subsection level", async () => {
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "router" }),
+    });
+    renderCard();
+
+    expect(
+      await screen.findByRole("heading", {
+        name: HOUSEHOLD_HEADLINE,
+        level: 3,
+      }),
+    ).toBeInTheDocument();
   });
 });

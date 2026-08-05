@@ -141,8 +141,14 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
           privacy stay Advanced-only for now, so here that reads: is the
           internet up, what is my Wi-Fi called, what's on it, and the router.
           The control brings its own `.card`, so it sits in this column's
-          existing 16px rhythm without a wrapper. */}
-      <HouseholdWifiCard />
+          existing 16px rhythm without a wrapper.
+          `headingLevel="h2"` (WARP-1733 UX review): ShellPage owns the
+          `<h1>Network</h1>`, so this column reads h1 → h2 Internet → this
+          card. The control's default h3 — correct inside the Advanced Wi-Fi
+          tab panel, where it IS a subsection — would claim here that the
+          household Wi-Fi belongs to the Internet hero above it. It's a
+          sibling card, and the outline has to say so. */}
+      <HouseholdWifiCard headingLevel="h2" />
 
       {/* Devices + auto-managed coverage + escape hatch to Advanced */}
       <section className="card">
@@ -173,8 +179,18 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
                 </span>
                 <div>
                   <p className="type-title-3 tabular-nums" style={{ color: "var(--text)" }}>{apsOnline}</p>
+                  {/* "Wi-Fi coverage", not "access point(s)" (WARP-1733 UX
+                      review, item C). On the edge-router shape the Wi-Fi card
+                      16px above says the household network is "broadcast by
+                      your Droplet access point" and is editable — so a
+                      read-only "N access points · auto-managed" right below it
+                      made an owner ask which of the two they had just edited,
+                      and "auto-managed" flatly contradicted the form above.
+                      Dropping the colliding noun keeps the count (still worth
+                      showing) and leaves exactly one thing on this page called
+                      an access point. The Wi-Fi card's own copy is WARP-1752. */}
                   <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
-                    access point{apsOnline === 1 ? "" : "s"} · auto-managed
+                    Wi-Fi coverage · auto-managed
                   </p>
                 </div>
               </div>

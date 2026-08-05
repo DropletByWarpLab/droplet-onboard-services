@@ -1,10 +1,10 @@
 "use client";
 
-import { Info } from "lucide-react";
 import useSWR from "swr";
 import { fetchCurrentWifi } from "@/lib/api";
 import type { CurrentWifi } from "@/lib/types";
 import { ApWifiCard } from "@/components/network/ApWifiCard";
+import type { CardHeadingLevel } from "@/components/network/card-heading-level";
 import {
   CURRENT_WIFI_KEY,
   WifiSettingsForm,
@@ -47,9 +47,19 @@ import {
  * `source: null` — a failed read) falls back to the router form, exactly what
  * rendered before the split — never a permanent skeleton. But "exactly what
  * rendered before the split" IS the bug on the edge-router shape, so that
- * fallback carries an honest notice — see FailedReadNotice at the bottom.
+ * fallback carries an honest notice, which the form draws inside its own card
+ * (WARP-1733 UX review, item A — see WifiSettingsForm's `failedRead` prop).
  */
-export function HouseholdWifiCard() {
+export function HouseholdWifiCard({
+  headingLevel = "h3",
+}: {
+  /**
+   * The document outline this control is mounted into (WARP-1733 UX review,
+   * item B) — see CardHeadingLevel. Threaded to BOTH branches, or the
+   * edge-router shape keeps the misnesting the router shape just lost.
+   */
+  headingLevel?: CardHeadingLevel;
+}) {
   const { resolved, source, failedRead } = useHouseholdWifiSource();
 
   if (!resolved) {
@@ -120,23 +130,22 @@ export function HouseholdWifiCard() {
     // slot — writes land where the Wi-Fi actually lives, and it wears
     // household copy (`slot="household"`) rather than presenting the home
     // network as an accessory one.
-    return <ApWifiCard slot="household" />;
+    return <ApWifiCard slot="household" headingLevel={headingLevel} />;
   }
 
-  return (
-    <>
-      {/* A FAILED read, not a resolved `source: null` — the form below
-          can't tell the user which radio it's about to write, so say it
-          here. `source: null` is a resolved answer and WifiSettingsForm
-          already carries its own honest notice for it; don't stack two. */}
-      {failedRead ? <FailedReadNotice /> : null}
-      {/* Issue #12: editable provisioning form so a user who skipped Wi-Fi
-          during onboarding can set the SSID/password here — same write path
-          as the setup wizard's InternetStep, against this Droplet's own
-          radio. */}
-      <WifiSettingsForm />
-    </>
-  );
+  // Issue #12: editable provisioning form so a user who skipped Wi-Fi during
+  // onboarding can set the SSID/password here — same write path as the setup
+  // wizard's InternetStep, against this Droplet's own radio.
+  //
+  // `failedRead` is a FAILED read, not a resolved `source: null` — the form
+  // can't tell the user which radio it is about to write, so it says so. It
+  // travels as a flag and the form renders the notice INSIDE its own card
+  // (WARP-1733 UX review, item A): as a sibling card here it was the third of
+  // five identically-styled `.card`s in Simple mode's column, which reads as a
+  // standalone page alert rather than a preamble to the form it qualifies.
+  // `source: null` is a resolved answer with its own notice in that same slot;
+  // the two can't stack, because a failed read leaves `live` undefined.
+  return <WifiSettingsForm headingLevel={headingLevel} failedRead={failedRead} />;
 }
 
 /**
@@ -166,41 +175,4 @@ export function useHouseholdWifiSource(): {
     source: data?.source ?? null,
     failedRead: error !== undefined,
   };
-}
-
-// ────────────────────────────────────────────────────────────────────
-// FailedReadNotice (WARP-1723 review finding 1, third pass) — shown above
-// the router form when the /wifi/current read FAILED.
-//
-// Falling back to WifiSettingsForm keeps the user able to edit, which is the
-// right call — but on the edge-router shape that form saves through the ROUTER
-// write path and reports success while nothing changes on air. That IS the bug
-// WARP-1723 removed, quietly restored by the error branch. The form's own
-// honesty notice can't cover for us here either: it's gated on
-// `live && !live.ssid`, and `live` is undefined precisely because this same
-// read (same SWR key) just failed. Without this line the user gets a bare,
-// silently-wrong-write-path form and no explanation.
-//
-// `role="status"`, not `alert`: nothing the user did caused this, so it is
-// announced politely rather than interrupting. Geometry is the page's own
-// banner idiom (see the operation-status banners in app/network/page.tsx) at
-// full text weight — the consequence is load-bearing, not supplementary — and
-// it does not animate in: a transition here would draw the eye to a failure
-// and buy nothing.
-// ────────────────────────────────────────────────────────────────────
-function FailedReadNotice() {
-  return (
-    <div role="status" className="card flex items-start gap-3">
-      <Info
-        size={16}
-        className="mt-0.5 flex-shrink-0"
-        style={{ color: "var(--text-muted)" }}
-        aria-hidden="true"
-      />
-      <p className="type-subheadline flex-1" style={{ color: "var(--text)" }}>
-        We couldn&apos;t read your current Wi-Fi settings just now. Saving here
-        changes the Wi-Fi this Droplet broadcasts itself.
-      </p>
-    </div>
-  );
 }

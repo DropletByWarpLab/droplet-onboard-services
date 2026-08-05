@@ -33,7 +33,14 @@ export function WifiTab() {
 
   return (
     <div className="space-y-4">
-      <HouseholdWifiCard />
+      {/* `headingLevel="h3"` is this panel's own answer, passed explicitly
+          rather than left to the default: since WARP-1733 the control has two
+          mounts whose outlines differ (Simple mode reads it as a sibling of
+          the h2 Internet hero and passes "h2"), so the level belongs at each
+          call site where it can be read against the surrounding headings.
+          Here it IS a subsection of the Wi-Fi tab panel — same level as every
+          card below it. */}
+      <HouseholdWifiCard headingLevel="h3" />
 
       {/* WARP-871: the channel write path (orchestrator route + routing) shipped
           at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab

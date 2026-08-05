@@ -239,7 +239,120 @@ describe("NetworkSimple household Wi-Fi control (WARP-1733)", () => {
     renderWithSource({ current: currentWifi({ source: "router" }) });
 
     expect(
-      await screen.findByText(/access point · auto-managed/i),
+      await screen.findByText(/wi-fi coverage · auto-managed/i),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-1733 UX review — the two Simple-mode-only findings. Both are caused by
+ * the new mount rather than by anything the Wi-Fi control does wrong: in
+ * Advanced the card sat first inside a Wi-Fi-only tab panel, and here it is one
+ * sibling card in a five-card column under a page `<h1>`.
+ */
+describe("NetworkSimple — WARP-1733 UX polish", () => {
+  const overview = overviewWith({ up: true, present: true, proto: "dhcp" }, true);
+
+  function renderWithSource(current: Parameters<typeof mockWifiEndpoints>[1]) {
+    mockWifiEndpoints(fetchMock, current);
+    return renderSimple(
+      <NetworkSimple overview={overview} onOpenAdvanced={() => {}} />,
+    );
+  }
+
+  /**
+   * Item B. ShellPage renders `<h1>Network</h1>`, so this column reads
+   * h1 → `<h2>Internet</h2>` → the Wi-Fi card. A hardcoded `h3` on that card
+   * makes the heading tree claim the household Wi-Fi is a subsection of the
+   * Internet hero. It is a sibling card, so it is an h2 here — while staying
+   * h3 in the Advanced tab panel, where the subsection reading is correct.
+   */
+  it("mounts the household Wi-Fi card as a SIBLING of the Internet hero, not under it", async () => {
+    renderWithSource({ current: currentWifi({ source: "router" }) });
+
+    const wifi = await screen.findByRole("heading", {
+      name: HOUSEHOLD_HEADLINE,
+      level: 2,
+    });
+    const internet = screen.getByRole("heading", { name: "Internet", level: 2 });
+    expect(wifi).toBeInTheDocument();
+    expect(internet).toBeInTheDocument();
+    // Nothing in Simple mode claims the Wi-Fi card is a subsection.
+    expect(
+      screen.queryByRole("heading", { name: HOUSEHOLD_HEADLINE, level: 3 }),
+    ).not.toBeInTheDocument();
+  });
+
+  // …and on the edge-router shape, where the AP card IS the household form.
+  it("levels the promoted AP form the same way", async () => {
+    renderWithSource({
+      current: currentWifi({ source: "ap" }),
+      apWifi: AP_WIFI_UP,
+    });
+
+    expect(
+      await screen.findByRole("heading", {
+        name: HOUSEHOLD_HEADLINE,
+        level: 2,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: HOUSEHOLD_HEADLINE, level: 3 }),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * Item C. On the edge-router shape the Wi-Fi card says the household network
+   * is "broadcast by your Droplet access point" (editable) while the card 16px
+   * below says "N access points · auto-managed" (read-only) — so an owner asks
+   * which of the two they just edited, and "auto-managed" flatly contradicts
+   * the editable form above. The count is still worth showing; the colliding
+   * noun is not. (The Wi-Fi card's own copy is WARP-1752, not this ticket.)
+   */
+  it("stops the coverage read-out from colliding with the Wi-Fi card's own noun", async () => {
+    apsMock.mockResolvedValue({
+      aps: [{ id: "ap1", status: "ONLINE" }],
+    } as never);
+    renderWithSource({
+      current: currentWifi({ source: "ap" }),
+      apWifi: AP_WIFI_UP,
+    });
+
+    // The editable household form is present and still names where it writes.
+    expect(
+      await screen.findByText(/broadcast by your Droplet access point/i),
+    ).toBeInTheDocument();
+    // The read-only coverage line no longer answers to the same noun.
+    expect(
+      screen.queryByText(/access points? · auto-managed/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/wi-fi coverage · auto-managed/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the count on the reworded coverage read-out", async () => {
+    apsMock.mockResolvedValue({
+      aps: [
+        { id: "ap1", status: "ONLINE" },
+        { id: "ap2", status: "ONLINE" },
+      ],
+    } as never);
+    renderWithSource({ current: currentWifi({ source: "router" }) });
+
+    const readout = await screen.findByText(/wi-fi coverage · auto-managed/i);
+    // The number sits immediately above its label, as it always has.
+    expect(readout.previousElementSibling?.textContent).toBe("2");
+  });
+
+  // No extenders at all: the whole read-out stays hidden, as before.
+  it("hides the coverage read-out when there are no access points", async () => {
+    apsMock.mockResolvedValue({ aps: [] } as never);
+    renderWithSource({ current: currentWifi({ source: "router" }) });
+
+    await screen.findByText(HOUSEHOLD_HEADLINE);
+    expect(
+      screen.queryByText(/wi-fi coverage · auto-managed/i),
+    ).not.toBeInTheDocument();
   });
 });

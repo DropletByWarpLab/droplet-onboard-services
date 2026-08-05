@@ -22,6 +22,7 @@ import {
   setWifiSsid,
 } from "@/lib/api";
 import type { CurrentWifi } from "@/lib/types";
+import type { CardHeadingLevel } from "@/components/network/card-heading-level";
 
 /** Under the /api/network prefix, so the tab's Refresh sweep covers it.
  *  Exported (WARP-1723) so WifiTab keys its source-split read on the SAME SWR
@@ -62,7 +63,30 @@ type Status =
   | { kind: "error"; message: string }
   | { kind: "notice"; message: string };
 
-export function WifiSettingsForm() {
+export function WifiSettingsForm({
+  headingLevel = "h3",
+  failedRead = false,
+}: {
+  /** The document outline this card is mounted into — see CardHeadingLevel. */
+  headingLevel?: CardHeadingLevel;
+  /**
+   * The `/api/network/wifi/current` read FAILED (WARP-1733 UX review, item A).
+   *
+   * HouseholdWifiCard falls back to this form on a failed read — the right
+   * call, since the alternative is taking the only Wi-Fi editor away — but on
+   * the edge-router shape this form saves through the ROUTER write path and
+   * reports success while nothing changes on air. So it has to say so, and the
+   * form's own `live && !live.ssid` notice can't: that one is gated on `live`,
+   * which is undefined precisely because this same read (same SWR key) failed.
+   *
+   * It arrives as a flag rather than as a notice the caller renders itself,
+   * because the notice has to live INSIDE this card. As a sibling card it read
+   * as a standalone page alert in Simple mode's five-card column instead of a
+   * preamble to the form it qualifies. The caller owns the FACT; the card owns
+   * where the fact is drawn.
+   */
+  failedRead?: boolean;
+}) {
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -223,6 +247,9 @@ export function WifiSettingsForm() {
   }
 
   const saving = status.kind === "saving";
+  // The mount decides the outline level; the styling token is the same either
+  // way. Capitalised so JSX reads it as the tag, not as a literal element name.
+  const Heading = headingLevel;
 
   return (
     <div className="card">
@@ -232,12 +259,44 @@ export function WifiSettingsForm() {
           promise has to land on a matching label. The ApWifiCard household
           variant carries the same headline by design; the two never occupy
           this slot at the same time. */}
-      <h3 className="type-headline text-[color:var(--text)] mb-1">Wi-Fi settings</h3>
+      <Heading className="type-headline text-[color:var(--text)] mb-1">
+        Wi-Fi settings
+      </Heading>
       <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Name the Wi-Fi network your Droplet broadcasts and set its password.
         Saving restarts the radio, which briefly disconnects every device —
         including this one. Rejoin with the new name and password.
       </p>
+
+      {/* WARP-1733 UX review (item A): the failed-read notice, in the SAME
+          inset slot as the resolved-but-empty notice below it — one card, one
+          subject. It used to be a sibling `.card` rendered above this one by
+          HouseholdWifiCard; in Simple mode that made it the third of five
+          identically-styled cards at `gap-4`, with nothing tying it to the
+          form it is about.
+
+          The two never stack: `failedRead` means the wifi/current read errored,
+          so `live` is undefined and the notice below cannot fire.
+
+          No entry transition, deliberately — animating a failure into view
+          draws the eye to it and buys nothing (the same restraint the sibling
+          card had). */}
+      {failedRead && (
+        <div
+          role="status"
+          className="mb-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-[var(--card-inner)] rounded-sm px-3 py-2"
+        >
+          <Info
+            size={14}
+            className="mt-0.5 flex-shrink-0 text-[color:var(--text-muted)]"
+            aria-hidden="true"
+          />
+          <span>
+            We couldn&apos;t read your current Wi-Fi settings just now. Saving
+            here changes the Wi-Fi this Droplet broadcasts itself.
+          </span>
+        </div>
+      )}
 
       {/* WARP-1714: when we can't read the current Wi-Fi, SAY SO. Empty fields
           that mean "we couldn't ask" are indistinguishable from ones that mean
@@ -326,7 +385,13 @@ export function WifiSettingsForm() {
               type="button"
               onClick={() => setShowPassword((s) => !s)}
               aria-label={showPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
+              // `p-2 -m-2` (WARP-1733 UX review, item D): the button wrapped a
+              // bare 16px icon, so its hit area was ~16×16 — under WCAG 2.2
+              // SC 2.5.8's 24px floor, on what Simple mode makes the likeliest
+              // phone surface. The padding grows the target to 32×32; the
+              // equal negative margin gives the space straight back, so the
+              // icon sits exactly where it did and no layout moves.
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -m-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>

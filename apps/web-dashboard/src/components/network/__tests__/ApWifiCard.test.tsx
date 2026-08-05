@@ -401,3 +401,58 @@ describe("save flow", () => {
     expect(screen.getByRole("alert").textContent).toMatch(/no access point is online/i);
   });
 });
+
+/**
+ * WARP-1733 UX review — this card is the other half of both cross-cutting
+ * polish items, because on the edge-router shape it IS the household form and
+ * therefore mounts in Simple mode too.
+ */
+describe("WARP-1733 UX polish", () => {
+  /**
+   * Item B. ShellPage owns the `<h1>`. In the Advanced Wi-Fi tab this card is
+   * a subsection (`h3`); in Simple mode the household mount is a SIBLING of
+   * the `<h2>Internet</h2>` hero, so `h3` there would claim the Wi-Fi card is
+   * part of that hero. The level belongs to the mount, not to the card.
+   */
+  it("takes its heading level from the mount context", async () => {
+    const { unmount } = renderCard({ slot: "household" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Wi-Fi settings", level: 3 }),
+      ).toBeTruthy(),
+    );
+    unmount();
+
+    renderCard({ slot: "household", headingLevel: "h2" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Wi-Fi settings", level: 2 }),
+      ).toBeTruthy(),
+    );
+  });
+
+  it("keeps the secondary slot at h3 — it is a subsection of the Wi-Fi tab", async () => {
+    renderCard();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Access point Wi-Fi", level: 3 }),
+      ).toBeTruthy(),
+    );
+  });
+
+  /**
+   * Item D. The reveal button wrapped a 16px icon with no padding, so its hit
+   * area was ~16×16 — under WCAG 2.2 SC 2.5.8's 24px floor. `p-2 -m-2` grows
+   * the target by 8px on every side and gives the margin straight back, so the
+   * icon does not move.
+   */
+  it("gives the password reveal a target that clears the 24px floor", async () => {
+    renderCard();
+    await waitFor(() => expect(ssidInput()).toBeTruthy());
+
+    // jsdom computes no layout, so pin the mechanism rather than a rect.
+    const reveal = screen.getByRole("button", { name: /show wi-fi password/i });
+    expect(reveal.className).toMatch(/(^|\s)p-2(\s|$)/);
+    expect(reveal.className).toMatch(/(^|\s)-m-2(\s|$)/);
+  });
+});

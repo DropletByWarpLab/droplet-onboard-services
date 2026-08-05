@@ -136,6 +136,54 @@ describe("WifiTab household slot + second-network composition (WARP-1723)", () =
     expect(document.getElementById("ap-wifi-ssid")).not.toBeNull();
   });
 
+  /**
+   * WARP-1733 UX review, item B. The household control now mounts in two
+   * places whose heading trees differ, so its level travels from the mount.
+   * HERE the h3 is CORRECT and must stay: inside the Wi-Fi tab panel the card
+   * genuinely is a subsection, and every sibling card below it is an h3 too.
+   * This is the regression guard on the Simple-mode fix — an h2 here would
+   * misnest the whole tab.
+   */
+  it("keeps the household card at h3 — inside this panel it IS a subsection", async () => {
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "router" }),
+      apWifi: AP_WIFI_UP,
+    });
+    renderTab();
+
+    expect(
+      await screen.findByRole("heading", {
+        name: HOUSEHOLD_HEADLINE,
+        level: 3,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: HOUSEHOLD_HEADLINE, level: 2 }),
+    ).not.toBeInTheDocument();
+    // The AP's own second network is a peer subsection, not a child of it.
+    expect(
+      screen.getByRole("heading", { name: "Access point Wi-Fi", level: 3 }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the promoted AP form at h3 on the edge-router shape too", async () => {
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "ap" }),
+      apWifi: AP_WIFI_UP,
+    });
+    renderTab();
+
+    expect(
+      await screen.findByRole("heading", {
+        name: HOUSEHOLD_HEADLINE,
+        level: 3,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: HOUSEHOLD_HEADLINE, level: 2 }),
+    ).not.toBeInTheDocument();
+  });
+
   // The extraction moved one child out of this tab. Pin the rest, so a future
   // move can't quietly take a power-user card with it — none of these have a
   // render test of their own at the tab level.
