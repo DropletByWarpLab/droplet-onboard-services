@@ -46,7 +46,12 @@ import {
   type OverlayProvisionRouter,
   type ProvisionedOverlayPeer,
 } from "../services/overlay-profile.service.js";
-import { pickHomeEndpoint, fetchBridgeUplinkIp } from "../lib/vpn-home-endpoint.js";
+import {
+  pickHomeEndpoint,
+  fetchBridgeUplinkIp,
+  fetchBridgeStunProbe,
+} from "../lib/vpn-home-endpoint.js";
+import { observePlacement } from "../services/overlay-placement.service.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
@@ -164,36 +169,41 @@ const overlayRouter: OverlayProvisionRouter = {
 };
 
 /**
- * WARP-1757 — the endpoint candidates a client should try, best first.
+ * WARP-1758 — the endpoint candidates a client should try, best first.
  *
- * This is the SHAPE, not yet the intelligence, and it deliberately ships EMPTY.
+ * Re-observed on every call. There is no cached placement to invalidate, so a
+ * DHCP renewal, a WAN failover, or the box being physically moved between an
+ * edge WAN and someone else's subnet is picked up by the next profile fetch
+ * with no redeploy and no owner action. That IS the auto-reconcile.
  *
- * The tempting placeholder — `resolveEndpointHost()`, i.e. the per-device
- * `<name>.droplet-us.com` — is exactly the endpoint WARP-1391 found to be dead
- * by design: that name is public-NXDOMAIN under ADR-023's split-horizon, so a
- * client off the home LAN cannot resolve it and has no handshake target. It is
- * the box's HTTPS/API address, not a WireGuard transport address. Emitting it
- * as a `direct` candidate would re-ship the very bug ADR-031 was written to
- * replace, so an empty list is the honest answer until real candidates exist.
- *
- * A client seeing `endpoint_candidates: []` knows the box has not yet worked
- * out how it can be reached — which is true.
- *
- * WARP-1758 fills this in with real WAN-placement detection: comparing the
- * box's own WAN address against its STUN-reflexive mapping to tell "I am the
- * edge router with a public IP" from "I live in someone else's subnet", adding
- * the LAN candidate, attempting a PCP/NAT-PMP/UPnP port map, and classifying
- * NAT properly rather than by the current port==51820 heuristic. Every
- * candidate it emits is an IP-literal transport address, never a name that
- * only resolves on the LAN.
- *
- * Shipping the ordered-list contract now means clients parse a list from day
- * one and gaining candidates later is a server-side change only.
+ * Every candidate is an IP-literal transport address. The per-device
+ * `<name>.droplet-us.com` is deliberately NOT among them: it is public-NXDOMAIN
+ * under ADR-023's split-horizon, so off the home LAN it has no handshake target
+ * — advertising it is the WARP-1391 dead-endpoint bug, and it is the box's
+ * HTTPS/API address, not a WireGuard transport address.
  */
 async function resolveOverlayEndpointCandidates(): Promise<
   OverlayEndpointCandidate[]
 > {
-  return [];
+  const snapshot = await observePlacement(
+    {
+      wanAddress: () => fetchBridgeUplinkIp(),
+      stun: () => fetchBridgeStunProbe(),
+      lanAddress: () => resolveHomeEndpointHost(),
+      // No second STUN destination is available from the host bridge yet, so
+      // NAT class stays `unknown` and `srflx` is still offered — we withhold it
+      // only on a POSITIVE address-dependent finding, never on absence of
+      // evidence. Wiring a second server is the remaining half of WARP-1758.
+    },
+    { listenPort: config.WIREGUARD_LISTEN_PORT },
+  );
+  if (snapshot.relayRequired) {
+    logger.warn(
+      { placement: snapshot.placement.placement, reason: snapshot.placement.reason },
+      "overlay: no remotely dial-able endpoint candidate — this box needs a relay to be reachable off-LAN",
+    );
+  }
+  return snapshot.candidates;
 }
 
 /**
