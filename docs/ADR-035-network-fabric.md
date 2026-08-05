@@ -9,6 +9,10 @@ Grounded in a four-angle research pass executed live against the lab fabric on 2
 
 ## Context — what is actually true today
 
+*Snapshot as of 2026-08-04, the date of this ADR, preserved as the state that
+motivated the decision. Several of the gaps below have since been closed — the
+progress note under Action items is the current record.*
+
 The fabric is ~70% built and the missing 30% was blockers, not architecture:
 
 - **Discovery never worked, and the reason was one decode call.** `umdns browse` serialises TXT records as *repeated* `"txt"` JSON keys (legal blobmsg, hostile JSON); Python's default decoder keeps only the last, destroying the `mac=` record before any parser ran. The `ApDevice` table had zero rows against a healthy announcing AP. Fixed and deployed as **WARP-1720** (2026-08-04); the lab AP entered the ADR-005 state machine — `AWAITING_APPROVAL` — for the first time on real hardware. Every conclusion below post-dates that fix.
@@ -103,7 +107,13 @@ These are not in tension: observation answers "what is", intent answers "what sh
 
 ## Sequencing (each stage remote, independently valuable, revertible)
 
-1. **Fix-first (landed / open):** WARP-1720 discovery decode ✅ deployed; AP credential enrolled + `.env` source-of-truth ✅; WARP-1721 approval gate ✅ merged (`ce5667bc`, fails closed on this shape — freeze lifted); switch `safe_apply` parity; AP identity source-fixes (macaddr_base, board.json, client-ID); Pi keep.d `/etc/droplet`.
+> **These stages are the plan, not a progress tracker.** Delivery has already
+> cut across them: the stage-3 topology unblock (FDB plugin, `get_fdb()`, PoE
+> refusal) is live, while the stage-2 node registry it was ordered behind does
+> not exist yet. Read the *progress note* under Action items — which is written
+> in feature terms, not stage numbers — for what is actually running.
+
+1. **Fix-first:** discovery decode; AP credential enrolment + `.env` source-of-truth; approval gate fails closed on this shape; switch `safe_apply` parity; AP identity source-fixes (macaddr_base, board.json, client-ID); Pi keep.d `/etc/droplet`.
 2. **Pin identity:** DHCP reservations + `_droplet-router._tcp` + consume the switch advertisement into the node registry.
 3. **Topology:** `bridge.fdb` rpcd plugin + `get_fdb()` contract + PoE dependency edges + hard PoE refusal.
 4. **Intent for one fact:** NetworkIntent for SSID+passphrase, converger, delete the router-side write path, repoint the MCP tool. Prove offline-write and drift-repush on one fact before generalising.
@@ -119,22 +129,82 @@ These are not in tension: observation answers "what is", intent answers "what sh
 - [x] WARP-1730 — switch driver `safe_apply` parity + PYNET-005 staged-revert (merged `1003493f`, #1408; verified live on the lab switch against an unused PoE port: apply→probe→confirm, zero staged leftovers)
 - [x] WARP-1729 — AP identity fixes: macaddr_base derived from the eth0 anchor, board.json bypassed, DHCP client-ID pinned (merged `14b4c6e`; kernel and hostapd now agree on both radios, one lease)
 - [x] WARP-1728 — Pi keep.d `/etc/droplet`, DHCP reservation for the AP, switch domain record, and `_droplet-router._tcp` (merged `c7de8a9`; router advert confirmed visible from the AP)
-- [x] WARP-1734 — `bridge.fdb` rpcd ucode plugin + ACL grant (edge-router `b3b0c18`, #15) and `SwitchDriver.get_fdb()` + `port_powers()` + the hard PoE refusal (`15f8d010`, #1411). Supersedes the ACL-only framing of WARP-1717. Verified on the rack: cutting lan2 is refused by name; lan5 still toggles.
+- [x] WARP-1734 — `bridge.fdb` rpcd ucode plugin + ACL grant (edge-router `b3b0c18`, #15) and `SwitchDriver.get_fdb()` + `port_powers()` + the hard PoE refusal (`15f8d010`, #1411). Supersedes the ACL-only framing of WARP-1717. Verified on the rack: cutting lan2 is refused, naming the MAC on that port; lan5 still toggles.
 - [x] WARP-1731 — `FabricApi.browse_members()` + `GET /fabric/members` (merged `bce6ed6f`, #1409; all three members returned live, router synthesized when its own advert is absent from its own browse)
-- [ ] WARP-1732 — FabricMember persistence: orchestrator table + reconciler + read API (in progress)
-- [ ] NetworkNode / NodeIdentity / TopologyEdge migration + topology-identity service (ticket needed — WARP-1732 is its first increment)
+- [x] WARP-1732 — FabricMember persistence: orchestrator table + reconciler + `GET /api/network/fabric/members` (merged `52c8c93e`, #1421). A flat observation ledger keyed on anchor MAC — **not** the §2 node registry, and deliberately not: no identity rows, no edges, no lifecycle state.
+- [x] WARP-1760 — `umdns update` before every browse (merged `dd58c6a4`, #1423). Found while verifying WARP-1732 on the box: `umdns browse` returns a cache nothing refreshed, so a rebooted AP was invisible indefinitely.
+- [ ] NetworkNode / NodeIdentity / TopologyEdge migration + topology-identity service (ticket needed — nothing in code today; WARP-1732's flat ledger is the closest thing that exists and does not supersede it)
 - [ ] NetworkIntent + converger for `wifi.primary`; delete router-side SSID path on this shape (ticket needed)
 - [ ] Enrollment broker (ADR-033 item 8; extends WARP-1474 substrate) + `setup.sh` shape detection (ADR-033 item 7)
 - [ ] Phase-0 pinned HTTPS across all three devices (ticket needed)
 
-### Progress note (2026-08-05)
+### Progress note (2026-08-05) — what is running vs what is only designed
 
-**Stage 1 (fix-first) and stage 2 (pin identity) are complete**, and every item
-was verified against the live rack rather than accepted from a test suite. The
-fabric now discovers all three devices, addresses them by reservation and
-stable name, cannot strand the switch on a bad write, and refuses to cut power
-to a device it can see. Stages 3–7 (topology graph persistence, intent
-convergence, enrollment, transport, mutual recognition) remain.
+Work has landed by deliverable, not by stage, so this note is written in
+feature terms. Stage numbers appear only as cross-references into the plan
+above; no stage should be read as wholly done or wholly open.
+
+**Merged and running.** Every item below is merged to `main` — in this repo or
+in droplet-edge-router, per the SHAs in the checklist above — and was exercised
+against the live devices rather than accepted from a test suite, except where
+the bullet says otherwise:
+
+- **Discovery works, and now asks instead of guessing.** The umdns
+  duplicate-key decode fix (WARP-1720) put the AP into the ADR-005 state
+  machine for the first time on real hardware; query-before-browse (WARP-1760)
+  closed the follow-on hole where `umdns browse` served a cache nothing ever
+  refreshed, so a rebooted device stayed invisible indefinitely.
+- **Fabric membership is inventoried and remembered.** The routing service
+  browses every `_droplet-*._tcp` and answers `GET /fabric/members` with all
+  three devices, synthesising the router when its own advert is missing from
+  its own browse (WARP-1731). The orchestrator persists what it sees —
+  including the switch's `poe_ports`/`poe_budget`, which previously advertised
+  into a void — and serves `GET /api/network/fabric/members` (WARP-1732).
+  WARP-1732's on-box check is what surfaced the stale-cache bug above; the
+  persisted ledger has not been re-verified end to end on the rack since that
+  fix landed.
+- **The port↔device edge and the PoE refusal are live (§6 "the one unblock",
+  stage 3).** The switch exposes its FDB through a read-only `bridge.fdb` rpcd
+  ucode plugin, `SwitchDriver` carries the `get_fdb()` + `port_powers()`
+  contract, and disabling PoE on a port the switch can see a device on is a
+  hard `409 PORT_POWERS_MEMBER` refusal, overridable only by explicit
+  `force=true` (WARP-1734). Verified on the rack: cutting lan2 is refused, with
+  the MAC that port feeds named in the error; lan5 still toggles. This is
+  **done**, not pending — it simply landed ahead of the registry work it was
+  sequenced behind.
+- **Addressing and identity are pinned at the source (stage 2's first half).**
+  DHCP reservation for the AP, the switch domain record, `_droplet-router._tcp`
+  on the Pi, and `/etc/droplet` in keep.d (WARP-1728); `macaddr_base` derived
+  from the eth0 anchor, the corrupted `board.json` bypassed, DHCP client-ID
+  pinned (WARP-1729).
+- **A bad write can no longer strand the switch.** `safe_apply` parity plus the
+  staged-revert arm — apply → probe → confirm (WARP-1730), verified live
+  against an unused PoE port with zero staged leftovers.
+
+**Designed in this ADR, absent from the code.** None of the following exists
+today; do not read the checklist above as delivering any of it:
+
+- **The node registry does not exist.** `NetworkNode`, `NodeIdentity` and
+  `TopologyEdge` (§2) are not in the schema, and neither is the
+  `topology-identity` service; `ApDevice`/`NetworkDevice` have no `nodeId`.
+  `FabricMember` is not a substitute — it is one flat row per announcing
+  device with no identity ledger and no edges. Consequently **there is no
+  persisted topology graph**: the FDB↔PoE join behind the refusal above is
+  computed live inside the switch service on each call, no `poe-feed` or
+  `switchport` edge is stored anywhere, and everything §6 specifies about
+  `observedAt`/`source`/`confidence`, dimming stale edges and BOOT
+  invalidation remains design. This is the half of stage 2 that is still open,
+  and it blocks the graph half of stage 3.
+- **The intent layer** (§7, stage 4): no `NetworkIntent`, no
+  `DeviceIntentState`, no converger. The router-side `POST /network/wifi/ssid`
+  path is still present and still the write path.
+- **Enrollment** (§3, stage 5): no broker, no recovery-key bootstrap with
+  rotation, no per-device escrow rows, no conditional credential mint, and
+  `setup.sh` still does not know the `edge-router` shape.
+- **Transport** (§4, stage 6): phase-0 pinned HTTPS is not started — all three
+  devices still speak ubus over plaintext `:80`.
+- **Mutual recognition** (§6, stage 7): LLDP runs nowhere in the fabric, and
+  the dawn / `rrm_nr_*` cross-AP reconcile is unbuilt.
 
 Two findings from this work belong in the record because they constrain later
 stages:
