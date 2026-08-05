@@ -502,10 +502,20 @@ class VpnOverlayPeerRequest(BaseModel):
     )
     # The phone's observed public mapping (STUN reflexive) as IPv4:port. IPv6 is
     # tracked as a follow-up caveat in ADR-030's client stories.
-    endpoint: str = Field(
-        ...,
+    # WARP-1757: OPTIONAL. WireGuard learns a peer's endpoint from its first
+    # authenticated handshake, so the box needs one configured only when the BOX
+    # must initiate — i.e. the NAT hole-punch. A peer installed at approval time
+    # (before any punch, and for a box that is its own edge router, behind a
+    # successful port map, or reached over the LAN) is client-initiated and must
+    # be installable WITHOUT one. The SDK's add_peer has always treated it as
+    # optional (`if endpoint:`); only this schema forced it.
+    endpoint: str | None = Field(
+        default=None,
         pattern=r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d):(?:[1-9]\d{0,4})$",
-        description="Peer's observed endpoint host:port, e.g. '203.0.113.7:51820'.",
+        description=(
+            "Peer's observed endpoint host:port, e.g. '203.0.113.7:51820'. "
+            "Omit for a client-initiated peer — WireGuard learns it from the handshake."
+        ),
     )
     allowed_ips: list[str] = Field(
         ..., min_length=1, max_length=8,

@@ -1105,7 +1105,12 @@ export async function createVpnPeer(opts: {
 export async function installOverlayVpnPeer(opts: {
   interface?: string;
   publicKey: string;
-  endpoint: string;
+  /** WARP-1757: OPTIONAL. Supply it only when the BOX must initiate — the NAT
+   *  hole-punch. A peer installed at approval time is client-initiated, and
+   *  WireGuard learns its endpoint from the first authenticated handshake, so
+   *  omitting it is what lets the direct / port-mapped / LAN paths work with no
+   *  rendezvous at all. */
+  endpoint?: string;
   allowedIps: string[];
   persistentKeepalive?: number;
   description?: string;
@@ -1113,15 +1118,16 @@ export async function installOverlayVpnPeer(opts: {
   status: "ok";
   interface: string;
   public_key: string;
-  endpoint: string;
+  endpoint: string | null;
   allowed_ips: string[];
   persistent_keepalive: number;
 }> {
   const body: Record<string, unknown> = {
     public_key: opts.publicKey,
-    endpoint: opts.endpoint,
     allowed_ips: opts.allowedIps,
   };
+  // Omitted, not null — the schema's pattern only applies to a present string.
+  if (opts.endpoint !== undefined) body.endpoint = opts.endpoint;
   if (opts.interface) body.interface = opts.interface;
   if (opts.persistentKeepalive !== undefined)
     body.persistent_keepalive = opts.persistentKeepalive;
@@ -1131,7 +1137,7 @@ export async function installOverlayVpnPeer(opts: {
     status: "ok";
     interface: string;
     public_key: string;
-    endpoint: string;
+    endpoint: string | null;
     allowed_ips: string[];
     persistent_keepalive: number;
   }>;

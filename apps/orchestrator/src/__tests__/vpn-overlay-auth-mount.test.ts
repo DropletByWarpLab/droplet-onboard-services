@@ -48,6 +48,7 @@ import { authMiddleware } from "../middleware/auth.js";
 import { createVpnRouter } from "../routes/vpn.js";
 import {
   hashToken,
+  buildProfilePopMessage,
   buildStatusPopMessage,
 } from "../services/overlay-link.service.js";
 
@@ -70,6 +71,15 @@ function popHeader(privateKey: unknown, pendingId: string): string {
   return cryptoSign(
     "sha256",
     Buffer.from(buildStatusPopMessage(pendingId), "ascii"),
+    { key: privateKey as never, dsaEncoding: "ieee-p1363" },
+  ).toString("base64");
+}
+
+/** WARP-1757 — the profile fetch's PoP, over its own domain prefix. */
+function profilePopHeader(privateKey: unknown, pendingId: string): string {
+  return cryptoSign(
+    "sha256",
+    Buffer.from(buildProfilePopMessage(pendingId), "ascii"),
     { key: privateKey as never, dsaEncoding: "ieee-p1363" },
   ).toString("base64");
 }
@@ -193,6 +203,49 @@ describe("WARP-1474 — bearer-less by-token routes REACH the handler behind the
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ state: "pending" });
+  });
+
+  // WARP-1757 — the profile fetch is the same bearer-less device using the same
+  // enrollment identity key, so it rides the same trailing-slash prefix. Prove
+  // it REACHES the handler: the tell is a handler-issued 409/503, not the
+  // middleware's 401.
+  it("GET …/by-token/:pending_id/profile is reachable with NO bearer (handler 409, not middleware 401)", async () => {
+    const prisma = createPrismaMock();
+    const { pem, privateKey } = p256();
+    prisma._pendings.push({
+      id: "pend-1",
+      signPublicKeyPem: pem,
+      state: "pending",
+      conflict: false,
+    });
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .get("/api/vpn/overlay/devices/by-token/pend-1/profile")
+      .set("X-Overlay-PoP", profilePopHeader(privateKey, "pend-1"));
+
+    // 409 = the handler ran and refused a not-yet-approved enrollment.
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("not_approved");
+  });
+
+  // Domain separation must hold behind the real gate too: reaching the handler
+  // is not the same as being authorized by it.
+  it("a STATUS signature replayed at …/profile reaches the handler and is refused (401 from the handler)", async () => {
+    const prisma = createPrismaMock();
+    const { pem, privateKey } = p256();
+    prisma._pendings.push({
+      id: "pend-1",
+      signPublicKeyPem: pem,
+      state: "approved",
+      conflict: false,
+    });
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get("/api/vpn/overlay/devices/by-token/pend-1/profile")
+      .set("X-Overlay-PoP", popHeader(privateKey, "pend-1"));
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("unauthorized");
   });
 
   it("a malformed bearer-less by-token POST reaches the handler's 400 (not the middleware 401)", async () => {
