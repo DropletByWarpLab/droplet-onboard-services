@@ -164,6 +164,44 @@ entries:
     review_by: 2027-07-04
     code_refs: [services/voice-io/voice/geo.py]
 
+  # ── WARP-1745 determination: this entry STAYS (re-checked 2026-08-05) ────
+  # Epic WARP-1740 stages Ollama → Docker Model Runner. Phase 1 (WARP-1745)
+  # proposed DELETING the entry below. That was re-checked against the code
+  # and REVERSED. Reasons, in order of weight:
+  #
+  #   1. The egress it documents is still LIVE. Ollama is still the runtime
+  #      (docker/docker-compose.yml:2250 pins ollama/ollama:0.30.8-rocm), and
+  #      apps/orchestrator/src/services/model-readiness.service.ts:358 still
+  #      POSTs /api/pull for any LLM_MODEL/VISION_MODEL missing from
+  #      /api/tags on first boot. The Ollama daemon resolves that to
+  #      registry.ollama.ai. WARP-1745 adds an OCI *pre-seed* path; it does
+  #      NOT remove that call, so a box that was never pre-seeded still makes
+  #      this exact connection on first boot.
+  #   2. This file is the source of truth for the WARP-268 RUNTIME egress
+  #      audit as well as the WARP-269 CI scanner (see the header, the
+  #      `runtime_enforcement` key above, and docs/SECURITY.md:135-136).
+  #      Deleting the entry would not stop the connection — it would delete
+  #      the RECORD of it, turning an audited channel into an undocumented
+  #      one, and would make on-device default-deny break first boot.
+  #
+  # NOT a reason to keep it: "removing it would red the egress gate." It
+  # would not, and that argument should not be repeated. The gate is
+  # one-directional — scripts/check-egress-allowlist.py only fails on hosts
+  # it FINDS that are unregistered (:199). docs/ is outside SCOPE_PREFIXES
+  # (:50-51), so registry.ollama.ai is matched nowhere in scanner scope and
+  # this entry ALREADY prints the non-fatal stale NOTICE (:208) — exactly as
+  # the other daemon/SDK-owned entries do (cloudflare-tunnel-edge,
+  # cloud-llm-providers-optin). The gate is indifferent in both directions;
+  # the reason to keep this is the runtime record, nothing to do with CI.
+  #
+  # REMOVE THIS ENTRY once ALL of the following hold — owner: WARP-1749
+  # ("flip the default runtime"), which is the ticket that makes them true:
+  #   a. the default inference runtime is no longer Ollama;
+  #   b. model-readiness.service.ts reaches Ollama /api/pull on no supported
+  #      boot path (pre-seeded or not); and
+  #   c. no shipped compose profile still starts the `ollama` service.
+  # Until (a)–(c) hold, removing this is a documentation regression, not a
+  # hardening win.
   - id: ollama-model-registry
     kind: egress
     service: orchestrator
@@ -177,6 +215,24 @@ entries:
       First-boot LLM weight download triggered via the local Ollama
       /api/pull (model-readiness service). No repo literal — the Ollama
       daemon owns the destination.
+      SUPERSEDED-IN-WAITING by epic WARP-1740, which moves weights onto
+      content-addressed, signable OCI artifacts. Still live because the
+      /api/pull call still exists — see the removal preconditions above.
+      Note deliberately NO replacement entry is registered yet. WARP-1745
+      ships only the packaging/signing/air-gap-seed tooling; nothing in the
+      running system pulls an OCI model artifact until WARP-1749 repoints
+      model-readiness.service.ts. An entry added now would be matchable by
+      the WARP-268 runtime audit immediately — allowlist matching is on the
+      (service, host, port) tuple, not the host alone, so registering
+      orchestrator->Docker Hub early would reclassify a genuine anomaly
+      (the orchestrator reaching a public registry) as expected traffic
+      months before any code can produce it. Default-deny exists to prevent
+      exactly that. The replacement entry, and its security review, belong
+      on the WARP-1749 PR where the channel actually becomes live.
+      When it is written it must describe the REAL destination: the tooling
+      requires an operator-supplied DROPLET_MODEL_REGISTRY with no default,
+      so the channel is "whichever OCI registry the operator configures",
+      not "Docker Hub".
     ticket: WARP-269
     added: 2026-07-04
     review_by: 2027-07-04
