@@ -34,6 +34,29 @@ type FetchMock = ReturnType<typeof vi.fn>;
 const HOUSEHOLD_HEADLINE = "Wi-Fi settings";
 /** WifiSettingsForm's distinguishing line (the ROUTER write path). */
 const ROUTER_FORM_SUBHEAD = /Name the Wi-Fi network your Droplet broadcasts/i;
+/**
+ * The placeholder's announcement. It is a real (visually hidden) TEXT NODE —
+ * the region carried a duplicate `aria-label` with the same words, which risks
+ * a double announcement in NVDA/JAWS, so the label is gone and the text stays.
+ * Query by text accordingly; `getByRole("status", { name })` would now find
+ * nothing, because role=status takes no accessible name from its contents.
+ */
+const SKELETON_TEXT = /loading wi-fi settings/i;
+/**
+ * The failed-read notice (see the error-branch tests). On the edge-router
+ * shape the form below it writes a radio that hosts nothing, so a bare form
+ * here is a silent wrong-write surface.
+ */
+const FAILED_READ_NOTICE =
+  /We couldn't read your current Wi-Fi settings just now/i;
+
+/** The placeholder card, reached through its live-region text. */
+async function findSkeleton(): Promise<HTMLElement> {
+  const announcement = await screen.findByText(SKELETON_TEXT);
+  const region = announcement.closest('[role="status"]');
+  expect(region).not.toBeNull();
+  return region as HTMLElement;
+}
 
 /** A reachable, editable AP — what wifi/ap reports on the edge-router shape. */
 const AP_WIFI_UP: ApWifiStatus = {
@@ -203,9 +226,7 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     mockEndpoints({ current: "pending" });
     renderTab();
 
-    expect(
-      await screen.findByRole("status", { name: "Loading Wi-Fi settings" }),
-    ).toBeInTheDocument();
+    expect(await findSkeleton()).toBeInTheDocument();
     expect(screen.queryByText(HOUSEHOLD_HEADLINE)).not.toBeInTheDocument();
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
   });
@@ -219,15 +240,16 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     mockEndpoints({ current: "pending" });
     renderTab();
 
-    const skeleton = await screen.findByRole("status", {
-      name: "Loading Wi-Fi settings",
-    });
+    const skeleton = await findSkeleton();
     expect(skeleton.style.minHeight).toBe("300px");
     // A live region whose only content is aria-label is unreliable — the
     // announcement must come from a real (visually hidden) text node.
     const srText = skeleton.querySelector(".sr-only");
     expect(srText).not.toBeNull();
-    expect(srText?.textContent).toMatch(/loading wi-fi settings/i);
+    expect(srText?.textContent).toMatch(SKELETON_TEXT);
+    // …and ONLY from that text node. Carrying both an aria-label and the same
+    // words as content is a double announcement in NVDA/JAWS (review nit 6).
+    expect(skeleton).not.toHaveAttribute("aria-label");
   });
 
   // QA note 1 (second pass): the ONE state whose failure mode is "the user can
@@ -238,8 +260,72 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     renderTab();
 
     expect(await screen.findByText(ROUTER_FORM_SUBHEAD)).toBeInTheDocument();
+    expect(screen.queryByText(SKELETON_TEXT)).not.toBeInTheDocument();
+  });
+
+  // Review finding 1 (third pass): that fallback silently restores the
+  // pre-split bug. On the edge-router shape WifiSettingsForm saves through the
+  // ROUTER write path and reports success while nothing changes on air — and
+  // the form's OWN honesty notice can't fire here, because it is gated on
+  // `live && !live.ssid` and `live` is undefined on the very read that just
+  // failed (same SWR key, same error). Without a notice the user gets a bare,
+  // silently-wrong-write-path form and no explanation.
+  it("a FAILED source read says WHERE this form writes, above the form", async () => {
+    mockEndpoints({ current: "error" });
+    renderTab();
+
+    const notice = await screen.findByText(FAILED_READ_NOTICE);
+    expect(notice).toBeInTheDocument();
+    // Polite live region: the tab announced nothing while it loaded, so the
+    // outcome has to be announced rather than silently swapped in.
+    expect(notice.closest('[role="status"]')).not.toBeNull();
+    // It names the consequence, not just the failure — this form writes THIS
+    // Droplet's radio, which on the edge-router shape hosts nothing.
     expect(
-      screen.queryByRole("status", { name: "Loading Wi-Fi settings" }),
-    ).not.toBeInTheDocument();
+      screen.getByText(/changes the Wi-Fi this Droplet broadcasts itself/i),
+    ).toBeInTheDocument();
+    // Above the form it qualifies, not buried under it.
+    const routerForm = screen.getByText(ROUTER_FORM_SUBHEAD);
+    expect(
+      notice.compareDocumentPosition(routerForm) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeGreaterThan(0);
+  });
+
+  it("the failed-read notice is ONLY for a failed read — a resolved source never shows it", async () => {
+    // `source: null` is a RESOLVED answer ("we asked, there's nothing"), and
+    // WifiSettingsForm already carries its own honest notice for it. A second
+    // one stacked above would be redundant noise.
+    mockEndpoints({
+      current: currentWifi({
+        source: null,
+        ssid: null,
+        key: null,
+        detail: "We couldn't read the Wi-Fi configuration right now.",
+      }),
+    });
+    renderTab();
+
+    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(screen.queryByText(FAILED_READ_NOTICE)).not.toBeInTheDocument();
+  });
+
+  // Review finding 4 (third pass): the AP card is self-sufficient — its own
+  // read, its own honesty states — so a transient wifi/current failure must
+  // not take it away. Dropping it strands a router-shape household with a real
+  // extender: the Devices panel is read-only since WARP-1723, so its "Change
+  // in Wi-Fi settings" link would land on a tab that can't edit what it
+  // promised.
+  it("a FAILED source read keeps the AP card — its own read is independent", async () => {
+    mockEndpoints({ current: "error", apWifi: AP_WIFI_UP });
+    renderTab();
+
+    expect(await screen.findByText(ROUTER_FORM_SUBHEAD)).toBeInTheDocument();
+    // Secondary-slot copy verbatim: nothing here resolved the household to the
+    // AP, so this card must not claim the household slot.
+    expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
+    expect(screen.getByText(/coverage extender/i)).toBeInTheDocument();
+    // …and it is genuinely editable, which is the whole point of keeping it.
+    expect(document.getElementById("ap-wifi-ssid")).not.toBeNull();
   });
 });

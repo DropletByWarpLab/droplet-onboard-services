@@ -65,6 +65,19 @@ describe("Network tabs URL integration (WARP-100)", () => {
     expect(src).toMatch(/router\.push\(/);
   });
 
+  // WARP-1723 review finding 2 (third pass): the switcher and networkTabHref
+  // built the same URL two different ways. The helper's whole reason to exist
+  // is that a cross-surface guarantee shouldn't rest on two literals staying
+  // in sync — if they drift, a cross-tab link's href (the middle-click /
+  // open-in-new-tab / no-JS path) points somewhere the switcher never
+  // produces. One builder, both callers.
+  it("builds its own tab URLs with networkTabHref, not an inline ?tab= literal", () => {
+    expect(src).toMatch(/router\.push\(networkTabHref\(next\)\)/);
+    expect(src).toMatch(/networkTabHref/);
+    // No hand-rolled `?tab=${…}` template anywhere in the page.
+    expect(src).not.toMatch(/`\/network\?tab=\$\{/);
+  });
+
   it("wraps the page in a Suspense boundary for useSearchParams", () => {
     expect(src).toMatch(/<Suspense/);
   });

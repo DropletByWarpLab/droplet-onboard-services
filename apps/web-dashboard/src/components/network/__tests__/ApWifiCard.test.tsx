@@ -120,6 +120,43 @@ describe("honesty fork", () => {
     },
   );
 
+  /**
+   * CHARACTERIZATION — documents CURRENT behaviour, not desired behaviour.
+   *
+   * In the HOUSEHOLD slot a resolved `supported: false` is a dead end: the
+   * edge-router shape puts the household SSID on the access point and nowhere
+   * else, so when that AP is a third-party one (or offline), the tab's only
+   * household editor answers "not available" with no next step and no other
+   * surface to send the user to. There is no honest state for a third-party
+   * AP today — that is a filed product decision, WARP-1738, which will replace
+   * this copy. Pinned so the swap is deliberate and visible in the diff rather
+   * than a silent copy change; do NOT "fix" the behaviour here.
+   */
+  it("household slot, resolved supported:false — documents today's dead end (WARP-1738)", async () => {
+    mockFetch.mockResolvedValue({
+      supported: false,
+      ssid: null,
+      fiveGhzSsid: null,
+      key: null,
+      encryption: null,
+      bandSteering: null,
+      apCount: 0,
+      inSync: true,
+    });
+    renderCard({ slot: "household" });
+
+    // It keeps the household headline — this IS the household slot — and then
+    // says the household Wi-Fi can't be edited at all.
+    await waitFor(() => expect(screen.getByText("Wi-Fi settings")).toBeTruthy());
+    expect(
+      screen.getByText(/needs an approved droplet access point/i),
+    ).toBeTruthy();
+    // No form, and (today) no route onward for a third-party AP.
+    expect(screen.queryByLabelText(/network name/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /save wi-fi settings/i })).toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
   it("reserves the household form's height while resolving (WARP-1726 shrink)", async () => {
     mockFetch.mockReturnValue(new Promise(() => {}));
     const { container } = renderCard({ slot: "household" });

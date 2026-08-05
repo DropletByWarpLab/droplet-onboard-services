@@ -70,7 +70,10 @@ import {
 import type { ApDeviceInfo, ApDeviceStatus, ApOnboardBackend } from "@/lib/types";
 import { networkTabHref } from "@/app/network/tab-url";
 import { ApRadioDetail } from "@/components/network/ApRadioDetail";
-import { AP_WIFI_KEY } from "@/components/network/ApWifiCard";
+import {
+  AP_WIFI_KEY,
+  AP_WIFI_SWR_OPTIONS,
+} from "@/components/network/ApWifiCard";
 import { BandSteeringCard } from "@/components/network/BandSteeringCard";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -833,17 +836,20 @@ export function CoverageExtendersPanel({
 // the network NAME only; the passphrase stays on the edit surface.
 // ────────────────────────────────────────────────────────────────────
 function ApWifiSummary({ onOpenWifiSettings }: CoverageExtendersPanelProps) {
-  // AP_WIFI_KEY, not a second hand-typed literal: WARP-1712's "the two
-  // surfaces can never disagree" guarantee is the SHARED SWR entry, and it
-  // shouldn't rest on two strings staying in sync.
+  // AP_WIFI_KEY *and* AP_WIFI_SWR_OPTIONS, not hand-typed literals: WARP-1712's
+  // "the two surfaces can never disagree" guarantee is the SHARED SWR entry,
+  // and it shouldn't rest on a string — or a refresh cadence — staying in sync
+  // across two files (review nit 5, third pass).
   //
   // `error` matters as much as `data` (UX blocker 2, second pass): without it
   // a persistent fetch failure left `data` undefined forever and this card
   // said "Reading its network name…" permanently — a read-only reflection
   // stuck lying about a network it never read.
-  const { data, error } = useSWR<ApWifiStatus>(AP_WIFI_KEY, fetchApWifi, {
-    refreshInterval: 30000,
-  });
+  const { data, error } = useSWR<ApWifiStatus>(
+    AP_WIFI_KEY,
+    fetchApWifi,
+    AP_WIFI_SWR_OPTIONS,
+  );
 
   return (
     <div className="card">

@@ -217,6 +217,12 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
       expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
       // The live network name the AP broadcasts — never the PSK.
       expect(await screen.findByText("Fotonia Home")).toBeInTheDocument();
+      // BOTH surfaces: the pre-WARP-1723 exposure was an <input value>, which
+      // queryByText does not match at all (it reads text nodes) — that
+      // assertion alone would have passed against the very code it guards.
+      expect(
+        screen.queryByDisplayValue("correct-horse-psk"),
+      ).not.toBeInTheDocument();
       expect(screen.queryByText("correct-horse-psk")).not.toBeInTheDocument();
       expect(screen.getByText("Band steering")).toBeInTheDocument();
     });

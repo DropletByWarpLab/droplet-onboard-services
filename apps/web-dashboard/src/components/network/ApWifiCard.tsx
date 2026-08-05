@@ -80,6 +80,15 @@ const PSK_MAX = 63;
 export const AP_WIFI_KEY = "/api/network/wifi/ap";
 
 /**
+ * The AP Wi-Fi SWR options, exported for the same reason as the key (review
+ * nit 5, third pass): both readers hard-coded `{ refreshInterval: 30000 }`
+ * against the shared key, so the "these two surfaces can never disagree"
+ * contract still rested on a literal in two files. One object, both callers —
+ * change the cadence here and both move together.
+ */
+export const AP_WIFI_SWR_OPTIONS = { refreshInterval: 30_000 } as const;
+
+/**
  * Which slot this card occupies (WARP-1723 second pass, UX blocker 1).
  *
  * On the edge-router shape (`/api/network/wifi/current` → `source: "ap"`) this
@@ -129,7 +138,7 @@ export function ApWifiCard({ slot = "secondary" }: { slot?: ApWifiCardSlot }) {
   const { data, isLoading, mutate } = useSWR<ApWifiStatus>(
     AP_WIFI_KEY,
     fetchApWifi,
-    { refreshInterval: 30000 },
+    AP_WIFI_SWR_OPTIONS,
   );
 
   const [ssid, setSsid] = useState("");

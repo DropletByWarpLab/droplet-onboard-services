@@ -53,7 +53,7 @@ import {
   type NetworkOperation,
   type NetworkTopology,
 } from "@/lib/api";
-import { parseNetworkTab, type Tab } from "./tab-url";
+import { networkTabHref, parseNetworkTab, type Tab } from "./tab-url";
 import {
   scrollToScheduleAnchor,
   scheduleHashFromEvent,
@@ -157,8 +157,13 @@ function NetworkPageInner() {
   const setActiveTab = useCallback(
     (next: Tab) => {
       if (next === activeTab) return;
-      // Default to Overview (no ?tab) to keep the canonical URL clean.
-      router.push(next === "overview" ? "/network" : `/network?tab=${next}`);
+      // networkTabHref, not an inline literal (WARP-1723 review finding 2):
+      // that helper exists so cross-tab LINKS build the same URL this switcher
+      // produces. Two builders can drift, and then a link's href — the
+      // middle-click / open-in-new-tab / no-JS path — points somewhere the
+      // switcher never goes. It also owns the "Overview is the bare /network
+      // path" rule that keeps the canonical URL clean.
+      router.push(networkTabHref(next));
     },
     [router, activeTab],
   );
