@@ -639,6 +639,21 @@ describe("translateError — projects domain (WARP-1154/1155)", () => {
     ).toContain("refresh");
   });
 
+  // WARP-1593: the mint refusal must reach the owner as its own reason, not as
+  // the generic "check the connection" vpn fallback — the connection is fine;
+  // the box simply has no internet address yet.
+  it("maps the overlay mint refusal to its own copy", () => {
+    const copy = translateError(
+      { code: "remote_access_not_configured", status: 503 },
+      "vpn",
+    );
+    expect(copy.toLowerCase()).toContain("internet address");
+    expect(copy).not.toContain("remote_access_not_configured");
+    expect(copy).not.toMatch(/[a-z]+_[a-z]+/);
+    // And it must NOT collapse into the generic network copy.
+    expect(copy).not.toBe(translateError({ code: "NETWORK" }, "vpn"));
+  });
+
   // Home-user persona (ADR-002): snake_case internals must never render.
   // An UNKNOWN code — one added to the orchestrator after this dashboard
   // build shipped — must land on the domain fallback, and neither the code

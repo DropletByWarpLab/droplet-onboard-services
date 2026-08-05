@@ -409,6 +409,14 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We can't reach this Droplet right now. Check the connection and try again.",
     NOT_FOUND: "That remote-access profile is no longer available.",
     TIMEOUT: "That took too long. Try again in a moment.",
+    // WARP-1593: the box refuses to mint a linking QR until it has an internet
+    // address, because the code would otherwise carry a host no phone can
+    // complete an HTTPS enrollment against. translateError never surfaces
+    // err.message verbatim, so without this entry the honest reason would be
+    // flattened to the generic vpn fallback and the owner would be told to
+    // "check the connection" — which is not the problem.
+    remote_access_not_configured:
+      "This Droplet doesn't have its internet address yet, so a linking code can't be created. Finish setting up remote access, then try again.",
   },
   camera: {
     NETWORK:

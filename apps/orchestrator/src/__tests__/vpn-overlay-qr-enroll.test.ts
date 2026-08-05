@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
@@ -233,6 +233,147 @@ describe("POST /api/vpn/overlay/link-tokens (mint)", () => {
     // The end-state invariant still holds: exactly one available, one expired.
     const states = prisma._linkTokens.map((t: any) => t.state).sort();
     expect(states).toEqual(["available", "expired"]);
+  });
+
+  // ── WARP-1593: `server` is an HTTPS API host, never the WG transport ──
+  describe("the QR's `server` never carries the WireGuard transport address", () => {
+    const savedFqdn = config.DROPLET_PUBLIC_FQDN;
+    const savedWgHost = config.WIREGUARD_ENDPOINT_HOST;
+
+    afterEach(() => {
+      (config as any).DROPLET_PUBLIC_FQDN = savedFqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = savedWgHost;
+    });
+
+    // The bug: with no FQDN the mint fell back to WIREGUARD_ENDPOINT_HOST,
+    // which is a UDP transport address. The phone then aimed an HTTPS POST at
+    // udp/51820 and failed with an opaque connection error.
+    it("refuses to mint (503) rather than advertising `host:51820` as the API host", async () => {
+      const { app, prisma } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example:51820";
+      const res = await mint(app);
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe("remote_access_not_configured");
+      expect(JSON.stringify(res.body)).not.toContain("51820");
+      // And nothing was minted — the owner keeps whatever code they had.
+      expect(prisma._linkTokens).toHaveLength(0);
+    });
+
+    // The refusal must precede the supersession transaction, or asking for a
+    // code on an unconfigured box would destroy a working one.
+    it("does not expire the owner's existing token when it refuses", async () => {
+      const { app, prisma } = buildApp();
+      const first = await mint(app);
+      expect(first.status).toBe(201);
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example:51820";
+      expect((await mint(app)).status).toBe(503);
+      expect(prisma._linkTokens.map((t: any) => t.state)).toEqual(["available"]);
+    });
+
+    it("audits the refusal", async () => {
+      const audit: AuditEntry[] = [];
+      const { app } = buildApp({ audit });
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example:51820";
+      await mint(app);
+      expect(
+        audit.some(
+          (a) => a.event === "overlay_link_mint_refused" && a.status === 503,
+        ),
+      ).toBe(true);
+    });
+
+    // A bare operator-supplied hostname is a legitimate box name, not a
+    // transport address — keep honoring it so this fix isn't a regression.
+    it("still accepts a bare WIREGUARD_ENDPOINT_HOST with no port", async () => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "box.example";
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe("box.example");
+    });
+
+    it("refuses when nothing at all is configured", async () => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "";
+      (config as any).WIREGUARD_ENDPOINT_HOST = "";
+      expect((await mint(app)).status).toBe(503);
+    });
+
+    it("strips an accidental scheme from the FQDN", async () => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = "https://d-abc.droplet-us.com/";
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe("d-abc.droplet-us.com");
+    });
+
+    // SEND-BACK — the guard above only ever ran on the WIREGUARD_ENDPOINT_HOST
+    // branch. `DROPLET_PUBLIC_FQDN` is priority 1 and returned BEFORE it, so
+    // every FQDN row here minted a QR carrying a transport address or a path —
+    // the exact thing this function exists to refuse. The table IS the
+    // reproduction, executed, so the two branches can never drift apart again.
+    //
+    // `DROPLET_PUBLIC_FQDN` is not the closed HQ-only channel it looks like:
+    // config.ts declares it `z.string().default("")` with NO shape validation,
+    // and scripts/lib/secrets.sh seeds it into .env as an empty key for an
+    // operator to fill in by hand.
+    it.each([
+      { how: "an FQDN carrying the WG port", fqdn: "box.example:51820", wg: "" },
+      {
+        how: "an FQDN carrying a scheme AND the WG port",
+        fqdn: "https://box.example:51820",
+        wg: "",
+      },
+      { how: "an FQDN carrying a path", fqdn: "box.example/evil", wg: "" },
+      {
+        how: "a WG endpoint host carrying the WG port",
+        fqdn: "",
+        wg: "box.example:51820",
+      },
+      { how: "a WG endpoint host carrying a path", fqdn: "", wg: "box.example/evil" },
+    ])("refuses to mint from $how", async ({ fqdn, wg }) => {
+      const { app, prisma } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = fqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = wg;
+      const res = await mint(app);
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe("remote_access_not_configured");
+      // Nothing about the rejected value may reach the client.
+      expect(JSON.stringify(res.body)).not.toContain("51820");
+      expect(JSON.stringify(res.body)).not.toContain("evil");
+      // And nothing was minted — the owner keeps whatever code they had.
+      expect(prisma._linkTokens).toHaveLength(0);
+    });
+
+    // The guard must stay a scalpel: a legitimate bare host on EITHER branch
+    // still mints, including a bracketed IPv6 literal whose colons belong to
+    // the address rather than to a port.
+    it.each([
+      { how: "a bare FQDN", fqdn: "box.example", wg: "", server: "box.example" },
+      {
+        how: "a bracketed IPv6 FQDN",
+        fqdn: "[2001:db8::1]",
+        wg: "",
+        server: "[2001:db8::1]",
+      },
+      {
+        how: "a bracketed IPv6 WG endpoint host",
+        fqdn: "",
+        wg: "[2001:db8::1]",
+        server: "[2001:db8::1]",
+      },
+    ])("still mints from $how", async ({ fqdn, wg, server }) => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = fqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = wg;
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe(server);
+    });
   });
 });
 
