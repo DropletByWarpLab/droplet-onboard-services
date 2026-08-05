@@ -51,6 +51,7 @@ from .base import (
     AuthenticationError,
     SwitchAPIError,
     InvalidPortError,
+    PoweredMemberError,
 )
 
 logger = logging.getLogger("droplet.switch.openwrt")
@@ -658,8 +659,70 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 return entry
         raise SwitchAPIError(code=404, message=f"No PoE state reported for port {port}")
 
-    async def set_port_poe(self, port: int, enabled: bool) -> dict | None:
+    async def get_fdb(self) -> list[dict]:
+        """Learned MAC→port map from the `bridge.fdb` rpcd plugin (WARP-1734).
+
+        The plugin ships in the switch overlay (droplet-edge-router
+        switch/files/usr/share/rpcd/ucode/droplet-bridge.uc) and already
+        filters the switch's own permanent addresses and the CPU-side port,
+        so what comes back is "what is plugged into which port".
+
+        Degrades to [] on ANY fault — an older image without the plugin
+        answers NOT_FOUND, and an image whose ACL predates the grant answers
+        PERMISSION_DENIED. Neither is an error the caller should see: the
+        topology is simply unknown, and every consumer must already handle
+        that (the PoE guard treats unknown as "cannot prove safe").
+        """
+        try:
+            result = await self._ubus("bridge", "fdb")
+        except (SwitchAPIError, ConnectionLost) as exc:
+            logger.info(
+                "FDB unavailable (%s) — switch image predates the bridge.fdb "
+                "plugin or its ACL grant; topology degrades to unknown", exc,
+            )
+            return []
+        entries = result.get("entries") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            return []
+        out: list[dict] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            mac, port = e.get("mac"), e.get("port")
+            if not isinstance(mac, str) or not isinstance(port, str):
+                continue
+            out.append({"mac": mac.lower(), "port": port, "vlan": e.get("vlan")})
+        return out
+
+    async def port_powers(self, port: int) -> list[str]:
+        """MACs the switch has learned on `port` — i.e. what this port feeds.
+
+        The join that makes the ADR-035 §7 PoE guard possible: `poe info`
+        knows a port draws power, the FDB knows which device is on it, and
+        only together can the control plane say "port 2 powers the AP that is
+        serving the household's Wi-Fi right now".
+        """
+        want = f"lan{port}"
+        return [e["mac"] for e in await self.get_fdb() if e.get("port") == want]
+
+    async def set_port_poe(
+        self, port: int, enabled: bool, force: bool = False,
+    ) -> dict | None:
         self._validate_poe_port(port)
+        # ADR-035 §7 hard refusal. De-powering a device is the one action in
+        # this rack with NO remote recovery: the device cannot roll itself
+        # back, cannot confirm, and cannot be reached to undo it. So a
+        # disable that would darken something the switch can SEE on that port
+        # is refused rather than warned about. `force` is the operator saying
+        # they know. Enables are never guarded — restoring power is safe.
+        if not enabled and not force:
+            powered = await self.port_powers(port)
+            if powered:
+                raise PoweredMemberError(
+                    f"Refusing to cut PoE on port {port}: it powers "
+                    f"{', '.join(powered)}. A de-powered device cannot be "
+                    f"reached to undo this. Pass force=true to override."
+                )
         plan = {"port": port, "enabled": enabled}
         if self._plan_only:
             logger.info("Port %d PoE %s PLANNED (plan_only) — not applied.",

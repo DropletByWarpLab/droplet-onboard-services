@@ -46,6 +46,7 @@ from drivers.base import (
     AuthenticationError,
     SwitchAPIError,
     InvalidPortError,
+    PoweredMemberError,
 )
 from provisioner import ProvisionConfig, reconcile_switch
 import provision_state
@@ -332,6 +333,16 @@ def handle_switch_error(exc: SwitchError):
         raise HTTPException(status_code=503, detail=f"Switch unreachable: {exc}")
     if isinstance(exc, AuthenticationError):
         raise HTTPException(status_code=401, detail=f"Switch auth failed: {exc}")
+    if isinstance(exc, PoweredMemberError):
+        # 409, not 400: the request is well-formed and the operator may
+        # legitimately want it — it conflicts with the CURRENT state of the
+        # rack (something is drawing power on that port). Typed so the
+        # dashboard can name the device and offer the force path, rather
+        # than showing a generic validation error (WARP-1734, ADR-035 §7).
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "PORT_POWERS_MEMBER", "message": str(exc)},
+        )
     if isinstance(exc, InvalidPortError):
         raise HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, SwitchAPIError):
@@ -625,10 +636,23 @@ async def enable_port_poe(port: int):
 
 
 @app.post("/poe/{port}/disable")
-async def disable_port_poe(port: int):
+async def disable_port_poe(port: int, force: bool = False):
+    """Disable PoE on a port.
+
+    Refuses with 409 PORT_POWERS_MEMBER when the switch can SEE a device on
+    that port (WARP-1734, ADR-035 §7) — de-powering is the one action here
+    with no remote recovery. `?force=true` is the operator override; drivers
+    that cannot supply an FDB report no devices and so never refuse.
+    """
     try:
         drv = get_driver()
-        result = await drv.set_port_poe(port, False)
+        try:
+            result = await drv.set_port_poe(port, False, force=force)
+        except TypeError:
+            # Driver predating the guard (no `force` parameter) — its writes
+            # are unguarded by definition, so honour the call rather than
+            # failing it.
+            result = await drv.set_port_poe(port, False)
         return _poe_write_response(result, drv, port, False)
     except SwitchError as exc:
         handle_switch_error(exc)
