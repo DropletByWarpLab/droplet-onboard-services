@@ -166,3 +166,113 @@ describe("WifiSettingsForm (issue #12)", () => {
     expect(pw.type).toBe("text");
   });
 });
+
+/**
+ * WARP-1733 UX review — three polish items the Simple-mode mount made visible.
+ * All three are properties of THIS form, so they are pinned here at the unit
+ * level; the mount-context half of the heading rule is pinned where the two
+ * mounts live (NetworkSimple.test.tsx / WifiTab.test.tsx).
+ */
+describe("WifiSettingsForm — WARP-1733 UX polish", () => {
+  /**
+   * Item A. The failed-read notice used to be its own `.card`, rendered as a
+   * SIBLING above this one. In Advanced that read acceptably — it was the
+   * first thing inside a Wi-Fi-only tab panel. In Simple mode the column
+   * becomes five identically-styled `.card` siblings at `gap-4`, so nothing
+   * ties the notice to the form it qualifies and a household reads it as a
+   * standalone page alert. One card, one subject: the notice belongs inside
+   * the form's card, in the same inset slot as the form's own
+   * `live && !live.ssid` honesty notice.
+   */
+  it("renders the failed-read notice inside its own card, not as a sibling card", () => {
+    const { container } = render(<WifiSettingsForm failedRead />);
+
+    // ONE card — the notice did not bring a second one with it.
+    expect(container.querySelectorAll(".card")).toHaveLength(1);
+    const card = container.querySelector(".card") as HTMLElement;
+    const notice = screen.getByText(
+      /We couldn't read your current Wi-Fi settings just now/i,
+    );
+    expect(card.contains(notice)).toBe(true);
+    // Copy and politeness are unchanged from the sibling-card version:
+    // nothing the user did caused this, so it is announced, not interrupting.
+    expect(notice).toHaveTextContent(
+      /changes the Wi-Fi this Droplet broadcasts itself/i,
+    );
+    expect(notice.closest('[role="status"]')).not.toBeNull();
+  });
+
+  it("puts that notice under the heading and above the fields it qualifies", () => {
+    render(<WifiSettingsForm failedRead />);
+
+    const heading = screen.getByRole("heading", { name: "Wi-Fi settings" });
+    const notice = screen.getByText(
+      /We couldn't read your current Wi-Fi settings just now/i,
+    );
+    const ssid = screen.getByLabelText(/^network name/i);
+    expect(
+      heading.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeGreaterThan(0);
+    expect(
+      notice.compareDocumentPosition(ssid) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeGreaterThan(0);
+  });
+
+  it("says nothing about a failed read when the read did not fail", () => {
+    render(<WifiSettingsForm />);
+    expect(
+      screen.queryByText(/We couldn't read your current Wi-Fi settings/i),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * Item B. ShellPage owns the `<h1>`. Inside the Advanced Wi-Fi tab panel
+   * this card is a subsection, so `h3` is right; in Simple mode it is a
+   * SIBLING of the `<h2>Internet</h2>` hero, and a hardcoded `h3` there claims
+   * the Wi-Fi card is part of the Internet hero. The level is a property of
+   * the mount, not of the card — so the mount supplies it.
+   */
+  it("takes its heading level from the mount context", () => {
+    const { unmount } = render(<WifiSettingsForm />);
+    expect(
+      screen.getByRole("heading", { name: "Wi-Fi settings", level: 3 }),
+    ).toBeInTheDocument();
+    unmount();
+
+    render(<WifiSettingsForm headingLevel="h2" />);
+    expect(
+      screen.getByRole("heading", { name: "Wi-Fi settings", level: 2 }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * Item D. The reveal button wrapped a 16px icon with no padding, so its hit
+   * area was ~16×16 — under WCAG 2.2 SC 2.5.8's 24px floor, on what Simple
+   * mode makes the likeliest phone surface. `p-2` grows the target to 32×32.
+   *
+   * The margin that gives the space back has to be HORIZONTAL ONLY. This
+   * button is absolutely positioned and vertically centred with
+   * `top-1/2 -translate-y-1/2`, and that translate percentage resolves against
+   * the element's own BORDER BOX — which `p-2` just grew from 16px to 32px. So
+   * padding alone re-centres itself (the translate compensates), while a
+   * negative TOP margin subtracts a further 8px that nothing gives back.
+   * Measured in headless Chrome on this exact class list, 46px-tall input,
+   * icon centre Y against the row:
+   *
+   *   no padding    icon centre 23 (centred)
+   *   `p-2 -m-2`    icon centre 15 — 8px HIGH, and 8px above the Lock icon
+   *                 sharing the same input, which has no padding
+   *   `p-2 -mr-2`   icon centre 23 (centred), right inset 12, target 32×32
+   *
+   * jsdom computes no layout, so this pins the mechanism rather than a rect —
+   * and pins the part that actually broke: no negative VERTICAL margin.
+   */
+  it("gives the password reveal a target that clears the 24px floor", () => {
+    render(<WifiSettingsForm />);
+    const reveal = screen.getByRole("button", { name: /show wi-fi password/i });
+    expect(reveal.className).toMatch(/(^|\s)p-2(\s|$)/);
+    expect(reveal.className).toMatch(/(^|\s)-mr-2(\s|$)/);
+    // The regression guard: `-m-2`/`-my-2`/`-mt-2` all break the centring.
+    expect(reveal.className).not.toMatch(/(^|\s)-m[ytb]?-\d/);
+  });
+});
