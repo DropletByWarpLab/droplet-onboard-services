@@ -3274,3 +3274,100 @@ def aps_decommission(mac: str, request: Request):
         }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Fabric member inventory (ADR-035 §5, WARP-1731)
+# ---------------------------------------------------------------------------
+def _synthesize_router_member(router) -> Optional[dict]:
+    """Build the `role=router` member from facts the service already holds.
+
+    The router browses umdns THROUGH itself, so its own
+    `_droplet-router._tcp` advert (WARP-1728) may or may not appear in its
+    own browse results. When it's absent, the inventory would silently lose
+    the one device the service is *connected to* — so synthesize the member
+    from local facts instead: anchor MAC from the wired management bridge
+    (br-lan, falling back to eth0 — ADR-035 §2), model/version/hostname
+    from `system board`, and the connected host as its address.
+
+    Best-effort by design: a ubus fault reading either fact (or a shape
+    without the surfaces, e.g. the mock router) degrades to "no synthesized
+    member" so the mDNS-observed members still return. A total transport
+    loss (`ConnectionLost`) propagates — an unreachable router must surface
+    as 503, not as a quietly router-less inventory.
+    """
+    try:
+        board = router.system.board_info()
+        devices = router.network.device_status()
+    except ConnectionLost:
+        raise
+    except UbusError as exc:
+        logger.warning(
+            "fabric: router-member synthesis skipped (ubus fault reading "
+            "board/device facts): %s", exc,
+        )
+        return None
+    except AttributeError:
+        # Router shape without a device_status surface (ROUTING_MODE=mock).
+        return None
+
+    mac = None
+    if isinstance(devices, dict):
+        for name in ("br-lan", "eth0"):
+            dev = devices.get(name)
+            if isinstance(dev, dict):
+                candidate = dev.get("macaddr")
+                if isinstance(candidate, str) and candidate:
+                    mac = candidate
+                    break
+    if not mac:
+        # Same discipline as the mac-less browse-record drop: no anchor
+        # MAC, no member — never invent an identity (ADR-035 §2).
+        return None
+
+    member: dict = {"role": "router", "mac": mac, "extra": {}}
+    if isinstance(board, dict):
+        if isinstance(board.get("model"), str) and board["model"]:
+            member["model"] = board["model"]
+        release = board.get("release")
+        if isinstance(release, dict):
+            version = release.get("version")
+            if isinstance(version, str) and version:
+                member["version"] = version
+        if isinstance(board.get("hostname"), str) and board["hostname"]:
+            member["hostname"] = board["hostname"]
+    # The address the routing service reaches the router at — the one
+    # address it verifiably holds for this member.
+    member["last_ip"] = OPENWRT_HOST
+    return member
+
+
+@app.get("/fabric/members")
+def fabric_members():
+    """Read-only inventory of every fabric device announcing on the LAN.
+
+    ADR-035 §5: one consumer for ALL `_droplet-*._tcp` service types —
+    AP, switch (whose rich poe_ports/poe_budget advertisement was
+    previously consumed by nothing), router, and any future role. Parsed
+    by `FabricApi.browse_members()` (same WARP-1720 duplicate-key
+    tolerance as AP discovery); a missing router advert is synthesized
+    from local facts (see `_synthesize_router_member`).
+
+    Observations only — no device writes, no lifecycle state machine.
+    `/aps/discovered` and the ADR-005 AP state machine are untouched;
+    the orchestrator's fabric-member reconciler polls this endpoint on
+    the AP-discovery cadence and upserts `FabricMember` rows.
+    """
+    try:
+        r = get_router()
+        members: list[dict] = []
+        fabric = getattr(r, "fabric", None)
+        if fabric is not None and hasattr(fabric, "browse_members"):
+            members = fabric.browse_members()
+        if not any(m.get("role") == "router" for m in members):
+            synthesized = _synthesize_router_member(r)
+            if synthesized is not None:
+                members.append(synthesized)
+        return {"members": members}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)

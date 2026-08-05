@@ -2443,6 +2443,135 @@ class ApApi:
 
 
 # ---------------------------------------------------------------------------
+# High-level API: Fabric member inventory (ADR-035 §5, WARP-1731)
+# ---------------------------------------------------------------------------
+
+# Per-role service types (ADR-035 §5): `_droplet-ap._tcp`,
+# `_droplet-switch._tcp`, `_droplet-router._tcp` today; the pattern keeps
+# future roles discoverable without an SDK change. The captured group is the
+# role fallback when a (mis-flashed) advert omits the `role=` TXT key.
+_FABRIC_SERVICE_RE = re.compile(r"^_droplet-([a-z0-9-]+)\._tcp$")
+
+# TXT keys promoted to top-level member fields; everything else the advert
+# carries (poe_ports/poe_budget on the switch, serial when non-blank, future
+# role-specific keys) lands verbatim in `extra`.
+_FABRIC_KNOWN_TXT_KEYS = frozenset({"role", "mac", "model", "version"})
+
+
+class FabricApi:
+    """Read-only inventory of every `_droplet-*._tcp` announcer on the LAN.
+
+    ADR-035 §5: one consumer browses ALL Droplet service types — the
+    switch's rich advertisement stops announcing into a void. Pure
+    observation: no writes, no lifecycle state machine. The AP onboarding
+    state machine keeps its own dedicated `ApApi.browse_discovered()` path
+    untouched.
+    """
+
+    def __init__(self, router: "DropletRouter"):
+        self._r = router
+
+    def browse_members(self) -> list[dict[str, Any]]:
+        """Parse `umdns browse` into fabric-member records.
+
+        Returns one dict per `_droplet-*._tcp` announcement:
+            {
+                "role": "switch",                 # TXT role= (or the
+                                                  #  service-type fallback)
+                "mac": "70:49:a2:77:64:1a",       # anchor MAC — mandatory;
+                                                  #  mac-less records dropped
+                "model": "...", "version": "...", # when announced
+                "last_ip": "192.168.9.2",
+                "hostname": "droplet-switch",
+                "extra": {"poe_ports": "8", ...}, # role-specific TXT, verbatim
+            }
+
+        Same tolerance contract as `ApApi.browse_discovered`: the WARP-1720
+        duplicate-key hook delivers repeated `txt` as a list and a single
+        TXT record as a bare string — both parse; umdns absent (NOT_FOUND /
+        NO_DATA) degrades to []; only network / auth failures bubble.
+        """
+        try:
+            raw = self._r._call("umdns", "browse")
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
+
+        members: list[dict[str, Any]] = []
+        services = raw if isinstance(raw, dict) else {}
+        for service_type, entries in services.items():
+            match = _FABRIC_SERVICE_RE.match(str(service_type))
+            if match is None or not isinstance(entries, dict):
+                continue
+            for host_key, entry in entries.items():
+                if not isinstance(entry, dict):
+                    continue
+                member = self._parse_member_txt(entry, default_role=match.group(1))
+                if member is None:
+                    continue
+                # Same three-shape ipv4 tolerance as browse_discovered:
+                # plain string, {address}/{ip} dict, or the WARP-1720
+                # repeated-field list (first address wins).
+                ipv4 = entry.get("ipv4")
+                if isinstance(ipv4, list):
+                    ipv4 = ipv4[0] if ipv4 else None
+                if isinstance(ipv4, dict):
+                    ipv4 = ipv4.get("address") or ipv4.get("ip")
+                if isinstance(ipv4, str) and "last_ip" not in member:
+                    member["last_ip"] = ipv4
+                member.setdefault("hostname", host_key)
+                members.append(member)
+        return members
+
+    @staticmethod
+    def _parse_member_txt(
+        entry: dict[str, Any], default_role: str
+    ) -> Optional[dict[str, Any]]:
+        """Tolerant TXT → member parse (mirrors `_parse_droplet_ap_txt`).
+
+        Drops any record without the mandatory `mac=` anchor — the MAC is
+        the orchestrator's primary key (ADR-035 §2) and a record without
+        one cannot be reconciled. Blank TXT values are omitted, never
+        recorded as "".
+        """
+        txt = entry.get("txt")
+        kv: dict[str, str] = {}
+        if isinstance(txt, str):
+            # A single TXT record decodes to a bare string even with the
+            # WARP-1720 hook (the hook only lists keys that repeat).
+            txt = [txt]
+        if isinstance(txt, list):
+            for item in txt:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, _, value = item.partition("=")
+                if key:
+                    kv[key.strip()] = value.strip()
+        elif isinstance(txt, dict):
+            kv = {str(k): str(v) for k, v in txt.items()}
+        else:
+            return None
+
+        mac = kv.get("mac")
+        if not mac:
+            return None
+        member: dict[str, Any] = {
+            "role": kv.get("role") or default_role,
+            "mac": mac,
+        }
+        for k in ("model", "version"):
+            if v := kv.get(k):
+                member[k] = v
+        member["extra"] = {
+            k: v
+            for k, v in kv.items()
+            if k not in _FABRIC_KNOWN_TXT_KEYS and v
+        }
+        return member
+
+
+# ---------------------------------------------------------------------------
 # High-level API: File operations
 # ---------------------------------------------------------------------------
 class FileApi:
@@ -2504,6 +2633,7 @@ class DropletRouter:
         self.system = SystemApi(self)
         self.vpn = VPNApi(self)
         self.ap = ApApi(self)  # WARP-446: coverage extender onboarding
+        self.fabric = FabricApi(self)  # WARP-1731: fabric member inventory
         self.file = FileApi(self)
 
         if auto_login:
