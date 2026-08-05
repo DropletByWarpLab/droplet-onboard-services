@@ -1697,6 +1697,69 @@ enum ApOnboardBackend {
   UNIFI
 }
 
+/// WARP-1732 (ADR-035 §2/§5/§6) — persisted inventory of every device
+/// announcing on the fabric: the edge router, the switch, each AP, and
+/// whatever role ships next.
+///
+/// **Observations only.** This table is a ledger of what the routing
+/// service's `GET /fabric/members` reported, nothing more. It owns no
+/// lifecycle state machine and drives no device writes — `ApDevice` keeps
+/// owning AP lifecycle (ADR-005), and this row existing for an AP MAC says
+/// only "something answered mDNS with that anchor MAC", never "approved".
+/// Deliberately no `status` column: there is no state to machine here, and
+/// inventing one would be exactly the derived-state drift ADR-035 argues
+/// against.
+///
+/// `anchorMac` is the primary key per ADR-035 §2 — the wired management
+/// interface's MAC is the one identifier every observer (mDNS TXT, DHCP,
+/// both FDBs, ARP, the beacon) agrees on. Every write path canonicalizes
+/// it through the existing `src/lib/mac.ts` `normalizeMac`, so the stored
+/// form is always `AA:BB:CC:DD:EE:FF` and a member cannot land twice under
+/// two spellings of the same address.
+///
+/// `role` is a bare String, NOT an enum: ADR-035 §5 explicitly plans for
+/// roles to grow (router | switch | ap today; box and beyond later), and a
+/// role the routing service starts announcing must be storable without a
+/// migration. That is the one place this schema prefers openness — every
+/// other state column in this file stays an explicit enum.
+///
+/// Staleness is a READ, never a delete (ADR-035 §6 — "stale edges dim,
+/// never silently vanish"). A member that stops announcing keeps its row
+/// with `lastSeen` frozen at the last real observation; the reconciler has
+/// no delete path at all. That is what makes "the switch dropped off the
+/// fabric at 10:05" answerable instead of indistinguishable from "the
+/// switch was never here".
+model FabricMember {
+  /// Wired management-interface MAC, canonical `AA:BB:CC:DD:EE:FF`.
+  anchorMac String   @id
+  /// `router` | `switch` | `ap` | … — free-form by design (see above).
+  role      String
+  /// Product string as announced (`Zyxel GS1900-10HP`, `Raspberry Pi 5
+  /// Model B`, …). Null until a member announces one.
+  model     String?
+  /// Firmware/overlay version as announced. Diverging versions across the
+  /// fabric are a dashboard yellow flag; nothing here auto-upgrades.
+  version   String?
+  /// Last IPv4 the member was observed at. A property of the observation,
+  /// not an identity — ADR-035 §2 forbids keying on it.
+  lastIp    String?
+  /// Last hostname the member announced.
+  hostname  String?
+  /// Switch-only PoE facts, parsed from the `poe_ports` / `poe_budget`
+  /// TXT keys the GS1900 already advertises (and which, before ADR-035,
+  /// were consumed by nothing). Null on every non-PoE member — null means
+  /// "not advertised", never "zero ports".
+  poePorts  Int?
+  poeBudget Int?
+  /// First time the orchestrator ever saw this anchor MAC. Write-once.
+  firstSeen DateTime @default(now())
+  /// Last time this member was present in a poll. The staleness signal.
+  lastSeen  DateTime @default(now())
+
+  @@index([role])
+  @@index([lastSeen])
+}
+
 // ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
 //
 // `User` is the local household-directory record. ADDITIVE on top of the

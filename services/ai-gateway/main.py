@@ -315,8 +315,12 @@ async def readiness():
         return {
             "status": "ok",
             "appliance": None,
-            "detail": "ollama-manager not configured (direct path); "
-            "set OLLAMA_MANAGER_URL to surface appliance health.",
+            # WARP-1748: the canonical name. This branch is only reached when
+            # NEITHER INFERENCE_MANAGER_URL nor the deprecated
+            # OLLAMA_MANAGER_URL is set, so advertising only the new name here
+            # cannot mislead a box that is still on the old one.
+            "detail": "inference manager not configured (direct path); "
+            "set INFERENCE_MANAGER_URL to surface appliance health.",
         }
     appliance: dict | None = None
     try:
