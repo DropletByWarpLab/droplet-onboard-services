@@ -51,6 +51,18 @@ class InvalidPortError(SwitchError):
     pass
 
 
+class PoweredMemberError(SwitchError):
+    """Refused: this port powers a device the fabric depends on (WARP-1734).
+
+    ADR-035 §7. Cutting PoE to an enrolled fabric member is the one action in
+    this rack with NO remote recovery: a de-powered device cannot roll itself
+    back, cannot confirm, and cannot be reached to undo the change. It is
+    therefore a hard refusal rather than a warning — the caller must pass
+    ``force=True``, which is the operator saying "I know this darkens the AP".
+    """
+    pass
+
+
 # --- Abstract Driver ---
 
 class SwitchDriver(ABC):
@@ -236,6 +248,33 @@ class SwitchDriver(ABC):
     async def set_port_poe(self, port: int, enabled: bool) -> None:
         """Enable or disable PoE on a port. Raises InvalidPortError for SFP ports."""
         ...
+
+    # --- Topology (WARP-1734, ADR-035 §6) ---
+
+    # NOT abstract, deliberately: FDB is an optional capability, and the
+    # contract below already defines the answer for a backend that lacks it
+    # ("returns []"). Forcing every driver to implement a method whose only
+    # correct implementation would be `return []` buys nothing and breaks
+    # every existing backend the day topology lands.
+    async def get_fdb(self) -> list[dict]:
+        """Which MAC addresses the switch has learned, and on which port.
+
+        This is the port↔device edge — the switch is the only device in the
+        fabric that knows it, and without it the control plane cannot answer
+        "what is plugged into port N", so it cannot know that cutting PoE on
+        a port would darken the AP serving the household's Wi-Fi.
+
+        Returns one entry per LEARNED address (the switch's own permanent
+        addresses and CPU-side ports are excluded by the source, not here)::
+
+            [{"mac": "80:ea:0b:39:ae:23", "port": "lan2", "vlan": 1}, ...]
+
+        Returns [] — never raises — when the backend cannot supply an FDB
+        (a driver without the capability, or a switch image whose ACL does
+        not grant the read). Absence of topology must degrade the guard to
+        "cannot prove this port is safe", never break unrelated calls.
+        """
+        return []
 
     # --- Higher-Level Operations ---
 
