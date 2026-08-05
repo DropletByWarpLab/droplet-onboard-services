@@ -1495,7 +1495,20 @@ export function createPublicAuthRouter(
       const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME] ?? null;
       const refreshTokenInput = refreshTokenBody ?? refreshTokenCookie;
       if (!refreshTokenInput) {
-        res.status(401).json({ error: "No refresh token available" });
+        // WARP-1726 — label the one refresh 401 the server can settle on its
+        // own. No cookie and no body token means there is nothing to rotate and
+        // nothing to verify: the caller simply has no refresh credential. Every
+        // anonymous page load lands here (/api/auth/me 401s, the dashboard
+        // tries a refresh), and while this answer was unlabelled the client
+        // could not tell it from a 401 it was obliged to double-check, so it
+        // spent a THIRD request re-probing /api/auth/me for an answer that was
+        // already definitive. Status and message are unchanged — only the
+        // machine-readable code is new, and no token is burned or cookie
+        // cleared because none was presented.
+        res.status(401).json({
+          error: "No refresh token available",
+          code: "NO_REFRESH_TOKEN",
+        });
         return;
       }
 
