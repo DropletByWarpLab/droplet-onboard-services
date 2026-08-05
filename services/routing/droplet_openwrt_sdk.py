@@ -2364,6 +2364,9 @@ class ApApi:
         ubus call shape changes. This is read-only — never raises on
         empty data; only network / auth failures bubble.
         """
+        # Ask before reading (WARP-1760) — `browse` alone returns a cache that
+        # nothing ever refreshes, so a rebooted AP would never come back.
+        _umdns_query(self._r)
         try:
             raw = self._r._call("umdns", "browse")
         except UbusError as exc:
@@ -2442,6 +2445,31 @@ class ApApi:
         return record
 
 
+def _umdns_query(router) -> None:
+    """Ask the network who is there, best-effort (WARP-1760).
+
+    `umdns browse` returns umdns's CACHE. Nothing else in the control plane
+    ever sends a query, so the box only learned about a device whose
+    unsolicited announcement happened to land while umdns was listening. A
+    device that reboots — or one announcement lost to multicast — then stays
+    invisible INDEFINITELY: the records carry a 4500 s TTL and nobody re-asks.
+    Observed live 2026-08-05: the AP was advertising correctly (its own
+    `umdns announcements` proved it) and the router's browse simply did not
+    have it; a single `umdns update` brought it straight back.
+
+    Deliberately fire-and-forget. Query responses arrive asynchronously over
+    multicast, so blocking here would add latency for results that are not
+    ready yet. We refresh the cache for the NEXT tick and read the current one
+    now — with the poller on a 10 s cadence the inventory self-corrects within
+    one interval instead of never. Any failure is ignored: a stale-but-present
+    cache is strictly better than no discovery at all.
+    """
+    try:
+        router._call("umdns", "update")
+    except (UbusError, ConnectionLost) as exc:
+        logger.debug("umdns update (query) skipped: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # High-level API: Fabric member inventory (ADR-035 §5, WARP-1731)
 # ---------------------------------------------------------------------------
@@ -2491,6 +2519,9 @@ class FabricApi:
         TXT record as a bare string — both parse; umdns absent (NOT_FOUND /
         NO_DATA) degrades to []; only network / auth failures bubble.
         """
+        # Ask before reading (WARP-1760) — see `_umdns_query`. Without this a
+        # member that reboots never returns to the inventory.
+        _umdns_query(self._r)
         try:
             raw = self._r._call("umdns", "browse")
         except UbusError as exc:

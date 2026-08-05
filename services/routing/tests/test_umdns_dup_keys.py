@@ -129,12 +129,20 @@ class TestParseDropletApTxt:
 
 
 class _StubRouter:
-    """Just enough router for ApApi: _call returns the decoded browse."""
+    """Just enough router for ApApi: _call returns the decoded browse.
+
+    Also answers `umdns update` — WARP-1760 made every browse path send a
+    query first, because `browse` alone reads a cache nothing refreshes and a
+    rebooted device would otherwise never reappear. That ordering has its own
+    coverage in test_umdns_query.py; here we only need the call not to blow up.
+    """
 
     def __init__(self, browse_result):
         self._browse = browse_result
 
     def _call(self, obj: str, method: str, args=None):
+        if (obj, method) == ("umdns", "update"):
+            return {}
         assert (obj, method) == ("umdns", "browse")
         return self._browse
 
