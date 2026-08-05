@@ -197,6 +197,14 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // /vpn/overlay/devices) match neither, so they stay authed. The /status
   // handler re-gates itself with the X-Overlay-PoP signature + per-IP/global
   // rate limits before revealing even the coarse state.
+  //
+  // WARP-1757: the same trailing-slash prefix also covers
+  // `…/by-token/<id>/profile`, deliberately — it is the same bearer-less
+  // device using the same enrollment identity key. It re-gates itself the same
+  // way, but over a DIFFERENT domain-prefixed PoP message
+  // (`droplet-overlay-enroll-profile:v1:`), so a captured /status signature
+  // cannot be replayed against it, and it additionally requires the enrollment
+  // to be in state 'approved'.
   const PUBLIC_PREFIXES = [
     "/api/setup/box-name",
     "/api/auth/invites/accept/",

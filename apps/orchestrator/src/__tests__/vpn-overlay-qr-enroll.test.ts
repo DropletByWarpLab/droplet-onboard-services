@@ -17,13 +17,61 @@ vi.mock("../config.js", () => ({
     ROUTING_SERVICE_URL: "http://routing.test",
     ROUTING_SERVICE_TOKEN: "test-token",
     WIREGUARD_HOME_ENDPOINT_HOST: "",
+    // WARP-1757 — approval now provisions a real wg0 peer, so the route needs
+    // the subnet/CIDR/DNS the profile is assembled from.
+    WIREGUARD_VPN_SUBNET: "10.66.0.0/24",
+    WIREGUARD_LAN_CIDR: "192.168.20.0/24",
+    WIREGUARD_HOME_DNS: "192.168.20.1",
+    WIREGUARD_DNS: "192.168.20.1",
   },
+}));
+
+// WARP-1757 — the routing sidecar. Approve installs the wg0 peer and the
+// profile route reads the server public key, so both must be stubbed here;
+// before this ticket the overlay routes never touched the router at all.
+// vi.mock's factory is hoisted above every top-level const, so the doubles it
+// returns must be created inside vi.hoisted() rather than referenced from
+// module scope.
+const { vpnSetupMock, installOverlayPeerMock, FakeRouterError } = vi.hoisted(
+  () => {
+    class FakeRouterError extends Error {
+      code: string;
+      constructor(message: string, code: string) {
+        super(message);
+        this.name = "RouterError";
+        this.code = code;
+      }
+    }
+    return {
+      // Params are declared so the mock's call tuple is typed — the assertions
+      // below read `.mock.calls[0][0]`.
+      vpnSetupMock: vi.fn(async (_opts: Record<string, unknown>) => ({
+        public_key: "SERVERPUBKEY0000000000000000000000000000000=",
+      })),
+      installOverlayPeerMock: vi.fn(
+        async (_opts: Record<string, unknown>) => ({ status: "ok" as const }),
+      ),
+      FakeRouterError,
+    };
+  },
+);
+vi.mock("../services/openwrt.client.js", () => ({
+  vpnSetup: vpnSetupMock,
+  installOverlayVpnPeer: installOverlayPeerMock,
+  vpnStatus: vi.fn(async () => ({})),
+  createVpnPeer: vi.fn(),
+  deleteVpnPeer: vi.fn(async () => ({ status: "ok", removed: 1 })),
+  fetchNetworkSummary: vi.fn(async () => {
+    throw new Error("no summary in unit tests");
+  }),
+  RouterError: FakeRouterError,
 }));
 
 import { createVpnRouter } from "../routes/vpn.js";
 import { createRequestLogger } from "../middleware/request-logger.js";
 import { config } from "../config.js";
 import {
+  buildProfilePopMessage,
   buildStatusPopMessage,
   signKeyFingerprint,
   OVERLAY_LINK_TOKEN_TTL_MS,
@@ -636,6 +684,207 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe("wg_key_conflict");
     expect(overlayEnroll).not.toHaveBeenCalled();
+  });
+
+  // ── WARP-1757: approval provisions the tunnel, it doesn't just vouch ──
+  describe("approval makes the box ready to accept the device's handshake", () => {
+    it("ensures wg0 exists, allocates an address, and installs the ENROLLED key", async () => {
+      const { app, prisma } = buildApp();
+      const pendingId = await stage(app);
+      const res = await approve(app, pendingId);
+
+      expect(res.status).toBe(200);
+      expect(res.body.tunnel_ready).toBe(true);
+
+      // wg0 setup runs unconditionally — without it the FIRST overlay peer on a
+      // box that never minted a legacy static peer fails "wg0 not configured".
+      expect(vpnSetupMock).toHaveBeenCalled();
+
+      // The peer row exists, is an active overlay peer, and holds the key the
+      // DEVICE enrolled with — not a box-minted one.
+      const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+      expect(peer).toBeDefined();
+      expect(peer.kind).toBe("overlay");
+      expect(peer.status).toBe("active");
+      expect(peer.assignedIp).toMatch(/^10\.66\.0\.\d+$/);
+
+      // Cryptokey routing: the router-side AllowedIPs must contain exactly the
+      // address the client will be told to use. If these disagree, a handshake
+      // can complete and every packet still gets dropped.
+      expect(installOverlayPeerMock).toHaveBeenCalledTimes(1);
+      const installed = installOverlayPeerMock.mock.calls[0][0] as any;
+      expect(installed.publicKey).toBe(VALID_WG_KEY);
+      expect(installed.allowedIps).toEqual([`${peer.assignedIp}/32`]);
+    });
+
+    // WireGuard learns a peer's endpoint from its first authenticated
+    // handshake. Configuring one here would pin the box to the punch path and
+    // break the case this whole feature has to serve: a box that is its own
+    // edge router, or behind a port map, reached by a client that initiates.
+    it("installs the peer WITHOUT an endpoint so the client can initiate", async () => {
+      const { app } = buildApp();
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      const installed = installOverlayPeerMock.mock.calls[0][0] as any;
+      expect(installed.endpoint).toBeUndefined();
+    });
+
+    it("stamps QR provenance on the peer row", async () => {
+      const { app, prisma } = buildApp();
+      const pendingId = await stage(app);
+      await approve(app, pendingId);
+      const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+      expect(peer.linkTokenLabel).toBe("Phone");
+      expect(peer.linkTokenEnrolledBy).toBe("owner-1");
+      expect(peer.linkTokenId).toBeDefined();
+    });
+
+    // The HQ vouch already succeeded and is not idempotent, so a provisioning
+    // failure must NOT roll the enrollment back to 'pending' — that would
+    // invite a second vouch for a device HQ already knows.
+    it("keeps the enrollment approved when provisioning fails, and says so", async () => {
+      const audit: AuditEntry[] = [];
+      const { app, prisma } = buildApp({ audit });
+      const pendingId = await stage(app);
+      installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+
+      const res = await approve(app, pendingId);
+      expect(res.status).toBe(200);
+      expect(res.body.state).toBe("approved");
+      expect(res.body.tunnel_ready).toBe(false);
+      expect(prisma._pendings[0].state).toBe("approved");
+      expect(
+        audit.some((a) => a.event === "overlay_enroll_provision_failed"),
+      ).toBe(true);
+    });
+  });
+});
+
+// ── WARP-1757 — GET …/by-token/:pending_id/profile ──
+describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => {
+  async function stageWithKey(app: any) {
+    const tokenRes = await mint(app);
+    const key = p256();
+    const res = await request(app).post("/api/vpn/overlay/devices/by-token").send({
+      token: tokenRes.body.token,
+      wg_public_key: VALID_WG_KEY,
+      sign_public_key_pem: key.pem,
+      label: "Phone",
+    });
+    return { pendingId: res.body.pending_id, key };
+  }
+  const profilePop = (privateKey: any, pendingId: string): string =>
+    cryptoSign(
+      "sha256",
+      Buffer.from(buildProfilePopMessage(pendingId), "ascii"),
+      { key: privateKey, dsaEncoding: "ieee-p1363" },
+    ).toString("base64");
+
+  const getProfile = (app: any, id: string, pop?: string) => {
+    const r = request(app).get(
+      `/api/vpn/overlay/devices/by-token/${id}/profile`,
+    );
+    return pop ? r.set("X-Overlay-PoP", pop) : r;
+  };
+
+  it("issues a complete, self-consistent profile to an approved device", async () => {
+    const { app, prisma } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(200);
+
+    const peer = prisma._vpnPeers.find((p: any) => p.publicKey === VALID_WG_KEY);
+    // The address the client is handed MUST be the one wg0 accepts for its key.
+    expect(res.body.address).toBe(`${peer.assignedIp}/32`);
+    expect(res.body.server_public_key).toBe(
+      "SERVERPUBKEY0000000000000000000000000000000=",
+    );
+    expect(res.body.allowed_ips).toEqual(["192.168.20.0/24", "10.66.0.0/24"]);
+    expect(res.body.dns).toEqual(["192.168.20.1"]);
+    expect(res.body.persistent_keepalive).toBe(25);
+    // Split-tunnel by construction — a default route must never be issued.
+    expect(res.body.allowed_ips).not.toContain("0.0.0.0/0");
+    // Ordered candidate list, best first.
+    expect(res.body.endpoint_candidates[0]).toEqual({
+      kind: "direct",
+      host: "d-abc.droplet-us.com",
+      port: 51820,
+      priority: 100,
+    });
+  });
+
+  it("never returns a private key", async () => {
+    const { app } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(JSON.stringify(res.body).toLowerCase()).not.toContain("private");
+  });
+
+  // Domain separation is the point of a second prefix: a status signature is a
+  // coarse read primitive; a profile signature discloses the box's server key
+  // and endpoints. Neither may be replayed as the other.
+  it("rejects a signature made over the STATUS message", async () => {
+    const { app } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    const res = await getProfile(app, pendingId, popHeader(key.privateKey, pendingId));
+    expect(res.status).toBe(401);
+  });
+
+  it("401s with no PoP, a wrong key, and an unknown id alike (no existence leak)", async () => {
+    const { app } = buildApp();
+    const { pendingId } = await stageWithKey(app);
+    const other = p256();
+    expect((await getProfile(app, pendingId)).status).toBe(401);
+    expect(
+      (await getProfile(app, pendingId, profilePop(other.privateKey, pendingId)))
+        .status,
+    ).toBe(401);
+    const unknown = await getProfile(
+      app,
+      "pend-does-not-exist",
+      profilePop(other.privateKey, "pend-does-not-exist"),
+    );
+    expect(unknown.status).toBe(401);
+    expect(unknown.body.error).toBe("unauthorized");
+  });
+
+  it("409s while the enrollment is still pending", async () => {
+    const { app } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("not_approved");
+    expect(res.body.state).toBe("pending");
+  });
+
+  // Approved but the wg0 peer never landed (provisioning failed, or the row
+  // predates WARP-1757). Handing out a profile whose address nothing accepts
+  // would be a silent dead tunnel; say it plainly instead.
+  it("503s when the device is approved but has no active peer", async () => {
+    const { app, prisma } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    // Provisioning threw before the row was installed router-side; drop any
+    // row so this models the "approved, not provisioned" state exactly.
+    prisma._vpnPeers.length = 0;
+
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("tunnel_not_ready");
+    expect(res.body.message).not.toMatch(/[a-z]+_[a-z]+/);
   });
 });
 

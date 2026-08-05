@@ -1745,7 +1745,10 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             public_key=req.public_key,
             allowed_ips=allowed_ips_uci,
             description=req.description,
-            endpoint=req.endpoint,
+            # WARP-1757: None means "client-initiated, no endpoint configured".
+            # add_peer's `if endpoint:` guard then omits endpoint_host entirely,
+            # which is what lets wg learn it from the first handshake.
+            endpoint=req.endpoint or "",
             persistent_keepalive=req.persistent_keepalive,
         )
         try:
