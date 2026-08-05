@@ -13,11 +13,19 @@
 # Node only — no SAP dependency, no license gate, and it builds on arm64 as
 # happily as on x86_64 (unlike the direct-SQL track, which has no aarch64 SAP
 # client at all).
-FROM node:20-alpine
+#
+# Debian-slim rather than Alpine to match every other Node image in this repo,
+# and because hadolint's DL3008 (unpinned apt versions) is baselined here while
+# DL3018 (unpinned apk versions) is not — see .hadolint.yaml for the rationale.
+FROM node:20-bookworm-slim
 
-# openssl: the harness mints its own private CA at start-up so TLS verification
-# can stay ON (Node has no X.509 signing API). curl: the HEALTHCHECK below.
-RUN apk add --no-cache openssl curl
+# openssl only: the harness mints its own private CA at start-up so TLS
+# verification can stay ON (Node has no X.509 signing API). No curl — the
+# HEALTHCHECK below uses the Node runtime that is already here.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      openssl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /harness
 
@@ -38,8 +46,10 @@ USER node
 EXPOSE 9888
 
 # /help is unauthenticated (it is the discovery page), so it doubles as the
-# liveness probe. -k because the cert chains to the harness's own private CA.
+# liveness probe. It verifies against the harness CA rather than skipping
+# verification: a box whose own certificate no longer checks out is not
+# healthy, and this harness exists to keep that distinction honest.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
-  CMD curl -fsk https://127.0.0.1:9888/help > /dev/null || exit 1
+  CMD ["node", "-e", "const fs=require('node:fs');require('node:https').get({host:'localhost',port:Number(process.env.MOCK_ES_PORT),path:'/help',ca:fs.readFileSync('/harness/.certs/harness-ca.crt')},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
 
 CMD ["node", "main.mjs"]
