@@ -1530,7 +1530,20 @@ export function createPublicAuthRouter(
         // two valid token pairs from being issued for the same refresh token.
         const claimed = await claimRefreshRotation(refreshTokenInput);
         if (!claimed) {
-          res.status(401).json({ error: "Refresh token is already being rotated" });
+          // WARP-1726 — label the conflict. Losing the claim is NOT a verdict
+          // on the session: the token is still live, the winner's rotation is
+          // landing in the shared cookie jar right now, and the caller only has
+          // to retry. Without a machine-readable code the dashboard couldn't
+          // tell this apart from SESSION_EXPIRED / USER_NOT_PROVISIONED below,
+          // so it evicted the cached user and hard-navigated to /login — the
+          // reload loop on the Network tab, whose many concurrent polls make
+          // this race routine rather than exotic. The claim itself is
+          // unchanged: the loser is still rejected, its token is neither burned
+          // nor its cookies cleared, and no second token pair is minted.
+          res.status(401).json({
+            error: "Refresh token is already being rotated",
+            code: "ROTATION_IN_FLIGHT",
+          });
           return;
         }
 

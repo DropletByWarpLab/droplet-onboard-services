@@ -98,7 +98,7 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createPublicAuthRouter } from "./auth.js";
 import { signRefreshToken } from "../services/jwt.service.js";
-import { denyRefreshToken } from "../services/jwt.service.js";
+import { denyRefreshToken, claimRefreshRotation } from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
 
 const aliceRow = {
@@ -145,6 +145,9 @@ function publicApp(prisma: unknown) {
 beforeEach(() => {
   vi.clearAllMocks();
   createSession.mockResolvedValue({ sid: "sid-mint-0001", evictedSids: [] });
+  // `vi.clearAllMocks()` only drops recorded calls — a per-test
+  // `mockImplementation` survives it — so re-arm the happy-path claim here.
+  (claimRefreshRotation as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 });
 
 async function loginAndGetRefreshToken(app: ReturnType<typeof publicApp>) {
@@ -228,5 +231,80 @@ describe("POST /api/auth/refresh — WARP-247 session gate", () => {
     expect(res.status).toBe(401);
     expect(res.body).toMatchObject({ code: "SESSION_EXPIRED", reason: "revoked" });
     expect(checkSession).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-1726 — the rotation-conflict 401 must be DISTINGUISHABLE from a dead
+ * session.
+ *
+ * The dashboard polls the Network tab from many hooks at once, so when the
+ * access token expires several requests 401 together and race into
+ * `/auth/refresh`. `claimRefreshRotation` lets exactly one of them through;
+ * the losers used to get a bare 401 with only a human message, which the
+ * dashboard's `authFetch` read as "session is dead" → clear the cached user →
+ * hard-navigate to /login. That full page load is the reload loop users see.
+ *
+ * The claim itself is unchanged (the loser is still rejected — that's what
+ * stops two live token pairs existing for one refresh token); we only LABEL
+ * the answer so the client can tell "someone else is rotating, retry in a
+ * moment" from "log in again".
+ */
+describe("POST /api/auth/refresh — rotation-conflict labelling (WARP-1726)", () => {
+  it("answers the loser of two concurrent refreshes with 401 + ROTATION_IN_FLIGHT", async () => {
+    const app = publicApp(createPrismaMock());
+    const refreshToken = await loginAndGetRefreshToken(app);
+
+    // Model the real single-claim semantics: the first caller takes the claim,
+    // every later caller loses it until it expires.
+    let claimTaken = false;
+    (claimRefreshRotation as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      if (claimTaken) return false;
+      claimTaken = true;
+      return true;
+    });
+
+    const [first, second] = await Promise.all([
+      request(app).post("/api/auth/refresh").send({ refreshToken }),
+      request(app).post("/api/auth/refresh").send({ refreshToken }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual([200, 401]);
+    const loser = first.status === 401 ? first : second;
+    expect(loser.body).toMatchObject({
+      error: "Refresh token is already being rotated",
+      code: "ROTATION_IN_FLIGHT",
+    });
+  });
+
+  it("rejects the losing claim without burning the token or clearing cookies", async () => {
+    const app = publicApp(createPrismaMock());
+    const refreshToken = await loginAndGetRefreshToken(app);
+
+    (claimRefreshRotation as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+
+    const res = await request(app).post("/api/auth/refresh").send({ refreshToken });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("ROTATION_IN_FLIGHT");
+    // Security posture unchanged: no new token pair for the loser…
+    expect(res.body.accessToken).toBeUndefined();
+    // …and the token stays live for the winner's rotation to consume, so the
+    // conflict must NOT denylist it or tear the browser's cookies down.
+    expect(denyRefreshToken).not.toHaveBeenCalledWith(refreshToken);
+    expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+
+  // The dead-session 401 keeps its OWN code — the client branches on these two
+  // being different, so a regression that collapsed them would be silent.
+  it("keeps SESSION_EXPIRED distinct from ROTATION_IN_FLIGHT", async () => {
+    const app = publicApp(createPrismaMock());
+    const refreshToken = await loginAndGetRefreshToken(app);
+
+    (checkSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ kind: "missing" });
+
+    const res = await request(app).post("/api/auth/refresh").send({ refreshToken });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SESSION_EXPIRED");
   });
 });
