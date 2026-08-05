@@ -5,7 +5,7 @@
 // the default page (+ reserved fields like `metadata`); a non-page named export
 // such as DevicesTab fails `next build`, so this component lives in its own module.
 import { useState } from "react";
-import { Loader2, Monitor } from "lucide-react";
+import { AlertCircle, Loader2, Monitor } from "lucide-react";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
@@ -104,6 +104,20 @@ export function DevicesTab() {
   const isLoading =
     devicesSwr.data === undefined && (devicesSwr.isLoading || devicesSwr.isValidating);
 
+  // WARP-1726 (second pass): tell a FAILED load apart from a load that really
+  // returned nothing. Without this the tab settled, between poll ticks, on
+  // "your router hasn't seen any devices yet" — a confident claim about the
+  // router made while we had in fact never heard back from the orchestrator at
+  // all (an expired access token, a box mid-reboot). That sentence is the
+  // reported symptom, "shows no devices", in the app's own voice.
+  //
+  // Gated on `data === undefined` so it only ever describes a COLD load. Once a
+  // good response has landed, SWR keeps serving it and a later poll failure
+  // must not replace a screen full of devices with an error card — the next
+  // tick usually repairs it silently. A definitive zero (data present, no
+  // devices) likewise stays the router's story to tell.
+  const loadFailed = devicesSwr.data === undefined && Boolean(devicesSwr.error);
+
   return (
     <div>
       {/* WARP-446: coverage extenders panel — auto-discovered + approved
@@ -184,7 +198,33 @@ export function DevicesTab() {
         </div>
       )}
 
-      {!isLoading && devices.length === 0 && (
+      {/* The load never landed. Same card, same retry — only the claim
+          changes, from one about the router to one about the connection.
+          `role="status"` (polite) rather than "alert": this is a state the
+          user navigated to, not an interruption, and it self-heals on the next
+          successful poll. AlertCircle in system-orange, the warning token — a
+          transient failure is not destructive-red. */}
+      {!isLoading && loadFailed && (
+        <div role="status" className="card text-center" style={{ padding: "48px 20px" }}>
+          <AlertCircle size={32} className="mx-auto text-system-orange mb-3" aria-hidden="true" />
+          <h3 className="type-title-3 text-[color:var(--text)] mb-1">
+            Couldn&apos;t load your devices
+          </h3>
+          <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
+            Something interrupted the connection. Your devices are still there
+            &mdash; try again in a moment.
+          </p>
+          <button
+            type="button"
+            onClick={() => devicesSwr.mutate()}
+            className="btn ghost sm"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!isLoading && !loadFailed && devices.length === 0 && (
         <div className="card text-center" style={{ padding: "48px 20px" }}>
           <Monitor size={32} className="mx-auto text-[color:var(--text-faint)] mb-3" />
           <h3 className="type-title-3 text-[color:var(--text)] mb-1">
