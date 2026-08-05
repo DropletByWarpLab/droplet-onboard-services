@@ -75,6 +75,7 @@ export {
 export {
   EaglesoftConnector,
   ConnectorBlockedError,
+  SQL_TRACK_REMEDIATION,
   fingerprintTables,
   type Connector,
   type ConnectorConfig,
@@ -86,6 +87,7 @@ export {
 export {
   EaglesoftApiConnector,
   DEFAULT_API_HTTPS_PORT,
+  API_TRACK_REMEDIATION,
   type EaglesoftApiConfig,
   type EaglesoftApiDeps,
 } from "./api-connector.js";

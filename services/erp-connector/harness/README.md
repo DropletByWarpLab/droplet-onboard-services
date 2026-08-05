@@ -5,10 +5,11 @@ whole Droplet ↔ Eaglesoft setup — provisioning, least-privilege reads, the
 optimistic-guarded write — **without a real dental office, a live server, or any
 PHI.**
 
-There are two variants:
+There are three variants:
 
 | Variant | Faithful to | Runs today? | Use it to |
 |---|---|---|---|
+| **`./eaglesoft-api/` (dummy REST box)** | the **Patterson REST API** on HTTPS :9888 — auth handshake, `/help` discovery, TLS, HTTP failure modes | ✅ yes, no SAP dependency, no Docker needed | **drive the real `EaglesoftApiConnector` end-to-end over a real socket** |
 | **`./` (PostgreSQL)** | the **schema + data shapes + privilege model** | ✅ yes, zero SAP dependency | dry-run the connector's actual read/write SQL + the `droplet_ro`/`droplet_rw` model |
 | **`./sqlanywhere/` (real dbsrv17)** | the **SQL Anywhere wire protocol, port 2638, catalog views** | ⛔ needs the (free) SAP Developer Edition binaries | prove the native driver + `provision.sql` against a real engine (the WARP-1106 driver-bridge target) |
 
@@ -16,6 +17,25 @@ There are two variants:
 > and the client the connector needs is license-governed. The Postgres mock lets
 > you exercise everything *except* the SQL Anywhere wire protocol **now**; the
 > `sqlanywhere/` variant closes that last gap once you drop in the SAP binaries.
+
+## Which harness do I want?
+
+Eaglesoft is **two providers**, and only one of them can be connection-tested
+today. Pick by the track you are installing:
+
+| Track | Provider key | Harness | Can our connector actually talk to it? |
+|---|---|---|---|
+| Patterson REST API (HTTPS :9888) | `eaglesoft-api` | [**`eaglesoft-api/`**](eaglesoft-api/) | ✅ **Yes — end-to-end over real TLS.** The HTTP machinery is real code; only the route map and credentials are injected. |
+| Direct SAP SQL Anywhere (:2638) | `eaglesoft` | `./` (Postgres) or `sqlanywhere/` | ⛔ **No.** `EaglesoftConnector` is entirely stubbed — every method throws `ConnectorBlockedError`. There is no driver to connect *with*. |
+
+That asymmetry is the important thing to understand before an install. On the
+SQL track the blocker is **not** the absence of a server to test against — it is
+the missing Python/unixODBC (`libdbodbc17_r.so`) driver bridge. Standing up a
+real `dbsrv17` would not change that; the connector still has no way to dial it.
+So the Postgres harness proves the **SQL text, schema shape, and privilege
+model**, and [`__tests__/harness-postgres-drift.test.ts`](../__tests__/harness-postgres-drift.test.ts)
+keeps it honest — it parses `init/01-schema.sql`, rebuilds every registered
+query against it, and fails if `smoke.sql` or the grants drift from the code.
 
 ---
 

@@ -101,9 +101,24 @@ contract, so the bridge language is invisible to it.
 ```bash
 # From the repo root (matches the package's own scripts):
 npm run -w @droplet/erp-connector build   # tsc
-npm run -w @droplet/erp-connector test    # vitest run — 58/58
+npm run -w @droplet/erp-connector test    # vitest run
 ```
 
-All tests are pure unit tests. There are **no mock-database integration
-tests** (team rule): DB-touching paths stay stubbed and are proven against a
-restored copy of `PattersonPM.db` in a later phase, never a faked database.
+**The SQL track has no mock-database tests, and must not** (team rule):
+DB-touching paths stay stubbed and are proven against a restored copy of
+`PattersonPM.db` in a later phase, never a faked database. What guards that
+track here is `__tests__/harness-postgres-drift.test.ts` — it parses the dry-run
+harness's DDL, rebuilds every registered query and grant against it, and fails
+when they drift. It asserts the harness still matches the code; it never
+pretends a fake database is Eaglesoft.
+
+**The REST track is different, and is tested against a live server.**
+`__tests__/api-connector.live.test.ts` starts the dummy Eaglesoft API box in
+[`harness/eaglesoft-api/`](harness/eaglesoft-api/) and drives the real
+`EaglesoftApiConnector` across a real TLS socket. That is not a faked
+Eaglesoft standing in for the real one: the connector's blocked-by-default
+contract is unchanged, and what the suite proves is the transport — TLS
+verification, the auth handshake, timeouts, 5xx, dropped connections, non-JSON
+bodies, and the honest degradation each produces. Those are the failures an
+install hits, and a mocked `fetch` cannot produce any of them. It needs no
+Docker (in-process, ephemeral port) and runs in the existing CI leg.

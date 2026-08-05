@@ -24,14 +24,28 @@ import {
 import { getReadQuery, type BuiltStatement } from "./read-queries.js";
 import { getWriteCommand } from "./write-commands.js";
 
-/** Thrown by every stubbed driver boundary in this DB-independent slice. */
+/** What the direct-SQL track is waiting on. The default, since that track is
+ *  where this error originated. */
+export const SQL_TRACK_REMEDIATION =
+  "needs the SAP SQL Anywhere client + a restored copy of PattersonPM.db " +
+  "(WARP-1094 Phase 0 is DB-independent only)";
+
+/**
+ * Thrown at every blocked boundary. Both providers throw THIS type so the
+ * orchestrator's honest-degradation branch (`instanceof ConnectorBlockedError`)
+ * stays single-typed.
+ *
+ * `remediation` says what is actually missing. It is a parameter rather than a
+ * constant because the two tracks are blocked on entirely different things: a
+ * REST-track TLS or credential failure has nothing to do with a SQL Anywhere
+ * client, and telling an installer otherwise sends them down the wrong path
+ * during triage. Callers that don't pass one get the SQL-track text, which is
+ * the historical behaviour.
+ */
 export class ConnectorBlockedError extends Error {
   readonly code = "CONNECTOR_BLOCKED";
-  constructor(operation: string) {
-    super(
-      `"${operation}" is blocked: needs the SAP SQL Anywhere client + a ` +
-        `restored copy of PattersonPM.db (WARP-1094 Phase 0 is DB-independent only)`,
-    );
+  constructor(operation: string, remediation: string = SQL_TRACK_REMEDIATION) {
+    super(`"${operation}" is blocked: ${remediation}`);
     this.name = "ConnectorBlockedError";
   }
 }
