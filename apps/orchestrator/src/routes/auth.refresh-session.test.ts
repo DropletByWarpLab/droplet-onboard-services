@@ -308,3 +308,60 @@ describe("POST /api/auth/refresh — rotation-conflict labelling (WARP-1726)", (
     expect(res.body.code).toBe("SESSION_EXPIRED");
   });
 });
+
+/**
+ * WARP-1726 (second pass) — "you presented no refresh token" is the one 401 the
+ * server can answer DEFINITIVELY without the client checking its work.
+ *
+ * Every anonymous page load walks /api/auth/me → 401 → /api/auth/refresh. That
+ * refresh has no cookie and no body token, so it cannot possibly rotate
+ * anything. Unlabelled, the dashboard could not tell it from a 401 it had to
+ * verify, and spent a THIRD request (/api/auth/me again) re-confirming what the
+ * server already knew for certain — on every anonymous cold boot. Labelling it
+ * lets the client skip that probe. The status stays 401: only the code is new.
+ */
+describe("POST /api/auth/refresh — the no-token 401 is labelled (WARP-1726)", () => {
+  it("answers a cookieless, bodyless refresh with 401 + NO_REFRESH_TOKEN", async () => {
+    const app = publicApp(createPrismaMock());
+
+    const res = await request(app).post("/api/auth/refresh").send({});
+
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({
+      error: "No refresh token available",
+      code: "NO_REFRESH_TOKEN",
+    });
+  });
+
+  it("does not burn a token or clear cookies — there was nothing to act on", async () => {
+    const app = publicApp(createPrismaMock());
+
+    const res = await request(app).post("/api/auth/refresh").send({});
+
+    expect(denyRefreshToken).not.toHaveBeenCalled();
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    // No rotation claim is taken for a request that carries no token.
+    expect(claimRefreshRotation).not.toHaveBeenCalled();
+  });
+
+  // The three definitive-ish codes must stay distinct: the dashboard branches on
+  // them and a regression that collapsed any pair would be silent.
+  it("keeps NO_REFRESH_TOKEN distinct from SESSION_EXPIRED and ROTATION_IN_FLIGHT", async () => {
+    const app = publicApp(createPrismaMock());
+    const refreshToken = await loginAndGetRefreshToken(app);
+
+    (checkSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ kind: "missing" });
+    const expired = await request(app).post("/api/auth/refresh").send({ refreshToken });
+
+    (claimRefreshRotation as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const rotating = await request(app).post("/api/auth/refresh").send({ refreshToken });
+
+    const absent = await request(app).post("/api/auth/refresh").send({});
+
+    expect([expired.body.code, rotating.body.code, absent.body.code]).toEqual([
+      "SESSION_EXPIRED",
+      "ROTATION_IN_FLIGHT",
+      "NO_REFRESH_TOKEN",
+    ]);
+  });
+});
