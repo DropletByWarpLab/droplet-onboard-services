@@ -236,7 +236,9 @@ export interface PortMapping {
 
 export interface CandidateInput {
   placement: PlacementResult;
-  /** The box's LAN-facing address, for a client already on the home network. */
+  /** The box's LAN-facing address, for a client already on the home network.
+   *  Only used when it is actually private — see the gate in
+   *  {@link buildCandidates}; the probe behind it can return a public address. */
   lanAddress: string | null;
   /** A stable mapping obtained from the upstream gateway, if any. */
   mapping: PortMapping | null;
@@ -280,12 +282,24 @@ const PRIORITY = {
  *    address as `direct`, and a duplicate just costs a wasted attempt.
  *  - `direct` is only emitted when we actually established we are the edge.
  *    A public reflexive address alone does not prove it.
+ *  - `lan` is withheld unless the address is actually PRIVATE. Well-formed
+ *    IPv4 is not enough: on the single-box shape (the default shipping SKU)
+ *    the LAN probe has no routing-summary WAN interface to read and falls back
+ *    to the SAME device-bridge uplink-ip probe that supplies `wanAddress`, so
+ *    on an edge_public box it returns the box's PUBLIC address. Emitting that
+ *    would advertise a public address to clients labelled `lan` and duplicate
+ *    `direct` — the exact redundancy `srflx` is withheld to avoid.
+ *
+ * And the same reasoning generalised: candidates colliding on host:port are
+ * collapsed before returning, keeping the highest-priority kind. A second
+ * candidate at an address already in the ladder tells the client nothing new
+ * and costs it a wasted handshake.
  */
 export function buildCandidates(input: CandidateInput): EndpointCandidate[] {
   const { placement, lanAddress, mapping, listenPort } = input;
   const out: EndpointCandidate[] = [];
 
-  if (lanAddress && parseIpv4(lanAddress)) {
+  if (lanAddress && isPrivateIpv4(lanAddress)) {
     out.push({
       kind: "lan",
       host: lanAddress,
@@ -327,7 +341,27 @@ export function buildCandidates(input: CandidateInput): EndpointCandidate[] {
     });
   }
 
-  return out.sort((a, b) => b.priority - a.priority);
+  return dedupeByTransport(out.sort((a, b) => b.priority - a.priority));
+}
+
+/**
+ * Collapse candidates that resolve to the same transport address, keeping the
+ * highest-priority kind.
+ *
+ * Runs on the ALREADY-SORTED ladder, so first-seen is highest-priority by
+ * construction rather than by relying on the order the pushes happen to be
+ * written in. A stable `mapped` therefore survives over an identical `srflx`
+ * observation, which is the right way round: one is a mapping the gateway
+ * promised to hold, the other is a mapping we merely watched happen once.
+ */
+function dedupeByTransport(sorted: EndpointCandidate[]): EndpointCandidate[] {
+  const seen = new Set<string>();
+  return sorted.filter((c) => {
+    const key = `${c.host}:${c.port}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**

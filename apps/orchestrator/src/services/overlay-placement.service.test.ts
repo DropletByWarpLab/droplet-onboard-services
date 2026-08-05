@@ -331,6 +331,51 @@ describe("buildCandidates", () => {
     expect(c).toEqual([]);
   });
 
+  // `lan` asserts "a client already on the home network can dial this". A
+  // PUBLIC address is by definition not that, and well-formed-IPv4 is not a
+  // sufficient check: on the single-box shape the LAN probe falls back to the
+  // SAME device-bridge uplink-ip probe that supplies `wanAddress`, so on an
+  // edge_public box it hands back the box's public address. Emitting it would
+  // both mislabel a public address as LAN and duplicate `direct`.
+  it("withholds the LAN candidate when the address is not actually private", () => {
+    const c = buildCandidates({
+      placement: placement({ placement: "edge_public", publicPort: 51820 }),
+      lanAddress: "203.0.113.7",
+      mapping: null,
+      listenPort: 51820,
+    });
+    expect(c.map((x) => x.kind)).toEqual(["direct"]);
+  });
+
+  // CGNAT is not LAN either — a client on the home network cannot reach the box
+  // at the address the ISP's NAT handed it.
+  it("withholds the LAN candidate for a CGNAT address", () => {
+    const c = buildCandidates({
+      placement: placement({ placement: "cgnat" }),
+      lanAddress: "100.100.7.7",
+      mapping: null,
+      listenPort: 51820,
+    });
+    expect(c).toEqual([]);
+  });
+
+  // Belt and braces behind the `lan` gate, and it covers the other kinds too: a
+  // transport address appears once whatever produced it. A duplicate only costs
+  // the client a wasted handshake — the same reasoning that already withholds
+  // `srflx` on an edge_public box, applied to every pair rather than one
+  // hand-picked case.
+  it("collapses candidates that collide on host:port, keeping the higher priority", () => {
+    const c = buildCandidates({
+      placement: placement({ publicPort: 51820 }),
+      lanAddress: null,
+      mapping: { host: "203.0.113.7", port: 51820 },
+      listenPort: 51820,
+    });
+    expect(c).toEqual([
+      { kind: "mapped", host: "203.0.113.7", port: 51820, priority: 80 },
+    ]);
+  });
+
   // Still unknown-placement: we don't know we're the edge, but the reflexive
   // mapping is still worth trying.
   it("still offers srflx when placement is unknown but a mapping was observed", () => {
@@ -373,6 +418,33 @@ describe("observePlacement", () => {
     );
     expect(s.placement.placement).toBe("edge_public");
     expect(s.candidates.map((c) => c.kind)).toEqual(["lan", "direct"]);
+  });
+
+  // The single-box shape — the DEFAULT shipping SKU — has no routing-summary
+  // WAN interface, so the LAN probe (`resolveHomeEndpointHost`) falls back to
+  // the SAME device-bridge /host/uplink-ip probe that supplies `wanAddress`. On
+  // an edge_public box that probe returns the box's PUBLIC address, so both
+  // arrive here identical. That is modelled honestly as ONE probe behind two
+  // call sites: handing this case an artificially distinct LAN address would
+  // mask the very collision it exists to catch.
+  //
+  // The box's public IP must never be advertised to a client labelled `lan`,
+  // and the ladder must never carry the same transport address twice.
+  it("never advertises the public address as `lan` when the single-box LAN probe falls back to the WAN probe", async () => {
+    const uplinkIp = async () => "203.0.113.7";
+    const s = await observePlacement(
+      {
+        wanAddress: uplinkIp,
+        stun: async () => "203.0.113.7:51820",
+        lanAddress: uplinkIp,
+      },
+      { listenPort: 51820 },
+    );
+    expect(s.placement.placement).toBe("edge_public");
+    expect(s.candidates.map((c) => c.kind)).toEqual(["direct"]);
+    expect(s.candidates.some((c) => c.kind === "lan")).toBe(false);
+    const transports = s.candidates.map((c) => `${c.host}:${c.port}`);
+    expect(new Set(transports).size).toBe(transports.length);
   });
 
   // An unreachable device-bridge must cost a weaker candidate list, never a
