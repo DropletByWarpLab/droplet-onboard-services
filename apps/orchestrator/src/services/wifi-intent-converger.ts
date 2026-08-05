@@ -213,10 +213,14 @@ export function createWifiIntentConverger(
           continue;
         }
 
-        if (!live.supported) {
-          // The AP answered but cannot report wireless (image predates the
-          // surface, no credential). Unjudgeable is NOT drifted — pushing at
-          // a device we cannot read back would be writing blind.
+        if (!live.supported || typeof live.ssid !== "string") {
+          // The AP answered but cannot report a wireless name (image predates
+          // the surface, no credential, no primary section). Unjudgeable is
+          // NOT drifted, for two reasons: pushing at a device we cannot read
+          // back is writing blind, and calling it drift would re-push on
+          // EVERY tick forever, since the next read would be just as silent.
+          // A converger that cannot verify its own repair must not keep
+          // attempting it.
           result.skipped += 1;
           continue;
         }

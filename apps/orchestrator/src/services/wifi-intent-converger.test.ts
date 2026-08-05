@@ -289,6 +289,24 @@ describe("wifi.primary converger (WARP-1761)", () => {
     expect(stateOf(prisma, AP_MAC)).toBeUndefined();
   });
 
+  // Without this guard the AP would be judged "drifted" on every single tick
+  // — a permanent write storm at a radio whose answer can never confirm the
+  // repair landed.
+  it("skips an AP that reports wireless but no name, rather than re-pushing forever", async () => {
+    const prisma = createPrismaMock({ intent: { ssid: "Droplet", generation: 1 } });
+    const routing = makeRouting({
+      getApWireless: vi.fn(async () => wireless({ ssid: undefined })),
+    });
+
+    const converger = createWifiIntentConverger(prisma as any, routing);
+    await converger.pollOnce();
+    await converger.pollOnce();
+    await converger.pollOnce();
+
+    expect(routing.setApWireless).not.toHaveBeenCalled();
+    expect(stateOf(prisma, AP_MAC)).toBeUndefined();
+  });
+
   it("an unreachable AP degrades to a logged no-op and never aborts the sweep", async () => {
     const prisma = createPrismaMock({
       intent: { ssid: "Droplet", generation: 1 },
