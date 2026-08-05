@@ -140,6 +140,53 @@ async function resolveEndpointHost(): Promise<string> {
 export function _resetEndpointCacheForTests(): void {}
 
 /**
+ * WARP-1593 — resolve the host a QR-enrolling client should call the **HTTPS
+ * enrollment API** on.
+ *
+ * This is deliberately NOT `resolveEndpointHost()`. That function answers a
+ * different question — "where does WireGuard send UDP?" — and its second
+ * priority, `WIREGUARD_ENDPOINT_HOST`, is a *transport* address that in
+ * practice carries the WG port (`box.example:51820`). Minting an enroll QR
+ * from it told the phone to POST an HTTPS request at the WireGuard UDP port,
+ * which can never complete; the failure surfaced on the phone as a generic
+ * connection error with nothing pointing at the real cause (an unconfigured
+ * box). Clients must not have to know port policy to undo that — so the split
+ * lives here.
+ *
+ * Priority:
+ *   1. `DROPLET_PUBLIC_FQDN` — the per-device `<name>.droplet-us.com` name the
+ *      box learns from HQ (ADR-023). Split-horizon: it resolves on the home
+ *      LAN, which is where enrollment happens, and over the tunnel afterwards.
+ *   2. `WIREGUARD_ENDPOINT_HOST` **only when it is a bare host** — an operator
+ *      who set a plain hostname meant "this is the box's name"; one who set
+ *      `host:port` gave a transport address, and that is exactly the input
+ *      this function exists to reject.
+ *   3. Empty — the caller refuses to mint and says so honestly.
+ *
+ * Returns a bare host (no scheme, no port); clients build `https://<host>`.
+ */
+export function resolveEnrollApiHost(): string {
+  const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
+  if (fqdn) return stripSchemeAndSlash(fqdn);
+  const override = stripSchemeAndSlash(
+    (config.WIREGUARD_ENDPOINT_HOST ?? "").trim(),
+  );
+  // A port means a transport address, never an API host. Bracketed IPv6
+  // literals ("[::1]") are checked after the brackets so they aren't mistaken
+  // for a port-bearing host.
+  const afterBracket = override.startsWith("[")
+    ? override.slice(override.indexOf("]") + 1)
+    : override;
+  if (afterBracket.includes(":")) return "";
+  return override;
+}
+
+/** Drop an accidental scheme prefix and any trailing slash from a host value. */
+function stripSchemeAndSlash(value: string): string {
+  return value.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "").replace(/\/+$/, "");
+}
+
+/**
  * WARP-1283: RouterError codes that mean "the routing sidecar is unavailable
  * right now" — unreachable, timed out, or intentionally disabled. All three
  * carry HTTP 503 per WARP-807, and this set mirrors the dashboard's
@@ -400,6 +447,26 @@ export function createVpnRouter(
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const createdBy = req.user?.id ?? "unknown";
+        // WARP-1593: resolve the API host BEFORE minting anything. A QR whose
+        // `server` we can't fill honestly is worse than no QR — and the mint
+        // transaction below expires the owner's current token, so failing
+        // after it would cost them a working code to hand back an error.
+        const server = resolveEnrollApiHost();
+        if (!server) {
+          audit({
+            event: "overlay_link_mint_refused",
+            method: req.method,
+            route: ROUTE_MINT,
+            status: 503,
+            clientId: createdBy,
+            refs: { reason: "remote_access_not_configured" },
+          });
+          return res.status(503).json({
+            error: "remote_access_not_configured",
+            message:
+              "This Droplet doesn't have its internet address yet, so a linking code can't be created. Finish setting up remote access, then try again.",
+          });
+        }
         const { token, tokenHash } = generateLinkToken();
         const parsedLabel = overlayLabelSchema.safeParse(req.body?.label);
         const expiresAt = new Date(now().getTime() + OVERLAY_LINK_TOKEN_TTL_MS);
@@ -423,7 +490,6 @@ export function createVpnRouter(
             },
           }),
         ]);
-        const server = await resolveEndpointHost();
         const boxName =
           config.DROPLET_BOX_NAME || config.DROPLET_PUBLIC_FQDN || "Droplet";
         audit({
