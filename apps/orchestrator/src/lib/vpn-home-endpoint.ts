@@ -145,3 +145,55 @@ export async function fetchBridgeUplinkIp(): Promise<string | null> {
   if (ip !== "" && isUsableHostIp(ip)) return ip;
   return null;
 }
+
+/**
+ * WARP-1758 — the box's public UDP mapping as the outside world sees it,
+ * observed from host udp/51820 by the device-bridge's STUN probe.
+ *
+ * Sibling of {@link fetchBridgeUplinkIp}, and the other half of the pair the
+ * placement classifier compares: uplink-ip is what the box thinks its WAN
+ * address is, this is what the internet says it is. Equal ⇒ the box is the edge
+ * router; different ⇒ it lives behind someone else's router.
+ *
+ * Best-effort in exactly the same way — a missing token, an unreachable bridge,
+ * a non-2xx, or a malformed body all yield null so the caller degrades to a
+ * weaker but honest conclusion rather than failing. (`overlay-connect.service`
+ * has its own fail-CLOSED probe for the punch path, where a missing mapping
+ * means there is nothing to answer HQ with; here a null just costs a candidate.)
+ *
+ * Returns `<ip>:<port>`.
+ */
+export async function fetchBridgeStunProbe(): Promise<string | null> {
+  const token = bridgeAuthToken();
+  if (!token) {
+    logger.debug({}, "vpn: bridge auth token not configured — skipping STUN probe");
+    return null;
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${config.DEVICE_BRIDGE_URL}/host/stun-probe`, {
+      method: "GET",
+      headers: { "X-Droplet-Auth": token },
+      signal: AbortSignal.timeout(BRIDGE_UPLINK_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (isBridgeConnectionError(err) || isTimeoutOrAbort(err)) {
+      logger.debug({ err }, "vpn: device-bridge not reachable for STUN probe");
+    } else {
+      logger.warn({ err }, "vpn: device-bridge STUN probe failed");
+    }
+    return null;
+  }
+  if (!res.ok) {
+    logger.warn({ status: res.status }, "vpn: device-bridge STUN probe non-2xx");
+    return null;
+  }
+  const body = (await res.json().catch(() => ({}))) as {
+    ip?: unknown;
+    port?: unknown;
+  };
+  const ip = typeof body.ip === "string" ? body.ip.trim() : "";
+  const port = typeof body.port === "number" ? body.port : Number(body.port);
+  if (!ip || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  return `${ip}:${port}`;
+}
