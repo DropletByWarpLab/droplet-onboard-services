@@ -60,7 +60,17 @@ DEFAULT_HOURS=24
 # Canonical Droplet service set. Names double as the docker container name
 # suffix (the compose project prefix is resolved at run time) and, where a
 # service is a host systemd unit, the unit base name.
-DEFAULT_SERVICES="orchestrator ai-gateway routing camera-discovery file-indexer mqtt nextcloud ollama-manager web-dashboard"
+# WARP-1748: `ollama-manager` -> `inference-manager`. BOTH are listed, and both
+# must stay listed through the deprecation window. `capture_one` resolves these
+# against `docker ps --format '{{.Names}}'`, i.e. against CONTAINER NAMES — the
+# compose network alias that keeps `ollama-manager` resolvable over DNS does
+# NOT help here. A box still running the pre-rename image has a container named
+# `…-ollama-manager-1`; a box on the new image has `…-inference-manager-1`.
+# Listing only one silently drops the model-lifecycle manager's logs from the
+# diagnostic bundle, with a bland "no source" note — the exact soft failure this
+# rename went out of its way to avoid everywhere else. A miss costs nothing:
+# `capture_one` already tolerates a service that is not running.
+DEFAULT_SERVICES="orchestrator ai-gateway routing camera-discovery file-indexer mqtt nextcloud inference-manager ollama-manager web-dashboard"
 SERVICES="${DROPLET_LOGS_SERVICES:-$DEFAULT_SERVICES}"
 
 FIXTURE_DIR="${DROPLET_LOGS_FIXTURE_DIR:-}"

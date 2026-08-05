@@ -37,6 +37,7 @@ import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
+import { startFabricMemberReconciler } from "./services/fabric-member-reconciler.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import {
   reconcileDepartments,
@@ -610,6 +611,22 @@ async function main() {
       easymeshEnabled: config.DROPLET_AP_EASYMESH_ENABLED,
       unifiEnabled: config.DROPLET_AP_UNIFI_ENABLED,
     });
+
+    // WARP-1732 (ADR-035 §5): fabric-member inventory. Rides the SAME
+    // AP-discovery cadence deliberately — both sweeps read one mDNS-derived
+    // routing endpoint, so a second interval would buy nothing but a second
+    // knob to drift. No new env var.
+    //
+    // Distinct advisory lock key, so it is its own single scheduler and
+    // cannot serialise behind (or double-fire with) AP discovery. Strictly
+    // observational: it upserts FabricMember rows, never deletes one, and
+    // never writes to a device — ApDevice above keeps owning AP lifecycle.
+    startFabricMemberReconciler(
+      cronRuntime,
+      prisma,
+      openwrt,
+      apDiscoveryIntervalMs,
+    );
   }
 
   // WARP-1122 — daily business-profile review check (03:30, offset from the

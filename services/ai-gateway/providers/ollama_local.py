@@ -43,30 +43,122 @@ logger = logging.getLogger(__name__)
 # See ADR-004 in the droplet-local-LLM repo for the original rationale.
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 
-# XR-05: /health (the appliance limits + readiness contract) lives on
-# ollama-manager (:8002), NOT on Ollama (:11434). On the canonical DIRECT chat
-# path OLLAMA_URL points at :11434, so probing "{OLLAMA_URL}/health" 404s — the
-# limits never size (outbound concurrency stuck at 1) and /ai/readiness is
-# perpetually "degraded". OLLAMA_MANAGER_URL decouples the lifecycle/health
-# endpoint from the chat endpoint. When it's unset AND OLLAMA_URL isn't the
-# opt-in /proxy path (i.e. the manager isn't deployed — single-box today), we
-# skip the probe entirely and run with sane default limits rather than spamming
-# 404s. See droplet-local-LLM/services/ollama-manager (the /health owner).
-OLLAMA_MANAGER_URL = os.getenv("OLLAMA_MANAGER_URL") or None
+# XR-05: /health (the appliance limits + readiness contract) lives on the
+# model-lifecycle manager (:8002), NOT on Ollama (:11434). On the canonical
+# DIRECT chat path OLLAMA_URL points at :11434, so probing "{OLLAMA_URL}/health"
+# 404s — the limits never size (outbound concurrency stuck at 1) and
+# /ai/readiness is perpetually "degraded". INFERENCE_MANAGER_URL decouples the
+# lifecycle/health endpoint from the chat endpoint. When it's unset AND
+# OLLAMA_URL isn't the opt-in /proxy path (i.e. the manager isn't deployed —
+# single-box today), we skip the probe entirely and run with sane default limits
+# rather than spamming 404s. See droplet-local-LLM/services/ollama-manager (the
+# /health owner).
+#
+# WARP-1748 — the variable was `OLLAMA_MANAGER_URL`. WARP-1743 turned that
+# service into a runtime-AGNOSTIC model-lifecycle manager (runtime/{base,ollama,
+# dmr,factory}.py, selected by INFERENCE_RUNTIME which defaults to `ollama`), so
+# the `OLLAMA_` prefix now names an implementation detail instead of the
+# contract — the same class of debt as a "poc"/"test" prefix on a shipping
+# surface. INFERENCE_MANAGER_URL is the canonical name; the old one still works.
+#
+# 🔴 Why the old name MUST keep working: `OLLAMA_MANAGER_URL` is set in the .env
+# of deployed boxes, and docker/docker-compose.yml wires the ai-gateway service
+# with `env_file: ../.env` (see the ai-gateway block, docker-compose.yml:979-981)
+# — so that key reaches this process verbatim on every appliance in the field. A
+# rename that simply dropped it would break the appliance-limits probe
+# everywhere, and it would fail SOFT (limits never size, outbound concurrency
+# pinned at 1, /ai/readiness stuck "degraded") — strictly worse than failing
+# loud, because nobody notices for weeks.
+#
+# The migration shape is copied verbatim from ADR-011's `JETSON_OLLAMA_URL` →
+# `OLLAMA_URL` rename (docs/ADR-011-hardware-agnostic-codebase.md §"Decision"):
+# read the new name, fall back to the old one with a logged deprecation warning,
+# and delete the fallback in a follow-up once every provisioned box has
+# migrated. Do NOT invent a different idiom for the next one.
+_MANAGER_URL_ENV = "INFERENCE_MANAGER_URL"
+_LEGACY_MANAGER_URL_ENV = "OLLAMA_MANAGER_URL"
+
+
+def _resolve_manager_url() -> str | None:
+    """Resolve the model-lifecycle manager root from the environment.
+
+    Precedence (WARP-1748):
+      1. ``INFERENCE_MANAGER_URL`` — the canonical name, wins outright.
+      2. ``OLLAMA_MANAGER_URL`` — deprecated; honored with a WARNING so a
+         field box that has not migrated its .env keeps sizing its limits.
+      3. ``None`` — no manager wired. Unchanged from today; the caller falls
+         through to the ``/proxy`` derivation and then to "skip the probe".
+
+    An explicitly-EMPTY value counts as UNSET at every step. docker-compose
+    passes optional settings through as ``${VAR:-}``, which delivers ``""``
+    (not "unset") into the container — so a blank ``INFERENCE_MANAGER_URL``
+    must not shadow a real legacy ``OLLAMA_MANAGER_URL``, and a blank legacy
+    value must not defeat the default. Same defensive idiom as
+    ``_resolve_chat_path`` below and router.py's LLM_MODEL read.
+
+    No default is introduced and no default changes: "nothing configured"
+    still resolves to ``None``.
+    """
+    canonical = (os.getenv(_MANAGER_URL_ENV) or "").strip()
+    legacy = (os.getenv(_LEGACY_MANAGER_URL_ENV) or "").strip()
+
+    if canonical:
+        if legacy:
+            # Both names present. The new one wins, but say so loudly: two
+            # names for one endpoint is exactly how a box ends up probing a
+            # stale manager after someone edits only the line they remember.
+            # Values are deliberately NOT logged (an operator could embed
+            # credentials in a URL) — the var names and the file are what
+            # make this actionable.
+            logger.warning(
+                "%s and the deprecated %s are BOTH set — using %s and ignoring "
+                "%s. Delete the %s line from the repo-root .env (the file "
+                "docker/docker-compose.yml passes to ai-gateway via env_file) "
+                "so the two cannot drift.",
+                _MANAGER_URL_ENV,
+                _LEGACY_MANAGER_URL_ENV,
+                _MANAGER_URL_ENV,
+                _LEGACY_MANAGER_URL_ENV,
+                _LEGACY_MANAGER_URL_ENV,
+            )
+        return canonical
+
+    if legacy:
+        logger.warning(
+            "%s is DEPRECATED — rename it to %s in the repo-root .env (the file "
+            "docker/docker-compose.yml passes to ai-gateway via env_file), then "
+            "restart the ai-gateway container. The service it points at became a "
+            "runtime-agnostic model-lifecycle manager in WARP-1743 (INFERENCE_RUNTIME "
+            "selects the backend), so the OLLAMA_ prefix names an implementation "
+            "detail rather than the contract. Honoring the deprecated name for now; "
+            "a future ticket removes this fallback once every deployed box has "
+            "migrated.",
+            _LEGACY_MANAGER_URL_ENV,
+            _MANAGER_URL_ENV,
+        )
+        return legacy
+
+    return None
+
+
+# Resolved ONCE at import so the deprecation warning is emitted once per
+# process, not once per health probe (mirrors ADR-011's import-time warn).
+INFERENCE_MANAGER_URL = _resolve_manager_url()
 
 
 def _resolve_manager_health_url(base_url: str) -> str | None:
-    """Return the ollama-manager /health URL, or None if no manager is wired.
+    """Return the manager's /health URL, or None if no manager is wired.
 
     Precedence:
-      1. explicit OLLAMA_MANAGER_URL → ``{manager}/health``
+      1. explicit INFERENCE_MANAGER_URL (or the deprecated OLLAMA_MANAGER_URL
+         — see `_resolve_manager_url`) → ``{manager}/health``
       2. OLLAMA_URL ending in ``/proxy`` (the opt-in manager chat path) →
          strip ``/proxy`` and use that root's ``/health`` (preserves the prior
          behavior for that specific deploy)
       3. otherwise None — the manager isn't deployed; skip the probe.
     """
-    if OLLAMA_MANAGER_URL:
-        return f"{OLLAMA_MANAGER_URL.rstrip('/')}/health"
+    if INFERENCE_MANAGER_URL:
+        return f"{INFERENCE_MANAGER_URL.rstrip('/')}/health"
     if base_url.endswith("/proxy"):
         return f"{base_url[: -len('/proxy')].rstrip('/')}/health"
     return None
@@ -144,7 +236,7 @@ def _resolve_chat_path(raw: str | None) -> str:
     root: docker-compose.yml passes optional settings through as
     `${VAR:-}`, which delivers "" (not "unset") to the container, and an
     empty path would silently retarget every chat request. Same defensive
-    idiom as OLLAMA_MANAGER_URL / router.py's LLM_MODEL read.
+    idiom as `_resolve_manager_url` / router.py's LLM_MODEL read.
     """
     return (raw or "").strip() or _DEFAULT_CHAT_PATH
 
@@ -318,11 +410,15 @@ class _LimitsCache:
         if health_url is None:
             if not self._logged_no_manager:
                 self._logged_no_manager = True
+                # WARP-1748: names the CANONICAL var. An operator who still has
+                # the deprecated OLLAMA_MANAGER_URL set never reaches this line
+                # (health_url is non-None), so pointing them at the new name
+                # here can't strand anyone.
                 logger.info(
-                    "appliance_limits_probe_skipped: no OLLAMA_MANAGER_URL and "
+                    "appliance_limits_probe_skipped: no INFERENCE_MANAGER_URL and "
                     "OLLAMA_URL is the direct path — using default limits "
                     "(num_parallel=%d, max_queue=%d, max_loaded_models=%d). "
-                    "Set OLLAMA_MANAGER_URL to size outbound concurrency.",
+                    "Set INFERENCE_MANAGER_URL to size outbound concurrency.",
                     self.num_parallel,
                     self.max_queue,
                     self.max_loaded_models,

@@ -299,6 +299,30 @@ export async function ensureDefaultModelPulled(): Promise<void> {
     return;
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // WARP-1742 (epic WARP-1740, Ollama → Docker Model Runner) — READ THIS
+  // BEFORE PORTING THIS CHECK TO DMR. Documentation only: Ollama is still
+  // the runtime and nothing below changes behavior.
+  //
+  // Against Ollama, name-presence in /api/tags is a sound readiness signal.
+  // Against Docker Model Runner it is NOT. A pull that fails integrity
+  // verification can leave a PHANTOM entry: observed on DMR v1.2.6, a pull
+  // downloaded all 270,590,624 bytes and then failed `blob digest mismatch`,
+  // after which /api/tags listed the model with `size: 0` — present, but
+  // unserveable. The retry failed *differently* (`rename …incomplete` →
+  // ENOENT); only wiping the model volume recovered the store. A presence
+  // test like the one below would therefore latch "already pulled — ready"
+  // forever and never re-pull a model that can never answer.
+  //
+  // Note the first failure was an integrity check doing its job — that is
+  // the supply-chain argument for OCI working as intended (WARP-1745). It
+  // is the RECOVERY path that needs hardening, not the verification.
+  //
+  // Size is not a usable discriminator either: DMR's /api/tags reports
+  // `size: 0` for every model, always. The real size is only on the native
+  // `GET /models` response, and as a human-readable string rather than a
+  // number. So a DMR readiness check must verify SERVEABILITY, not listing.
+  // ──────────────────────────────────────────────────────────────────
   const present = new Set((tags.models ?? []).map((m) => m.name));
   for (const model of models) {
     if (present.has(model)) {

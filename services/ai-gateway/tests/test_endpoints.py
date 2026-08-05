@@ -268,8 +268,9 @@ class TestReadinessEndpoint:
     """XR-05: /ai/readiness must not 404 against Ollama on the direct path."""
 
     async def test_readiness_ok_when_no_manager_configured(self, client):
-        # conftest sets OLLAMA_URL to the direct :11434 path (no /proxy) and no
-        # OLLAMA_MANAGER_URL, so there's no manager /health to probe. The
+        # conftest sets OLLAMA_URL to the direct :11434 path (no /proxy) and
+        # neither INFERENCE_MANAGER_URL nor the deprecated OLLAMA_MANAGER_URL
+        # (WARP-1748), so there's no manager /health to probe. The
         # endpoint must report ok with appliance=None, NOT a perpetual degraded.
         import main
         from router import ProviderRouter
