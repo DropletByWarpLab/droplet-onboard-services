@@ -307,6 +307,46 @@ describe("fabric-member reconciler (WARP-1732)", () => {
     expect(ap.version).toBe("1.0");
   });
 
+  // Same rule one level down from the never-delete invariant: a switch that
+  // reboots and briefly announces a minimal TXT record must not have its PoE
+  // inventory blanked. Absence of a key is absence of an OBSERVATION, never
+  // an observation of absence.
+  it("PoE facts survive an announce that omits them, and one that garbles them", async () => {
+    const prisma = createPrismaMock();
+    let members: any[] = [
+      {
+        role: "switch",
+        mac: "70:49:a2:77:64:1a",
+        extra: { poe_ports: "8", poe_budget: "77" },
+      },
+    ];
+    const routing = makeRouting({ listFabricMembers: async () => members });
+    const reconciler = createFabricMemberReconciler(prisma as any, routing);
+
+    await reconciler.pollOnce();
+    expect(prisma.rows.get("70:49:A2:77:64:1A").poePorts).toBe(8);
+
+    // Announce with the PoE keys gone entirely.
+    members = [{ role: "switch", mac: "70:49:a2:77:64:1a" }];
+    await reconciler.pollOnce();
+    expect(prisma.rows.get("70:49:A2:77:64:1A").poePorts).toBe(8);
+    expect(prisma.rows.get("70:49:A2:77:64:1A").poeBudget).toBe(77);
+
+    // Announce with junk in them — equally uninformative, equally ignored.
+    members = [
+      { role: "switch", mac: "70:49:a2:77:64:1a", extra: { poe_ports: "eight" } },
+    ];
+    await reconciler.pollOnce();
+    expect(prisma.rows.get("70:49:A2:77:64:1A").poePorts).toBe(8);
+
+    // A real new value still lands — preservation is not staleness.
+    members = [
+      { role: "switch", mac: "70:49:a2:77:64:1a", extra: { poe_ports: "10" } },
+    ];
+    await reconciler.pollOnce();
+    expect(prisma.rows.get("70:49:A2:77:64:1A").poePorts).toBe(10);
+  });
+
   it("routing-service failure degrades to a logged no-op — never throws", async () => {
     const prisma = createPrismaMock();
     const err = RouterError.unreachable("routing down");

@@ -74,22 +74,25 @@ export interface FabricMemberReconciler {
 }
 
 /**
- * Coerce an mDNS TXT value into a non-negative integer, or null.
+ * Coerce an mDNS TXT value into a non-negative integer, or `undefined` for
+ * "no usable value in this announce".
  *
  * TXT values are text, so `poe_ports` arrives as `"8"`. `Number("")` is 0
  * and `parseInt("eight")` is NaN — both would be lies in a column where
  * null means "not advertised" and 0 would mean "a switch with zero PoE
- * ports". Anything that isn't a clean non-negative integer becomes null.
+ * ports". Anything that isn't a clean non-negative integer yields
+ * `undefined`, which the update path then treats the same as any other
+ * un-announced fact: leave what we already knew alone.
  */
-function toOptionalInt(value: string | number | undefined): number | null {
+function toOptionalInt(value: string | number | undefined): number | undefined {
   if (typeof value === "number") {
-    return Number.isInteger(value) && value >= 0 ? value : null;
+    return Number.isInteger(value) && value >= 0 ? value : undefined;
   }
-  if (typeof value !== "string") return null;
+  if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
-  if (!/^\d+$/.test(trimmed)) return null;
+  if (!/^\d+$/.test(trimmed)) return undefined;
   const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) ? parsed : null;
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 /** Drop `undefined` keys so an absent fact never overwrites a known one. */
@@ -148,23 +151,23 @@ export function createFabricMemberReconciler(
         }
 
         const extra = member.extra ?? {};
-        // Facts as observed. `undefined` (key absent from this announce)
-        // is stripped below so a member that stops advertising its model
-        // keeps the model we already learned — dim, don't erase. An
-        // explicitly-null PoE value, by contrast, IS written: the parse
-        // above already distinguishes "not advertised" from "advertised
-        // as junk", and both are honestly null.
+        // Facts as observed, with un-announced keys stripped. Applied to
+        // the UPDATE, this is the same "dim, don't erase" rule the
+        // never-delete invariant applies to whole rows, one level down: a
+        // switch that reboots and briefly announces a minimal TXT record
+        // must not blank the model and PoE inventory we already learned.
+        // Absence of a key is absence of an observation, never an
+        // observation of absence — an unparseable PoE value is treated
+        // identically, since "eight" tells us nothing new either.
         const facts = definedOnly({
           role: member.role,
           model: member.model,
           version: member.version,
           lastIp: member.last_ip,
           hostname: member.hostname,
-        });
-        const poe = {
           poePorts: toOptionalInt(extra.poe_ports),
           poeBudget: toOptionalInt(extra.poe_budget),
-        };
+        });
         const now = new Date();
 
         try {
@@ -173,17 +176,26 @@ export function createFabricMemberReconciler(
             create: {
               anchorMac,
               // `role` is the only non-key column the contract guarantees;
-              // the spread above supplies it, this is the type-level floor.
+              // the spread supplies it, this is the type-level floor.
               role: member.role,
+              // On CREATE the un-announced columns are written as explicit
+              // nulls rather than left off: for a brand-new row "we have
+              // never seen a PoE value" IS null, and spelling it out keeps
+              // the created row's shape identical to the table's.
+              model: null,
+              version: null,
+              lastIp: null,
+              hostname: null,
+              poePorts: null,
+              poeBudget: null,
               ...facts,
-              ...poe,
               firstSeen: now,
               lastSeen: now,
             },
             // `firstSeen` is intentionally absent from the update: it is
             // write-once, so re-observing a member can never rewrite when
             // the fabric first met it.
-            update: { ...facts, ...poe, lastSeen: now },
+            update: { ...facts, lastSeen: now },
           });
           result.upserted += 1;
         } catch (err) {
