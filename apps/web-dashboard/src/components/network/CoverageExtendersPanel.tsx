@@ -43,6 +43,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR, { mutate } from "swr";
+import Link from "next/link";
 import {
   Wifi,
   WifiOff,
@@ -55,17 +56,24 @@ import {
   ArrowUpRight,
   Eye,
   EyeOff,
+  RadioTower,
   X,
 } from "lucide-react";
 import {
   fetchApDevices,
+  fetchApWifi,
   approveApDevice,
   decommissionApDevice,
   fetchNetworkOperation,
+  type ApWifiStatus,
 } from "@/lib/api";
 import type { ApDeviceInfo, ApDeviceStatus, ApOnboardBackend } from "@/lib/types";
+import { networkTabHref } from "@/app/network/tab-url";
 import { ApRadioDetail } from "@/components/network/ApRadioDetail";
-import { ApWifiCard } from "@/components/network/ApWifiCard";
+import {
+  AP_WIFI_KEY,
+  AP_WIFI_SWR_OPTIONS,
+} from "@/components/network/ApWifiCard";
 import { BandSteeringCard } from "@/components/network/BandSteeringCard";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -383,7 +391,21 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
   );
 }
 
-export function CoverageExtendersPanel() {
+export type CoverageExtendersPanelProps = {
+  /**
+   * Activation handler for the read-only summary's "Change in Wi-Fi settings"
+   * link (WARP-1723 second pass, a11y). The Network page's tabpanels
+   * conditionally unmount, so letting the browser navigate destroys the
+   * focused <a> and drops focus to <body>. When supplied, the page takes the
+   * activation and moves focus to the arrival tab; when not (standalone
+   * renders, no-JS, middle-click), the href navigates as before.
+   */
+  onOpenWifiSettings?: () => void;
+};
+
+export function CoverageExtendersPanel({
+  onOpenWifiSettings,
+}: CoverageExtendersPanelProps = {}) {
   // 10s refresh — same cadence as the orchestrator's discovery poller
   // (DROPLET_AP_DISCOVERY_INTERVAL=10). New extender announces become
   // visible within one polling cycle on each side. Operation-Id
@@ -746,16 +768,20 @@ export function CoverageExtendersPanel() {
         </div>
       )}
 
-      {/* WARP-1712 — the founder's ask: the AP belongs to the network, so its
-          controls live here in the extender surface too, not only on the Wi-Fi
-          tab. These are the SAME components the Wi-Fi tab renders, keyed on the
-          same SWR endpoints — so the two surfaces share one cache entry and
-          literally cannot show different values. Shown only once at least one
-          Droplet AP is ONLINE; before that the cards would just render their
-          "not available" state and add noise. */}
+      {/* WARP-1712 — the founder's ask: the AP belongs to the network, so it
+          reads as infrastructure here too, not only on the Wi-Fi tab.
+          WARP-1723 tightened HOW: the household Wi-Fi is EDITABLE in exactly
+          one place (Network → Wi-Fi), because a second form is how the wrong
+          write path shipped. This panel now reflects the live name read-only
+          (ApWifiSummary, same /api/network/wifi/ap read the form uses — zero
+          extra cache, so the two surfaces still cannot disagree) and links to
+          the one canonical edit surface. Band steering keeps its editable card
+          (out of WARP-1723's scope). Shown only once at least one Droplet AP
+          is ONLINE; before that the cards would just render their "not
+          available" state and add noise. */}
       {hasOnlineDropletAp ? (
         <div className="flex flex-col gap-3 mt-4">
-          <ApWifiCard />
+          <ApWifiSummary onOpenWifiSettings={onOpenWifiSettings} />
           <BandSteeringCard />
         </div>
       ) : null}
@@ -795,6 +821,115 @@ export function CoverageExtendersPanel() {
         onCancel={() => setRemoveTarget(null)}
       />
     </section>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ApWifiSummary (WARP-1723): the read-only reflection of the household
+// Wi-Fi the AP broadcasts. This slot used to mount the EDITABLE
+// ApWifiCard (WARP-1712) — the third editable household-Wi-Fi surface
+// in the dashboard. It keys on the SAME live `/api/network/wifi/ap`
+// read as the Wi-Fi tab's form (the orchestrator dials the AP per
+// request, nothing cached beyond the shared SWR entry), so the name
+// here still cannot disagree with the form it links to — WARP-1712's
+// "always in agreement" contract, minus the second write path. Shows
+// the network NAME only; the passphrase stays on the edit surface.
+// ────────────────────────────────────────────────────────────────────
+function ApWifiSummary({ onOpenWifiSettings }: CoverageExtendersPanelProps) {
+  // AP_WIFI_KEY *and* AP_WIFI_SWR_OPTIONS, not hand-typed literals: WARP-1712's
+  // "the two surfaces can never disagree" guarantee is the SHARED SWR entry,
+  // and it shouldn't rest on a string — or a refresh cadence — staying in sync
+  // across two files (review nit 5, third pass).
+  //
+  // `error` matters as much as `data` (UX blocker 2, second pass): without it
+  // a persistent fetch failure left `data` undefined forever and this card
+  // said "Reading its network name…" permanently — a read-only reflection
+  // stuck lying about a network it never read.
+  const { data, error } = useSWR<ApWifiStatus>(
+    AP_WIFI_KEY,
+    fetchApWifi,
+    AP_WIFI_SWR_OPTIONS,
+  );
+
+  return (
+    <div className="card">
+      <div className="flex items-start gap-3">
+        <div
+          className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+        >
+          <RadioTower size={18} aria-hidden="true" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="type-headline" style={{ color: "var(--text)" }}>
+            Access point Wi-Fi
+          </h3>
+          {/* Polite live region: an operator who heard "Reading its network
+              name…" has to hear how it ended — the name, or the failure. */}
+          <p
+            className="type-caption-1 mt-0.5"
+            style={{ color: "var(--text-muted)" }}
+            aria-live="polite"
+          >
+            {data === undefined && error === undefined ? (
+              "Reading its network name…"
+            ) : data?.supported && data.ssid ? (
+              <>
+                Broadcasting{" "}
+                <span className="font-medium" style={{ color: "var(--text)" }}>
+                  {data.ssid}
+                </span>
+                {data.fiveGhzSsid && data.fiveGhzSsid !== data.ssid ? (
+                  <>
+                    {" "}
+                    (and{" "}
+                    <span className="font-medium" style={{ color: "var(--text)" }}>
+                      {data.fiveGhzSsid}
+                    </span>{" "}
+                    on 5 GHz)
+                  </>
+                ) : null}
+                .
+              </>
+            ) : (
+              "Its network name couldn't be read right now."
+            )}
+          </p>
+          {data?.inSync === false ? (
+            <p className="type-caption-1 mt-1" style={{ color: "var(--text-muted)" }}>
+              Your access points aren&apos;t all broadcasting the same name —
+              saving in Wi-Fi settings sets them all to one.
+            </p>
+          ) : null}
+          {/* The SOLE route from here to editing the household Wi-Fi, so it
+              carries full text weight rather than the quiet colour this
+              pattern uses for supplementary links.
+
+              `py-1` lifts the hit area from the 18px `type-footnote` line box
+              to 26px, clearing WCAG 2.2 SC 2.5.8's 24px floor — it sits on its
+              own line just above the 56px mobile tab bar. The margins absorb
+              it exactly (`mt-2` → `mt-1` + 4px top padding; `-mb-1` cancels
+              the 4px bottom padding), so nothing moves on screen. Don't
+              collapse this to `-my-1`: `mt-*` out-orders `my-*` in Tailwind's
+              generated CSS, so the top compensation would silently not
+              apply. */}
+          <Link
+            href={networkTabHref("wifi")}
+            onClick={(e) => {
+              // Let the browser handle new-tab / new-window intents.
+              if (!onOpenWifiSettings) return;
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              if (e.button !== 0) return;
+              e.preventDefault();
+              onOpenWifiSettings();
+            }}
+            className="type-footnote text-[color:var(--text)] hover:text-[color:var(--brand)] inline-flex items-center gap-1 py-1 mt-1 -mb-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
+          >
+            Change in Wi-Fi settings <ArrowUpRight size={12} aria-hidden />
+          </Link>
+        </div>
+      </div>
+    </div>
   );
 }
 

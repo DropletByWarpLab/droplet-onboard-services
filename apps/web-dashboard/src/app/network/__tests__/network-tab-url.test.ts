@@ -7,7 +7,7 @@
  * without mounting the whole hook-heavy page.
  */
 import { describe, it, expect } from "vitest";
-import { parseNetworkTab } from "../tab-url";
+import { NETWORK_TABS, networkTabHref, parseNetworkTab } from "../tab-url";
 
 describe("parseNetworkTab (WARP-100)", () => {
   it("maps a valid tab id through unchanged", () => {
@@ -27,5 +27,27 @@ describe("parseNetworkTab (WARP-100)", () => {
     expect(parseNetworkTab("nope")).toBe("overview");
     // No prototype-pollution surprise: inherited keys aren't valid tabs.
     expect(parseNetworkTab("toString")).toBe("overview");
+  });
+});
+
+// WARP-1723 — the inverse mapping. Cross-tab links (the Coverage Extenders
+// panel's "Change in Wi-Fi settings") build their hrefs here rather than
+// re-typing the `?tab=` scheme inline.
+describe("networkTabHref (WARP-1723)", () => {
+  it("builds the ?tab= URL for a non-default tab", () => {
+    expect(networkTabHref("wifi")).toBe("/network?tab=wifi");
+    expect(networkTabHref("devices")).toBe("/network?tab=devices");
+  });
+
+  it("overview is the bare /network path (matches the page's own switcher)", () => {
+    expect(networkTabHref("overview")).toBe("/network");
+  });
+
+  it("round-trips through parseNetworkTab for every tab", () => {
+    for (const tab of NETWORK_TABS) {
+      const raw = new URL(networkTabHref(tab), "http://droplet.local")
+        .searchParams.get("tab");
+      expect(parseNetworkTab(raw)).toBe(tab);
+    }
   });
 });

@@ -23,8 +23,10 @@ import {
 } from "@/lib/api";
 import type { CurrentWifi } from "@/lib/types";
 
-/** Under the /api/network prefix, so the tab's Refresh sweep covers it. */
-const CURRENT_WIFI_KEY = "/api/network/wifi/current";
+/** Under the /api/network prefix, so the tab's Refresh sweep covers it.
+ *  Exported (WARP-1723) so WifiTab keys its source-split read on the SAME SWR
+ *  entry — shared cache, no second fetch. */
+export const CURRENT_WIFI_KEY = "/api/network/wifi/current";
 
 /**
  * Issue #12 — editable Wi-Fi provisioning for the Network → WiFi tab.
@@ -224,7 +226,13 @@ export function WifiSettingsForm() {
 
   return (
     <div className="card">
-      <h3 className="type-headline text-[color:var(--text)] mb-1">WiFi Settings</h3>
+      {/* "Wi-Fi settings" (WARP-1723 second pass): Title-Case + unhyphenated
+          was inconsistent with every other Wi-Fi string in this same file, and
+          the Devices-tab link promises "Change in Wi-Fi settings" — that
+          promise has to land on a matching label. The ApWifiCard household
+          variant carries the same headline by design; the two never occupy
+          this slot at the same time. */}
+      <h3 className="type-headline text-[color:var(--text)] mb-1">Wi-Fi settings</h3>
       <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Name the Wi-Fi network your Droplet broadcasts and set its password.
         Saving restarts the radio, which briefly disconnects every device —

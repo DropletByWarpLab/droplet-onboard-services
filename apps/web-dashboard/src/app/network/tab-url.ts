@@ -32,3 +32,10 @@ const VALID = new Set<string>(NETWORK_TABS);
 export function parseNetworkTab(raw: string | null | undefined): Tab {
   return raw && VALID.has(raw) ? (raw as Tab) : "overview";
 }
+
+// WARP-1723 — the inverse mapping, for cross-tab links (e.g. the Coverage
+// Extenders panel's "Change in Wi-Fi settings"). Mirrors the page's own tab
+// switcher: "overview" is the bare /network path, everything else `?tab=`.
+export function networkTabHref(tab: Tab): string {
+  return tab === "overview" ? "/network" : `/network?tab=${tab}`;
+}

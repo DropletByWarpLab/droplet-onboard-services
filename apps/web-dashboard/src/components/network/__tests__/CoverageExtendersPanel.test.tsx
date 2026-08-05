@@ -9,11 +9,31 @@
  * Same shape as DeviceGridSection.test.tsx — render with synthetic
  * SWR data via SWRConfig + provider mock.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SWRConfig } from "swr";
-import { CoverageExtendersPanel } from "../CoverageExtendersPanel";
 import type { ApDeviceInfo } from "@/lib/types";
+
+// The setup.ts global next/link mock renders a string template; the panel's
+// read-only Wi-Fi reflection (WARP-1723) carries a real navigation link whose
+// role + href this suite asserts, so re-mock it as a plain <a> (the
+// CitationCard.test.tsx pattern).
+vi.mock("next/link", () => ({
+  default: ({
+    children,
+    href,
+    ...props
+  }: {
+    children: React.ReactNode;
+    href: string;
+  }) => (
+    <a href={href} {...props}>
+      {children}
+    </a>
+  ),
+}));
+
+import { CoverageExtendersPanel } from "../CoverageExtendersPanel";
 
 vi.mock("@/lib/api", () => ({
   fetchApDevices: vi.fn(),
@@ -34,7 +54,7 @@ vi.mock("@/lib/api", () => ({
   confirmNetworkCommand: vi.fn(),
 }));
 
-import { fetchApDevices } from "@/lib/api";
+import { fetchApDevices, fetchApWifi } from "@/lib/api";
 
 function makeAp(overrides: Partial<ApDeviceInfo> = {}): ApDeviceInfo {
   return {
@@ -60,10 +80,12 @@ function makeAp(overrides: Partial<ApDeviceInfo> = {}): ApDeviceInfo {
   };
 }
 
-function renderPanel() {
+function renderPanel(
+  props: React.ComponentProps<typeof CoverageExtendersPanel> = {},
+) {
   return render(
     <SWRConfig value={{ provider: () => new Map() }}>
-      <CoverageExtendersPanel />
+      <CoverageExtendersPanel {...props} />
     </SWRConfig>,
   );
 }
@@ -167,16 +189,150 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
 
   /**
    * WARP-1712 — the founder's ask: the AP belongs to the network, so it lives
-   * in the extender surface AND is controllable there, not just listed.
+   * in the extender surface, not just listed. WARP-1723 tightened HOW: the
+   * household Wi-Fi is editable in exactly ONE place (Network → Wi-Fi), so
+   * this panel reflects the live name read-only and links there instead of
+   * mounting a second editable form.
    */
-  describe("the AP as controllable infrastructure", () => {
-    it("renders the AP Wi-Fi + band-steering controls once one is ONLINE", async () => {
+  describe("the AP as network infrastructure", () => {
+    beforeEach(() => {
+      // Deterministic default regardless of test order — individual tests
+      // override with a reachable AP where they need one.
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: false, ssid: null, fiveGhzSsid: null, key: null,
+        encryption: null, bandSteering: null, apCount: 0, inSync: true,
+      });
+    });
+
+    it("shows a read-only household Wi-Fi reflection + band steering once one is ONLINE", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: true, ssid: "Fotonia Home", fiveGhzSsid: null,
+        key: "correct-horse-psk", encryption: "psk2", bandSteering: true,
+        apCount: 1, inSync: true,
+      });
+      renderPanel();
+      expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
+      // The live network name the AP broadcasts — never the PSK.
+      expect(await screen.findByText("Fotonia Home")).toBeInTheDocument();
+      // BOTH surfaces: the pre-WARP-1723 exposure was an <input value>, which
+      // queryByText does not match at all (it reads text nodes) — that
+      // assertion alone would have passed against the very code it guards.
+      expect(
+        screen.queryByDisplayValue("correct-horse-psk"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("correct-horse-psk")).not.toBeInTheDocument();
+      expect(screen.getByText("Band steering")).toBeInTheDocument();
+    });
+
+    it("has NO editable Wi-Fi form — edits route to the Wi-Fi tab (WARP-1723)", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: true, ssid: "Fotonia Home", fiveGhzSsid: null,
+        key: "correct-horse-psk", encryption: "psk2", bandSteering: true,
+        apCount: 1, inSync: true,
+      });
+      renderPanel();
+      await screen.findByText("Access point Wi-Fi");
+      // No SSID/password inputs, no save button — a second editable surface is
+      // exactly the bug WARP-1723 removed.
+      expect(
+        screen.queryByLabelText("Network name (SSID)"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Wi-Fi password")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Save Wi-Fi settings" }),
+      ).not.toBeInTheDocument();
+      // Instead: a link to the one canonical edit surface.
+      const link = screen.getByRole("link", {
+        name: /change in wi-fi settings/i,
+      });
+      expect(link).toHaveAttribute("href", "/network?tab=wifi");
+    });
+
+    /**
+     * UX blocker 2 (second pass) — the summary destructured only `{ data }`,
+     * so a persistent fetch failure left `data` undefined forever and the card
+     * said "Reading its network name…" permanently. A read-only reflection
+     * that can get stuck lying is worse than one that admits it failed; the
+     * honest string was already written one branch away.
+     */
+    it("admits a failed read instead of 'reading…' forever", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("Failed to fetch access point Wi-Fi: 502"),
+      );
+      renderPanel();
+      await screen.findByText("Access point Wi-Fi");
+
+      expect(
+        await screen.findByText(/network name couldn't be read right now/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/reading its network name/i),
+      ).not.toBeInTheDocument();
+    });
+
+    /**
+     * UX a11y (second pass) — the tabpanels conditionally unmount, so
+     * activating this link destroys the focused <a> and focus falls to
+     * <body>: a keyboard/SR user lands nowhere and has to re-Tab through the
+     * shell. The panel hands the activation back to the page, which owns the
+     * post-activation focus machinery (`keyboardFocusTarget` → focus
+     * `#network-tab-wifi`). Plain <a> navigation stays the fallback.
+     */
+    it("hands cross-tab activation to the page so focus can follow", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: true, ssid: "Fotonia Home", fiveGhzSsid: null,
+        key: "correct-horse-psk", encryption: "psk2", bandSteering: true,
+        apCount: 1, inSync: true,
+      });
+      const onOpenWifiSettings = vi.fn();
+      renderPanel({ onOpenWifiSettings });
+      const link = await screen.findByRole("link", {
+        name: /change in wi-fi settings/i,
+      });
+
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      link.dispatchEvent(event);
+      expect(onOpenWifiSettings).toHaveBeenCalledTimes(1);
+      // The handler replaces the navigation, so the page keeps control of
+      // focus rather than the browser tearing the panel down mid-activation.
+      expect(event.defaultPrevented).toBe(true);
+      // …but it is still a real link: the href survives for middle-click,
+      // "open in new tab", and the no-JS path.
+      expect(link).toHaveAttribute("href", "/network?tab=wifi");
+    });
+
+    /**
+     * UX mobile (second pass) — `type-footnote` + `inline-flex` with no
+     * padding is an 18px hit area, under WCAG 2.2 SC 2.5.8's 24px floor, and
+     * it sits on its own line just above the 56px bottom tab bar. `py-1` takes
+     * it to 26px; the margins absorb the padding so nothing moves. The quiet
+     * link colour is used elsewhere for SUPPLEMENTARY links; here it is the
+     * sole route to a primary task, so it reads at full text weight.
+     */
+    it("meets the 24px tap target and reads as a primary route", async () => {
       (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
         aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
       });
       renderPanel();
-      expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
-      expect(screen.getByText("Band steering")).toBeInTheDocument();
+      const link = await screen.findByRole("link", {
+        name: /change in wi-fi settings/i,
+      });
+
+      expect(link.className).toContain("py-1");
+      expect(link.className).toContain("text-[color:var(--text)]");
+      expect(link.className).not.toContain("text-[color:var(--text-muted)]");
     });
 
     it("identifies it as Droplet infrastructure, not a generic device", async () => {

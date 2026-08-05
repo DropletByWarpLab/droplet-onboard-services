@@ -28,25 +28,20 @@ import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkViewMode } from "@/lib/hooks/useNetworkViewMode";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { DevicesTab } from "@/components/network/DevicesTab";
+// WARP-1723: the Wi-Fi tab is an extracted component (like SchedulesTab /
+// DevicesTab) so its single-editable-surface source split is render-testable.
+import { WifiTab } from "@/components/network/WifiTab";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
-import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { AiAgentAccessCard } from "@/components/network/AiAgentAccessCard";
 import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
-import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { InterfacesTable } from "@/components/network/InterfacesTable";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
-import { BandSteeringCard } from "@/components/network/BandSteeringCard";
-import { ApWifiCard } from "@/components/network/ApWifiCard";
-import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
 import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/FirewallRuleForm";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
-import { WifiScanPanel } from "@/components/network/WifiScanPanel";
-import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
-import { WifiChannelCard } from "@/components/network/WifiChannelCard";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import { DnsServersForm } from "@/components/network/DnsServersForm";
@@ -58,7 +53,7 @@ import {
   type NetworkOperation,
   type NetworkTopology,
 } from "@/lib/api";
-import { parseNetworkTab, type Tab } from "./tab-url";
+import { networkTabHref, parseNetworkTab, type Tab } from "./tab-url";
 import {
   scrollToScheduleAnchor,
   scheduleHashFromEvent,
@@ -162,8 +157,13 @@ function NetworkPageInner() {
   const setActiveTab = useCallback(
     (next: Tab) => {
       if (next === activeTab) return;
-      // Default to Overview (no ?tab) to keep the canonical URL clean.
-      router.push(next === "overview" ? "/network" : `/network?tab=${next}`);
+      // networkTabHref, not an inline literal (WARP-1723 review finding 2):
+      // that helper exists so cross-tab LINKS build the same URL this switcher
+      // produces. Two builders can drift, and then a link's href — the
+      // middle-click / open-in-new-tab / no-JS path — points somewhere the
+      // switcher never goes. It also owns the "Overview is the bare /network
+      // path" rule that keeps the canonical URL clean.
+      router.push(networkTabHref(next));
     },
     [router, activeTab],
   );
@@ -175,6 +175,10 @@ function NetworkPageInner() {
   // the async gap. Instead, record the keyboard target here and focus it in an
   // effect once `activeTab` reflects it (see below), so the focused tab is
   // already selected at the moment it receives focus.
+  //
+  // WARP-1723 (second pass): cross-tab LINKS inside a tabpanel need the same
+  // treatment for the same reason — the panel unmounts on activation, taking
+  // the focused element with it — so they set this ref too before switching.
   const keyboardFocusTarget = useRef<Tab | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
@@ -578,7 +582,20 @@ function NetworkPageInner() {
         tabIndex={0}
         hidden={activeTab !== "devices"}
       >
-        {activeTab === "devices" && <DevicesTab />}
+        {activeTab === "devices" && (
+          // WARP-1723 (second pass, a11y): the tabpanels conditionally unmount,
+          // so letting the Coverage Extenders panel's "Change in Wi-Fi
+          // settings" link navigate on its own destroys the focused <a> and
+          // drops focus to <body> — a keyboard/SR user lands nowhere. Reuse
+          // the same record-then-focus machinery the arrow-key nav drives so
+          // the arrival tab takes focus once it reads aria-selected={true}.
+          <DevicesTab
+            onOpenWifiSettings={() => {
+              keyboardFocusTarget.current = "wifi";
+              setActiveTab("wifi");
+            }}
+          />
+        )}
       </div>
       <div
         role="tabpanel"
@@ -758,58 +775,6 @@ function StatusCard({
   );
 }
 
-
-// --- WiFi Tab ---
-function WifiTab() {
-  return (
-    <div className="space-y-4">
-      {/* Issue #12: editable provisioning form so a user who skipped Wi-Fi
-          during onboarding can set the SSID/password here — same write path as
-          the setup wizard's InternetStep. WARP-1714: the form seeds the current
-          SSID/password from /api/network/wifi/current, which resolves this
-          Droplet's own radio OR the approved AP — on the edge-router shape the
-          router hosts no AP at all, so reading it alone leaves the card blank. */}
-      <WifiSettingsForm />
-
-      {/* WARP-871: the channel write path (orchestrator route + routing) shipped
-          at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab
-          never surfaced a channel picker — the one lever for dodging a congested
-          band. */}
-      <WifiChannelCard />
-      {/* Read-only host-radio detail (band/channel/width/country + a
-          Broadcasting chip). Honest for the single combined-radio shape — no
-          enable/disable toggle; every chip is a real iwinfo field or "not
-          reported". */}
-      <RadioDetailCard />
-
-      {/* WARP-1712: the external access point's OWN network name + password.
-          Sits directly under the router's Wi-Fi form so both halves of the
-          household's wireless are set from one place. The same component is
-          rendered inside the Coverage Extenders panel on the Devices tab —
-          shared SWR key, so the two surfaces can never disagree. Honest
-          unavailable state when no approved Droplet AP is online. */}
-      <ApWifiCard />
-
-      {/* WARP-1703: the external Droplet AP's 802.11k/v band-steering master
-          switch. Honest unavailable state when no approved Droplet AP is
-          online — same no-fake-toggle contract as UpnpCard. */}
-      <BandSteeringCard />
-
-      {/* Guest Wi-Fi — an isolated visitor network (own SSID + firewall zone). */}
-      <GuestWifiCard />
-
-      {/* Camera privacy — network isolation posture (honest, read-only) plus
-          the live "block cameras from the internet" toggle. Sits with the
-          everyday Wi-Fi/network controls per the design's Simple-mode layout. */}
-      <CameraPrivacyCard />
-
-      {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
-          AP-mode "scanning unavailable while broadcasting" state (typed
-          SCAN_UNSUPPORTED signal) from a genuine empty scan. */}
-      <WifiScanPanel />
-    </div>
-  );
-}
 
 // --- Firewall Tab ---
 // A zone's input/output/forward policy chip — green for ACCEPT, red for the

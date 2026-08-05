@@ -47,10 +47,10 @@ const SUPPORTED = {
   inSync: true,
 };
 
-function renderCard() {
+function renderCard(props: Parameters<typeof ApWifiCard>[0] = {}) {
   return render(
     <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-      <ApWifiCard />
+      <ApWifiCard {...props} />
     </SWRConfig>,
   );
 }
@@ -92,6 +92,113 @@ describe("honesty fork", () => {
     renderCard();
     await waitFor(() => expect(ssidInput()).toBeTruthy());
     expect(saveButton()).toBeTruthy();
+  });
+
+  /**
+   * QA note 3 (WARP-1723 second pass) — `supported` defaults to false, so
+   * before the read lands the card ASSERTS "not available" about an access
+   * point that is fine. Since WARP-1723 this card mounts only after
+   * /api/network/wifi/current resolves, so its own read starts late and an
+   * edge-router user sees that flash on every first visit to the Wi-Fi tab.
+   */
+  it.each(["household", "secondary"] as const)(
+    "does NOT claim 'not available' while the read is still in flight (%s slot)",
+    async (slot) => {
+      // A read that never settles — SWR stays isLoading with no data.
+      mockFetch.mockReturnValue(new Promise(() => {}));
+      renderCard({ slot });
+
+      await waitFor(() =>
+        expect(screen.getByText(/checking with your access point/i)).toBeTruthy(),
+      );
+      expect(
+        screen.queryByText(/needs an approved droplet access point/i),
+      ).toBeNull();
+      // Calm placeholder, not a fake form.
+      expect(screen.queryByLabelText(/network name/i)).toBeNull();
+      expect(screen.queryByRole("button", { name: /save wi-fi settings/i })).toBeNull();
+    },
+  );
+
+  /**
+   * CHARACTERIZATION — documents CURRENT behaviour, not desired behaviour.
+   *
+   * In the HOUSEHOLD slot a resolved `supported: false` is a dead end: the
+   * edge-router shape puts the household SSID on the access point and nowhere
+   * else, so when that AP is a third-party one (or offline), the tab's only
+   * household editor answers "not available" with no next step and no other
+   * surface to send the user to. There is no honest state for a third-party
+   * AP today — that is a filed product decision, WARP-1738, which will replace
+   * this copy. Pinned so the swap is deliberate and visible in the diff rather
+   * than a silent copy change; do NOT "fix" the behaviour here.
+   */
+  it("household slot, resolved supported:false — documents today's dead end (WARP-1738)", async () => {
+    mockFetch.mockResolvedValue({
+      supported: false,
+      ssid: null,
+      fiveGhzSsid: null,
+      key: null,
+      encryption: null,
+      bandSteering: null,
+      apCount: 0,
+      inSync: true,
+    });
+    renderCard({ slot: "household" });
+
+    // It keeps the household headline — this IS the household slot — and then
+    // says the household Wi-Fi can't be edited at all.
+    await waitFor(() => expect(screen.getByText("Wi-Fi settings")).toBeTruthy());
+    expect(
+      screen.getByText(/needs an approved droplet access point/i),
+    ).toBeTruthy();
+    // No form, and (today) no route onward for a third-party AP.
+    expect(screen.queryByLabelText(/network name/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /save wi-fi settings/i })).toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("reserves the household form's height while resolving (WARP-1726 shrink)", async () => {
+    mockFetch.mockReturnValue(new Promise(() => {}));
+    const { container } = renderCard({ slot: "household" });
+
+    await waitFor(() =>
+      expect(screen.getByText(/checking with your access point/i)).toBeTruthy(),
+    );
+    const card = container.querySelector(".card") as HTMLElement;
+    expect(card.style.minHeight).toBe("300px");
+  });
+});
+
+/**
+ * UX blocker 1 (WARP-1723 second pass) — this card occupies two very different
+ * slots. In the household slot it IS the home network (the edge-router shape
+ * hosts the household SSID nowhere else), so describing itself as a "coverage
+ * extender" told a household admin their Wi-Fi wasn't editable here.
+ */
+describe("slot copy", () => {
+  it("household slot: names the home network, never a coverage extender", async () => {
+    renderCard({ slot: "household" });
+    await waitFor(() => expect(ssidInput()).toBeTruthy());
+
+    expect(screen.getByText("Wi-Fi settings")).toBeTruthy();
+    expect(screen.queryByText("Access point Wi-Fi")).toBeNull();
+    expect(screen.getByText(/the network your devices join/i)).toBeTruthy();
+    expect(screen.queryByText(/coverage extender/i)).toBeNull();
+    // Still honest about which radio restarts.
+    expect(screen.getByText(/restarts that radio/i)).toBeTruthy();
+  });
+
+  it("default (secondary) slot keeps the original strings verbatim", async () => {
+    renderCard();
+    await waitFor(() => expect(ssidInput()).toBeTruthy());
+
+    expect(screen.getByText("Access point Wi-Fi")).toBeTruthy();
+    expect(screen.queryByText("Wi-Fi settings")).toBeNull();
+    expect(
+      screen.getByText(
+        "The network name and password your coverage extender broadcasts. Saving restarts its radios, so devices on it reconnect.",
+      ),
+    ).toBeTruthy();
   });
 });
 

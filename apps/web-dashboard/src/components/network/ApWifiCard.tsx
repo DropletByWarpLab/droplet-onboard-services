@@ -29,16 +29,30 @@ import {
  * driven from the Network tab and always in agreement with the Coverage
  * Extenders card.
  *
- * This card is that control, and it is deliberately used in BOTH places. It
- * keys its SWR read on `/api/network/wifi/ap`, so mounting it twice shares
- * one cache entry: the two surfaces literally cannot show different names,
- * and a save in one revalidates the other. Nothing is cached client-side
- * beyond that — the orchestrator dials the AP on every read, so the name here
- * is whatever the AP's uci actually says.
+ * Single-surface contract (WARP-1723): this card is the ONE editable form for
+ * the AP's Wi-Fi, and it mounts only on Network → Wi-Fi — as the household
+ * form itself when /api/network/wifi/current resolves `source: "ap"` (the
+ * edge-router shape, where this Droplet's own radio hosts nothing), or below
+ * the router's form when the household network lives on the router and the AP
+ * is genuinely a second network (see WifiTab). The Coverage Extenders panel
+ * used to mount this same editable card; it now renders a read-only
+ * reflection (ApWifiSummary) that links here. That reflection keys on the
+ * same `/api/network/wifi/ap` SWR read, so the two surfaces still cannot
+ * show different names — WARP-1712's "always in agreement" contract holds
+ * without a second write surface. Don't re-add another editable mount.
+ * Nothing is cached client-side beyond the shared SWR entry — the
+ * orchestrator dials the AP on every read, so the name here is whatever the
+ * AP's uci actually says.
+ *
+ * The two mounts wear different copy — see `ApWifiCardSlot`. In the household
+ * slot this IS the home network, so it must not describe itself as a
+ * "coverage extender"; in the secondary slot it must, because there the
+ * household network is the card above it.
  *
  * Honesty fork (the UpnpCard / BandSteeringCard contract): with no approved
  * Droplet AP online it shows a calm read-only "not available" line, never a
- * fake form.
+ * fake form. That line is an assertion, so it waits for the read to resolve
+ * rather than defaulting to it (see `resolving`).
  *
  * Tiering mirrors the router's Wi-Fi form exactly:
  *   * a name-only save is Tier 1 and applies immediately;
@@ -57,6 +71,57 @@ const SSID_MAX_BYTES = 32;
 const PSK_MIN = 8;
 const PSK_MAX = 63;
 
+/**
+ * The AP Wi-Fi SWR key. Exported (WARP-1723 second pass) so the Coverage
+ * Extenders panel's read-only reflection keys on the SAME entry instead of
+ * re-typing the path: WARP-1712's "the two surfaces can never disagree"
+ * guarantee shouldn't rest on two string literals staying in sync.
+ */
+export const AP_WIFI_KEY = "/api/network/wifi/ap";
+
+/**
+ * The AP Wi-Fi SWR options, exported for the same reason as the key (review
+ * nit 5, third pass): both readers hard-coded `{ refreshInterval: 30000 }`
+ * against the shared key, so the "these two surfaces can never disagree"
+ * contract still rested on a literal in two files. One object, both callers —
+ * change the cadence here and both move together.
+ */
+export const AP_WIFI_SWR_OPTIONS = { refreshInterval: 30_000 } as const;
+
+/**
+ * Which slot this card occupies (WARP-1723 second pass, UX blocker 1).
+ *
+ * On the edge-router shape (`/api/network/wifi/current` → `source: "ap"`) this
+ * card IS the household Wi-Fi form — the household SSID exists nowhere else.
+ * Wearing "Access point Wi-Fi" / "your coverage extender" there reads as an
+ * accessory network, so a household admin concludes their own Wi-Fi isn't
+ * editable on this page at all. `"household"` says whose network it is while
+ * staying honest about which radio restarts.
+ *
+ * Default `"secondary"` — the router-shape mount below WifiSettingsForm, where
+ * the AP genuinely IS a second network, keeps today's strings verbatim.
+ */
+export type ApWifiCardSlot = "household" | "secondary";
+
+const SLOT_COPY: Record<ApWifiCardSlot, { headline: string; supported: string }> = {
+  household: {
+    headline: "Wi-Fi settings",
+    supported:
+      "Your home Wi-Fi — the network your devices join. It's broadcast by your Droplet access point, so saving restarts that radio and devices reconnect.",
+  },
+  secondary: {
+    headline: "Access point Wi-Fi",
+    supported:
+      "The network name and password your coverage extender broadcasts. Saving restarts its radios, so devices on it reconnect.",
+  },
+};
+
+/** Shown while the AP read is still in flight — never the "not available"
+ *  assertion, which on a healthy box is simply false (see `resolving`). */
+const CHECKING_COPY = "Checking with your access point…";
+const UNAVAILABLE_COPY =
+  "Not available — this needs an approved Droplet access point that's online.";
+
 type Status =
   | { kind: "idle" }
   | { kind: "saving" }
@@ -69,11 +134,11 @@ function ssidByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
-export function ApWifiCard() {
+export function ApWifiCard({ slot = "secondary" }: { slot?: ApWifiCardSlot }) {
   const { data, isLoading, mutate } = useSWR<ApWifiStatus>(
-    "/api/network/wifi/ap",
+    AP_WIFI_KEY,
     fetchApWifi,
-    { refreshInterval: 30000 },
+    AP_WIFI_SWR_OPTIONS,
   );
 
   const [ssid, setSsid] = useState("");
@@ -85,6 +150,14 @@ export function ApWifiCard() {
   const supported = data?.supported ?? false;
   const liveSsid = data?.ssid ?? "";
   const liveKey = data?.key ?? "";
+  // QA note 3 (second pass): `supported` defaults to false, so until the read
+  // lands the card ASSERTS "not available" about an access point that is fine.
+  // Since WARP-1723 this card mounts only AFTER /api/network/wifi/current
+  // resolves, so its own read starts late and that flash hits every first
+  // visit to the Wi-Fi tab on the edge-router shape. Hold a form-shaped
+  // placeholder while the answer is genuinely unknown; the honest unavailable
+  // state is for a RESOLVED `supported: false`.
+  const resolving = isLoading && data === undefined;
 
   // Seed the inputs from the AP once, and re-seed whenever the AP's own
   // values change while the operator isn't mid-edit. Never clobber typing.
@@ -194,8 +267,18 @@ export function ApWifiCard() {
 
   const saving = status.kind === "saving";
 
+  const copy = SLOT_COPY[slot];
+
   return (
-    <div className="card">
+    <div
+      className="card"
+      // Layout stability (UX + QA second pass, compounding live bug
+      // WARP-1726): in the household slot this card follows WifiTab's
+      // placeholder and precedes a ~350px form, so it must not be the short
+      // step in between — a mid-flight SHRINK is what the scroll clamp bites
+      // on. Same reservation as the placeholder it replaces.
+      style={slot === "household" && resolving ? { minHeight: 300 } : undefined}
+    >
       <div className="flex items-start gap-3 mb-3">
         <div
           className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
@@ -205,17 +288,56 @@ export function ApWifiCard() {
         </div>
         <div className="flex-1 min-w-0">
           <h3 className="type-headline" style={{ color: "var(--text)" }}>
-            Access point Wi-Fi
+            {copy.headline}
           </h3>
           <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
-            {supported
-              ? "The network name and password your coverage extender broadcasts. Saving restarts its radios, so devices on it reconnect."
-              : "Not available — this needs an approved Droplet access point that's online."}
+            {resolving ? CHECKING_COPY : supported ? copy.supported : UNAVAILABLE_COPY}
           </p>
         </div>
       </div>
 
-      {!supported ? null : (
+      {resolving ? (
+        // Only the household slot draws a form-shaped body. There it holds the
+        // primary surface's footprint (see the minHeight above) so the tab
+        // never shrinks mid-flight. In the secondary slot the card is SHORT in
+        // its most common resolved state ("not available" — a router-shape
+        // household with no extender at all), so a form skeleton there would
+        // manufacture the very shrink this fix removes; the calm header line
+        // already matches that footprint. No labelled controls either way —
+        // nothing here is interactive.
+        slot === "household" ? (
+          <div className="space-y-4 max-w-md animate-pulse" aria-hidden="true">
+            {[0, 1].map((i) => (
+              <div key={i}>
+                <div
+                  className="w-32"
+                  style={{
+                    height: 14,
+                    background: "var(--surface-2)",
+                    borderRadius: "var(--radius-input)",
+                  }}
+                />
+                <div
+                  className="mt-1.5"
+                  style={{
+                    height: 42,
+                    background: "var(--surface-2)",
+                    borderRadius: "var(--radius-input)",
+                  }}
+                />
+              </div>
+            ))}
+            <div
+              className="w-44"
+              style={{
+                height: 40,
+                background: "var(--surface-2)",
+                borderRadius: "var(--radius-input)",
+              }}
+            />
+          </div>
+        ) : null
+      ) : !supported ? null : (
         <>
           {data?.inSync === false && (
             <div
