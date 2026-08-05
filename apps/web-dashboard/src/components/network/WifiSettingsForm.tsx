@@ -22,6 +22,7 @@ import {
   setWifiSsid,
 } from "@/lib/api";
 import type { CurrentWifi } from "@/lib/types";
+import type { CardHeadingLevel } from "@/components/network/card-heading-level";
 
 /** Under the /api/network prefix, so the tab's Refresh sweep covers it.
  *  Exported (WARP-1723) so WifiTab keys its source-split read on the SAME SWR
@@ -62,7 +63,37 @@ type Status =
   | { kind: "error"; message: string }
   | { kind: "notice"; message: string };
 
-export function WifiSettingsForm() {
+export function WifiSettingsForm({
+  headingLevel = "h3",
+  failedRead = false,
+}: {
+  /** The document outline this card is mounted into — see CardHeadingLevel. */
+  headingLevel?: CardHeadingLevel;
+  /**
+   * The `/api/network/wifi/current` read FAILED (WARP-1733 UX review, item A).
+   *
+   * HouseholdWifiCard falls back to this form on a failed read — the right
+   * call, since the alternative is taking the only Wi-Fi editor away — but on
+   * the edge-router shape this form saves through the ROUTER write path and
+   * reports success while nothing changes on air. So it has to say so, and the
+   * form's own `live && !live.ssid` notice can't: that one is gated on `live`,
+   * which is undefined on a read that produced nothing.
+   *
+   * "Produced nothing" is the contract, NOT "errored". This is a 30s polling
+   * read and SWR keeps cached `data` across a failed revalidation, so a caller
+   * passing a bare `error !== undefined` would raise this notice over fields
+   * this form had just seeded from that cache. `useHouseholdWifiSource` owns
+   * that distinction (`error !== undefined && data === undefined`) — read its
+   * `failedRead` note before changing either side.
+   *
+   * It arrives as a flag rather than as a notice the caller renders itself,
+   * because the notice has to live INSIDE this card. As a sibling card it read
+   * as a standalone page alert in Simple mode's five-card column instead of a
+   * preamble to the form it qualifies. The caller owns the FACT; the card owns
+   * where the fact is drawn.
+   */
+  failedRead?: boolean;
+}) {
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -223,6 +254,9 @@ export function WifiSettingsForm() {
   }
 
   const saving = status.kind === "saving";
+  // The mount decides the outline level; the styling token is the same either
+  // way. Capitalised so JSX reads it as the tag, not as a literal element name.
+  const Heading = headingLevel;
 
   return (
     <div className="card">
@@ -232,12 +266,48 @@ export function WifiSettingsForm() {
           promise has to land on a matching label. The ApWifiCard household
           variant carries the same headline by design; the two never occupy
           this slot at the same time. */}
-      <h3 className="type-headline text-[color:var(--text)] mb-1">Wi-Fi settings</h3>
+      <Heading className="type-headline text-[color:var(--text)] mb-1">
+        Wi-Fi settings
+      </Heading>
       <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Name the Wi-Fi network your Droplet broadcasts and set its password.
         Saving restarts the radio, which briefly disconnects every device —
         including this one. Rejoin with the new name and password.
       </p>
+
+      {/* WARP-1733 UX review (item A): the failed-read notice, in the SAME
+          inset slot as the resolved-but-empty notice below it — one card, one
+          subject. It used to be a sibling `.card` rendered above this one by
+          HouseholdWifiCard; in Simple mode that made it the third of five
+          identically-styled cards at `gap-4`, with nothing tying it to the
+          form it is about.
+
+          The two never stack, and that rests on the caller's contract rather
+          than on this file: `failedRead` means the wifi/current read produced
+          NO data, so `live` — same SWR key — is undefined and the notice below
+          cannot fire. It would stack if `failedRead` merely meant "errored",
+          because a failed poll over a cached `source: null` body leaves `live`
+          defined with no ssid. See `useHouseholdWifiSource`.
+
+          No entry transition, deliberately — animating a failure into view
+          draws the eye to it and buys nothing (the same restraint the sibling
+          card had). */}
+      {failedRead && (
+        <div
+          role="status"
+          className="mb-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-[var(--card-inner)] rounded-sm px-3 py-2"
+        >
+          <Info
+            size={14}
+            className="mt-0.5 flex-shrink-0 text-[color:var(--text-muted)]"
+            aria-hidden="true"
+          />
+          <span>
+            We couldn&apos;t read your current Wi-Fi settings just now. Saving
+            here changes the Wi-Fi this Droplet broadcasts itself.
+          </span>
+        </div>
+      )}
 
       {/* WARP-1714: when we can't read the current Wi-Fi, SAY SO. Empty fields
           that mean "we couldn't ask" are indistinguishable from ones that mean
@@ -326,7 +396,31 @@ export function WifiSettingsForm() {
               type="button"
               onClick={() => setShowPassword((s) => !s)}
               aria-label={showPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
+              // `p-2 -mr-2` (WARP-1733 UX review, item D): the button wrapped a
+              // bare 16px icon, so its hit area was ~16×16 — under WCAG 2.2
+              // SC 2.5.8's 24px floor, on what Simple mode makes the likeliest
+              // phone surface. The padding grows the target to 32×32.
+              //
+              // The margin that gives that space back is HORIZONTAL ONLY, and
+              // that asymmetry is load-bearing. This button is absolutely
+              // positioned and vertically centred with `-translate-y-1/2`, and
+              // a translate percentage resolves against the element's own
+              // BORDER BOX — which `p-2` just grew from 16px to 32px. So the
+              // translate already absorbs the padding on its own (it now
+              // subtracts 16px instead of 8px) and the vertical half of a
+              // symmetric `-m-2` is not a give-back at all: it's a second,
+              // uncompensated 8px shove upward. Measured in headless Chrome,
+              // 46px-tall input, icon centre Y within the row:
+              //
+              //   no padding    23 (centred)
+              //   `p-2 -m-2`    15 — 8px high, and 8px above the Lock icon on
+              //                 this same input, which has no padding
+              //   `p-2 -mr-2`   23 (centred), right inset 12, target 32×32
+              //
+              // Horizontally there is no translate, so `-mr-2` IS a plain
+              // give-back and keeps the icon's 12px inset. Do not "tidy" this
+              // into `-m-2`.
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -mr-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>

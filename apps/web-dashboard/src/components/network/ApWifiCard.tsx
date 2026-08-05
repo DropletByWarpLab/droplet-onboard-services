@@ -20,6 +20,7 @@ import {
   setApWifi,
   type ApWifiStatus,
 } from "@/lib/api";
+import type { CardHeadingLevel } from "@/components/network/card-heading-level";
 
 /**
  * Access-point Wi-Fi (WARP-1712 · Droplet Design System · Network · Wi-Fi).
@@ -134,7 +135,19 @@ function ssidByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
-export function ApWifiCard({ slot = "secondary" }: { slot?: ApWifiCardSlot }) {
+export function ApWifiCard({
+  slot = "secondary",
+  headingLevel = "h3",
+}: {
+  slot?: ApWifiCardSlot;
+  /**
+   * The document outline this card is mounted into (WARP-1733 UX review,
+   * item B) — see CardHeadingLevel. Only the household slot ever gets an
+   * `h2`: the secondary mount lives inside the Advanced Wi-Fi tab panel,
+   * where a subsection is exactly what it is.
+   */
+  headingLevel?: CardHeadingLevel;
+}) {
   const { data, isLoading, mutate } = useSWR<ApWifiStatus>(
     AP_WIFI_KEY,
     fetchApWifi,
@@ -268,6 +281,9 @@ export function ApWifiCard({ slot = "secondary" }: { slot?: ApWifiCardSlot }) {
   const saving = status.kind === "saving";
 
   const copy = SLOT_COPY[slot];
+  // The mount decides the outline level; the styling token is the same either
+  // way. Capitalised so JSX reads it as the tag, not as a literal element name.
+  const Heading = headingLevel;
 
   return (
     <div
@@ -287,9 +303,9 @@ export function ApWifiCard({ slot = "secondary" }: { slot?: ApWifiCardSlot }) {
           <RadioTower size={18} aria-hidden="true" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="type-headline" style={{ color: "var(--text)" }}>
+          <Heading className="type-headline" style={{ color: "var(--text)" }}>
             {copy.headline}
-          </h3>
+          </Heading>
           <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
             {resolving ? CHECKING_COPY : supported ? copy.supported : UNAVAILABLE_COPY}
           </p>
@@ -444,7 +460,22 @@ export function ApWifiCard({ slot = "secondary" }: { slot?: ApWifiCardSlot }) {
                   aria-label={
                     showPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"
                   }
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
+                  // `p-2 -mr-2` (WARP-1733 UX review, item D): the button
+                  // wrapped a bare 16px icon, so its hit area was ~16×16 —
+                  // under WCAG 2.2 SC 2.5.8's 24px floor, and on the
+                  // edge-router shape this card IS the household form, so it
+                  // is a phone target too. The padding grows the target to
+                  // 32×32.
+                  //
+                  // The give-back margin is HORIZONTAL ONLY — see the twin
+                  // comment in WifiSettingsForm.tsx for the measurements. Short
+                  // version: `-translate-y-1/2` resolves against this button's
+                  // own border box, which `p-2` doubled, so the translate
+                  // already absorbs the vertical padding by itself; adding a
+                  // negative TOP margin shoves the icon a further 8px up, out
+                  // of line with the Lock icon on the same input. Do not
+                  // "tidy" this into `-m-2`.
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -mr-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
