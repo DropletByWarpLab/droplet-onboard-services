@@ -153,32 +153,55 @@ export function _resetEndpointCacheForTests(): void {}
  * box). Clients must not have to know port policy to undo that — so the split
  * lives here.
  *
- * Priority:
+ * Priority — each source is honoured **only when it is a bare host**, because
+ * a value carrying a port is a transport address and that is exactly the input
+ * this function exists to reject. A set-but-unusable source refuses outright
+ * rather than falling through: the box would otherwise silently mint a QR for
+ * a DIFFERENT host than the one the operator configured.
  *   1. `DROPLET_PUBLIC_FQDN` — the per-device `<name>.droplet-us.com` name the
  *      box learns from HQ (ADR-023). Split-horizon: it resolves on the home
  *      LAN, which is where enrollment happens, and over the tunnel afterwards.
- *   2. `WIREGUARD_ENDPOINT_HOST` **only when it is a bare host** — an operator
- *      who set a plain hostname meant "this is the box's name"; one who set
- *      `host:port` gave a transport address, and that is exactly the input
- *      this function exists to reject.
+ *   2. `WIREGUARD_ENDPOINT_HOST` — an operator who set a plain hostname meant
+ *      "this is the box's name".
  *   3. Empty — the caller refuses to mint and says so honestly.
  *
  * Returns a bare host (no scheme, no port); clients build `https://<host>`.
  */
 export function resolveEnrollApiHost(): string {
   const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
-  if (fqdn) return stripSchemeAndSlash(fqdn);
-  const override = stripSchemeAndSlash(
-    (config.WIREGUARD_ENDPOINT_HOST ?? "").trim(),
+  if (fqdn) return bareHostOrEmpty(stripSchemeAndSlash(fqdn));
+  return bareHostOrEmpty(
+    stripSchemeAndSlash((config.WIREGUARD_ENDPOINT_HOST ?? "").trim()),
   );
-  // A port means a transport address, never an API host. Bracketed IPv6
-  // literals ("[::1]") are checked after the brackets so they aren't mistaken
-  // for a port-bearing host.
-  const afterBracket = override.startsWith("[")
-    ? override.slice(override.indexOf("]") + 1)
-    : override;
+}
+
+/**
+ * Return `value` only if it is a BARE host, else empty so the caller refuses.
+ *
+ * WARP-1593 send-back: this guard was originally inline in the
+ * `WIREGUARD_ENDPOINT_HOST` branch above, which meant the higher-priority
+ * `DROPLET_PUBLIC_FQDN` returned BEFORE it ever ran — `box.example:51820` was
+ * minted into a QR verbatim, exactly the transport address this function
+ * exists to reject. `DROPLET_PUBLIC_FQDN` is not the closed HQ-only channel it
+ * looks like either: config.ts declares it `z.string().default("")` with no
+ * shape validation, and scripts/lib/secrets.sh seeds it into .env as an empty
+ * key for an operator to fill in. Both branches now share ONE guard so they
+ * cannot drift apart again.
+ *
+ *   - A port means a transport address, never an API host. Bracketed IPv6
+ *     literals ("[::1]") are checked AFTER the brackets, so the colons in the
+ *     address aren't mistaken for a port.
+ *   - Anything past the host — path, query, fragment, userinfo — is not a host,
+ *     and interior whitespace/newlines are the injection shape the shell side
+ *     already hardened against for this very variable (WARP-988, WARP-994).
+ */
+function bareHostOrEmpty(value: string): string {
+  const afterBracket = value.startsWith("[")
+    ? value.slice(value.indexOf("]") + 1)
+    : value;
   if (afterBracket.includes(":")) return "";
-  return override;
+  if (/[\/?#@\s]/.test(value)) return "";
+  return value;
 }
 
 /** Drop an accidental scheme prefix and any trailing slash from a host value. */

@@ -310,6 +310,70 @@ describe("POST /api/vpn/overlay/link-tokens (mint)", () => {
       expect(res.status).toBe(201);
       expect(res.body.server).toBe("d-abc.droplet-us.com");
     });
+
+    // SEND-BACK — the guard above only ever ran on the WIREGUARD_ENDPOINT_HOST
+    // branch. `DROPLET_PUBLIC_FQDN` is priority 1 and returned BEFORE it, so
+    // every FQDN row here minted a QR carrying a transport address or a path —
+    // the exact thing this function exists to refuse. The table IS the
+    // reproduction, executed, so the two branches can never drift apart again.
+    //
+    // `DROPLET_PUBLIC_FQDN` is not the closed HQ-only channel it looks like:
+    // config.ts declares it `z.string().default("")` with NO shape validation,
+    // and scripts/lib/secrets.sh seeds it into .env as an empty key for an
+    // operator to fill in by hand.
+    it.each([
+      { how: "an FQDN carrying the WG port", fqdn: "box.example:51820", wg: "" },
+      {
+        how: "an FQDN carrying a scheme AND the WG port",
+        fqdn: "https://box.example:51820",
+        wg: "",
+      },
+      { how: "an FQDN carrying a path", fqdn: "box.example/evil", wg: "" },
+      {
+        how: "a WG endpoint host carrying the WG port",
+        fqdn: "",
+        wg: "box.example:51820",
+      },
+      { how: "a WG endpoint host carrying a path", fqdn: "", wg: "box.example/evil" },
+    ])("refuses to mint from $how", async ({ fqdn, wg }) => {
+      const { app, prisma } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = fqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = wg;
+      const res = await mint(app);
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe("remote_access_not_configured");
+      // Nothing about the rejected value may reach the client.
+      expect(JSON.stringify(res.body)).not.toContain("51820");
+      expect(JSON.stringify(res.body)).not.toContain("evil");
+      // And nothing was minted — the owner keeps whatever code they had.
+      expect(prisma._linkTokens).toHaveLength(0);
+    });
+
+    // The guard must stay a scalpel: a legitimate bare host on EITHER branch
+    // still mints, including a bracketed IPv6 literal whose colons belong to
+    // the address rather than to a port.
+    it.each([
+      { how: "a bare FQDN", fqdn: "box.example", wg: "", server: "box.example" },
+      {
+        how: "a bracketed IPv6 FQDN",
+        fqdn: "[2001:db8::1]",
+        wg: "",
+        server: "[2001:db8::1]",
+      },
+      {
+        how: "a bracketed IPv6 WG endpoint host",
+        fqdn: "",
+        wg: "[2001:db8::1]",
+        server: "[2001:db8::1]",
+      },
+    ])("still mints from $how", async ({ fqdn, wg, server }) => {
+      const { app } = buildApp();
+      (config as any).DROPLET_PUBLIC_FQDN = fqdn;
+      (config as any).WIREGUARD_ENDPOINT_HOST = wg;
+      const res = await mint(app);
+      expect(res.status).toBe(201);
+      expect(res.body.server).toBe(server);
+    });
   });
 });
 
