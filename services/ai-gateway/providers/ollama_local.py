@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
-from capabilities import ollama_capabilities_from_show
+from capabilities import ollama_capabilities_from_show, static_capabilities
 from providers.base import BaseProvider
 from request_context import get_request_id
 from schemas import ChatMessage, ModelCapabilities, ModelInfo
@@ -105,12 +105,66 @@ _MAX_CONNECTIONS = int(os.getenv("OLLAMA_MAX_CONNECTIONS", "64"))
 # answers /api/tags in milliseconds.
 _TAGS_TIMEOUT_S = 5.0
 
-# We ALWAYS talk to Ollama's OpenAI-compatible chat endpoint, never the native
-# `/api/chat`. This keeps the request/response shape identical to the cloud
-# providers (one code path in router.py) and is the canonical direct-to-:11434
-# contract. The body therefore uses OpenAI field names (top-level
-# `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
-_CHAT_PATH = "/v1/chat/completions"
+# We ALWAYS talk to the daemon's OpenAI-compatible chat endpoint, never a
+# native `/api/chat`. This keeps the request/response shape identical to the
+# cloud providers (one code path in router.py) and is the canonical
+# direct-to-:11434 contract. The body therefore uses OpenAI field names
+# (top-level `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
+#
+# WARP-1744: the PATH is configurable, the SHAPE is not. Ollama serves the
+# OpenAI-compatible surface under `/v1/…`; Docker Model Runner (DMR — the
+# alternative local runtime evaluated in WARP-1740..1748) serves the identical
+# OpenAI surface under `/engines/v1/…`, i.e.
+# `POST /engines/v1/chat/completions` (docker/model-runner v1.2.6). Same body,
+# same response, different prefix — so a one-line path override is the whole
+# delta, and nothing downstream of this constant has to know which daemon is
+# on the other end.
+#
+# The default is the exact literal this provider has always used, so an unset
+# OLLAMA_CHAT_PATH leaves every request byte-identical to pre-WARP-1744
+# behavior.
+#
+# NOTE (verified live 2026-08-05 against docker/model-runner:v1.2.6): DMR
+# serves the OpenAI surface at BOTH `/engines/v1/chat/completions` and the bare
+# `/v1/chat/completions` — the bare path returns 200. So a DMR deployment does
+# NOT have to set this at all; the default already works against it. This knob
+# is kept for explicitness and for a future DMR that mounts only the prefixed
+# form, not because the migration needs it. The desk analysis originally
+# assumed the `/engines` prefix was mandatory; measurement said otherwise.
+#
+# The path is resolved RELATIVE to OLLAMA_URL, so it composes with the opt-in
+# `/proxy` base the same way the hardcoded literal did.
+_DEFAULT_CHAT_PATH = "/v1/chat/completions"
+
+
+def _resolve_chat_path(raw: str | None) -> str:
+    """Chat path from the raw env value, falling back to the Ollama default.
+
+    An explicitly-EMPTY value falls back rather than posting to the daemon
+    root: docker-compose.yml passes optional settings through as
+    `${VAR:-}`, which delivers "" (not "unset") to the container, and an
+    empty path would silently retarget every chat request. Same defensive
+    idiom as OLLAMA_MANAGER_URL / router.py's LLM_MODEL read.
+    """
+    return (raw or "").strip() or _DEFAULT_CHAT_PATH
+
+
+_CHAT_PATH = _resolve_chat_path(os.getenv("OLLAMA_CHAT_PATH"))
+
+# WARP-1744 — is the static capability table allowed to answer?
+#
+# OFF by default, which makes the default path provably byte-identical: with
+# the table disabled `_capabilities` is exactly the pre-WARP-1744 probe. It is
+# switched on by the same `INFERENCE_RUNTIME=dmr` that selects the Docker Model
+# Runner backend in droplet-local-LLM's ollama-manager (WARP-1743) — one word
+# for the whole epic rather than a knob per service, so a box cannot end up
+# half-migrated.
+#
+# Even when enabled the table never overrides a daemon that answered: see the
+# gap-filler condition in `_capabilities`. The switch exists because three
+# independent reviewers flagged an earlier table-first draft as a ships-dark
+# violation, and "provably off" beats "argued to be equivalent".
+_STATIC_CAPABILITY_TABLE = os.getenv("INFERENCE_RUNTIME", "ollama").strip().lower() == "dmr"
 
 # WARP-1333: gpt-oss's harmony parser intermittently 500s when the model
 # emits a tool call whose function name carries channel tokens
@@ -368,8 +422,9 @@ class OllamaLocalProvider(BaseProvider):
             limits=httpx.Limits(max_connections=_MAX_CONNECTIONS),
         )
         # Per-model capability cache (vision/tools). Model capabilities are
-        # immutable for a given tag, so we probe `/api/show` once per id and
-        # reuse the result across list_models calls.
+        # immutable for a given tag, so we resolve once per id (static table,
+        # else an `/api/show` probe — see _capabilities) and reuse the result
+        # across list_models calls.
         self._caps_cache: dict[str, ModelCapabilities | None] = {}
 
     def _build_sema(self, num_parallel: int) -> None:
@@ -410,20 +465,54 @@ class OllamaLocalProvider(BaseProvider):
             self._build_sema(self._limits.num_parallel)
 
     async def _capabilities(self, model: str) -> ModelCapabilities | None:
-        """Best-effort capability probe via Ollama `/api/show`, cached per id.
+        """Capabilities for a local model id, cached per id.
 
-        Returns None when the daemon is unreachable or errors — callers treat
-        unknown capabilities conservatively (non-vision → OCR fallback).
+        WARP-1744 — resolution order is `/api/show` probe FIRST, then the
+        static table strictly as a GAP-FILLER:
+
+        1. The best-effort ``/api/show`` probe, exactly as before. When the
+           daemon returns a ``capabilities`` array its answer wins outright.
+           Ollama reports that array, so on a stock appliance this method is
+           byte-identical to pre-WARP-1744 behavior: same POST, same parse,
+           same result, and step 2 is never reached.
+        2. ``capabilities.static_capabilities``, consulted ONLY when the probe
+           came back without a ``capabilities`` array (or failed outright) AND
+           the table is enabled. That is the Docker Model Runner case: verified
+           live on 2026-08-05 against ``docker/model-runner:v1.2.6``, DMR's
+           Ollama-compatible ``/api/show`` returns ``details`` and nothing else,
+           so ``ollama_capabilities_from_show`` degrades to ``tools=False`` for
+           every model and ``vision`` to the ``details.families`` heuristic.
+
+        The probe-first order matters. An earlier draft consulted the table
+        first, which skipped the ``/api/show`` POST entirely for known ids and
+        changed the reported value for any sparse-``/api/show`` daemon — a live
+        behavior change on the default path, i.e. not dark. Capability really
+        is a property of the model rather than of the daemon, but acting on
+        that belief has to wait for the runtime it was written for.
+
+        Returns None when the daemon is unreachable AND the table is disabled
+        or has no row — callers treat unknown capabilities conservatively
+        (non-vision → OCR fallback).
         """
         if model in self._caps_cache:
             return self._caps_cache[model]
         caps: ModelCapabilities | None = None
+        show: dict | None = None
         try:
             resp = await self.client.post("/api/show", json={"model": model})
             resp.raise_for_status()
-            caps = ollama_capabilities_from_show(resp.json())
+            show = resp.json()
+            caps = ollama_capabilities_from_show(show)
         except Exception as e:  # noqa: BLE001 — probe is best-effort
             logger.debug("ollama /api/show failed for %s: %s", model, e)
+        # Gap-filler only. `show is None` = probe failed; a show without
+        # `capabilities` = a daemon that cannot answer the question (DMR).
+        # Both are cases where today's answer is a guess, never cases where
+        # we are overriding a daemon that DID answer.
+        if _STATIC_CAPABILITY_TABLE and (show is None or "capabilities" not in show):
+            tabled = static_capabilities(model)
+            if tabled is not None:
+                caps = tabled
         self._caps_cache[model] = caps
         return caps
 

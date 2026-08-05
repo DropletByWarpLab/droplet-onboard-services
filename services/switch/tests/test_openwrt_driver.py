@@ -36,6 +36,13 @@ class FakeUbus:
         self.calls: list[tuple[str, str, dict]] = []
         self.login_count = 0
         self.session_valid = True
+        # rpcd's SHARED uci staging area (WARP-1730): set/add/delete stage
+        # deltas here; `apply` consumes them (NO_DATA when empty); `changes`
+        # lists them; `revert` discards one config's worth.
+        self.staged: dict[str, list] = {}
+        self.fail_board = False
+        self.fail_apply_code: int | None = None
+        self.fail_set_code: int | None = None
         self.uci = {
             "network": {
                 "cfg_vlan1": {
@@ -105,6 +112,10 @@ class FakeUbus:
             return status(6)
 
         if obj == "system" and method == "board":
+            if self.fail_board:
+                # The management plane went dark right after an apply — the
+                # transport-level failure the safe-apply probe exists to catch.
+                raise httpx.ConnectError("management plane unreachable")
             return ok({
                 "hostname": "droplet-switch",
                 "model": "Zyxel GS1900-10HP A1",
@@ -136,10 +147,18 @@ class FakeUbus:
                     return status(4)  # NOT_FOUND
                 return ok({"values": self.uci[config]})
             if method == "set":
+                if self.fail_set_code is not None:
+                    return status(self.fail_set_code)
                 section = self.uci.get(config, {}).get(args.get("section", ""))
                 if section is None:
                     return status(4)
-                section.update(args.get("values", {}))
+                values = args.get("values", {})
+                # rpcd skips unchanged options server-side (WARP-987) — only
+                # a real delta ever reaches the staging area.
+                if any(section.get(k) != v for k, v in values.items()):
+                    section.update(values)
+                    self.staged.setdefault(config, []).append(
+                        ["set", args.get("section", ""), values])
                 return ok()
             if method == "add":
                 sid = f"cfg_new{len(self.uci.get(config, {}))}"
@@ -147,11 +166,30 @@ class FakeUbus:
                     ".type": args.get("type", ""),
                     **args.get("values", {}),
                 }
+                self.staged.setdefault(config, []).append(["add", sid])
                 return ok({"section": sid})
             if method == "delete":
-                self.uci.get(config, {}).pop(args.get("section", ""), None)
+                removed = self.uci.get(config, {}).pop(args.get("section", ""), None)
+                if removed is not None:
+                    self.staged.setdefault(config, []).append(
+                        ["delete", args.get("section", "")])
                 return ok()
             if method == "commit":
+                self.staged.pop(config, None)
+                return ok()
+            if method == "apply":
+                if self.fail_apply_code is not None:
+                    return status(self.fail_apply_code)
+                if not self.staged:
+                    return status(5)  # NO_DATA — nothing pending to apply
+                self.staged.clear()
+                return ok()
+            if method == "confirm":
+                return ok()
+            if method == "changes":
+                return ok({"changes": {c: list(d) for c, d in self.staged.items()}})
+            if method == "revert":
+                self.staged.pop(config, None)
                 return ok()
 
         return status(3)  # METHOD_NOT_FOUND for anything unmodelled
@@ -334,7 +372,11 @@ class TestWrites:
         assert sets == [("uci", "set", {
             "config": "poe", "section": "cfg_p2", "values": {"enable": "1"},
         })]
-        assert ("uci", "commit", {"config": "poe"}) in fake.calls
+        # WARP-1730: the write rides the safe-apply arm — a rollback-armed
+        # apply subsumes the bare commit (which had NO safety net).
+        assert ("uci", "apply", {"rollback": True, "timeout": 60}) in fake.calls
+        assert ("uci", "confirm", {}) in fake.calls
+        assert not [c for c in fake.calls if c[:2] == ("uci", "commit")]
         assert ("poe", "reload", {}) in fake.calls
         # The fake mutated its uci state, so the read-back saw enabled=True.
         assert fake.uci["poe"]["cfg_p2"]["enable"] == "1"
@@ -374,7 +416,122 @@ class TestWrites:
         assert fake.uci["network"]["cfg_vlan100"]["ports"] == [
             "lan2:u*", "lan4:u*", "lan9:t",
         ]
-        assert ("network", "reload", {}) in fake.calls
+        # WARP-1730: `uci apply` triggers reload_config itself — the explicit
+        # `network reload` (which could go live with NO rollback armed) is gone.
+        assert ("uci", "apply", {"rollback": True, "timeout": 60}) in fake.calls
+        assert ("network", "reload", {}) not in fake.calls
+
+
+# ---------------------------------------------------------------------------
+# Safe apply (WARP-1730)
+# ---------------------------------------------------------------------------
+class TestSafeApply:
+    """Every live uci write rides apply(rollback) → probe → confirm — parity
+    with services/routing's ``safe_apply``. The switch's management address
+    (static 192.168.9.2) has no second path back: a bad bridge/VLAN write that
+    goes live without a rollback timer is a rack visit."""
+
+    ARM_APPLY = ("uci", "apply", {"rollback": True, "timeout": 60})
+    ARM_PROBE = ("system", "board", {})
+    ARM_CONFIRM = ("uci", "confirm", {})
+
+    @pytest.mark.asyncio
+    async def test_happy_arm_applies_probes_then_confirms_in_order(self):
+        fake = FakeUbus()
+        driver = make_driver(fake, plan_only=False)
+        await driver.set_vlan_membership(100, [
+            {"port": 2, "tagged": False, "member": True},
+            {"port": 4, "tagged": False, "member": True},
+        ])
+        arm = [c for c in fake.calls
+               if c in (self.ARM_APPLY, self.ARM_PROBE, self.ARM_CONFIRM)]
+        assert arm == [self.ARM_APPLY, self.ARM_PROBE, self.ARM_CONFIRM]
+        # The rollback-armed apply subsumes the bare commit — a bare commit
+        # would write the config to disk with NO safety net.
+        assert not [c for c in fake.calls if c[:2] == ("uci", "commit")]
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_never_confirms_so_the_device_rolls_back(self):
+        fake = FakeUbus()
+        fake.fail_board = True
+        driver = make_driver(fake, plan_only=False)
+        with pytest.raises(ConnectionLost):
+            await driver.set_vlan_membership(100, [
+                {"port": 2, "tagged": False, "member": True},
+            ])
+        assert self.ARM_APPLY in fake.calls
+        # confirm NEVER fires — the device-side rollback timer is the recovery.
+        assert self.ARM_CONFIRM not in fake.calls
+
+    @pytest.mark.asyncio
+    async def test_apply_failure_reverts_the_staged_config_and_reraises(self):
+        fake = FakeUbus()
+        fake.fail_apply_code = 9  # UNKNOWN_ERROR
+        driver = make_driver(fake, plan_only=False)
+        with pytest.raises(SwitchAPIError):
+            await driver.set_port_poe(2, True)
+        assert ("uci", "revert", {"config": "poe"}) in fake.calls
+        assert self.ARM_CONFIRM not in fake.calls
+        assert fake.staged == {}
+
+    @pytest.mark.asyncio
+    async def test_staging_failure_reverts_every_config_uci_reports(self):
+        fake = FakeUbus()
+        # Leftover deltas from a previous failed writer are sitting in rpcd's
+        # SHARED staging area — the next unrelated apply from ANY endpoint
+        # would silently commit them. The sweep must take out every config
+        # uci reports, not just our own.
+        fake.staged["poe"] = [["set", "cfg_p2", {"enable": "1"}]]
+        fake.staged["network"] = [["set", "cfg_vlan1", {"ports": []}]]
+        fake.fail_set_code = 9
+        driver = make_driver(fake, plan_only=False)
+        with pytest.raises(SwitchAPIError):
+            await driver.set_vlan_membership(100, [
+                {"port": 2, "tagged": False, "member": True},
+            ])
+        reverted = {c[2]["config"] for c in fake.calls if c[:2] == ("uci", "revert")}
+        assert reverted == {"poe", "network"}
+        assert self.ARM_APPLY not in fake.calls
+        assert fake.staged == {}
+
+    @pytest.mark.asyncio
+    async def test_zero_pending_apply_is_benign(self):
+        fake = FakeUbus()
+        driver = make_driver(fake, plan_only=False)
+        # lan1 PoE is already enabled: rpcd stages nothing for an unchanged
+        # value (WARP-987), so apply reports NO_DATA — "nothing to do",
+        # never a fault.
+        result = await driver.set_port_poe(1, True)
+        assert result == {"port": 1, "enabled": True}
+        assert self.ARM_APPLY in fake.calls
+        assert self.ARM_CONFIRM not in fake.calls
+        assert not [c for c in fake.calls if c[:2] == ("uci", "revert")]
+
+    @pytest.mark.asyncio
+    async def test_create_vlan_goes_through_the_same_arm(self):
+        fake = FakeUbus()
+        driver = make_driver(fake, plan_only=False)
+        await driver.create_vlan(200, "iot")
+        names = [(c[0], c[1]) for c in fake.calls]
+        assert (
+            names.index(("uci", "add"))
+            < names.index(("uci", "apply"))
+            < names.index(("system", "board"))
+            < names.index(("uci", "confirm"))
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_vlan_goes_through_the_same_arm(self):
+        fake = FakeUbus()
+        driver = make_driver(fake, plan_only=False)
+        await driver.delete_vlan(100)
+        names = [(c[0], c[1]) for c in fake.calls]
+        assert (
+            names.index(("uci", "delete"))
+            < names.index(("uci", "apply"))
+            < names.index(("system", "board"))
+            < names.index(("uci", "confirm"))
+        )
 
 
 # ---------------------------------------------------------------------------
