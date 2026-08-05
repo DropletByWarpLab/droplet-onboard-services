@@ -1231,6 +1231,51 @@ export async function listDiscoveredAps(): Promise<DiscoveredApInfo[]> {
   return data.discovered;
 }
 
+/**
+ * WARP-1731/WARP-1732 (ADR-035 §5) — one fabric member as the routing
+ * service reports it on `GET /fabric/members`.
+ *
+ * Deliberately snake_case and loosely typed: this is the wire shape from
+ * `FabricApi.browse_members()`, not the orchestrator's domain model. The
+ * mapping to `FabricMember` columns (MAC normalization, PoE coercion)
+ * happens once, at the reconciler boundary.
+ *
+ * `mac` is optional in the TYPE even though the routing service drops
+ * mac-less records — the reconciler must not assume a contract it doesn't
+ * enforce, and a mac-less record is skipped rather than trusted.
+ *
+ * `extra` carries the role-specific TXT keys verbatim. Values arrive as
+ * strings (mDNS TXT is text), hence the `string | number` union rather
+ * than plain `number` for `poe_ports` / `poe_budget`.
+ */
+export type FabricMemberInfo = {
+  role: string;
+  mac?: string;
+  model?: string;
+  version?: string;
+  last_ip?: string;
+  hostname?: string;
+  extra?: Record<string, string | number | undefined>;
+};
+
+/**
+ * Read-only inventory of every `_droplet-*._tcp` announcer on the LAN.
+ *
+ * Pure observation — this endpoint performs no device writes, and neither
+ * does anything downstream of it. `/aps/discovered` and the ADR-005 AP
+ * state machine are a separate path and are untouched by this call.
+ */
+export async function listFabricMembers(): Promise<FabricMemberInfo[]> {
+  const data = await routingFetchJson<{ members: FabricMemberInfo[] }>(
+    "/fabric/members",
+    { label: "Fabric member inventory" },
+  );
+  // Belt-and-suspenders against an older routing build that predates
+  // WARP-1731 and answers 200 with a body that has no `members` key: an
+  // empty inventory is a fine degradation, `undefined.length` is not.
+  return Array.isArray(data?.members) ? data.members : [];
+}
+
 export async function getApStatus(opts: { mac: string }): Promise<ApStatusResponse | null> {
   try {
     return await routingFetchJson<ApStatusResponse>(
