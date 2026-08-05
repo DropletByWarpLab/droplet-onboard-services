@@ -135,6 +135,13 @@ export interface ProvisionedOverlayPeer {
  *  identity. Mirrors `OVERLAY_PEER_USER` in overlay-connect.service.ts. */
 const OVERLAY_PEER_USER = "overlay";
 
+/** Overlay peers are remote devices dialling the box from OUTSIDE the home LAN
+ *  — always AWAY mode, exactly like the ones overlay-connect installs. Named so
+ *  the peer row's `mode` and the profile's CIDR+DNS pair can never drift apart:
+ *  {@link buildOverlayProfile} selects BOTH from a single mode, and this is the
+ *  value the row is stamped with. */
+export const OVERLAY_PEER_MODE: VpnPeerMode = "away";
+
 /**
  * Make the box ready to accept this device's handshake, and return what the
  * client needs to know about the result.
@@ -181,8 +188,12 @@ export async function provisionOverlayPeer(
         assignedIp,
         kind: "overlay",
         status: "active",
-        mode: "away" satisfies VpnPeerMode,
+        mode: OVERLAY_PEER_MODE,
         deviceLabel: input.label,
+        // Non-NULL for the same reason as the create branch below. A revived
+        // row may carry a stale lastSessionAt from a previous life; re-approval
+        // restarts its idle clock rather than leaving it instantly reapable.
+        lastSessionAt: now,
         revokedAt: null,
         ...provenance,
       },
@@ -195,8 +206,17 @@ export async function provisionOverlayPeer(
         publicKey: input.wgPublicKey,
         assignedIp,
         status: "active",
-        mode: "away" satisfies VpnPeerMode,
+        mode: OVERLAY_PEER_MODE,
         kind: "overlay",
+        // INVARIANT (schema.prisma, repo rule 10): kind='overlay' implies a
+        // non-NULL lastSessionAt. The idle-expiry sweep filters on
+        // `kind='overlay' AND status='active' AND lastSessionAt < cutoff`, and
+        // in Postgres `NULL < cutoff` is NULL — a row left NULL here would
+        // never match the sweep, so the peer would live forever with no expiry
+        // path, removable only by a manual DELETE /vpn/peers/:id. Approval is
+        // the honest start of the idle clock: the device now has a full
+        // OVERLAY_PEER_IDLE_EXPIRY_HOURS window to actually connect.
+        lastSessionAt: now,
         ...provenance,
       },
     });

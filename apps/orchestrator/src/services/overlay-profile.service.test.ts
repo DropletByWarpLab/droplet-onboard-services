@@ -13,6 +13,10 @@ import {
   type OverlayEndpointCandidate,
   type ProvisionOverlayPeerDeps,
 } from "./overlay-profile.service.js";
+import {
+  expireIdleOverlayPeers,
+  type OverlayConnectDeps,
+} from "./overlay-connect.service.js";
 
 const WG_KEY = "A".repeat(43) + "=";
 
@@ -120,6 +124,150 @@ describe("provisionOverlayPeer", () => {
       linkTokenEnrolledBy: "owner-1",
       linkTokenLabel: "Phone",
     });
+  });
+
+  // schema.prisma states the invariant in words: kind='overlay' IMPLIES
+  // lastSessionAt is non-NULL, precisely so the idle-expiry sweep's
+  // `kind='overlay' AND lastSessionAt < cutoff` filter never has to derive
+  // state from an absence (repo rule 10). A NULL here is not "unset" — in
+  // Postgres `NULL < cutoff` is NULL, so the row NEVER matches the sweep and
+  // the peer becomes permanent, removable only by hand.
+  //
+  // Asserted EXPLICITLY and not folded into the toMatchObject above: that
+  // matcher ignores every field it does not name, which is exactly how a
+  // missing lastSessionAt survives review.
+  it("stamps lastSessionAt on a NEW row (kind='overlay' ⇒ non-NULL)", async () => {
+    const { d, rows } = deps();
+    await provisionOverlayPeer(d, input);
+    expect(rows[0].lastSessionAt).toBeInstanceOf(Date);
+    expect(rows[0].lastSessionAt).toEqual(new Date("2026-08-05T00:00:00Z"));
+  });
+
+  it("stamps lastSessionAt when REVIVING an existing row", async () => {
+    const { d, rows } = deps();
+    rows.push({
+      id: "vp-old",
+      publicKey: WG_KEY,
+      assignedIp: "10.66.0.3",
+      status: "revoked",
+      lastSessionAt: null,
+    });
+    await provisionOverlayPeer(d, input);
+    expect(rows[0].lastSessionAt).toBeInstanceOf(Date);
+    expect(rows[0].lastSessionAt).toEqual(new Date("2026-08-05T00:00:00Z"));
+  });
+});
+
+// The unit assertions above pin the field; this pins the CONSEQUENCE. The row
+// this flow writes must be reachable by the very sweep that owns overlay-peer
+// lifecycle — otherwise every device approved through the QR flow gets a
+// permanent wg0 peer with no expiry path, and the defect is invisible until
+// someone flips OVERLAY_CONNECT_ENABLED.
+describe("provisioned peers are visible to the idle-expiry sweep", () => {
+  /** findMany with Postgres three-valued logic for `lt`: a NULL column never
+   *  satisfies a comparison, so a NULL lastSessionAt is silently un-sweepable.
+   *  Modelling that faithfully is the whole point of this test. */
+  function sweepPrisma(rows: any[]) {
+    return {
+      vpnPeer: {
+        findUnique: vi.fn(async ({ where }: any) =>
+          rows.find((r) => r.publicKey === where.publicKey) ?? null,
+        ),
+        create: vi.fn(async ({ data }: any) => {
+          const row = { id: `vp-${rows.length + 1}`, ...data };
+          rows.push(row);
+          return row;
+        }),
+        update: vi.fn(async ({ where, data }: any) => {
+          const row = rows.find((r) => r.publicKey === where.publicKey);
+          Object.assign(row, data);
+          return row;
+        }),
+        findMany: vi.fn(async ({ where }: any) =>
+          rows.filter((r) => {
+            if (where.kind !== undefined && r.kind !== where.kind) return false;
+            if (where.status !== undefined && r.status !== where.status)
+              return false;
+            const lt = where.lastSessionAt?.lt;
+            if (lt !== undefined) {
+              // SQL: NULL < x → NULL → row excluded.
+              if (r.lastSessionAt === null || r.lastSessionAt === undefined)
+                return false;
+              if (!(r.lastSessionAt < lt)) return false;
+            }
+            return true;
+          }),
+        ),
+      },
+    };
+  }
+
+  it("expires a QR-approved peer once it idles past the cutoff", async () => {
+    const rows: any[] = [];
+    const prisma = sweepPrisma(rows);
+    const approvedAt = new Date("2026-08-05T00:00:00Z");
+
+    await provisionOverlayPeer(
+      { ...deps({ prisma } as any).d, prisma, now: () => approvedAt } as any,
+      input,
+    );
+    expect(rows).toHaveLength(1);
+
+    const remove = vi.fn(async () => {});
+    const sweepDeps = {
+      config: {
+        hqBaseUrl: "",
+        deviceId: "d",
+        bridgeUrl: "",
+        bridgeToken: "",
+        vpnInterface: "wg0",
+        keepaliveSeconds: 25,
+        idleExpiryHours: 12,
+      },
+      identity: {} as never,
+      prisma: prisma as never,
+      peers: { install: vi.fn(), remove } as never,
+      allocateIp: vi.fn(),
+      // 13 h after approval — one hour past the 12 h idle window, with no
+      // session ever recorded.
+      now: () => new Date(approvedAt.getTime() + 13 * 3_600_000),
+    } as unknown as OverlayConnectDeps;
+
+    const expired = await expireIdleOverlayPeers(sweepDeps);
+    expect(expired).toBe(1);
+    expect(remove).toHaveBeenCalledWith({
+      interface: "wg0",
+      publicKey: WG_KEY,
+    });
+    expect(rows[0].status).toBe("revoked");
+  });
+
+  it("does NOT expire the same peer while it is still inside the idle window", async () => {
+    const rows: any[] = [];
+    const prisma = sweepPrisma(rows);
+    const approvedAt = new Date("2026-08-05T00:00:00Z");
+    await provisionOverlayPeer(
+      { ...deps({ prisma } as any).d, prisma, now: () => approvedAt } as any,
+      input,
+    );
+    const sweepDeps = {
+      config: {
+        hqBaseUrl: "",
+        deviceId: "d",
+        bridgeUrl: "",
+        bridgeToken: "",
+        vpnInterface: "wg0",
+        keepaliveSeconds: 25,
+        idleExpiryHours: 12,
+      },
+      identity: {} as never,
+      prisma: prisma as never,
+      peers: { install: vi.fn(), remove: vi.fn() } as never,
+      allocateIp: vi.fn(),
+      now: () => new Date(approvedAt.getTime() + 11 * 3_600_000),
+    } as unknown as OverlayConnectDeps;
+    expect(await expireIdleOverlayPeers(sweepDeps)).toBe(0);
+    expect(rows[0].status).toBe("active");
   });
 
   // Re-approving a device whose row survives (a revoked one, say) must reuse
