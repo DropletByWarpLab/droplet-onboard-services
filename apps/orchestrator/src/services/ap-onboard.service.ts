@@ -53,6 +53,9 @@ import {
   createEasyMeshControllerClient,
   type EasyMeshControllerClient,
 } from "./easymesh-controller.client.js";
+// WARP-1761 — WRITE-path only. `getApWifi` below deliberately does NOT import
+// anything from here: ADR-035 §1 keeps reads dialing the device.
+import { recordWifiPrimaryIntent } from "./network-intent.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("ap-onboard");
@@ -1164,6 +1167,7 @@ export async function getApWifi(prisma: PrismaClient): Promise<ApWifiState> {
 export async function setApWifi(
   prisma: PrismaClient,
   opts: { ssid?: string; key?: string },
+  writtenBy?: string,
 ): Promise<{ operationId: string | null; ssid: string | null; fiveGhzSsid: string | null }> {
   if (opts.ssid === undefined && opts.key === undefined) {
     throw new ApOnboardError(
@@ -1172,6 +1176,24 @@ export async function setApWifi(
       "AP_INVALID",
     );
   }
+  // WARP-1761 (ADR-035 §7) — record the operator's INTENT before anything
+  // touches a device, then push exactly as before. This is the one seam, so
+  // it covers both callers: the Tier-1 `PUT /network/wifi/ap` and the Tier-2
+  // confirm dispatcher in network-status.routes.ts, which replays the params
+  // in a separate request. A future third caller cannot bypass it either.
+  //
+  // Deliberately ABOVE the online-AP lookup: "no approved AP is online" is
+  // the lost-write case itself (the lab AP was unreachable for ~20 minutes
+  // during a firmware experiment), so the 422 below must not be able to
+  // discard what the operator asked for. The intent survives every failure
+  // path from here down, and the converger applies it when the AP returns.
+  //
+  // Best-effort by construction: `recordWifiPrimaryIntent` never throws, so
+  // this line cannot change the status, body, or timing contract of any
+  // response below it. It records the SSID only — never the passphrase (see
+  // network-intent.service.ts).
+  await recordWifiPrimaryIntent(prisma, opts, writtenBy);
+
   const rows = await onlineDropletImageAps(prisma);
   if (rows.length === 0) {
     throw apWirelessUnavailable(
