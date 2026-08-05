@@ -1,0 +1,172 @@
+# Design-token ratchet — grandfathered debt.
+#
+# Enforced by `scripts/check-dashboard-classes.sh` (guards 3–5), run by
+# `npm run lint:dashboard-classes` from apps/web-dashboard.
+#
+# Format: `<rule> <path>`, path relative to apps/web-dashboard/src.
+# A hit in a listed file passes; a hit anywhere else fails the build.
+#
+# Seeded from origin/main @ 149500ba (2026-08-04): 94 legacy-token files
+# (855 hits), 22 accent-alpha files (44 hits), 14 white-on-accent files
+# (15 hits). Those numbers only go down.
+#
+# THIS FILE MAY ONLY SHRINK. Never add a line to make CI green — fix the
+# code instead. When you clean a file, delete its line here in the same
+# PR; the guard hard-fails on an entry that no longer matches, because a
+# stale entry is how a ratchet quietly stops ratcheting.
+#
+# Rules:
+#   legacy-token     pre-DESIGN.md tokens (dp-card, dp-btn*, dp-input,
+#                    bg-surface-*, text-label-*, text-accent, bg-accent,
+#                    border-separator, bg-separator, bg-label-*,
+#                    ring-accent, --color-accent*). Valid CSS, but not
+#                    the ratified system. See DESIGN.md.
+#   accent-alpha     `-accent/NN`. Silently dropped by Tailwind: the
+#                    `accent` color is `var(--color-accent)` with no
+#                    <alpha-value> placeholder and the variable is a hex.
+#                    Every entry below is a live bug — mostly focus rings
+#                    that render no ring at all. Paying this down is its
+#                    own PR (a visual change), not a lint change.
+#   white-on-accent  `text-white`/`bg-white`/`#fff` on an accent fill.
+#                    On-Accent flips to #1d1d1f in dark mode, so these
+#                    are dark-mode contrast failures. Also its own PR.
+#
+# Out of scope entirely (never listed here, never scanned): the setup
+# wizard + auth routes and the components they solely own (WARP-1078),
+# and `__tests__/` + co-located `*.test.ts(x)`.
+
+# ── legacy-token ──
+legacy-token app/calendar/page.tsx
+legacy-token app/cameras/[name]/page.tsx
+legacy-token app/cameras/[name]/recordings/page.tsx
+legacy-token app/cameras/[name]/settings/page.tsx
+legacy-token app/cameras/birdseye/page.tsx
+legacy-token app/cameras/notifications/page.tsx
+legacy-token app/cameras/people/page.tsx
+legacy-token app/cameras/plates/page.tsx
+legacy-token app/chat/page.tsx
+legacy-token app/devices/clients/page.tsx
+legacy-token app/devices/page.tsx
+legacy-token app/devices/pair/page.tsx
+legacy-token app/error.tsx
+legacy-token app/events/page.tsx
+legacy-token app/files/page.tsx
+legacy-token app/global-error.tsx
+legacy-token app/globals.css
+legacy-token app/help/page.tsx
+legacy-token app/integrations/eaglesoft/page.tsx
+legacy-token app/integrations/page.tsx
+legacy-token app/knowledge/BrainMemoryTab.tsx
+legacy-token app/knowledge/RecentlyIndexedTab.tsx
+legacy-token app/knowledge/SearchTab.tsx
+legacy-token app/layout.tsx
+legacy-token app/messages/ConversationPane.tsx
+legacy-token app/messages/ForwardDialogs.tsx
+legacy-token app/messages/MeetingCard.tsx
+legacy-token app/messages/MeetingDialog.tsx
+legacy-token app/messages/NewThreadDialog.tsx
+legacy-token app/messages/page.tsx
+legacy-token app/messages/ThreadList.tsx
+legacy-token app/messages/TranscriptModal.tsx
+legacy-token app/not-found.tsx
+legacy-token app/page.tsx
+legacy-token app/projects/projects.css
+legacy-token app/remote-access/page.tsx
+legacy-token app/settings/page.tsx
+legacy-token app/settings/updates/page.tsx
+legacy-token app/users/page.tsx
+legacy-token components/AttachmentChip.tsx
+legacy-token components/auth/PasswordRulesChecklist.tsx
+legacy-token components/Breadcrumbs.tsx
+legacy-token components/chat/ChatHistoryPanel.tsx
+legacy-token components/chat/InterviewSurfaces.tsx
+legacy-token components/chat/ReasoningDisclosure.tsx
+legacy-token components/chat/ReviewCard.tsx
+legacy-token components/chat/SessionHeader.tsx
+legacy-token components/chat/ThinkingMessage.tsx
+legacy-token components/ChatInput.tsx
+legacy-token components/ChatMessage.tsx
+legacy-token components/ClientDetailPanel.tsx
+legacy-token components/CodeBlock.tsx
+legacy-token components/context/BytesBySource.tsx
+legacy-token components/context/ContextWidget.tsx
+legacy-token components/context/CoverageDonut.tsx
+legacy-token components/context/EmptyState.tsx
+legacy-token components/context/FailedList.tsx
+legacy-token components/context/PipelineHealth.tsx
+legacy-token components/context/QueuedList.tsx
+legacy-token components/context/RecentlyIndexed.tsx
+legacy-token components/context/StatCards.tsx
+legacy-token components/context/ThroughputSparkline.tsx
+legacy-token components/erp/ConnectionHero.tsx
+legacy-token components/erp/ManageSheet.tsx
+legacy-token components/erp/NewAppointmentDialog.tsx
+legacy-token components/erp/PatientPeek.tsx
+legacy-token components/erp/PatientSearch.tsx
+legacy-token components/erp/SyncFooter.tsx
+legacy-token components/erp/WriteConfirmModal.tsx
+legacy-token components/events/ReviewCard.tsx
+legacy-token components/FileManager/FileListSimple.tsx
+legacy-token components/FileManager/SearchBar.tsx
+legacy-token components/FileManager/SpaceSwitcher.tsx
+legacy-token components/help/HelpLauncher.tsx
+legacy-token components/home/home-bento.css
+legacy-token components/home/widgets.tsx
+legacy-token components/integrations/ConnectorCard.tsx
+legacy-token components/integrations/ConnectWizard.tsx
+legacy-token components/integrations/SafetyChip.tsx
+legacy-token components/ModelSelector.tsx
+legacy-token components/ModuleRouteGuard.tsx
+legacy-token components/settings/BusinessProfileCard.tsx
+legacy-token components/shell/droplet-shell.css
+legacy-token components/Sidebar.tsx
+legacy-token components/smart-home/RoutinesSection.tsx
+legacy-token components/smart-home/ToggleSwitch.tsx
+legacy-token components/SourceChannelBadge.tsx
+legacy-token components/ThemeToggle.tsx
+legacy-token components/Toast.tsx
+legacy-token components/Topbar.tsx
+legacy-token components/voice/CalibrationWizard.tsx
+legacy-token components/voice/EnrollmentWizard.tsx
+legacy-token components/voice/voice.css
+legacy-token components/voice/VoiceBits.tsx
+
+# ── accent-alpha ──
+accent-alpha app/calendar/page.tsx
+accent-alpha app/cameras/[name]/page.tsx
+accent-alpha app/chat/page.tsx
+accent-alpha app/knowledge/RecentlyIndexedTab.tsx
+accent-alpha app/messages/ConversationPane.tsx
+accent-alpha app/messages/ForwardDialogs.tsx
+accent-alpha app/messages/MeetingCard.tsx
+accent-alpha app/messages/NewThreadDialog.tsx
+accent-alpha app/messages/ThreadList.tsx
+accent-alpha app/page.tsx
+accent-alpha app/settings/page.tsx
+accent-alpha components/chat/InterviewSurfaces.tsx
+accent-alpha components/chat/ReasoningDisclosure.tsx
+accent-alpha components/ClientDetailPanel.tsx
+accent-alpha components/CodeBlock.tsx
+accent-alpha components/context/FailedList.tsx
+accent-alpha components/context/QueuedList.tsx
+accent-alpha components/home/widgets.tsx
+accent-alpha components/integrations/SafetyChip.tsx
+accent-alpha components/settings/BusinessProfileCard.tsx
+accent-alpha components/Sidebar.tsx
+accent-alpha components/Toast.tsx
+
+# ── white-on-accent ──
+white-on-accent app/cameras/[name]/page.tsx
+white-on-accent app/chat/page.tsx
+white-on-accent app/devices/pair/page.tsx
+white-on-accent app/messages/ConversationPane.tsx
+white-on-accent app/messages/ThreadList.tsx
+white-on-accent app/messages/TranscriptModal.tsx
+white-on-accent components/cameras/CameraCard.tsx
+white-on-accent components/chat/InterviewSurfaces.tsx
+white-on-accent components/chat/ReviewCard.tsx
+white-on-accent components/context/EmptyState.tsx
+white-on-accent components/settings/BusinessProfileCard.tsx
+white-on-accent components/settings/ZoneEditor.tsx
+white-on-accent components/smart-home/RoomModal.tsx
+white-on-accent components/smart-home/RoomSections.tsx

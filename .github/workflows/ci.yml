@@ -129,6 +129,7 @@ jobs:
               - "packages/shared-types/**"
               - "packages/auth-policy/**"
               - "scripts/check-dashboard-classes.sh"
+              - "scripts/dashboard-token-allowlist.txt"
             matter-controller:
               - "services/matter-controller/**"
               - "packages/fips-selftest/**"

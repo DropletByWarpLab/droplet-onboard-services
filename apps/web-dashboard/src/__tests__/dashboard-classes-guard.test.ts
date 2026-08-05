@@ -13,6 +13,21 @@
  * shell guard enforces the same invariant in CI.
  *
  * Keep this list in sync with `scripts/check-dashboard-classes.sh`.
+ *
+ * SCOPE: this file mirrors guard 1 (`BAD_CLASSES`) only. The shell
+ * script also carries guards 3–5 — the DESIGN.md design-token ratchet
+ * (legacy tokens, `-accent/NN`, white-on-accent). Those are deliberately
+ * NOT mirrored here:
+ *
+ *   - They are allowlist-driven off a checked-in data file
+ *     (`scripts/dashboard-token-allowlist.txt`, 130 grandfathered
+ *     entries). A vitest copy would mean a second parser for that file
+ *     and a second scope-exclusion list to keep in sync — two more
+ *     things to drift, for zero extra signal, since the shell guard
+ *     already runs in the same CI leg as this suite and locally via
+ *     `npm run lint:dashboard-classes`.
+ *   - Guard 1 is a fixed nine-name list that genuinely benefits from
+ *     being asserted twice. A 130-entry ratchet does not.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
