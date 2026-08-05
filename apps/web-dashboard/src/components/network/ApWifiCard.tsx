@@ -460,14 +460,22 @@ export function ApWifiCard({
                   aria-label={
                     showPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"
                   }
-                  // `p-2 -m-2` (WARP-1733 UX review, item D): the button
+                  // `p-2 -mr-2` (WARP-1733 UX review, item D): the button
                   // wrapped a bare 16px icon, so its hit area was ~16×16 —
                   // under WCAG 2.2 SC 2.5.8's 24px floor, and on the
                   // edge-router shape this card IS the household form, so it
                   // is a phone target too. The padding grows the target to
-                  // 32×32; the equal negative margin gives the space back, so
-                  // the icon does not move.
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -m-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
+                  // 32×32.
+                  //
+                  // The give-back margin is HORIZONTAL ONLY — see the twin
+                  // comment in WifiSettingsForm.tsx for the measurements. Short
+                  // version: `-translate-y-1/2` resolves against this button's
+                  // own border box, which `p-2` doubled, so the translate
+                  // already absorbs the vertical padding by itself; adding a
+                  // negative TOP margin shoves the icon a further 8px up, out
+                  // of line with the Lock icon on the same input. Do not
+                  // "tidy" this into `-m-2`.
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -mr-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>

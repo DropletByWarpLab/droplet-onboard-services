@@ -70,6 +70,13 @@ export function WifiTab() {
         // that strands the extender's Wi-Fi editor entirely: the Devices panel
         // is read-only since WARP-1723, so its "Change in Wi-Fi settings" link
         // would land on a tab that can't edit what it promised.
+        //
+        // `failedRead` has to mean "the read produced NOTHING" for this `||`
+        // to be safe. If it meant merely "errored", a failed poll over a
+        // cached `source: "ap"` would satisfy BOTH sides at once — the card
+        // above promotes the AP form into the household slot while this gate
+        // renders the same AP a second time as the secondary network. See
+        // `useHouseholdWifiSource`; WifiTab.test.tsx pins the state.
         <ApWifiCard />
       ) : null}
 

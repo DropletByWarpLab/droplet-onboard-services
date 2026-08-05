@@ -442,17 +442,29 @@ describe("WARP-1733 UX polish", () => {
 
   /**
    * Item D. The reveal button wrapped a 16px icon with no padding, so its hit
-   * area was ~16×16 — under WCAG 2.2 SC 2.5.8's 24px floor. `p-2 -m-2` grows
-   * the target by 8px on every side and gives the margin straight back, so the
-   * icon does not move.
+   * area was ~16×16 — under WCAG 2.2 SC 2.5.8's 24px floor, and on the
+   * edge-router shape this card IS the household form. `p-2` grows the target
+   * to 32×32.
+   *
+   * The margin that gives the space back has to be HORIZONTAL ONLY — see the
+   * twin test in WifiSettingsForm.test.tsx for the measured numbers. Short
+   * version: the button is absolutely positioned and centred with
+   * `top-1/2 -translate-y-1/2`, that translate resolves against the element's
+   * own border box, and `p-2` doubles it — so padding re-centres itself and a
+   * negative TOP margin pulls the icon 8px above the Lock icon on the same
+   * input.
+   *
+   * jsdom computes no layout, so this pins the mechanism rather than a rect —
+   * and pins the part that actually broke: no negative VERTICAL margin.
    */
   it("gives the password reveal a target that clears the 24px floor", async () => {
     renderCard();
     await waitFor(() => expect(ssidInput()).toBeTruthy());
 
-    // jsdom computes no layout, so pin the mechanism rather than a rect.
     const reveal = screen.getByRole("button", { name: /show wi-fi password/i });
     expect(reveal.className).toMatch(/(^|\s)p-2(\s|$)/);
-    expect(reveal.className).toMatch(/(^|\s)-m-2(\s|$)/);
+    expect(reveal.className).toMatch(/(^|\s)-mr-2(\s|$)/);
+    // The regression guard: `-m-2`/`-my-2`/`-mt-2` all break the centring.
+    expect(reveal.className).not.toMatch(/(^|\s)-m[ytb]?-\d/);
   });
 });

@@ -16,9 +16,11 @@
  * run, so the components mount exactly as they ship.
  */
 import { expect, vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
+import { useSWRConfig } from "swr";
 import type { ApWifiStatus } from "@/lib/api";
 import type { CurrentWifi } from "@/lib/types";
+import { CURRENT_WIFI_KEY } from "@/components/network/WifiSettingsForm";
 
 export type FetchMock = ReturnType<typeof vi.fn>;
 
@@ -91,32 +93,47 @@ export const CURRENT_WIFI_NONE = currentWifi({
   detail: "We couldn't read the Wi-Fi configuration right now.",
 });
 
+export type CurrentWifiResponse = CurrentWifi | "pending" | "error";
+
 /**
  * Drive every endpoint the Wi-Fi surfaces read.
  *
  * `current` takes the resolved body, or the two non-bodies that matter:
  *   - "pending" — the read never settles (SWR data stays undefined);
  *   - "error"   — the read FAILS (fetchCurrentWifi throws on !ok).
+ *
+ * `currentAfterFirst` is what the SECOND and later `/wifi/current` reads do,
+ * when that differs from the first. The card polls this endpoint every 30s, so
+ * "succeeded once, then a poll failed" is an ordinary steady state — and it is
+ * the one the single-value form of this helper cannot express (see
+ * `pollCurrentWifi`).
  */
 export function mockWifiEndpoints(
   fetchMock: FetchMock,
   {
     current,
     apWifi = AP_WIFI_NONE,
+    currentAfterFirst,
   }: {
-    current: CurrentWifi | "pending" | "error";
+    current: CurrentWifiResponse;
     apWifi?: ApWifiStatus;
+    currentAfterFirst?: CurrentWifiResponse;
   },
 ): void {
+  let currentReads = 0;
   fetchMock.mockImplementation((url: string) => {
     const path = String(url);
     const json = (body: unknown) =>
       Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (path.includes("/api/network/wifi/current")) {
-      if (current === "pending") return new Promise(() => {});
-      if (current === "error")
+      const answer =
+        currentReads++ > 0 && currentAfterFirst !== undefined
+          ? currentAfterFirst
+          : current;
+      if (answer === "pending") return new Promise(() => {});
+      if (answer === "error")
         return Promise.resolve({ ok: false, status: 502, json: async () => ({}) });
-      return json(current);
+      return json(answer);
     }
     if (path.includes("/api/network/wifi/ap")) return json(apWifi);
     if (path.includes("/api/network/wifi/band-steering"))
@@ -133,6 +150,46 @@ export function mockWifiEndpoints(
     if (path.includes("/api/aps")) return json({ aps: [] });
     // Bare /api/network/wifi (WifiChannelCard) + phone-home + switch + rest.
     return json({});
+  });
+}
+
+/**
+ * A handle on the enclosing <SWRConfig> cache's `mutate`, so a test can fire
+ * the 30s poll's revalidation on demand.
+ *
+ * Why not fake timers: the cards under test also run `setTimeout`-driven status
+ * transitions and RTL's async helpers, and advancing a 30s interval through all
+ * of that is far more machinery than the one thing being asserted. `mutate(key)`
+ * with no data performs exactly the same operation the interval performs — a
+ * revalidation against the same key with the same fetcher — so it reproduces
+ * the state faithfully and reads as what it is.
+ *
+ * Mount `<SwrRevalidateHandle handle={h} />` inside the SWRConfig, then await
+ * `pollCurrentWifi(h)`.
+ */
+export type RevalidateHandle = { revalidate?: () => Promise<unknown> };
+
+export function SwrRevalidateHandle({
+  handle,
+}: {
+  handle: RevalidateHandle;
+}): null {
+  const { mutate } = useSWRConfig();
+  handle.revalidate = () => mutate(CURRENT_WIFI_KEY);
+  return null;
+}
+
+/**
+ * Fire one `/api/network/wifi/current` poll and let the result settle.
+ *
+ * The rejection is swallowed deliberately: a failing poll is the scenario, and
+ * SWR surfaces it to the component as `error` — `mutate` re-throwing it at the
+ * caller is just the API's way of reporting the same thing twice.
+ */
+export async function pollCurrentWifi(handle: RevalidateHandle): Promise<void> {
+  expect(handle.revalidate).toBeDefined();
+  await act(async () => {
+    await handle.revalidate!().catch(() => {});
   });
 }
 

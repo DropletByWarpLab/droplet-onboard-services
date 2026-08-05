@@ -23,7 +23,7 @@
  *   read failed     → FailedReadNotice + WifiSettingsForm, never a stuck skeleton
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { HouseholdWifiCard } from "../HouseholdWifiCard";
 import {
@@ -33,10 +33,13 @@ import {
   HOUSEHOLD_HEADLINE,
   ROUTER_FORM_SUBHEAD,
   SKELETON_TEXT,
+  SwrRevalidateHandle,
   currentWifi,
   findSkeleton,
   mockWifiEndpoints,
+  pollCurrentWifi,
   type FetchMock,
+  type RevalidateHandle,
 } from "./wifi-source-fixtures";
 
 function renderCard() {
@@ -239,6 +242,66 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     // …and it is the FORM's card it lives in, not a card of its own that
     // happens to be the only one.
     expect(card.contains(screen.getByLabelText(/^network name/i))).toBe(true);
+  });
+
+  /**
+   * A failed read is not the same event as a failed POLL on top of a good one.
+   *
+   * `failedRead` was `error !== undefined` alone, which ignores whether `data`
+   * survived. SWR sets `error` on a failed revalidation and deliberately keeps
+   * the cached `data` — that is what makes stale-while-revalidate work. So one
+   * bad 30s poll (the card polls that often) put the card in a state where the
+   * form was correctly seeded FROM the cached read while a notice above it
+   * announced that we couldn't read it. On the calm home surface that is a
+   * card arguing with itself, and unlike a genuinely failed read it says
+   * nothing true: we DID read the Wi-Fi, moments ago, and the fields prove it.
+   *
+   * `failedRead` now means what its name says — the read produced nothing.
+   */
+  it("a failed POLL on top of a good read stays quiet — no 'couldn't read' notice over a seeded form", async () => {
+    const handle: RevalidateHandle = {};
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "router", ssid: "Fotonia Home" }),
+      currentAfterFirst: "error",
+    });
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <SwrRevalidateHandle handle={handle} />
+        <HouseholdWifiCard />
+      </SWRConfig>,
+    );
+
+    // The first read lands and seeds the form.
+    const ssid = await screen.findByLabelText(/^network name/i);
+    await waitFor(() => expect(ssid).toHaveValue("Fotonia Home"));
+
+    // The next poll fails. SWR raises `error` and keeps the cached body.
+    await pollCurrentWifi(handle);
+
+    // Still showing that cached answer — so the form has NOT lost the read…
+    expect(ssid).toHaveValue("Fotonia Home");
+    // …and must not claim it did.
+    expect(screen.queryByText(FAILED_READ_NOTICE)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The other half of the same distinction: when the read genuinely produced
+   * nothing, the notice still has to fire. This is the assertion that stops
+   * "make the contradiction go away" from being fixed by muting the notice.
+   */
+  it("still speaks up when the poll fails and there is no cached read to fall back on", async () => {
+    const handle: RevalidateHandle = {};
+    mockWifiEndpoints(fetchMock, { current: "error" });
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <SwrRevalidateHandle handle={handle} />
+        <HouseholdWifiCard />
+      </SWRConfig>,
+    );
+
+    expect(await screen.findByText(FAILED_READ_NOTICE)).toBeInTheDocument();
+    await pollCurrentWifi(handle);
+    expect(screen.getByText(FAILED_READ_NOTICE)).toBeInTheDocument();
   });
 
   /**

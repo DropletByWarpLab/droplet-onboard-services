@@ -77,7 +77,14 @@ export function WifiSettingsForm({
    * the edge-router shape this form saves through the ROUTER write path and
    * reports success while nothing changes on air. So it has to say so, and the
    * form's own `live && !live.ssid` notice can't: that one is gated on `live`,
-   * which is undefined precisely because this same read (same SWR key) failed.
+   * which is undefined on a read that produced nothing.
+   *
+   * "Produced nothing" is the contract, NOT "errored". This is a 30s polling
+   * read and SWR keeps cached `data` across a failed revalidation, so a caller
+   * passing a bare `error !== undefined` would raise this notice over fields
+   * this form had just seeded from that cache. `useHouseholdWifiSource` owns
+   * that distinction (`error !== undefined && data === undefined`) — read its
+   * `failedRead` note before changing either side.
    *
    * It arrives as a flag rather than as a notice the caller renders itself,
    * because the notice has to live INSIDE this card. As a sibling card it read
@@ -275,8 +282,12 @@ export function WifiSettingsForm({
           identically-styled cards at `gap-4`, with nothing tying it to the
           form it is about.
 
-          The two never stack: `failedRead` means the wifi/current read errored,
-          so `live` is undefined and the notice below cannot fire.
+          The two never stack, and that rests on the caller's contract rather
+          than on this file: `failedRead` means the wifi/current read produced
+          NO data, so `live` — same SWR key — is undefined and the notice below
+          cannot fire. It would stack if `failedRead` merely meant "errored",
+          because a failed poll over a cached `source: null` body leaves `live`
+          defined with no ssid. See `useHouseholdWifiSource`.
 
           No entry transition, deliberately — animating a failure into view
           draws the eye to it and buys nothing (the same restraint the sibling
@@ -385,13 +396,31 @@ export function WifiSettingsForm({
               type="button"
               onClick={() => setShowPassword((s) => !s)}
               aria-label={showPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"}
-              // `p-2 -m-2` (WARP-1733 UX review, item D): the button wrapped a
+              // `p-2 -mr-2` (WARP-1733 UX review, item D): the button wrapped a
               // bare 16px icon, so its hit area was ~16×16 — under WCAG 2.2
               // SC 2.5.8's 24px floor, on what Simple mode makes the likeliest
-              // phone surface. The padding grows the target to 32×32; the
-              // equal negative margin gives the space straight back, so the
-              // icon sits exactly where it did and no layout moves.
-              className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -m-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
+              // phone surface. The padding grows the target to 32×32.
+              //
+              // The margin that gives that space back is HORIZONTAL ONLY, and
+              // that asymmetry is load-bearing. This button is absolutely
+              // positioned and vertically centred with `-translate-y-1/2`, and
+              // a translate percentage resolves against the element's own
+              // BORDER BOX — which `p-2` just grew from 16px to 32px. So the
+              // translate already absorbs the padding on its own (it now
+              // subtracts 16px instead of 8px) and the vertical half of a
+              // symmetric `-m-2` is not a give-back at all: it's a second,
+              // uncompensated 8px shove upward. Measured in headless Chrome,
+              // 46px-tall input, icon centre Y within the row:
+              //
+              //   no padding    23 (centred)
+              //   `p-2 -m-2`    15 — 8px high, and 8px above the Lock icon on
+              //                 this same input, which has no padding
+              //   `p-2 -mr-2`   23 (centred), right inset 12, target 32×32
+              //
+              // Horizontally there is no translate, so `-mr-2` IS a plain
+              // give-back and keeps the icon's 12px inset. Do not "tidy" this
+              // into `-m-2`.
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -mr-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>

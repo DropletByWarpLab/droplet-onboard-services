@@ -164,7 +164,33 @@ export function useHouseholdWifiSource(): {
   resolved: boolean;
   /** The resolved source, or null (both "nothing found" and "not resolved"). */
   source: CurrentWifi["source"] | null;
-  /** The read FAILED. Distinct from a resolved `source: null`. */
+  /**
+   * We have NO answer: the read failed and left nothing behind. Distinct from
+   * a resolved `source: null` ("we asked, there's nothing"), and — the part
+   * that has to be spelled out — distinct from `error` alone.
+   *
+   * This is a polling read (every 30s), and SWR keeps the cached `data` when a
+   * revalidation fails; that is the whole point of stale-while-revalidate. So
+   * `error !== undefined` on its own is true in a state where we have a
+   * perfectly good, recent answer and are merely failing to refresh it. Both
+   * consumers of this hook draw the wrong conclusion from that:
+   *
+   *   - WifiSettingsForm renders "we couldn't read your current Wi-Fi
+   *     settings" ABOVE fields it just seeded from that cached read — a card
+   *     contradicting itself on the calmest surface in the product;
+   *   - WifiTab's second-card gate (`source === "router" || failedRead`) fires
+   *     while `source` is still "ap", so the AP card renders BOTH promoted
+   *     into the household slot here and again below as the "second network":
+   *     two editable forms for one access point on one SWR key, sharing a
+   *     duplicate `#ap-wifi-ssid` (which also silently breaks the second
+   *     form's `<label for>`), under two contradictory titles. That duplicate
+   *     editable surface is exactly the bug WARP-1723 removed.
+   *
+   * Requiring `data === undefined` makes the flag mean what its name says. A
+   * failing poll over a good read is not news to a household — the answer on
+   * screen is still the answer — and a read that genuinely produced nothing
+   * still raises it, which is the case the notice exists for.
+   */
   failedRead: boolean;
 } {
   const { data, error } = useSWR<CurrentWifi>(CURRENT_WIFI_KEY, fetchCurrentWifi, {
@@ -173,6 +199,6 @@ export function useHouseholdWifiSource(): {
   return {
     resolved: data !== undefined || error !== undefined,
     source: data?.source ?? null,
-    failedRead: error !== undefined,
+    failedRead: error !== undefined && data === undefined,
   };
 }

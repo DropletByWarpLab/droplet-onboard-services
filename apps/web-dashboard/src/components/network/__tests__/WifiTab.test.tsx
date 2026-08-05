@@ -30,10 +30,13 @@ import {
   CURRENT_WIFI_NONE,
   HOUSEHOLD_HEADLINE,
   ROUTER_FORM_SUBHEAD,
+  SwrRevalidateHandle,
   currentWifi,
   findSkeleton,
   mockWifiEndpoints,
+  pollCurrentWifi,
   type FetchMock,
+  type RevalidateHandle,
 } from "./wifi-source-fixtures";
 
 function renderTab() {
@@ -134,6 +137,55 @@ describe("WifiTab household slot + second-network composition (WARP-1723)", () =
     expect(screen.getByText(/coverage extender/i)).toBeInTheDocument();
     // …and it is genuinely editable, which is the whole point of keeping it.
     expect(document.getElementById("ap-wifi-ssid")).not.toBeNull();
+  });
+
+  /**
+   * The duplicate-editable-form state, reached by a poll rather than a read.
+   *
+   * The two gates disagreed about what a stale cache means. HouseholdWifiCard
+   * reads `source` (still "ap" — the cached body survives) and promotes the AP
+   * form into the household slot; this tab's second-card gate read `failedRead`
+   * (true, because SWR raised `error` beside that surviving body) and rendered
+   * the SAME AP card again as the "second network". Two editable forms for one
+   * access point, on one SWR key, with a duplicate `#ap-wifi-ssid` id and two
+   * contradictory titles — the exact invariant WARP-1723 established.
+   *
+   * The suite's other failed-read test starts from `current: "error"` with no
+   * prior success, so `source` is null there and this branch is never reached.
+   * The state needs a read that SUCCEEDS and then a poll that fails.
+   */
+  it('source "ap" then a FAILED poll: still one editable AP card, not two', async () => {
+    const handle: RevalidateHandle = {};
+    mockWifiEndpoints(fetchMock, {
+      current: currentWifi({ source: "ap" }),
+      apWifi: AP_WIFI_UP,
+      currentAfterFirst: "error",
+    });
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <SwrRevalidateHandle handle={handle} />
+        <WifiTab />
+      </SWRConfig>,
+    );
+
+    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(await screen.findByLabelText("Network name (SSID)")).toHaveAttribute(
+      "id",
+      "ap-wifi-ssid",
+    );
+
+    // The 30s poll fails; the cached `source: "ap"` body survives it.
+    await pollCurrentWifi(handle);
+
+    // One AP form, so one `#ap-wifi-ssid` — a duplicate id would also break
+    // every `<label for>` on the second copy.
+    expect(screen.getAllByLabelText("Network name (SSID)")).toHaveLength(1);
+    expect(document.querySelectorAll("#ap-wifi-ssid")).toHaveLength(1);
+    // …and one story about that radio: the household's, not the household's
+    // plus a "coverage extender" describing the same hardware.
+    expect(screen.getAllByText(HOUSEHOLD_HEADLINE)).toHaveLength(1);
+    expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
+    expect(screen.queryByText(/coverage extender/i)).not.toBeInTheDocument();
   });
 
   /**
