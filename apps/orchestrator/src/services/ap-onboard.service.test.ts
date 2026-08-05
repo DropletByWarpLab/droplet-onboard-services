@@ -68,11 +68,13 @@ import {
   ApOnboardError,
 } from "./ap-onboard.service.js";
 import * as openwrt from "./openwrt.client.js";
+import { RouterError } from "../types/router-error.js";
 import type { UniFiNetworkClient } from "./unifi-network.client.js";
 import type { EasyMeshControllerClient } from "./easymesh-controller.client.js";
 
 function createPrismaMock() {
   const rows = new Map<string, any>();
+  const intentRows = new Map<string, any>();
   return {
     rows,
     apDevice: {
@@ -116,6 +118,28 @@ function createPrismaMock() {
       }),
       findMany: vi.fn(async () => []),
       deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
+    // WARP-1761: the intent table `setApWifi` now records into. Present on
+    // the shared mock so every existing setApWifi assertion exercises the
+    // real recorder rather than its swallowed-error path.
+    intentRows,
+    networkIntent: {
+      findUnique: vi.fn(async ({ where }: any) => intentRows.get(where.key) ?? null),
+      upsert: vi.fn(async ({ where, create, update }: any) => {
+        const existing = intentRows.get(where.key);
+        const row = existing
+          ? {
+              ...existing,
+              ...update,
+              generation:
+                update.generation && typeof update.generation === "object"
+                  ? existing.generation + update.generation.increment
+                  : existing.generation,
+            }
+          : { ...create };
+        intentRows.set(where.key, row);
+        return row;
+      }),
     },
   };
 }
@@ -917,6 +941,150 @@ describe("AP Wi-Fi household surface (WARP-1712)", () => {
         status: 422,
       });
       expect(setApWireless).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // WARP-1761 (ADR-035 §1/§7) — intent is recorded HERE, at the one seam
+  // both writers share: the Tier-1 `PUT /network/wifi/ap` handler and the
+  // Tier-2 confirm dispatcher in network-status.routes.ts, which replays the
+  // params in a separate request. Testing it at the service is what makes
+  // the dispatcher path covered by construction rather than by inspection.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("setApWifi → NetworkIntent (WARP-1761)", () => {
+    it("records the SSID intent and still pushes, on the happy path", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      getApWireless.mockResolvedValue(state());
+      setApWireless.mockResolvedValue({ operationId: "op-1", ssid: "Home" });
+
+      await setApWifi(prisma as any, { ssid: "Home" }, "user-9");
+
+      expect(setApWireless).toHaveBeenCalledWith({ mac: MAC_A, ssid: "Home" });
+      expect(prisma.intentRows.get("wifi.primary")).toMatchObject({
+        key: "wifi.primary",
+        value: { ssid: "Home" },
+        generation: 1,
+        writtenBy: "user-9",
+      });
+    });
+
+    it("keeps the intent when the AP is unreachable — the lost write is fixed", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      getApWireless.mockResolvedValue(state());
+      setApWireless.mockRejectedValue(
+        RouterError.unreachable("AP wireless write: fetch failed"),
+      );
+
+      await expect(
+        setApWifi(prisma as any, { ssid: "Home" }),
+      ).rejects.toBeInstanceOf(ApOnboardError);
+
+      // Never rolled back: the failed push is exactly the case the converger
+      // exists for (ADR-035 §7).
+      expect(prisma.intentRows.get("wifi.primary")).toMatchObject({
+        value: { ssid: "Home" },
+        generation: 1,
+      });
+    });
+
+    it("records the intent even when NO AP is online to receive it", async () => {
+      const prisma = prismaWithAps([]);
+
+      await expect(setApWifi(prisma as any, { ssid: "Home" })).rejects.toMatchObject({
+        status: 422,
+      });
+
+      // The 422 is the unchanged contract; the intent is the new durability.
+      expect(prisma.intentRows.get("wifi.primary")).toMatchObject({
+        value: { ssid: "Home" },
+        generation: 1,
+      });
+    });
+
+    it("bumps the generation once per write", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      getApWireless.mockResolvedValue(state());
+      setApWireless.mockResolvedValue({ operationId: "op-1" });
+
+      await setApWifi(prisma as any, { ssid: "One" });
+      await setApWifi(prisma as any, { ssid: "Two" });
+
+      expect(prisma.intentRows.get("wifi.primary")).toMatchObject({
+        value: { ssid: "Two" },
+        generation: 2,
+      });
+    });
+
+    it("stores NO passphrase — a key-only save writes no intent row at all", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      getApWireless.mockResolvedValue(state());
+      setApWireless.mockResolvedValue({ operationId: "op-1" });
+
+      await setApWifi(prisma as any, { key: "hunter2hunter2" });
+
+      // The push still carried the key to the AP — only the DB is spared it.
+      expect(setApWireless).toHaveBeenCalledWith({
+        mac: MAC_A,
+        key: "hunter2hunter2",
+      });
+      expect(prisma.intentRows.size).toBe(0);
+    });
+
+    it("an invalid save reaches neither the intent table nor the AP", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      await expect(setApWifi(prisma as any, {})).rejects.toMatchObject({ status: 400 });
+      expect(prisma.intentRows.size).toBe(0);
+    });
+
+    // ADR-035 §1: reads still dial the device. If a read path ever starts
+    // consulting intent, the intent store has become a display cache and
+    // drift has stopped being visible — the exact failure this ADR removes.
+    it("getApWifi NEVER touches the intent table", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      // Intent says one thing…
+      prisma.intentRows.set("wifi.primary", {
+        key: "wifi.primary",
+        value: { ssid: "WHAT-INTENT-WANTS" },
+        generation: 9,
+      });
+      // …and ANY read of it is a hard failure, not a silent preference.
+      prisma.networkIntent.findUnique.mockImplementation(async () => {
+        throw new Error("read path must never consult NetworkIntent (ADR-035 §1)");
+      });
+      getApWireless.mockResolvedValue(state({ ssid: "WHAT-THE-AP-BROADCASTS" }));
+
+      const result = await getApWifi(prisma as any);
+
+      expect(result.ssid).toBe("WHAT-THE-AP-BROADCASTS");
+      expect(prisma.networkIntent.findUnique).not.toHaveBeenCalled();
+      expect(prisma.networkIntent.upsert).not.toHaveBeenCalled();
+    });
+
+    it("getApWirelessForMac NEVER touches the intent table either", async () => {
+      const prisma = prismaWithAps([
+        { mac: MAC_A, status: "ONLINE", backend: "DROPLET_IMAGE" },
+      ]);
+      prisma.networkIntent.findUnique.mockImplementation(async () => {
+        throw new Error("read path must never consult NetworkIntent (ADR-035 §1)");
+      });
+      getApWireless.mockResolvedValue(state({ ssid: "WHAT-THE-AP-BROADCASTS" }));
+
+      await expect(getApWirelessForMac(prisma as any, MAC_A)).resolves.toMatchObject({
+        ssid: "WHAT-THE-AP-BROADCASTS",
+      });
+      expect(prisma.networkIntent.findUnique).not.toHaveBeenCalled();
     });
   });
 

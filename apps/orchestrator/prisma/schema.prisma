@@ -1760,6 +1760,103 @@ model FabricMember {
   @@index([lastSeen])
 }
 
+/// WARP-1761 (ADR-035 §1/§7) — the INTENDED state of a fabric-owned config
+/// domain. One row per domain key; `wifi.primary` is the first and, today,
+/// the only one.
+///
+/// ADR-035 §1 draws a hard line this model sits on one side of:
+///   * **observed** state — "what IS the AP broadcasting" — is read LIVE off
+///     the device on every request and is never cached here; and
+///   * **intended** state — "what SHOULD it broadcast" — lives here.
+/// The two are rendered side by side plus the delta. This table must NEVER
+/// be read by a display path: the moment intent answers "what is my Wi-Fi
+/// called", drift stops being visible and starts being hidden, which is the
+/// exact failure ADR-035 exists to kill. `getApWifi()` keeps dialing the AP.
+///
+/// Why it exists: before this table a Wi-Fi write was a synchronous RPC at
+/// one device. An unreachable AP (the lab unit was, for ~20 minutes, during
+/// a firmware experiment) meant the call failed and the operator's intent
+/// was DISCARDED with nothing left to retry. Now the write records intent
+/// and still pushes; if the push fails the intent remains and the converger
+/// applies it when the device comes back.
+///
+/// `value` is Json so a domain can carry a shape without a migration per
+/// domain — but it is a small, closed, documented shape per key, never a
+/// junk drawer. For `wifi.primary` it is exactly `{ "ssid": string }`.
+///
+/// **No secret ever lands in `value`.** The Wi-Fi passphrase is deliberately
+/// NOT stored: the orchestrator has never persisted one (the audit writer
+/// redacts it via `redactSecretParams`, the Tier-2 pending record that
+/// carries it is in-memory with a 60 s TTL, and `ApDevice` stores only the
+/// approval-time `approvedSsid`), and this ticket is not the place to open a
+/// durable Wi-Fi-secret surface. Passphrase convergence waits for the
+/// per-device escrow rows of ADR-035 §3. Passphrase WRITES are unchanged:
+/// they still push directly, exactly as before.
+///
+/// `generation` is monotonic and bumped atomically (`{ increment: 1 }`) on
+/// every write, so the converger can distinguish "this device already
+/// applied the current intent" from "this device is behind". Rows are never
+/// deleted (ADR-035 §6) — a domain that stops being written keeps its last
+/// intent rather than silently reverting to "no opinion".
+model NetworkIntent {
+  /// Domain key, dot-namespaced: `wifi.primary` today. A bare String, not
+  /// an enum, for the same reason `FabricMember.role` is — ADR-035 §7 lists
+  /// six more domains (VLANs, DHCP, band steering, …) and a new one must be
+  /// storable without a migration.
+  key        String   @id
+  /// The intended fact. Closed shape per key; `{ "ssid": string }` for
+  /// `wifi.primary`. Never holds a secret (see above).
+  value      Json
+  /// Monotonic, incremented on every write. Never reset, never decremented.
+  generation Int      @default(0)
+  /// `User.id` of the last writer, or null for a write with no authenticated
+  /// principal. Audit only — nothing branches on it.
+  writtenBy  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+/// WARP-1761 (ADR-035 §7) — per-device convergence bookkeeping: how far a
+/// single fabric member has got with a single intent key.
+///
+/// Keyed on `(anchorMac, key)` — the same anchor MAC that is `FabricMember`'s
+/// primary key (ADR-035 §2), canonicalized through `src/lib/mac.ts`
+/// `normalizeMac`. No FK: `FabricMember` is an observation ledger whose rows
+/// may lag or lead this one, and a convergence record must not be deletable
+/// as a side effect of inventory churn.
+///
+/// All three data columns are OBSERVATION TIMESTAMPS / values, not a state
+/// machine — there is deliberately no derived-state column, and nothing
+/// infers status from a NULL. Read them as facts:
+///   * `appliedGeneration` — the `NetworkIntent.generation` this device was
+///     last VERIFIED to be running. Null = never yet verified.
+///   * `lastVerifiedAt`    — when that verification happened.
+///   * `driftDetectedAt`   — the last time the device was found disagreeing
+///     with intent. It is NEVER cleared: ADR-035 §6's "stale observations
+///     dim, they do not vanish" applied to drift. A dashboard shows drift as
+///     current by comparing it against `lastVerifiedAt`, and "this AP was
+///     edited in LuCI at 14:02 and repaired at 14:03" stays answerable
+///     instead of collapsing into "nothing ever happened".
+///
+/// Rows are never deleted, consistent with `FabricMember`.
+model DeviceIntentState {
+  /// Wired management-interface MAC, canonical `AA:BB:CC:DD:EE:FF`.
+  anchorMac         String
+  /// The `NetworkIntent.key` this row tracks.
+  key               String
+  /// Last generation VERIFIED on the device. Null = never verified.
+  appliedGeneration Int?
+  /// When the device was last read and found to match intent.
+  lastVerifiedAt    DateTime?
+  /// When the device was last found NOT to match. Never cleared.
+  driftDetectedAt   DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@id([anchorMac, key])
+  @@index([key])
+}
+
 // ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
 //
 // `User` is the local household-directory record. ADDITIVE on top of the

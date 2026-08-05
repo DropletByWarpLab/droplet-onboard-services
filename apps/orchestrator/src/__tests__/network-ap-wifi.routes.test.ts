@@ -196,9 +196,14 @@ describe("PUT /api/network/wifi/ap — tier routing", () => {
     expect(res.status).toBe(200);
     expect(res.body.tier).toBe(1);
     expect(res.body.operationId).toBe("op-ap");
-    expect(setApWifi).toHaveBeenCalledWith(expect.anything(), {
-      ssid: "Living Room", key: undefined,
-    });
+    // WARP-1761: the authenticated user id rides along as a third argument so
+    // the NetworkIntent row this write records carries a truthful `writtenBy`.
+    // Additive — the params and the response shape are untouched.
+    expect(setApWifi).toHaveBeenCalledWith(
+      expect.anything(),
+      { ssid: "Living Room", key: undefined },
+      "u-owner",
+    );
   });
 
   it("reports the derived 5 GHz name so the operator knows what to rejoin", async () => {

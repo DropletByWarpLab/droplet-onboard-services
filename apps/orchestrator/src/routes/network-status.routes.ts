@@ -771,10 +771,19 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           // PUT (it only minted the token), so this is where the write —
           // and the service's honest 422 (AP_WIRELESS_UNAVAILABLE) — lands.
           // An SSID-only save is Tier 1 and never arrives here.
-          writeResult = await setApWifi(prisma, {
-            ssid: params?.ssid as string | undefined,
-            key: params?.key as string | undefined,
-          });
+          // WARP-1761: the intent record is written INSIDE setApWifi, so this
+          // separate-request replay records it exactly like the Tier-1 path —
+          // there is one seam, not two. `userId` is the confirming human, who
+          // is the same principal that minted the token (confirmNetworkCommand
+          // enforces the match), so `writtenBy` stays truthful.
+          writeResult = await setApWifi(
+            prisma,
+            {
+              ssid: params?.ssid as string | undefined,
+              key: params?.key as string | undefined,
+            },
+            userId,
+          );
           break;
         case "set_dhcp_pool":
           // Tier-2 confirm for POST /network/dhcp/pool. The route validated the
