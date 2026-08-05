@@ -299,10 +299,57 @@ describe("the no-refresh-token 401 is definitive (WARP-1726)", () => {
     expect(localStorage.getItem(USER_KEY)).toBe(CACHED_USER);
   });
 
-  it("does not treat a NON-401 carrying the code as definitive", async () => {
+  it("still probes on a 401 carrying USER_NOT_PROVISIONED", async () => {
     const assign = stubLocation("/network");
     const f = stubFetch({
-      // A 503 body that happens to echo the code is still just an unwell box.
+      "/api/auth/refresh": () => json({ code: "USER_NOT_PROVISIONED" }, 401),
+      "/api/auth/me": () => json({ id: "u-1", username: "alice" }, 200),
+    });
+
+    const res = await authFetch("/api/network/devices");
+
+    expect(res.status).toBe(401);
+    // The short-circuit is deliberately ONE code wide. USER_NOT_PROVISIONED
+    // says the refresh token maps to no provisioned user — that is a claim
+    // about the TOKEN, and the session cookie may still be perfectly good. So
+    // it pays for the probe like every other unconfirmed 401, the probe says
+    // the session is alive, and the user keeps it. Widening the short-circuit
+    // to this code would turn a token-scoped complaint into a logout.
+    expect(f.countOf("/api/auth/me")).toBe(1);
+    expect(assign).not.toHaveBeenCalled();
+    expect(localStorage.getItem(USER_KEY)).toBe(CACHED_USER);
+  });
+
+  it("does not treat a 403 carrying the code as definitive", async () => {
+    const assign = stubLocation("/network");
+    const f = stubFetch({
+      // 403 is the status that reaches the code check at all: anything >= 500
+      // (or 429) is classified transient BEFORE the body is ever parsed, so a
+      // 5xx can never exercise the `r.status === 401` half of this guard.
+      "/api/auth/refresh": () => json({ code: "NO_REFRESH_TOKEN" }, 403),
+      "/api/auth/me": () => json({ id: "u-1", username: "alice" }, 200),
+    });
+
+    const res = await authFetch("/api/network/devices");
+
+    expect(res.status).toBe(401);
+    // Only a 401 means "the credential you presented was rejected". A 403
+    // carrying the same label is the box refusing the CALL, and the session
+    // cookie is untouched — so the probe still runs, still finds the session
+    // alive, and the user keeps it. Drop the status half of the guard and this
+    // response short-circuits straight to a logout: the exact false-logout
+    // shape WARP-1726 exists to remove.
+    expect(f.countOf("/api/auth/me")).toBe(1);
+    expect(assign).not.toHaveBeenCalled();
+    expect(localStorage.getItem(USER_KEY)).toBe(CACHED_USER);
+  });
+
+  it("treats a 5xx carrying the code as an unwell box, not a verdict", async () => {
+    const assign = stubLocation("/network");
+    const f = stubFetch({
+      // A 503 body that happens to echo the code is still just an unwell box —
+      // and it never reaches the code check, because 5xx is classified
+      // transient first. Kept as coverage of THAT branch, not of the guard.
       "/api/auth/refresh": () => json({ code: "NO_REFRESH_TOKEN" }, 503),
       "/api/auth/me": () => new Response("", { status: 401 }),
     });
