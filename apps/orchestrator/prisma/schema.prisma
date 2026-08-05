@@ -4600,3 +4600,59 @@ model TeamChatMeetingRsvp {
   @@unique([meetingId, userId])
   @@index([userId])
 }
+
+/// WARP-1749 (ADR-036 Phase 2) — rollback journal for the model-id migration.
+///
+/// The Ollama→OCI map is LOSSY: `gemma4:26b` and `gemma4:31b` both become
+/// `ai/gemma4` (see `services/model-id-map.ts`). A reversed lookup table
+/// therefore cannot restore what a row held — only a record of the actual
+/// before-value can. That is what this pair of tables is.
+///
+/// Created EMPTY by its migration and stays empty until an operator runs
+/// `npm run model-id-migrate -- --apply`. Nothing on the boot path writes
+/// here: `migrate deploy` (scripts/migrate-and-start.sh) adds the tables, the
+/// data rewrite is an explicit operator step and never runs by itself.
+///
+/// `state` is an EXPLICIT column, never derived from the absence of a later
+/// row (CLAUDE.md rule 10 — same discipline as ADR-035's ApDevice states).
+///   - `direction`  `forward` (Ollama→OCI) | `backward` (the revert)
+///   - `state`      `applied` | `reverted`. A `backward` batch is born
+///                  `applied` and is never itself reverted — re-running the
+///                  forward migration creates a NEW forward batch instead.
+model ModelIdMigrationBatch {
+  id             String                  @id @default(uuid())
+  direction      String
+  state          String
+  /// Set on a `backward` batch: the `forward` batch it undid. NULL on a
+  /// forward batch — this is provenance, not state.
+  revertsBatchId String?
+  /// Free-text operator note (`--note`), so a box can say WHY it was run.
+  note           String?
+  startedAt      DateTime                @default(now())
+  entries        ModelIdMigrationEntry[]
+
+  @@index([direction, state, startedAt])
+}
+
+/// WARP-1749 — one column of one row, rewritten by one batch.
+///
+/// `beforeValue`/`afterValue` are stored verbatim (not normalised): rollback
+/// re-checks that the row STILL holds `afterValue` before restoring, so a row
+/// somebody changed by hand in between is skipped and reported rather than
+/// clobbered.
+model ModelIdMigrationEntry {
+  id          String                @id @default(uuid())
+  batchId     String
+  batch       ModelIdMigrationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  /// `workspace_setting` | `chat_session` | `chat_message`
+  site        String
+  /// Primary key of the row (or the WorkspaceSetting `key`).
+  rowKey      String
+  /// `valueJson` | `model`
+  column      String
+  beforeValue String
+  afterValue  String
+
+  @@index([batchId])
+  @@index([site, rowKey])
+}

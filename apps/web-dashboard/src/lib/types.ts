@@ -267,7 +267,25 @@ export interface LocalModelRow {
   /** ISO timestamp of the last throughput benchmark (drives tokensPerSec);
    *  null when never measured. */
   benchmarkedAt?: string | null;
+  // WARP-1749 honest metrics, part two: WHY a number is missing.
+  /** `measured` → the value next to it is real. `unreported` → this box's AI
+   *  runtime can report the field but didn't for this model (render "—"; it
+   *  may arrive on a later poll). `unsupported` → this runtime has no way to
+   *  report it, so waiting won't help and the card SAYS so rather than leaving
+   *  the reader to guess what a dash means. Optional: an orchestrator that
+   *  predates the flag omits it and the card falls back to today's rendering. */
+  gbOnDiskState?: MetricState;
+  /** Same three-way for `vramGb`. `unsupported` on a Docker-Model-Runner box:
+   *  its /api/ps never populates `size_vram` on any accelerator, so per-model
+   *  graphics memory is genuinely unobtainable there — printing "0 GB" would
+   *  be a confident wrong number on a page whose point is honesty. */
+  vramState?: MetricState;
 }
+
+/** Why a metric has no number. Mirrors the orchestrator's `MetricState`
+ *  (model-metrics.service.ts) 1:1 — state is stated on the wire, never
+ *  inferred by the dashboard from the absence of a value. */
+export type MetricState = "measured" | "unreported" | "unsupported";
 
 /** One opt-in cloud provider. Read-only on this surface — enabling a provider
  *  happens in Settings (the off-LAN allowlist), never here. */

@@ -1,4 +1,11 @@
 import { createLogger } from "../lib/logger.js";
+import {
+  inferenceRuntime,
+  inferenceRuntimeUrl,
+  modelRepositoryKey,
+  normalizeModelReference,
+  parseHumanSizeBytes,
+} from "./inference-runtime.js";
 /**
  * model-readiness.service.ts — First-boot Ollama model pull.
  *
@@ -239,6 +246,13 @@ export async function probeColdModel(
       (m) => canonicalModelName(m.name) === wanted,
     );
     if (!installed) return null; // cloud model / not pulled — not ours to claim
+    // WARP-1749: `size` is a real byte count under Ollama and hard-coded 0
+    // under DMR, so the > 0 guard already yields an honest null there rather
+    // than "0.0 GB" — the SSE says "loading" without claiming a size. This
+    // path deliberately does NOT run the serveability corroboration
+    // (verifyListedModelServeable): it sits in the chat hot path on a 1.5 s
+    // budget, and its only output is a cosmetic "model is loading" event. A
+    // phantom's failure surfaces from the completion request a moment later.
     const sizeGb =
       typeof installed.size === "number" && installed.size > 0
         ? Math.round(installed.size / 1e8) / 10
@@ -251,6 +265,154 @@ export async function probeColdModel(
     );
     return null;
   }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// WARP-1749 — presence in /api/tags is NOT readiness.
+//
+// This service has always equated "listed by GET /api/tags" with "ready to
+// serve". Under Ollama that equation holds: Ollama lists a model only once its
+// blobs are written and verified, and the entry carries the real byte count, so
+// a listing is a statement about a complete model on disk.
+//
+// It does not hold under Docker Model Runner. MEASURED (2026-08-05,
+// docker/model-runner:v1.2.6): a corrupt blob WEDGES the model store — the pull
+// fails with a digest mismatch, a retry fails differently, and `/api/tags`
+// then lists the model anyway at `size: 0`. The model is PRESENT AND
+// UNSERVEABLE, and because DMR reports `size: 0` for healthy models too, the
+// ollama-compatible surface cannot tell the two apart. Left alone, first boot
+// would log "Model already pulled — ready", warm a model that cannot load, and
+// hand the customer a dashboard whose wizard probe fails with no explanation.
+//
+// The corroborating source is DMR's NATIVE `GET /models`, the same listing
+// model-metrics uses for file sizes: it reports a real per-model size as a
+// human string (`config.size = "256.35 MiB"`). A model the native listing does
+// not carry a usable size for is not something we are willing to call ready.
+//
+// Fail-open by design. An unreachable or unrecognised native listing yields
+// `unverified`, which is treated exactly like today's behaviour — probes in
+// this service are optimisations, never dependencies, and a probe outage must
+// not trigger a pull storm against a store that is probably fine.
+//
+// NOT fixed here, deliberately: the `present` set below still compares raw
+// strings, so a DMR box whose `.env` says `smollm2:360M` will not match the
+// `docker.io/ai/smollm2:latest` the daemon reports and will pull rather than
+// recognise it. That id-vocabulary translation is `comparable_id()`'s job in
+// droplet-local-LLM's runtime adapter (WARP-1743) and belongs with the
+// lifecycle owner, not duplicated here. This guard only makes the branch that
+// DOES match honest.
+// ──────────────────────────────────────────────────────────────────
+
+/** Budget for the corroborating native listing. Same posture as the cold
+ *  probe: a wedged daemon costs at most this much on startup, never a hang. */
+const SERVEABILITY_BUDGET_MS = 1500;
+
+/**
+ * Whether a model that `/api/tags` LISTS can actually be served.
+ *
+ *   - `serveable`   — listing corroborated (or the runtime is one where a
+ *                     listing is itself the corroboration).
+ *   - `not_serveable` — the runtime's own store does not carry a usable copy:
+ *                     the phantom left by a failed DMR pull.
+ *   - `unverified`  — we could not ask. Callers must treat this as today's
+ *                     behaviour, not as a failure.
+ *
+ * NEVER throws.
+ */
+export type ServeabilityVerdict = "serveable" | "not_serveable" | "unverified";
+
+export async function verifyListedModelServeable(
+  model: string,
+): Promise<ServeabilityVerdict> {
+  // Default runtime: a listing IS the corroboration (see the block comment).
+  // No request is made, so an Ollama box behaves byte-for-byte as before.
+  if (inferenceRuntime() !== "dmr") return "serveable";
+
+  const url = `${inferenceRuntimeUrl()}/models`;
+  try {
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(SERVEABILITY_BUDGET_MS),
+    });
+    // Drain in every branch — an undrained undici body can pin the socket.
+    const body = await resp.json().catch(() => undefined);
+    if (!resp.ok) {
+      logger.warn(
+        { model, status: resp.status, url },
+        "serveability_unverified (native model listing answered non-2xx)",
+      );
+      return "unverified";
+    }
+    const entries = nativeModelEntries(body);
+    if (!entries) {
+      logger.warn(
+        { model, url },
+        "serveability_unverified (native model listing shape not recognised)",
+      );
+      return "unverified";
+    }
+    return nativeListingHasUsableSize(entries, model)
+      ? "serveable"
+      : "not_serveable";
+  } catch (err) {
+    logger.warn(
+      { model, url, err: (err as Error).message },
+      "serveability_unverified (native model listing unreachable)",
+    );
+    return "unverified";
+  }
+}
+
+/** The array inside whatever `GET /models` returned, or null when the payload
+ *  isn't a shape we recognise (→ `unverified`, never a guess). */
+function nativeModelEntries(body: unknown): unknown[] | null {
+  if (Array.isArray(body)) return body;
+  if (body && typeof body === "object") {
+    const obj = body as Record<string, unknown>;
+    for (const key of ["models", "data", "objects"]) {
+      if (Array.isArray(obj[key])) return obj[key] as unknown[];
+    }
+  }
+  return null;
+}
+
+/**
+ * True when the native listing names `model` AND reports a parseable, non-zero
+ * size for it. Both halves matter: a missing entry is the wedged-store phantom,
+ * and an entry with no usable size is a copy we cannot vouch for either.
+ *
+ * Matching is done on the same folded OCI reference model-metrics joins on —
+ * DMR reports `docker.io/ai/smollm2:latest` where `.env` says `smollm2:360M` —
+ * with the repository as a second chance, since a manifest name carries an
+ * Ollama-style tag that has no OCI equivalent to compare against.
+ */
+function nativeListingHasUsableSize(entries: unknown[], model: string): boolean {
+  const wantedRef = normalizeModelReference(model);
+  const wantedRepo = modelRepositoryKey(model);
+  for (const raw of entries) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as Record<string, unknown>;
+    const refs: string[] = [];
+    if (Array.isArray(entry.tags)) {
+      for (const t of entry.tags) if (typeof t === "string") refs.push(t);
+    }
+    for (const key of ["id", "name", "model"]) {
+      const v = entry[key];
+      if (typeof v === "string") refs.push(v);
+    }
+    const matches = refs.some(
+      (r) =>
+        normalizeModelReference(r) === wantedRef ||
+        (wantedRepo !== "" && modelRepositoryKey(r) === wantedRepo),
+    );
+    if (!matches) continue;
+    const config =
+      entry.config && typeof entry.config === "object"
+        ? (entry.config as Record<string, unknown>)
+        : {};
+    const bytes = parseHumanSizeBytes(config.size);
+    if (bytes != null && bytes > 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -302,20 +464,36 @@ export async function ensureDefaultModelPulled(): Promise<void> {
   const present = new Set((tags.models ?? []).map((m) => m.name));
   for (const model of models) {
     if (present.has(model)) {
-      logger.info({ model }, "Model already pulled — ready");
-      // WARP-1041 — pulled ≠ loaded. Warm the CHAT default so the first
-      // ask after this boot (wizard probe or /chat) skips the 30-90 s
-      // GPU load. Only the LLM_MODEL: warming is chat-first, and the
-      // vision model loads on demand.
-      if (model === process.env.LLM_MODEL) {
-        void warmDefaultModel();
+      // WARP-1749 — listed ≠ serveable. On the default runtime this returns
+      // "serveable" without a request, so the branch below is the same one
+      // that has always run. On DMR it catches the wedged-store phantom.
+      const verdict = await verifyListedModelServeable(model);
+      if (verdict === "not_serveable") {
+        logger.error(
+          { model, runtime: inferenceRuntime() },
+          "model_listed_but_not_serveable — the daemon lists this model but its own store has no usable copy (a failed pull can leave this phantom). Treating it as missing and retrying the pull; if that keeps failing on a digest mismatch the store is wedged and only `docker model purge -f` clears it — note that removes EVERY model.",
+        );
+        // Fall through to the pull below: re-pulling is the same repair we
+        // would attempt for a model that was never there, and it self-heals an
+        // incomplete (as opposed to corrupt) copy. Deliberately NOT warmed —
+        // warming a phantom just errors.
+      } else {
+        logger.info({ model, serveability: verdict }, "Model already pulled — ready");
+        // WARP-1041 — pulled ≠ loaded. Warm the CHAT default so the first
+        // ask after this boot (wizard probe or /chat) skips the 30-90 s
+        // GPU load. Only the LLM_MODEL: warming is chat-first, and the
+        // vision model loads on demand.
+        if (model === process.env.LLM_MODEL) {
+          void warmDefaultModel();
+        }
+        continue;
       }
-      continue;
     }
-    // Step 2 — model missing. Kick off a background pull.
+    // Step 2 — model not ready: either absent from the listing, or listed but
+    // not serveable (WARP-1749). Kick off a background pull.
     logger.info(
       { model, url: OLLAMA_URL },
-      "Model not present — starting background pull (download time depends on model size and network)",
+      "Model not ready — starting background pull (download time depends on model size and network)",
     );
     // Fire-and-forget. The `void` makes intent explicit and silences the
     // floating-promise lint. Errors are caught + logged inside backgroundPull.
