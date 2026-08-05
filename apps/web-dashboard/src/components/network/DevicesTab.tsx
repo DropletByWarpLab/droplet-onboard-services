@@ -16,7 +16,18 @@ import type { EnrichedNetworkDevice } from "@/lib/types";
 
 type DeviceSort = "name" | "lastSeen" | "vendor";
 
-export function DevicesTab() {
+export type DevicesTabProps = {
+  /**
+   * WARP-1723 (second pass, a11y): activation handler for the Coverage
+   * Extenders panel's "Change in Wi-Fi settings" link. Threaded from the page
+   * because the page owns the tab state AND the post-activation focus
+   * machinery — this panel unmounts the moment the tab changes, so it can't
+   * move focus itself. Optional: standalone renders keep plain <a> navigation.
+   */
+  onOpenWifiSettings?: () => void;
+};
+
+export function DevicesTab({ onOpenWifiSettings }: DevicesTabProps = {}) {
   const [search, setSearch] = useState("");
   const [onlineOnly, setOnlineOnly] = useState(false);
   const [sort, setSort] = useState<DeviceSort>("name");
@@ -101,7 +112,7 @@ export function DevicesTab() {
           AP listing. Renders above the devices grid so the operator sees
           AWAITING_APPROVAL action-items before scanning the device list. */}
       <div className="mb-6">
-        <CoverageExtendersPanel />
+        <CoverageExtendersPanel onOpenWifiSettings={onOpenWifiSettings} />
       </div>
 
       {/* Header controls */}

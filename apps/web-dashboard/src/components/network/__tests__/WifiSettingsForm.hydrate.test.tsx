@@ -1,5 +1,5 @@
 /**
- * WARP-1714 — the WiFi Settings card must open showing the network it's about
+ * WARP-1714 — the Wi-Fi settings card must open showing the network it's about
  * to edit.
  *
  * Both fields used to start as `useState("")` and never hydrate, so the card

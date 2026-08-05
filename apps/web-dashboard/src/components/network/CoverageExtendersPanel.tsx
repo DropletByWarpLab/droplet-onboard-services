@@ -70,6 +70,7 @@ import {
 import type { ApDeviceInfo, ApDeviceStatus, ApOnboardBackend } from "@/lib/types";
 import { networkTabHref } from "@/app/network/tab-url";
 import { ApRadioDetail } from "@/components/network/ApRadioDetail";
+import { AP_WIFI_KEY } from "@/components/network/ApWifiCard";
 import { BandSteeringCard } from "@/components/network/BandSteeringCard";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -387,7 +388,21 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
   );
 }
 
-export function CoverageExtendersPanel() {
+export type CoverageExtendersPanelProps = {
+  /**
+   * Activation handler for the read-only summary's "Change in Wi-Fi settings"
+   * link (WARP-1723 second pass, a11y). The Network page's tabpanels
+   * conditionally unmount, so letting the browser navigate destroys the
+   * focused <a> and drops focus to <body>. When supplied, the page takes the
+   * activation and moves focus to the arrival tab; when not (standalone
+   * renders, no-JS, middle-click), the href navigates as before.
+   */
+  onOpenWifiSettings?: () => void;
+};
+
+export function CoverageExtendersPanel({
+  onOpenWifiSettings,
+}: CoverageExtendersPanelProps = {}) {
   // 10s refresh — same cadence as the orchestrator's discovery poller
   // (DROPLET_AP_DISCOVERY_INTERVAL=10). New extender announces become
   // visible within one polling cycle on each side. Operation-Id
@@ -763,7 +778,7 @@ export function CoverageExtendersPanel() {
           available" state and add noise. */}
       {hasOnlineDropletAp ? (
         <div className="flex flex-col gap-3 mt-4">
-          <ApWifiSummary />
+          <ApWifiSummary onOpenWifiSettings={onOpenWifiSettings} />
           <BandSteeringCard />
         </div>
       ) : null}
@@ -817,8 +832,16 @@ export function CoverageExtendersPanel() {
 // "always in agreement" contract, minus the second write path. Shows
 // the network NAME only; the passphrase stays on the edit surface.
 // ────────────────────────────────────────────────────────────────────
-function ApWifiSummary() {
-  const { data } = useSWR<ApWifiStatus>("/api/network/wifi/ap", fetchApWifi, {
+function ApWifiSummary({ onOpenWifiSettings }: CoverageExtendersPanelProps) {
+  // AP_WIFI_KEY, not a second hand-typed literal: WARP-1712's "the two
+  // surfaces can never disagree" guarantee is the SHARED SWR entry, and it
+  // shouldn't rest on two strings staying in sync.
+  //
+  // `error` matters as much as `data` (UX blocker 2, second pass): without it
+  // a persistent fetch failure left `data` undefined forever and this card
+  // said "Reading its network name…" permanently — a read-only reflection
+  // stuck lying about a network it never read.
+  const { data, error } = useSWR<ApWifiStatus>(AP_WIFI_KEY, fetchApWifi, {
     refreshInterval: 30000,
   });
 
@@ -835,10 +858,16 @@ function ApWifiSummary() {
           <h3 className="type-headline" style={{ color: "var(--text)" }}>
             Access point Wi-Fi
           </h3>
-          <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
-            {data === undefined ? (
+          {/* Polite live region: an operator who heard "Reading its network
+              name…" has to hear how it ended — the name, or the failure. */}
+          <p
+            className="type-caption-1 mt-0.5"
+            style={{ color: "var(--text-muted)" }}
+            aria-live="polite"
+          >
+            {data === undefined && error === undefined ? (
               "Reading its network name…"
-            ) : data.supported && data.ssid ? (
+            ) : data?.supported && data.ssid ? (
               <>
                 Broadcasting{" "}
                 <span className="font-medium" style={{ color: "var(--text)" }}>
@@ -866,9 +895,29 @@ function ApWifiSummary() {
               saving in Wi-Fi settings sets them all to one.
             </p>
           ) : null}
+          {/* The SOLE route from here to editing the household Wi-Fi, so it
+              carries full text weight rather than the quiet colour this
+              pattern uses for supplementary links.
+
+              `py-1` lifts the hit area from the 18px `type-footnote` line box
+              to 26px, clearing WCAG 2.2 SC 2.5.8's 24px floor — it sits on its
+              own line just above the 56px mobile tab bar. The margins absorb
+              it exactly (`mt-2` → `mt-1` + 4px top padding; `-mb-1` cancels
+              the 4px bottom padding), so nothing moves on screen. Don't
+              collapse this to `-my-1`: `mt-*` out-orders `my-*` in Tailwind's
+              generated CSS, so the top compensation would silently not
+              apply. */}
           <Link
             href={networkTabHref("wifi")}
-            className="type-footnote text-[color:var(--text-muted)] hover:text-[color:var(--text)] inline-flex items-center gap-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm mt-2"
+            onClick={(e) => {
+              // Let the browser handle new-tab / new-window intents.
+              if (!onOpenWifiSettings) return;
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              if (e.button !== 0) return;
+              e.preventDefault();
+              onOpenWifiSettings();
+            }}
+            className="type-footnote text-[color:var(--text)] hover:text-[color:var(--brand)] inline-flex items-center gap-1 py-1 mt-1 -mb-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
           >
             Change in Wi-Fi settings <ArrowUpRight size={12} aria-hidden />
           </Link>

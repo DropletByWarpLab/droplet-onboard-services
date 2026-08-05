@@ -25,6 +25,16 @@ import type { CurrentWifi } from "@/lib/types";
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
+/**
+ * The household slot's headline. BOTH branches present it — WifiSettingsForm
+ * on the router shape, ApWifiCard's `slot="household"` variant on the
+ * edge-router shape — which is intended: they never mount in that slot
+ * simultaneously, and the Devices-tab link promises exactly this label.
+ */
+const HOUSEHOLD_HEADLINE = "Wi-Fi settings";
+/** WifiSettingsForm's distinguishing line (the ROUTER write path). */
+const ROUTER_FORM_SUBHEAD = /Name the Wi-Fi network your Droplet broadcasts/i;
+
 /** A reachable, editable AP — what wifi/ap reports on the edge-router shape. */
 const AP_WIFI_UP: ApWifiStatus = {
   supported: true,
@@ -83,7 +93,7 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     current,
     apWifi = AP_WIFI_NONE,
   }: {
-    current: CurrentWifi | "pending";
+    current: CurrentWifi | "pending" | "error";
     apWifi?: ApWifiStatus;
   }) {
     fetchMock.mockImplementation((url: string) => {
@@ -93,6 +103,9 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
       if (path.includes("/api/network/wifi/current")) {
         // "pending" = the read hasn't resolved yet — SWR data stays undefined.
         if (current === "pending") return new Promise(() => {});
+        // "error" = the read FAILS (fetchCurrentWifi throws on !ok).
+        if (current === "error")
+          return Promise.resolve({ ok: false, status: 502, json: async () => ({}) });
         return json(current);
       }
       if (path.includes("/api/network/wifi/ap")) return json(apWifi);
@@ -117,16 +130,36 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     mockEndpoints({ current: currentWifi({ source: "ap" }), apWifi: AP_WIFI_UP });
     renderTab();
 
-    // Exactly one AP card (getBy* throws on duplicates), with its editable form.
-    expect(await screen.findByText("Access point Wi-Fi")).toBeInTheDocument();
-    expect(screen.getAllByText("Access point Wi-Fi")).toHaveLength(1);
-    expect(
-      await screen.findByLabelText("Network name (SSID)"),
-    ).toBeInTheDocument();
+    // Exactly one household form, and it is the AP's — its input carries the
+    // AP write path's id, not the router form's `wifi-ssid`.
+    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(screen.getAllByText(HOUSEHOLD_HEADLINE)).toHaveLength(1);
+    const ssid = await screen.findByLabelText("Network name (SSID)");
+    expect(ssid).toHaveAttribute("id", "ap-wifi-ssid");
 
     // The router-radio form must NOT render — its save path (POST
     // /api/network/wifi/ssid) writes to a radio that hosts nothing here.
-    expect(screen.queryByText("WiFi Settings")).not.toBeInTheDocument();
+    expect(screen.queryByText(ROUTER_FORM_SUBHEAD)).not.toBeInTheDocument();
+    expect(document.getElementById("wifi-ssid")).toBeNull();
+  });
+
+  // UX blocker 1 (second pass): promoted into the household slot, the AP card
+  // must stop wearing secondary-slot copy. "Access point Wi-Fi" / "the network
+  // your COVERAGE EXTENDER broadcasts" reads as an accessory network, so a
+  // household admin concludes their own Wi-Fi isn't editable here — and the
+  // Devices-tab link's "Change in Wi-Fi settings" promise lands on no such
+  // label. The household variant says whose network it is.
+  it('source "ap": the promoted card wears household copy, not coverage-extender copy', async () => {
+    mockEndpoints({ current: currentWifi({ source: "ap" }), apWifi: AP_WIFI_UP });
+    renderTab();
+
+    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
+    // It still says WHERE the network is broadcast — honest about the restart.
+    expect(
+      screen.getByText(/the network your devices join/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/coverage extender/i)).not.toBeInTheDocument();
   });
 
   it('source "router": the router form owns the household slot and the AP card still renders below (two real networks)', async () => {
@@ -136,10 +169,14 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     });
     renderTab();
 
-    const routerForm = await screen.findByText("WiFi Settings");
+    const routerForm = await screen.findByText(HOUSEHOLD_HEADLINE);
     const apCard = await screen.findByText("Access point Wi-Fi");
     expect(routerForm).toBeInTheDocument();
     expect(apCard).toBeInTheDocument();
+    // Only ONE card claims the household headline; the second network keeps
+    // the secondary-slot copy verbatim.
+    expect(screen.getAllByText(HOUSEHOLD_HEADLINE)).toHaveLength(1);
+    expect(screen.getByText(/coverage extender/i)).toBeInTheDocument();
     // The household form keeps the primary slot; the AP card follows it.
     expect(
       routerForm.compareDocumentPosition(apCard) &
@@ -158,7 +195,7 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     });
     renderTab();
 
-    expect(await screen.findByText("WiFi Settings")).toBeInTheDocument();
+    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
   });
 
@@ -169,7 +206,40 @@ describe("WifiTab household Wi-Fi source split (WARP-1723)", () => {
     expect(
       await screen.findByRole("status", { name: "Loading Wi-Fi settings" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("WiFi Settings")).not.toBeInTheDocument();
+    expect(screen.queryByText(HOUSEHOLD_HEADLINE)).not.toBeInTheDocument();
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
+  });
+
+  // UX + QA (second pass), compounding live bug WARP-1726: the placeholder
+  // measured ~168px and became a ~350px form, so the tab jumped under the
+  // scroll clamp. It now reserves the form's height and carries real text
+  // inside the live region — an empty region with only aria-label announces
+  // inconsistently across screen readers.
+  it("the placeholder reserves the form's height and announces with real text", async () => {
+    mockEndpoints({ current: "pending" });
+    renderTab();
+
+    const skeleton = await screen.findByRole("status", {
+      name: "Loading Wi-Fi settings",
+    });
+    expect(skeleton.style.minHeight).toBe("300px");
+    // A live region whose only content is aria-label is unreliable — the
+    // announcement must come from a real (visually hidden) text node.
+    const srText = skeleton.querySelector(".sr-only");
+    expect(srText).not.toBeNull();
+    expect(srText?.textContent).toMatch(/loading wi-fi settings/i);
+  });
+
+  // QA note 1 (second pass): the ONE state whose failure mode is "the user can
+  // never edit Wi-Fi again". A failed read must fall back to the router form —
+  // exactly what rendered before the split — never a permanent skeleton.
+  it("a FAILED source read falls back to the router form, never a stuck skeleton", async () => {
+    mockEndpoints({ current: "error" });
+    renderTab();
+
+    expect(await screen.findByText(ROUTER_FORM_SUBHEAD)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("status", { name: "Loading Wi-Fi settings" }),
+    ).not.toBeInTheDocument();
   });
 });

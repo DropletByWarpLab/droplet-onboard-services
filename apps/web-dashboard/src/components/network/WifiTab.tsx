@@ -59,9 +59,23 @@ export function WifiTab() {
       {!resolved ? (
         // Calm placeholder holding the household-Wi-Fi slot while the source
         // resolves — never both editable forms at once (the pre-split bug).
-        // Shape mirrors the form it becomes: a title line and two fields.
-        <div className="card" role="status" aria-label="Loading Wi-Fi settings">
-          <div className="animate-pulse space-y-4 max-w-md">
+        //
+        // Shape AND height mirror the form it becomes (UX + QA second pass):
+        // the first cut drew a headline and two fields only (~168px) and then
+        // became a ~350px form, so the tab jumped on every load — which live
+        // bug WARP-1726's scroll clamp compounds. Fixed-height skeletons are
+        // the house convention (see app/network/page.tsx NetworkPageSkeleton).
+        <div
+          className="card"
+          role="status"
+          aria-label="Loading Wi-Fi settings"
+          style={{ minHeight: 300 }}
+        >
+          {/* A live region whose only content is an aria-label announces
+              inconsistently across screen readers — carry real text. */}
+          <span className="sr-only">Loading Wi-Fi settings…</span>
+          <div className="animate-pulse space-y-4 max-w-md" aria-hidden="true">
+            {/* headline */}
             <div
               className="w-32"
               style={{
@@ -70,6 +84,15 @@ export function WifiTab() {
                 borderRadius: "var(--radius-input)",
               }}
             />
+            {/* subhead (two lines) */}
+            <div
+              style={{
+                height: 32,
+                background: "var(--surface-2)",
+                borderRadius: "var(--radius-input)",
+              }}
+            />
+            {/* network name + password */}
             <div
               style={{
                 height: 42,
@@ -80,6 +103,15 @@ export function WifiTab() {
             <div
               style={{
                 height: 42,
+                background: "var(--surface-2)",
+                borderRadius: "var(--radius-input)",
+              }}
+            />
+            {/* save button */}
+            <div
+              className="w-44"
+              style={{
+                height: 40,
                 background: "var(--surface-2)",
                 borderRadius: "var(--radius-input)",
               }}
@@ -88,8 +120,10 @@ export function WifiTab() {
         </div>
       ) : source === "ap" ? (
         // The AP hosts the household network, so its form takes the primary
-        // slot — writes land where the Wi-Fi actually lives.
-        <ApWifiCard />
+        // slot — writes land where the Wi-Fi actually lives, and it wears
+        // household copy (`slot="household"`) rather than presenting the home
+        // network as an accessory one.
+        <ApWifiCard slot="household" />
       ) : (
         // Issue #12: editable provisioning form so a user who skipped Wi-Fi
         // during onboarding can set the SSID/password here — same write path
@@ -113,7 +147,8 @@ export function WifiTab() {
         // password, below the router's household form — two real networks, two
         // honest cards. This is the ONLY other mount of ApWifiCard; the
         // Coverage Extenders panel on the Devices tab now shows a read-only
-        // reflection that links here instead of a second editable form.
+        // reflection that links here instead of a second editable form. The
+        // default `slot="secondary"` keeps this card's original copy verbatim.
         <ApWifiCard />
       ) : null}
 

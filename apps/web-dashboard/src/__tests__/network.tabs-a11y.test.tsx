@@ -113,3 +113,20 @@ describe("Network tabs reactive-hash + a11y fixes (WARP-100 PR #720)", () => {
     expect(src).not.toMatch(/setTimeout\(tryScroll, 100\)/);
   });
 });
+
+// WARP-1723 (second pass) — a cross-tab link inside a tabpanel is a focus trap
+// in reverse: the panels conditionally unmount (`activeTab === "devices" &&
+// <DevicesTab />`), so activating the Coverage Extenders panel's "Change in
+// Wi-Fi settings" link destroys the focused <a> and focus falls to <body>. A
+// keyboard/SR user lands nowhere and has to re-Tab through the whole shell.
+// The page already owns the fix — record the arrival tab and let the
+// post-activation effect focus it once aria-selected reflects the change.
+describe("Network cross-tab link focus (WARP-1723)", () => {
+  it("routes the Devices→Wi-Fi link through the page's focus machinery", () => {
+    expect(src).toMatch(/onOpenWifiSettings=\{/);
+    // Same ref the arrow-key nav uses, so the arrival tab is focused only
+    // AFTER it reads aria-selected={true} / tabIndex={0}.
+    expect(src).toMatch(/keyboardFocusTarget\.current = "wifi"/);
+    expect(src).toMatch(/setActiveTab\("wifi"\)/);
+  });
+});

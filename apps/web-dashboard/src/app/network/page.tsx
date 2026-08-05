@@ -170,6 +170,10 @@ function NetworkPageInner() {
   // the async gap. Instead, record the keyboard target here and focus it in an
   // effect once `activeTab` reflects it (see below), so the focused tab is
   // already selected at the moment it receives focus.
+  //
+  // WARP-1723 (second pass): cross-tab LINKS inside a tabpanel need the same
+  // treatment for the same reason — the panel unmounts on activation, taking
+  // the focused element with it — so they set this ref too before switching.
   const keyboardFocusTarget = useRef<Tab | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
@@ -573,7 +577,20 @@ function NetworkPageInner() {
         tabIndex={0}
         hidden={activeTab !== "devices"}
       >
-        {activeTab === "devices" && <DevicesTab />}
+        {activeTab === "devices" && (
+          // WARP-1723 (second pass, a11y): the tabpanels conditionally unmount,
+          // so letting the Coverage Extenders panel's "Change in Wi-Fi
+          // settings" link navigate on its own destroys the focused <a> and
+          // drops focus to <body> — a keyboard/SR user lands nowhere. Reuse
+          // the same record-then-focus machinery the arrow-key nav drives so
+          // the arrival tab takes focus once it reads aria-selected={true}.
+          <DevicesTab
+            onOpenWifiSettings={() => {
+              keyboardFocusTarget.current = "wifi";
+              setActiveTab("wifi");
+            }}
+          />
+        )}
       </div>
       <div
         role="tabpanel"

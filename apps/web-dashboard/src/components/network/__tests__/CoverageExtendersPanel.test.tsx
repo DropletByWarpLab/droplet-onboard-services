@@ -80,10 +80,12 @@ function makeAp(overrides: Partial<ApDeviceInfo> = {}): ApDeviceInfo {
   };
 }
 
-function renderPanel() {
+function renderPanel(
+  props: React.ComponentProps<typeof CoverageExtendersPanel> = {},
+) {
   return render(
     <SWRConfig value={{ provider: () => new Map() }}>
-      <CoverageExtendersPanel />
+      <CoverageExtendersPanel {...props} />
     </SWRConfig>,
   );
 }
@@ -244,6 +246,87 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
         name: /change in wi-fi settings/i,
       });
       expect(link).toHaveAttribute("href", "/network?tab=wifi");
+    });
+
+    /**
+     * UX blocker 2 (second pass) — the summary destructured only `{ data }`,
+     * so a persistent fetch failure left `data` undefined forever and the card
+     * said "Reading its network name…" permanently. A read-only reflection
+     * that can get stuck lying is worse than one that admits it failed; the
+     * honest string was already written one branch away.
+     */
+    it("admits a failed read instead of 'reading…' forever", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("Failed to fetch access point Wi-Fi: 502"),
+      );
+      renderPanel();
+      await screen.findByText("Access point Wi-Fi");
+
+      expect(
+        await screen.findByText(/network name couldn't be read right now/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/reading its network name/i),
+      ).not.toBeInTheDocument();
+    });
+
+    /**
+     * UX a11y (second pass) — the tabpanels conditionally unmount, so
+     * activating this link destroys the focused <a> and focus falls to
+     * <body>: a keyboard/SR user lands nowhere and has to re-Tab through the
+     * shell. The panel hands the activation back to the page, which owns the
+     * post-activation focus machinery (`keyboardFocusTarget` → focus
+     * `#network-tab-wifi`). Plain <a> navigation stays the fallback.
+     */
+    it("hands cross-tab activation to the page so focus can follow", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      (fetchApWifi as ReturnType<typeof vi.fn>).mockResolvedValue({
+        supported: true, ssid: "Fotonia Home", fiveGhzSsid: null,
+        key: "correct-horse-psk", encryption: "psk2", bandSteering: true,
+        apCount: 1, inSync: true,
+      });
+      const onOpenWifiSettings = vi.fn();
+      renderPanel({ onOpenWifiSettings });
+      const link = await screen.findByRole("link", {
+        name: /change in wi-fi settings/i,
+      });
+
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      link.dispatchEvent(event);
+      expect(onOpenWifiSettings).toHaveBeenCalledTimes(1);
+      // The handler replaces the navigation, so the page keeps control of
+      // focus rather than the browser tearing the panel down mid-activation.
+      expect(event.defaultPrevented).toBe(true);
+      // …but it is still a real link: the href survives for middle-click,
+      // "open in new tab", and the no-JS path.
+      expect(link).toHaveAttribute("href", "/network?tab=wifi");
+    });
+
+    /**
+     * UX mobile (second pass) — `type-footnote` + `inline-flex` with no
+     * padding is an 18px hit area, under WCAG 2.2 SC 2.5.8's 24px floor, and
+     * it sits on its own line just above the 56px bottom tab bar. `py-1` takes
+     * it to 26px; the margins absorb the padding so nothing moves. The quiet
+     * link colour is used elsewhere for SUPPLEMENTARY links; here it is the
+     * sole route to a primary task, so it reads at full text weight.
+     */
+    it("meets the 24px tap target and reads as a primary route", async () => {
+      (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+        aps: [makeAp({ status: "ONLINE", backend: "DROPLET_IMAGE" })],
+      });
+      renderPanel();
+      const link = await screen.findByRole("link", {
+        name: /change in wi-fi settings/i,
+      });
+
+      expect(link.className).toContain("py-1");
+      expect(link.className).toContain("text-[color:var(--text)]");
+      expect(link.className).not.toContain("text-[color:var(--text-muted)]");
     });
 
     it("identifies it as Droplet infrastructure, not a generic device", async () => {
