@@ -40,28 +40,24 @@ export function TranscriptModal({
     >
       <div>
         <div className="flex items-center gap-2">
-          <Sparkles size={16} className="text-accent" aria-hidden="true" />
-          <h2 id="transcript-title" className="type-headline text-label-primary truncate">
+          <Sparkles
+            size={16}
+            style={{ color: "var(--brand)" }}
+            aria-hidden="true"
+          />
+          <h2 id="transcript-title" className="mx-dlg-title truncate">
             {data?.title ?? "AI conversation"}
           </h2>
         </div>
-        <p className="mt-0.5 type-footnote text-label-tertiary">
-          Shared snapshot — read-only.
-        </p>
+        <p className="mx-dlg-sub">Shared snapshot — read-only.</p>
 
         <div className="mt-3 max-h-[60vh] overflow-y-auto flex flex-col gap-2 pr-1">
-          {isLoading && (
-            <p className="type-footnote text-label-tertiary">Loading transcript…</p>
-          )}
+          {isLoading && <p className="mx-quiet">Loading transcript…</p>}
           {error != null && (
-            <p className="type-footnote text-system-red">
-              This transcript isn&apos;t available.
-            </p>
+            <p className="mx-error">This transcript isn&apos;t available.</p>
           )}
           {data && data.messages.length === 0 && (
-            <p className="type-footnote text-label-tertiary">
-              This conversation had no messages.
-            </p>
+            <p className="mx-quiet">This conversation had no messages.</p>
           )}
           {data?.messages.map((m, i) => {
             const isUser = m.role === "user";
@@ -74,19 +70,11 @@ export function TranscriptModal({
                 key={`${m.createdAt}-${i}`}
                 className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}
               >
-                <span className="type-caption-2 text-label-tertiary px-1 pb-0.5">
+                <span className="mx-sender">
                   {isUser ? userLabel : "Assistant"}
                 </span>
                 <div
-                  className={`
-                    max-w-[85%] rounded-2xl px-3.5 py-2 type-subheadline
-                    whitespace-pre-wrap break-words
-                    ${
-                      isUser
-                        ? "bg-accent text-white"
-                        : "bg-surface-secondary text-label-primary"
-                    }
-                  `}
+                  className={`mx-bubble ${isUser ? "is-mine" : "is-theirs"} whitespace-pre-wrap break-words`}
                 >
                   {m.content}
                 </div>
@@ -96,7 +84,7 @@ export function TranscriptModal({
         </div>
 
         <div className="mt-4 flex justify-end">
-          <button type="button" onClick={onClose} className="dp-btn-secondary">
+          <button type="button" onClick={onClose} className="btn">
             Close
           </button>
         </div>

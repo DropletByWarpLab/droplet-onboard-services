@@ -60,14 +60,6 @@ legacy-token app/knowledge/BrainMemoryTab.tsx
 legacy-token app/knowledge/RecentlyIndexedTab.tsx
 legacy-token app/knowledge/SearchTab.tsx
 legacy-token app/layout.tsx
-legacy-token app/messages/ConversationPane.tsx
-legacy-token app/messages/ForwardDialogs.tsx
-legacy-token app/messages/MeetingCard.tsx
-legacy-token app/messages/MeetingDialog.tsx
-legacy-token app/messages/NewThreadDialog.tsx
-legacy-token app/messages/page.tsx
-legacy-token app/messages/ThreadList.tsx
-legacy-token app/messages/TranscriptModal.tsx
 legacy-token app/not-found.tsx
 legacy-token app/page.tsx
 legacy-token app/projects/projects.css
@@ -136,11 +128,6 @@ accent-alpha app/calendar/page.tsx
 accent-alpha app/cameras/[name]/page.tsx
 accent-alpha app/chat/page.tsx
 accent-alpha app/knowledge/RecentlyIndexedTab.tsx
-accent-alpha app/messages/ConversationPane.tsx
-accent-alpha app/messages/ForwardDialogs.tsx
-accent-alpha app/messages/MeetingCard.tsx
-accent-alpha app/messages/NewThreadDialog.tsx
-accent-alpha app/messages/ThreadList.tsx
 accent-alpha app/page.tsx
 accent-alpha app/settings/page.tsx
 accent-alpha components/chat/InterviewSurfaces.tsx
@@ -159,9 +146,6 @@ accent-alpha components/Toast.tsx
 white-on-accent app/cameras/[name]/page.tsx
 white-on-accent app/chat/page.tsx
 white-on-accent app/devices/pair/page.tsx
-white-on-accent app/messages/ConversationPane.tsx
-white-on-accent app/messages/ThreadList.tsx
-white-on-accent app/messages/TranscriptModal.tsx
 white-on-accent components/cameras/CameraCard.tsx
 white-on-accent components/chat/InterviewSurfaces.tsx
 white-on-accent components/chat/ReviewCard.tsx

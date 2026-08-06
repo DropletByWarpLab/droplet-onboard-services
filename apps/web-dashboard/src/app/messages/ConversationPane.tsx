@@ -191,13 +191,11 @@ export function ConversationPane({
         <MessagesSquare
           size={30}
           strokeWidth={1.5}
-          className="text-label-quaternary"
+          className="mx-empty-icon"
           aria-hidden="true"
         />
-        <p className="mt-3 type-subheadline text-label-secondary">
-          Select a conversation
-        </p>
-        <p className="mt-1 type-footnote text-label-tertiary">
+        <p className="mx-empty-title">Select a conversation</p>
+        <p className="mx-empty-sub">
           Pick one on the left, or start a new message.
         </p>
       </div>
@@ -212,25 +210,18 @@ export function ConversationPane({
   return (
     <>
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 h-12 border-b border-separator flex-shrink-0">
+      <div className="mx-head">
         <button
           type="button"
           onClick={onBack}
-          className="
-            lg:hidden p-1.5 -ml-1.5 rounded-md text-label-secondary
-            hover:text-label-primary hover:bg-surface-secondary
-            transition-colors duration-200 ease-smooth
-            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-          "
+          className="mx-iconbtn lg:hidden -ml-1.5"
           aria-label="Back to conversations"
         >
           <ArrowLeft size={16} />
         </button>
         <div className="flex-1 min-w-0">
-          <p className="type-subheadline font-medium text-label-primary truncate">
-            {name}
-          </p>
-          <p className="type-caption-2 text-label-tertiary truncate">
+          <p className="mx-head-title truncate">{name}</p>
+          <p className="mx-head-sub truncate">
             {thread.kind === "group" ? memberNames : "Direct message"}
           </p>
         </div>
@@ -239,15 +230,15 @@ export function ConversationPane({
       {/* Messages — column-reverse renders the newest-first array bottom-up. */}
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col-reverse gap-2 px-4 py-3">
         {messagesError !== undefined && messages === undefined && (
-          <p role="alert" className="type-footnote text-label-tertiary">
+          <p role="alert" className="mx-quiet">
             Couldn&apos;t load messages — retrying.
           </p>
         )}
         {messagesError === undefined && isLoading && !messages && (
-          <p className="type-footnote text-label-tertiary">Loading messages…</p>
+          <p className="mx-quiet">Loading messages…</p>
         )}
         {messages && messages.length === 0 && (
-          <p className="type-footnote text-label-tertiary text-center py-6">
+          <p className="mx-quiet text-center py-6">
             No messages yet — say hello.
           </p>
         )}
@@ -268,28 +259,23 @@ export function ConversationPane({
       </div>
 
       {/* Composer */}
-      <div className="border-t border-separator px-3 py-2.5 flex-shrink-0">
+      <div className="mx-composer">
         {sendError && (
-          <p role="alert" className="type-caption-1 text-system-red px-1 pb-1.5">
+          <p role="alert" className="mx-error px-1 pb-1.5">
             {sendError}
           </p>
         )}
         {meetingError && (
-          <p role="alert" className="type-caption-1 text-system-red px-1 pb-1.5">
+          <p role="alert" className="mx-error px-1 pb-1.5">
             {meetingError}
           </p>
         )}
-        <div className="flex items-end gap-1.5">
+        <div className="mx-composer-inner">
           <button
             type="button"
             onClick={() => setFilePickerOpen(true)}
             disabled={sending}
-            className="
-              p-2 rounded-md text-label-secondary
-              hover:text-accent hover:bg-accent-subtle
-              transition-colors duration-200 ease-smooth disabled:opacity-50
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-            "
+            className="mx-iconbtn"
             title="Forward a file"
             aria-label="Forward a file"
           >
@@ -299,12 +285,7 @@ export function ConversationPane({
             type="button"
             onClick={() => setMeetingDialogOpen(true)}
             disabled={sending}
-            className="
-              p-2 rounded-md text-label-secondary
-              hover:text-accent hover:bg-accent-subtle
-              transition-colors duration-200 ease-smooth disabled:opacity-50
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-            "
+            className="mx-iconbtn"
             title="Schedule a meeting"
             aria-label="Schedule a meeting"
           >
@@ -314,12 +295,7 @@ export function ConversationPane({
             type="button"
             onClick={() => setChatPickerOpen(true)}
             disabled={sending}
-            className="
-              p-2 rounded-md text-label-secondary
-              hover:text-accent hover:bg-accent-subtle
-              transition-colors duration-200 ease-smooth disabled:opacity-50
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-            "
+            className="mx-iconbtn"
             title="Forward an AI chat"
             aria-label="Forward an AI chat"
           >
@@ -337,19 +313,13 @@ export function ConversationPane({
             rows={1}
             placeholder={`Message ${name}`}
             aria-label={`Message ${name}`}
-            className="dp-input flex-1 resize-none max-h-28 min-h-[38px]"
             disabled={sending}
           />
           <button
             type="button"
             onClick={sendText}
             disabled={sending || draft.trim().length === 0}
-            className="
-              p-2 rounded-full bg-accent text-white
-              hover:bg-accent-hover transition-colors duration-200 ease-smooth
-              disabled:opacity-40 disabled:hover:bg-accent
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-            "
+            className="mx-send"
             title="Send"
             aria-label="Send message"
           >
@@ -409,6 +379,14 @@ export function ConversationPane({
  * cards open the read-only transcript modal. No entrance motion by design:
  * the 5s poll re-renders the list, and replayed animations would turn
  * ambient refresh into noise (design-motion restraint).
+ *
+ * WARP-1783 — the bubble pair mirrors /chat: theirs is `--surface` + the
+ * `--border` hairline, mine is the soft `--user-bubble` / `--user-bubble-text`
+ * pair. Mine used to be a saturated legacy-accent fill under a hardcoded
+ * white literal (2.98:1 in dark — a WCAG 1.4.3 failure), which is also why
+ * every nested element carried a `mine ? … : …` tone branch. With both
+ * bubbles now on theme-appropriate fills, one `--inset` card tone and a
+ * currentColor-derived `.mx-sub` serve both sides, so that branching is gone.
  */
 function MessageBubble({
   message,
@@ -433,27 +411,15 @@ function MessageBubble({
   busyMeetingId: string | null;
 }) {
   const align = mine ? "items-end" : "items-start";
-  const bubble = mine
-    ? "bg-accent text-white"
-    : "bg-surface-secondary text-label-primary";
-  // Card surfaces stay readable inside both bubble colors.
-  const cardTone = mine
-    ? "bg-white/10 border-white/20"
-    : "bg-surface-primary border-separator";
-  // UX review: /70 on the accent bubble fell under 4.5:1 for the caption
-  // text — /80 clears it while still reading as secondary.
-  const subtle = mine ? "text-white/80" : "text-label-tertiary";
 
   return (
     <div className={`flex flex-col ${align}`}>
       {showSender && !mine && (
-        <span className="type-caption-2 text-label-tertiary px-1 pb-0.5">
+        <span className="mx-sender">
           {message.senderDisplayName ?? "Member"}
         </span>
       )}
-      <div
-        className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-3.5 py-2 ${bubble}`}
-      >
+      <div className={`mx-bubble ${mine ? "is-mine" : "is-theirs"}`}>
         {message.kind === "file_share" && (
           <Link
             href={
@@ -463,19 +429,15 @@ function MessageBubble({
                   )}`
                 : "/files"
             }
-            className={`
-              flex items-center gap-2.5 rounded-lg border px-3 py-2 mb-1 ${cardTone}
-              transition-opacity duration-200 ease-smooth hover:opacity-80
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-            `}
+            className="mx-card"
           >
             <FileText size={18} strokeWidth={1.5} aria-hidden="true" />
             <span className="min-w-0">
-              <span className="block type-footnote font-medium truncate">
+              <span className="mx-card-title truncate">
                 {message.sharedFileName ?? "Shared file"}
               </span>
               {message.sharedFilePath && (
-                <span className={`block type-caption-2 truncate ${subtle}`}>
+                <span className="mx-card-meta mx-sub truncate">
                   {message.sharedFilePath}
                 </span>
               )}
@@ -487,7 +449,6 @@ function MessageBubble({
           (message.meeting ? (
             <MeetingCard
               meeting={message.meeting}
-              mine={mine}
               meId={meId}
               participants={participants}
               onRsvp={onRsvp}
@@ -497,31 +458,19 @@ function MessageBubble({
           ) : (
             // The meeting row is gone (FK SetNull) — say so honestly
             // instead of rendering a dead card.
-            <p className={`type-caption-2 mb-1 ${subtle}`}>
-              Meeting no longer available
-            </p>
+            <p className="mx-card-meta mx-sub mb-1">Meeting no longer available</p>
           ))}
 
         {message.kind === "meeting_reminder" && (
-          <MeetingReminderCard meeting={message.meeting} mine={mine} />
+          <MeetingReminderCard meeting={message.meeting} />
         )}
 
         {message.kind === "ai_chat_share" && (
-          <button
-            type="button"
-            onClick={onOpenTranscript}
-            className={`
-              w-full text-left flex items-center gap-2.5 rounded-lg border px-3 py-2 mb-1 ${cardTone}
-              transition-opacity duration-200 ease-smooth hover:opacity-80
-              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-            `}
-          >
+          <button type="button" onClick={onOpenTranscript} className="mx-card">
             <Sparkles size={18} strokeWidth={1.5} aria-hidden="true" />
             <span className="min-w-0">
-              <span className="block type-footnote font-medium truncate">
-                AI conversation
-              </span>
-              <span className={`block type-caption-2 truncate ${subtle}`}>
+              <span className="mx-card-title truncate">AI conversation</span>
+              <span className="mx-card-meta mx-sub truncate">
                 Open the transcript
               </span>
             </span>
@@ -529,14 +478,12 @@ function MessageBubble({
         )}
 
         {message.body && (
-          <p className="type-subheadline whitespace-pre-wrap break-words">
-            {message.body}
-          </p>
+          <p className="whitespace-pre-wrap break-words">{message.body}</p>
         )}
 
-        <p className={`type-caption-2 mt-0.5 text-right tabular-nums ${subtle}`}>
+        <span className="mx-time mx-sub">
           {formatMessageTime(message.createdAt)}
-        </p>
+        </span>
       </div>
     </div>
   );
