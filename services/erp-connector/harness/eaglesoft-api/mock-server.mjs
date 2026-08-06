@@ -381,10 +381,14 @@ function handleRead(res, op, url, state) {
 
     case "find_patient": {
       const term = q.get("lastName") ?? "";
-      // LITERAL prefix match, case-insensitive. Literal is the important half:
-      // the SQL track escapes LIKE metacharacters so a "%" search cannot turn a
-      // name lookup into a full-table PHI dump, and the mock must not be more
-      // permissive than the system it stands in for.
+      // LITERAL prefix match, case-insensitive — no wildcard syntax of any
+      // kind, so "%" and "_" are ordinary characters that match nothing. This
+      // is the CONSERVATIVE choice for a stand-in: a mock that quietly matched
+      // more than a real box would let an over-fetch bug pass unnoticed.
+      //
+      // It is NOT a claim that the REST track escapes anything — it doesn't.
+      // What a real Eaglesoft box does with `lastName` is undiscovered (see
+      // fixture.mjs). Change this to match, once known.
       const needle = term.toLowerCase();
       const rows = needle
         ? PATIENTS.filter((p) => p.LastName.toLowerCase().startsWith(needle))

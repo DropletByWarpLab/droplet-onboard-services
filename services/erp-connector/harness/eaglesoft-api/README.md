@@ -168,3 +168,11 @@ In-process, the same knobs are on the returned box object (`setFaults`,
   optimistic guard so the write slice has a target the day it lands.
 - **Patterson's real contract.** Discovery against a live box is still the first
   step of a real install; this proves everything downstream of it.
+- **Wildcard over-fetch on the REST track.** There is no sanitization here:
+  `toApiQuery` renames the param and passes the value through untouched, and
+  `escapeLike` belongs to the SQL track's statement builder alone. This box
+  matches a literal prefix, so `%` matches nothing — but that is the *mock's*
+  behaviour, not a defence in the connector. Whether one is needed depends on
+  how a real box matches `lastName`, which is undiscovered. Settle it during
+  `/help` discovery, before any practice data is reachable. See the note above
+  `find_patient` in [`fixture.mjs`](fixture.mjs).

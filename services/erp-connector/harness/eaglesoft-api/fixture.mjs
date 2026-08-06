@@ -59,6 +59,15 @@ export const ROUTE_MAP = {
         patient_id: "PatientId",
       },
     },
+    // ⚠ OPEN QUESTION — matching semantics of `lastName` are UNDISCOVERED.
+    // This box treats it as a literal prefix. A real Eaglesoft box might do a
+    // substring or LIKE match instead, in which case a "%"-style term could
+    // over-fetch and minimum-necessary (§14) would need an answer on the REST
+    // track. The SQL track already has one (`escapeLike` in read-queries.ts);
+    // this track has NO sanitization — `toApiQuery` passes the value through
+    // untouched. Determine the real behaviour during /help discovery against a
+    // live box, and if it is not a literal match, add escaping BEFORE any
+    // practice data is reachable through it.
     find_patient: {
       controller: "Patient",
       method: "GetPatientByName",

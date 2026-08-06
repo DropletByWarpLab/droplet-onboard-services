@@ -219,7 +219,20 @@ describe.skipIf(!HAS_OPENSSL)("EaglesoftApiConnector — live dummy box", () => 
       expect(Object.keys(rows[0])).toHaveLength(3);
     });
 
-    it("find_patient — a wildcard search cannot become a full-table PHI dump", async () => {
+    it("find_patient — a SQL metacharacter is just a character to this box", async () => {
+      // What this asserts, precisely: the harness box matches a LITERAL prefix,
+      // so "%" and "_" match nothing rather than everything. It keeps the mock
+      // from being MORE permissive than the system it stands in for.
+      //
+      // What it does NOT assert: that the REST track defends against wildcard
+      // over-fetch. It has no such defence. `escapeLike` is used only by the
+      // SQL track's statement builder (read-queries.ts); on this track
+      // `toApiQuery` renames the param and passes the value through untouched.
+      // Whether that matters depends on what Patterson's API does with
+      // `lastName` server-side — an UNDISCOVERED behaviour (see the note on
+      // find_patient in harness/eaglesoft-api/fixture.mjs). If a real box turns
+      // out to do a substring/LIKE match, minimum-necessary needs an answer on
+      // this track too, and it will not come from this test.
       const c = await connected();
       await expect(c.runRead("find_patient", { query: "%" })).resolves.toEqual([]);
       await expect(c.runRead("find_patient", { query: "_" })).resolves.toEqual([]);
