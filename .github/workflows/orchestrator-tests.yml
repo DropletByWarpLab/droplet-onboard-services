@@ -9,10 +9,25 @@ name: orchestrator-tests
 # the pg-gated vitest files against a real Postgres (started as a step, not
 # a `services:` container — see the WARP-1586 note on the job below).
 #
-# Paths are only what the pg lane consumes: the app itself (source,
-# migrations, prisma schema) and the root npm workspace manifests. The old
-# workspace-dep paths (tools-core, mcp-server, fips-selftest, erp-connector)
-# belonged to the retired unit job — the pg lane never builds those dists.
+# Paths are what the pg lane consumes: the app itself (source, migrations,
+# prisma schema), the root npm workspace manifests, and the four workspace
+# packages the lane BUILDS FROM SOURCE.
+#
+# Those four were previously excluded, with the note "the pg lane never builds
+# those dists" — true of the retired unit job, and no longer true. The lane now
+# builds fips-selftest / tools-core / mcp-server / erp-connector, because
+# erp-api-e2e.pg.test.ts imports createApp and so pulls the whole service graph.
+# Leaving them out meant a PR touching ONLY erp-connector would not trigger this
+# workflow on the PR or on the main-push canary — and erp-api-e2e.pg.test.ts
+# exists precisely to cover that code reaching a live box. The coverage would
+# have been silently absent for the change that needed it most.
+#
+# Spend (per the CI budget in CLAUDE.md / docs/ci-cost-budget.md): the
+# pg-integration job measures 68-85 s wall clock. The added paths fire it only
+# for changes that touch those four packages WITHOUT touching apps/orchestrator
+# — a small slice. At a generous 30 such PRs/month with 2 runs each plus the
+# main-push canary, that is ~90 runs x ~1.5 min = **~135 min/month**, far under
+# the 2k min/month callout threshold.
 
 on:
   pull_request:
@@ -20,6 +35,12 @@ on:
       - "apps/orchestrator/**"
       - "package.json"
       - "package-lock.json"
+      # Built from source by this lane (see the note above) — a change to any
+      # of them can break the pg suites without touching apps/orchestrator.
+      - "packages/fips-selftest/**"
+      - "packages/tools-core/**"
+      - "services/mcp-server/**"
+      - "services/erp-connector/**"
       # WARP-1542: the drift gate's script lives outside apps/orchestrator,
       # so a change to it must still re-prove the lane.
       - "scripts/check-schema-drift.sh"
@@ -30,6 +51,10 @@ on:
       - "apps/orchestrator/**"
       - "package.json"
       - "package-lock.json"
+      - "packages/fips-selftest/**"
+      - "packages/tools-core/**"
+      - "services/mcp-server/**"
+      - "services/erp-connector/**"
       # WARP-1542: the drift gate's script lives outside apps/orchestrator,
       # so a change to it must still re-prove the lane.
       - "scripts/check-schema-drift.sh"
