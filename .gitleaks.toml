@@ -25,6 +25,13 @@ paths = [
   '''(^|/)testing/.*''',
   '''(^|/)conftest\.py$''',
   '''^docs/superpowers/.*''',
+  # Throwaway TLS material the Eaglesoft harness MINTS AT RUN TIME (its own
+  # private CA, so certificate verification can stay on in the tests). Never
+  # committed — the directory is gitignored, and a fresh checkout has no such
+  # files, so this changes nothing about what CI scans. It exists so a
+  # developer who runs the harness and then runs gitleaks does not get two
+  # findings for keys that live only in their working tree.
+  '''(^|/)harness/eaglesoft-api/\.certs/.*''',
 ]
 regexes = [
   # services/oled-display/device-bridge.py:803 — claim-code alphabet

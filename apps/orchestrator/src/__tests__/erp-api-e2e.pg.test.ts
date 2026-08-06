@@ -80,6 +80,29 @@ describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft b
   let box: any;
 
   beforeAll(async () => {
+    // Fail loudly and specifically on a misconfigured lane. Without these the
+    // symptom is nine assertion failures reading `expected 401 to be 200` (auth
+    // on) or an opaque throw from the encryption service — neither of which
+    // names the actual cause. They are set by the pg-integration job and by
+    // scripts/test-orchestrator-pg.sh; keep those two in lockstep.
+    //
+    // Deliberately a throw, not a skip: silently skipping when the environment
+    // is wrong is how coverage disappears without anyone noticing.
+    const { config } = await import("../config.js");
+    if (config.AUTH_ENABLED) {
+      throw new Error(
+        "erp-api-e2e.pg.test.ts needs AUTH_ENABLED=false — it exercises the ERP " +
+          "routers and their RBAC gates, not the login flow. Run it via " +
+          "scripts/test-orchestrator-pg.sh, which sets it.",
+      );
+    }
+    if (!config.DEVICE_SECRET_KEY) {
+      throw new Error(
+        "erp-api-e2e.pg.test.ts needs DEVICE_SECRET_KEY — connect() encrypts the " +
+          "stored ERP credentials. Run it via scripts/test-orchestrator-pg.sh.",
+      );
+    }
+
     const { PrismaClient } = await import("@prisma/client");
     prisma = new (PrismaClient as any)();
     const { createApp } = await import("../app.js");
