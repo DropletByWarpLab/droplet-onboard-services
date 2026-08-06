@@ -177,13 +177,23 @@ jobs:
       - name: Generate Prisma client
         run: npm run -w @droplet/orchestrator db:generate
 
-      # ci.yml builds this before the orchestrator suite; this lane never did,
-      # so any pg test importing a module that reaches @droplet/tools-core died
-      # at "Failed to resolve entry for package" rather than on an assertion.
-      # Latent since the lane was added — WARP-1534's suite is the first pg test
-      # to import it.
+      # ci.yml builds these before the orchestrator suite; this lane never did,
+      # so any pg test importing a module that reaches one of them died at
+      # "Failed to resolve entry for package" rather than on an assertion.
+      # Latent since the lane was added — WARP-1534's suite was the first pg
+      # test to reach @droplet/tools-core, and erp-api-e2e.pg.test.ts (the
+      # first to import createApp, which pulls the whole service graph) was the
+      # first to reach the other three.
+      #
+      # This now mirrors ci.yml's orchestrator leg exactly. Keep it that way:
+      # the failure mode is a resolve error in an unrelated-looking suite, and
+      # it only appears once some pg test happens to import far enough.
       - name: Build workspace packages the orchestrator imports
-        run: npm run -w @droplet/tools-core build
+        run: |
+          npm run -w @droplet/fips-selftest build
+          npm run -w @droplet/tools-core build
+          npm run -w @droplet/mcp-server build
+          npm run -w @droplet/erp-connector build
 
       # WARP-1571's lesson, applied here too: on a cold volume the postgres
       # entrypoint runs a TEMPORARY init server bound to the unix socket only
