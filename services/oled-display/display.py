@@ -259,6 +259,34 @@ AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 # enough that walking away disarms it.
 CONSOLE_CONFIRM_SECONDS = float(os.environ.get("CONSOLE_CONFIRM_SECONDS", "4"))
 
+# WARP-1782 — the rail's second QR face: the Wi-Fi join code.
+#
+# Design brief §8 says never render the PSK in LIVE state, because a
+# permanently-displayed credential on a rack front in a shared room is a
+# standing leak. This is a deliberate, narrow exception to that rule, and the
+# distinction it turns on is display vs REVEAL: the Wi-Fi code is not on the
+# glass until someone standing at the rack asks for it, and it takes itself
+# back off. Nothing about the panel's resting state changes.
+#
+# The mitigations are the reason this is defensible, so do not quietly drop
+# any of them:
+#   - the PSK is never drawn as TEXT here. It exists only inside the QR, which
+#     needs a camera at roughly 25cm; text is readable across a room and by
+#     whatever camera is already pointed at the rack.
+#   - the face is time-boxed and self-reverting, so there is no way to leave
+#     the panel parked on it.
+#   - PANEL_RAIL_WIFI_QR=0 removes the face entirely.
+RAIL_WIFI_QR = os.environ.get("PANEL_RAIL_WIFI_QR", "1") != "0"
+RAIL_WIFI_SECONDS = float(os.environ.get("PANEL_RAIL_WIFI_SECONDS", "45"))
+
+# Mirrors layout_wide.QR_BYTE_BUDGET — the byte count above which the encoder
+# drops below the 4px/module scan floor. Duplicated rather than imported
+# because layout_wide imports THIS module; a test pins the two together. A
+# 32-char SSID plus a 16-char passphrase really does clear it, and the honest
+# response to that is to not arm the face at all rather than to paint a card
+# nobody can scan.
+RAIL_QR_BYTE_BUDGET = 62
+
 # ---------------------------------------------------------------------------
 # Boot readiness (WARP-624; redirect/TLS fix WARP-638)
 # ---------------------------------------------------------------------------
@@ -799,6 +827,11 @@ class TFTDisplay:
         # WARP-1641 — debug screen's two-tap console handback.
         self._console_confirm_until: float = 0.0
         self._console_last_result: str = ""
+        # WARP-1782 — the rail's Wi-Fi QR face is a DEADLINE, not a flag. The
+        # revert is then a property of the clock rather than of something
+        # remembering to fire, so there is no timer to leak and no path where
+        # a missed callback strands a credential on the rack's front panel.
+        self._rail_wifi_until: float = 0.0
 
         self._init_device()
         self._load_logo()
@@ -2983,6 +3016,86 @@ class TFTDisplay:
         self._console_confirm_until = 0.0
         self._console_last_result = ""
         self._set_mode(self.HOME, pause_cycle=False)
+
+    # --- WARP-1782: the rail's two QR faces ---------------------------------
+
+    def wifi_qr_payload(self) -> str:
+        """The `WIFI:` join string for the rail's Wi-Fi face, or "" if there
+        is nothing safe and scannable to show.
+
+        Prefers the payload device-bridge already built: it is the side that
+        knows the encryption mode and whether the SSID is hidden, and it does
+        the metachar escaping once (WARP-819) instead of every caller doing it
+        slightly differently. Falls back to composing one locally so a bridge
+        that predates that field still lights the face up.
+
+        Returns "" — never a half-formed payload — when the AP is down or
+        disabled, when there is no passphrase, or when the string is too long
+        to encode above the scan floor. Each of those is a reason NOT to offer
+        the face, and the caller reads "" as exactly that.
+        """
+        wifi = self._v3.get("wifi") or {}
+        # `ok` is absent until the first bridge snapshot lands, so only an
+        # explicit False counts as "the bridge told us the AP is unreachable".
+        if wifi.get("ok") is False or wifi.get("disabled"):
+            return ""
+
+        payload = str(wifi.get("payload") or "")
+        if not payload:
+            ssid = str(wifi.get("ssid") or "")
+            # The bridge sends `key`; the older py-v3 System screen reads
+            # `password`. Accept either rather than caring which fed us.
+            key = str(wifi.get("key") or wifi.get("password") or "")
+            if not ssid or not key:
+                return ""
+            payload = _wifi_qr_payload(ssid, key)
+
+        if len(payload) > RAIL_QR_BYTE_BUDGET:
+            logger.warning(
+                "Wi-Fi QR payload is %d bytes, over the %d-byte rail budget — "
+                "it would encode below the scan floor, so the rail's Wi-Fi "
+                "face stays off. Shorten the SSID or the passphrase.",
+                len(payload), RAIL_QR_BYTE_BUDGET)
+            return ""
+        return payload
+
+    def rail_face(self) -> str:
+        """Which QR the rail is showing: "wifi" or "dashboard".
+
+        DERIVED, every time it is asked. `dashboard` is therefore the state
+        the panel falls back into on its own — after the window, if the Wi-Fi
+        feed goes away mid-reveal, or if the face is switched off under the
+        panel. Nothing has to run for the credential to leave the glass.
+        """
+        if not RAIL_WIFI_QR:
+            return "dashboard"
+        if time.time() >= self._rail_wifi_until:
+            return "dashboard"
+        if not self.wifi_qr_payload():
+            return "dashboard"
+        return "wifi"
+
+    def _tap_rail_qr(self) -> None:
+        """Tap the rail to flip the QR between the dashboard link and the
+        Wi-Fi join code.
+
+        A plain toggle, deliberately: unlike the console handback this is
+        reversible, harmless and guest-facing, so making it a two-tap confirm
+        would only make it feel broken. Tapping back is instant — someone who
+        opened the Wi-Fi code by accident should not have to wait out the
+        window to clear it.
+        """
+        if not RAIL_WIFI_QR:
+            return
+        if self.rail_face() == "wifi":
+            self._rail_wifi_until = 0.0
+        elif self.wifi_qr_payload():
+            self._rail_wifi_until = time.time() + RAIL_WIFI_SECONDS
+        else:
+            # Nothing to flip to. Re-render anyway so the tap is not silent —
+            # the pager below shows a single dot when the face is unavailable.
+            logger.info("rail Wi-Fi face unavailable — no scannable payload")
+        self._render_current()
 
     # --- WARP-1641: the panel's debug / recovery screen ---------------------
 

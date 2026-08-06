@@ -10,6 +10,8 @@ the rack.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from PIL import Image, ImageDraw
 
@@ -700,3 +702,229 @@ def test_shipping_inset_keeps_the_qr_at_full_scannable_size(populated,
     assert at0 is not None and at5 is not None
     assert mod5 == mod0 >= lw.QR_MIN_MODULE_PX
     assert at5.size == at0.size
+
+
+# --- WARP-1782: the rail's two QR faces --------------------------------------
+# The rail used to hold exactly one code, the dashboard link, and a visitor at
+# the rack who needed to get a phone onto the Wi-Fi had no path at all — the
+# join QR only ever existed in the CLAIM state, which is gone the moment the
+# box is claimed.
+#
+# The reason this section is dense is design brief §8: the panel is physically
+# exposed in a shared room, so the Wi-Fi credential is REVEALED rather than
+# displayed. Every property that makes that defensible — the tap, the time
+# box, the self-revert, the passphrase never being drawn as text, the kill
+# switch — is pinned below, because each is individually easy to drop in a
+# later edit that "simplifies" the rail.
+
+@pytest.fixture
+def with_wifi(populated):
+    """A box whose bridge snapshot carries joinable Wi-Fi credentials.
+
+    `populated` deliberately does NOT — it has an SSID (the LIVE screen shows
+    one) but no key — so every test above this section exercises the
+    no-second-face path and proves it is byte-for-byte the old rail.
+    """
+    populated._v3["wifi"].update({
+        "ok": True, "key": "7fmqx3rp2kdz9nva",
+        "payload": "WIFI:T:WPA;S:Droplet-AI;P:7fmqx3rp2kdz9nva;;",
+    })
+    return populated
+
+
+def _tap_rail(disp):
+    """Fire the tap through the real touch path.
+
+    Calling `_tap_rail_qr` directly would leave the binding untested, and the
+    binding is the half that was a `lambda: None` until this ticket.
+    """
+    g = lw.geom()
+    name = disp.handle_touch(g.rail_x + g.rail_w // 2, PANEL_H // 2)
+    assert name == "rail_qr", f"tap landed on {name!r}, not the rail"
+
+
+def _rail_dots(disp):
+    """Ellipses drawn inside the rail — the pager, and nothing else."""
+    g = lw.geom()
+    seen = []
+    real = ImageDraw.ImageDraw.ellipse
+    try:
+        ImageDraw.ImageDraw.ellipse = lambda self, xy, *a, **k: (
+            seen.append(tuple(xy)), real(self, xy, *a, **k))[1]
+        lw.render_status(disp)
+    finally:
+        ImageDraw.ImageDraw.ellipse = real
+    return [e for e in seen if e[0] >= g.rail_x]
+
+
+def test_a_box_with_no_wifi_credentials_offers_one_face(populated):
+    """No advertising a flip that goes nowhere."""
+    assert populated.wifi_qr_payload() == ""
+    assert populated.rail_face() == "dashboard"
+    assert lw._rail_content(populated, populated._v3)["faces"] == 1
+    assert _rail_dots(populated) == []
+
+
+def test_tap_flips_the_rail_to_the_wifi_face(with_wifi):
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "wifi"
+    c = lw._rail_content(with_wifi, with_wifi._v3)
+    assert c["payload"].startswith("WIFI:T:WPA;S:Droplet-AI;")
+    assert c["faces"] == 2 and c["face_index"] == 1
+
+
+def test_tapping_the_wifi_face_returns_immediately(with_wifi):
+    """Reversible, harmless and guest-facing, so it is a plain toggle — not
+    the two-tap confirm the console handback earns. Someone who opened the
+    Wi-Fi code by accident must not have to wait out the window."""
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "wifi"
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "dashboard"
+    # A real reset, not a shortened window.
+    assert with_wifi._rail_wifi_until == 0.0
+
+
+def test_the_wifi_face_is_time_boxed(with_wifi):
+    lw.render_status(with_wifi)
+    before = time.time()
+    _tap_rail(with_wifi)
+    assert (with_wifi._rail_wifi_until - before) == pytest.approx(
+        display_module.RAIL_WIFI_SECONDS, abs=1.0)
+
+
+def test_an_expired_window_reverts_with_nothing_running(with_wifi):
+    """The revert is a property of the clock — no timer, no callback, no
+    thread — so there is no missed-callback path that strands a credential on
+    the rack's front panel."""
+    with_wifi._rail_wifi_until = time.time() - 0.001
+    assert with_wifi.rail_face() == "dashboard"
+    assert lw._rail_content(with_wifi, with_wifi._v3)["face_index"] == 0
+
+
+def test_the_face_drops_if_the_wifi_feed_goes_away_mid_reveal(with_wifi):
+    """`rail_face` is derived on every call, so losing the feed reverts the
+    panel by itself rather than leaving a stale code on the glass."""
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "wifi"
+    with_wifi._v3["wifi"].update(ok=False)
+    assert with_wifi.rail_face() == "dashboard"
+
+
+def test_the_passphrase_is_never_drawn_as_text(with_wifi):
+    """Design brief §8, and the whole reason this feature is defensible.
+
+    The credential exists only inside the QR, which has to be scanned from
+    ~25cm. Text on a rack front is readable across the room, memorable, and
+    already in frame of whatever camera is pointed at the rack.
+    """
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    psk = with_wifi._v3["wifi"]["key"]
+    drawn = _texts(with_wifi)
+    assert drawn, "spy never fired — the render path changed"
+    for text in drawn:
+        assert psk not in text, f"passphrase leaked onto the panel: {text!r}"
+
+
+def test_the_wifi_face_names_the_network_it_joins(with_wifi):
+    """The SSID takes the headline: it is the fact a visitor has to confirm
+    before scanning, and it is not a secret."""
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert "Droplet-AI" in _texts(with_wifi)
+    # The caption is drawn with letter tracking, i.e. one glyph per `text()`
+    # call, so it never lands in the spy as a whole string — assert it on the
+    # content the renderer was handed instead.
+    assert lw._rail_content(with_wifi, with_wifi._v3)["caption"] == "JOIN WI-FI"
+
+
+def test_the_wifi_face_stays_inside_the_safe_area(with_wifi):
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    g = lw.geom()
+    boxes = _rail_boxes(with_wifi)
+    assert boxes
+    for box, text in boxes:
+        assert box[1] >= g.top, f"{text!r} above the safe area: {box}"
+        assert box[3] <= g.bottom, f"{text!r} below the safe area: {box}"
+        assert box[2] <= g.rail_x + g.rail_w, f"{text!r} overflows: {box}"
+
+
+def test_the_wifi_payload_encodes_above_the_scan_floor(with_wifi):
+    img, module_px = lw.render_qr(with_wifi.wifi_qr_payload())
+    assert img is not None and module_px >= lw.QR_MIN_MODULE_PX
+
+
+def test_the_pager_marks_the_active_face_above_the_card(with_wifi):
+    """The pager goes in the 24px of rail that was already empty. Everything
+    below the card is anchored to the safe area's bottom, so a line added
+    there comes straight out of the QR's edge — and scan distance is the
+    tightest budget on this panel."""
+    g = lw.geom()
+    dots = _rail_dots(with_wifi)
+    assert len(dots) == 2
+    for dot in dots:
+        assert dot[1] >= g.top, f"pager dot above the safe area: {dot}"
+        assert dot[3] <= g.top + 24, f"pager dot overlaps the QR card: {dot}"
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda w: w.update(ok=False), id="bridge-says-ap-unreachable"),
+    pytest.param(lambda w: w.update(disabled=True), id="ap-disabled"),
+    pytest.param(lambda w: w.update(payload="", key="", password=""),
+                 id="no-passphrase"),
+])
+def test_an_unavailable_ap_never_arms_the_face(with_wifi, mutate):
+    mutate(with_wifi._v3["wifi"])
+    assert with_wifi.wifi_qr_payload() == ""
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "dashboard"
+
+
+def test_the_payload_is_composed_when_the_bridge_sends_none(with_wifi):
+    """A bridge that predates the `payload` field still lights the face up."""
+    with_wifi._v3["wifi"]["payload"] = ""
+    assert with_wifi.wifi_qr_payload() == \
+        "WIFI:T:WPA;S:Droplet-AI;P:7fmqx3rp2kdz9nva;;"
+
+
+def test_an_unscannable_payload_never_arms_the_face(with_wifi):
+    """A 32-char SSID plus a 16-char passphrase really does clear the budget.
+    Refusing the face is the honest failure; painting a card nobody can scan
+    is the one the design brief calls worse than no QR at all."""
+    ssid = "W" * 32
+    with_wifi._v3["wifi"].update(
+        ssid=ssid, payload=f"WIFI:T:WPA;S:{ssid};P:7fmqx3rp2kdz9nva;;")
+    assert len(with_wifi._v3["wifi"]["payload"]) > lw.QR_BYTE_BUDGET
+    assert with_wifi.wifi_qr_payload() == ""
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "dashboard"
+
+
+def test_the_rail_budget_matches_the_renderer():
+    """display.py duplicates the byte budget because layout_wide imports it,
+    not the other way round. Pin the copy so it cannot drift into a face that
+    arms and then refuses to draw."""
+    assert display_module.RAIL_QR_BYTE_BUDGET == lw.QR_BYTE_BUDGET
+
+
+def test_the_kill_switch_restores_the_dashboard_only_rail(with_wifi,
+                                                          monkeypatch):
+    """PANEL_RAIL_WIFI_QR=0 is for a deployment that will not take the
+    trade-off. It has to leave the old rail exactly as it was."""
+    monkeypatch.setattr(display_module, "RAIL_WIFI_QR", False)
+    lw.render_status(with_wifi)
+    _tap_rail(with_wifi)
+    assert with_wifi.rail_face() == "dashboard"
+    c = lw._rail_content(with_wifi, with_wifi._v3)
+    assert c["faces"] == 1
+    assert c["caption"] == "SCAN TO OPEN" and c["headline"] == "Dashboard"
+    assert c["fallback"] == with_wifi._v3["public_host"]
+    assert _rail_dots(with_wifi) == []
