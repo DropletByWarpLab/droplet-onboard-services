@@ -4201,6 +4201,11 @@ model IntegrationConnection {
   provider      String
   status        IntegrationStatus @default(NOT_CONFIGURED)
   host          String
+  /// TCP port of the practice's box. NULL = the track's default (2638 direct
+  /// SQL, 9888 REST). Persisted because `connect()` has always ACCEPTED a port
+  /// and, before this column, silently dropped it — so a site on a non-default
+  /// port could not be configured at all.
+  port          Int?
   databaseName  String
   secretRef     String
   schemaVersion String?
@@ -4209,6 +4214,26 @@ model IntegrationConnection {
   lastHealthyAt DateTime?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
+
+  // --- REST-track ("eaglesoft-api") connection material ---------------------
+  // All three are nullable and unused by the direct-SQL provider, which keeps
+  // its credentials behind `secretRef` and needs no route contract.
+
+  /// aes-256-gcm blob (encryption.service) of {integrationKey,userId,password}.
+  /// `secretRef` stays the human-facing POINTER/label; this is the ciphertext
+  /// it points at. Cleartext is never stored, logged, or returned by the API.
+  apiCredentialsEnc String?
+
+  /// The DISCOVERED route contract (verbs/templates/field maps) for this box,
+  /// shaped as `EaglesoftApiRouteMap`. Supplied by the operator from the box's
+  /// own /help page — never guessed, and never auto-parsed from a format we
+  /// have not seen (see erp-connector/src/api-route-map.ts).
+  apiRouteMap Json?
+
+  /// PEM of the CA to trust for this box's certificate (Patterson's private
+  /// PdcoTechCA in production; the harness's own CA in a rehearsal). Absent =
+  /// use the system trust store. Certificate verification is never disabled.
+  apiCaCert String?
 
   @@index([provider, status])
 }

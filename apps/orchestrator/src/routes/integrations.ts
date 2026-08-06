@@ -44,6 +44,29 @@ const connectSchema = z.object({
   port: z.number().int().positive().optional(),
   scopes: z.array(z.string()).optional(),
   enableWrites: z.boolean().optional(),
+  /** "eaglesoft" (direct SQL, the default) | "eaglesoft-api" (Patterson REST).
+   *  Validated against the known-provider list in the service, which rejects an
+   *  unrecognized value rather than routing it to a surprise transport. */
+  provider: z.string().min(1).optional(),
+
+  // --- REST-track material. Ignored by the direct-SQL provider. -------------
+
+  /** Vendor key + Eaglesoft Provider login. Accepted ONLY here, on the way in;
+   *  stored encrypted and never echoed back by any read path. */
+  apiCredentials: z
+    .object({
+      integrationKey: z.string().min(1),
+      userId: z.string().min(1),
+      password: z.string().min(1),
+    })
+    .optional(),
+  /** The route contract discovered from the box's /help page. Shape-checked in
+   *  the service (`parseRouteMap`), not here — the per-operation validity rule
+   *  lives in the connector and duplicating it in a zod schema would create a
+   *  second copy to keep in sync. */
+  apiRouteMap: z.record(z.string(), z.unknown()).optional(),
+  /** PEM of the CA to trust for this box's certificate. */
+  apiCaCert: z.string().min(1).optional(),
 });
 
 export function createIntegrationsRouter(prisma: PrismaClient): Router {

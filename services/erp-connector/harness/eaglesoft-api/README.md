@@ -123,6 +123,40 @@ await connector.connect();
 await connector.runRead("get_schedule_today", { from, to });
 ```
 
+## Pointing the ORCHESTRATOR at it (the full rehearsal)
+
+The connector snippet above proves the transport. To rehearse the thing an
+installer actually does — configure a connection, then watch real data appear —
+`POST /api/integrations/eaglesoft/connect` with the REST provider and the three
+pieces of connection material:
+
+```jsonc
+{
+  "provider": "eaglesoft-api",
+  "host": "127.0.0.1",
+  "port": 9888,
+  "apiCredentials": {                        // stored encrypted, never echoed back
+    "integrationKey": "mock-vendor-integration-key",
+    "userId": "droplet_api",
+    "password": "mock_dev_password"
+  },
+  "apiRouteMap": { /* ROUTE_MAP from fixture.mjs, or a real /help discovery */ },
+  "apiCaCert": "-----BEGIN CERTIFICATE-----\n…"   // .certs/harness-ca.crt
+}
+```
+
+After that, `GET /api/erp/schedule?date=…` returns the box's appointments
+through the ordinary dashboard path. On install day the only things that change
+are the host, the credentials, and the route map — the shape is identical.
+
+Credentials are encrypted at rest with the same `encryption.service`
+(`DEVICE_SECRET_KEY`) the calendar integration uses, and no read path ever
+returns them. If the credentials are missing, undecryptable, the route map is
+absent, or the box's certificate doesn't verify, the connection degrades to
+`ERP_NOT_CONNECTED` rather than half-working — each of those is asserted in
+`apps/orchestrator/src/services/erp-api-live.test.ts`, which drives the real
+orchestrator service against this box.
+
 ## The data
 
 Fictional computer scientists, `555-01xx` reserved phone numbers, mirroring the
@@ -163,6 +197,10 @@ In-process, the same knobs are on the returned box object (`setFaults`,
 - **The direct-SQL track.** A different provider entirely — see
   [`../README.md`](../README.md). Its connector is stubbed, so no dummy server
   can exercise it until the Python/unixODBC bridge exists.
+- **Session reuse.** The orchestrator builds and closes a connector per call, so
+  every read costs one `Authenticate` round-trip. Correct, but not free — if it
+  shows up under real load the fix belongs in the connector (a pooled session
+  that knows when its token expires), not a token cached in the service.
 - **The REST write path.** `applyWrite` is deferred in the connector and stays
   honestly blocked. The box implements `PUT /api/schedule/appointment` with the
   optimistic guard so the write slice has a target the day it lands.

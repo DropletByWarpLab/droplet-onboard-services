@@ -241,7 +241,11 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       // The stubbed connector can't apply → we surface FAILED, never APPLIED.
       expect(applied.status).toBe("FAILED");
       expect(applied.confirmedBy).toBe(OWNER.id);
-      expect(connector.applyWrite).toHaveBeenCalledTimes(1);
+      // The block is caught at connect(), so the write is never even attempted
+      // against the practice — a stronger guarantee than "applyWrite refused",
+      // which is what this asserted before the service opened a session first.
+      expect(connector.connect).toHaveBeenCalledTimes(1);
+      expect(connector.applyWrite).not.toHaveBeenCalled();
       // Transitions are audited (confirm + apply-result).
       const actions = mock._state.auditLog.map((a) => a.action);
       expect(actions).toContain("write:confirm");
@@ -284,6 +288,9 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       // Prove the state machine can reach APPLIED — even though the real
       // connector is stubbed, the service maps a successful apply correctly.
       const applyingConnector = makeBlockedConnector({
+        // A connector that can apply is one that can also connect — the
+        // service opens a session first (as it must against a real box).
+        connect: vi.fn(async () => {}),
         applyWrite: vi.fn(async () => ({ ok: true })),
       });
       build({ writeEnabled: true, connector: applyingConnector });
@@ -300,6 +307,9 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
 
     it("a non-blocked apply failure records FAILED with a discrepancy (never a fake APPLIED)", async () => {
       const failing = makeBlockedConnector({
+        // Connects fine; it is the APPLY that fails, which is the scenario
+        // under test (a non-blocked failure → FAILED + discrepancy).
+        connect: vi.fn(async () => {}),
         applyWrite: vi.fn(async () => {
           throw new Error("optimistic guard miss");
         }),
