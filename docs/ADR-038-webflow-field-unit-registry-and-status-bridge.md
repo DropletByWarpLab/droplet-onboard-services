@@ -6,7 +6,9 @@
 - **Date:** 2026-08-07
 - **Authors:** Claude (Dev agent), for Stefan Cruceru
 - **Related tickets:** WARP-360 (Droplet Analytics portal, parent),
-  WARP-962 (fleet visibility live — the commissioning gate),
+  WARP-962 (fleet visibility live — the commissioning gate; its
+  rejected-heartbeat audit AC is what `docs/THREAT_MODEL.md` T6.6
+  tracks, so the two framings are one ticket, not a mismatch),
   WARP-1043 (duplicate telemetry agents), WARP-1179 (null-tier audit
   retention, HIPAA), WARP-420 (HIPAA v1.1 MFA step-up for SSH),
   WARP-813 (trusted-proxy allowlist)
@@ -171,8 +173,10 @@ box's only outbound fleet path remains
 The new traffic is **browser → portal**, originating on an operator's
 or customer's device, not on the appliance. `warp-lab.com` is already
 carried as `kind: reference` under `ref-brand-and-fleet-domains`, and
-`scripts/check-egress-allowlist.py` excludes `docs/` and markdown, so
-this ADR does not trip the gate.
+`scripts/check-egress-allowlist.py` scans only tracked files under
+`apps/ services/ packages/ docker/ scripts/ openwrt/ proto/ schemas/`
+plus the root `.env.example` — `docs/` is outside that scope, so this
+ADR does not trip the gate.
 
 What *does* change is the **portal's inbound attack surface**: a
 capability-addressed public route on an origin that today serves only
