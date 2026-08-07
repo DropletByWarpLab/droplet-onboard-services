@@ -54,17 +54,12 @@ export function joinLocalInput(date: string, time: string): string {
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /**
- * The 96 quarter-hour slots of a day, 00:00 → 23:45, each with a 24-hour
- * "HH:mm" display label. The locale is pinned to "en-GB" (24 h clock, no
- * AM/PM) so server-side pre-render and browser hydration always produce
- * identical option text, preventing React hydration mismatches on locales that
- * default to a 12-hour clock (e.g. en-US).
+ * Build the 96 quarter-hour slots of a day, 00:00 → 23:45. `value` is always
+ * the machine `HH:mm` string regardless of locale — only `label` is localized.
  */
-export function quarterHourOptions(): TimeOption[] {
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+function buildQuarterHourOptions(
+  fmt: Intl.DateTimeFormat,
+): TimeOption[] {
   const opts: TimeOption[] = [];
   for (let minutes = 0; minutes < 24 * 60; minutes += QUARTER_HOUR_MINUTES) {
     const h = Math.floor(minutes / 60);
@@ -75,6 +70,43 @@ export function quarterHourOptions(): TimeOption[] {
     opts.push({ value, label });
   }
   return opts;
+}
+
+/**
+ * Quarter-hour slots with 24-hour "HH:mm" labels, locale pinned to "en-GB".
+ *
+ * The pin is a hydration constraint, not a formatting preference: the server
+ * pre-render and the browser's FIRST render must emit byte-identical option
+ * text, and the server has no way to know the visitor's clock format. Any
+ * attempt to localize here directly re-introduces the React hydration mismatch
+ * this pin was added to prevent.
+ *
+ * Renderers should pair this with {@link quarterHourOptionsForDevice}, swapping
+ * to it after mount — see `DateTimePicker` (WARP-1793).
+ */
+export function quarterHourOptions(): TimeOption[] {
+  return buildQuarterHourOptions(
+    new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }),
+  );
+}
+
+/**
+ * The same 96 slots labelled in the **device's own** locale and clock format —
+ * "9:45 AM" where the phone is set to 12-hour, "09:45" where it is set to 24.
+ *
+ * WARP-1793: QA read "09:45"/"14:30" on a US iPhone and had to double-check
+ * whether an afternoon meeting had landed in the morning. `hour: "numeric"`
+ * (not "2-digit") is deliberate so en-US reads "9:45 AM" rather than the
+ * clumsier "09:45 AM".
+ *
+ * CLIENT ONLY. Calling this during SSR or in the first client render will
+ * desynchronize hydration for every visitor whose locale is not en-GB.
+ */
+export function quarterHourOptionsForDevice(): TimeOption[] {
+  return buildQuarterHourOptions(
+    // `undefined` locale = the runtime's own resolved locale.
+    new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }),
+  );
 }
 
 /**
