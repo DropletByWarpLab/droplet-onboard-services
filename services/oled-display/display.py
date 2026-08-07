@@ -3506,6 +3506,15 @@ class TFTDisplay:
                 except Exception as e:
                     logger.warning("Touch action %s failed: %s", r.name, e)
                 return r.name
+        # WARP-1801 — a miss used to be completely silent: the caller only logs
+        # when a region matched, so tapping a control that is 96px from where
+        # it is drawn produced no log line, no on-glass change, and no way to
+        # tell "the panel is wedged" from "you missed". That is what turned a
+        # mis-targeted BACK button into a bug report saying there was no BACK
+        # button at all. Log the miss with the screen it happened on, so the
+        # next mis-aimed control leaves a trace instead of vanishing.
+        logger.info("Tap MISS at (%d,%d) on %s — no region (%d registered)",
+                    x, y, self._current_mode, len(regions))
         return None
 
     # ----- Boot readiness ----------------------------------------------

@@ -89,6 +89,82 @@ def test_debug_targets_are_hittable(wide):
         assert r.w >= 44 and r.h >= 44, f"{r.name} too small to hit"
 
 
+# --- WARP-1801: the way out is the way in -----------------------------------
+
+def _region(disp, name):
+    return next(r for r in disp._touch_regions if r.name == name)
+
+
+def _resolve(disp, x, y):
+    """Which region a tap at (x,y) would hit — same first-match order as
+    handle_touch, but WITHOUT firing the action, so a sweep can probe many
+    points without each one navigating the panel out from under the next.
+    """
+    for r in disp._touch_regions:
+        if r.contains(x, y):
+            return r.name
+    return None
+
+
+def test_every_pixel_that_enters_debug_also_leaves_it(wide):
+    """The exit target must span the entry target, pixel for pixel.
+
+    WARP-1784 widened the way IN to the whole brand lockup because the droplet
+    mark is what people aim at. The way OUT stayed the 74px "‹ BACK" chip, so
+    170 of those 256px did nothing on the debug screen — you tapped the logo
+    that had just worked and got silence. This asserts the two stay the same
+    span, so moving either one without the other fails here rather than at a
+    rack.
+    """
+    lw.render_status(wide)
+    enter = _region(wide, "debug_enter")
+
+    lw.render_debug(wide)
+    dead = [x for x in range(enter.x, enter.x + enter.w + 1)
+            if _resolve(wide, x, enter.y + enter.h // 2) != "debug_back"]
+    assert not dead, (
+        f"{len(dead)} px of the debug_enter span do not leave the debug "
+        f"screen: {dead[:8]}{'...' if len(dead) > 8 else ''}")
+
+    # And it really does navigate, not just match a region.
+    assert wide.handle_touch(enter.x + 2, enter.y + 2) == "debug_back"
+    assert wide._current_mode == TFTDisplay.HOME
+
+
+def test_the_back_chip_stays_visible(wide):
+    """Widening the hit box must not delete the affordance — an unlabelled way
+    out is how you get "there is no back button" a second time."""
+    img = lw.render_debug(wide)
+    g = lw.geom()
+    cx, cy, cw, ch = g.left + 172, g.top + 12, 74, 22
+    px = img.load()
+    surface = sum(1 for x in range(cx, cx + cw) for y in range(cy, cy + ch)
+                  if px[x, y] == display_module.V3_SURFACE)
+    assert surface > 200, (
+        f"the '‹ BACK' chip is not being drawn ({surface} surface px)")
+    # ...and the hit box around it is the full lockup, not just the chip.
+    assert _region(wide, "debug_back").w == lw.LOCKUP_W > cw
+
+
+def test_the_widened_back_target_does_not_swallow_console_return(wide):
+    lw.render_debug(wide)
+    back, console = _region(wide, "debug_back"), _region(wide, "console_return")
+    assert back.x + back.w <= console.x, (
+        "the back target must not overlap RETURN CONSOLE TO PANEL — that "
+        "button swaps what is physically on the rack's front")
+    # And the console button must still answer where it is drawn.
+    assert wide.handle_touch(console.x + console.w // 2,
+                             console.y + console.h // 2) == "console_return"
+
+
+def test_a_missed_tap_is_logged(wide, caplog):
+    """A silent miss is what disguised WARP-1801 as "the button is gone"."""
+    lw.render_debug(wide)
+    with caplog.at_level("INFO", logger="droplet.tft"):
+        assert wide.handle_touch(700, 260) is None
+    assert "Tap MISS at (700,260)" in caplog.text
+
+
 # --- the two-tap confirm ----------------------------------------------------
 
 def test_first_tap_only_arms(wide, monkeypatch):

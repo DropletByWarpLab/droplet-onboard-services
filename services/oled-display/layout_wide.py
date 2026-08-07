@@ -428,6 +428,34 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
 # ---------------------------------------------------------------------------
 # Chrome + foot rails
 # ---------------------------------------------------------------------------
+# WARP-1784 / WARP-1801 — the top-left brand lockup, as a hit box.
+#
+# It is the way INTO the debug screen (from LIVE) and the way OUT of it, and
+# those two have to be the SAME span. WARP-1784 widened the way in to the whole
+# lockup, because the droplet mark is the element up here that reads as a
+# button and is what people actually aim at. The way out was left as the 74px
+# "‹ BACK" chip alone — so 170 of the 256px a user had just been taught to tap
+# did nothing on the debug screen, and a miss is not even a visible no-op:
+# there is no auto-cycle off DEBUG and the touchscreen cannot type, so that
+# chip was the only exit from a screen people reach precisely when something
+# is already wrong.
+#
+# Sharing one definition is the fix, not a tidy-up: two hardcoded spans is
+# exactly how the gap opened, twice (WARP-1641's x=124, then WARP-1644's
+# g.left + 96). Anchoring to g.left keeps a future inset change from
+# reopening it.
+LOCKUP_W, LOCKUP_H = 256, 46
+
+
+def _lockup_region(disp, name: str, action) -> None:
+    """Register the brand-lockup hit box under `name`, firing `action`."""
+    d = _d()
+    g = geom()
+    with disp._touch_regions_lock:
+        disp._touch_regions.append(
+            d.TouchRegion(name, g.left, g.top, LOCKUP_W, LOCKUP_H, action))
+
+
 def _render_chrome(disp, draw, now, state: str) -> None:
     d = _d()
     g = geom()
@@ -445,18 +473,12 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     # WARP-1784 — the target is the WHOLE lockup: mark, wordmark and device
     # label. It used to start 96px in, at the label alone, which left the
     # droplet mark in a dead zone — and the mark is the one element up here
-    # that reads as a button, so it is what people actually aim at. Worse, the
-    # dead zone moved: this was a hardcoded x=124 on an inset-less canvas
-    # (WARP-1641) before WARP-1644 made it `g.left + 96`, which at the shipping
-    # 30px inset resolves to 154. Everything slid 30px right and a learned tap
-    # point started landing on nothing.
+    # that reads as a button, so it is what people actually aim at.
     #
     # Unlabelled is the design intent. Smaller than the thing you aim at is
-    # not. Anchoring the left edge to g.left (rather than any + offset) is what
-    # stops a future inset change from reopening the gap.
-    with disp._touch_regions_lock:
-        disp._touch_regions.append(
-            d.TouchRegion("debug_enter", g.left, g.top, 256, 46, disp._go_debug))
+    # not. WARP-1801 moved the span into _lockup_region so the way out of the
+    # debug screen is the same physical place as the way in.
+    _lockup_region(disp, "debug_enter", disp._go_debug)
 
     label, fill, ink = _pill_style(state)
     pf = d._get_font(10, weight="bold")
@@ -927,10 +949,10 @@ def _back_button(disp, draw) -> None:
     d._v3_text(draw, "‹ BACK", x + w // 2, y + 5,
                font=d._get_font(10, weight="bold"), fill=d.V3_LABEL2,
                anchor="ma", tracking=1)
-    with disp._touch_regions_lock:
-        disp._touch_regions.append(
-            d.TouchRegion("debug_back", x - 6, y - 6, w + 12, h + 24,
-                          disp._go_home))
+    # WARP-1801 — the hit box is the whole lockup, not just this chip. The chip
+    # stays as the affordance; what changes is how much of the corner accepts
+    # the tap. See _lockup_region for why the two must be the same span.
+    _lockup_region(disp, "debug_back", disp._go_home)
 
 
 def render_claim(disp, code: str, setup_url: str,
