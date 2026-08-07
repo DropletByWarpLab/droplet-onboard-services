@@ -104,12 +104,21 @@ _COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.S)
 
 
 def _bare(sql: str) -> str:
-    """Comments removed, one trailing semicolon allowed, string literals masked.
+    """Comments removed, trailing terminators removed, string literals masked.
 
-    Literals are masked so a semicolon INSIDE a value ('x;y') is not mistaken
-    for a statement separator.
+    "Trailing terminators" means any run of semicolons and whitespace at the
+    very end — `;`, `;;;`, and `; ; ` all normalize the same way. They are
+    empty statements, not a second real one, so accepting them is correct; what
+    matters is that the three spellings agree. A plain `.rstrip(";")` did not:
+    it collapsed `;;;` but left `; ; ` holding a semicolon, so two inputs with
+    identical meaning got opposite verdicts purely on spacing (review nit,
+    verified). Only the END is stripped — an interior `;` is exactly the
+    separator this is looking for and must survive.
+
+    Literals are masked AFTER that, so a semicolon INSIDE a value ('x;y') is
+    not mistaken for a separator either.
     """
-    stripped = _COMMENT.sub(" ", sql).strip().rstrip(";")
+    stripped = re.sub(r"[\s;]+$", "", _COMMENT.sub(" ", sql).strip())
     return re.sub(r"'(?:''|[^'])*'", "''", stripped)
 
 

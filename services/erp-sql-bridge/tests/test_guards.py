@@ -58,6 +58,39 @@ class TestSingleStatementDetection:
     def test_rejects_a_batch_whatever_it_starts_with(self, sql):
         assert _is_single_statement(sql) is False
 
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "UPDATE dba.appointment SET status = ?;",
+            "UPDATE dba.appointment SET status = ?;;;",
+            "UPDATE dba.appointment SET status = ? ; ; ",
+            "SELECT 1 ;\n;\t",
+        ],
+    )
+    def test_trailing_terminators_are_empty_statements_not_a_second_one(self, sql):
+        """All spellings of "nothing after the statement" agree.
+
+        A plain `.rstrip(';')` collapsed `;;;` but left `; ; ` holding a
+        semicolon, so two inputs with identical meaning got opposite verdicts
+        purely on spacing (review nit). Neither form is a second statement, so
+        both are accepted — the point is that they cannot disagree.
+        """
+        assert _is_single_statement(sql) is True
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "UPDATE dba.appointment SET status = ?; DROP TABLE dba.patient;",
+            "UPDATE dba.appointment SET status = ?;;DROP TABLE dba.patient",
+            "SELECT 1 ; ; DROP TABLE dba.patient ; ;",
+        ],
+    )
+    def test_stripping_trailing_terminators_never_swallows_a_real_second_statement(self, sql):
+        """Only the END is stripped. An interior semicolon is precisely the
+        separator being looked for, and no amount of trailing punctuation may
+        hide one."""
+        assert _is_single_statement(sql) is False
+
 
 class TestSelectDetection:
     @pytest.mark.parametrize(
