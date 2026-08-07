@@ -700,3 +700,81 @@ def test_shipping_inset_keeps_the_qr_at_full_scannable_size(populated,
     assert at0 is not None and at5 is not None
     assert mod5 == mod0 >= lw.QR_MIN_MODULE_PX
     assert at5.size == at0.size
+
+
+# --- WARP-1784: the debug target covers the whole brand lockup ---------------
+# Reported from the rack as "tapping the droplet logo to diagnose doesn't work
+# anymore". The mechanism was fine; the target was 96px to the right of the
+# thing people aim at, and it had MOVED there — a hardcoded x=124 on an
+# inset-less canvas (WARP-1641) became `g.left + 96` in WARP-1644, which at the
+# shipping 30px inset resolves to 154.
+#
+# These tests are about the aim point, so they hit REAL pixel positions
+# computed from where the chrome actually draws, not from the region's own
+# numbers. Asserting the region against itself would have passed throughout
+# the entire time this was broken.
+
+def _chrome_targets():
+    """The three things drawn in the top-left lockup, as tap points."""
+    g = lw.geom()
+    return {
+        # draw_droplet_mark(g.left, g.top + 12, 22) — centre of the mark.
+        "droplet mark": (g.left + 11, g.top + 23),
+        # "DROPLET" wordmark starts at g.left + 30.
+        "wordmark": (g.left + 55, g.top + 20),
+        # "WARP LAB · MINI-RACK" starts at g.left + 104.
+        "device label": (g.left + 150, g.top + 20),
+    }
+
+
+@pytest.mark.parametrize("what", ["droplet mark", "wordmark", "device label"])
+def test_every_part_of_the_brand_lockup_opens_debug(populated, what):
+    x, y = _chrome_targets()[what]
+    lw.render_status(populated)
+    assert populated.handle_touch(x, y) == "debug_enter", \
+        f"tapping the {what} at {(x, y)} hits nothing"
+
+
+def test_the_debug_target_starts_at_the_lockup_not_past_it(populated):
+    """Anchored to `g.left`, not to an offset from it. An offset is what let
+    the gap open in the first place, and it would reopen the moment the safe
+    inset changed."""
+    lw.render_status(populated)
+    g = lw.geom()
+    region = next(r for r in populated._touch_regions if r.name == "debug_enter")
+    assert region.x == g.left
+    # It must still reach the far end of the device label.
+    assert region.x + region.w >= g.left + 234
+
+
+@pytest.mark.parametrize("inset", [0, 30, 60])
+def test_the_lockup_stays_tappable_at_any_safe_inset(populated, monkeypatch,
+                                                     inset):
+    """The dead zone was born when the inset shipped and slid the chrome 30px
+    right. Prove the aim points track the chrome at every inset, not just the
+    one that happens to be the default today."""
+    monkeypatch.setattr(lw, "SAFE_INSET_X", inset)
+    lw.render_status(populated)
+    for what, (x, y) in _chrome_targets().items():
+        assert populated.handle_touch(x, y) == "debug_enter", \
+            f"{what} at inset {inset} hits nothing"
+        lw.render_status(populated)
+
+
+def test_the_debug_target_does_not_swallow_the_cells(populated):
+    """It is a wide region on a panel whose next row is four tap targets."""
+    lw.render_status(populated)
+    regions = {r.name: r for r in populated._touch_regions}
+    dbg = regions["debug_enter"]
+    for name in ("cell_reach", "cell_health", "cell_services", "cell_netstore"):
+        cell = regions[name]
+        assert dbg.y + dbg.h <= cell.y, f"debug_enter overlaps {name}"
+
+
+def test_the_debug_target_stays_unlabelled(populated):
+    """Design intent: the LIVE screen is what belongs on a rack front. Making
+    the target bigger must not make it visible."""
+    drawn = _texts(populated)
+    for word in ("DEBUG", "DIAGNOSE", "RECOVERY"):
+        assert not any(word in t.upper() for t in drawn if len(t) > 1), \
+            f"{word!r} appeared in the chrome — the target should stay silent"

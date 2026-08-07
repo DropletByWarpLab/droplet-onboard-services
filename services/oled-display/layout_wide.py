@@ -405,15 +405,27 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     d._v3_text(draw, "DROPLET", g.left + 30, g.top + 16,
                font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL3, tracking=2)
-    # The device label doubles as the way into the DEBUG/recovery screen.
-    # Deliberately a small, unlabelled target rather than a visible button:
-    # the LIVE screen is what belongs on a rack front, and the people who need
-    # the recovery path are the people who have been told where it is.
+    # The top-left brand lockup doubles as the way into the DEBUG/recovery
+    # screen. Deliberately unlabelled rather than a visible button: the LIVE
+    # screen is what belongs on a rack front, and the people who need the
+    # recovery path are the people who have been told where it is.
     d._v3_text(draw, "WARP LAB · MINI-RACK", g.left + 104, g.top + 16,
                font=d._get_font(9), fill=d.V3_LABEL4, tracking=1.2)
+    # WARP-1784 — the target is the WHOLE lockup: mark, wordmark and device
+    # label. It used to start 96px in, at the label alone, which left the
+    # droplet mark in a dead zone — and the mark is the one element up here
+    # that reads as a button, so it is what people actually aim at. Worse, the
+    # dead zone moved: this was a hardcoded x=124 on an inset-less canvas
+    # (WARP-1641) before WARP-1644 made it `g.left + 96`, which at the shipping
+    # 30px inset resolves to 154. Everything slid 30px right and a learned tap
+    # point started landing on nothing.
+    #
+    # Unlabelled is the design intent. Smaller than the thing you aim at is
+    # not. Anchoring the left edge to g.left (rather than any + offset) is what
+    # stops a future inset change from reopening the gap.
     with disp._touch_regions_lock:
         disp._touch_regions.append(
-            d.TouchRegion("debug_enter", g.left + 96, g.top, 160, 46, disp._go_debug))
+            d.TouchRegion("debug_enter", g.left, g.top, 256, 46, disp._go_debug))
 
     label, fill, ink = _pill_style(state)
     pf = d._get_font(10, weight="bold")
