@@ -347,6 +347,12 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 
 /* ── Knowledge / tabbed page (tabs + indexed-item lists) ─ */
 .droplet-shell .tabstrip { display: flex; align-items: center; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 22px; }
+/* WARP-1792 (same defect class): the UA rule `[hidden] { display: none }` is
+   an origin-level default and loses to ANY author `display` declaration, so
+   the `hidden={mode === "simple"}` on the Network tab strip
+   (app/network/page.tsx:495) never actually hid it — all seven tabs stayed
+   visible in Simple mode. Restore the attribute's meaning explicitly. */
+.droplet-shell .tabstrip[hidden] { display: none; }
 .droplet-shell .tab { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 14px; margin-bottom: -1px; border: 0; background: transparent; cursor: pointer;
   border-bottom: 2px solid transparent; font-size: 14px; color: var(--text-muted); transition: color 150ms var(--ease), border-color 150ms var(--ease); }
 .droplet-shell .tab:hover { color: var(--text); }

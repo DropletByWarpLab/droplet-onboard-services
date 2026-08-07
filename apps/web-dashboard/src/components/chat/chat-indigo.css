@@ -181,11 +181,22 @@
 
 /* ── Conversation rail ──────────────────────────────────────────────── */
 
+/* WARP-1792: this rule must NOT declare `display`.
+   The element is authored as `className="conv-rail hidden lg:flex"`
+   (app/chat/page.tsx:618) — desktop rail, hidden on phones, with the mobile
+   drawer from WARP-331 taking over below `lg`. But `.droplet-shell .conv-rail`
+   is specificity (0,2,0) and Tailwind's `.hidden` is (0,1,0), so a `display`
+   here silently BEAT the utility and the rail rendered on phones anyway:
+   measured at 375px it took 277px and left the conversation 98px — 26% of the
+   viewport — which is what clipped message bubbles mid-word, wrapped
+   "Droplet is thinking" one word per line, and squashed the Ask input into a
+   corner square. Both the rail and the drawer were live at once.
+   `display` is therefore owned entirely by the utilities, which specify it at
+   both breakpoints (`hidden` below lg, `lg:flex` at and above). */
 .droplet-shell .conv-rail {
   width: 276px;
   flex-shrink: 0;
   height: 100%;
-  display: flex;
   flex-direction: column;
   background: var(--glass-2);
   border-right: 1px solid var(--border);
