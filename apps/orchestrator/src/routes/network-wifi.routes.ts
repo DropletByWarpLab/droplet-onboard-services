@@ -98,6 +98,29 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
         return res.status(400).json({ error: "Missing 'ssid' in request body" });
       }
 
+      // The household Wi-Fi may be broadcast by a separate approved access point
+      // (the edge-router shape), not this router's radio. Writing the SSID here
+      // would land on a disabled/absent radio and FALSELY report success — the
+      // gap that leaves the set_wifi_ssid MCP tool writing into the void (audit
+      // 2026-08-06). Resolve where the Wi-Fi actually lives; when it's on the
+      // AP, refuse with a pointer to the AP control rather than lying. The
+      // dashboard already routes AP-hosted edits to PUT /network/wifi/ap — this
+      // closes the same gap for the MCP tool and any legacy caller. Single-box
+      // (hostapd on the router's own radio) resolves to source:"router" and is
+      // unaffected.
+      const current = await getCurrentWifi(
+        prisma,
+        await getWifiSettings().catch(() => null),
+      );
+      if (current.source === "ap") {
+        return res.status(409).json({
+          error:
+            "This Droplet's Wi-Fi is broadcast by a separate access point — " +
+            "change the network name from the access-point Wi-Fi settings.",
+          code: "WIFI_ON_ACCESS_POINT",
+        });
+      }
+
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
         prisma, "wireless.ssid", "set_ssid", { radio, iface_section, ssid }, userId

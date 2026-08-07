@@ -1699,13 +1699,20 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
         # Bring the new peer online without a full network restart by reloading
         # the wg interface. apply (without rollback timer) is the same path used
         # by the DNS hostnames endpoint — it triggers ucitrack -> wg reload.
+        applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
+            applied = False
             logger.warning("vpn: uci.apply after add_peer failed (peer is staged): %s", exc)
 
+        # 🔴 Report staged-vs-live honestly. Remote access is the one feature
+        # where a silent "ok" that never went live means the customer simply
+        # cannot get in — so a peer that committed but never applied returns
+        # status "staged", not "ok" (audit 2026-08-06).
         return {
-            "status": "ok",
+            "status": "ok" if applied else "staged",
+            "applied": applied,
             "interface": req.interface,
             "public_key": public_key,
             "private_key": private_key,
@@ -1751,13 +1758,18 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             endpoint=req.endpoint or "",
             persistent_keepalive=req.persistent_keepalive,
         )
+        applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
+            applied = False
             logger.warning("vpn: uci.apply after overlay add_peer failed (peer is staged): %s", exc)
 
+        # staged-vs-live: an overlay peer that never applied cannot hole-punch,
+        # so the phone would silently fail to connect (audit 2026-08-06).
         return {
-            "status": "ok",
+            "status": "ok" if applied else "staged",
+            "applied": applied,
             "interface": req.interface,
             "public_key": req.public_key,
             "endpoint": req.endpoint,
@@ -1783,11 +1795,21 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
         removed = r.vpn.delete_peer(req.interface, req.public_key)
         if removed == 0:
             raise HTTPException(status_code=404, detail="Peer not found")
+        applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001
+            applied = False
             logger.warning("vpn: uci.apply after delete_peer failed: %s", exc)
-        return {"status": "ok", "interface": req.interface, "removed": removed}
+        # staged-vs-live: on apply failure the peer is removed from config but
+        # STILL ACTIVE until a reload — the caller must know revocation isn't
+        # live yet (audit 2026-08-06).
+        return {
+            "status": "ok" if applied else "staged",
+            "applied": applied,
+            "interface": req.interface,
+            "removed": removed,
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
