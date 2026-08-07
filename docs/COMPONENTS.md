@@ -320,7 +320,7 @@ network. Host-published ports and host-network services are called out.
 ## services/camera-discovery
 
 - **Purpose:** ONVIF/RTSP camera auto-discovery → Frigate. Pulls DHCP leases from
-  routing, sweeps the camera subnet (`CAMERA_SUBNET`, default `192.168.100.0/24`)
+  routing, sweeps the camera subnet (`CAMERA_SUBNET`, default `192.168.100.0/24`; `auto` resolves it from the edge router at scan time — WARP-1805)
   for RTSP, runs ONVIF WS-Discovery, probes credentials, optionally runs the vendor
   first-run init flow, registers confirmed cameras in Frigate, publishes discovery
   events to MQTT.

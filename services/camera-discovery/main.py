@@ -92,9 +92,16 @@ if not DEVICE_SECRET:
 # Camera subnet: when set, only scan this subnet for cameras.
 # Default 192.168.100.0/24 matches the OpenWrt VLAN 100 config.
 # Set to empty string to scan all private subnets (no isolation).
+# Set to "auto" (the single-box provisioning default — WARP-1805) to resolve
+# the camera network from the edge router at scan time via the routing
+# service, so the filter and sweep follow the LAN that actually hands
+# cameras their leases instead of a provision-time constant that goes stale
+# every time the fabric moves (192.168.100.0/24 → 192.168.20.0/24 → the
+# Pi edge router's LAN, each of which silently blinded discovery).
 CAMERA_SUBNET = os.getenv("CAMERA_SUBNET", "192.168.100.0/24")
+CAMERA_SUBNET_AUTO = CAMERA_SUBNET.strip().lower() == "auto"
 _camera_network: ipaddress.IPv4Network | None = None
-if CAMERA_SUBNET:
+if CAMERA_SUBNET and not CAMERA_SUBNET_AUTO:
     try:
         _camera_network = ipaddress.ip_network(CAMERA_SUBNET, strict=False)
     except ValueError:
@@ -429,16 +436,87 @@ async def _maybe_auto_initialize(ip: str) -> bool:
     return False
 
 
+# WARP-1805: refresh cadence for CAMERA_SUBNET=auto. Between refreshes the
+# last resolved network keeps filtering, so a routing-service blip can't
+# blind the scan loop or flap the sweep target every 30 s.
+AUTO_SUBNET_TTL_SECONDS = 300.0
+_auto_subnet_resolved_at = 0.0
+
+
+async def resolve_camera_network_auto() -> None:
+    """Resolve the camera network from the edge router (CAMERA_SUBNET=auto).
+
+    WARP-1805: a hardcoded CAMERA_SUBNET goes stale every time the fabric
+    moves, and a stale value filters out every candidate — the whole
+    ONVIF/RTSP pipeline runs healthy but blind. In auto mode the subnet
+    filter and sweep follow whatever LAN the edge router actually serves,
+    read from the routing service's ``/network/interfaces`` (the same
+    router that hands cameras their DHCP leases, so the lease feed and the
+    filter can never disagree about which network cameras live on).
+
+    Failure contract: while unresolved, ``_camera_network`` stays ``None`` —
+    the candidate filter falls back to all-private (RFC 1918) so lease and
+    WS-Discovery candidates still surface, and the brute subnet sweep stays
+    off (discovery degrades, never widens). After a first successful
+    resolve, a refresh failure keeps the last known network.
+    """
+    global _camera_network, _auto_subnet_resolved_at
+    if not CAMERA_SUBNET_AUTO:
+        return
+    now = time.time()
+    if _camera_network is not None and (now - _auto_subnet_resolved_at) < AUTO_SUBNET_TTL_SECONDS:
+        return
+    try:
+        resp = await routing_client.get("/network/interfaces")
+        resp.raise_for_status()
+        payload = resp.json()
+        lan = (payload or {}).get("lan") or {}
+        addrs = lan.get("ipv4-address") or []
+        first = addrs[0] if addrs else {}
+        address = first.get("address")
+        mask = first.get("mask")
+        if not address or mask is None:
+            raise ValueError("no usable lan ipv4-address in response")
+        network = ipaddress.ip_network(f"{address}/{mask}", strict=False)
+        if not network.is_private:
+            # A poisoned/misconfigured router answer must not widen probing
+            # beyond RFC 1918 space: is_safe_ip() already rejects public
+            # candidates one by one, refusing here keeps the sweep off too.
+            raise ValueError(f"resolved network {network} is not private")
+        if network != _camera_network:
+            logger.info(
+                "CAMERA_SUBNET=auto: camera network resolved from edge router: %s",
+                network,
+            )
+        _camera_network = network
+        _auto_subnet_resolved_at = now
+    except Exception as exc:
+        if _camera_network is None:
+            logger.warning(
+                "CAMERA_SUBNET=auto: camera network not resolved yet (%s) — "
+                "subnet sweep disabled, candidates gated to private IPs only",
+                exc,
+            )
+        else:
+            logger.warning(
+                "CAMERA_SUBNET=auto: refresh failed (%s) — keeping %s",
+                exc,
+                _camera_network,
+            )
+
+
 async def scan_and_discover() -> None:
     """Main discovery loop iteration.
 
-    1. Fetch DHCP leases from the routing service
-    2. Sweep the camera subnet for RTSP hosts (catches static-IP cameras)
-    3. Run any operator-approved first-run init on fresh cameras
-    4. Probe each candidate with RTSP and ONVIF
-    5. Add confirmed cameras to Frigate
-    6. Publish events to MQTT
+    1. Resolve the camera network from the edge router (CAMERA_SUBNET=auto)
+    2. Fetch DHCP leases from the routing service
+    3. Sweep the camera subnet for RTSP hosts (catches static-IP cameras)
+    4. Run any operator-approved first-run init on fresh cameras
+    5. Probe each candidate with RTSP and ONVIF
+    6. Add confirmed cameras to Frigate
+    7. Publish events to MQTT
     """
+    await resolve_camera_network_auto()
     leases = await fetch_dhcp_leases()
 
     # Always run a port-554 sweep of the camera subnet in parallel with the
@@ -1040,8 +1118,18 @@ async def subnet_status(request: Request):
     isolation state — network-topology reconnaissance.
     """
     _require_auth(request)
+    if CAMERA_SUBNET_AUTO:
+        mode = "auto"
+    elif _camera_network is not None:
+        mode = "static"
+    else:
+        mode = "all_private"
     return {
         "camera_subnet": CAMERA_SUBNET or "all_private",
+        # WARP-1805: "auto" resolves the network from the edge router at scan
+        # time; "network" below is the currently-resolved value (null until
+        # the first successful resolve).
+        "mode": mode,
         "isolation_active": _camera_network is not None,
         "network": str(_camera_network) if _camera_network else None,
     }

@@ -82,7 +82,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `OPENWRT_PASSWORD`   | OpenWrt rpcd password                                |
 | `FRIGATE_URL`        | Frigate NVR API endpoint (default `http://frigate:5000`) |
 | `CAMERA_SCAN_INTERVAL` | Camera discovery scan interval in seconds (default `30`) |
-| `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`) |
+| `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`; `auto` = resolve from the edge router at scan time — WARP-1805; single-box provisions `auto`) |
 | `CAMERA_DEFAULT_USERNAME` | Operator-supplied admin user for IP cameras; tried before factory defaults |
 | `CAMERA_DEFAULT_PASSWORD` | Operator-supplied admin password (paired with `CAMERA_DEFAULT_USERNAME`) |
 | `CAMERA_CREDENTIALS_JSON` | JSON array of `[user, pw]` pairs probed before factory defaults |
