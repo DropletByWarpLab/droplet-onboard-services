@@ -114,16 +114,47 @@ describe("<Sidebar> Projects module gating", () => {
     ).toBeNull();
   });
 
-  it("leaves ungated neighbors (Calendar, Knowledge) untouched when Projects is off", () => {
+  it("leaves ungated neighbors (Calendar, Email) untouched when Projects is off", () => {
     modulesRef.current = { projects: false };
     render(<Sidebar />);
     const aside = desktopAside();
     expect(
       within(aside).getByRole("link", { name: /calendar/i }),
     ).toHaveAttribute("href", "/calendar");
+    // WARP-1807 swapped this fixture from Knowledge (now tucked out of the
+    // nav entirely) to Email — still a module-gated neighbor that must
+    // survive an unrelated module going off.
     expect(
-      within(aside).getByRole("link", { name: /knowledge/i }),
-    ).toHaveAttribute("href", "/knowledge");
+      within(aside).getByRole("link", { name: /email/i }),
+    ).toHaveAttribute("href", "/email");
+  });
+});
+
+/**
+ * WARP-1807 — Knowledge + Context are tucked out of the primary nav
+ * (`hidden: true` in nav-config): not daily-operation surfaces, so no nav
+ * surface renders them, while Settings → Advanced keeps them reachable.
+ * The document-wide query covers all three surfaces at once (desktop aside,
+ * bottom tab bar, opened More drawer) — same pattern as the module-gating
+ * pins above. Crucially the knowledge module is ON here: hidden must win
+ * even when role/capability/module would all allow the entry.
+ */
+describe("<Sidebar> tucked entries (WARP-1807)", () => {
+  beforeEach(() => {
+    modulesRef.current = { projects: true, knowledge: true };
+  });
+
+  it("renders no /knowledge or /context link on any nav surface, even with the module on", () => {
+    render(<Sidebar />);
+    // Open the More drawer so its markup is in the document too.
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    expect(document.querySelector("a[href='/knowledge']")).toBeNull();
+    expect(document.querySelector("a[href='/context']")).toBeNull();
   });
 });
 

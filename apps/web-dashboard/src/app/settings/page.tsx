@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  BookOpen,
   ChevronRight,
   DownloadCloud,
   Mic,
   Plus,
   Settings as SettingsIcon,
+  Sparkles,
   Trash2,
   Users,
   X,
@@ -25,6 +27,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
+import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { boxDisplayHost } from "@/lib/box-identity";
 import { useAuth } from "@/lib/auth";
 import {
@@ -40,6 +43,9 @@ import { Sect, Badge } from "@/components/shell/primitives";
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
+  // WARP-1807: the tucked Knowledge row below mirrors the nav's module gate
+  // (fail-open — hidden only on a positive "off").
+  const isModuleOn = useModuleGate();
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
@@ -161,6 +167,51 @@ export default function SettingsPage() {
             modules (registry: orchestrator module-registry.ts). Self-gates to
             owner/admin like the cards below. */}
         <FeaturesCard />
+
+        {/* Advanced (WARP-1807) — the way in to the tucked Knowledge + Context
+            surfaces. Not daily operation, so they left the primary nav
+            (hidden: true in nav-config), but they must stay reachable.
+            Knowledge mirrors the nav's fail-open module gate; Context carries
+            no module and always renders. */}
+        <Sect title="Advanced" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            {isModuleOn("knowledge") && (
+              <Link
+                href="/knowledge"
+                className="lrow"
+                style={{ padding: "12px 16px", alignItems: "center" }}
+              >
+                <span className="ri">
+                  <BookOpen size={16} />
+                </span>
+                <span className="rt">
+                  <span className="nm">Knowledge</span>
+                  <span className="sub">
+                    Browse what&apos;s indexed for retrieval.
+                  </span>
+                </span>
+                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+              </Link>
+            )}
+            <Link
+              href="/context"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <Sparkles size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Context</span>
+                <span className="sub">
+                  Indexing coverage and pipeline health.
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
+          </div>
+        </div>
 
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to

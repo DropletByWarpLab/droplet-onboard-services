@@ -92,6 +92,14 @@ export type NavItem = {
     | "voice"
     | "team_chat";
   /**
+   * WARP-1807 — a tucked destination: rendered by NO nav surface (desktop
+   * aside, mobile tab bar, More drawer), but still part of the nav
+   * definition so `moduleForPath` keeps claiming its route (the WARP-1528
+   * gap-(c) gate must not regress) and the label/icon stay canonical.
+   * Reachable from Settings instead.
+   */
+  hidden?: boolean;
+  /**
    * WARP-1683 — named live-count badge rendered on the item (desktop
    * sidebar + mobile More drawer). The KEY lives here so nav-config stays
    * the one source of truth for what the nav shows; the VALUE is resolved
@@ -181,11 +189,19 @@ export const NAV_GROUPS: NavGroup[] = [
       // WARP-1154/1155: hidden when the orchestrator says the Projects module
       // is off, so the nav never advertises a surface the box won't serve.
       { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
-      { href: "/knowledge", label: "Knowledge", icon: BookOpen, requiresModule: "knowledge" },
+      // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
+      {
+        href: "/knowledge",
+        label: "Knowledge",
+        icon: BookOpen,
+        requiresModule: "knowledge",
+        hidden: true,
+      },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,
       // /context is "what's indexed" by capability density.
-      { href: "/context", label: "Context", icon: Sparkles },
+      // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
+      { href: "/context", label: "Context", icon: Sparkles, hidden: true },
     ],
   },
   {
@@ -340,6 +356,10 @@ export function visibleItems(
   isModuleOn: (moduleId: string) => boolean,
 ): NavItem[] {
   const allowed = (item: NavItem): boolean => {
+    // WARP-1807: a tucked item renders on no surface regardless of what its
+    // other gates would say — Settings owns the way in. Children run this
+    // same predicate, so a hidden child drops too.
+    if (item.hidden) return false;
     if (item.roles && (!role || !item.roles.includes(role))) return false;
     if (item.requiresCapability && !capabilities[item.requiresCapability])
       return false;
