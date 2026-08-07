@@ -13,6 +13,10 @@
  * see lib/hooks/useTeamChat.ts. Sends await the server then mutate the
  * affected SWR keys (no optimistic insert — the poll cadence keeps the gap
  * short and there is no rollback state to get wrong).
+ *
+ * Painted by messages-indigo.css (WARP-1783) — the surface reads the
+ * `.droplet-shell` indigo tokens ShellPage already puts in scope, matching
+ * /chat, / and /voice. It used to use the legacy globals.css surface ramp.
  */
 
 import { useCallback, useState } from "react";
@@ -29,6 +33,7 @@ import {
 import { ThreadList } from "./ThreadList";
 import { ConversationPane } from "./ConversationPane";
 import { NewThreadDialog } from "./NewThreadDialog";
+import "./messages-indigo.css";
 
 const SUB =
   "Direct and group messages between members of this Droplet — and a place to hand a file or an AI conversation to a colleague. Everything stays on the box.";
@@ -73,7 +78,7 @@ export default function MessagesPage() {
     >
       <div
         className="
-          dp-card overflow-hidden
+          mx-shell
           h-[calc(100dvh-260px)] min-h-[420px]
           grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)]
         "
@@ -81,7 +86,7 @@ export default function MessagesPage() {
         {/* Thread list — always on lg+; on mobile only while nothing is open. */}
         <div
           className={`
-            min-h-0 border-separator lg:border-r
+            mx-rail min-h-0
             ${selectedThreadId ? "hidden lg:flex" : "flex"} flex-col
           `}
         >

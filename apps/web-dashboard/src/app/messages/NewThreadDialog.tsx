@@ -87,10 +87,10 @@ export function NewThreadDialog({
       labelledBy="new-message-title"
     >
       <div>
-        <h2 id="new-message-title" className="type-headline text-label-primary">
+        <h2 id="new-message-title" className="mx-dlg-title">
           New message
         </h2>
-        <p className="mt-0.5 type-footnote text-label-tertiary">
+        <p className="mx-dlg-sub">
           Pick one person for a direct message, or several for a group.
         </p>
 
@@ -100,17 +100,15 @@ export function NewThreadDialog({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search people"
           aria-label="Search people"
-          className="dp-input w-full mt-3"
+          className="mx-field mt-3"
         />
 
-        <div className="mt-2 max-h-60 overflow-y-auto rounded-lg border border-separator divide-y divide-separator">
+        <div className="mx-list mt-2 max-h-60">
           {isLoading && !contacts && (
-            <p className="px-3 py-3 type-footnote text-label-tertiary">
-              Loading people…
-            </p>
+            <p className="mx-quiet px-3 py-3">Loading people…</p>
           )}
           {contacts && roster.length === 0 && (
-            <p className="px-3 py-3 type-footnote text-label-tertiary">
+            <p className="mx-quiet px-3 py-3">
               {query ? "No one matches that search." : "No other members yet."}
             </p>
           )}
@@ -122,33 +120,26 @@ export function NewThreadDialog({
                 type="button"
                 onClick={() => toggle(c.id)}
                 aria-pressed={active}
-                className={`
-                  w-full flex items-center gap-2.5 px-3 py-2 text-left
-                  transition-colors duration-200 ease-smooth
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                  ${active ? "bg-accent-subtle" : "hover:bg-surface-secondary"}
-                `}
+                className={`mx-row items-center ${active ? "is-active" : ""}`}
               >
-                <span
-                  aria-hidden="true"
-                  className="
-                    w-7 h-7 rounded-full bg-accent-subtle flex-shrink-0
-                    flex items-center justify-center
-                    type-caption-1 font-semibold text-accent
-                  "
-                >
+                <span aria-hidden="true" className="mx-ava w-7 h-7 text-[11px]">
                   {c.displayName.slice(0, 2).toUpperCase()}
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="block type-subheadline text-label-primary truncate">
+                  <span className="mx-row-name block truncate">
                     {c.displayName}
                   </span>
-                  <span className="block type-caption-2 text-label-tertiary truncate">
+                  <span className="mx-row-preview block truncate">
                     {c.username}
                   </span>
                 </span>
                 {active && (
-                  <Check size={16} className="text-accent flex-shrink-0" aria-hidden="true" />
+                  <Check
+                    size={16}
+                    className="flex-shrink-0"
+                    style={{ color: "var(--brand)" }}
+                    aria-hidden="true"
+                  />
                 )}
               </button>
             );
@@ -163,12 +154,12 @@ export function NewThreadDialog({
             maxLength={80}
             placeholder="Group name (optional)"
             aria-label="Group name"
-            className="dp-input w-full mt-3"
+            className="mx-field mt-3"
           />
         )}
 
         {error && (
-          <p role="alert" className="mt-2 type-caption-1 text-system-red">
+          <p role="alert" className="mx-error mt-2">
             {error}
           </p>
         )}
@@ -180,7 +171,7 @@ export function NewThreadDialog({
               reset();
               onClose();
             }}
-            className="dp-btn-secondary"
+            className="btn"
           >
             Cancel
           </button>
@@ -188,7 +179,7 @@ export function NewThreadDialog({
             type="button"
             onClick={() => void create()}
             disabled={selected.length === 0 || creating}
-            className="dp-btn-primary disabled:opacity-50"
+            className="btn primary"
           >
             {creating
               ? "Starting…"

@@ -103,42 +103,42 @@ export function MeetingDialog({
           void create();
         }}
       >
-        <h2 id="meeting-dialog-title" className="type-headline text-label-primary">
+        <h2 id="meeting-dialog-title" className="mx-dlg-title">
           Schedule a meeting
         </h2>
-        <p className="mt-0.5 type-footnote text-label-tertiary">
+        <p className="mx-dlg-sub">
           Everyone in this conversation gets the invite and can answer from it.
         </p>
 
         <label className="block mt-3">
-          <span className="type-caption-1 text-label-secondary">Title</span>
+          <span className="mx-label">Title</span>
           <input
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             maxLength={200}
             placeholder="What's it about?"
-            className="dp-input w-full mt-1"
+            className="mx-field"
           />
         </label>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
           <label className="block">
-            <span className="type-caption-1 text-label-secondary">Starts</span>
+            <span className="mx-label">Starts</span>
             <input
               type="datetime-local"
               value={start}
               min={toLocalInputValue(new Date())}
               onChange={(e) => setStart(e.target.value)}
-              className="dp-input w-full mt-1"
+              className="mx-field"
             />
           </label>
           <label className="block">
-            <span className="type-caption-1 text-label-secondary">Length</span>
+            <span className="mx-label">Length</span>
             <select
               value={duration}
               onChange={(e) => setDuration(e.target.value)}
-              className="dp-input w-full mt-1"
+              className="mx-field"
             >
               {DURATIONS.map((d) => (
                 <option key={d.value} value={d.value}>
@@ -150,8 +150,8 @@ export function MeetingDialog({
         </div>
 
         <label className="block mt-3">
-          <span className="type-caption-1 text-label-secondary">
-            Location <span className="text-label-tertiary">(optional)</span>
+          <span className="mx-label">
+            Location <span className="opt">(optional)</span>
           </span>
           <input
             type="text"
@@ -159,13 +159,13 @@ export function MeetingDialog({
             onChange={(e) => setLocation(e.target.value)}
             maxLength={200}
             placeholder="Kitchen, office, a call…"
-            className="dp-input w-full mt-1"
+            className="mx-field"
           />
         </label>
 
         <label className="block mt-3">
-          <span className="type-caption-1 text-label-secondary">
-            Note <span className="text-label-tertiary">(optional)</span>
+          <span className="mx-label">
+            Note <span className="opt">(optional)</span>
           </span>
           <textarea
             value={note}
@@ -173,25 +173,21 @@ export function MeetingDialog({
             maxLength={2000}
             rows={2}
             placeholder="Anything people should bring or know."
-            className="dp-input w-full mt-1 resize-none"
+            className="mx-field"
           />
         </label>
 
         {error && (
-          <p role="alert" className="mt-2 type-caption-1 text-system-red">
+          <p role="alert" className="mx-error mt-2">
             {error}
           </p>
         )}
 
         <div className="mt-4 flex justify-end gap-2">
-          <button type="button" onClick={close} className="dp-btn-secondary">
+          <button type="button" onClick={close} className="btn">
             Cancel
           </button>
-          <button
-            type="submit"
-            disabled={!canSubmit}
-            className="dp-btn-primary disabled:opacity-50"
-          >
+          <button type="submit" disabled={!canSubmit} className="btn primary">
             {creating ? "Scheduling…" : "Schedule meeting"}
           </button>
         </div>

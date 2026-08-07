@@ -17,7 +17,14 @@
  * No entrance motion by design (the 5s poll re-renders the list —
  * replayed animations would turn ambient refresh into noise; the v1
  * MessageBubble restraint). Interactive affordances keep the surface's
- * 200ms ease-smooth color transitions.
+ * color transitions.
+ *
+ * WARP-1783 — both cards used to take a `mine` prop purely to pick a tone,
+ * because the caller's own bubble was a saturated accent fill that nothing
+ * legible could sit on unaltered (hence the translucent-white-literal
+ * branches). The bubble pair is now `--user-bubble` / `--surface`, so the
+ * single `.mx-card` inset tone and the currentColor-derived `.mx-sub` read
+ * correctly on both sides and the prop is gone.
  */
 
 import { useEffect, useState } from "react";
@@ -50,7 +57,6 @@ function nameOf(participants: ParticipantRef[], userId: string): string {
 
 export function MeetingCard({
   meeting,
-  mine,
   meId,
   participants,
   onRsvp,
@@ -58,8 +64,6 @@ export function MeetingCard({
   busy,
 }: {
   meeting: TeamChatMeeting;
-  /** Rendered inside the caller's own (accent) bubble? Drives card tones. */
-  mine: boolean;
   meId: string;
   participants: ParticipantRef[];
   onRsvp: (meetingId: string, response: TeamChatRsvpResponse) => void;
@@ -78,12 +82,6 @@ export function MeetingCard({
   // live RSVP pills on a meeting that already began are stale advice).
   const started = new Date(meeting.startsAt).getTime() <= Date.now();
 
-  const cardTone = mine
-    ? "bg-white/10 border-white/20"
-    : "bg-surface-primary border-separator";
-  const subtle = mine ? "text-white/80" : "text-label-tertiary";
-  const strong = mine ? "text-white" : "text-label-primary";
-
   const whenParts = [
     formatMeetingStart(meeting.startsAt),
     meeting.durationMinutes !== null ? `${meeting.durationMinutes} min` : null,
@@ -91,33 +89,33 @@ export function MeetingCard({
   ].filter((x): x is string => x !== null && x.length > 0);
 
   return (
-    <div className={`rounded-lg border px-3 py-2.5 mb-1 ${cardTone}`}>
+    <div className="mx-card is-block">
       <div className="flex items-start gap-2.5">
         <CalendarClock
           size={18}
           strokeWidth={1.5}
-          className={`flex-shrink-0 mt-0.5 ${cancelled ? subtle : ""}`}
+          className={`flex-shrink-0 mt-0.5 ${cancelled ? "mx-sub" : ""}`}
           aria-hidden="true"
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <span
-              className={`type-footnote font-medium truncate ${cancelled ? `line-through ${subtle}` : strong}`}
+              className={`mx-card-title truncate ${cancelled ? "line-through mx-sub" : ""}`}
             >
               {meeting.title}
             </span>
             {cancelled && (
-              <span className={`type-caption-2 flex-shrink-0 ${subtle}`}>
+              <span className="mx-card-meta mx-sub flex-shrink-0">
                 Cancelled
               </span>
             )}
           </div>
-          <p className={`type-caption-2 ${subtle}`}>{whenParts.join(" · ")}</p>
-          <p className={`type-caption-2 ${subtle}`}>
+          <p className="mx-card-meta mx-sub">{whenParts.join(" · ")}</p>
+          <p className="mx-card-meta mx-sub">
             Organized by {nameOf(participants, meeting.createdById)}
           </p>
           {meeting.note && (
-            <p className={`type-caption-2 mt-1 whitespace-pre-wrap break-words ${subtle}`}>
+            <p className="mx-card-meta mx-sub mt-1 whitespace-pre-wrap break-words">
               {meeting.note}
             </p>
           )}
@@ -127,14 +125,10 @@ export function MeetingCard({
               {meeting.rsvps.map((r) => (
                 <span
                   key={r.userId}
-                  className={`inline-flex items-center gap-1 type-caption-2 ${subtle}`}
+                  className="inline-flex items-center gap-1 mx-card-meta mx-sub"
                 >
                   {r.response === "accepted" ? (
-                    <Check
-                      size={11}
-                      className={mine ? "text-white" : "text-system-green"}
-                      aria-hidden="true"
-                    />
+                    <Check size={11} aria-hidden="true" />
                   ) : (
                     <X size={11} aria-hidden="true" />
                   )}
@@ -150,21 +144,19 @@ export function MeetingCard({
           {/* Actions — scheduled meetings only. A meeting that already
               began shows the honest cue instead of live RSVP pills. */}
           {!cancelled && !isOrganizer && started && (
-            <p className={`type-caption-2 mt-1.5 ${subtle}`}>Already started</p>
+            <p className="mx-card-meta mx-sub mt-1.5">Already started</p>
           )}
           {!cancelled && !isOrganizer && !started && (
             <div className="flex gap-1.5 mt-2">
               <RsvpButton
                 label="Going"
                 selected={myResponse === "accepted"}
-                mine={mine}
                 disabled={busy}
                 onClick={() => onRsvp(meeting.id, "accepted")}
               />
               <RsvpButton
                 label="Can't go"
                 selected={myResponse === "declined"}
-                mine={mine}
                 disabled={busy}
                 onClick={() => onRsvp(meeting.id, "declined")}
               />
@@ -174,18 +166,16 @@ export function MeetingCard({
             <div className="flex flex-wrap items-center gap-1.5 mt-2">
               {confirmingCancel ? (
                 <>
-                  <span className={`type-caption-1 ${subtle}`}>
+                  <span className="mx-card-meta mx-sub">
                     Cancel this meeting?
                   </span>
                   <SmallButton
                     label="Keep it"
-                    mine={mine}
                     disabled={busy}
                     onClick={() => setConfirmingCancel(false)}
                   />
                   <SmallButton
                     label="Yes, cancel it"
-                    mine={mine}
                     emphasis
                     disabled={busy}
                     onClick={() => onCancel(meeting.id)}
@@ -194,7 +184,6 @@ export function MeetingCard({
               ) : (
                 <SmallButton
                   label="Cancel meeting"
-                  mine={mine}
                   disabled={busy}
                   onClick={() => setConfirmingCancel(true)}
                 />
@@ -211,34 +200,21 @@ export function MeetingCard({
 function RsvpButton({
   label,
   selected,
-  mine,
   disabled,
   onClick,
 }: {
   label: string;
   selected: boolean;
-  mine: boolean;
   disabled: boolean;
   onClick: () => void;
 }) {
-  const idle = mine
-    ? "border-white/30 text-white hover:bg-white/10"
-    : "border-separator text-label-secondary hover:bg-surface-secondary";
-  const active = mine
-    ? "bg-white/20 border-white/40 text-white"
-    : "bg-accent-subtle border-accent/30 text-accent";
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       aria-pressed={selected}
-      className={`
-        px-2.5 py-1 rounded-full border type-caption-1 font-medium
-        transition-colors duration-200 ease-smooth disabled:opacity-50
-        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-        ${selected ? active : idle}
-      `}
+      className={`mx-pill ${selected ? "is-on" : ""}`}
     >
       {label}
     </button>
@@ -247,35 +223,21 @@ function RsvpButton({
 
 function SmallButton({
   label,
-  mine,
   emphasis = false,
   disabled,
   onClick,
 }: {
   label: string;
-  mine: boolean;
   emphasis?: boolean;
   disabled: boolean;
   onClick: () => void;
 }) {
-  const tone = emphasis
-    ? mine
-      ? "border-white/40 text-white bg-white/15 hover:bg-white/25"
-      : "border-system-red/30 text-system-red hover:bg-system-red/10"
-    : mine
-      ? "border-white/30 text-white/90 hover:bg-white/10"
-      : "border-separator text-label-secondary hover:bg-surface-secondary";
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`
-        px-2.5 py-1 rounded-full border type-caption-1 font-medium
-        transition-colors duration-200 ease-smooth disabled:opacity-50
-        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-        ${tone}
-      `}
+      className={`mx-pill ${emphasis ? "is-danger" : ""}`}
     >
       {label}
     </button>
@@ -289,16 +251,9 @@ function SmallButton({
  */
 export function MeetingReminderCard({
   meeting,
-  mine,
 }: {
   meeting: TeamChatMeeting | null;
-  mine: boolean;
 }) {
-  const subtle = mine ? "text-white/80" : "text-label-tertiary";
-  const cardTone = mine
-    ? "bg-white/10 border-white/20"
-    : "bg-surface-primary border-separator";
-
   let line: string;
   if (!meeting) {
     line = "Meeting reminder";
@@ -317,20 +272,13 @@ export function MeetingReminderCard({
   }
 
   return (
-    <div
-      className={`flex items-center gap-2 rounded-lg border px-3 py-2 mb-1 ${cardTone}`}
-    >
+    <div className="mx-card mx-sub">
       {meeting?.status === "cancelled" ? (
-        <Ban size={14} strokeWidth={1.5} className={subtle} aria-hidden="true" />
+        <Ban size={14} strokeWidth={1.5} aria-hidden="true" />
       ) : (
-        <CalendarClock
-          size={14}
-          strokeWidth={1.5}
-          className={subtle}
-          aria-hidden="true"
-        />
+        <CalendarClock size={14} strokeWidth={1.5} aria-hidden="true" />
       )}
-      <span className={`type-caption-1 ${subtle}`}>{line}</span>
+      <span className="mx-card-meta">{line}</span>
     </div>
   );
 }

@@ -55,7 +55,6 @@ describe("MeetingCard (WARP-1685)", () => {
     render(
       <MeetingCard
         meeting={meeting()}
-        mine={false}
         meId="u-bob"
         participants={PARTICIPANTS}
         onRsvp={noop}
@@ -78,7 +77,6 @@ describe("MeetingCard (WARP-1685)", () => {
             { userId: "u-bob", response: "accepted", respondedAt: "2026-08-03T11:00:00.000Z" },
           ],
         })}
-        mine={false}
         meId="u-bob"
         participants={PARTICIPANTS}
         onRsvp={onRsvp}
@@ -100,7 +98,6 @@ describe("MeetingCard (WARP-1685)", () => {
     render(
       <MeetingCard
         meeting={meeting()}
-        mine
         meId="u-alice"
         participants={PARTICIPANTS}
         onRsvp={noop}
@@ -121,7 +118,6 @@ describe("MeetingCard (WARP-1685)", () => {
     const { rerender } = render(
       <MeetingCard
         meeting={meeting({ status: "cancelled" })}
-        mine={false}
         meId="u-bob"
         participants={PARTICIPANTS}
         onRsvp={noop}
@@ -136,7 +132,6 @@ describe("MeetingCard (WARP-1685)", () => {
     rerender(
       <MeetingCard
         meeting={meeting({ status: "cancelled" })}
-        mine
         meId="u-alice"
         participants={PARTICIPANTS}
         onRsvp={noop}
@@ -151,7 +146,6 @@ describe("MeetingCard (WARP-1685)", () => {
     render(
       <MeetingCard
         meeting={meeting({ startsAt: new Date(Date.now() - 10 * 60_000).toISOString() })}
-        mine={false}
         meId="u-bob"
         participants={PARTICIPANTS}
         onRsvp={noop}
@@ -173,7 +167,6 @@ describe("MeetingCard (WARP-1685)", () => {
             { userId: "u-carol", response: "declined", respondedAt: "2026-08-03T11:05:00.000Z" },
           ],
         })}
-        mine={false}
         meId="u-bob"
         participants={PARTICIPANTS}
         onRsvp={noop}
@@ -191,7 +184,6 @@ describe("MeetingReminderCard (WARP-1685)", () => {
     render(
       <MeetingReminderCard
         meeting={meeting({ startsAt: new Date(Date.now() + 10 * 60_000).toISOString() })}
-        mine={false}
       />,
     );
     expect(screen.getByText(/Reminder/)).toBeTruthy();
@@ -206,7 +198,6 @@ describe("MeetingReminderCard (WARP-1685)", () => {
           status: "cancelled",
           startsAt: new Date(Date.now() + 10 * 60_000).toISOString(),
         })}
-        mine={false}
       />,
     );
     expect(screen.getByText(/cancelled/i)).toBeTruthy();

@@ -41,7 +41,7 @@ export interface PickedFile {
 function NoteFooter({ note }: { note?: string }) {
   if (!note || note.length === 0) return null;
   return (
-    <p className="mt-3 type-caption-1 text-label-secondary truncate">
+    <p className="mx-quiet mt-3 truncate">
       Sends with your note: &ldquo;{note}&rdquo;
     </p>
   );
@@ -51,9 +51,7 @@ function NoteFooter({ note }: { note?: string }) {
 function CapNotice({ shown }: { shown: boolean }) {
   if (!shown) return null;
   return (
-    <p className="px-3 py-2 type-caption-2 text-label-tertiary border-t border-separator">
-      Showing first 50 — refine your search.
-    </p>
+    <p className="mx-quiet px-3 py-2">Showing first 50 — refine your search.</p>
   );
 }
 
@@ -115,10 +113,10 @@ export function ForwardFileDialog({
   return (
     <Dialog open={open} onClose={onClose} labelledBy="forward-file-title">
       <div>
-        <h2 id="forward-file-title" className="type-headline text-label-primary">
+        <h2 id="forward-file-title" className="mx-dlg-title">
           Forward a file
         </h2>
-        <p className="mt-0.5 type-footnote text-label-tertiary">
+        <p className="mx-dlg-sub">
           The message links the file — access still follows Files permissions.
         </p>
 
@@ -129,7 +127,7 @@ export function ForwardFileDialog({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search files"
             aria-label="Search files"
-            className="dp-input flex-1"
+            className="mx-field flex-1"
           />
           {!searching && spaces.length > 1 && (
             <select
@@ -139,7 +137,7 @@ export function ForwardFileDialog({
                 setPath("/");
               }}
               aria-label="Files space"
-              className="dp-input w-36"
+              className="mx-field w-36"
             >
               {spaces.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -150,35 +148,26 @@ export function ForwardFileDialog({
           )}
         </div>
 
-        <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-separator divide-y divide-separator">
+        <div className="mx-list mt-2 max-h-64">
           {!searching && path !== "/" && (
-            <button
-              type="button"
-              onClick={up}
-              className="
-                w-full flex items-center gap-2.5 px-3 py-2 text-left
-                type-footnote text-label-secondary
-                hover:bg-surface-secondary transition-colors duration-200 ease-smooth
-                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-              "
-            >
+            <button type="button" onClick={up} className="mx-row items-center">
               <CornerLeftUp size={15} aria-hidden="true" />
-              Up one folder
+              <span className="mx-row-preview">Up one folder</span>
             </button>
           )}
 
           {isLoading && (
-            <p className="px-3 py-3 type-footnote text-label-tertiary">
+            <p className="mx-quiet px-3 py-3">
               {searching ? "Searching…" : "Loading files…"}
             </p>
           )}
           {error != null && (
-            <p className="px-3 py-3 type-footnote text-system-red">
+            <p className="mx-error px-3 py-3">
               Couldn&apos;t load files. Try again.
             </p>
           )}
           {entries && entries.length === 0 && (
-            <p className="px-3 py-3 type-footnote text-label-tertiary">
+            <p className="mx-quiet px-3 py-3">
               {searching ? "No files match that search." : "This folder is empty."}
             </p>
           )}
@@ -193,16 +182,10 @@ export function ForwardFileDialog({
                     setQuery("");
                     setPath(entry.path);
                   }}
-                  className="
-                    w-full flex items-center gap-2.5 px-3 py-2 text-left
-                    hover:bg-surface-secondary transition-colors duration-200 ease-smooth
-                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                  "
+                  className="mx-row items-center"
                 >
-                  <Folder size={16} className="text-label-tertiary flex-shrink-0" aria-hidden="true" />
-                  <span className="type-subheadline text-label-primary truncate">
-                    {entry.name}
-                  </span>
+                  <Folder size={16} className="flex-shrink-0" aria-hidden="true" />
+                  <span className="mx-row-name truncate">{entry.name}</span>
                 </button>
               );
             }
@@ -223,24 +206,17 @@ export function ForwardFileDialog({
                     path: entry.path,
                   })
                 }
-                className={`
-                  w-full flex items-center gap-2.5 px-3 py-2 text-left
-                  transition-colors duration-200 ease-smooth
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                  ${pickable ? "hover:bg-surface-secondary" : "opacity-60 cursor-default"}
-                `}
+                className={`mx-row items-center ${pickable ? "" : "is-disabled"}`}
               >
-                <FileText size={16} className="text-label-tertiary flex-shrink-0" aria-hidden="true" />
+                <FileText size={16} className="flex-shrink-0" aria-hidden="true" />
                 <span className="flex-1 min-w-0">
-                  <span className="block type-subheadline text-label-primary truncate">
-                    {entry.name}
-                  </span>
+                  <span className="mx-row-name block truncate">{entry.name}</span>
                   {pickable ? (
-                    <span className="block type-caption-2 text-label-tertiary truncate">
+                    <span className="mx-row-preview block truncate">
                       {entry.path}
                     </span>
                   ) : (
-                    <span className="block type-caption-2 text-label-tertiary">
+                    <span className="mx-row-preview block">
                       Can&apos;t be forwarded yet
                     </span>
                   )}
@@ -253,7 +229,7 @@ export function ForwardFileDialog({
 
         <NoteFooter note={note} />
         <div className="mt-4 flex justify-end">
-          <button type="button" onClick={onClose} className="dp-btn-secondary">
+          <button type="button" onClick={onClose} className="btn">
             Cancel
           </button>
         </div>
@@ -294,10 +270,10 @@ export function ForwardChatDialog({
   return (
     <Dialog open={open} onClose={onClose} labelledBy="forward-chat-title">
       <div>
-        <h2 id="forward-chat-title" className="type-headline text-label-primary">
+        <h2 id="forward-chat-title" className="mx-dlg-title">
           Forward an AI chat
         </h2>
-        <p className="mt-0.5 type-footnote text-label-tertiary">
+        <p className="mx-dlg-sub">
           A snapshot of the conversation is shared — later edits or deletion
           won&apos;t change what they see.
         </p>
@@ -308,22 +284,20 @@ export function ForwardChatDialog({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search your conversations"
           aria-label="Search your conversations"
-          className="dp-input w-full mt-3"
+          className="mx-field mt-3"
         />
 
-        <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-separator divide-y divide-separator">
+        <div className="mx-list mt-2 max-h-64">
           {isLoading && (
-            <p className="px-3 py-3 type-footnote text-label-tertiary">
-              Loading conversations…
-            </p>
+            <p className="mx-quiet px-3 py-3">Loading conversations…</p>
           )}
           {error != null && (
-            <p className="px-3 py-3 type-footnote text-system-red">
+            <p className="mx-error px-3 py-3">
               Couldn&apos;t load conversations. Try again.
             </p>
           )}
           {conversations && conversations.length === 0 && (
-            <p className="px-3 py-3 type-footnote text-label-tertiary">
+            <p className="mx-quiet px-3 py-3">
               {query
                 ? "No conversations match that search."
                 : "No AI conversations yet."}
@@ -334,22 +308,18 @@ export function ForwardChatDialog({
               key={c.id}
               type="button"
               onClick={() => onPick(c)}
-              className="
-                w-full flex items-center gap-2.5 px-3 py-2 text-left
-                hover:bg-surface-secondary transition-colors duration-200 ease-smooth
-                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-              "
+              className="mx-row items-center"
             >
               <MessageSquare
                 size={16}
-                className="text-label-tertiary flex-shrink-0"
+                className="flex-shrink-0"
                 aria-hidden="true"
               />
               <span className="flex-1 min-w-0">
-                <span className="block type-subheadline text-label-primary truncate">
+                <span className="mx-row-name block truncate">
                   {c.title ?? "Untitled conversation"}
                 </span>
-                <span className="block type-caption-2 text-label-tertiary">
+                <span className="mx-row-preview block">
                   {new Date(c.updatedAt).toLocaleDateString(undefined, {
                     month: "short",
                     day: "numeric",
@@ -363,7 +333,7 @@ export function ForwardChatDialog({
 
         <NoteFooter note={note} />
         <div className="mt-4 flex justify-end">
-          <button type="button" onClick={onClose} className="dp-btn-secondary">
+          <button type="button" onClick={onClose} className="btn">
             Cancel
           </button>
         </div>
