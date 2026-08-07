@@ -188,7 +188,7 @@ export default function SettingsPage() {
                 <span className="rt">
                   <span className="nm">Knowledge</span>
                   <span className="sub">
-                    Browse what&apos;s indexed for retrieval.
+                    What&apos;s indexed for retrieval
                   </span>
                 </span>
                 <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
@@ -205,7 +205,7 @@ export default function SettingsPage() {
               <span className="rt">
                 <span className="nm">Context</span>
                 <span className="sub">
-                  Indexing coverage and pipeline health.
+                  Indexing coverage and pipeline health
                 </span>
               </span>
               <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />

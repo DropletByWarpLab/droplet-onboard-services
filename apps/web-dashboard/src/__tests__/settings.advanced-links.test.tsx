@@ -94,17 +94,17 @@ describe("Settings — Advanced links to the tucked surfaces (WARP-1807)", () =>
       screen.getByRole("heading", { name: /^advanced$/i }),
     ).toBeInTheDocument();
 
+    // UX note (WARP-1807 review): sub-lines are period-free noun-phrase
+    // fragments, matching the neighboring Voice / Software updates rows.
     const knowledge = screen.getByRole("link", { name: /knowledge/i });
     expect(knowledge).toHaveAttribute("href", "/knowledge");
-    expect(knowledge.textContent).toMatch(
-      /Browse what's indexed for retrieval\./,
-    );
+    expect(knowledge.textContent).toMatch(/What's indexed for retrieval/);
+    expect(knowledge.textContent).not.toMatch(/retrieval\./);
 
     const context = screen.getByRole("link", { name: /context/i });
     expect(context).toHaveAttribute("href", "/context");
-    expect(context.textContent).toMatch(
-      /Indexing coverage and pipeline health\./,
-    );
+    expect(context.textContent).toMatch(/Indexing coverage and pipeline health/);
+    expect(context.textContent).not.toMatch(/health\./);
   });
 
   it("hides the Knowledge row on a POSITIVE module-off only; Context stays", () => {
