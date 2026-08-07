@@ -28,6 +28,7 @@
  * ignores all three.
  */
 import { Agent } from "undici";
+import { config } from "../config.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
 import {
   EaglesoftConnector,
@@ -199,11 +200,20 @@ export function connectorForProvider(sel: ConnectorSelector): Connector {
       },
     );
   }
-  return new EaglesoftConnector({
-    host: sel.host,
-    port: sel.port ?? DEFAULT_PORT,
-    serverName: sel.serverName ?? sel.databaseName ?? DEFAULT_DATABASE_NAME,
-    databaseName: sel.databaseName || DEFAULT_DATABASE_NAME,
-    readSecretRef: sel.secretRef ?? "",
-  });
+  return new EaglesoftConnector(
+    {
+      host: sel.host,
+      port: sel.port ?? DEFAULT_PORT,
+      serverName: sel.serverName ?? sel.databaseName ?? DEFAULT_DATABASE_NAME,
+      databaseName: sel.databaseName || DEFAULT_DATABASE_NAME,
+      readSecretRef: sel.secretRef ?? "",
+    },
+    {
+      // Same honest-degradation rule as the API track's three optionals: an
+      // empty URL leaves `bridgeUrl` undefined, so the connector keeps its
+      // blocked I/O boundary and reports that the SAP client is missing —
+      // which is the accurate remediation for a box with no bridge deployed.
+      bridgeUrl: config.ERP_SQL_BRIDGE_URL || undefined,
+    },
+  );
 }

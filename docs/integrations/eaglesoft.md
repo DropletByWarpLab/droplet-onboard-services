@@ -103,10 +103,12 @@ Direct database access is powerful and **not sanctioned by Patterson** — clear
 | Dashboard (`/integrations` + `/integrations/eaglesoft`) | **Built** — PR #900 (design-reconciled). |
 | Orchestrator API + service layer | **Built** — PR #916. |
 | Copy-DB harness (Postgres mock runs in CI; real dbsrv17 template documented) | **Merged** — PR #909. |
-| **Python/ODBC driver bridge + Dockerfile + offline gate** (WARP-1106) | ⛔ **Blocked** — needs the SAP SQL Anywhere client + a copy of `PattersonPM.db` on an **x86_64** host. This is the un-blocker; everything live depends on it. |
+| **Python/ODBC driver bridge + Dockerfile** (WARP-1106) | **Built** — `services/erp-sql-bridge` (FastAPI + unixODBC + pyodbc), the `erp` compose profile, and `SqlBridgeClient` on the TS side. `scripts/test-erp-sql-bridge.sh` proves the whole path — real connector → real bridge → real database — against a Postgres stand-in (psqlODBC), because the SAP client cannot exist in CI. |
+| SAP SQL Anywhere client in the image | ⛔ **Operator-supplied** — license-governed and account-walled, so it is vendored per deployment (`services/erp-sql-bridge/vendor/README.md`), not shipped. Without it the track stays blocked, honestly. **x86_64-only** (no aarch64 client); ARM boxes take the `eaglesoft-api` REST track. |
+| Live reads/writes against a real `PattersonPM.db` | ⛔ **Blocked** — needs a restored copy on an x86_64 host with the client present. The pipeline is proven; what a copy DB establishes is that the registries match Eaglesoft's real schema. |
 | Live reads → writes (WARP-1095 / 1096 / 1097 / 1098 / 1099) | ⛔ Blocked on WARP-1106; writes additionally gated on WARP-1100 (legal). |
 
-**To unblock:** a copy of `PattersonPM.db` restored into a SQL Anywhere container **+ the SAP SQL Anywhere client** on x86_64 (or a reachable test Eaglesoft server), plus the WARP-1100 legal sign-off before any production/real-PHI step. A **field-introspection spike** on a live box (WARP-1108) de-risks the driver work (capture the service command line, `SYS.SYSTABCOL` watermark/ownership scans, and `CONNECTION_PROPERTY('Encryption')`).
+**To unblock:** the SAP SQL Anywhere client vendored into the bridge image on an x86_64 host, **+** a copy of `PattersonPM.db` restored into a SQL Anywhere container (or a reachable test Eaglesoft server), plus the WARP-1100 legal sign-off before any production/real-PHI step. The bridge and the connector are no longer part of the blocker — with a client and a reachable server, the direct-SQL track connects. A **field-introspection spike** on a live box (WARP-1108) de-risks the driver work (capture the service command line, `SYS.SYSTABCOL` watermark/ownership scans, and `CONNECTION_PROPERTY('Encryption')`).
 
 ---
 

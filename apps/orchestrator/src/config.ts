@@ -754,6 +754,22 @@ const envSchema = z.object({
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
 
+  // --- ERP direct-SQL bridge (WARP-1106) ---
+  // Compose-internal base URL of services/erp-sql-bridge, the unixODBC +
+  // pyodbc sidecar that reaches a practice's SAP SQL Anywhere database (there
+  // is no viable modern Node driver for it). Consumed by erp-provider.ts when
+  // building the `eaglesoft` (direct-SQL) connector.
+  //
+  // The default is EMPTY, not the internal URL, and that is load-bearing: the
+  // bridge is only useful once an operator has vendored the license-gated SAP
+  // client into the image (services/erp-sql-bridge/vendor/README.md). With no
+  // URL the connector blocks with the accurate "needs the SAP SQL Anywhere
+  // client" remediation; pointing it at a bridge that exists but has no driver
+  // would instead report a connection failure and send an installer looking
+  // for a network problem that isn't there. The REST track (`eaglesoft-api`)
+  // ignores this entirely.
+  ERP_SQL_BRIDGE_URL: z.string().default(""),
+
   // --- Ambient web data (WARP-1436) ---
   // WEB_FETCH_URL — compose-internal base URL of the services/web-fetch
   // allowlisted fetcher (weather via api.open-meteo.com, currency rates

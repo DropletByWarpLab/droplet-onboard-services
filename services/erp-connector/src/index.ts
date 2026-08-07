@@ -1,11 +1,21 @@
 /**
  * @droplet/erp-connector — first-party ERP-connector framework (WARP-1094).
  *
- * DB-independent foundation: the schema map + drift fingerprint, the
+ * The DB-independent foundation — the schema map + drift fingerprint, the
  * introspection SQL constants, the parameterized read-query registry, the
- * write-command registry, and the provider abstraction with a stubbed
- * EaglesoftConnector. Every live-database path is blocked on the SAP SQL
- * Anywhere client + a restored copy of PattersonPM.db (see README).
+ * write-command registry — plus both concrete providers:
+ *
+ *   EaglesoftConnector     direct SQL, via the `erp-sql-bridge` sidecar
+ *                          (WARP-1106). Blocked until a bridge is configured
+ *                          AND an operator has vendored the license-gated SAP
+ *                          SQL Anywhere client into its image.
+ *   EaglesoftApiConnector  Patterson's official REST API (WARP-1294). Blocked
+ *                          until a route map, credentials, and CA are on the
+ *                          connection row.
+ *
+ * Both implement the same `Connector` interface and both degrade honestly:
+ * an unconfigured track throws ConnectorBlockedError (→ ERP_NOT_CONNECTED)
+ * rather than pretending. See README.
  */
 export {
   computeSchemaFingerprint,
@@ -79,8 +89,21 @@ export {
   fingerprintTables,
   type Connector,
   type ConnectorConfig,
+  type EaglesoftConnectorDeps,
   type IntrospectionResult,
 } from "./connector.js";
+
+// WARP-1106 — the direct-SQL track's I/O seam: an HTTP client for the
+// `erp-sql-bridge` sidecar (unixODBC + pyodbc), which owns the SAP SQL
+// Anywhere driver because no viable modern Node driver for it exists.
+export {
+  SqlBridgeClient,
+  SqlBridgeError,
+  DEFAULT_BRIDGE_URL,
+  type BridgeTarget,
+  type BridgeStatement,
+  type SqlBridgeOptions,
+} from "./sql-bridge-client.js";
 
 // WARP-1294 — dual-track official-REST-API provider (Patterson Eaglesoft
 // Innovation Connection). Same Connector interface as the SQL connector.

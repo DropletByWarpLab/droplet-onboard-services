@@ -81,6 +81,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **file-indexer** | `services/file-indexer/` | Python + watchdog | Filesystem indexer + embedder (RAG) |
 | **email-indexer** | `services/email-indexer/` | Python + FastAPI | IMAP IDLE ingest + SMTP send |
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
+| **erp-sql-bridge** | `services/erp-sql-bridge/` | Python + FastAPI + pyodbc | Direct-SQL ERP bridge (SAP SQL Anywhere) |
 | **voice-io** | `services/voice-io/` | Python + FastAPI | Wake → STT → agent → TTS |
 | **oled-display** | `services/oled-display/` | Python + FastAPI | Front-panel TFT screen |
 | **ops-console** | `services/ops-console/` | Python + FastAPI | Support "what's running" console |
@@ -113,6 +114,7 @@ network. Host-published ports and host-network services are called out.
 | switch | 8081 | HTTP | host (profile `full`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
 | camera-discovery | 8085 | HTTP | internal (profile `full`) |
+| erp-sql-bridge | 9095 | HTTP | internal only (profile `erp`) — holds the practice's DB credentials |
 | voice-io | 8086 | HTTP | host (audio, profile `linux`) |
 | ops-console | 8089→127.0.0.1:8087 | HTTP | loopback only (profile `ops`) |
 | file-indexer | 8090 | HTTP (admin reindex) | internal |
@@ -328,6 +330,44 @@ network. Host-published ports and host-network services are called out.
   subnet sweep is throttled (concurrency cap) to respect the inference host FD limit; RTSP
   URLs validated as RFC-1918 before reaching Frigate; `ONVIF_WS_DISCOVERY_ENABLED`
   defaults off (FD leak on Python 3.12+).
+
+## services/erp-sql-bridge
+
+- **Purpose:** the DB-touching half of the direct-SQL Eaglesoft ERP track —
+  unixODBC + pyodbc against a dental practice's SAP SQL Anywhere
+  (`PattersonPM`) database. Exists because there is no viable modern Node
+  driver for SQL Anywhere, so the TypeScript orchestrator cannot open the
+  connection itself.
+- **Entry point:** `main.py` (FastAPI). `db.py` owns connection-string
+  assembly, the pool, redaction, and row normalization.
+- **Port:** 9095, `expose:` only — **never published off-box**. Profile `erp`,
+  off by default.
+- **Talks to:** the practice's SQL Anywhere server (ODBC, default :2638).
+  Called only by the orchestrator, via
+  `@droplet/erp-connector`'s `SqlBridgeClient`.
+- **Gotchas:**
+  - **It never builds SQL.** Statements arrive already built by the canonical
+    registries in `@droplet/erp-connector`, with identifiers resolved through
+    the introspected schema map and values bound as `?`. Re-deriving them here
+    would be a second source of truth for what runs against a practice's
+    database.
+  - **Credentials never cross the wire.** `droplet_ro` / `droplet_rw` come from
+    this container's environment and are picked by ROUTE (`/read/*` vs
+    `/write/*`). The request models have no username/password field at all.
+  - **The real boundary is the database grant**, not this process —
+    `droplet_ro` holds SELECT and nothing else. The route guards are
+    belt-and-braces on top.
+  - **The SAP client is not in the image.** It is license-gated and
+    operator-supplied (`vendor/README.md`); without it the track stays honestly
+    blocked (`ERP_NOT_CONNECTED`). SAP ships **no aarch64 Linux client** — on
+    ARM, use the `eaglesoft-api` REST track instead.
+  - `rowCount: 0` from `/write/*` is the optimistic-concurrency guard missing,
+    **not** an error. The caller decides.
+- **Tests:** `pytest` for the pure half; `scripts/test-erp-sql-bridge.sh` boots
+  a real Postgres (psqlODBC standing in for the license-gated SAP driver) and
+  runs the live half plus the TypeScript connector on top.
+
+---
 
 ## services/voice-io
 

@@ -205,13 +205,22 @@ if [ -f "$ENV_EXAMPLE" ]; then
   #     scripts/lib/secrets.sh::sync_ap_password_secret + services/routing —
   #     which would then authenticate against a nonexistent AP with the
   #     literal written into /run/secrets/ap_openwrt_password.
+  #   * ERP_DB_RO_PASSWORD / ERP_DB_RW_PASSWORD (WARP-1106) — same shape as
+  #     AP_OPENWRT_PASSWORD: empty means "this ERP track is not configured", and
+  #     services/erp-sql-bridge/db.py refuses to connect and reports
+  #     NOT_CONFIGURED. A truthy `change-me` would instead make the bridge open
+  #     a real ODBC connection to a practice's database with a bogus password,
+  #     turning honest degradation into an authentication failure against a
+  #     customer's system of record. Empty is additionally the correct default
+  #     for the WRITE account specifically: writes are opt-in and `droplet_rw`
+  #     is provisioned unusable until a capability is enabled.
   # The list is deliberately explicit rather than a blanket "empty is fine" —
   # a NEW secret that ships empty by accident must fail this check and be added
   # here on purpose, with a reason.
   # All other secrets must use `change-me` as their placeholder.
   PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" \
     | grep -v 'change-me' \
-    | grep -vE '^(ONLYOFFICE_JWT_SECRET|AP_OPENWRT_PASSWORD)=[[:space:]]*$' \
+    | grep -vE '^(ONLYOFFICE_JWT_SECRET|AP_OPENWRT_PASSWORD|ERP_DB_RO_PASSWORD|ERP_DB_RW_PASSWORD)=[[:space:]]*$' \
     | grep -v '^#' || true)
   if [ -z "$PASSWORD_LINES" ]; then
     pass ".env.example: all secrets use 'change-me' or empty placeholder"

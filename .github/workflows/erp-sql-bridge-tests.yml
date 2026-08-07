@@ -1,0 +1,104 @@
+name: erp-sql-bridge-tests
+
+# Live-database lane for services/erp-sql-bridge (WARP-1106).
+#
+# ci.yml's path-aware `erp-sql-bridge` python leg runs the PURE half on every
+# PR — connection-string assembly, redaction, the route guards. What it cannot
+# run is the half that matters: the bridge's entire job is unixODBC + pyodbc
+# I/O, so mocking pyodbc would test nothing that can break. This workflow boots
+# a real Postgres, seeds it with the synthetic PattersonPM schema and its
+# least-privilege grants, and drives the service against it — plus the
+# TypeScript connector on top, executing the SQL the canonical registries
+# actually generate.
+#
+# That is coverage no ci.yml leg has, which is why this one keeps a
+# `pull_request:` trigger where the other per-service workflows do not (the
+# CI-budget rule retired duplicates of ci.yml legs; the same exception applies
+# to orchestrator-tests.yml's pg-integration job, for the same reason).
+#
+# WHY POSTGRES: the SAP SQL Anywhere client is license-gated, account-walled,
+# and x86_64-only, so it cannot exist in CI. unixODBC is driver-agnostic —
+# everything above `pyodbc.connect` is identical — so psqlODBC stands in.
+# scripts/test-erp-sql-bridge.sh documents exactly what that does and does not
+# prove.
+#
+# Paths are what the lane consumes: the bridge, the connector whose statements
+# it executes, the harness DDL that defines the mock schema, and the runner.
+#
+# Spend (CI budget in CLAUDE.md / docs/ci-cost-budget.md): measured ~3 min per
+# run — apt (postgresql + unixODBC + psqlODBC) and `npm ci` dominate; the
+# suites themselves are ~5 s. The paths are narrow: at a generous 15 PRs/month
+# touching them with 2 runs each, plus the main-push canary, that is ~45 runs x
+# 3 min = **~135 min/month**, far under the 2k min/month callout threshold.
+
+on:
+  pull_request:
+    paths:
+      - "services/erp-sql-bridge/**"
+      # The vitest half drives the real EaglesoftConnector and the read/write
+      # registries through this service, so a change there must re-prove it.
+      - "services/erp-connector/**"
+      - "scripts/test-erp-sql-bridge.sh"
+      - ".github/workflows/erp-sql-bridge-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/erp-sql-bridge/**"
+      - "services/erp-connector/**"
+      - "scripts/test-erp-sql-bridge.sh"
+      - ".github/workflows/erp-sql-bridge-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: erp-sql-bridge-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-database:
+    runs-on: ubuntu-latest
+    # A hung ODBC connect must fail the job fast, not burn the 6h default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # PostgreSQL is preinstalled on the runner image but its client/server
+      # binaries are not on PATH; the script finds initdb there. unixODBC +
+      # psqlODBC are the driver manager and the stand-in driver.
+      - name: Install PostgreSQL + unixODBC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql unixodbc odbc-postgresql
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/erp-sql-bridge/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/erp-sql-bridge/requirements.txt pytest httpx
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      # The vitest half imports the connector from source via the workspace,
+      # but @droplet/erp-connector resolves through its `dist`.
+      - name: Build @droplet/erp-connector
+        run: npm run -w @droplet/erp-connector build
+
+      # Boots the database, seeds it, runs pytest against it, starts the
+      # bridge, and runs the connector -> bridge -> database vitest suite.
+      - name: Run the live lane
+        run: ./scripts/test-erp-sql-bridge.sh

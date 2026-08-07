@@ -1,0 +1,7 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.0
+pydantic==2.13.4
+# unixODBC + the SAP SQL Anywhere client (libdbodbc17_r.so) are INSTALLED IN THE
+# IMAGE, not here — the SAP client is license-governed and operator-supplied.
+# See the Dockerfile. pyodbc is the only Python-side piece.
+pyodbc==5.3.0

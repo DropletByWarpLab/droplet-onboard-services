@@ -7,20 +7,31 @@
  * query allow-list. This module defines the provider abstraction and the
  * Eaglesoft implementation.
  *
- * BLOCKED SLICE: every driver / network call is stubbed. The native
- * `sqlanywhere` addon and a restored copy of `PattersonPM.db` are not
- * available in this environment, so no live connection is opened, no
- * introspection is executed, and no read/write runs. The pure pieces that DO
- * ship and are unit-tested — the schema map + fingerprint, the read-query
- * registry, and the write-command registry — are wired in here so the shape
- * of the eventual implementation is fixed, but the I/O boundary throws a
- * typed "blocked" error until the driver + copy DB exist.
+ * WARP-1106 replaced the stubbed I/O boundary with the real one: database
+ * calls go to the `erp-sql-bridge` sidecar (unixODBC + pyodbc), which owns the
+ * native SQL Anywhere driver because no viable modern Node driver exists. What
+ * decides WHAT runs stays here — the read/write registries, the introspected
+ * schema map, the drift fingerprint — so there remains exactly one definition
+ * of the SQL that reaches a practice's database.
+ *
+ * The blocked boundary did not go away, it moved: with no bridge configured
+ * (the default, since the SAP client is license-gated and operator-supplied)
+ * every I/O method still throws {@link ConnectorBlockedError}, and an
+ * unreachable bridge degrades to the same thing. A deployment that cannot
+ * reach a practice's database says so rather than pretending.
  */
-import { computeSchemaFingerprint, type IntrospectedTable } from "./schema-map.js";
 import {
-  LIST_TABLES_SQL,
-  LIST_COLUMNS_SQL,
+  buildSchemaMap,
+  computeSchemaFingerprint,
+  type IntrospectedTable,
+  type SchemaMap,
+} from "./schema-map.js";
+import { SqlBridgeClient, SqlBridgeError } from "./sql-bridge-client.js";
+import {
+  catalogQueriesFor,
+  type CatalogQuerySet,
 } from "./introspection.js";
+import type { CatalogDialect } from "./version-detect.js";
 import { getReadQuery, type BuiltStatement } from "./read-queries.js";
 import { getWriteCommand } from "./write-commands.js";
 
@@ -90,74 +101,215 @@ export interface Connector {
   applyWrite(name: string, params: Record<string, unknown>): Promise<unknown>;
 }
 
+/** What the SQL connector can be handed at construction. Every field is
+ *  optional; with none of them the connector keeps its blocked I/O boundary
+ *  and degrades honestly (see {@link EaglesoftConnector}). */
+export interface EaglesoftConnectorDeps {
+  /** A pre-built bridge client (tests, or a shared pool). */
+  bridge?: SqlBridgeClient;
+  /** Where the `erp-sql-bridge` sidecar lives. Absent ⇒ no database I/O. */
+  bridgeUrl?: string;
+  /** Override the catalog family outright — a suite introspecting a
+   *  non-SQL-Anywhere database to prove the pipeline end to end. */
+  catalog?: CatalogQuerySet;
+  /** Pick the catalog family by engine band instead of supplying it outright.
+   *  Ignored when `catalog` is set. Defaults to "modern". */
+  dialect?: CatalogDialect;
+}
+
 /**
- * Eaglesoft provider (brief §7). All database I/O is stubbed behind
- * {@link ConnectorBlockedError}; the driver is wired in a later, copy-DB-gated
- * phase. The statement-building helpers (which are pure and unit-tested) are
- * exposed so callers can see exactly what WOULD run.
+ * Eaglesoft provider (brief §7), direct-SQL track.
+ *
+ * Database I/O goes through the `erp-sql-bridge` sidecar (unixODBC + pyodbc),
+ * because no viable modern Node driver for SQL Anywhere exists. Everything
+ * that decides WHAT runs stays here: the read/write registries, the
+ * introspected schema map, and the drift fingerprint. The bridge only executes
+ * the parameterized statement it is handed, so there is exactly one definition
+ * of the SQL that reaches a practice's database.
+ *
+ * The connector stays honestly blocked when no bridge is configured — a
+ * deployment without the (license-governed, operator-supplied) SAP client
+ * degrades to ERP_NOT_CONNECTED rather than pretending.
  */
 export class EaglesoftConnector implements Connector {
   readonly provider = "eaglesoft";
   private schema: IntrospectionResult | null = null;
+  private map: SchemaMap | null = null;
+  private readonly bridge: SqlBridgeClient | null;
 
-  constructor(private readonly config: ConnectorConfig) {}
+  /**
+   * Which catalog-view family to introspect with. Genuinely varies in
+   * production: SA10+ uses SYS.SYSTAB*, ASA7 uses SYSTABLE/SYSCOLUMN, and
+   * introspecting one with the other's views fails on exactly the installs
+   * where it matters (review C-5). Defaults to the modern set, which covers
+   * every engine band Eaglesoft 16+ ships on.
+   */
+  private readonly catalog: CatalogQuerySet;
+
+  constructor(
+    private readonly config: ConnectorConfig,
+    deps: EaglesoftConnectorDeps = {},
+  ) {
+    this.catalog = deps.catalog ?? catalogQueriesFor(deps.dialect ?? "modern");
+    // A bridge is wired when one is injected, or when a URL is configured.
+    // Absent both, every I/O method blocks — see the class docstring.
+    this.bridge =
+      deps.bridge ??
+      (deps.bridgeUrl
+        ? new SqlBridgeClient({
+            baseUrl: deps.bridgeUrl,
+            target: {
+              host: config.host,
+              port: config.port,
+              serverName: config.serverName,
+              databaseName: config.databaseName,
+            },
+          })
+        : null);
+  }
+
+  /** The bridge, or a blocked error naming what is missing. */
+  private requireBridge(op: string): SqlBridgeClient {
+    if (!this.bridge) throw new ConnectorBlockedError(op, SQL_TRACK_REMEDIATION);
+    return this.bridge;
+  }
+
+  /** Map a bridge failure onto the connector's error contract. An unreachable
+   *  practice server becomes ConnectorBlockedError (honest degradation); a
+   *  rejected statement is a bug on our side and is rethrown as-is so it stays
+   *  loud rather than being laundered into "not connected". */
+  private asConnectorError(op: string, err: unknown): Error {
+    if (err instanceof ConnectorBlockedError) return err;
+    if (err instanceof SqlBridgeError && err.isUpstream) {
+      return new ConnectorBlockedError(`${op} (${err.message})`, SQL_TRACK_REMEDIATION);
+    }
+    return err instanceof Error ? err : new Error(String(err));
+  }
 
   async connect(): Promise<void> {
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    // Open the `droplet_ro` pool (config.readSecretRef resolved via secret store).
-    void this.config;
-    throw new ConnectorBlockedError("connect");
+    const bridge = this.requireBridge("connect");
+    try {
+      const probe = await bridge.health();
+      if (!probe.ok) {
+        throw new ConnectorBlockedError(
+          `connect (${probe.reason ?? "bridge reports not ok"})`,
+          SQL_TRACK_REMEDIATION,
+        );
+      }
+      // Pin the schema up front: identifier resolution and the drift
+      // fingerprint both depend on it, and a read must never run against an
+      // un-introspected database.
+      await this.introspect();
+    } catch (err) {
+      this.schema = null;
+      this.map = null;
+      throw this.asConnectorError("connect", err);
+    }
   }
 
   async close(): Promise<void> {
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    // Drain and close the pools. No-op safe until connect() is real.
+    // Pooling lives in the bridge (it owns the ODBC handles), so there is
+    // nothing to drain here — just drop the pinned schema so a reconnect
+    // re-introspects rather than trusting a stale map.
     this.schema = null;
+    this.map = null;
   }
 
   async health(): Promise<{ ok: boolean }> {
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    // Run a `SELECT 1`-class probe and report pool + fingerprint state.
-    throw new ConnectorBlockedError("health");
+    const bridge = this.requireBridge("health");
+    try {
+      const probe = await bridge.health();
+      if (!probe.ok) {
+        throw new ConnectorBlockedError(`health (${probe.reason ?? "not ok"})`, SQL_TRACK_REMEDIATION);
+      }
+      return { ok: true };
+    } catch (err) {
+      throw this.asConnectorError("health", err);
+    }
   }
 
   async introspect(): Promise<IntrospectionResult> {
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    // Execute LIST_TABLES_SQL + LIST_COLUMNS_SQL per table, then fingerprint.
-    void LIST_TABLES_SQL;
-    void LIST_COLUMNS_SQL;
-    throw new ConnectorBlockedError("introspect");
+    const bridge = this.requireBridge("introspect");
+    try {
+      // Catalog family is chosen once, in the constructor (see `catalog`).
+      // `/introspect` runs a whole batch on ONE connection, so the column pass
+      // is a single round trip rather than one per table.
+      const { tables: tableRows = [] } = await bridge.introspect({
+        tables: { sql: this.catalog.listTables, params: [] },
+      });
+
+      // Column names come back in whatever case the catalog reports; SQL
+      // Anywhere is case-insensitive and the schema map normalizes, so accept
+      // either and let an empty name fall out as a skipped row.
+      const named = tableRows
+        .map((t) => ({
+          name: String(t.table_name ?? t.TABLE_NAME ?? ""),
+          owner: String(t.owner ?? t.OWNER ?? "dba"),
+        }))
+        .filter((t) => t.name !== "");
+
+      // Labelled by table name so the results match back up without relying on
+      // ordering. The name binds as `?` — never concatenated (invariant 3).
+      const columnQueries = Object.fromEntries(
+        named.map((t) => [t.name, { sql: this.catalog.listColumns, params: [t.name] }]),
+      );
+      const columnResults = named.length ? await bridge.introspect(columnQueries) : {};
+
+      const tables: IntrospectedTable[] = named.map((t) => ({
+        name: t.name,
+        owner: t.owner,
+        columns: (columnResults[t.name] ?? []).map((c) => ({
+          name: String(c.column_name ?? c.COLUMN_NAME ?? ""),
+          type: String(c.type ?? c.TYPE ?? ""),
+        })),
+      }));
+      const result: IntrospectionResult = {
+        tables,
+        fingerprint: computeSchemaFingerprint(tables),
+      };
+      this.schema = result;
+      this.map = buildSchemaMap(tables);
+      return result;
+    } catch (err) {
+      throw this.asConnectorError("introspect", err);
+    }
   }
 
   async runRead(name: string, params: Record<string, unknown>): Promise<unknown[]> {
-    // The statement is BUILT from the pinned schema map (pure, tested); only
-    // the execution is blocked. Validate the query name + params eagerly so a
-    // bad call fails the same way it will once the driver lands.
-    if (!this.schema) {
-      throw new ConnectorBlockedError("runRead (introspection required first)");
+    // Validate the name against the shared registry FIRST, so an unknown query
+    // is an UnknownReadQueryError regardless of connection state.
+    const query = getReadQuery(name);
+    const bridge = this.requireBridge("runRead");
+    if (!this.map) {
+      throw new ConnectorBlockedError("runRead (introspection required first)", SQL_TRACK_REMEDIATION);
     }
-    // getReadQuery throws UnknownReadQueryError on an unregistered name.
-    getReadQuery(name).build(this.buildMapStub(), params);
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    throw new ConnectorBlockedError("runRead");
+    try {
+      // Identifiers resolve through the introspected map; values bind as `?`.
+      const built = query.build(this.map, params);
+      return await bridge.runRead(name, built);
+    } catch (err) {
+      throw this.asConnectorError(`runRead:${name}`, err);
+    }
   }
 
   async applyWrite(name: string, params: Record<string, unknown>): Promise<unknown> {
-    // getWriteCommand throws on an unregistered name; the command's own
-    // buildStatement enforces the allowlist + optimistic guard.
-    void getWriteCommand(name);
-    void params;
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    // Run inside ONE transaction as droplet_rw (brief §11.1 step 3).
-    throw new ConnectorBlockedError("applyWrite");
-  }
-
-  /** Placeholder for the introspected schema map. The real map is built from
-   *  `introspect()`'s result; until the driver lands, callers cannot reach a
-   *  non-blocked path, so this is never actually returned to production. */
-  private buildMapStub(): never {
-    // TODO(WARP-1094): blocked on SAP SQL Anywhere client + copy of PattersonPM.db
-    throw new ConnectorBlockedError("schema map (introspection required first)");
+    // The command's own buildStatement enforces the column allowlist, the
+    // required optimistic-guard params, and the forbidden-target check.
+    const command = getWriteCommand(name);
+    const bridge = this.requireBridge("applyWrite");
+    if (!this.map) {
+      throw new ConnectorBlockedError("applyWrite (introspection required first)", SQL_TRACK_REMEDIATION);
+    }
+    try {
+      const built = command.buildStatement(this.map, params);
+      const result = await bridge.applyWrite(name, built);
+      // A guard miss (0 rows) is NOT an error — the row moved under us. The
+      // caller decides; reporting it as success would be a lie, and throwing
+      // would invite a blind retry over a front-desk edit.
+      return { applied: result.applied, rowCount: result.rowCount };
+    } catch (err) {
+      throw this.asConnectorError(`applyWrite:${name}`, err);
+    }
   }
 }
 

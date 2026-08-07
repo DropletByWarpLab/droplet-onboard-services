@@ -1650,6 +1650,73 @@ services:
     cpus: ${WEB_FETCH_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+  # --- ERP direct-SQL bridge (WARP-1106) ---
+  # The DB-touching half of the direct-SQL Eaglesoft track: unixODBC + pyodbc
+  # against a practice's SAP SQL Anywhere database. It exists because there is
+  # no viable modern Node driver for SQL Anywhere, so the orchestrator reaches
+  # it over internal REST instead (services/erp-connector/src/sql-bridge-client.ts).
+  #
+  # NEVER PUBLISHED OFF-BOX. `expose:` only, no `ports:` — this container holds
+  # the practice's database credentials and executes statements against their
+  # system of record. The orchestrator is its only caller.
+  #
+  # Opt-in twice over, and both are load-bearing:
+  #   1. the `erp` compose profile (off by default), and
+  #   2. an operator vendoring the license-gated SAP SQL Anywhere client into
+  #      the image (services/erp-sql-bridge/vendor/README.md). Without it the
+  #      container starts and answers /health honestly with ok:false.
+  # The orchestrator's ERP_SQL_BRIDGE_URL is likewise empty by default, so a
+  # box that has not done both degrades to ERP_NOT_CONNECTED rather than
+  # reporting a connection failure it cannot act on.
+  #
+  # ERP_DB_RO_PASSWORD / ERP_DB_RW_PASSWORD are the practice's own least-
+  # privilege accounts (services/erp-connector/sql/provision.sql). They live in
+  # .env, never in this file, and are never accepted from a request — the
+  # bridge picks the identity by ROUTE (/read/* → ro, /write/* → rw). The write
+  # account is unset until a write capability is explicitly enabled.
+  erp-sql-bridge:
+    build:
+      # WARP-229: repo-root context for shared FIPS config + helper.
+      context: ..
+      dockerfile: services/erp-sql-bridge/Dockerfile
+    expose:
+      - "9095"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot gate +
+      # OpenSSL config to the literal OFF posture (see the device-identity-svc
+      # comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      - ERP_DB_HOST=${ERP_DB_HOST:-}
+      - ERP_DB_PORT=${ERP_DB_PORT:-2638}
+      - ERP_DB_NAME=${ERP_DB_NAME:-PattersonPM}
+      - ERP_DB_SERVER_NAME=${ERP_DB_SERVER_NAME:-PattersonPM}
+      - ERP_DB_RO_USER=${ERP_DB_RO_USER:-droplet_ro}
+      - ERP_DB_RO_PASSWORD=${ERP_DB_RO_PASSWORD:-}
+      - ERP_DB_RW_USER=${ERP_DB_RW_USER:-droplet_rw}
+      - ERP_DB_RW_PASSWORD=${ERP_DB_RW_PASSWORD:-}
+      - ERP_ODBC_DRIVER=${ERP_ODBC_DRIVER:-SQL Anywhere 17}
+      - ERP_DB_ENCRYPTION=${ERP_DB_ENCRYPTION:-NONE}
+    healthcheck:
+      # /health returns 200 with ok:false when the practice's DB is
+      # unreachable — that is the honest answer, and it is deliberately NOT a
+      # container failure: a dental server rebooting must not restart-loop this
+      # sidecar. The probe checks the service answers, not that the practice is up.
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:9095/health',timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    profiles: ["erp"]
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${ERP_SQL_BRIDGE_MEM_LIMIT:-256m}
+    cpus: ${ERP_SQL_BRIDGE_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
   camera-discovery:
     build:
