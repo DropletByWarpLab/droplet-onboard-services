@@ -25,7 +25,11 @@ import {
   setApWifi,
 } from "../services/ap-onboard.service.js";
 import { getCurrentWifi } from "../services/current-wifi.service.js";
-import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import {
+  requireRole,
+  requireRoleOrMcpService,
+  requireRoleOrService,
+} from "../middleware/auth.js";
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -63,6 +67,43 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       next(err);
     }
   });
+
+  /**
+   * WARP-1800: the household join code, for the rack panel.
+   *
+   * Same resolver as /network/wifi/current — this is deliberately NOT a
+   * second opinion about what the household Wi-Fi is (WARP-1723 spent a whole
+   * ticket collapsing three of those into one). What differs is only who may
+   * ask and how much they get back.
+   *
+   * `_service:display` is admitted by ID, not by the coarse `service` role, so
+   * no other service principal reaches a route whose body is credential
+   * material. The panel's previous source was the box's own hostapd via the
+   * bridge's /openwrt/qr; on the edge-router shape that file does not exist,
+   * because the household SSID lives only on the approved AP.
+   *
+   * Returns the SSID and the passphrase but NOT `section`/`radio` — those are
+   * write-path targeting for the dashboard's Wi-Fi form and mean nothing to a
+   * panel. `detail` comes through unchanged so a dark rail can say why.
+   */
+  router.get(
+    "/network/wifi/join-code",
+    requireRoleOrService("_service:display", "owner", "admin"),
+    async (_req, res, next) => {
+      try {
+        const wifi = await getWifiSettings().catch(() => null);
+        const current = await getCurrentWifi(prisma, wifi);
+        res.json({
+          ssid: current.ssid,
+          key: current.key,
+          source: current.source,
+          detail: current.detail,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   router.get("/network/wifi/scan", async (_req, res, next) => {
     try {
