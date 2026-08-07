@@ -18,6 +18,17 @@ from extractors.types import ExtractedDoc
 
 _HTML_EXT = {".html", ".htm", ".xhtml"}
 
+# WARP-1790: RTF is a *markup* format that carries a `text/*` MIME
+# (`mimetypes.guess_type("x.rtf")` -> "text/rtf"), so the registry routes it
+# here on the `mime.startswith("text/")` branch and it used to fall through to
+# the raw-passthrough `else` below. The whole control-word stream was then
+# indexed as if it were prose: QA saw chunk snippets reading
+# "Section: Adler Essay 2.4 IVC.rtf \lsdpriority46 \lsdlocked0 List Ta…" in
+# Knowledge -> Recently indexed. That also silently poisons retrieval for the
+# document, because queries match style-table markup rather than the text.
+# Same situation HTML is already in, so it gets the same treatment.
+_RTF_EXT = {".rtf"}
+
 
 def _read_text(path: str) -> str:
     # Try utf-8 first, fall back to latin-1 with replace so we never crash.
@@ -45,13 +56,38 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"<[^>]+>", " ", raw)
 
 
+def _strip_rtf(raw: str) -> str:
+    """RTF control words -> readable text, mirroring `_strip_html`'s contract:
+    a best-effort library pass, then a crude fallback so a missing or unhappy
+    dependency degrades instead of indexing raw markup."""
+    try:
+        from striprtf.striprtf import rtf_to_text  # noqa: PLC0415
+
+        text = rtf_to_text(raw, errors="ignore").strip()
+        if text:
+            return text
+    except Exception:  # pragma: no cover - falls through to crude strip
+        pass
+    # Last-resort: drop the group delimiters and control words
+    # (`\lsdpriority46`, `\par`, `\'e9`, …) and keep whatever plain runs remain.
+    stripped = re.sub(r"\\'[0-9a-fA-F]{2}", "", raw)
+    stripped = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", stripped)
+    stripped = re.sub(r"[{}]", " ", stripped)
+    return re.sub(r"[ \t]+", " ", stripped)
+
+
 def extract(path: str) -> ExtractedDoc:
     ext = os.path.splitext(path)[1].lower()
     raw = _read_text(path)
     head = raw.lstrip().lower()
     is_html = ext in _HTML_EXT or head.startswith("<!doctype html") or head.startswith("<html")
+    # Sniff the magic as well as the extension: RTF always opens `{\rtf`, and a
+    # mis-extensioned file should still not reach the index as markup.
+    is_rtf = ext in _RTF_EXT or head.startswith("{\\rtf")
     if is_html:
         text = _strip_html(raw)
+    elif is_rtf:
+        text = _strip_rtf(raw)
     else:
         text = raw
 
@@ -60,7 +96,10 @@ def extract(path: str) -> ExtractedDoc:
 
     metadata = {
         "extractor_name": "text",
-        "extractor_version": "2",
+        # WARP-1790 bumped this to 3: .rtf now yields prose instead of raw
+        # control words, so chunks written by version 2 for an RTF document
+        # are wrong and need re-indexing to be corrected.
+        "extractor_version": "3",
         "word_count": word_count,
     }
 
