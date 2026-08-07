@@ -290,6 +290,12 @@ def _is_camera_hostname(hostname: str) -> bool:
         "cam", "camera", "ipc", "nvr", "dvr", "hikvision", "dahua",
         "reolink", "amcrest", "axis", "foscam", "wyze", "eufy",
         "unifi", "protect", "tapo", "ezviz", "annke",
+        # WARP-1806: Hanwha Vision (ex Samsung Techwin) — brand names plus the
+        # X/Q/P-series model prefixes their DHCP hostnames lead with
+        # (e.g. "XNV-C8083R-<serial>"). Keeps a Wisenet pending even when its
+        # RTSP probe can't classify it (auth-gated, mid-lockout, or offline).
+        "hanwha", "wisenet", "techwin", "ipolis",
+        "xnv", "xnd", "xno", "qnv", "qnd", "qno", "pnm", "pnv", "pno",
     ]
     hostname_lower = hostname.lower()
     return any(kw in hostname_lower for kw in camera_keywords)

@@ -67,6 +67,73 @@ async def scan_ports(ip: str, ports: list[int] | None = None, timeout: float = 2
     return open_ports
 
 
+# Number of leading STREAM_PATHS the anonymous-DESCRIBE fallback in
+# is_rtsp_server probes. The first entries are the Hanwha Wisenet paths (the
+# firmware family known to reject a bare-path OPTIONS) plus /live as a broad
+# third — enough to classify without turning the fallback into a path scan.
+_DESCRIBE_FALLBACK_PATHS = 3
+
+
+def _rtsp_status_code(resp: str) -> int | None:
+    """Parse a well-formed RTSP status line; None for HTTP/garbage."""
+    status_line = resp.split("\r\n", 1)[0]
+    if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return None
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+async def _describe_speaks_rtsp(ip: str, port: int, timeout: float) -> bool:
+    """Anonymous-DESCRIBE fallback for cameras that reject a bare-path OPTIONS.
+
+    WARP-1806: Hanwha Wisenet answers ``OPTIONS rtsp://ip:port/`` with the
+    same ``400 Bad Request`` + un-echoed ``CSeq: 0`` shape as the TP-Link-AP
+    guard's not-a-camera fingerprint, but a DESCRIBE on a real stream path
+    returns a well-formed ``401 Unauthorized`` with a ``WWW-Authenticate``
+    challenge — proof of an RTSP camera that merely needs credentials.
+
+    Requests here are anonymous (no ``Authorization`` header), so they never
+    consume vendor failed-login lockout budgets (Hanwha blocks the admin
+    account after ~5 bad passwords and answers ``490 Account Blocked``).
+
+    Accepts: ``200`` (open stream), ``401`` WITH a challenge header, ``403``
+    (auth-walled), and Hanwha's non-standard ``490`` (only an auth-gated
+    camera mid-lockout emits it). A 401 without a challenge, plain 400/404s,
+    HTTP responses, and resets keep the device classified as not-a-camera.
+    """
+    for path in STREAM_PATHS[:_DESCRIBE_FALLBACK_PATHS]:
+        try:
+            reader, writer = await _open_rtsp(ip, port, timeout)
+        except (asyncio.TimeoutError, OSError):
+            return False
+        raw = b""
+        try:
+            request = (
+                f"DESCRIBE rtsp://{ip}:{port}{path} RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"Accept: application/sdp\r\n"
+                f"User-Agent: Droplet-CameraDiscovery/1.0\r\n"
+                f"\r\n"
+            )
+            writer.write(request.encode())
+            await writer.drain()
+            raw = await asyncio.wait_for(reader.read(1024), timeout=timeout)
+        except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
+            continue  # a reset/timeout on one path isn't conclusive
+        finally:
+            _close_rtsp(writer)
+
+        resp = raw.decode("utf-8", errors="ignore")
+        code = _rtsp_status_code(resp)
+        if code in (200, 403, 490):
+            return True
+        if code == 401 and "www-authenticate" in resp.lower():
+            return True
+    return False
+
+
 async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool:
     """Return True iff ``ip:port`` actually speaks RTSP at the protocol level.
 
@@ -77,15 +144,25 @@ async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool
     typically ``CSeq: 0`` — our CSeq not echoed), or a connection reset.
 
     A genuine RTSP server — even one that's auth-gated or exposes no stream on
-    the paths we guess — answers ``OPTIONS`` with a well-formed RTSP status:
-    ``200 OK`` (usually with a ``Public:`` method list), or ``401/403`` when it
-    demands credentials. We accept exactly those and reject everything else, so
-    a port-open-only guess is never emitted for a device that isn't a camera.
+    the paths we guess — usually answers ``OPTIONS`` with a well-formed RTSP
+    status: ``200 OK`` (usually with a ``Public:`` method list), or ``401/403``
+    when it demands credentials. We accept exactly those on the fast path.
+
+    WARP-1806: some real cameras (Hanwha Wisenet) reject the bare-path OPTIONS
+    with the very 400-shape the guard above filters, while answering a
+    DESCRIBE on a real stream path with a clean 401 + ``WWW-Authenticate``
+    challenge. Before ruling a device out, fall back to anonymous DESCRIBEs on
+    the first few known stream paths (see ``_describe_speaks_rtsp``) — the
+    fallback only ever runs for devices the fast path would have dropped, so
+    the TP-Link-AP rejection cost is a few extra round-trips, not a
+    reclassification.
     """
     try:
         reader, writer = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
+        # Connect refused/timed out — nothing is listening; no fallback.
         return False
+    raw = b""
     try:
         request = (
             f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
@@ -97,23 +174,24 @@ async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool
         await writer.drain()
         raw = await asyncio.wait_for(reader.read(1024), timeout=timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
-        return False
+        # Accepted the TCP connect but went silent/reset on OPTIONS — some
+        # firmwares only process path-specific requests; let the DESCRIBE
+        # fallback decide.
+        return await _describe_speaks_rtsp(ip, port, timeout)
     finally:
         _close_rtsp(writer)
 
     resp = raw.decode("utf-8", errors="ignore")
-    status_line = resp.split("\r\n", 1)[0]
     # Must be an RTSP status line (reject HTTP responders on 554) with a code
-    # that proves a working RTSP control channel. 400/5xx ⇒ not a camera.
+    # that proves a working RTSP control channel. 400/5xx ⇒ not a camera on
+    # the fast path (subject to the DESCRIBE fallback below).
     # 404 is accepted: some Hikvision/Dahua firmware returns 404 on a root
     # OPTIONS because they only process path-specific requests, but are real
     # RTSP servers — silently dropping them would hide valid cameras.
-    if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
-        return False
-    parts = status_line.split(" ", 2)
-    if len(parts) < 2 or not parts[1].isdigit():
-        return False
-    return int(parts[1]) in (200, 401, 403, 404)
+    code = _rtsp_status_code(resp)
+    if code in (200, 401, 403, 404):
+        return True
+    return await _describe_speaks_rtsp(ip, port, timeout)
 
 
 async def probe_rtsp_stream(ip: str, port: int = 554, timeout: float = 3.0) -> str | None:
