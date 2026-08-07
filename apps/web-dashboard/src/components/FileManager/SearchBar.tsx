@@ -204,7 +204,24 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
 
   return (
     <div ref={containerRef} className="relative w-full max-w-md">
-      <div className="relative flex items-center gap-2">
+      {/* WARP-1785: the input and the 3-segment mode control share one row.
+          Both refuse to shrink below their content (the pills carry
+          `whiteSpace: nowrap`), so on a 375px phone the row demanded 516px
+          inside a 343px column and pushed the page to 532px wide — the mode
+          control's right edge landed 157px off-screen, clipping "Semantic"
+          to "Se…". `flex-wrap` lets the pills drop to their own full-width line
+          below the input, and that alone is sufficient: `.search` carries
+          `min-width: 220px` (droplet-shell.css:207), which fits inside the
+          343px mobile column once the row is allowed to break.
+
+          Deliberately NOT adding `min-w-0` to the label. Measured in a browser:
+          Tailwind's `.min-w-0` is specificity (0,1,0) and loses to
+          `.droplet-shell .search` at (0,2,0), so the computed min-width stays
+          220px and the utility is inert — it would read as load-bearing while
+          doing nothing.
+
+          Above `sm` the row still fits on one line, so desktop is unchanged. */}
+      <div className="relative flex flex-wrap items-center gap-2">
         <label className="search flex-1" style={{ maxWidth: "none" }}>
           <span
             style={{ display: "flex", flexShrink: 0, color: "var(--text-muted)" }}

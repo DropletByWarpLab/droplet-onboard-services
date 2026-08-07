@@ -420,3 +420,53 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 @media (max-width: 480px) {
   .droplet-shell .hide-narrow { display: none; }
 }
+
+/* ══ Phone layout layer — WARP-1785 / 1788 / 1789 / 1791 ══════════════════
+   Declared last on purpose: these are same-specificity overrides of the
+   desktop primitives defined above (`.pills` and `.tabstrip`), so they only
+   win by source order — the same contract the `.sev-ic` block relies on.
+   Moving this block earlier in the file silently disables it.
+
+   Two distinct desktop-first defects, both reported from QA on a 375px
+   iPhone and both measured in a browser before and after this change:
+
+   1. `.phead` is a two-column header whose text side carries `min-width: 0`
+      while `.phead-actions` carries `flex-shrink: 0`. The buttons therefore
+      hold their full intrinsic width and the text column absorbs the whole
+      shortfall — measured at 53px on a 375px viewport, about four
+      characters, which is why the title and intro paragraph wrapped one
+      word per line down the left edge.
+
+   2. `.tabstrip` (seven Network tabs) is an unwrapped flex row with no
+      overflow handling. Flex items default to `min-width: auto` and refuse
+      to shrink below their content, so the row's min-content width becomes
+      the *page's* width: the document measured 460px inside a 375px
+      viewport. That is what shrinks every card to roughly half width and
+      lets the whole page pan sideways, and it is also why fixed elements
+      that span `inset-x-0` (the bottom tab bar) render wider than the
+      screen and clip their last label to "Mor…".
+
+   Every sibling row in this file (`.toolbar`, `.chiprow`, `.cal-legend`,
+   `.gleg`, `.k-row1`) already carries `flex-wrap: wrap` and was never
+   affected. These two simply missed it.
+
+   Scrollbars are deliberately NOT hidden here: Sam's report calls out that
+   the clipped row gave "no visual hint that the row scrolls", and iOS/Android
+   overlay scrollbars are the affordance that answers it. */
+@media (max-width: 720px) {
+  /* Stack the header rather than starving the text column to ~4 characters. */
+  .droplet-shell .phead { flex-direction: column; align-items: stretch; gap: 14px; }
+  .droplet-shell .phead-actions { flex-wrap: wrap; }
+  .droplet-shell .phead h1 { font-size: 24px; }
+
+  /* Contain the strip's overflow in its own scroll box so it can never widen
+     the page. Tabs keep their intrinsic width and scroll horizontally. */
+  .droplet-shell .tabstrip { overflow-x: auto; overscroll-behavior-x: contain; }
+  .droplet-shell .tabstrip > * { flex: 0 0 auto; }
+
+  /* Same containment for segmented `.pills` controls (file search modes,
+     audit-log time range) so a long segment set scrolls instead of
+     stretching the page behind it. */
+  .droplet-shell .pills { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+  .droplet-shell .pills button { flex: 0 0 auto; }
+}
