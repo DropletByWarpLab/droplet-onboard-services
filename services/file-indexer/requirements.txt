@@ -71,7 +71,8 @@ cryptography>=49.0.0
 # WARP-1790 — .rtf carries a `text/` MIME, so the registry routes it to the
 # text extractor, which used to index the raw control-word stream as prose
 # (QA saw "\lsdpriority46 \lsdlocked0" in Knowledge snippets). striprtf is the
-# canonical pure-Python RTF-to-text lib: ~200 LOC, MIT, zero dependencies, so
-# it adds nothing to the image beyond itself. The extractor still falls back to
-# a regex strip if the import fails, matching how HTML degrades.
+# canonical pure-Python RTF-to-text lib: ~200 LOC, BSD-3-Clause, zero runtime
+# dependencies, so it adds nothing to the image beyond itself. The extractor
+# still falls back to a regex strip if the import fails, matching how HTML
+# degrades.
 striprtf>=0.0.29
