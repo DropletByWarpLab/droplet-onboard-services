@@ -10,8 +10,10 @@ Guard shape under test:
   * disable + device present            -> PoweredMemberError (409 upstream)
   * disable + device present + force    -> proceeds
   * disable + nothing learned on port   -> proceeds (nothing to darken)
-  * disable + FDB unavailable           -> proceeds (unknown != unsafe; an
-    older image without the plugin must not have its PoE controls bricked)
+  * disable + FDB unavailable/malformed -> REFUSED (audit 2026-08-06: fail
+    closed — if we can't verify the port is safe to cut, don't cut it; `force`
+    is the override, so an older image without the plugin isn't bricked). This
+    reverses the WARP-1734 fail-open default.
   * ENABLE is never guarded             -> restoring power is always safe
 """
 
@@ -73,28 +75,43 @@ class TestGuardRefuses:
         assert result is not None
 
 
-class TestGuardDegradesOpen:
-    """Unknown topology must not brick PoE control on older images."""
+class TestGuardFailsClosed:
+    """Unknown topology must FAIL CLOSED (audit 2026-08-06).
+
+    This REVERSES the WARP-1734 fail-open default. Rationale: de-powering a
+    device has no remote recovery, so if the switch cannot tell us what a port
+    feeds we must not cut it. `force=true` remains the operator override, so an
+    older image without the bridge.fdb plugin is not bricked — it just requires
+    an explicit override, which is the safe direction for a shipping product.
+    """
 
     @pytest.mark.asyncio
-    async def test_fdb_unavailable_allows_the_write(self):
+    async def test_fdb_unavailable_is_refused(self):
         from drivers.base import SwitchAPIError
         d = _driver(SwitchAPIError(code=404, message="Object not found"))
-        result = await d.set_port_poe(2, False)
+        with pytest.raises(PoweredMemberError) as ei:
+            await d.set_port_poe(2, False)
+        assert "force" in str(ei.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_fdb_unavailable_force_overrides(self):
+        from drivers.base import SwitchAPIError
+        d = _driver(SwitchAPIError(code=404, message="Object not found"))
+        result = await d.set_port_poe(2, False, force=True)
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_permission_denied_allows_the_write(self):
+    async def test_permission_denied_is_refused(self):
         from drivers.base import SwitchAPIError
         d = _driver(SwitchAPIError(code=6, message="Permission denied"))
-        result = await d.set_port_poe(2, False)
-        assert result is not None
+        with pytest.raises(PoweredMemberError):
+            await d.set_port_poe(2, False)
 
     @pytest.mark.asyncio
-    async def test_malformed_fdb_allows_the_write(self):
+    async def test_malformed_fdb_is_refused(self):
         d = _driver({"entries": "not-a-list"})
-        result = await d.set_port_poe(2, False)
-        assert result is not None
+        with pytest.raises(PoweredMemberError):
+            await d.set_port_poe(2, False)
 
 
 class TestEnableNeverGuarded:

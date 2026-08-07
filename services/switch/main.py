@@ -646,12 +646,18 @@ async def disable_port_poe(port: int, force: bool = False):
     """
     try:
         drv = get_driver()
-        try:
+        # Decide whether the driver understands `force` by INSPECTING its
+        # signature, not by catching TypeError. A blanket `except TypeError`
+        # also swallows a TypeError raised INSIDE the guard body and silently
+        # retries WITHOUT force — turning a bug into an unguarded PoE cut, the
+        # one action with no remote recovery (audit 2026-08-06).
+        import inspect
+
+        if "force" in inspect.signature(drv.set_port_poe).parameters:
             result = await drv.set_port_poe(port, False, force=force)
-        except TypeError:
-            # Driver predating the guard (no `force` parameter) — its writes
-            # are unguarded by definition, so honour the call rather than
-            # failing it.
+        else:
+            # A driver predating the guard is unguarded by definition; honour
+            # the call rather than failing it.
             result = await drv.set_port_poe(port, False)
         return _poe_write_response(result, drv, port, False)
     except SwitchError as exc:

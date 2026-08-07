@@ -421,6 +421,43 @@ class TestWrites:
         assert ("uci", "apply", {"rollback": True, "timeout": 60}) in fake.calls
         assert ("network", "reload", {}) not in fake.calls
 
+    @pytest.mark.asyncio
+    async def test_vlan1_ports_as_string_is_parsed(self):
+        # board.d/02_network writes VLAN 1's members as a whitespace-joined
+        # STRING, not a list. Iterating the string char-by-char used to yield
+        # zero valid ports, so VLAN 1 rendered EMPTY (audit 2026-08-06).
+        fake = FakeUbus()
+        fake.uci["network"]["cfg_vlan1"]["ports"] = "lan1 lan2 lan3 lan4"
+        driver = make_driver(fake)
+        vlans = {v["vlan_id"]: v for v in await driver.get_vlans()}
+        assert [p["port"] for p in vlans[1]["ports"]] == [1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_set_port_access_vlan_merges_and_preserves_others(self):
+        # The provisioner's "move one port" must NOT wipe the VLAN's other
+        # members — on VLAN 1 those are the uplink, the AP and the appliance
+        # (audit 2026-08-06). It must also preserve raw suffixes verbatim (a
+        # bare VLAN-1 entry must not come back tagged) and leave tagged trunks
+        # (the guest VLAN) alone.
+        fake = FakeUbus()
+        fake.uci["network"]["cfg_vlan1"]["ports"] = "lan1 lan2 lan3 lan8"
+        fake.uci["network"]["cfg_vlan30"] = {
+            ".type": "bridge-vlan", "device": "switch", "vlan": "30",
+            "ports": ["lan1:t", "lan2:t", "lan8:t"],
+        }
+        driver = make_driver(fake, plan_only=False)
+
+        await driver.set_port_access_vlan(2, 100)  # move port 2 to camera VLAN
+
+        net = fake.uci["network"]
+        # target VLAN 100 gains lan2 untagged AND keeps its existing member:
+        assert "lan2:u*" in net["cfg_vlan100"]["ports"]
+        assert "lan9:t" in net["cfg_vlan100"]["ports"]
+        # VLAN 1 loses ONLY lan2 (its untagged membership); the rest verbatim:
+        assert net["cfg_vlan1"]["ports"] == ["lan1", "lan3", "lan8"]
+        # the guest VLAN 30 trunk is tagged → untouched, lan2:t survives:
+        assert net["cfg_vlan30"]["ports"] == ["lan1:t", "lan2:t", "lan8:t"]
+
 
 # ---------------------------------------------------------------------------
 # Safe apply (WARP-1730)

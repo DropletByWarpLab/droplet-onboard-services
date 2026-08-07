@@ -12,7 +12,7 @@
  * uses the managed switch driver, production may use a custom ASIC).
  */
 
-import { Router } from "express";
+import { Router, type Response, type NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import * as switchClient from "../services/switch.client.js";
 import {
@@ -28,6 +28,28 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("switch-routes");
+
+/**
+ * A switch write can be REFUSED by the service (e.g. the ADR-035 §7 PoE guard's
+ * 409: "cutting PoE on port 2 would darken the AP…"). switch.client surfaces
+ * that as an Error carrying `.status` + the service's own message. Relay a 409
+ * to the caller with that message instead of collapsing it to a generic 500;
+ * everything else flows to the error middleware unchanged.
+ */
+function surfaceSwitchConflict(
+  res: Response,
+  err: unknown,
+  next: NextFunction,
+): void {
+  const status = (err as { status?: number } | null | undefined)?.status;
+  if (status === 409) {
+    res.status(409).json({
+      error: err instanceof Error ? err.message : "Conflict",
+    });
+    return;
+  }
+  next(err);
+}
 
 /**
  * Protected port: the port the appliance is connected to.
@@ -291,10 +313,12 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
         const result = await evalSwitchCommand(prisma, "switch_port_disable", { port }, userId);
         if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       }
-      await switchClient.disablePort(port);
-      res.json({ status: "ok", port, enabled: false });
+      const op = await switchClient.disablePort(port);
+      // Spread the service's result LAST so a plan-only write (dry_run:true,
+      // status:"planned") isn't reported to the user as a success that happened.
+      res.json({ status: "ok", port, enabled: false, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -309,10 +333,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_create_vlan", { vlan_id, name }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.createVlan(vlan_id, name || "");
-      res.json({ status: "ok", vlan_id });
+      const op = await switchClient.createVlan(vlan_id, name || "");
+      res.json({ status: "ok", vlan_id, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -328,10 +352,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_delete_vlan", { vlan_id: vlanId }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.deleteVlan(vlanId);
-      res.json({ status: "ok", vlan_id: vlanId, deleted: true });
+      const op = await switchClient.deleteVlan(vlanId);
+      res.json({ status: "ok", vlan_id: vlanId, deleted: true, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -352,10 +376,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
         prisma, "switch_set_vlan_membership", { vlan_id: vlanId, ports }, userId
       );
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.setVlanMembership(vlanId, ports);
-      res.json({ status: "ok", vlan_id: vlanId });
+      const op = await switchClient.setVlanMembership(vlanId, ports);
+      res.json({ status: "ok", vlan_id: vlanId, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -372,10 +396,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_poe_enable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.enablePortPoe(port);
-      res.json({ status: "ok", port, poe_enabled: true });
+      const op = await switchClient.enablePortPoe(port);
+      res.json({ status: "ok", port, poe_enabled: true, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -390,10 +414,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_poe_disable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.disablePortPoe(port);
-      res.json({ status: "ok", port, poe_enabled: false });
+      const op = await switchClient.disablePortPoe(port);
+      // dry_run:true (SWITCH_LIVE_WRITES=0) surfaces as status:"planned" so the
+      // dashboard stops reporting a PoE cut that never happened.
+      res.json({ status: "ok", port, poe_enabled: false, ...op });
     } catch (err) {
-      next(err);
+      // A 409 here is the guard refusing to darken a device with no remote
+      // recovery — relay its message verbatim, don't bury it as a 500.
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
