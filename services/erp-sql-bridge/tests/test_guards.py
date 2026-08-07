@@ -10,11 +10,56 @@ from __future__ import annotations
 
 import pytest
 
-from main import _looks_like_single_select
+from main import _is_select, _is_single_statement
 from schemas import ExecRequest, IntrospectRequest, Statement, TargetSpec
 
 
-class TestSingleSelectDetection:
+class TestSingleStatementDetection:
+    """`_is_single_statement` is deliberately independent of statement KIND.
+
+    Folding it into the is-a-SELECT check is exactly the bug review found: a
+    non-SELECT short-circuited out of the combined helper before the stacking
+    test ran, so `/write/*` — whose only guard was "reject if it IS a select" —
+    accepted `UPDATE ...; UPDATE ...` and executed both, reporting the last
+    statement's rowcount as if one row had changed. These cases pin the
+    property on non-SELECTs specifically, which is where it was missing.
+    """
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1",
+            "SELECT 1;",
+            "  UPDATE dba.appointment SET status = ?  ",
+            "DELETE FROM dba.patient WHERE patient_id = ?",
+            "SELECT 'a;b' FROM dba.patient",
+            "UPDATE dba.appointment SET reason = 'a;b' WHERE appt_id = ?",
+            "SELECT * FROM t WHERE c = 'it''s; fine'",
+        ],
+    )
+    def test_accepts_exactly_one_statement(self, sql):
+        assert _is_single_statement(sql) is True
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; DROP TABLE dba.patient",
+            "SELECT 1;SELECT 2",
+            # The reproduction from review: two UPDATEs, neither carrying the
+            # optimistic guard, in one call.
+            "UPDATE dba.appointment SET status = 'a' WHERE appt_id = 5001; "
+            "UPDATE dba.appointment SET status = 'b' WHERE appt_id = 5002",
+            "UPDATE dba.appointment SET status = 'a'; DROP TABLE dba.patient",
+            "DELETE FROM dba.patient; DELETE FROM dba.account",
+            # A comment must not hide the separator either.
+            "UPDATE dba.appointment SET status = 'a' /* x */; DROP TABLE dba.patient",
+        ],
+    )
+    def test_rejects_a_batch_whatever_it_starts_with(self, sql):
+        assert _is_single_statement(sql) is False
+
+
+class TestSelectDetection:
     @pytest.mark.parametrize(
         "sql",
         [
@@ -22,12 +67,10 @@ class TestSingleSelectDetection:
             "select appt_id from dba.appointment where appt_time >= ?",
             "  SELECT 1  ",
             "SELECT 1;",
-            # A literal containing a semicolon is not a statement separator.
-            "SELECT 'a;b' FROM dba.patient WHERE last_name LIKE ? ESCAPE '\\'",
         ],
     )
-    def test_accepts_a_single_select(self, sql):
-        assert _looks_like_single_select(sql) is True
+    def test_recognises_a_select(self, sql):
+        assert _is_select(sql) is True
 
     @pytest.mark.parametrize(
         "sql",
@@ -39,8 +82,8 @@ class TestSingleSelectDetection:
             "GRANT SELECT ON dba.patient TO droplet_ro",
         ],
     )
-    def test_rejects_a_non_select(self, sql):
-        assert _looks_like_single_select(sql) is False
+    def test_recognises_a_non_select(self, sql):
+        assert _is_select(sql) is False
 
     @pytest.mark.parametrize(
         "sql",
@@ -53,26 +96,7 @@ class TestSingleSelectDetection:
     def test_a_comment_cannot_disguise_a_write_as_a_read(self, sql):
         """Comments are stripped before the anchor check, so a leading
         `/* SELECT */` cannot get a write onto the read route."""
-        assert _looks_like_single_select(sql) is False
-
-    @pytest.mark.parametrize(
-        "sql",
-        [
-            "SELECT 1; DROP TABLE dba.patient",
-            "SELECT 1; UPDATE dba.appointment SET status = 'x'",
-            "SELECT 1;SELECT 2",
-        ],
-    )
-    def test_a_stacked_statement_is_not_a_read(self, sql):
-        """Anchoring on `SELECT` alone would wave through anything appended
-        after a semicolon."""
-        assert _looks_like_single_select(sql) is False
-
-    def test_a_semicolon_inside_a_quoted_literal_is_not_a_separator(self):
-        assert _looks_like_single_select("SELECT * FROM t WHERE c = 'x;y'") is True
-
-    def test_an_escaped_quote_does_not_unbalance_literal_stripping(self):
-        assert _looks_like_single_select("SELECT * FROM t WHERE c = 'it''s; fine'") is True
+        assert _is_select(sql) is False
 
 
 class TestRequestContract:

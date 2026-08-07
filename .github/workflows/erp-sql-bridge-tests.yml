@@ -76,12 +76,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: services/erp-sql-bridge/requirements.txt
+          cache-dependency-path: services/erp-sql-bridge/requirements*.txt
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r services/erp-sql-bridge/requirements.txt pytest httpx
+          pip install -r services/erp-sql-bridge/requirements-dev.txt
 
       - name: Set up Node.js
         uses: actions/setup-node@v7

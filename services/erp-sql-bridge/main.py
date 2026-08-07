@@ -18,6 +18,11 @@ every check here were removed. The route-level assertions below are
 belt-and-braces on top of that — they make a mistake fail early and loudly
 instead of relying solely on the remote server's refusal.
 
+Those assertions are two SEPARATE properties, and every route checks both:
+exactly one statement (`_is_single_statement`), and the right kind of statement
+(`_is_select`). Keeping them separate is not stylistic — see the note on
+`_is_single_statement` for the bug that combining them produced.
+
 Statements arrive already built. See db.py for why they are not built here.
 """
 from __future__ import annotations
@@ -93,22 +98,54 @@ def _target_from(req: ExecRequest | IntrospectRequest) -> Target:
     return default_target()
 
 
-# A statement is a read iff it is exactly one SELECT. Anchored, and comments
-# are stripped first so `/*x*/ UPDATE ...` cannot masquerade as one.
+# Comments are stripped before ANY classification, so `/*SELECT*/ UPDATE ...`
+# cannot masquerade as a read.
 _COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.S)
 
 
-def _looks_like_single_select(sql: str) -> bool:
+def _bare(sql: str) -> str:
+    """Comments removed, one trailing semicolon allowed, string literals masked.
+
+    Literals are masked so a semicolon INSIDE a value ('x;y') is not mistaken
+    for a statement separator.
+    """
     stripped = _COMMENT.sub(" ", sql).strip().rstrip(";")
-    if not stripped.lower().startswith("select"):
-        return False
-    # One statement only: no unquoted semicolon may remain.
-    without_literals = re.sub(r"'(?:''|[^'])*'", "''", stripped)
-    return ";" not in without_literals
+    return re.sub(r"'(?:''|[^'])*'", "''", stripped)
+
+
+def _is_single_statement(sql: str) -> bool:
+    """Exactly one statement — no unquoted semicolon survives.
+
+    Deliberately INDEPENDENT of what kind of statement it is. An earlier
+    revision folded this into the is-a-SELECT check, which meant a non-SELECT
+    short-circuited out before the stacking test ever ran: `/write/*` (whose
+    only guard is "reject if it IS a select") then accepted
+    `UPDATE ...; UPDATE ...` and executed both, while reporting `cursor.rowcount`
+    from the last one only — a response that understated what it had changed.
+    Found in review; the property is now asserted on every route.
+    """
+    return ";" not in _bare(sql)
+
+
+def _is_select(sql: str) -> bool:
+    """Anchored on the first keyword, after comment stripping."""
+    return _bare(sql).lower().startswith("select")
 
 
 def _fail(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": redact(message)})
+
+
+def _assert_single_statement(what: str, name: str, sql: str) -> None:
+    """Every route runs exactly one statement. A batch is always a caller bug:
+    the registries emit one statement per named operation, so more than one
+    means something built SQL by concatenation."""
+    if not _is_single_statement(sql):
+        raise _fail(
+            400,
+            "NOT_A_SINGLE_STATEMENT",
+            f"{what} '{name}' was handed more than one statement",
+        )
 
 
 @app.get("/health")
@@ -152,7 +189,8 @@ def run_read(name: str, req: ExecRequest) -> dict[str, Any]:
     exists so logs and errors say which named read failed, rather than leaving
     an operator to reverse-engineer it from SQL.
     """
-    if not _looks_like_single_select(req.sql):
+    _assert_single_statement("read", name, req.sql)
+    if not _is_select(req.sql):
         # A non-SELECT here means a caller bug: the read registry only ever
         # produces SELECTs. Refuse rather than hand it to a connection whose
         # grants would (correctly) reject it with a less obvious error.
@@ -196,7 +234,11 @@ def apply_write(name: str, req: ExecRequest) -> dict[str, Any]:
     orchestrator maps to DISCREPANCY rather than retrying blindly over a
     front-desk edit.
     """
-    if _looks_like_single_select(req.sql):
+    # Order matters: the batch check runs FIRST and unconditionally, so a
+    # stacked write cannot slip past a guard that only knows how to say "this
+    # is a SELECT".
+    _assert_single_statement("write", name, req.sql)
+    if _is_select(req.sql):
         raise _fail(400, "NOT_A_WRITE", f"write '{name}' was handed a SELECT")
 
     target = _target_from(req)
@@ -240,8 +282,9 @@ def introspect(req: IntrospectRequest) -> dict[str, Any]:
     # name rather than as a server-side permission error. (The grant is still
     # what makes it impossible; this makes it obvious.)
     for label, statement in req.queries.items():
-        if not _looks_like_single_select(statement.sql):
-            raise _fail(400, "NOT_A_READ", f"introspection query '{label}' is not a single SELECT")
+        _assert_single_statement("introspection query", label, statement.sql)
+        if not _is_select(statement.sql):
+            raise _fail(400, "NOT_A_READ", f"introspection query '{label}' is not a SELECT")
 
     target = _target_from(req)
     conn = None

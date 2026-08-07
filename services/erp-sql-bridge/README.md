@@ -55,11 +55,21 @@ granted only the one enabled write capability — a column-scoped UPDATE on
 `appointment`'s four mutable scheduling columns.
 `services/erp-connector/sql/provision.sql` is the script that establishes this.
 
-The route guards (`/read/*` refuses a non-SELECT, `/write/*` refuses a SELECT,
-comments are stripped so `/*SELECT*/ UPDATE` cannot masquerade, stacked
-statements are rejected) sit on top of that so a caller bug fails immediately
-and by name. `tests/test_live_bridge.py::TestGrantsAreTheRealBoundary` proves
-the grant half against a live server, bypassing the routes entirely.
+The route guards sit on top of that so a caller bug fails immediately and by
+name. Two independent properties, checked in this order on **every** route:
+
+1. **Exactly one statement** (`NOT_A_SINGLE_STATEMENT`). Unconditional, and
+   deliberately independent of statement kind — an earlier revision folded this
+   into the is-a-SELECT test, so a non-SELECT short-circuited out before the
+   stacking check ran and `/write/*` executed `UPDATE ...; UPDATE ...` while
+   reporting only the last statement's row count. Caught in review; now a
+   shared assertion with a live test per route.
+2. **The right kind of statement** — `/read/*` and `/introspect` require a
+   SELECT (`NOT_A_READ`), `/write/*` refuses one (`NOT_A_WRITE`). Comments are
+   stripped first, so `/*SELECT*/ UPDATE` cannot masquerade as a read.
+
+`tests/test_live_bridge.py::TestGrantsAreTheRealBoundary` proves the grant half
+against a live server, bypassing the routes entirely.
 
 ## API
 
@@ -89,7 +99,8 @@ connection that does not exist.
 
 ```bash
 # Pure suite — no database, no ODBC driver. This is what ci.yml's leg runs.
-cd services/erp-sql-bridge && pytest
+# Needs unixODBC on the host (pyodbc links against libodbc).
+cd services/erp-sql-bridge && pip install -r requirements-dev.txt && pytest
 
 # Live suite — boots a throwaway Postgres, seeds the synthetic PattersonPM
 # schema and its grants, drives this service through psqlODBC, then runs the

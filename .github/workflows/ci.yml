@@ -210,8 +210,7 @@ jobs:
                then {sysdeps: "libtss2-dev pkg-config", reqs: "requirements.txt",
                      extra_pip: "pytest", needs_pythonpath: "1"} else {} end)
             + (if . == "erp-sql-bridge"
-               then {sysdeps: "unixodbc", reqs: "requirements.txt",
-                     extra_pip: "pytest"} else {} end)]' \
+               then {sysdeps: "unixodbc"} else {} end)]' \
             <<<"$python")
           {
             echo "node-suites=$node"

@@ -138,6 +138,11 @@ class TestRead:
         assert r.json()["code"] == "NOT_A_READ"
         assert "get_patient" in r.json()["message"]
 
+    def test_a_stacked_read_is_refused_as_a_batch(self, client):
+        r = _post(client, "/read/get_patient", sql="SELECT 1; DROP TABLE dba.patient")
+        assert r.status_code == 400
+        assert r.json()["code"] == "NOT_A_SINGLE_STATEMENT"
+
     def test_a_broken_statement_is_a_query_error_not_a_connection_error(self, client):
         """The distinction matters: UPSTREAM_UNAVAILABLE degrades the whole ERP
         integration honestly, while QUERY_FAILED is our bug and must stay
@@ -318,6 +323,64 @@ class TestWrite:
         assert r.status_code == 400
         assert r.json()["code"] == "NOT_A_WRITE"
 
+    def test_a_stacked_write_is_refused_and_nothing_is_applied(self, client):
+        """Review's reproduction, verbatim. Before the guard was made
+        unconditional this returned 200 {"rowCount":1,"applied":true} and
+        mutated BOTH rows — neither carrying an optimistic guard — because the
+        write route only knew how to reject a SELECT, and the stacking check
+        lived behind an is-a-SELECT short-circuit that a write never reached.
+        The `rowCount` was the LAST statement's, so the response understated
+        what it had changed."""
+        r = _post(
+            client,
+            "/write/pwn_test",
+            sql=(
+                "UPDATE dba.appointment SET status = 'HACKED-5001' WHERE appt_id = 5001; "
+                "UPDATE dba.appointment SET status = 'HACKED-5002' WHERE appt_id = 5002"
+            ),
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "NOT_A_SINGLE_STATEMENT"
+
+        # Neither row moved — the batch never reached a connection at all.
+        rows = _post(
+            client,
+            "/read/get_appt",
+            sql="SELECT appt_id, status FROM dba.appointment WHERE appt_id IN (5001, 5002) "
+            "ORDER BY appt_id",
+        ).json()["rows"]
+        assert not any(str(row["status"]).startswith("HACKED") for row in rows)
+
+    def test_a_batch_appended_to_a_legitimate_write_is_refused(self, client):
+        """The realistic shape of the same bug: a correct, guarded UPDATE with
+        a second statement tacked on. The first statement alone would have been
+        accepted, so this fails only because the batch check runs first."""
+        r = _post(
+            client,
+            "/write/reschedule_appointment",
+            sql=(
+                "UPDATE dba.appointment SET status = ? WHERE appt_id = ? AND last_modified = ?; "
+                "DELETE FROM dba.recall"
+            ),
+            params=["confirmed", 5001, "1999-01-01T00:00:00"],
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "NOT_A_SINGLE_STATEMENT"
+
+    def test_a_semicolon_inside_a_bound_value_does_not_block_a_real_write(self, client):
+        """The guard must not become a denial-of-service on legitimate data:
+        parameters are not part of the statement text at all, and a literal
+        containing a semicolon is not a separator."""
+        guard = self._last_modified(client, 5003)
+        r = _post(
+            client,
+            "/write/reschedule_appointment",
+            sql="UPDATE dba.appointment SET status = ? WHERE appt_id = ? AND last_modified = ?",
+            params=["a;b", 5003, guard],
+        )
+        assert r.status_code == 200
+        assert r.json() == {"rowCount": 1, "applied": True}
+
     def test_a_missing_write_credential_reports_not_configured(self, client, env):
         """Writes are opt-in: a box that never enabled a write capability has
         no ERP_DB_RW_PASSWORD, and must say so rather than trying the read
@@ -407,6 +470,14 @@ class TestIntrospect:
         assert r.status_code == 400
         assert r.json()["code"] == "NOT_A_READ"
         assert "sneaky" in r.json()["message"]
+
+    def test_a_batch_is_refused_on_the_introspect_route_too(self, client):
+        r = client.post(
+            "/introspect",
+            json={"queries": {"t": {"sql": "SELECT 1; UPDATE dba.appointment SET status = 'x'"}}},
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "NOT_A_SINGLE_STATEMENT"
 
     def test_introspection_uses_the_read_identity(self, client, env):
         env(ERP_DB_RO_PASSWORD=None)
