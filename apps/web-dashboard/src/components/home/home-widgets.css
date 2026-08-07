@@ -195,6 +195,81 @@
   white-space: nowrap;
 }
 
+/* ---------- Chat: inline conversation mode (WARP-1803) ----------
+   After the first submit the hero tile becomes a mini chat: header row
+   (Open full chat / New chat), a scrolling thread, and the capsule as the
+   follow-up composer. The thread div carries `.droplet-shell` purely as the
+   chat surface's token/skin scope for ChatMessage. */
+.droplet-home .w-chat--conv {
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 0;
+}
+.droplet-home .w-chat-conv-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.droplet-home .w-chat-conv-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-right: auto;
+}
+.droplet-home .w-chat-conv-title svg {
+  color: var(--brand);
+}
+.droplet-home .w-chat-conv-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  background: var(--card-inner);
+  border: 1px solid var(--card-bd);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  transition: border-color 200ms var(--ease), color 200ms var(--ease);
+}
+.droplet-home .w-chat-conv-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  color: var(--text);
+}
+.droplet-home .w-chat-conv-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Neutralize the shell's page-level box styles (droplet-shell.css may be
+   loaded from a visited /chat route in the same session) so the token scope
+   behaves as a plain scroll region inside the tile. */
+.droplet-home .w-chat-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: transparent;
+  border-radius: 12px;
+  scrollbar-width: thin;
+}
+.droplet-home .w-chat-thread-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 2px 6px;
+}
+.droplet-home .w-chat--conv .w-chat-capsule {
+  margin-top: 0;
+}
+/* Mobile single-column board: the tile grows with content there, so bound
+   the thread's viewport instead of flex-sizing it. */
+.droplet-home.dh-mobile .w-chat-thread {
+  flex: none;
+  max-height: min(52vh, 420px);
+}
+
 /* ---------- Calendar ---------- */
 .droplet-home .w-cal {
   height: 100%;
