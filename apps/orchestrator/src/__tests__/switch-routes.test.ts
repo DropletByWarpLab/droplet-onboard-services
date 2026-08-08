@@ -212,7 +212,14 @@ describe("confirm executes the §7 write", () => {
       .post("/api/switch/command/confirm")
       .send({ confirmationToken: "tok-123" });
     expect(res.status).toBe(200);
-    expect(switchClient.setVlanMembership).toHaveBeenCalledWith(100, [{ port: 4, tagged: false, member: true }]);
+    // The third arg is the declared membership semantics: a token with no
+    // recorded mode replays as "merge", which cannot wipe the VLAN's other
+    // members (audit 2026-08-06).
+    expect(switchClient.setVlanMembership).toHaveBeenCalledWith(
+      100,
+      [{ port: 4, tagged: false, member: true }],
+      "merge",
+    );
   });
 
   it("confirming switch_provision calls provisionSwitch", async () => {

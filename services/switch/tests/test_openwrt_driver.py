@@ -404,6 +404,19 @@ class TestWrites:
         assert not [c for c in fake.calls if c[0] == "uci" and c[1] != "get"]
 
     @pytest.mark.asyncio
+    async def test_set_port_access_vlan_is_plan_gated(self):
+        # The merge-safe primitive is now reachable from the INTERACTIVE
+        # endpoint, not just the provisioner — so it has to honour
+        # SWITCH_LIVE_WRITES=0 like every sibling write. Without this gate a
+        # "dry run" moved a port on real hardware.
+        fake = FakeUbus()
+        driver = make_driver(fake, plan_only=True)
+        before = json.dumps(fake.uci["network"], sort_keys=True)
+        await driver.set_port_access_vlan(2, 100)
+        assert not [c for c in fake.calls if c[0] == "uci" and c[1] != "get"]
+        assert json.dumps(fake.uci["network"], sort_keys=True) == before
+
+    @pytest.mark.asyncio
     async def test_set_vlan_membership_live_writes_uci_ports_list(self):
         fake = FakeUbus()
         driver = make_driver(fake, plan_only=False)

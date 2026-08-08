@@ -646,6 +646,16 @@ class OpenWrtSwitchDriver(SwitchDriver):
         Tagged (trunk) memberships — `lanN:t`, e.g. the guest VLAN 30 trunk —
         are left untouched: only untagged/access membership is exclusive.
         """
+        if self._plan_only:
+            # Same gate as every sibling write. This primitive is now reachable
+            # from the interactive membership endpoint (not just the
+            # provisioner), so without it SWITCH_LIVE_WRITES=0 would move a
+            # port on real hardware while the API answered "planned".
+            logger.info(
+                "Port %d → access VLAN %d PLANNED (plan_only) — not applied.",
+                port, vlan_id,
+            )
+            return
         name = _port_name(port)
 
         def _num(entry: str) -> Optional[int]:

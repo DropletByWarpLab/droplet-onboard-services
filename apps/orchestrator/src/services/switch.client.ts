@@ -216,13 +216,32 @@ export async function fetchVlanMembership(vlanId: number): Promise<unknown> {
   return resp.json();
 }
 
+/**
+ * How a membership write treats the VLAN's EXISTING members.
+ *
+ * - `merge`   — each entry is an access move: the port becomes the VLAN's
+ *               untagged member and every other member is preserved. This is
+ *               what "move port 4 to the camera VLAN" means, and the switch
+ *               service refuses entries it can't express that way (tagged /
+ *               removals) rather than guessing.
+ * - `replace` — write the VLAN's whole member list; anything absent is
+ *               DROPPED. Only for callers that genuinely computed the full
+ *               list.
+ *
+ * Required, not defaulted: a single-port `replace` on VLAN 1 drops the uplink,
+ * the AP and the appliance, so the compiler makes every call site say which it
+ * means (audit 2026-08-06).
+ */
+export type VlanMembershipMode = "merge" | "replace";
+
 export async function setVlanMembership(
   vlanId: number,
-  ports: { port: number; tagged: boolean; member: boolean }[]
+  ports: { port: number; tagged: boolean; member: boolean }[],
+  mode: VlanMembershipMode
 ): Promise<SwitchWriteResult> {
   return switchWrite(`/vlans/${vlanId}/membership`, "Set VLAN membership", {
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ports }),
+    body: JSON.stringify({ ports, mode }),
   });
 }
 
@@ -273,7 +292,7 @@ export async function fetchProvisionConfig(): Promise<SwitchProvisionConfig> {
 }
 
 /** Re-run the bring-up provisioner (re-apply the managed layout). */
-export async function provisionSwitch(): Promise<unknown> {
+export async function provisionSwitch(): Promise<SwitchWriteResult> {
   const resp = await internalFetch(`${SWITCH_URL}/provision`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -301,7 +320,7 @@ export async function setupCameraPorts(
   vlanId = 100,
   cameraPorts = [1, 2, 3, 4, 5, 6, 7, 8],
   uplinkPorts = [9, 10]
-): Promise<unknown> {
+): Promise<SwitchWriteResult> {
   const resp = await internalFetch(`${SWITCH_URL}/setup/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
