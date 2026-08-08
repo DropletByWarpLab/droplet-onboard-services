@@ -309,15 +309,19 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         return False
 
     # Retry on the SAME connection (CSeq 2) — connection-bound-nonce firmwares
-    # require it. A clean 401 here means wrong credentials → stop. A dead
-    # socket (hard-close-after-401 firmwares) → fall back to a fresh
-    # connection reusing the same challenge/header.
+    # require it. A well-formed RTSP reply here is authoritative: 200 →
+    # success, 401 → wrong credentials, stop either way. An empty read or a
+    # raise means the socket died between the 401 and the retry (hard-close-
+    # after-401 firmwares) → fall back to a fresh connection reusing the same
+    # challenge/header (a hard-closed socket EOFs rather than raising, so we
+    # must check for that explicitly, not just catch exceptions).
     try:
         resp2 = await _rtsp_describe(reader, writer, url, 2, auth_header, timeout)
-        _close_rtsp(writer)
-        return _is_rtsp_200(resp2)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
-        _close_rtsp(writer)
+        resp2 = ""
+    _close_rtsp(writer)
+    if resp2.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return _is_rtsp_200(resp2)
 
     try:
         reader2, writer2 = await _open_rtsp(ip, port, timeout)
