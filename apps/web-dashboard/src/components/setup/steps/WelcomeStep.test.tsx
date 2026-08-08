@@ -4,12 +4,12 @@
  * The very first thing a first-time customer reads is the WelcomeStep privacy
  * claim. Before WARP-913 it rendered in the dim `text-label-secondary` token
  * with verbose, jargon-leaning copy, so the single most important promise of
- * the product (your data stays in your home) read as quiet fine-print.
+ * the product (your data stays on your premises) read as quiet fine-print.
  *
  * These tests pin the fix: the claim is rendered in a prominent design-system
  * token (NOT the dim secondary one) and in plain, first-time-reader language
  * that stays truthful to the product — local AI on your own hardware, nothing
- * leaves your home. The supporting trust content stays intact.
+ * leaves your premises. The supporting trust content stays intact.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -36,7 +36,10 @@ describe("WelcomeStep privacy claim (WARP-913)", () => {
 
     // Plain language: speaks to a first-time reader, no "powered by local AI
     // running on your hardware" jargon clause leading the sentence.
-    expect(text.toLowerCase()).toMatch(/stays? in your home/);
+    // WARP-1810: business build — locative is "on your premises", not "in your
+    // home"; the subjects are "connected devices", not "smart home".
+    expect(text.toLowerCase()).toMatch(/stays? on your premises/);
+    expect(text.toLowerCase()).not.toMatch(/in your home/);
     expect(text.toLowerCase()).toContain("never leaves");
     // Still truthful to the product: the AI is local / on your own hardware.
     expect(text.toLowerCase()).toMatch(/your own (droplet|hardware)|on your droplet/);

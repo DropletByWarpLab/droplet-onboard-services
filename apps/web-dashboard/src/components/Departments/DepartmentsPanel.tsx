@@ -35,7 +35,6 @@ import {
   Archive,
   Building2,
   Eye,
-  Home,
   KeyRound,
   Loader2,
   Pencil,
@@ -650,7 +649,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                     color: "var(--text-muted)",
                   }}
                 >
-                  <Home size={17} />
+                  <Building2 size={17} />
                 </span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={NM_STYLE}>{deptDisplayName(household)}</span>

@@ -394,7 +394,7 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
         >
           Many smart devices and cameras quietly send usage data — telemetry —
           back to the companies that made them. Blocking phone-home keeps that
-          data on your home network instead of leaving it. Essential traffic
+          data on your local network instead of leaving it. Essential traffic
           like time sync and security &amp; firmware updates is always allowed,
           so your devices stay safe and up to date.
         </p>

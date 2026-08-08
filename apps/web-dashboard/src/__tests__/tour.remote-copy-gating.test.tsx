@@ -127,5 +127,10 @@ describe("ProductTour — remote beat honesty (WARP-993)", () => {
       screen.queryAllByText(/office and away/i).length,
     ).toBeGreaterThan(0);
     expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
+    // WARP-1810: the address-bar motif's caption is business-locative —
+    // "on-site and away", never "at home and away".
+    expect(
+      screen.getByText(/same secure address on-site and away/i),
+    ).toBeInTheDocument();
   });
 });

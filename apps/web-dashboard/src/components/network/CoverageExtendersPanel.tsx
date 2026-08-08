@@ -615,7 +615,7 @@ export function CoverageExtendersPanel({
             Coverage extenders
           </h2>
           <p className="type-footnote text-[color:var(--text-muted)] mt-0.5">
-            Extra Wi-Fi access points around your home.
+            Extra Wi-Fi access points around your workspace.
           </p>
         </div>
         <button

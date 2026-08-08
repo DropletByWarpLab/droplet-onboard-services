@@ -152,6 +152,11 @@ describe("DepartmentsPanel — list + detail", () => {
     expect(within(screen.getByTestId("household-card")).getByText("Workspace")).toBeInTheDocument();
     expect(within(screen.getByTestId("household-card")).queryByText("Household")).not.toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument();
+    // WARP-1810 — the Workspace card's glyph is Building2, not the residential
+    // Home/House glyph (lucide-react renders Home as the "house" icon).
+    const card = screen.getByTestId("household-card");
+    expect(card.querySelector("svg.lucide-building-2")).toBeInTheDocument();
+    expect(card.querySelector("svg.lucide-house")).not.toBeInTheDocument();
   });
 
   // WARP-1808 — display mapping keys off `kind`, never the name string: a

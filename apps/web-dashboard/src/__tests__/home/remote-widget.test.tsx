@@ -123,8 +123,9 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     await screen.findByText(/scan to connect/i);
     expect(screen.getByText(/the private key is shown once/i)).toBeInTheDocument();
     // WARP-993 honesty gate: no offLanReachable on the create response ⇒
-    // never promise "from anywhere".
-    expect(screen.getByText(/on your home network/i)).toBeInTheDocument();
+    // never promise "from anywhere". WARP-1810: business build says "local
+    // network", not "home network".
+    expect(screen.getByText(/on your local network/i)).toBeInTheDocument();
     expect(screen.queryByText(/from anywhere/i)).not.toBeInTheDocument();
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
     expect(
@@ -247,7 +248,7 @@ describe("RemoteAccessWidget — home-mode gate (WARP-1391)", () => {
 
     const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
-      expect(screen.getByText(/home address not ready yet/i)).toBeInTheDocument(),
+      expect(screen.getByText(/local address not ready yet/i)).toBeInTheDocument(),
     );
     expect(sw).toHaveAttribute("aria-disabled", "true");
     // aria-describedby already points at the sub text, so SR users hear WHY.
@@ -264,7 +265,7 @@ describe("RemoteAccessWidget — home-mode gate (WARP-1391)", () => {
 
     const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
-      expect(screen.getByText(/home address not ready yet/i)).toBeInTheDocument(),
+      expect(screen.getByText(/local address not ready yet/i)).toBeInTheDocument(),
     );
     expect(sw).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(sw);

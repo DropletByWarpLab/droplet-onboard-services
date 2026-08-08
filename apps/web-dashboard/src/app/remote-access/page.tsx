@@ -219,9 +219,9 @@ export default function RemoteAccessPage() {
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
-              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Home address not ready yet</p>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Local address not ready yet</p>
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
-                Once your home address is ready you’ll be able to add a device —
+                Once your Droplet’s local address is ready you’ll be able to add a device —
                 it works on your office Wi-Fi, and the button turns on
                 automatically, with nothing to enter. If this doesn’t clear on
                 its own, restart the box.

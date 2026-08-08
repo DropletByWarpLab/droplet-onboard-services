@@ -35,8 +35,8 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
         data-testid="welcome-privacy-claim"
         className="type-headline text-label-primary max-w-md"
       >
-        Your files, conversations, and smart home stay in your home — the AI
-        that runs them lives on your own Droplet and never leaves it.
+        Your files, conversations, and connected devices stay on your premises
+        — the AI that runs them lives on your own Droplet and never leaves it.
       </p>
 
       <ul className="mt-6 flex flex-wrap gap-2">

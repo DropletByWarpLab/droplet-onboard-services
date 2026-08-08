@@ -1168,7 +1168,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
     : endpointBlocked
       ? "Web address not ready yet"
       : homeBlocked
-        ? "Home address not ready yet"
+        ? "Local address not ready yet"
         : submitting
           ? "Connecting this device…"
           : on
@@ -1298,7 +1298,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
                       response; missing ⇒ stay honest). */}
                   {created.offLanReachable === true
                     ? "that’s this Droplet from anywhere."
-                    : "that’s this Droplet on your home network."}
+                    : "that’s this Droplet on your local network."}
                 </li>
               </ol>
               <div className="flex justify-center">

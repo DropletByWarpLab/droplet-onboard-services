@@ -128,9 +128,13 @@ describe("Remote Access — home-mode mint (WARP-1391)", () => {
     const addBtn = screen.getByRole("button", { name: /add device/i });
     expect(addBtn).toBeDisabled();
     // Honest guidance that leads with the temporal gate (no "add one now" read
-    // next to a disabled button).
+    // next to a disabled button). WARP-1810: business build — the discovered
+    // LAN endpoint is the "local address", not the "home address".
     expect(
-      screen.getByText(/once your home address is ready you.ll be able to add a device/i),
+      screen.getByText(/local address not ready yet/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/once your droplet.s local address is ready you.ll be able to add a device/i),
     ).toBeInTheDocument();
     // a11y: the disabled button points screen-reader users at the WHY card.
     expect(addBtn).toHaveAttribute("aria-describedby", "ra-home-guidance");

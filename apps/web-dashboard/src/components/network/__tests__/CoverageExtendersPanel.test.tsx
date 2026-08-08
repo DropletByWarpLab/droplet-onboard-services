@@ -96,6 +96,9 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
     renderPanel();
     // Empty-state copy is operator-friendly, no installer jargon.
     expect(await screen.findByText(/no extra access points yet/i)).toBeInTheDocument();
+    // WARP-1810: business build — extenders sit "around your workspace", not
+    // "around your home".
+    expect(screen.getByText(/around your workspace/i)).toBeInTheDocument();
   });
 
   it("renders an ONLINE extender card with status pill + display name + last-seen", async () => {
