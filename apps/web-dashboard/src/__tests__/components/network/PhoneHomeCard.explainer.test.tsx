@@ -70,14 +70,16 @@ describe("<PhoneHomeCard> explainer copy (Samantha QA #bugs)", () => {
     expect(text).toMatch(/quietly|behind the scenes/i);
   });
 
-  it("says blocking keeps that data on the home network", () => {
+  it("says blocking keeps that data on the local network", () => {
     render(
       <Wrap>
         <PhoneHomeCard />
       </Wrap>,
     );
     const text = screen.getByTestId("phone-home-explainer").textContent ?? "";
-    expect(text).toMatch(/your (home )?network|stays home/i);
+    // WARP-1810: business build — "local network", not "home network".
+    expect(text).toMatch(/your local network/i);
+    expect(text).not.toMatch(/home network/i);
   });
 
   it("reassures that essential traffic (time sync, security/firmware updates) is always allowed", () => {

@@ -527,7 +527,7 @@ export function AddressStep({
               One address everywhere
             </div>
             <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
-              the same trusted address resolves at home and over the VPN
+              the same trusted address resolves on-site and over the VPN
             </div>
           </div>
         </div>
