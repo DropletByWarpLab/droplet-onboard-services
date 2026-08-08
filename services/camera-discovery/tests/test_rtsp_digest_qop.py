@@ -28,6 +28,9 @@ USER, PW, REALM = "admin", "Droplet123!", "iPOLiS"
 
 
 def _md5(s: str) -> str:
+    # RTSP Digest auth mandates MD5 (RFC 2617); this test server mirrors the
+    # camera's own digest computation. Registered FIPS exception.
+    # fips:allowed: rtsp-digest-rfc2617
     return hashlib.md5(s.encode()).hexdigest()
 
 
