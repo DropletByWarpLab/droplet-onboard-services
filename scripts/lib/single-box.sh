@@ -753,7 +753,8 @@ configure_single_box_env() {
 #                        node when the host has two (leaving the dGPU for
 #                        Ollama), otherwise the only one. Never assumed —
 #                        a hardcoded renderD129 broke every single-GPU box.
-#   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
+#   CAMERA_SUBNET        "auto" — camera-discovery resolves the camera network
+#                        from the edge router at scan time (WARP-1805);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
 #   WIREGUARD_LAN_CIDR/  VPN peer .conf AllowedIPs + DNS, pinned to the single-
 #   WIREGUARD_DNS        box LAN (br-lan 192.168.20.0/24, gateway/dnsmasq at
@@ -850,14 +851,16 @@ EOF
   # CAMERA_SUBNET: the compose default (192.168.100.0/24) is the multi-box
   # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
   # single-box shape has no separate camera VLAN today — cameras attach to
-  # the box's own LAN (br-lan, 192.168.20.0/24; see
-  # scripts/host/etc-droplet-host-net/lan-dhcp.conf). Pinning the subnet
-  # to the actual single-box camera network is what makes camera discovery
-  # scan where the cameras are instead of an empty multi-box VLAN (ADR-018
-  # Decision 4). When the OpenWrt single-box unification (ADR-018 T3) lands a
-  # real isolated camera VLAN on this shape, this value moves to that VLAN's
-  # network in lockstep.
-  upsert_env CAMERA_SUBNET       192.168.20.0/24
+  # whatever LAN the edge router serves, and a provision-time constant here
+  # has now gone stale TWICE (192.168.100.0/24 when ADR-018 pinned br-lan
+  # 192.168.20.0/24; then 192.168.20.0/24 when networking moved to the Pi
+  # edge router and cameras landed on its LAN — WARP-1805, camera discovery
+  # ran healthy but blind both times). "auto" makes camera-discovery resolve
+  # the network from the routing service's /network/interfaces at scan time,
+  # so the filter follows the same router that hands cameras their leases.
+  # When the OpenWrt single-box unification (ADR-018 T3) lands a real
+  # isolated camera VLAN on this shape, pin this to that VLAN's network.
+  upsert_env CAMERA_SUBNET       auto
   # WARP-839: pin the WireGuard peer LAN CIDR + DNS to the single-box LAN. The
   # orchestrator's defaults (WIREGUARD_LAN_CIDR=192.168.50.0/24,
   # WIREGUARD_DNS=192.168.50.1 in apps/orchestrator/src/config.ts) are the
@@ -1010,5 +1013,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

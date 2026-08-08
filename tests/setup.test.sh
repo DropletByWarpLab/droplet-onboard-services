@@ -291,32 +291,32 @@ else
   fail "DROPLET_AP_MODE duplicated/changed on second call (found ${AP_MODE_COUNT2})"
 fi
 
-# --- Shape-aware CAMERA_SUBNET (ADR-018 Decision 4 / T5) ------------------
+# --- Shape-aware CAMERA_SUBNET (ADR-018 Decision 4 / T5, WARP-1805) -------
 # The compose default CAMERA_SUBNET is 192.168.100.0/24 — the multi-box
 # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). On the
-# single-box shape the cameras live on the box's own LAN (br-lan,
-# 192.168.20.0/24 per scripts/host/etc-droplet-host-net/lan-dhcp.conf),
-# NOT on a separate VLAN — so the multi-box default would scan an empty
-# subnet and find nothing (the live "camera scan finds nothing" symptom).
-# configure_single_box_env must pin CAMERA_SUBNET to the single-box camera
-# network so camera-discovery scans where the cameras actually are.
+# single-box shape cameras attach to whatever LAN the edge router serves,
+# and every provision-time CIDR pinned here has gone stale when the fabric
+# moved (192.168.20.0/24 br-lan, then the Pi edge router's LAN) — the live
+# "camera scan finds nothing" symptom, twice. configure_single_box_env now
+# writes CAMERA_SUBNET=auto so camera-discovery resolves the network from
+# the routing service at scan time (WARP-1805).
 # Two calls already ran above, so this also asserts idempotency.
-CAM_SUBNET_COUNT=$(grep -cE '^CAMERA_SUBNET=192\.168\.20\.0/24$' "$TMP_ROOT/.env" || true)
+CAM_SUBNET_COUNT=$(grep -cE '^CAMERA_SUBNET=auto$' "$TMP_ROOT/.env" || true)
 if [ "$CAM_SUBNET_COUNT" = "1" ]; then
-  pass "configure_single_box_env sets CAMERA_SUBNET=192.168.20.0/24 (single occurrence, idempotent)"
+  pass "configure_single_box_env sets CAMERA_SUBNET=auto (single occurrence, idempotent)"
 else
-  fail "expected exactly one 'CAMERA_SUBNET=192.168.20.0/24' in .env, found ${CAM_SUBNET_COUNT}"
+  fail "expected exactly one 'CAMERA_SUBNET=auto' in .env, found ${CAM_SUBNET_COUNT}"
 fi
 
 # The last-wins CAMERA_SUBNET (what docker-compose env_file actually uses)
-# must be the single-box network, not the inherited multi-box default. This
-# guards against an append-without-strip regression that would leave the
-# 192.168.100.0/24 default as the effective value.
+# must be auto, not the inherited multi-box default. This guards against an
+# append-without-strip regression that would leave the 192.168.100.0/24
+# default as the effective value.
 CAM_SUBNET_EFFECTIVE=$( { grep -E '^CAMERA_SUBNET=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
-if [ "$CAM_SUBNET_EFFECTIVE" = "192.168.20.0/24" ]; then
-  pass "effective (last-wins) CAMERA_SUBNET is the single-box network 192.168.20.0/24"
+if [ "$CAM_SUBNET_EFFECTIVE" = "auto" ]; then
+  pass "effective (last-wins) CAMERA_SUBNET is auto (edge-router derived)"
 else
-  fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected 192.168.20.0/24)"
+  fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected auto)"
 fi
 
 # --- Shape-aware WireGuard LAN CIDR/DNS (WARP-839) ------------------------

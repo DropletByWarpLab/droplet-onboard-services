@@ -215,5 +215,5 @@ Both are internal-only — no ports exposed to host. All access through Nginx.
 |----------|---------|-------------|
 | `FRIGATE_URL` | `http://frigate:5000` | Frigate API endpoint |
 | `CAMERA_SCAN_INTERVAL` | `30` | Discovery scan interval (seconds) |
-| `CAMERA_SUBNET` | `192.168.100.0/24` | Camera isolation subnet |
+| `CAMERA_SUBNET` | `192.168.100.0/24` | Camera isolation subnet. `auto` (single-box provisioning default, WARP-1805) resolves the network from the edge router at scan time via the routing service, so the filter follows the LAN that hands cameras their leases; an explicit CIDR pins it (multi-box camera VLAN, future isolated VLAN per ADR-018 T3) |
 | `CAMERA_DISCOVERY_URL` | `http://localhost:8085` | Discovery service endpoint |

@@ -23,7 +23,7 @@ ONVIF WS-Discovery ─────┘      │
 ## Security
 
 - **IP validation** — only probes RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x). Rejects loopback, link-local, multicast, and public IPs.
-- **Subnet filtering** — when `CAMERA_SUBNET` is set (default: `192.168.100.0/24`), only scans that subnet. Prevents probing devices on the main LAN.
+- **Subnet filtering** — when `CAMERA_SUBNET` is set (default: `192.168.100.0/24`), only scans that subnet. Prevents probing devices on the main LAN. `CAMERA_SUBNET=auto` (WARP-1805, the single-box provisioning default) resolves the network from the edge router at scan time via the routing service's `/network/interfaces`, so the filter follows the LAN that actually hands cameras their DHCP leases instead of a provision-time constant that goes stale when the fabric moves. While auto is unresolved (routing service unreachable), the sweep stays off and candidates are gated to private (RFC 1918) IPs only — discovery degrades, never widens.
 - **RTSP URL validation** — validates scheme (`rtsp://`/`rtsps://`) and host before passing to Frigate.
 - **Driver fix auth** — the `/drivers/fix` endpoint (which runs `modprobe`) requires `DEVICE_SECRET` bearer token.
 - **ONVIF probes are read-only** — only calls `GetDeviceInformation` and `GetStreamUri`, never modifies camera config.
@@ -50,7 +50,7 @@ ONVIF WS-Discovery ─────┘      │
 | `FRIGATE_URL` | `http://localhost:5000` | Frigate NVR API |
 | `MQTT_BROKER` | `mqtt://localhost:1883` | MQTT broker URL (with credentials) |
 | `SCAN_INTERVAL` | `30` | Seconds between discovery scans (min: 5) |
-| `CAMERA_SUBNET` | `192.168.100.0/24` | Subnet to scan (empty = all private) |
+| `CAMERA_SUBNET` | `192.168.100.0/24` | Subnet to scan (empty = all private; `auto` = resolve from the edge router at scan time) |
 | `CAMERA_INIT_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the camera first-run (vendor-init) HTTPS clients (WARP-583). When set, httpx verifies the camera cert against it; a set-but-missing path fails closed rather than silently downgrading. When unset, verification is disabled — cameras ship per-device self-signed certs on first run, so pinning is not always feasible — and a warning is logged once per process. Residual risk while unpinned: an on-LAN MITM between this service and the camera VLAN can intercept the first-run admin-password set. Pinning also verifies the hostname/IP against the cert's SANs, so a device cert without the camera's IP in its SANs will fail verification against raw-IP targets — fail-closed, by design; provision a cert carrying the device IP in its SANs, or fall back to unpinned. Mirrors the switch service's `SWITCH_CA_CERT`. |
 | `DEVICE_SECRET` | (empty) | Auth token for `/drivers/fix` |
 
