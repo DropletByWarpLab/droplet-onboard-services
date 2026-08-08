@@ -2307,6 +2307,105 @@ services:
     cpus: ${OLLAMA_CPUS:-4.0}
     pids_limit: ${OLLAMA_PIDS_LIMIT:-2048}
 
+  # --- Docker Model Runner (DARK — WARP-1772, epic WARP-1740) ---------------
+  # The second implementation of the ADR-036 runtime contract, wired for the
+  # single-box shape but NEVER started by default: `dmr` is a non-default
+  # profile, so a bare `docker compose up` starts nothing here and
+  # `docker compose config --services` does not even list it until an operator
+  # adds `dmr` to COMPOSE_PROFILES (or passes --profile dmr). Flipping the
+  # serving default is NOT this service's job — that is WARP-1749 (multi-box)
+  # / WARP-1772 phase 2 (this shape), both hard-gated on a lab soak, the
+  # size_vram product decision, and explicit human sign-off (ADR-036 §8).
+  #
+  # Phase-0 gate (WARP-1741) PASSED on this box 2026-08-08: gfx1200 visible
+  # via rocminfo inside the container; decode 103.5% of Ollama on the 3B pair
+  # (50-trial tool arm, 100% parse both sides) and 102.8% on gpt-oss:20b
+  # (65.87 vs 64.10 tok/s, 25/25 tool parse both sides, 80 schemas). Full
+  # tables in docs/ADR-036-inference-runtime-abstraction.md §5a.
+  dmr:
+    # Pinned for the same reason `ollama` above is (WARP-590): a floating tag
+    # would swap the inference runtime under the box on a routine pull. The
+    # `-rocm` variant is the AMD build; bare `v1.2.6` is CPU-only and presents
+    # as a catastrophic-looking perf regression rather than as an error.
+    image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-rocm}
+    container_name: droplet-dmr
+    profiles: ["dmr"]
+    restart: unless-stopped
+    <<: *default-logging
+    ports:
+      # LOOPBACK ONLY — a security control, not a convenience (ADR-036 §6).
+      # DMR's API is unauthenticated by design, and POST /models/create is an
+      # arbitrary-registry-pull primitive: anything that reaches this port can
+      # make the box fetch an OCI artifact of its choosing. Never the LAN
+      # bridge, never 0.0.0.0. Parity here is with THIS file's `ollama`
+      # (127.0.0.1:11434 above); the appliance repo's cross-host 11434 publish
+      # is a divergence its own ADR-005 §5 owns and must not be copied.
+      - "127.0.0.1:${DMR_PORT:-12434}:12434"
+    devices:
+      # Identical GPU wiring to `ollama` above — same kernel interfaces, same
+      # render node, so the two runtimes are interchangeable on this card.
+      # Inline rather than droplet-local-LLM#51's per-vendor overlay split:
+      # this file IS the single-box shape and already wires its `ollama` for
+      # ROCm inline; adopt the overlay idiom only if single-box ever ships on
+      # non-AMD silicon.
+      - "/dev/kfd:/dev/kfd"
+      - "${OLLAMA_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128"
+    group_add:
+      # Host GIDs, mirrored from `ollama` above. DMR runs as the non-root
+      # `modelrunner` user, so without these it opens /dev/kfd and the render
+      # node with no group membership and silently falls back to CPU — which
+      # presents as "40x slower", not as a permissions error.
+      - "993"  # render
+      - "44"   # video
+    environment:
+      # DMR's model store, pointed at the named volume below. Restated (it is
+      # the image default) because the mount and this value must agree — a
+      # silent disagreement means an empty store.
+      MODELS_PATH: /models
+      # Same single-GPU pin as `ollama` above.
+      ROCR_VISIBLE_DEVICES: "0"
+      # WARP-854 parity: the same 16k window as OLLAMA_CONTEXT_LENGTH above,
+      # expressed the only way that provably applies AND survives a container
+      # restart. LLAMA_ARG_CTX_SIZE is llama.cpp's env form of --ctx-size; the
+      # image itself relies on that mechanism (its baked env sets
+      # LLAMA_ARG_HOST), and model-runner spawns llama-server without
+      # scrubbing the environment. MEASURED on the box 2026-08-08: the HTTP
+      # _configure alternative returns 202 yet silently no-ops unless the
+      # model id is REGISTRY-QUALIFIED (docker.io/ai/…) — an env var has no
+      # such trap and is visible in `docker inspect`.
+      #
+      # DELIBERATELY ABSENT: HSA_OVERRIDE_GFX_VERSION. gfx1200 (RDNA4) is
+      # native; the override forces gfx1100 kernels onto it and breaks it —
+      # same warning as `ollama` above.
+      LLAMA_ARG_CTX_SIZE: "${DMR_CONTEXT_LENGTH:-16384}"
+    volumes:
+      # Its OWN store, never ollama-data. The two runtimes use different
+      # on-disk formats (OCI artifact layout vs Ollama's manifest/blob
+      # layout); pointing them at one directory risks either runtime
+      # rewriting the other's store, which is unrecoverable short of a purge.
+      - dmr-models:/models
+    # HEALTHCHECK DELIBERATELY NOT DECLARED — the image ships its own against
+    # GET /engines/status, which is exactly the right probe, so the correct
+    # action is to inherit it. Restating it would hard-code a tool (curl/wget/
+    # sh) we have not verified exists in the image; `disable: true` would
+    # suppress it entirely. Same stage-rather-than-guess call as the openwrt
+    # cap reduction below.
+    security_opt:
+      # Defence in depth on an unauthenticated listener: the process cannot
+      # gain capabilities it didn't start with.
+      - "no-new-privileges:true"
+    # Model loads are slow; a SIGKILL mid-load can tear the model store.
+    stop_grace_period: 60s
+    # ADR-021 parity with `ollama` above — same default, same .env override.
+    # CAVEAT (recorded, not guessed away): the Phase-0 bench rig ran UNCAPPED
+    # (the rig file documents that as a known confound), so 4g is inherited
+    # from the ollama service's reasoning, not re-measured under DMR's
+    # staging behavior. Verify under load before any flip; raise via
+    # DMR_MEM_LIMIT if the 20B load thrashes.
+    mem_limit: ${DMR_MEM_LIMIT:-4g}
+    cpus: ${DMR_CPUS:-4.0}
+    pids_limit: ${DMR_PIDS_LIMIT:-2048}
+
   # --- OpenWrt (router-in-container) ---------------------------------------
   # Hosts the Wi-Fi AP (after `droplet-openwrt-attach` moves the host's
   # MT7922 PHY into this container's netns) plus the WireGuard VPN
@@ -2620,6 +2719,13 @@ volumes:
   # the volumes themselves are only materialized when the services start.
   # factory-reset.sh includes these in its wipe list.
   ollama-data:
+  # WARP-1772 — Docker Model Runner's OCI model store (dark `dmr` profile).
+  # Separate from ollama-data by construction: different on-disk formats, and
+  # sharing a directory risks either runtime rewriting the other's store.
+  # Only materialized when the `dmr` profile is active. NOT in
+  # factory-reset.sh's wipe list until the flip ships — a dark profile's
+  # volume holds nothing customer-facing.
+  dmr-models:
   openwrt-config:
   openwrt-overlay:
   # WARP-963 — fleet-agent runtime state: portal ingest token (identity.json,

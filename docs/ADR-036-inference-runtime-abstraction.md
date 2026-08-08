@@ -117,6 +117,32 @@ The honest cost: models pulled outside the manifest (an operator's ad-hoc `ollam
 
 **Therefore Phase 0 is a measurement, not a migration** (WARP-1741): stand DMR up on the lab box's gfx1200, run the existing bench and the agent loop, and compare tokens/sec, time-to-first-token, tool-call correctness, and VRAM residency against `0.30.8-rocm` head to head. **If DMR does not run correctly on gfx1200, Phases 1–3 do not start and this ADR is withdrawn to Rejected**, keeping only the §3 capability fix (which is owed anyway) and possibly Alternative D.
 
+### 5a. Phase 0 result — measured 2026-08-08 on the lab box: **PASS** (WARP-1741)
+
+Run on the shipping single-box (`droplet-sys`, gfx1200, 15.92 GiB VRAM; `ollama/ollama:0.30.8-rocm` live and serving throughout; candidate `docker/model-runner:v1.2.6-rocm`) using the WARP-1741 harness — `droplet-local-LLM` `scripts/bench-runtime.sh` @ `e32c557` for the 3B pair, plus hand-driven `bench_probe.py` arms for the 20B because two 20B models cannot co-reside on a 16 GiB card (arms serialized around explicit evictions; the box's model was re-warmed afterwards). Raw artifacts: `.data/bench/` and `.data/bench20b/` from the run, mirrored off-box; summary tables in WARP-1741.
+
+| | 3B pair (50-trial tool arm) | 20B — the real model (25-trial tool arm) |
+|---|---|---|
+| models | `qwen2.5:3b` vs `ai/qwen2.5:3B-Q4_K_M` | `gpt-oss:20b` vs `ai/gpt-oss:20B-F16` |
+| GPU gate | **gfx1200 via `rocminfo` inside the DMR container** | same container, same wiring |
+| decode median (gate: ≥85%) | 90.41 vs 87.37 tok/s — **DMR 103.5%** | 65.87 vs 64.10 tok/s — **DMR 102.8%** |
+| tool-call parse (80 schemas) | **100% vs 100%** (50/50 each side) | **100% vs 100%** (25/25 each side) |
+| TTFT, medium prompt | 0.016 s vs 0.123 s | 1.356 s vs 1.810 s |
+| cold / first load | DMR 0.849 s (probe-measured) | DMR 14.0 s vs Ollama 43.9 s (manual stopwatch, both cache-warm-ish) |
+| keep_alive | honored (per-request arm) | `_configure keep_alive=24h` → `/api/ps` `expires_at` stamped +24 h |
+| context | model-native 32k | 16384 confirmed via `n_ctx_slot` canary |
+
+Both runs print **PASS** against the §5 stop rule. Both reports carry a quantization-label warning (`Q4_K_M` vs `IQ2_XXS/Q4_K_M`; `MXFP4` vs `MOSTLY_F16`) — these are artifact-metadata labels of equivalent layouts (the two 20B artifacts differ by 0.8 MB in 13.79 GB), recorded here rather than dismissed.
+
+Operationally load-bearing findings from the run, beyond the gate itself:
+
+1. **`_configure` keys strictly by REGISTRY-QUALIFIED model id.** `POST /engines/llama.cpp/_configure` with `{"model":"ai/qwen2.5:3B-Q4_K_M","context-size":16384}` returns **202 and silently does nothing** — the next load came up at the model's native window. The identical call with `docker.io/ai/qwen2.5:3B-Q4_K_M` applied (`n_ctx_slot = 16384`). Any tooling that configures by short id — including the WARP-1749 branch's `configure-runtime.sh` as of this writing — must qualify the id (or configure both forms) **and canary the loaded `n_ctx_slot`, never the HTTP status**.
+2. **`LLAMA_ARG_CTX_SIZE` is the restart-surviving context mechanism**, and it is what this repo's dark `dmr` service sets. `_configure` state dies with the container.
+3. **The reasoning channel breaks naive stream-timing.** gpt-oss spends a small `max_tokens` budget entirely on `reasoning_content` before any `content` delta; the probe's cold-load arm ("warm baseline request did not stream a token") and the 20B long-prompt row failed for exactly that reason **on both runtimes** — a probe assumption, not a runtime defect. The manual load timings above fill that gap; a future probe revision should count reasoning deltas as liveness.
+4. The three §2 gaps re-confirmed live on ROCm: `/api/tags` `size: 0`, `/api/ps` without `size_vram` (though `expires_at` **is** present), and ids reported registry-qualified (`docker.io/ai/…`).
+
+**Status stays Proposed.** Per §8 and WARP-1749, the flip still requires a lab soak, the `size_vram` product decision, and explicit human sign-off. What this section changes is narrower: the hardware gate can no longer be the reason to wait, and the dark `dmr` service this repo now carries (WARP-1772) makes the single-box shape flip-capable the day those judgments land.
+
 ### 6. Security — parity, written down instead of inherited
 
 **DMR's API is unauthenticated by design.** Docker documents this plainly; there is no token, no allowlist, no per-caller identity. `POST /models/create` is an **arbitrary-registry-pull primitive**: anything that can reach port 12434 can make the box fetch and materialise an arbitrary OCI artifact from an arbitrary registry, consuming disk and egress, with no credential.
