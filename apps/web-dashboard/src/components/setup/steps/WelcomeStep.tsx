@@ -62,8 +62,8 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
       <LearnMoreCard title="What is Droplet?" helpAnchor="privacy">
         <p>
           A single box on your own network that runs your files, conversations,
-          cameras, and smart-home control — your own private cloud, except it
-          never leaves home.
+          cameras, and connected devices — your own private cloud, except it
+          never leaves your premises.
         </p>
         <p>
           The AI runs locally on the hardware in front of you, so your data
