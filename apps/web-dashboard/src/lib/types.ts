@@ -386,8 +386,9 @@ export interface FileSpace {
   root: string;
   /** The effective right the caller has in this space (personal→undefined, dept→'reader'|'contributor'|'manager'). */
   right?: string;
-  /** Department kind: 'personal'|'household'|'department'|'team'. */
-  kind?: string;
+  /** Space kind — the documented wire values (WARP-1809 narrowed this from
+   *  `string` so a typo'd comparison is a type error, not a silent false). */
+  kind?: "personal" | "household" | "department" | "team";
   /** Provision state (active, pending, failed, archiving, archived). */
   state?: string;
   /**
@@ -1239,8 +1240,11 @@ export interface EffectiveAccess {
     /** Where the effective value came from (T7 "roster shows source"). */
     source?: "person" | "role" | "default";
   };
-  /** Read-only reference — ADR-029 owns these; never merged into grants. */
-  deptRights: Array<{ id: string; name: string; right: DepartmentRight }>;
+  /** Read-only reference — ADR-029 owns these; never merged into grants.
+   *  `kind` is WARP-1809-additive (optional: an older orchestrator omits it)
+   *  — the drawer renders HOUSEHOLD entries kind-keyed as "Workspace" via
+   *  `orgUnitDisplayName`, falling back to the raw name when absent. */
+  deptRights: Array<{ id: string; name: string; kind?: DepartmentKind; right: DepartmentRight }>;
   exceptions?: Array<AccessExceptionInput & { id?: string }>;
 }
 

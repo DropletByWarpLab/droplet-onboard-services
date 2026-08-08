@@ -38,6 +38,10 @@ import {
   formatStorageBytes,
   tierLabel,
 } from "@/lib/access";
+// WARP-1809: every user holds a boot-seeded HOUSEHOLD membership, so the
+// drawer's deptRights chips would otherwise echo the seeded server name;
+// the shared kind-keyed mapping renders it as "Workspace" instead.
+import { orgUnitDisplayName } from "@/lib/org-unit-name";
 import { ACCESS_COPY } from "./copy";
 import { AccessChip, GuardNote } from "./bits";
 // WARP-1533: the option-building logic is shared with the invite modal's
@@ -258,7 +262,7 @@ export function PersonAccessSection({
                       </AccessChip>
                     ))}
                     {drawer.data.deptRights.map((d) => (
-                      <AccessChip key={d.id}>{`${d.name}: ${d.right}`}</AccessChip>
+                      <AccessChip key={d.id}>{`${orgUnitDisplayName(d.kind, d.name)}: ${d.right}`}</AccessChip>
                     ))}
                     <AccessChip mono>
                       Storage {formatStorageBytes(drawer.data.usage.storageQuotaBytes) === "—"

@@ -20,6 +20,14 @@ const restoreDepartmentMock = vi.fn();
 const addDepartmentMemberMock = vi.fn();
 const updateDepartmentMemberRightMock = vi.fn();
 const removeDepartmentMemberMock = vi.fn();
+// WARP-1809 — toast LABELS are part of the panel's display-name contract
+// (every unit name a toast interpolates routes through deptDisplayName),
+// so the spy replaces the ToastContext default no-op.
+const toastMock = vi.fn();
+
+vi.mock("@/components/Toast", () => ({
+  useToast: () => ({ toast: toastMock }),
+}));
 
 vi.mock("@/lib/api", () => ({
   listDepartments: (...a: any[]) => listDepartmentsMock(...a),
@@ -90,6 +98,7 @@ beforeEach(() => {
   addDepartmentMemberMock.mockReset();
   updateDepartmentMemberRightMock.mockReset();
   removeDepartmentMemberMock.mockReset();
+  toastMock.mockReset();
 });
 
 describe("DepartmentsPanel — empty state", () => {
@@ -145,12 +154,12 @@ describe("DepartmentsPanel — list + detail", () => {
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("household-card")).toBeInTheDocument();
+      expect(screen.getByTestId("workspace-card")).toBeInTheDocument();
     });
     // WARP-1808 — the server seeds the unit's name as "Household" (data
     // contract), but the rendered card always reads "Workspace".
-    expect(within(screen.getByTestId("household-card")).getByText("Workspace")).toBeInTheDocument();
-    expect(within(screen.getByTestId("household-card")).queryByText("Household")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("workspace-card")).getByText("Workspace")).toBeInTheDocument();
+    expect(within(screen.getByTestId("workspace-card")).queryByText("Household")).not.toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument();
   });
 
@@ -165,9 +174,9 @@ describe("DepartmentsPanel — list + detail", () => {
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("household-card")).toBeInTheDocument();
+      expect(screen.getByTestId("workspace-card")).toBeInTheDocument();
     });
-    expect(within(screen.getByTestId("household-card")).getByText("Workspace")).toBeInTheDocument();
+    expect(within(screen.getByTestId("workspace-card")).getByText("Workspace")).toBeInTheDocument();
     expect(screen.queryByText("The Smiths")).not.toBeInTheDocument();
     // Household is the only unit, so it auto-selects — the detail header maps
     // too. waitFor + a fresh query: the detail load re-renders the header
@@ -220,6 +229,33 @@ describe("DepartmentsPanel — list + detail", () => {
 
     await waitFor(() => {
       expect(removeDepartmentMemberMock).toHaveBeenCalledWith("d1", "u1");
+    });
+    // WARP-1809 — the toast label routes through the display helper too
+    // (identity for a DEPARTMENT; defense-in-depth for the seeded unit).
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Priya Nair removed from Finance.", "success");
+    });
+  });
+
+  // WARP-1809 — the display mapping is KIND-keyed, never word-keyed: a
+  // user-created DEPARTMENT that happens to be NAMED "Household" keeps its
+  // raw name everywhere the removal flow prints it (confirm copy + toast).
+  it("a DEPARTMENT literally named 'Household' keeps its raw name in remove confirm + toast", async () => {
+    const named = dept({ name: "Household", slug: "household" });
+    listDepartmentsMock.mockResolvedValue({ departments: [named] });
+    getDepartmentMock.mockResolvedValue(detail(named));
+    removeDepartmentMemberMock.mockResolvedValue(undefined);
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    const removeBtn = await screen.findByRole("button", { name: /remove priya nair from household/i });
+    fireEvent.click(removeBtn);
+
+    const dialog = await screen.findByRole("dialog", { name: /remove member/i });
+    expect(dialog.textContent).toMatch(/Remove Priya Nair from Household\?/);
+    fireEvent.click(dialog.querySelector("button.danger") as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Priya Nair removed from Household.", "success");
     });
   });
 
@@ -442,6 +478,10 @@ describe("DepartmentsPanel — archive / restore", () => {
     await waitFor(() => {
       expect(archiveDepartmentMock).toHaveBeenCalledWith("d1");
     });
+    // WARP-1809 — archive toast label routes through the display helper.
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Finance archived.", "success");
+    });
   });
 
   it("an archived unit shows Restore instead of Archive; confirming calls restoreDepartment", async () => {
@@ -464,6 +504,10 @@ describe("DepartmentsPanel — archive / restore", () => {
 
     await waitFor(() => {
       expect(restoreDepartmentMock).toHaveBeenCalledWith("d1");
+    });
+    // WARP-1809 — restore toast label routes through the display helper.
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Finance is being restored…", "success");
     });
   });
 

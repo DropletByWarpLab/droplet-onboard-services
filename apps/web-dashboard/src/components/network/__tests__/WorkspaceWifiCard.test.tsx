@@ -1,7 +1,7 @@
 /**
- * HouseholdWifiCard — THE household Wi-Fi control (WARP-1723 → WARP-1733).
+ * WorkspaceWifiCard — THE workspace Wi-Fi control (WARP-1723 → WARP-1733).
  *
- * WARP-1723 established one editable household surface, chosen by where the
+ * WARP-1723 established one editable workspace surface, chosen by where the
  * Wi-Fi actually lives (`/api/network/wifi/current` → `source`). That choice
  * was inlined in WifiTab, which meant it existed only on the Advanced-mode
  * Wi-Fi tab — and Simple mode, the home persona's view (ADR-002), had no way
@@ -16,7 +16,7 @@
  * sibling cards); NetworkSimple keeps the mount test.
  *
  * The five states, unchanged from WARP-1723:
- *   source "ap"     → ApWifiCard slot="household" (the AP hosts the household net)
+ *   source "ap"     → ApWifiCard slot="workspace" (the AP hosts the workspace net)
  *   source "router" → WifiSettingsForm (this Droplet's own radio hosts it)
  *   source null     → WifiSettingsForm + its own honest "couldn't read" notice
  *   unresolved      → the height-reserving skeleton, never both forms
@@ -25,12 +25,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
-import { HouseholdWifiCard } from "../HouseholdWifiCard";
+import { WorkspaceWifiCard } from "../WorkspaceWifiCard";
 import {
   AP_WIFI_UP,
   CURRENT_WIFI_NONE,
   FAILED_READ_NOTICE,
-  HOUSEHOLD_HEADLINE,
+  WORKSPACE_HEADLINE,
   ROUTER_FORM_SUBHEAD,
   SKELETON_TEXT,
   SwrRevalidateHandle,
@@ -45,12 +45,12 @@ import {
 function renderCard() {
   return render(
     <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-      <HouseholdWifiCard />
+      <WorkspaceWifiCard />
     </SWRConfig>,
   );
 }
 
-describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () => {
+describe("WorkspaceWifiCard source split (WARP-1723, extracted WARP-1733)", () => {
   let fetchMock: FetchMock;
 
   beforeEach(() => {
@@ -61,17 +61,17 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     vi.unstubAllGlobals();
   });
 
-  it('source "ap" (edge-router shape): the AP form IS the household form; the router form is gone', async () => {
+  it('source "ap" (edge-router shape): the AP form IS the workspace form; the router form is gone', async () => {
     mockWifiEndpoints(fetchMock, {
       current: currentWifi({ source: "ap" }),
       apWifi: AP_WIFI_UP,
     });
     renderCard();
 
-    // Exactly one household form, and it is the AP's — its input carries the
+    // Exactly one workspace form, and it is the AP's — its input carries the
     // AP write path's id, not the router form's `wifi-ssid`.
-    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
-    expect(screen.getAllByText(HOUSEHOLD_HEADLINE)).toHaveLength(1);
+    expect(await screen.findByText(WORKSPACE_HEADLINE)).toBeInTheDocument();
+    expect(screen.getAllByText(WORKSPACE_HEADLINE)).toHaveLength(1);
     const ssid = await screen.findByLabelText("Network name (SSID)");
     expect(ssid).toHaveAttribute("id", "ap-wifi-ssid");
 
@@ -81,18 +81,18 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     expect(document.getElementById("wifi-ssid")).toBeNull();
   });
 
-  // UX blocker 1 (WARP-1723 second pass): promoted into the household slot, the
+  // UX blocker 1 (WARP-1723 second pass): promoted into the workspace slot, the
   // AP card must stop wearing secondary-slot copy. "Access point Wi-Fi" / "the
   // network your COVERAGE EXTENDER broadcasts" reads as an accessory network,
-  // so a household admin concludes their own Wi-Fi isn't editable here.
-  it('source "ap": the promoted card wears household copy, not coverage-extender copy', async () => {
+  // so a workspace admin concludes their own Wi-Fi isn't editable here.
+  it('source "ap": the promoted card wears workspace copy, not coverage-extender copy', async () => {
     mockWifiEndpoints(fetchMock, {
       current: currentWifi({ source: "ap" }),
       apWifi: AP_WIFI_UP,
     });
     renderCard();
 
-    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(await screen.findByText(WORKSPACE_HEADLINE)).toBeInTheDocument();
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
     // It still says WHERE the network is broadcast — honest about the restart.
     expect(screen.getByText(/the network your devices join/i)).toBeInTheDocument();
@@ -123,14 +123,14 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     expect(screen.queryByText(/Not available —/)).not.toBeInTheDocument();
   });
 
-  it('source "router": the router form owns the household slot', async () => {
+  it('source "router": the router form owns the workspace slot', async () => {
     mockWifiEndpoints(fetchMock, {
       current: currentWifi({ source: "router" }),
       apWifi: AP_WIFI_UP,
     });
     renderCard();
 
-    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(await screen.findByText(WORKSPACE_HEADLINE)).toBeInTheDocument();
     expect(screen.getByText(ROUTER_FORM_SUBHEAD)).toBeInTheDocument();
     expect(document.getElementById("wifi-ssid")).not.toBeNull();
     // The SECOND network's card is WifiTab's business, not this control's —
@@ -143,7 +143,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     mockWifiEndpoints(fetchMock, { current: CURRENT_WIFI_NONE });
     renderCard();
 
-    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(await screen.findByText(WORKSPACE_HEADLINE)).toBeInTheDocument();
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
     // WifiSettingsForm's own `live && !live.ssid` notice, not a second one
     // stacked above it: `source: null` is a RESOLVED answer.
@@ -158,7 +158,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     renderCard();
 
     expect(await findSkeleton()).toBeInTheDocument();
-    expect(screen.queryByText(HOUSEHOLD_HEADLINE)).not.toBeInTheDocument();
+    expect(screen.queryByText(WORKSPACE_HEADLINE)).not.toBeInTheDocument();
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
   });
 
@@ -227,7 +227,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
    * SIBLING above the form. Inside the Advanced Wi-Fi tab panel that read
    * acceptably — it was the first thing in a Wi-Fi-only panel. In Simple mode
    * the column becomes five identically-styled `.card` siblings at `gap-4`,
-   * with nothing binding the notice to the form it qualifies, so a household
+   * with nothing binding the notice to the form it qualifies, so a workspace
    * reads it as a standalone page alert rather than a preamble to that form.
    * One card, one subject.
    */
@@ -267,7 +267,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     render(
       <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
         <SwrRevalidateHandle handle={handle} />
-        <HouseholdWifiCard />
+        <WorkspaceWifiCard />
       </SWRConfig>,
     );
 
@@ -295,7 +295,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     render(
       <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
         <SwrRevalidateHandle handle={handle} />
-        <HouseholdWifiCard />
+        <WorkspaceWifiCard />
       </SWRConfig>,
     );
 
@@ -310,7 +310,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
    * subsection (h3), while in Simple mode it is a sibling of the
    * `<h2>Internet</h2>` hero. The level therefore travels from the mount —
    * and it has to reach BOTH branches, or the edge-router shape (where the AP
-   * card is the household form) keeps the misnesting.
+   * card is the workspace form) keeps the misnesting.
    */
   it("passes the mount's heading level through to whichever form owns the slot", async () => {
     mockWifiEndpoints(fetchMock, {
@@ -318,12 +318,12 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     });
     const { unmount } = render(
       <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-        <HouseholdWifiCard headingLevel="h2" />
+        <WorkspaceWifiCard headingLevel="h2" />
       </SWRConfig>,
     );
     expect(
       await screen.findByRole("heading", {
-        name: HOUSEHOLD_HEADLINE,
+        name: WORKSPACE_HEADLINE,
         level: 2,
       }),
     ).toBeInTheDocument();
@@ -335,12 +335,12 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
     });
     render(
       <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-        <HouseholdWifiCard headingLevel="h2" />
+        <WorkspaceWifiCard headingLevel="h2" />
       </SWRConfig>,
     );
     expect(
       await screen.findByRole("heading", {
-        name: HOUSEHOLD_HEADLINE,
+        name: WORKSPACE_HEADLINE,
         level: 2,
       }),
     ).toBeInTheDocument();
@@ -354,7 +354,7 @@ describe("HouseholdWifiCard source split (WARP-1723, extracted WARP-1733)", () =
 
     expect(
       await screen.findByRole("heading", {
-        name: HOUSEHOLD_HEADLINE,
+        name: WORKSPACE_HEADLINE,
         level: 3,
       }),
     ).toBeInTheDocument();

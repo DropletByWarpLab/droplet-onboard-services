@@ -23,7 +23,7 @@ import {
   AP_WIFI_UP,
   CURRENT_WIFI_NONE,
   FAILED_READ_NOTICE,
-  HOUSEHOLD_HEADLINE,
+  WORKSPACE_HEADLINE,
   ROUTER_FORM_SUBHEAD,
   currentWifi,
   findSkeleton,
@@ -43,7 +43,7 @@ beforeEach(() => {
   apsMock.mockReset();
   // No coverage extenders — keeps the test focused on the internet/router hero.
   apsMock.mockResolvedValue({ aps: [] } as never);
-  // WARP-1733: Simple mode now mounts the household Wi-Fi control, whose
+  // WARP-1733: Simple mode now mounts the workspace Wi-Fi control, whose
   // children run their real fetchers. Stub the global fetch (never let jsdom
   // reach the network) and leave the source unresolved by default, so the
   // hero/router assertions below meet only the calm placeholder.
@@ -116,15 +116,15 @@ describe("NetworkSimple internet/router status", () => {
  * WARP-1733 — Simple mode is the home persona's view (ADR-002), and it had no
  * Wi-Fi name/password control at all. Its only Wi-Fi element was a read-only
  * count ("N access points · auto-managed"); the sole route onward was the
- * "All network controls" button, so a household could change its Wi-Fi only by
+ * "All network controls" button, so a workspace could change its Wi-Fi only by
  * first discovering the Simple/Advanced segmented control and then the right
  * tab inside it.
  *
- * The fix mounts the SAME HouseholdWifiCard the Wi-Fi tab uses — not a copy.
+ * The fix mounts the SAME WorkspaceWifiCard the Wi-Fi tab uses — not a copy.
  * A second editable Wi-Fi surface is precisely the bug WARP-1723 removed, and
  * two surfaces would be free to disagree about which radio they write.
  */
-describe("NetworkSimple household Wi-Fi control (WARP-1733)", () => {
+describe("NetworkSimple workspace Wi-Fi control (WARP-1733)", () => {
   const overview = overviewWith(
     { up: true, present: true, proto: "dhcp" },
     true,
@@ -164,7 +164,7 @@ describe("NetworkSimple household Wi-Fi control (WARP-1733)", () => {
   it("puts the Wi-Fi control above the escape hatch to Advanced", async () => {
     renderWithSource({ current: currentWifi({ source: "router" }) });
 
-    const wifi = await screen.findByText(HOUSEHOLD_HEADLINE);
+    const wifi = await screen.findByText(WORKSPACE_HEADLINE);
     const internet = screen.getByText("Internet");
     const advanced = screen.getByRole("button", {
       name: /all network controls/i,
@@ -188,8 +188,8 @@ describe("NetworkSimple household Wi-Fi control (WARP-1733)", () => {
     // The router form writes a radio that hosts nothing on this shape.
     expect(screen.queryByText(ROUTER_FORM_SUBHEAD)).not.toBeInTheDocument();
     expect(document.getElementById("wifi-ssid")).toBeNull();
-    // ONE household control, never two.
-    expect(screen.getAllByText(HOUSEHOLD_HEADLINE)).toHaveLength(1);
+    // ONE workspace control, never two.
+    expect(screen.getAllByText(WORKSPACE_HEADLINE)).toHaveLength(1);
   });
 
   it('source "router": the router form is the one that renders', async () => {
@@ -201,15 +201,15 @@ describe("NetworkSimple household Wi-Fi control (WARP-1733)", () => {
     expect(await screen.findByText(ROUTER_FORM_SUBHEAD)).toBeInTheDocument();
     expect(document.getElementById("wifi-ssid")).not.toBeNull();
     // The AP's own second network belongs to the Wi-Fi tab, not to the
-    // Simple-mode glance — Simple mode carries the household network only.
+    // Simple-mode glance — Simple mode carries the workspace network only.
     expect(screen.queryByText("Access point Wi-Fi")).not.toBeInTheDocument();
-    expect(screen.getAllByText(HOUSEHOLD_HEADLINE)).toHaveLength(1);
+    expect(screen.getAllByText(WORKSPACE_HEADLINE)).toHaveLength(1);
   });
 
   it("source null (couldn't read): the form still renders, with its honest notice", async () => {
     renderWithSource({ current: CURRENT_WIFI_NONE });
 
-    expect(await screen.findByText(HOUSEHOLD_HEADLINE)).toBeInTheDocument();
+    expect(await screen.findByText(WORKSPACE_HEADLINE)).toBeInTheDocument();
     expect(
       screen.getByText("We couldn't read the Wi-Fi configuration right now."),
     ).toBeInTheDocument();
@@ -220,7 +220,7 @@ describe("NetworkSimple household Wi-Fi control (WARP-1733)", () => {
 
     const skeleton = await findSkeleton();
     expect(skeleton.style.minHeight).toBe("300px");
-    expect(screen.queryByText(HOUSEHOLD_HEADLINE)).not.toBeInTheDocument();
+    expect(screen.queryByText(WORKSPACE_HEADLINE)).not.toBeInTheDocument();
   });
 
   it("a FAILED source read keeps the form and says where it writes", async () => {
@@ -263,15 +263,15 @@ describe("NetworkSimple — WARP-1733 UX polish", () => {
   /**
    * Item B. ShellPage renders `<h1>Network</h1>`, so this column reads
    * h1 → `<h2>Internet</h2>` → the Wi-Fi card. A hardcoded `h3` on that card
-   * makes the heading tree claim the household Wi-Fi is a subsection of the
+   * makes the heading tree claim the workspace Wi-Fi is a subsection of the
    * Internet hero. It is a sibling card, so it is an h2 here — while staying
    * h3 in the Advanced tab panel, where the subsection reading is correct.
    */
-  it("mounts the household Wi-Fi card as a SIBLING of the Internet hero, not under it", async () => {
+  it("mounts the workspace Wi-Fi card as a SIBLING of the Internet hero, not under it", async () => {
     renderWithSource({ current: currentWifi({ source: "router" }) });
 
     const wifi = await screen.findByRole("heading", {
-      name: HOUSEHOLD_HEADLINE,
+      name: WORKSPACE_HEADLINE,
       level: 2,
     });
     const internet = screen.getByRole("heading", { name: "Internet", level: 2 });
@@ -279,11 +279,11 @@ describe("NetworkSimple — WARP-1733 UX polish", () => {
     expect(internet).toBeInTheDocument();
     // Nothing in Simple mode claims the Wi-Fi card is a subsection.
     expect(
-      screen.queryByRole("heading", { name: HOUSEHOLD_HEADLINE, level: 3 }),
+      screen.queryByRole("heading", { name: WORKSPACE_HEADLINE, level: 3 }),
     ).not.toBeInTheDocument();
   });
 
-  // …and on the edge-router shape, where the AP card IS the household form.
+  // …and on the edge-router shape, where the AP card IS the workspace form.
   it("levels the promoted AP form the same way", async () => {
     renderWithSource({
       current: currentWifi({ source: "ap" }),
@@ -292,17 +292,17 @@ describe("NetworkSimple — WARP-1733 UX polish", () => {
 
     expect(
       await screen.findByRole("heading", {
-        name: HOUSEHOLD_HEADLINE,
+        name: WORKSPACE_HEADLINE,
         level: 2,
       }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: HOUSEHOLD_HEADLINE, level: 3 }),
+      screen.queryByRole("heading", { name: WORKSPACE_HEADLINE, level: 3 }),
     ).not.toBeInTheDocument();
   });
 
   /**
-   * Item C. On the edge-router shape the Wi-Fi card says the household network
+   * Item C. On the edge-router shape the Wi-Fi card says the workspace network
    * is "broadcast by your Droplet access point" (editable) while the card 16px
    * below says "N access points · auto-managed" (read-only) — so an owner asks
    * which of the two they just edited, and "auto-managed" flatly contradicts
@@ -318,7 +318,7 @@ describe("NetworkSimple — WARP-1733 UX polish", () => {
       apWifi: AP_WIFI_UP,
     });
 
-    // The editable household form is present and still names where it writes.
+    // The editable workspace form is present and still names where it writes.
     expect(
       await screen.findByText(/broadcast by your Droplet access point/i),
     ).toBeInTheDocument();
@@ -350,7 +350,7 @@ describe("NetworkSimple — WARP-1733 UX polish", () => {
     apsMock.mockResolvedValue({ aps: [] } as never);
     renderWithSource({ current: currentWifi({ source: "router" }) });
 
-    await screen.findByText(HOUSEHOLD_HEADLINE);
+    await screen.findByText(WORKSPACE_HEADLINE);
     expect(
       screen.queryByText(/wi-fi coverage · auto-managed/i),
     ).not.toBeInTheDocument();

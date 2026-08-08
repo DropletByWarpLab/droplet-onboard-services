@@ -31,10 +31,10 @@ import type { CardHeadingLevel } from "@/components/network/card-heading-level";
  * Extenders card.
  *
  * Single-surface contract (WARP-1723): this card is the ONE editable form for
- * the AP's Wi-Fi, and it mounts only on Network → Wi-Fi — as the household
+ * the AP's Wi-Fi, and it mounts only on Network → Wi-Fi — as the workspace
  * form itself when /api/network/wifi/current resolves `source: "ap"` (the
  * edge-router shape, where this Droplet's own radio hosts nothing), or below
- * the router's form when the household network lives on the router and the AP
+ * the router's form when the workspace network lives on the router and the AP
  * is genuinely a second network (see WifiTab). The Coverage Extenders panel
  * used to mount this same editable card; it now renders a read-only
  * reflection (ApWifiSummary) that links here. That reflection keys on the
@@ -45,10 +45,10 @@ import type { CardHeadingLevel } from "@/components/network/card-heading-level";
  * orchestrator dials the AP on every read, so the name here is whatever the
  * AP's uci actually says.
  *
- * The two mounts wear different copy — see `ApWifiCardSlot`. In the household
+ * The two mounts wear different copy — see `ApWifiCardSlot`. In the workspace
  * slot this IS the home network, so it must not describe itself as a
  * "coverage extender"; in the secondary slot it must, because there the
- * household network is the card above it.
+ * workspace network is the card above it.
  *
  * Honesty fork (the UpnpCard / BandSteeringCard contract): with no approved
  * Droplet AP online it shows a calm read-only "not available" line, never a
@@ -93,19 +93,19 @@ export const AP_WIFI_SWR_OPTIONS = { refreshInterval: 30_000 } as const;
  * Which slot this card occupies (WARP-1723 second pass, UX blocker 1).
  *
  * On the edge-router shape (`/api/network/wifi/current` → `source: "ap"`) this
- * card IS the household Wi-Fi form — the household SSID exists nowhere else.
+ * card IS the workspace Wi-Fi form — the workspace SSID exists nowhere else.
  * Wearing "Access point Wi-Fi" / "your coverage extender" there reads as an
- * accessory network, so a household admin concludes their own Wi-Fi isn't
- * editable on this page at all. `"household"` says whose network it is while
+ * accessory network, so a workspace admin concludes their own Wi-Fi isn't
+ * editable on this page at all. `"workspace"` says whose network it is while
  * staying honest about which radio restarts.
  *
  * Default `"secondary"` — the router-shape mount below WifiSettingsForm, where
  * the AP genuinely IS a second network, keeps today's strings verbatim.
  */
-export type ApWifiCardSlot = "household" | "secondary";
+export type ApWifiCardSlot = "workspace" | "secondary";
 
 const SLOT_COPY: Record<ApWifiCardSlot, { headline: string; supported: string }> = {
-  household: {
+  workspace: {
     headline: "Wi-Fi settings",
     supported:
       "Your workspace Wi-Fi — the network your devices join. It's broadcast by your Droplet access point, so saving restarts that radio and devices reconnect.",
@@ -142,7 +142,7 @@ export function ApWifiCard({
   slot?: ApWifiCardSlot;
   /**
    * The document outline this card is mounted into (WARP-1733 UX review,
-   * item B) — see CardHeadingLevel. Only the household slot ever gets an
+   * item B) — see CardHeadingLevel. Only the workspace slot ever gets an
    * `h2`: the secondary mount lives inside the Advanced Wi-Fi tab panel,
    * where a subsection is exactly what it is.
    */
@@ -289,11 +289,11 @@ export function ApWifiCard({
     <div
       className="card"
       // Layout stability (UX + QA second pass, compounding live bug
-      // WARP-1726): in the household slot this card follows WifiTab's
+      // WARP-1726): in the workspace slot this card follows WifiTab's
       // placeholder and precedes a ~350px form, so it must not be the short
       // step in between — a mid-flight SHRINK is what the scroll clamp bites
       // on. Same reservation as the placeholder it replaces.
-      style={slot === "household" && resolving ? { minHeight: 300 } : undefined}
+      style={slot === "workspace" && resolving ? { minHeight: 300 } : undefined}
     >
       <div className="flex items-start gap-3 mb-3">
         <div
@@ -313,15 +313,15 @@ export function ApWifiCard({
       </div>
 
       {resolving ? (
-        // Only the household slot draws a form-shaped body. There it holds the
+        // Only the workspace slot draws a form-shaped body. There it holds the
         // primary surface's footprint (see the minHeight above) so the tab
         // never shrinks mid-flight. In the secondary slot the card is SHORT in
         // its most common resolved state ("not available" — a router-shape
-        // household with no extender at all), so a form skeleton there would
+        // workspace with no extender at all), so a form skeleton there would
         // manufacture the very shrink this fix removes; the calm header line
         // already matches that footprint. No labelled controls either way —
         // nothing here is interactive.
-        slot === "household" ? (
+        slot === "workspace" ? (
           <div className="space-y-4 max-w-md animate-pulse" aria-hidden="true">
             {[0, 1].map((i) => (
               <div key={i}>
@@ -463,7 +463,7 @@ export function ApWifiCard({
                   // `p-2 -mr-2` (WARP-1733 UX review, item D): the button
                   // wrapped a bare 16px icon, so its hit area was ~16×16 —
                   // under WCAG 2.2 SC 2.5.8's 24px floor, and on the
-                  // edge-router shape this card IS the household form, so it
+                  // edge-router shape this card IS the workspace form, so it
                   // is a phone target too. The padding grows the target to
                   // 32×32.
                   //

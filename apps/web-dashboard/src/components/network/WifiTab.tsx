@@ -5,9 +5,9 @@ import { BandSteeringCard } from "@/components/network/BandSteeringCard";
 import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import {
-  HouseholdWifiCard,
-  useHouseholdWifiSource,
-} from "@/components/network/HouseholdWifiCard";
+  WorkspaceWifiCard,
+  useWorkspaceWifiSource,
+} from "@/components/network/WorkspaceWifiCard";
 import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { WifiChannelCard } from "@/components/network/WifiChannelCard";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
@@ -17,19 +17,19 @@ import { WifiScanPanel } from "@/components/network/WifiScanPanel";
  * single-editable-surface split below is render-testable — the page is a tower
  * of hooks, and a Next.js page route can't carry named exports.
  *
- * The household Wi-Fi control itself moved out again at WARP-1733, into
- * HouseholdWifiCard, so Simple mode can mount the SAME control instead of
+ * The workspace Wi-Fi control itself moved out again at WARP-1733, into
+ * WorkspaceWifiCard, so Simple mode can mount the SAME control instead of
  * growing a second editable Wi-Fi surface (the bug WARP-1723 removed). Read
  * that file for the `source`-based choice between the AP form, the router
  * form, the skeleton and the failed-read fallback. What stays here is what
- * this TAB owns: the household slot's placement, the AP's own second network,
+ * this TAB owns: the workspace slot's placement, the AP's own second network,
  * and the power-user cards below.
  */
 export function WifiTab() {
-  // The same read the household card makes (shared SWR key, so no extra
+  // The same read the workspace card makes (shared SWR key, so no extra
   // fetch) — the tab needs it for one decision of its own: whether the AP's
   // OWN network is a second card worth showing.
-  const { resolved, source, failedRead } = useHouseholdWifiSource();
+  const { resolved, source, failedRead } = useWorkspaceWifiSource();
 
   return (
     <div className="space-y-4">
@@ -40,7 +40,7 @@ export function WifiTab() {
           call site where it can be read against the surrounding headings.
           Here it IS a subsection of the Wi-Fi tab panel — same level as every
           card below it. */}
-      <HouseholdWifiCard headingLevel="h3" />
+      <WorkspaceWifiCard headingLevel="h3" />
 
       {/* WARP-871: the channel write path (orchestrator route + routing) shipped
           at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab
@@ -55,18 +55,18 @@ export function WifiTab() {
 
       {resolved && (source === "router" || failedRead) ? (
         // WARP-1712 → WARP-1723: the external access point's OWN network name +
-        // password, below the router's household form — two real networks, two
+        // password, below the router's workspace form — two real networks, two
         // honest cards. This is the ONLY other mount of ApWifiCard; the
         // Coverage Extenders panel on the Devices tab now shows a read-only
         // reflection that links here instead of a second editable form, and
-        // Simple mode (WARP-1733) mounts the household card only. The default
+        // Simple mode (WARP-1733) mounts the workspace card only. The default
         // `slot="secondary"` keeps this card's original copy verbatim.
         //
         // Also rendered on a FAILED wifi/current read (review nit 4, third
         // pass). The first cut treated that error like `source: null` and
         // dropped the card, but this card is self-sufficient — its own read,
         // its own honesty states — so a transient failure here would take away
-        // a working control. On a router-shape household with a real extender
+        // a working control. On a router-shape workspace with a real extender
         // that strands the extender's Wi-Fi editor entirely: the Devices panel
         // is read-only since WARP-1723, so its "Change in Wi-Fi settings" link
         // would land on a tab that can't edit what it promised.
@@ -74,9 +74,9 @@ export function WifiTab() {
         // `failedRead` has to mean "the read produced NOTHING" for this `||`
         // to be safe. If it meant merely "errored", a failed poll over a
         // cached `source: "ap"` would satisfy BOTH sides at once — the card
-        // above promotes the AP form into the household slot while this gate
+        // above promotes the AP form into the workspace slot while this gate
         // renders the same AP a second time as the secondary network. See
-        // `useHouseholdWifiSource`; WifiTab.test.tsx pins the state.
+        // `useWorkspaceWifiSource`; WifiTab.test.tsx pins the state.
         <ApWifiCard />
       ) : null}
 

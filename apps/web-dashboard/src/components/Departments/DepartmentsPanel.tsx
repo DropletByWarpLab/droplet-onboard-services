@@ -66,6 +66,7 @@ import {
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { orgUnitDisplayName } from "@/lib/org-unit-name";
 import { Badge, Meter, type BadgeKind } from "@/components/shell/primitives";
 
 const RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
@@ -85,10 +86,12 @@ const RIGHT_ICON: Record<DepartmentRight, LucideIcon> = {
  * unit's name as "Household" (a data contract — ids drive selection/lookup and
  * the name feeds nothing structural here), but the build is business-only, so
  * the RENDERED name is always "Workspace". Keyed off `kind`, never the name
- * string, and used at render sites only.
+ * string, and used at render sites only. WARP-1809 moved the mapping to the
+ * shared `orgUnitDisplayName` (the People-page access drawer renders the same
+ * rule on deptRights chips); this wrapper just adapts a Department row.
  */
 function deptDisplayName(d: Department): string {
-  return d.kind === "HOUSEHOLD" ? "Workspace" : d.name;
+  return orgUnitDisplayName(d.kind, d.name);
 }
 
 /** Verbatim copy (design brief §2–§5) — ships as-is. */
@@ -355,7 +358,11 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
 
   const selected = departments.find((d) => d.id === selectedId) ?? null;
   const canManage = !!selected && (isAdminTier || selected.myRight === "manager");
-  const libraryLabel = selected?.name ?? "this library";
+  // WARP-1809 defense-in-depth: display name, not the raw row name. Today
+  // this only ever names a DEPARTMENT/TEAM (member removal is HOUSEHOLD-
+  // gated), for which the helper is identity — but a future gate change
+  // must not be able to leak the seeded unit name into the confirm copy.
+  const libraryLabel = selected ? deptDisplayName(selected) : "this library";
 
   const availablePeople = useMemo(() => {
     const memberIds = new Set((detail?.members ?? []).map((m) => m.userId));
@@ -442,7 +449,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   async function performRemoveMember() {
     if (!selected || !removeTarget) return;
     await removeDepartmentMember(selected.id, removeTarget.userId);
-    toast(`${removeTarget.displayName} removed from ${selected.name}.`, "success");
+    toast(`${removeTarget.displayName} removed from ${deptDisplayName(selected)}.`, "success");
     await loadDetail(selected.id);
   }
 
@@ -462,10 +469,13 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   }
 
   // ── Archive / restore ──
+  // WARP-1809: toast labels route through deptDisplayName — identity for
+  // every archivable unit today (archive/restore are HOUSEHOLD-gated), but
+  // a future gate change can't leak the raw seeded name.
   async function performArchive() {
     if (!archiveTarget) return;
     await archiveDepartment(archiveTarget.id);
-    toast(`${archiveTarget.name} archived.`, "success");
+    toast(`${deptDisplayName(archiveTarget)} archived.`, "success");
     if (selectedId === archiveTarget.id) setSelectedId(null);
     await reload();
   }
@@ -473,7 +483,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   async function performRestore() {
     if (!restoreTarget) return;
     await restoreDepartment(restoreTarget.id);
-    toast(`${restoreTarget.name} is being restored…`, "success");
+    toast(`${deptDisplayName(restoreTarget)} is being restored…`, "success");
     await reload();
   }
 
@@ -635,7 +645,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             <div className="sect">
               <h2>System</h2>
             </div>
-            <div className="card" data-testid="household-card">
+            <div className="card" data-testid="workspace-card">
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <span
                   style={{
@@ -855,7 +865,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       <button
                         type="button"
                         onClick={() => setRemoveTarget({ userId: m.userId, displayName: m.displayName })}
-                        aria-label={`Remove ${m.displayName} from ${selected.name}`}
+                        aria-label={`Remove ${m.displayName} from ${deptDisplayName(selected)}`}
                         className="p-2.5 rounded-sm text-[var(--text-faint)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
                       >
                         <Trash2 size={14} />
@@ -928,7 +938,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
         open={archiveTarget !== null}
         onConfirm={performArchive}
         onCancel={() => setArchiveTarget(null)}
-        title={archiveTarget ? `Archive ${archiveTarget.name}?` : "Archive department?"}
+        title={archiveTarget ? `Archive ${deptDisplayName(archiveTarget)}?` : "Archive department?"}
         description={COPY.archiveBody}
         confirmLabel="Archive"
         variant="destructive"
@@ -938,7 +948,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
         open={restoreTarget !== null}
         onConfirm={performRestore}
         onCancel={() => setRestoreTarget(null)}
-        title={restoreTarget ? `Restore ${restoreTarget.name}?` : "Restore department?"}
+        title={restoreTarget ? `Restore ${deptDisplayName(restoreTarget)}?` : "Restore department?"}
         description={COPY.restoreBody}
         confirmLabel="Restore"
         variant="neutral"

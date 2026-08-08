@@ -4,7 +4,7 @@ import useSWR from "swr";
 import { Globe, Cpu, Wifi, ArrowRight, AlertTriangle, Router } from "lucide-react";
 import { fetchApDevices } from "@/lib/api";
 import type { NetworkOverview } from "@/lib/types";
-import { HouseholdWifiCard } from "@/components/network/HouseholdWifiCard";
+import { WorkspaceWifiCard } from "@/components/network/WorkspaceWifiCard";
 
 function fmtUptime(sec: number): string {
   if (!sec || sec <= 0) return "—";
@@ -38,7 +38,7 @@ interface Props {
 }
 
 /** WARP-612: the everyday "is the internet up?" glance for Home installs —
- *  the Droplet Design System's Simple-mode internet hero, household Wi-Fi,
+ *  the Droplet Design System's Simple-mode internet hero, workspace Wi-Fi,
  *  device count, and a read-out of the auto-managed coverage access points
  *  (ADR-005: APs auto-discover + auto band-steer; one approval tap is the only
  *  manual gate). Built on real /api/network + /api/aps data;
@@ -48,7 +48,7 @@ interface Props {
  *  the backends it waited on shipped (GET /api/network/wifi/current at
  *  WARP-1714, GET/PUT /api/network/wifi/ap at WARP-1712), and its absence was
  *  the whole complaint. This is the home persona's view (ADR-002); leaving the
- *  single most-changed home network setting out of it meant a household could
+ *  single most-changed network setting out of it meant a workspace could
  *  only reach it by discovering the Simple/Advanced segmented control and then
  *  the right tab behind it. Guest Wi-Fi and camera privacy remain Advanced-only
  *  and out of this ticket's scope. */
@@ -126,7 +126,7 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
         </div>
       </section>
 
-      {/* Household Wi-Fi (WARP-1733) — THE canonical control, the same
+      {/* Workspace Wi-Fi (WARP-1733) — THE canonical control, the same
           component the Advanced Wi-Fi tab mounts, not a copy of it: two
           editable Wi-Fi surfaces is the bug WARP-1723 removed, and copies are
           free to drift into disagreeing about which radio they write.
@@ -146,9 +146,9 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
           `<h1>Network</h1>`, so this column reads h1 → h2 Internet → this
           card. The control's default h3 — correct inside the Advanced Wi-Fi
           tab panel, where it IS a subsection — would claim here that the
-          household Wi-Fi belongs to the Internet hero above it. It's a
+          workspace Wi-Fi belongs to the Internet hero above it. It's a
           sibling card, and the outline has to say so. */}
-      <HouseholdWifiCard headingLevel="h2" />
+      <WorkspaceWifiCard headingLevel="h2" />
 
       {/* Devices + auto-managed coverage + escape hatch to Advanced */}
       <section className="card">
@@ -181,7 +181,7 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
                   <p className="type-title-3 tabular-nums" style={{ color: "var(--text)" }}>{apsOnline}</p>
                   {/* "Wi-Fi coverage", not "access point(s)" (WARP-1733 UX
                       review, item C). On the edge-router shape the Wi-Fi card
-                      16px above says the household network is "broadcast by
+                      16px above says the workspace network is "broadcast by
                       your Droplet access point" and is editable — so a
                       read-only "N access points · auto-managed" right below it
                       made an owner ask which of the two they had just edited,

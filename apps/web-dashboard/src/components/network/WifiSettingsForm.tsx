@@ -72,7 +72,7 @@ export function WifiSettingsForm({
   /**
    * The `/api/network/wifi/current` read FAILED (WARP-1733 UX review, item A).
    *
-   * HouseholdWifiCard falls back to this form on a failed read — the right
+   * WorkspaceWifiCard falls back to this form on a failed read — the right
    * call, since the alternative is taking the only Wi-Fi editor away — but on
    * the edge-router shape this form saves through the ROUTER write path and
    * reports success while nothing changes on air. So it has to say so, and the
@@ -82,7 +82,7 @@ export function WifiSettingsForm({
    * "Produced nothing" is the contract, NOT "errored". This is a 30s polling
    * read and SWR keeps cached `data` across a failed revalidation, so a caller
    * passing a bare `error !== undefined` would raise this notice over fields
-   * this form had just seeded from that cache. `useHouseholdWifiSource` owns
+   * this form had just seeded from that cache. `useWorkspaceWifiSource` owns
    * that distinction (`error !== undefined && data === undefined`) — read its
    * `failedRead` note before changing either side.
    *
@@ -107,7 +107,7 @@ export function WifiSettingsForm({
   // The orchestrator resolves WHERE that Wi-Fi lives, because it differs by
   // deployment shape: on the edge-router shape this Droplet's own radio hosts
   // nothing (`interfaces: []`, uci carries only a disabled placeholder) and the
-  // household SSID exists only on the approved access point.
+  // workspace SSID exists only on the approved access point.
   //
   // A background poll must never overwrite what the user is halfway through
   // typing. `dirty` latches on the first edit and holds the fields until the
@@ -263,7 +263,7 @@ export function WifiSettingsForm({
       {/* "Wi-Fi settings" (WARP-1723 second pass): Title-Case + unhyphenated
           was inconsistent with every other Wi-Fi string in this same file, and
           the Devices-tab link promises "Change in Wi-Fi settings" — that
-          promise has to land on a matching label. The ApWifiCard household
+          promise has to land on a matching label. The ApWifiCard workspace
           variant carries the same headline by design; the two never occupy
           this slot at the same time. */}
       <Heading className="type-headline text-[color:var(--text)] mb-1">
@@ -278,7 +278,7 @@ export function WifiSettingsForm({
       {/* WARP-1733 UX review (item A): the failed-read notice, in the SAME
           inset slot as the resolved-but-empty notice below it — one card, one
           subject. It used to be a sibling `.card` rendered above this one by
-          HouseholdWifiCard; in Simple mode that made it the third of five
+          WorkspaceWifiCard; in Simple mode that made it the third of five
           identically-styled cards at `gap-4`, with nothing tying it to the
           form it is about.
 
@@ -287,7 +287,7 @@ export function WifiSettingsForm({
           NO data, so `live` — same SWR key — is undefined and the notice below
           cannot fire. It would stack if `failedRead` merely meant "errored",
           because a failed poll over a cached `source: null` body leaves `live`
-          defined with no ssid. See `useHouseholdWifiSource`.
+          defined with no ssid. See `useWorkspaceWifiSource`.
 
           No entry transition, deliberately — animating a failure into view
           draws the eye to it and buys nothing (the same restraint the sibling

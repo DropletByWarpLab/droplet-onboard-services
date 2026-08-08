@@ -101,7 +101,7 @@ describe("honesty fork", () => {
    * /api/network/wifi/current resolves, so its own read starts late and an
    * edge-router user sees that flash on every first visit to the Wi-Fi tab.
    */
-  it.each(["household", "secondary"] as const)(
+  it.each(["workspace", "secondary"] as const)(
     "does NOT claim 'not available' while the read is still in flight (%s slot)",
     async (slot) => {
       // A read that never settles — SWR stays isLoading with no data.
@@ -123,16 +123,16 @@ describe("honesty fork", () => {
   /**
    * CHARACTERIZATION — documents CURRENT behaviour, not desired behaviour.
    *
-   * In the HOUSEHOLD slot a resolved `supported: false` is a dead end: the
-   * edge-router shape puts the household SSID on the access point and nowhere
+   * In the WORKSPACE slot a resolved `supported: false` is a dead end: the
+   * edge-router shape puts the workspace SSID on the access point and nowhere
    * else, so when that AP is a third-party one (or offline), the tab's only
-   * household editor answers "not available" with no next step and no other
+   * workspace editor answers "not available" with no next step and no other
    * surface to send the user to. There is no honest state for a third-party
    * AP today — that is a filed product decision, WARP-1738, which will replace
    * this copy. Pinned so the swap is deliberate and visible in the diff rather
    * than a silent copy change; do NOT "fix" the behaviour here.
    */
-  it("household slot, resolved supported:false — documents today's dead end (WARP-1738)", async () => {
+  it("workspace slot, resolved supported:false — documents today's dead end (WARP-1738)", async () => {
     mockFetch.mockResolvedValue({
       supported: false,
       ssid: null,
@@ -143,10 +143,10 @@ describe("honesty fork", () => {
       apCount: 0,
       inSync: true,
     });
-    renderCard({ slot: "household" });
+    renderCard({ slot: "workspace" });
 
-    // It keeps the household headline — this IS the household slot — and then
-    // says the household Wi-Fi can't be edited at all.
+    // It keeps the workspace headline — this IS the workspace slot — and then
+    // says the workspace Wi-Fi can't be edited at all.
     await waitFor(() => expect(screen.getByText("Wi-Fi settings")).toBeTruthy());
     expect(
       screen.getByText(/needs an approved droplet access point/i),
@@ -157,9 +157,9 @@ describe("honesty fork", () => {
     expect(screen.queryByRole("link")).toBeNull();
   });
 
-  it("reserves the household form's height while resolving (WARP-1726 shrink)", async () => {
+  it("reserves the workspace form's height while resolving (WARP-1726 shrink)", async () => {
     mockFetch.mockReturnValue(new Promise(() => {}));
-    const { container } = renderCard({ slot: "household" });
+    const { container } = renderCard({ slot: "workspace" });
 
     await waitFor(() =>
       expect(screen.getByText(/checking with your access point/i)).toBeTruthy(),
@@ -171,13 +171,13 @@ describe("honesty fork", () => {
 
 /**
  * UX blocker 1 (WARP-1723 second pass) — this card occupies two very different
- * slots. In the household slot it IS the home network (the edge-router shape
- * hosts the household SSID nowhere else), so describing itself as a "coverage
- * extender" told a household admin their Wi-Fi wasn't editable here.
+ * slots. In the workspace slot it IS the home network (the edge-router shape
+ * hosts the workspace SSID nowhere else), so describing itself as a "coverage
+ * extender" told a workspace admin their Wi-Fi wasn't editable here.
  */
 describe("slot copy", () => {
-  it("household slot: names the home network, never a coverage extender", async () => {
-    renderCard({ slot: "household" });
+  it("workspace slot: names the home network, never a coverage extender", async () => {
+    renderCard({ slot: "workspace" });
     await waitFor(() => expect(ssidInput()).toBeTruthy());
 
     expect(screen.getByText("Wi-Fi settings")).toBeTruthy();
@@ -404,18 +404,18 @@ describe("save flow", () => {
 
 /**
  * WARP-1733 UX review — this card is the other half of both cross-cutting
- * polish items, because on the edge-router shape it IS the household form and
+ * polish items, because on the edge-router shape it IS the workspace form and
  * therefore mounts in Simple mode too.
  */
 describe("WARP-1733 UX polish", () => {
   /**
    * Item B. ShellPage owns the `<h1>`. In the Advanced Wi-Fi tab this card is
-   * a subsection (`h3`); in Simple mode the household mount is a SIBLING of
+   * a subsection (`h3`); in Simple mode the workspace mount is a SIBLING of
    * the `<h2>Internet</h2>` hero, so `h3` there would claim the Wi-Fi card is
    * part of that hero. The level belongs to the mount, not to the card.
    */
   it("takes its heading level from the mount context", async () => {
-    const { unmount } = renderCard({ slot: "household" });
+    const { unmount } = renderCard({ slot: "workspace" });
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { name: "Wi-Fi settings", level: 3 }),
@@ -423,7 +423,7 @@ describe("WARP-1733 UX polish", () => {
     );
     unmount();
 
-    renderCard({ slot: "household", headingLevel: "h2" });
+    renderCard({ slot: "workspace", headingLevel: "h2" });
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { name: "Wi-Fi settings", level: 2 }),
@@ -443,7 +443,7 @@ describe("WARP-1733 UX polish", () => {
   /**
    * Item D. The reveal button wrapped a 16px icon with no padding, so its hit
    * area was ~16×16 — under WCAG 2.2 SC 2.5.8's 24px floor, and on the
-   * edge-router shape this card IS the household form. `p-2` grows the target
+   * edge-router shape this card IS the workspace form. `p-2` grows the target
    * to 32×32.
    *
    * The margin that gives the space back has to be HORIZONTAL ONLY — see the
