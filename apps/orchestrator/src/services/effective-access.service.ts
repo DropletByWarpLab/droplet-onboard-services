@@ -78,7 +78,7 @@
  * the resolver matrix tests need no DB, and so T4/T5/T6 callers that
  * already hold the rows can compose without a second read.
  */
-import type { ModuleId, PrismaClient } from "@prisma/client";
+import type { DepartmentKind, ModuleId, PrismaClient } from "@prisma/client";
 import { TOOL_DOMAINS } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import {
@@ -136,7 +136,9 @@ export interface EffectiveAccessInputs {
     maxUploadSizeMb: number | null;
     llmDailyMessageCap: number | null;
   } | null;
-  deptRights: Array<{ id: string; name: string; right: string }>;
+  /** WARP-1809: `kind` rides along (additive) so the People-page drawer can
+   *  render the HOUSEHOLD unit kind-keyed ("Workspace"), never name-keyed. */
+  deptRights: Array<{ id: string; name: string; kind: DepartmentKind; right: string }>;
 }
 
 /** The §5 wire shape (matches the dashboard's EffectiveAccess type —
@@ -181,7 +183,9 @@ export interface EffectiveAccessResult {
       llmDailyMessageCap: EffectiveUsageSource;
     };
   };
-  deptRights: Array<{ id: string; name: string; right: string }>;
+  /** WARP-1809: additive `kind` per entry — the dashboard renders HOUSEHOLD
+   *  entries as "Workspace" keyed off kind; older clients ignore the extra. */
+  deptRights: Array<{ id: string; name: string; kind: DepartmentKind; right: string }>;
   exceptions: AccessExceptionRow[];
 }
 
@@ -492,7 +496,7 @@ export async function resolveEffectiveAccess(
         }),
         tx.departmentMembership.findMany({
           where: { userId },
-          select: { right: true, department: { select: { id: true, name: true } } },
+          select: { right: true, department: { select: { id: true, name: true, kind: true } } },
         }),
       ]);
 
@@ -508,6 +512,9 @@ export async function resolveEffectiveAccess(
       deptRights: memberships.map((m) => ({
         id: m.department.id,
         name: m.department.name,
+        // WARP-1809: the row's kind, verbatim — the client's display mapping
+        // ("Workspace" for HOUSEHOLD) keys off this, never the name string.
+        kind: m.department.kind,
         right: m.right,
       })),
     });

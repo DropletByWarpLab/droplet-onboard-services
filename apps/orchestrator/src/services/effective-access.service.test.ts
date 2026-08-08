@@ -738,7 +738,13 @@ describe("effective-access — usage passthrough (T7)", () => {
 
 describe("effective-access — deptRights are a read-only reference", () => {
   it("passes department rights through untouched (ADR-029 owns them)", () => {
-    const deptRights = [{ id: "d1", name: "Reception", right: "contributor" }];
+    // WARP-1809: entries carry the unit's DepartmentKind so the People-page
+    // drawer can render the HOUSEHOLD unit kind-keyed ("Workspace") without
+    // ever keying off the seeded name string.
+    const deptRights = [
+      { id: "d1", name: "Reception", kind: "DEPARTMENT" as const, right: "contributor" },
+      { id: "hh", name: "Household", kind: "HOUSEHOLD" as const, right: "manager" },
+    ];
     const res = computeEffectiveAccess(baseInputs({ deptRights }));
     expect(res.deptRights).toEqual(deptRights);
   });
@@ -766,5 +772,60 @@ describe("resolveEffectiveAccess — bound fetch wrapper", () => {
   it("throws when unwired (fail closed, scope-loader posture)", async () => {
     _setEffectiveAccessForTests(null, null);
     await expect(resolveEffectiveAccess("u-1")).rejects.toThrow(/not initialised/);
+  });
+
+  it("carries each membership's department kind onto the wire (WARP-1809)", async () => {
+    // The People-page access drawer (ADR-032 §6.3) renders deptRights chips.
+    // Every user holds a boot-seeded HOUSEHOLD membership whose stored name
+    // is a data contract ("Household") — the client maps it to "Workspace"
+    // KEYED OFF KIND, so the resolver must report the row's kind verbatim,
+    // additively beside the existing {id, name, right}.
+    const CFG = {
+      AI_GATEWAY_URL: "http://ai:8000",
+      FILE_INDEXER_URL: "http://fi:8090",
+      NEXTCLOUD_URL: "http://nc:8080",
+      DOCS_ENABLED: "1",
+      DOCS_INTERNAL_URL: "http://docs",
+      SERVICE_TOKEN_EMAIL: "tok",
+      SERVICE_TOKEN_VOICE: "tok",
+      FRIGATE_URL: "http://frigate:5000",
+      DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
+      ROUTING_SERVICE_URL: "http://routing:8080",
+      SWITCH_SERVICE_URL: "http://switch:8081",
+    };
+    const prisma: any = {
+      user: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue({ id: "u-1", role: "family", accessRole: null }),
+      },
+      userAccessException: { findMany: vi.fn().mockResolvedValue([]) },
+      moduleSetting: { findMany: vi.fn().mockResolvedValue([]) },
+      offLanAllowlistChannel: { findUnique: vi.fn().mockResolvedValue(null) },
+      integrationConnection: { findMany: vi.fn().mockResolvedValue([]) },
+      userUsagePolicy: { findUnique: vi.fn().mockResolvedValue(null) },
+      departmentMembership: {
+        findMany: vi.fn().mockResolvedValue([
+          { right: "manager", department: { id: "hh", name: "Household", kind: "HOUSEHOLD" } },
+          { right: "contributor", department: { id: "d1", name: "Reception", kind: "DEPARTMENT" } },
+        ]),
+      },
+    };
+    const seam = createTransactionSeam({ client: () => prisma });
+    prisma.$transaction = seam.$transaction;
+    _setEffectiveAccessForTests(prisma, CFG);
+
+    const res = await resolveEffectiveAccess("u-1");
+    expect(res?.deptRights).toEqual([
+      { id: "hh", name: "Household", kind: "HOUSEHOLD", right: "manager" },
+      { id: "d1", name: "Reception", kind: "DEPARTMENT", right: "contributor" },
+    ]);
+    // The kind is the ROW's kind straight off the select — never re-derived.
+    expect(prisma.departmentMembership.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: { right: true, department: { select: { id: true, name: true, kind: true } } },
+      }),
+    );
+    _setEffectiveAccessForTests(null, null);
   });
 });

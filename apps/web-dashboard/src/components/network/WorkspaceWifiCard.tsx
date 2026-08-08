@@ -11,13 +11,13 @@ import {
 } from "@/components/network/WifiSettingsForm";
 
 /**
- * The household Wi-Fi control — ONE editable surface for the home network,
+ * The workspace Wi-Fi control — ONE editable surface for the main network,
  * chosen by where that Wi-Fi actually lives.
  *
  * WARP-1723 built this split and inlined it in WifiTab. WARP-1733 extracts it
  * verbatim, because inlined it existed only on the Advanced-mode Wi-Fi tab:
  * Simple mode — the home persona's view (ADR-002) — had no Wi-Fi name/password
- * control at all, so a household could change its Wi-Fi only by first
+ * control at all, so a workspace could change its Wi-Fi only by first
  * discovering the Simple/Advanced segmented control and then the right tab
  * inside it. Simple mode now mounts THIS component, not a copy of it. A second
  * editable Wi-Fi surface is exactly the bug WARP-1723 removed, and two copies
@@ -27,17 +27,17 @@ import {
  * shape:
  *
  *   - `source: "ap"` — the edge-router shape. This Droplet's own radio hosts
- *     nothing (uci carries only a disabled placeholder); the household SSID
+ *     nothing (uci carries only a disabled placeholder); the workspace SSID
  *     exists only on the approved access point. The router-radio form used to
  *     render here anyway: it READ the AP's values but SAVED through the
  *     router write path (POST /api/network/wifi/ssid + /password), reporting
  *     "applied" while the network in the air never changed. On this shape the
- *     AP form (PUT /api/network/wifi/ap) IS the household form, and the
+ *     AP form (PUT /api/network/wifi/ap) IS the workspace form, and the
  *     router form doesn't render at all.
- *   - `source: "router"` — the household network lives on this Droplet's own
+ *   - `source: "router"` — the workspace network lives on this Droplet's own
  *     radio, so the router form owns the slot. (A separate approved AP is
  *     genuinely a SECOND network; its card is WifiTab's business, not this
- *     control's — see the `useHouseholdWifiSource` note below.)
+ *     control's — see the `useWorkspaceWifiSource` note below.)
  *   - `source: null` — no Wi-Fi could be read. The router form renders with
  *     its own honest "couldn't read" notice.
  *
@@ -50,7 +50,7 @@ import {
  * fallback carries an honest notice, which the form draws inside its own card
  * (WARP-1733 UX review, item A — see WifiSettingsForm's `failedRead` prop).
  */
-export function HouseholdWifiCard({
+export function WorkspaceWifiCard({
   headingLevel = "h3",
 }: {
   /**
@@ -60,10 +60,10 @@ export function HouseholdWifiCard({
    */
   headingLevel?: CardHeadingLevel;
 }) {
-  const { resolved, source, failedRead } = useHouseholdWifiSource();
+  const { resolved, source, failedRead } = useWorkspaceWifiSource();
 
   if (!resolved) {
-    // Calm placeholder holding the household-Wi-Fi slot while the source
+    // Calm placeholder holding the workspace-Wi-Fi slot while the source
     // resolves — never both editable forms at once (the pre-split bug).
     //
     // Shape AND height mirror the form it becomes (UX + QA second pass):
@@ -126,11 +126,11 @@ export function HouseholdWifiCard({
   }
 
   if (source === "ap") {
-    // The AP hosts the household network, so its form takes the primary
+    // The AP hosts the workspace network, so its form takes the primary
     // slot — writes land where the Wi-Fi actually lives, and it wears
-    // household copy (`slot="household"`) rather than presenting the home
+    // workspace copy (`slot="workspace"`) rather than presenting the main
     // network as an accessory one.
-    return <ApWifiCard slot="household" headingLevel={headingLevel} />;
+    return <ApWifiCard slot="workspace" headingLevel={headingLevel} />;
   }
 
   // Issue #12: editable provisioning form so a user who skipped Wi-Fi during
@@ -149,9 +149,9 @@ export function HouseholdWifiCard({
 }
 
 /**
- * Where the household Wi-Fi lives, as one answer for every caller.
+ * Where the workspace Wi-Fi lives, as one answer for every caller.
  *
- * HouseholdWifiCard picks its branch with this; WifiTab uses the same hook to
+ * WorkspaceWifiCard picks its branch with this; WifiTab uses the same hook to
  * decide whether the AP's OWN network is a second card worth showing. Exported
  * rather than re-read inline (WARP-1733) for the reason WARP-1723 exported
  * AP_WIFI_KEY and AP_WIFI_SWR_OPTIONS: a "these surfaces can never disagree"
@@ -159,7 +159,7 @@ export function HouseholdWifiCard({
  * re-typed identically in several files. One hook, one key, one cadence — and
  * because SWR dedupes on the key, extra callers cost no extra fetch.
  */
-export function useHouseholdWifiSource(): {
+export function useWorkspaceWifiSource(): {
   /** The read has landed — as data OR as an error. Until then: the skeleton. */
   resolved: boolean;
   /** The resolved source, or null (both "nothing found" and "not resolved"). */
@@ -180,14 +180,14 @@ export function useHouseholdWifiSource(): {
    *     contradicting itself on the calmest surface in the product;
    *   - WifiTab's second-card gate (`source === "router" || failedRead`) fires
    *     while `source` is still "ap", so the AP card renders BOTH promoted
-   *     into the household slot here and again below as the "second network":
+   *     into the workspace slot here and again below as the "second network":
    *     two editable forms for one access point on one SWR key, sharing a
    *     duplicate `#ap-wifi-ssid` (which also silently breaks the second
    *     form's `<label for>`), under two contradictory titles. That duplicate
    *     editable surface is exactly the bug WARP-1723 removed.
    *
    * Requiring `data === undefined` makes the flag mean what its name says. A
-   * failing poll over a good read is not news to a household — the answer on
+   * failing poll over a good read is not news to the workspace — the answer on
    * screen is still the answer — and a read that genuinely produced nothing
    * still raises it, which is the case the notice exists for.
    */

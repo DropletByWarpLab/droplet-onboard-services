@@ -1,9 +1,9 @@
 /**
- * Shared harness for the household-Wi-Fi source split (WARP-1723 → WARP-1733).
+ * Shared harness for the workspace-Wi-Fi source split (WARP-1723 → WARP-1733).
  *
- * WARP-1733 gives the household Wi-Fi control a second mount point (Simple
+ * WARP-1733 gives the workspace Wi-Fi control a second mount point (Simple
  * mode), so the same set of `/api/network/wifi/current` states now has to be
- * driven from three suites: HouseholdWifiCard (the control itself), WifiTab
+ * driven from three suites: WorkspaceWifiCard (the control itself), WifiTab
  * (the Advanced-mode composition around it), and NetworkSimple (the
  * Simple-mode mount). Copying the endpoint stub three ways would let the three
  * suites drift into testing three different backends — the thing that would
@@ -25,12 +25,12 @@ import { CURRENT_WIFI_KEY } from "@/components/network/WifiSettingsForm";
 export type FetchMock = ReturnType<typeof vi.fn>;
 
 /**
- * The household slot's headline. BOTH branches present it — WifiSettingsForm
- * on the router shape, ApWifiCard's `slot="household"` variant on the
+ * The workspace slot's headline. BOTH branches present it — WifiSettingsForm
+ * on the router shape, ApWifiCard's `slot="workspace"` variant on the
  * edge-router shape — which is intended: they never mount in that slot
  * simultaneously, and the Devices-tab link promises exactly this label.
  */
-export const HOUSEHOLD_HEADLINE = "Wi-Fi settings";
+export const WORKSPACE_HEADLINE = "Wi-Fi settings";
 /** WifiSettingsForm's distinguishing line (the ROUTER write path). */
 export const ROUTER_FORM_SUBHEAD =
   /Name the Wi-Fi network your Droplet broadcasts/i;
