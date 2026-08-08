@@ -6,8 +6,9 @@
  * dialog built on the WARP-289 `<Dialog>` primitive. The dialog hosts
  * every nav destination NOT in the bottom 5 plus the theme toggle and
  * sign-out — so on phone/tablet Settings / Users / Cameras / Network /
- * Events / Remote Access / Knowledge / Context / Calendar are all
- * reachable through a single tap target.
+ * Events / Remote Access / Calendar are all reachable through a single
+ * tap target. (Knowledge + Context are tucked since WARP-1807 — reachable
+ * from Settings, rendered by no nav surface.)
  *
  * WARP-1554 folded in the Files sub-views: a bottom-tab primary's children
  * must survive into the drawer even though the primary's own row does not,
@@ -189,8 +190,9 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     // Displaced primary items (not in the 5-tab bar):
     expect(within(dialog).getByRole("link", { name: /calendar/i })).toHaveAttribute("href", "/calendar");
     expect(within(dialog).getByRole("link", { name: /projects/i })).toHaveAttribute("href", "/projects");
-    expect(within(dialog).getByRole("link", { name: /knowledge/i })).toHaveAttribute("href", "/knowledge");
-    expect(within(dialog).getByRole("link", { name: /context/i })).toHaveAttribute("href", "/context");
+    // WARP-1807: tucked — reachable from Settings, not nav.
+    expect(within(dialog).queryByRole("link", { name: /knowledge/i })).toBeNull();
+    expect(within(dialog).queryByRole("link", { name: /context/i })).toBeNull();
 
     // Every secondary nav destination:
     expect(within(dialog).getByRole("link", { name: /cameras/i })).toHaveAttribute("href", "/cameras");
