@@ -60,10 +60,37 @@ vi.mock("../services/network.service.js", async () => {
         }),
       ),
     setWifiChannel: vi.fn(),
-    getWifiSettings: vi.fn(),
+    // The SSID route reads the current wireless status before it writes. With
+    // routing down that read fails too — the route tolerates it
+    // (`.catch(() => null)`) so the write is still the thing that surfaces
+    // UNREACHABLE. A bare `vi.fn()` here returns undefined, which would throw a
+    // TypeError on `.catch` and mask the 503 behind an opaque 500.
+    getWifiSettings: vi
+      .fn()
+      .mockRejectedValue(
+        RouterError.unreachable("Get wifi settings: fetch failed", {
+          label: "Get wifi settings",
+        }),
+      ),
     scanWifiNetworks: vi.fn(),
   };
 });
+
+// The SSID route resolves where the household Wi-Fi actually lives before it
+// writes, so a router-radio write can't falsely succeed on the edge-router
+// shape (audit 2026-08-06). This suite pins the UNREACHABLE error contract, not
+// that resolution, and hands the router a `{}` prisma — so pin source:"router"
+// (the single-box shape) and let the write be what fails.
+vi.mock("../services/current-wifi.service.js", () => ({
+  getCurrentWifi: vi.fn().mockResolvedValue({
+    source: "router",
+    ssid: "MyHomeWifi",
+    key: null,
+    detail: "",
+    section: null,
+    radio: null,
+  }),
+}));
 
 import { errorHandler } from "../middleware/error-handler.js";
 import { registerWifiRoutes } from "./network-wifi.routes.js";
