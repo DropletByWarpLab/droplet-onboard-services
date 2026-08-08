@@ -147,8 +147,35 @@ describe("DepartmentsPanel — list + detail", () => {
     await waitFor(() => {
       expect(screen.getByTestId("household-card")).toBeInTheDocument();
     });
-    expect(within(screen.getByTestId("household-card")).getByText("Household")).toBeInTheDocument();
+    // WARP-1808 — the server seeds the unit's name as "Household" (data
+    // contract), but the rendered card always reads "Workspace".
+    expect(within(screen.getByTestId("household-card")).getByText("Workspace")).toBeInTheDocument();
+    expect(within(screen.getByTestId("household-card")).queryByText("Household")).not.toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument();
+  });
+
+  // WARP-1808 — display mapping keys off `kind`, never the name string: a
+  // HOUSEHOLD unit whose server name differs still renders "Workspace" on the
+  // overview card AND in the detail header.
+  it("renders 'Workspace' for a HOUSEHOLD unit whose server name differs", async () => {
+    const household = dept({ id: "hh", name: "The Smiths", kind: "HOUSEHOLD", memberCount: 2, myRight: null });
+    listDepartmentsMock.mockResolvedValue({ departments: [household] });
+    getDepartmentMock.mockResolvedValue(detail(household));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("household-card")).toBeInTheDocument();
+    });
+    expect(within(screen.getByTestId("household-card")).getByText("Workspace")).toBeInTheDocument();
+    expect(screen.queryByText("The Smiths")).not.toBeInTheDocument();
+    // Household is the only unit, so it auto-selects — the detail header maps
+    // too. waitFor + a fresh query: the detail load re-renders the header
+    // (detail, then loading-flag, land as separate renders), so a node held
+    // across that boundary can be detached by the time it's asserted.
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 2, name: "Workspace" })).toBeInTheDocument();
+    });
   });
 
   it("changing a member's rights calls updateDepartmentMemberRight and reloads", async () => {
@@ -204,7 +231,7 @@ describe("DepartmentsPanel — list + detail", () => {
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
 
-    expect(screen.getByText("Household access follows each person's role for now.")).toBeInTheDocument();
+    expect(screen.getByText("Workspace-wide access follows each person's role for now.")).toBeInTheDocument();
     expect(screen.getByLabelText(/rights for priya nair/i)).toBeDisabled();
   });
 });

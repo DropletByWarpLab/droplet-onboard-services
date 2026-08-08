@@ -80,13 +80,24 @@ const RIGHT_ICON: Record<DepartmentRight, LucideIcon> = {
   manager: KeyRound,
 };
 
+/**
+ * WARP-1808 — display-only name for a unit. The server seeds the HOUSEHOLD
+ * unit's name as "Household" (a data contract — ids drive selection/lookup and
+ * the name feeds nothing structural here), but the build is business-only, so
+ * the RENDERED name is always "Workspace". Keyed off `kind`, never the name
+ * string, and used at render sites only.
+ */
+function deptDisplayName(d: Department): string {
+  return d.kind === "HOUSEHOLD" ? "Workspace" : d.name;
+}
+
 /** Verbatim copy (design brief §2–§5) — ships as-is. */
 const COPY = {
   emptyDepts:
     "No departments yet — create the first one to give a group of people their own file library.",
   removeConfirm: (name: string, lib: string) =>
     `Remove ${name} from ${lib}? They lose access to these files immediately.`,
-  householdTip: "Household access follows each person's role for now.",
+  householdTip: "Workspace-wide access follows each person's role for now.",
   archiveBody: "Files stay stored and admins can still retrieve them. Members lose access now.",
   restoreBody: "Members regain access with the rights they had before it was archived.",
   syncingShort: "Syncing…",
@@ -642,7 +653,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                   <Home size={17} />
                 </span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={NM_STYLE}>{household.name}</span>
+                  <span style={NM_STYLE}>{deptDisplayName(household)}</span>
                   <span style={SUB_STYLE}>
                     {household.memberCount} {household.memberCount === 1 ? "member" : "members"}
                   </span>
@@ -676,7 +687,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             <div style={{ display: "flex", alignItems: "flex-start", gap: 14, paddingBottom: 18, borderBottom: "1px solid var(--card-bd)" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "0.35px" }}>{selected.name}</h2>
+                  <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "0.35px" }}>{deptDisplayName(selected)}</h2>
                   <span className="chip" style={{ cursor: "default", fontWeight: 500, color: "var(--text)" }}>
                     {selected.kind === "TEAM" ? "Team" : selected.kind === "HOUSEHOLD" ? "System" : "Department"}
                   </span>

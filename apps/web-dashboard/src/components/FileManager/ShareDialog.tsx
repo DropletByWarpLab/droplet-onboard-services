@@ -673,7 +673,7 @@ export function ShareDialog({
                       className="type-caption-1"
                       style={{ color: "var(--text-muted)" }}
                     >
-                      Household members
+                      Workspace members
                     </label>
                     {selectedRecipients.size > 0 && (
                       <span
@@ -703,7 +703,7 @@ export function ShareDialog({
                       className="type-footnote py-1"
                       style={{ color: "var(--text-muted)" }}
                     >
-                      No other household members yet
+                      No other workspace members yet
                     </p>
                   ) : (
                     <div className="space-y-1.5 max-h-44 overflow-auto">

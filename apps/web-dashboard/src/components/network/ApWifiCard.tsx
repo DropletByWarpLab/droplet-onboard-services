@@ -108,7 +108,7 @@ const SLOT_COPY: Record<ApWifiCardSlot, { headline: string; supported: string }>
   household: {
     headline: "Wi-Fi settings",
     supported:
-      "Your home Wi-Fi — the network your devices join. It's broadcast by your Droplet access point, so saving restarts that radio and devices reconnect.",
+      "Your workspace Wi-Fi — the network your devices join. It's broadcast by your Droplet access point, so saving restarts that radio and devices reconnect.",
   },
   secondary: {
     headline: "Access point Wi-Fi",

@@ -205,18 +205,38 @@ export function resolveFileSpace(path: string, spaces: FileSpace[]): SpaceAttrib
 }
 
 /**
+ * WARP-1808 — display-only mapping for the shared household space.
+ *
+ * The build is business-only (WARP-1341): the server still seeds and mounts
+ * the shared space under its raw name ("Household" — a data contract that
+ * grouping, `parentName` joins, and the longest-prefix path math above all
+ * key off), but no user-visible surface may render that word. ONLY the
+ * presentation changes, and it keys off `kind`, never the name string, so a
+ * renamed server row maps too and a user-created space that happens to be
+ * NAMED "Household" renders verbatim.
+ */
+export function spaceRenderName(space: FileSpace): string {
+  return space.kind === "household" ? "Workspace" : space.name;
+}
+
+/**
  * The library's name as the user knows it, reconstructed to equal the mount
  * name: DEPARTMENT → `name`; TEAM → `"<Parent> — <Team>"`.
  *
  * A team's `name` alone ("Platform") is ambiguous across departments, so the
  * parent is included when the server sent one. Nothing is invented: with no
  * `parentName` the bare team name is shown rather than a guessed parent.
+ *
+ * The household space renders as "Workspace" (WARP-1808, `spaceRenderName`) —
+ * for every other space this still equals the mount name. Teams keep their
+ * RAW parent name: a team can't parent off the household space, and mapping
+ * `parentName` would break the equals-the-mount-name property.
  */
 export function spaceDisplayName(space: FileSpace): string {
   if (space.kind === "team" && space.parentName) {
     return `${space.parentName} — ${space.name}`;
   }
-  return space.name;
+  return spaceRenderName(space);
 }
 
 /**
