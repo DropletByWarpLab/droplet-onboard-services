@@ -163,7 +163,7 @@ describe("DepartmentsPanel — list + detail", () => {
     expect(screen.getByText("System")).toBeInTheDocument();
     // WARP-1810 — the Workspace card's glyph is Building2, not the residential
     // Home/House glyph (lucide-react renders Home as the "house" icon).
-    const card = screen.getByTestId("household-card");
+    const card = screen.getByTestId("workspace-card");
     expect(card.querySelector("svg.lucide-building-2")).toBeInTheDocument();
     expect(card.querySelector("svg.lucide-house")).not.toBeInTheDocument();
   });
