@@ -47,6 +47,24 @@ vi.mock("../services/network.service.js", () => ({
   getRouterOperation: vi.fn().mockResolvedValue({}),
 }));
 
+// The SSID route resolves where the household Wi-Fi actually lives before it
+// writes, so a router-radio write can't falsely succeed on the edge-router
+// shape (audit 2026-08-06). This suite pins the auth boundary, not that
+// resolution, and its prisma mock carries only commandAuditLog — the real
+// resolver would reach for `prisma.apDevice` and 500 in front of the RBAC
+// assertion. Pin source:"router" (the single-box shape) so the Tier-1 write
+// proceeds and the principal check is what's actually under test.
+vi.mock("../services/current-wifi.service.js", () => ({
+  getCurrentWifi: vi.fn().mockResolvedValue({
+    source: "router",
+    ssid: "Home",
+    key: null,
+    detail: "",
+    section: null,
+    radio: null,
+  }),
+}));
+
 import { registerWifiRoutes } from "../routes/network-wifi.routes.js";
 import { registerFirewallRoutes } from "../routes/network-firewall.routes.js";
 import { registerStatusRoutes, type StatusDeps } from "../routes/network-status.routes.js";

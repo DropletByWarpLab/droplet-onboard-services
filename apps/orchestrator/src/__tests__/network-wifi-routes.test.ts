@@ -50,9 +50,25 @@ vi.mock("../services/network.service.js", () => ({
   setWifiChannel: vi.fn().mockResolvedValue({ operationId: "op-2" }),
 }));
 
+// The SSID route resolves where the household Wi-Fi actually lives, to refuse a
+// router-radio write when it's really on a separate AP (audit 2026-08-06).
+// Default to source:"router" so the immediate-apply cases behave as before;
+// the AP-hosted case is overridden per-test.
+vi.mock("../services/current-wifi.service.js", () => ({
+  getCurrentWifi: vi.fn().mockResolvedValue({
+    source: "router",
+    ssid: "Home",
+    key: null,
+    detail: "",
+    section: null,
+    radio: null,
+  }),
+}));
+
 import { registerWifiRoutes } from "../routes/network-wifi.routes.js";
 import { classifyNetworkCommand } from "../config/network-safety-rules.js";
 import * as networkService from "../services/network.service.js";
+import { getCurrentWifi } from "../services/current-wifi.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 function createPrismaMock() {
@@ -119,6 +135,29 @@ describe("wifi routes through the real safety-tier service", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "ok", ssid: "MyHome", tier: 1 });
     expect(networkService.setWifiSsid).toHaveBeenCalledOnce();
+  });
+
+  it("POST /api/network/wifi/ssid refuses when the Wi-Fi is on a separate AP (audit 2026-08-06)", async () => {
+    // Edge-router shape: the household network is broadcast by an approved AP,
+    // so a router-radio write would land nowhere and (before this) falsely
+    // report success — the gap that left the set_wifi_ssid MCP tool writing
+    // into the void. The route must refuse with a pointer to the AP control.
+    vi.mocked(getCurrentWifi).mockResolvedValueOnce({
+      source: "ap",
+      ssid: "Home",
+      key: null,
+      detail: "Broadcast by the access point.",
+      section: "default_radio0",
+      radio: null,
+    });
+
+    const res = await request(buildApp())
+      .post("/api/network/wifi/ssid")
+      .send({ ssid: "MyHome" });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "WIFI_ON_ACCESS_POINT" });
+    expect(networkService.setWifiSsid).not.toHaveBeenCalled();
   });
 
   it("POST /api/network/wifi/password requires confirmation: 202 + token, no write", async () => {
