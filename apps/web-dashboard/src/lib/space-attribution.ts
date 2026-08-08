@@ -214,8 +214,11 @@ export function resolveFileSpace(path: string, spaces: FileSpace[]): SpaceAttrib
  * presentation changes, and it keys off `kind`, never the name string, so a
  * renamed server row maps too and a user-created space that happens to be
  * NAMED "Household" renders verbatim.
+ *
+ * Takes just `kind` + `name` (all it reads) so callers holding a partial
+ * space row — e.g. a pre-load fallback literal without `root` — can use it.
  */
-export function spaceRenderName(space: FileSpace): string {
+export function spaceRenderName(space: Pick<FileSpace, "kind" | "name">): string {
   return space.kind === "household" ? "Workspace" : space.name;
 }
 
