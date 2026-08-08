@@ -156,11 +156,21 @@ def _orchestrator_tls_context():
     # in files_snapshot's case).
     #
     # Verification is therefore skipped for LOOPBACK LITERALS ONLY. The
-    # trade is deliberate and narrow: this connection never leaves the box, the
-    # payload is unauthenticated health data with no credential material, and
+    # trade is deliberate and narrow: this connection never leaves the box, and
     # anyone positioned to MITM the box's own loopback interface already has
     # code execution on it — so verification is buying nothing here that the
     # host's own integrity does not already provide.
+    #
+    # ⚠ WARP-1800 CHANGED WHAT RIDES THIS PATH. It used to carry only
+    # unauthenticated health data, and the original note leaned on that. The
+    # join-code read now sends a Bearer token and receives the household PSK.
+    # The conclusion holds but the reasoning is different, so state it: an
+    # attacker who can answer 127.0.0.1 ahead of the gateway, or read this
+    # process's memory, already has the token out of BRIDGE_AUTH_TOKEN in the
+    # bridge's own environment and passwordless `sudo -n` besides. Unverified
+    # loopback TLS does not widen that boundary. It would be wrong to extend
+    # the same skip to a NON-loopback host on the strength of this comment —
+    # _is_loopback_url is what keeps that from happening, not this note.
     #
     # What was NOT done, and why:
     #   * publishing the orchestrator on a host port — a fixed port collides
@@ -188,6 +198,70 @@ def _orchestrator_base_url_raw():
 
 def _orchestrator_base_url():
     return _orchestrator_base_url_raw()
+
+
+def _orchestrator_household_wifi(timeout=4.0):
+    """The household join credentials, from the orchestrator's canonical
+    resolver. Returns (creds, None) or (None, reason).
+
+    WARP-1800. This is the THIRD shape a box can be, and the only one the two
+    local sources below cannot see:
+
+      * single-box  — the box's own hostapd IS the household AP  (local)
+      * multi-box   — an OpenWrt/UCI router hosts it             (local, SSH)
+      * edge-router — a standalone approved AP hosts it, and the box's
+                      hostapd/UCI genuinely hold nothing         (here)
+
+    On the edge-router shape the household SSID lives only on the approved AP,
+    so /etc/hostapd.conf does not exist and reading UCI returns the Pi's
+    disabled `OpenWrt` placeholder — an answer that is worse than none because
+    it looks real. Rather than teach the bridge to talk to APs (a second
+    opinion about household Wi-Fi, which is exactly what WARP-1723 collapsed),
+    ask the orchestrator, which already resolves router-then-approved-AP.
+
+    Deliberately NOT a general orchestrator client: one URL, short timeout,
+    every failure a reason string. The panel renders a dark rail on "" and
+    that has to stay true when the orchestrator is the thing that is down.
+    """
+    if not BRIDGE_AUTH_TOKEN:
+        return None, "no service token configured for the orchestrator"
+    url = _orchestrator_base_url() + "/api/network/wifi/join-code"
+    req = urlrequest.Request(
+        url, headers={"Authorization": "Bearer " + BRIDGE_AUTH_TOKEN})
+    try:
+        with urlrequest.urlopen(req, timeout=timeout,
+                                context=_orchestrator_tls_context()) as r:
+            body = json.loads(r.read().decode())
+    except Exception as e:                                          # noqa: BLE001
+        # 401 here means the orchestrator does not know SERVICE_TOKEN_DISPLAY
+        # — say so plainly rather than "unreachable", because the fix is a
+        # `setup.sh --sync-secrets`, not a reboot.
+        code = getattr(e, "code", None)
+        if code in (401, 403):
+            return None, ("orchestrator rejected the panel's service token "
+                          "— run ./scripts/setup.sh --sync-secrets")
+        logger.debug("household wifi read failed: %s", e)
+        return None, "orchestrator unreachable: {}".format(e)
+
+    ssid = str(body.get("ssid") or "")
+    key = str(body.get("key") or "")
+    if not ssid or not key:
+        # `detail` is the resolver's own operator-facing explanation ("no
+        # access point has been approved", "run --sync-secrets", …). Pass it
+        # through — a generic string here would throw away the one field that
+        # tells someone at the rack what to do.
+        return None, str(body.get("detail") or "no household Wi-Fi is set")
+
+    return {
+        "ssid": ssid,
+        "key": key,
+        # The resolver only ever reports a PSK network; it has no WEP/open
+        # path. `psk2` maps to `T:WPA` in _wifi_payload.
+        "encryption": "psk2",
+        "hidden": False,
+        "disabled": False,
+        "source": str(body.get("source") or ""),
+    }, None
 FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
 
 BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
@@ -847,12 +921,32 @@ def qr_snapshot():
         creds, err = hostapd_wifi_credentials()
     else:
         creds, err = openwrt_wifi_credentials()
-    if creds is None:
-        out["error"] = err or ("hostapd AP unavailable" if hostapd
-                               else "router unreachable")
-        return out
 
-    if hostapd:
+    # WARP-1800 — the edge-router shape. Neither local source can answer when
+    # the household SSID lives on a standalone approved AP, so fall through to
+    # the orchestrator's canonical resolver rather than reporting "router
+    # unreachable" for a router that is fine and simply hosts no Wi-Fi.
+    #
+    # Strictly a FALLBACK: a box whose own radio is the household AP keeps
+    # answering locally, with no orchestrator dependency added to the path
+    # that already worked. Only the shapes that were returning an error now
+    # make a network call, so the happy path costs nothing.
+    from_orchestrator = False
+    if creds is None:
+        creds, orch_err = _orchestrator_household_wifi()
+        from_orchestrator = creds is not None
+        if creds is None:
+            # Lead with the LOCAL reason: on a single-box the local failure is
+            # the real one and the orchestrator is a red herring. Carry the
+            # orchestrator's reason too — on the edge-router shape the local
+            # error is the red herring ("hostapd.conf: No such file" is
+            # expected there, not a fault).
+            out["error"] = " / ".join(
+                m for m in (err, orch_err) if m
+            ) or ("hostapd AP unavailable" if hostapd else "router unreachable")
+            return out
+
+    if hostapd and not from_orchestrator:
         # Single-box hostapd AP is WPA2-PSK; use the fixed-security T;S;P
         # payload the single-box pairing flow expects.
         payload = _hostapd_wifi_payload(creds["ssid"], creds["key"])
@@ -865,7 +959,17 @@ def qr_snapshot():
         return out
     out.update({
         "ok": True, "ssid": creds["ssid"],
-        "security": "WPA" if hostapd else creds["encryption"],
+        # Track the branch actually taken, not the box shape: an edge-router
+        # fallback on a hostapd box goes through _wifi_payload, so reporting
+        # the hostapd constant here would describe a payload we did not build.
+        "security": ("WPA" if (hostapd and not from_orchestrator)
+                     else creds["encryption"]),
+        # WARP-1800 — which of the three sources answered. The endpoint is
+        # still called /openwrt/qr for compatibility with the panel and the
+        # single-box pairing flow, but it is no longer always OpenWrt telling
+        # us; anyone debugging a wrong SSID needs to know which one did.
+        "source": "orchestrator" if from_orchestrator else (
+            "hostapd" if hostapd else "uci"),
         "hidden": creds["hidden"],
         "disabled": creds["disabled"], "payload": payload,
         # Cleartext key is already inside `payload` (the phone QR scanner

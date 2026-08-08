@@ -84,6 +84,19 @@ HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 #
 # On a 480x320 panel the inset is (0, 0), the canvas IS the frame and
 # `_fit_panel` is a no-op, so that path renders byte-identically to before.
+def _is_wide_panel() -> bool:
+    """True on the rack bar panel. Same deferred-import reason as _safe_inset.
+
+    Fails CLOSED: a geometry probe that raises must not add polling to a panel
+    that may not want it, and must never take the display service down.
+    """
+    try:
+        import layout_wide
+        return layout_wide.is_wide()
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
 def _safe_inset() -> Tuple[int, int]:
     """(x, y) bezel inset for the current panel. (0, 0) unless wide.
 
@@ -170,6 +183,15 @@ CAMERAS_REFRESH_SECONDS = int(os.environ.get("CAMERAS_REFRESH_SECONDS", "15"))
 # WARP-1645 — the orchestrator's health monitor refreshes on its own 15s
 # cadence, so there is nothing to gain by polling faster than it updates.
 SERVICES_REFRESH_SECONDS = int(os.environ.get("SERVICES_REFRESH_SECONDS", "15"))
+# WARP-1800 — the household join code behind the rail's Wi-Fi face.
+#
+# Slow on purpose. A passphrase changes only when someone rotates it (and
+# rotation pushes a fresh snapshot itself), while the read behind it can cost
+# a `docker exec` and, on the edge-router shape, an orchestrator round trip —
+# so polling it at the scan feed's 20s would spend real work to re-learn a
+# constant. The tap handler must never block on this: it reads whatever the
+# last poll left, which is why the face is derived rather than fetched.
+JOIN_REFRESH_SECONDS = int(os.environ.get("JOIN_REFRESH_SECONDS", "120"))
 
 # ---------------------------------------------------------------------------
 # Design tokens — mirror apps/web-dashboard/src/app/globals.css (dark mode).
@@ -807,6 +829,12 @@ class TFTDisplay:
             "sparks_cpu": [],
             "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
                      "band": "", "key_ttl_seconds": 0, "password": ""},
+            # WARP-1800 — the household JOIN credentials, from the bridge's
+            # /openwrt/qr. Distinct from "wifi" above, which is the client
+            # SCAN feed (/wifi: adapter, networks, connected_to) and has never
+            # carried an SSID+key pair. Conflating them is what left the
+            # rail's Wi-Fi face permanently dark.
+            "wifi_join": {},
             "cameras": {"online": 0, "total": 0},
             # WARP-1645 — filled by fetch_services(). All-None so a cold box
             # renders em dashes; see WARP-1643 on why not zeros.
@@ -971,6 +999,8 @@ class TFTDisplay:
                 self.update_cameras(data)
             elif mode == "services":
                 self.update_services(data)
+            elif mode == "qr":
+                self.update_wifi_join(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -1925,6 +1955,16 @@ class TFTDisplay:
     def update_wifi(self, data: dict) -> None:
         for k, v in data.items():
             self._v3["wifi"][k] = v
+
+    def update_wifi_join(self, data: dict) -> None:
+        """WARP-1800. Replaces wholesale rather than merging, for the same
+        reason update_services does: `ok` going False, or `payload` going
+        away, is the signal that the face must go dark. A merge would leave
+        the last good payload pinned in place and the rail would keep offering
+        a join code for a network that is no longer there — the credential
+        equivalent of WARP-1643's frozen sensor reading."""
+        if isinstance(data, dict):
+            self._v3["wifi_join"] = data
 
     def update_services(self, data: dict) -> None:
         """WARP-1645. Replaces wholesale rather than merging: `degraded` is a
@@ -3033,11 +3073,28 @@ class TFTDisplay:
         disabled, when there is no passphrase, or when the string is too long
         to encode above the scan floor. Each of those is a reason NOT to offer
         the face, and the caller reads "" as exactly that.
+
+        WARP-1800 — WHICH FEED. This reads `wifi_join` (the bridge's
+        /openwrt/qr, whose whole job is the household join code), not `wifi`
+        (the bridge's /wifi, which is the client SCAN: adapter, networks,
+        connected_to, state). WARP-1782 read the latter, which has never
+        carried an ssid+key pair on any box — so the face could not light up
+        anywhere, and the tests missed it by writing credentials straight into
+        `_v3["wifi"]` instead of feeding a real bridge response through.
+
+        `wifi` is still read as a fallback, and that is not just politeness to
+        old bridges: on the single-box shape the System screen's wifi frame
+        genuinely does carry `ssid` + `password`.
         """
+        join = self._v3.get("wifi_join") or {}
         wifi = self._v3.get("wifi") or {}
         # `ok` is absent until the first bridge snapshot lands, so only an
         # explicit False counts as "the bridge told us the AP is unreachable".
-        if wifi.get("ok") is False or wifi.get("disabled"):
+        if join.get("ok") is False or join.get("disabled"):
+            return ""
+        if join.get("payload") or join.get("ssid"):
+            wifi = join
+        elif wifi.get("ok") is False or wifi.get("disabled"):
             return ""
 
         payload = str(wifi.get("payload") or "")
@@ -3681,6 +3738,7 @@ class TFTDisplay:
         last_files_push = 0.0
         last_cams_push = 0.0
         last_services_push = 0.0
+        last_join_push = 0.0
         last_backend_retry = 0.0
         serial_buf = b""
         while self._cycle_running:
@@ -3795,6 +3853,22 @@ class TFTDisplay:
                 if svc is not None:
                     self._pyportal_send("services", svc)
                 last_services_push = now
+            # WARP-1800 — the household join code for the rail's Wi-Fi face.
+            #
+            # Wide panels only. On a PyPortal the QR already arrives on demand
+            # (REQUEST_QR / NAV:qr from the firmware) and there is no rail to
+            # feed, so polling there would add serial traffic to a device that
+            # did not ask for it — a behaviour change on hardware this branch
+            # cannot test. The bar panel has no firmware to ask, which is
+            # exactly why the face had no data.
+            if (self._wants_data() and _is_wide_panel()
+                    and (now - last_join_push) > JOIN_REFRESH_SECONDS):
+                qr = self.fetch_qr()
+                if qr is not None:
+                    # Carries data, so this does NOT navigate a display — only
+                    # a BARE {"mode": ...} frame is a nav (pyportal/code.py).
+                    self._pyportal_send("qr", qr)
+                last_join_push = now
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
             if self._wants_data():
                 if not hasattr(self, "_last_drives_push"):

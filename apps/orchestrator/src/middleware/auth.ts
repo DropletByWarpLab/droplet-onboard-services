@@ -681,6 +681,26 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  {
+    // WARP-1800: the rack panel's device-bridge presents this Bearer on GET
+    // /api/network/wifi/join-code — the ONE route this principal may reach
+    // (pinned by requireRoleOrService, so the coarse `service` role shared by
+    // every principal above is not enough).
+    //
+    // Same token as the orchestrator → oled-display leg (WARP-165); compose
+    // already gives both ends the value, so this adds a direction, not a
+    // secret. The panel needs the household join code because its old source
+    // — the box's own hostapd via the bridge's /openwrt/qr — does not exist
+    // on the edge-router shape, where the household SSID lives only on the
+    // approved AP.
+    token: config.SERVICE_TOKEN_DISPLAY,
+    principal: {
+      id: "_service:display",
+      username: "_service:display",
+      displayName: "Rack Panel Bridge",
+      role: "service",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {

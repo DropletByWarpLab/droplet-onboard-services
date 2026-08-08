@@ -903,6 +903,17 @@ const envSchema = z.object({
   // (ORCHESTRATOR_SERVICE_TOKEN).
   SERVICE_TOKEN_RAG_EVAL: z.string().default(""),
 
+  // SERVICE_TOKEN_DISPLAY — WARP-165 wired this orchestrator → oled-display.
+  // WARP-1800 uses the SAME token for the reverse leg: device-bridge presents
+  // it on GET /api/network/wifi/join-code so the rack panel can resolve the
+  // household join code from the one canonical source (WARP-1723) instead of
+  // the box's own hostapd, which on the edge-router shape does not host the
+  // household SSID at all. No new secret — compose already hands this value
+  // to the orchestrator (line 274) and to the bridge as BRIDGE_AUTH_TOKEN.
+  // authMiddleware's matchServiceToken sets `_service:display`. Empty default
+  // = principal disabled, so a box without a panel still boots.
+  SERVICE_TOKEN_DISPLAY: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if

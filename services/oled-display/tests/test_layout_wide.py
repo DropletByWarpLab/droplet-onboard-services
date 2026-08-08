@@ -717,6 +717,29 @@ def test_shipping_inset_keeps_the_qr_at_full_scannable_size(populated,
 # switch — is pinned below, because each is individually easy to drop in a
 # later edit that "simplifies" the rail.
 
+# A verbatim-shaped device-bridge GET /openwrt/qr body. WARP-1800: the fixture
+# below used to write credentials straight into `_v3["wifi"]`, which no bridge
+# response has ever populated — so every test here passed while the face could
+# not light up on any box. Feed the real frame through the real mirror instead;
+# if the wiring breaks again, these fail with it.
+BRIDGE_QR_OK = {
+    "ok": True, "ssid": "Droplet-AI", "security": "WPA", "hidden": False,
+    "disabled": False, "source": "orchestrator",
+    "payload": "WIFI:T:WPA;S:Droplet-AI;P:7fmqx3rp2kdz9nva;;",
+    "key": "7fmqx3rp2kdz9nva", "matrix": None, "version": None,
+    "error": None, "rotation_enabled": False, "ttl_seconds": 0,
+}
+
+# The bridge's GET /wifi — the CLIENT SCAN. This is what WARP-1782 actually
+# read. Note what is absent: ssid, key, payload. Captured off the live box.
+BRIDGE_WIFI_SCAN = {
+    "adapter": None, "connected_to": None, "networks": [],
+    "scanned_at": "2026-08-07T19:53:44Z", "source": None,
+    "state": "unavailable",
+    "error": "[Errno 2] No such file or directory: 'sshpass'",
+}
+
+
 @pytest.fixture
 def with_wifi(populated):
     """A box whose bridge snapshot carries joinable Wi-Fi credentials.
@@ -724,11 +747,11 @@ def with_wifi(populated):
     `populated` deliberately does NOT — it has an SSID (the LIVE screen shows
     one) but no key — so every test above this section exercises the
     no-second-face path and proves it is byte-for-byte the old rail.
+
+    Fed through `_pyportal_send`, the same call the poll loop makes, so the
+    mode→`_v3` mirror is under test rather than assumed.
     """
-    populated._v3["wifi"].update({
-        "ok": True, "key": "7fmqx3rp2kdz9nva",
-        "payload": "WIFI:T:WPA;S:Droplet-AI;P:7fmqx3rp2kdz9nva;;",
-    })
+    populated._pyportal_send("qr", dict(BRIDGE_QR_OK))
     return populated
 
 
@@ -763,6 +786,46 @@ def test_a_box_with_no_wifi_credentials_offers_one_face(populated):
     assert populated.rail_face() == "dashboard"
     assert lw._rail_content(populated, populated._v3)["faces"] == 1
     assert _rail_dots(populated) == []
+
+
+# --- WARP-1800: the feed, not just the render -------------------------------
+
+def test_the_bridge_join_frame_reaches_the_rail(populated):
+    """bridge body -> _pyportal_send -> _v3 -> payload, with no hand-placed
+    dict in the middle. This is the assertion WARP-1782 was missing."""
+    assert populated.wifi_qr_payload() == ""
+    populated._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    assert populated.wifi_qr_payload() == BRIDGE_QR_OK["payload"]
+
+
+def test_the_client_scan_feed_never_produces_a_join_payload(populated):
+    """The exact regression. /wifi is the scan — adapter, networks, state — and
+    it carries no credentials on any box. Reading it for a join code is how the
+    face stayed dark everywhere, so pin that it cannot be the source."""
+    populated._pyportal_send("wifi", dict(BRIDGE_WIFI_SCAN))
+    assert populated.wifi_qr_payload() == ""
+    assert populated.rail_face() == "dashboard"
+
+
+def test_an_unreachable_ap_takes_the_face_back_down(populated):
+    """`ok: False` must beat a previously-good payload — a merge would pin a
+    join code for a network that is gone."""
+    populated._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    assert populated.wifi_qr_payload()
+    populated._pyportal_send("qr", {
+        "ok": False, "ssid": None, "payload": None,
+        "error": "cat: can't open '/etc/hostapd.conf': No such file",
+    })
+    assert populated.wifi_qr_payload() == ""
+
+
+def test_the_single_box_wifi_frame_still_works(populated):
+    """The fallback is load-bearing, not politeness: on the single-box shape
+    the System screen's wifi frame really does carry ssid + password."""
+    populated._pyportal_send("wifi", {"ssid": "Droplet-AI",
+                                      "password": "7fmqx3rp2kdz9nva"})
+    assert populated.wifi_qr_payload() == (
+        "WIFI:T:WPA;S:Droplet-AI;P:7fmqx3rp2kdz9nva;;")
 
 
 def test_tap_flips_the_rail_to_the_wifi_face(with_wifi):
@@ -811,7 +874,7 @@ def test_the_face_drops_if_the_wifi_feed_goes_away_mid_reveal(with_wifi):
     lw.render_status(with_wifi)
     _tap_rail(with_wifi)
     assert with_wifi.rail_face() == "wifi"
-    with_wifi._v3["wifi"].update(ok=False)
+    with_wifi._v3["wifi_join"].update(ok=False)
     assert with_wifi.rail_face() == "dashboard"
 
 
@@ -824,7 +887,7 @@ def test_the_passphrase_is_never_drawn_as_text(with_wifi):
     """
     lw.render_status(with_wifi)
     _tap_rail(with_wifi)
-    psk = with_wifi._v3["wifi"]["key"]
+    psk = with_wifi._v3["wifi_join"]["key"]
     drawn = _texts(with_wifi)
     assert drawn, "spy never fired — the render path changed"
     for text in drawn:
@@ -880,7 +943,7 @@ def test_the_pager_marks_the_active_face_above_the_card(with_wifi):
                  id="no-passphrase"),
 ])
 def test_an_unavailable_ap_never_arms_the_face(with_wifi, mutate):
-    mutate(with_wifi._v3["wifi"])
+    mutate(with_wifi._v3["wifi_join"])
     assert with_wifi.wifi_qr_payload() == ""
     lw.render_status(with_wifi)
     _tap_rail(with_wifi)
@@ -889,7 +952,7 @@ def test_an_unavailable_ap_never_arms_the_face(with_wifi, mutate):
 
 def test_the_payload_is_composed_when_the_bridge_sends_none(with_wifi):
     """A bridge that predates the `payload` field still lights the face up."""
-    with_wifi._v3["wifi"]["payload"] = ""
+    with_wifi._v3["wifi_join"]["payload"] = ""
     assert with_wifi.wifi_qr_payload() == \
         "WIFI:T:WPA;S:Droplet-AI;P:7fmqx3rp2kdz9nva;;"
 
@@ -899,9 +962,9 @@ def test_an_unscannable_payload_never_arms_the_face(with_wifi):
     Refusing the face is the honest failure; painting a card nobody can scan
     is the one the design brief calls worse than no QR at all."""
     ssid = "W" * 32
-    with_wifi._v3["wifi"].update(
+    with_wifi._v3["wifi_join"].update(
         ssid=ssid, payload=f"WIFI:T:WPA;S:{ssid};P:7fmqx3rp2kdz9nva;;")
-    assert len(with_wifi._v3["wifi"]["payload"]) > lw.QR_BYTE_BUDGET
+    assert len(with_wifi._v3["wifi_join"]["payload"]) > lw.QR_BYTE_BUDGET
     assert with_wifi.wifi_qr_payload() == ""
     lw.render_status(with_wifi)
     _tap_rail(with_wifi)
