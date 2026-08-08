@@ -60,7 +60,7 @@ describe("DiscoveryStep BLE-unavailable notice (WARP-851)", () => {
     render(<DiscoveryStep onContinue={() => {}} />);
 
     const notice = await screen.findByTestId("ble-unavailable-notice");
-    expect(notice).toHaveTextContent(/already on your home wi-?fi/i);
+    expect(notice).toHaveTextContent(/already on your workspace wi-?fi/i);
     expect(notice).toHaveTextContent(
       /bluetooth for first-time setup aren't supported yet/i,
     );

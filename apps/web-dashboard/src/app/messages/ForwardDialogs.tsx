@@ -26,6 +26,9 @@ import {
   type ConversationSummary,
 } from "@/lib/api";
 import type { FileEntryInfo, FileSpacesResponse } from "@/lib/types";
+// WARP-1808 — display-only "Workspace" mapping for the household space; the
+// option VALUE stays the raw space id the files API expects.
+import { spaceRenderName } from "@/lib/space-attribution";
 
 export interface PickedFile {
   ncFileId: number;
@@ -141,7 +144,7 @@ export function ForwardFileDialog({
             >
               {spaces.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name}
+                  {spaceRenderName(s)}
                 </option>
               ))}
             </select>

@@ -14,6 +14,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { FileSpace, FileSpaceId } from "@/lib/types";
+// WARP-1808 — display-only "Workspace" mapping for the household space, used
+// at RENDER SITES ONLY. Grouping and parent lookups below (`teamsByParent`,
+// `claimedParentNames`) keep keying off RAW server names — the data contract.
+import { spaceRenderName } from "@/lib/space-attribution";
 
 interface SpaceSwitcherProps {
   spaces: FileSpace[];
@@ -164,7 +168,7 @@ export function SpaceSwitcher({
               }}
             >
               <Icon size={14} aria-hidden="true" />
-              {space.name}
+              {spaceRenderName(space)}
             </button>
           );
         })}
@@ -181,7 +185,8 @@ export function SpaceSwitcher({
 
   const activeSpace = spaces.find((s) => s.id === active);
   const activeIsInMenu = !!activeSpace && !PINNED_IDS.has(activeSpace.id);
-  const triggerLabel = activeIsInMenu && activeSpace ? activeSpace.name : "Spaces";
+  const triggerLabel =
+    activeIsInMenu && activeSpace ? spaceRenderName(activeSpace) : "Spaces";
 
   const departments = menuItems.filter((s) => s.kind === "department");
   const teams = menuItems.filter((s) => s.kind === "team");
@@ -229,7 +234,7 @@ export function SpaceSwitcher({
           aria-hidden="true"
           className="flex-none text-label-secondary"
         />
-        <span className="flex-1 min-w-0 truncate">{space.name}</span>
+        <span className="flex-1 min-w-0 truncate">{spaceRenderName(space)}</span>
         {isProvisioning && (
           <span className="inline-flex items-center gap-1.5 type-caption-1 text-system-orange flex-none">
             <Loader2
@@ -272,7 +277,7 @@ export function SpaceSwitcher({
             }}
           >
             <Icon size={14} aria-hidden="true" />
-            {space.name}
+            {spaceRenderName(space)}
           </button>
         );
       })}

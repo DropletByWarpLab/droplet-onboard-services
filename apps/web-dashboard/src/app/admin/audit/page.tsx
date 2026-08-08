@@ -390,7 +390,7 @@ function AuditPageInner() {
             <span className="eh">Admin access required</span>
             <span>
               The audit log is only visible to <code>admin</code> / <code>owner</code>{" "}
-              roles, since it can include other household members&apos; activity.
+              roles, since it can include other workspace members&apos; activity.
             </span>
           </div>
         </div>

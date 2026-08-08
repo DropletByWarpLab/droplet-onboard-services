@@ -262,7 +262,9 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
   it("renders the SpaceSwitcher when a shared space is available", () => {
     render(<FilesPage />);
     expect(screen.getByRole("tab", { name: /my files/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /household/i })).toBeInTheDocument();
+    // WARP-1808 — the shared space's server name is "Household"; the tab
+    // renders the business-facing "Workspace".
+    expect(screen.getByRole("tab", { name: /workspace/i })).toBeInTheDocument();
   });
 
   it("renders the file list rows", () => {
@@ -770,7 +772,7 @@ describe("<FilesPage /> — (space, path) round-trip + URL write-back (WARP-1547
 
     fireEvent.click(screen.getByRole("button", { name: /pick search result/i }));
 
-    expect(screen.getByRole("tab", { name: /household/i })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: /workspace/i })).toHaveAttribute(
       "aria-selected",
       "true",
     );

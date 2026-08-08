@@ -137,9 +137,11 @@ function renderDialog(props: Partial<React.ComponentProps<typeof ShareDialog>> =
 }
 
 describe("WARP-879 — ShareDialog internal sharing", () => {
-  it("defaults to Person mode and loads the household roster", async () => {
+  it("defaults to Person mode and loads the member roster", async () => {
     renderDialog();
     expect(fetchRecipientsMock).toHaveBeenCalled();
+    // WARP-1808 — the picker is labelled with business vocabulary.
+    expect(await screen.findByText("Workspace members")).toBeInTheDocument();
     // Roster members surface once loaded.
     expect(await screen.findByText("Romain")).toBeInTheDocument();
     expect(screen.getByText("Samantha")).toBeInTheDocument();
@@ -191,11 +193,11 @@ describe("WARP-879 — ShareDialog internal sharing", () => {
     expect(opts.shareWith).toBeUndefined();
   });
 
-  it("shows a friendly empty state when there are no other household members", async () => {
+  it("shows a friendly empty state when there are no other workspace members", async () => {
     fetchRecipientsMock.mockResolvedValue([]);
     renderDialog();
     expect(
-      await screen.findByText(/no other household members yet/i),
+      await screen.findByText(/no other workspace members yet/i),
     ).toBeInTheDocument();
   });
 

@@ -132,7 +132,9 @@ import FilesPage from "@/app/files/page";
 import { uploadFiles, createDirectory, bulkCopyFiles } from "@/lib/api";
 
 function switchToHousehold() {
-  fireEvent.click(screen.getByRole("tab", { name: /household/i }));
+  // WARP-1808 — the shared tab renders "Workspace" (the raw server name
+  // "Household" stays in the fixture/data layer).
+  fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
 }
 
 /** Drop a file onto the list area — bubbles up to the UploadZone's onDrop. */
