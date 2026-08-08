@@ -215,11 +215,45 @@ class SwitchDriver(ABC):
     async def set_vlan_membership(
         self, vlan_id: int, membership: list[dict]
     ) -> None:
-        """Set port membership for a VLAN.
+        """Set port membership for a VLAN. REPLACES the VLAN's whole member list.
 
         membership: list of {"port": int, "tagged": bool, "member": bool}
+
+        Callers that mean "add ONE port to its access VLAN" must use
+        set_port_access_vlan — passing a single-port list here wipes every other
+        member (audit 2026-08-06).
         """
         ...
+
+    # NOT abstract: a correct default composes the two membership primitives,
+    # so no existing backend or test fake needs to change. The OpenWrt driver
+    # overrides this to operate on RAW uci entries (a read→re-serialise there is
+    # lossy — a bare VLAN-1 entry comes back tagged).
+    async def set_port_access_vlan(self, port: int, vlan_id: int) -> None:
+        """Make `port` the untagged (access/PVID) member of `vlan_id` WITHOUT
+        disturbing that VLAN's other members, and remove it from every other
+        VLAN's untagged membership (a port has exactly one access VLAN; tagged
+        trunk memberships are left alone).
+
+        The provisioner previously called set_vlan_membership with a single-port
+        list to "move" a port, which replaced the VLAN's entire member list and
+        could strand the uplink/AP/appliance on VLAN 1 (audit 2026-08-06).
+        """
+        target = await self.get_vlan_membership(vlan_id)
+        members = [m for m in target.get("ports", []) if m.get("port") != port]
+        members.append({"port": port, "tagged": False, "member": True})
+        await self.set_vlan_membership(vlan_id, members)
+        for v in await self.get_vlans():
+            vid = v.get("vlan_id")
+            if vid == vlan_id:
+                continue
+            vm = await self.get_vlan_membership(vid)
+            kept = [
+                m for m in vm.get("ports", [])
+                if not (m.get("port") == port and not m.get("tagged"))
+            ]
+            if len(kept) != len(vm.get("ports", [])):
+                await self.set_vlan_membership(vid, kept)
 
     # --- PoE Control ---
 

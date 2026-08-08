@@ -47,6 +47,49 @@ describe("set_port_vlan", () => {
     expect(ctx.http.switchSvc.post).not.toHaveBeenCalled();
   });
 
+  // Audit 2026-08-06: the membership endpoint REPLACED the VLAN's member list,
+  // so an agent moving one port wiped the rest (on the main LAN: the router,
+  // the AP and the appliance). The endpoint now defaults to merge; this
+  // handler must not assert an intent the model never expressed, and must be
+  // able to carry a genuine full-replacement when the model does mean it.
+  it("omits mode when the model did not ask for one (endpoint default applies)", async () => {
+    const post = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    await setPortVlan.handler(
+      { vlan_id: 100, ports: [{ port: 1, tagged: false, member: true }] },
+      ctxWithPost(post),
+    );
+    expect(post.mock.calls[0][1]).not.toHaveProperty("mode");
+  });
+
+  it("forwards an explicit replace so a full-membership write stays possible", async () => {
+    const post = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const ports = [
+      { port: 1, tagged: false, member: true },
+      { port: 9, tagged: true, member: true },
+    ];
+    await setPortVlan.handler({ vlan_id: 100, ports, mode: "replace" }, ctxWithPost(post));
+    expect(post).toHaveBeenCalledWith("/api/switch/vlans/100/membership", {
+      ports,
+      mode: "replace",
+    });
+  });
+
+  it("rejects an unknown mode instead of posting it", async () => {
+    const post = vi.fn();
+    const r = await setPortVlan.handler(
+      { vlan_id: 100, ports: [], mode: "clobber" },
+      ctxWithPost(post),
+    );
+    expect(r.ok).toBe(false);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("advertises both modes on its input schema", () => {
+    const props = (setPortVlan.inputSchema as { properties: Record<string, { enum?: string[] }> })
+      .properties;
+    expect(props.mode?.enum).toEqual(["merge", "replace"]);
+  });
+
   it("returns confirmation_required on 202", async () => {
     const post = vi.fn().mockResolvedValue(new Response(JSON.stringify({ reason: "ok" }), { status: 202 }));
     const r = await setPortVlan.handler({ vlan_id: 100, ports: [] }, ctxWithPost(post));

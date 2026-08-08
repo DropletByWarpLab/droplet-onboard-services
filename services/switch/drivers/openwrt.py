@@ -147,12 +147,28 @@ def _format_uptime(seconds: Any) -> Optional[str]:
     return f"{minutes}m"
 
 
+def _raw_vlan_port_list(entries: Any) -> list[str]:
+    """Normalise a uci bridge-vlan `ports` value to a list of raw entry strings.
+
+    🔴 uci returns a MULTI-value option as a JSON list but a SINGLE-value (or
+    whitespace-joined) option as a plain STRING. VLAN 1 as written by
+    board.d/02_network comes back as the string "lan1 lan2 ... lan10"; iterating
+    that string yields one CHARACTER at a time, so every entry failed to parse
+    and VLAN 1 rendered with ZERO ports (audit 2026-08-06). Split a string on
+    whitespace; pass a list through unchanged."""
+    if isinstance(entries, str):
+        return entries.split()
+    if isinstance(entries, list):
+        return [str(e) for e in entries]
+    return []
+
+
 def _parse_bridge_vlan_ports(entries: Any) -> list[dict]:
     """uci bridge-vlan `ports` entries ("lan1:u*", "lan9:t", bare "lan3") →
     the base-class membership shape. `u` = untagged, `*` = PVID; a bare entry
     is tagged (netifd's default)."""
     out: list[dict] = []
-    for entry in entries or []:
+    for entry in _raw_vlan_port_list(entries):
         name, _, flags = str(entry).partition(":")
         port = _port_from_name(name)
         if port is None:
@@ -612,6 +628,85 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 "config": "network", "section": vlan["_section"], "values": {"ports": ports},
             })
 
+    async def set_port_access_vlan(self, port: int, vlan_id: int) -> None:
+        """Make `port` the untagged (access/PVID) member of `vlan_id` WITHOUT
+        disturbing that VLAN's other members, and remove it from any OTHER VLAN
+        where it is an untagged member (a port has exactly one access VLAN).
+
+        🔴 Why this is not `set_vlan_membership([one port])`: that writes the
+        VLAN's whole `ports` list, so a single-port call WIPED every other
+        member — on the flat-lan default VLAN 1 that is the router uplink, the
+        AP and the appliance, i.e. it strands the entire fabric on the first
+        reconcile (audit 2026-08-06). This works on the RAW uci entries so it
+        preserves each other port's exact suffix (bare / `:u*` / `:t`): a
+        read→parse→re-serialise round-trip is lossy (a bare VLAN-1 entry would
+        come back `:t`, silently re-tagging the LAN), so we never rebuild an
+        entry we did not have to.
+
+        Tagged (trunk) memberships — `lanN:t`, e.g. the guest VLAN 30 trunk —
+        are left untouched: only untagged/access membership is exclusive.
+        """
+        if self._plan_only:
+            # Same gate as every sibling write. This primitive is now reachable
+            # from the interactive membership endpoint (not just the
+            # provisioner), so without it SWITCH_LIVE_WRITES=0 would move a
+            # port on real hardware while the API answered "planned".
+            logger.info(
+                "Port %d → access VLAN %d PLANNED (plan_only) — not applied.",
+                port, vlan_id,
+            )
+            return
+        name = _port_name(port)
+
+        def _num(entry: str) -> Optional[int]:
+            return _port_from_name(str(entry).partition(":")[0])
+
+        def _is_tagged(entry: str) -> bool:
+            return str(entry).endswith(":t")
+
+        values = await self._uci_values("network")
+        sections: dict[int, tuple[str, list[str]]] = {}
+        for sid, section in values.items():
+            if section.get(".type") != "bridge-vlan":
+                continue
+            try:
+                vid = int(section.get("vlan"))
+            except (TypeError, ValueError):
+                continue
+            sections[vid] = (sid, _raw_vlan_port_list(section.get("ports")))
+
+        if vlan_id not in sections:
+            raise SwitchAPIError(
+                code=404,
+                message=f"VLAN {vlan_id} not found — create it before assigning a port",
+            )
+
+        async with self._safe_apply():
+            # Target VLAN: keep every other entry verbatim; (re)add this port
+            # as explicit untagged + PVID.
+            target_sid, target_ports = sections[vlan_id]
+            kept = [e for e in target_ports if _num(e) != port]
+            kept.append(f"{name}:u*")
+            await self._ubus("uci", "set", {
+                "config": "network", "section": target_sid,
+                "values": {"ports": kept},
+            })
+
+            # Every other VLAN: drop this port ONLY from untagged membership;
+            # never touch a tagged trunk entry.
+            for vid, (sid, raw_ports) in sections.items():
+                if vid == vlan_id:
+                    continue
+                pruned = [
+                    e for e in raw_ports
+                    if not (_num(e) == port and not _is_tagged(e))
+                ]
+                if len(pruned) != len(raw_ports):
+                    await self._ubus("uci", "set", {
+                        "config": "network", "section": sid,
+                        "values": {"ports": pruned},
+                    })
+
     # ------------------------------------------------------------------
     # PoE
     # ------------------------------------------------------------------
@@ -667,11 +762,12 @@ class OpenWrtSwitchDriver(SwitchDriver):
         filters the switch's own permanent addresses and the CPU-side port,
         so what comes back is "what is plugged into which port".
 
-        Degrades to [] on ANY fault — an older image without the plugin
-        answers NOT_FOUND, and an image whose ACL predates the grant answers
-        PERMISSION_DENIED. Neither is an error the caller should see: the
-        topology is simply unknown, and every consumer must already handle
-        that (the PoE guard treats unknown as "cannot prove safe").
+        Degrades to [] on ANY fault, so read-only consumers (topology display)
+        keep working on an older image without the plugin. NOTE: [] here is
+        AMBIGUOUS — it means both "FDB read failed" and "FDB is empty". The PoE
+        guard must distinguish the two (unavailable ⇒ cannot prove safe ⇒ fail
+        closed), so it does NOT use this method; it reads the FDB itself via
+        `_powered_or_unknown`, which reports availability separately.
         """
         try:
             result = await self._ubus("bridge", "fdb")
@@ -705,6 +801,35 @@ class OpenWrtSwitchDriver(SwitchDriver):
         want = f"lan{port}"
         return [e["mac"] for e in await self.get_fdb() if e.get("port") == want]
 
+    async def _powered_or_unknown(self, port: int) -> tuple[bool, list[str]]:
+        """`(topology_known, macs_on_port)` for the PoE guard.
+
+        `get_fdb()` deliberately degrades to `[]` on ANY fault, which conflates
+        two very different states: "the FDB is readable and this port feeds
+        nothing" (safe to cut) versus "we could not read the FDB at all" (we
+        CANNOT prove the port is safe to cut). The guard must fail CLOSED on the
+        latter, so read the FDB here directly and report availability, rather
+        than going through the swallowing helper."""
+        try:
+            result = await self._ubus("bridge", "fdb")
+        except (SwitchAPIError, ConnectionLost) as exc:
+            logger.warning(
+                "PoE guard: FDB unreadable (%s) — cannot verify what port %d "
+                "feeds; failing closed", exc, port,
+            )
+            return (False, [])
+        entries = result.get("entries") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            # A malformed answer is not a trustworthy "empty" — treat as unknown.
+            return (False, [])
+        want = f"lan{port}"
+        macs = [
+            e["mac"].lower()
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("mac"), str) and e.get("port") == want
+        ]
+        return (True, macs)
+
     async def set_port_poe(
         self, port: int, enabled: bool, force: bool = False,
     ) -> dict | None:
@@ -716,7 +841,17 @@ class OpenWrtSwitchDriver(SwitchDriver):
         # is refused rather than warned about. `force` is the operator saying
         # they know. Enables are never guarded — restoring power is safe.
         if not enabled and not force:
-            powered = await self.port_powers(port)
+            known, powered = await self._powered_or_unknown(port)
+            if not known:
+                # Fail CLOSED: de-powering a device has no remote recovery, so
+                # if we cannot read the forwarding table we cannot prove the
+                # port is safe to cut. (Older images without the bridge.fdb
+                # plugin land here — the operator overrides with force=true.)
+                raise PoweredMemberError(
+                    f"Refusing to cut PoE on port {port}: the switch's "
+                    f"forwarding table is unreadable, so I can't verify nothing "
+                    f"critical is on it. Pass force=true to override."
+                )
             if powered:
                 raise PoweredMemberError(
                     f"Refusing to cut PoE on port {port}: it powers "

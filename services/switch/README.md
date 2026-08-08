@@ -63,7 +63,19 @@ SM8TAT2SA WebStaX driver was removed in WARP-1674.
 | POST | `/vlans` | Create VLAN (`{"vlan_id": 100, "name": "cameras"}`) |
 | DELETE | `/vlans/{vlan_id}` | Delete a VLAN |
 | GET | `/vlans/{vlan_id}/membership` | Port membership for a VLAN |
-| POST | `/vlans/{vlan_id}/membership` | Set port membership |
+| POST | `/vlans/{vlan_id}/membership` | Set port membership (`{"ports": [...], "mode": "merge"\|"replace"}`) |
+
+`mode` declares what happens to the VLAN's EXISTING members, because a
+one-port list means both "move this port here" and "this VLAN has exactly one
+member" and only one of those is recoverable:
+
+* **`merge`** (default) — each entry is an access move: the port becomes the
+  VLAN's untagged member, every other member is preserved, and the port is
+  dropped from other VLANs' untagged membership (tagged trunks are left
+  alone). Entries that cannot be expressed that way (`tagged: true`,
+  `member: false`) are refused with a 400 naming `replace`.
+* **`replace`** — write the whole member list; anything absent is removed.
+  Only for callers that computed the complete membership.
 
 ### PoE
 | Method | Path | Description |

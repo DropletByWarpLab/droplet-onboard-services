@@ -552,31 +552,87 @@ async def get_vlan_membership(vlan_id: int):
 
 @app.post("/vlans/{vlan_id}/membership")
 async def set_vlan_membership(vlan_id: int, req: SetVlanMembershipRequest):
+    """Write VLAN membership under the intent the caller DECLARED.
+
+    This is the interactive path: the orchestrator proxies it for the
+    dashboard's "move this port to that VLAN" control and for the
+    `set_port_vlan` LLM tool, and both send a one-port list. Sent to the raw
+    replace primitive that wiped every other member of the VLAN — on VLAN 1
+    the uplink, the AP and the appliance, i.e. one click or one tool call
+    stranded the rack (audit 2026-08-06). `mode` (default `merge`) picks the
+    merge-safe primitive the provisioner already uses; `replace` keeps the
+    whole-list write for callers that genuinely mean it.
+    """
     try:
         membership = [
             {"port": p.port, "tagged": p.tagged, "member": p.member}
             for p in req.ports
         ]
         drv = get_driver()
-        result = await drv.set_vlan_membership(vlan_id, membership)
-        # WARP-1176 (PYNET-001): the driver returns {**plan, "dry_run": bool}
-        # (see _gated_write). Use that as the authoritative dry-run signal and
-        # propagate the plan payload instead of discarding the driver's return
-        # value — a plan-only "write" must never read as an applied change.
-        # getattr(plan_only) stays as the fallback for drivers whose write
-        # methods return None.
-        if isinstance(result, dict):
-            dry = bool(result.get("dry_run"))
+
+        if req.mode == "merge":
+            # Merge can only express "this port is now this VLAN's untagged
+            # member". Anything else (a tagged trunk entry, or a removal) is
+            # REFUSED here rather than guessed at — being told to use
+            # mode:"replace" is how a full-membership caller keeps its
+            # semantics instead of silently getting merge's.
+            unsupported = [
+                p.port for p in req.ports if p.tagged or not p.member
+            ]
+            if unsupported:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "mode='merge' only accepts untagged member entries "
+                        "(tagged=false, member=true) — it moves each port's "
+                        f"access VLAN. Ports {unsupported} are tagged and/or "
+                        "removals; send mode='replace' to write the VLAN's "
+                        "whole member list instead (that DROPS every member "
+                        "not in the list)."
+                    ),
+                )
+            results = [
+                await drv.set_port_access_vlan(p.port, vlan_id) for p in req.ports
+            ]
+            # A driver may return the gated-write plan ({**plan, "dry_run"}) or
+            # None; treat any returned dry_run as authoritative and fall back
+            # to the driver's plan_only attribute otherwise.
+            dicts = [r for r in results if isinstance(r, dict)]
+            if dicts:
+                dry = any(bool(r.get("dry_run")) for r in dicts)
+            else:
+                dry = bool(getattr(drv, "plan_only", False))
+            plan: Optional[dict] = {
+                "op": "set_port_access_vlan",
+                "vlan_id": vlan_id,
+                "ports": [p.port for p in req.ports],
+            }
         else:
-            dry = bool(getattr(drv, "plan_only", False))
+            result = await drv.set_vlan_membership(vlan_id, membership)
+            # WARP-1176 (PYNET-001): the driver returns {**plan, "dry_run": bool}
+            # (see _gated_write). Use that as the authoritative dry-run signal and
+            # propagate the plan payload instead of discarding the driver's return
+            # value — a plan-only "write" must never read as an applied change.
+            # getattr(plan_only) stays as the fallback for drivers whose write
+            # methods return None.
+            if isinstance(result, dict):
+                dry = bool(result.get("dry_run"))
+                plan = {k: v for k, v in result.items() if k != "dry_run"}
+            else:
+                dry = bool(getattr(drv, "plan_only", False))
+                plan = None
+
         resp: dict = {
             "status": "planned" if dry else "ok",
             "vlan_id": vlan_id,
             "ports_updated": len(membership),
+            # Echo the semantics that actually ran — a caller should not have
+            # to infer whether its write merged or replaced.
+            "mode": req.mode,
             "dry_run": dry,
         }
-        if dry and isinstance(result, dict):
-            resp["plan"] = {k: v for k, v in result.items() if k != "dry_run"}
+        if dry and plan is not None:
+            resp["plan"] = plan
         return resp
     except SwitchError as exc:
         handle_switch_error(exc)
@@ -646,12 +702,18 @@ async def disable_port_poe(port: int, force: bool = False):
     """
     try:
         drv = get_driver()
-        try:
+        # Decide whether the driver understands `force` by INSPECTING its
+        # signature, not by catching TypeError. A blanket `except TypeError`
+        # also swallows a TypeError raised INSIDE the guard body and silently
+        # retries WITHOUT force — turning a bug into an unguarded PoE cut, the
+        # one action with no remote recovery (audit 2026-08-06).
+        import inspect
+
+        if "force" in inspect.signature(drv.set_port_poe).parameters:
             result = await drv.set_port_poe(port, False, force=force)
-        except TypeError:
-            # Driver predating the guard (no `force` parameter) — its writes
-            # are unguarded by definition, so honour the call rather than
-            # failing it.
+        else:
+            # A driver predating the guard is unguarded by definition; honour
+            # the call rather than failing it.
             result = await drv.set_port_poe(port, False)
         return _poe_write_response(result, drv, port, False)
     except SwitchError as exc:
