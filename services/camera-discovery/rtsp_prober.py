@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import secrets
 import socket
 from urllib.parse import quote, unquote, urlsplit
 
@@ -176,23 +177,42 @@ def _parse_www_authenticate(header_value: str) -> dict:
 
 def _digest_header(user: str, pw: str, method: str, uri: str,
                    auth_info: dict) -> str:
-    """Build an RFC 2069 Digest Authorization header value.
+    """Build a Digest Authorization header value.
 
-    We implement the legacy (qop-less) form because every camera we test
-    against accepts it; full RFC 2617 with cnonce+nc is unnecessary.
+    WARP-1812: cameras that advertise ``qop`` (e.g. Hanwha Wisenet:
+    ``Digest realm="iPOLiS", qop="auth"``) REJECT the legacy qop-less
+    RFC 2069 form and require the full RFC 2617 computation with a client
+    nonce (cnonce) and nonce-count (nc):
+    ``response = MD5(HA1:nonce:nc:cnonce:qop:HA2)``. We emit that form when
+    the challenge carries ``qop=auth`` and fall back to the RFC 2069 form
+    (``response = MD5(HA1:nonce:HA2)``) when it does not, so the cameras
+    that were already working keep working.
     """
     realm = auth_info.get("realm", "")
     nonce = auth_info.get("nonce", "")
-    # RFC 2617 Digest auth mandates MD5 (legacy form). The three MD5
-    # call sites below — HA1, HA2, response — are the protocol's
-    # required digest nesting; every RTSP camera firmware we support
-    # accepts only the MD5 form on the RTSP control port. See
-    # docs/security/fips-exceptions.md → rtsp-digest-rfc2617 for the
-    # full risk acceptance + annual-review owner.
+    qop_values = [q.strip().lower() for q in auth_info.get("qop", "").split(",") if q.strip()]
+    # RFC 2617 Digest auth mandates MD5 (legacy form). The MD5 call sites
+    # below — HA1, HA2, response — are the protocol's required digest
+    # nesting; every RTSP camera firmware we support accepts only the MD5
+    # form on the RTSP control port. See docs/security/fips-exceptions.md →
+    # rtsp-digest-rfc2617 for the full risk acceptance + annual-review owner.
     # fips:allowed: rtsp-digest-rfc2617
     ha1 = hashlib.md5(f"{user}:{realm}:{pw}".encode()).hexdigest()
     # fips:allowed: rtsp-digest-rfc2617
     ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+
+    if "auth" in qop_values:
+        cnonce = secrets.token_hex(8)
+        nc = "00000001"
+        # fips:allowed: rtsp-digest-rfc2617
+        response = hashlib.md5(
+            f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()
+        ).hexdigest()
+        return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
+                f'uri="{uri}", algorithm=MD5, qop=auth, nc={nc}, '
+                f'cnonce="{cnonce}", response="{response}"')
+
+    # RFC 2069 (qop-less) fallback.
     # fips:allowed: rtsp-digest-rfc2617
     response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
     return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
@@ -235,16 +255,23 @@ def _close_rtsp(writer) -> None:
     # paths where swallowing is fine.
 
 
+def _is_rtsp_200(resp: str) -> bool:
+    return "RTSP/1.0 200" in resp or "RTSP/2.0 200" in resp
+
+
 async def _try_credentials_once(ip: str, port: int, path: str,
                                 user: str, pw: str,
                                 timeout: float = 3.0) -> bool:
     """Open RTSP, send DESCRIBE, retry with auth on 401.
 
-    Many cameras close the TCP socket after responding 401, so the
-    authenticated retry runs on a freshly opened connection. Reusing
-    the original stream here caused "probe succeeded at CLI, failed
-    from the service" inconsistencies on Hanwha Wisenet firmwares
-    that hard-close on challenge.
+    WARP-1812: the authenticated retry runs on the SAME connection as the
+    challenge. This Hanwha Wisenet firmware binds the digest nonce to the
+    TCP connection — a fresh-socket retry (with a new *or* the old nonce)
+    401s, while reusing the challenge socket lands 200 (proven live on
+    XNV-C8083R). If the socket dies between the 401 and the retry (older
+    Wisenet firmwares that hard-close after a 401), we fall back to a fresh
+    connection reusing the same challenge, which is what the previous
+    always-new-connection code was compensating for.
     """
     url = f"rtsp://{ip}:{port}{path}"
     try:
@@ -258,7 +285,7 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return False
 
-    if "RTSP/1.0 200" in resp1 or "RTSP/2.0 200" in resp1:
+    if _is_rtsp_200(resp1):
         _close_rtsp(writer)
         return True
     if "RTSP/1.0 401" not in resp1 and "RTSP/2.0 401" not in resp1:
@@ -281,23 +308,29 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return False
 
-    # Drop the challenge socket before the authenticated retry — Hanwha
-    # hangs up on 401, so reusing it silently 0-read's every probe.
-    _close_rtsp(writer)
+    # Retry on the SAME connection (CSeq 2) — connection-bound-nonce firmwares
+    # require it. A clean 401 here means wrong credentials → stop. A dead
+    # socket (hard-close-after-401 firmwares) → fall back to a fresh
+    # connection reusing the same challenge/header.
+    try:
+        resp2 = await _rtsp_describe(reader, writer, url, 2, auth_header, timeout)
+        _close_rtsp(writer)
+        return _is_rtsp_200(resp2)
+    except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
+        _close_rtsp(writer)
+
     try:
         reader2, writer2 = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
         return False
     try:
-        resp2 = await _rtsp_describe(
-            reader2, writer2, url, 1, auth_header, timeout,
-        )
+        resp2 = await _rtsp_describe(reader2, writer2, url, 1, auth_header, timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
         return False
     finally:
         _close_rtsp(writer2)
 
-    return "RTSP/1.0 200" in resp2 or "RTSP/2.0 200" in resp2
+    return _is_rtsp_200(resp2)
 
 
 async def probe_rtsp_with_credentials(ip: str, port: int
