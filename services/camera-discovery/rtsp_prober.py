@@ -175,6 +175,17 @@ def _parse_www_authenticate(header_value: str) -> dict:
     return result
 
 
+def _digest_md5(data: str) -> str:
+    """MD5 hex digest for RTSP Digest auth (the ONLY MD5 use in this module).
+
+    RFC 2617 Digest auth mandates MD5; every RTSP camera firmware we support
+    accepts only the MD5 form on the RTSP control port. Registered FIPS
+    exception — see docs/security/fips-exceptions.md → rtsp-digest-rfc2617.
+    """
+    # fips:allowed: rtsp-digest-rfc2617
+    return hashlib.md5(data.encode()).hexdigest()  # nosemgrep: droplet.banned-hash-python, python.lang.security.insecure-hash-algorithms-md5.insecure-hash-algorithm-md5
+
+
 def _digest_header(user: str, pw: str, method: str, uri: str,
                    auth_info: dict) -> str:
     """Build a Digest Authorization header value.
@@ -191,30 +202,19 @@ def _digest_header(user: str, pw: str, method: str, uri: str,
     realm = auth_info.get("realm", "")
     nonce = auth_info.get("nonce", "")
     qop_values = [q.strip().lower() for q in auth_info.get("qop", "").split(",") if q.strip()]
-    # RFC 2617 Digest auth mandates MD5 (legacy form). The MD5 call sites
-    # below — HA1, HA2, response — are the protocol's required digest
-    # nesting; every RTSP camera firmware we support accepts only the MD5
-    # form on the RTSP control port. See docs/security/fips-exceptions.md →
-    # rtsp-digest-rfc2617 for the full risk acceptance + annual-review owner.
-    # fips:allowed: rtsp-digest-rfc2617
-    ha1 = hashlib.md5(f"{user}:{realm}:{pw}".encode()).hexdigest()
-    # fips:allowed: rtsp-digest-rfc2617
-    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+    ha1 = _digest_md5(f"{user}:{realm}:{pw}")
+    ha2 = _digest_md5(f"{method}:{uri}")
 
     if "auth" in qop_values:
         cnonce = secrets.token_hex(8)
         nc = "00000001"
-        # fips:allowed: rtsp-digest-rfc2617
-        response = hashlib.md5(
-            f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()
-        ).hexdigest()
+        response = _digest_md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}")
         return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
                 f'uri="{uri}", algorithm=MD5, qop=auth, nc={nc}, '
                 f'cnonce="{cnonce}", response="{response}"')
 
     # RFC 2069 (qop-less) fallback.
-    # fips:allowed: rtsp-digest-rfc2617
-    response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+    response = _digest_md5(f"{ha1}:{nonce}:{ha2}")
     return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
             f'uri="{uri}", response="{response}"')
 
