@@ -54,6 +54,7 @@ import {
   Settings,
   ShieldOff,
   Sparkles,
+  Square,
   Thermometer,
   Video,
   Wrench,
@@ -61,6 +62,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { useChat } from "@/lib/hooks/useChat";
+import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
 import { useCameras } from "@/lib/hooks/useCameras";
@@ -80,12 +83,20 @@ import { translateError } from "@/lib/friendly-errors";
 import { dashboardUrlFromConf } from "@/lib/wireguard";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ChatMessage } from "@/components/ChatMessage";
 import type {
   FileEntryInfo,
+  ModelInfo,
   VpnPeerCreatedInfo,
   VpnPeerInfo,
   VpnStatusInfo,
 } from "@/lib/types";
+// WARP-1803 — the hero's inline conversation reuses the chat surface's
+// message rendering (ChatMessage + the indigo chat skin). Both sheets are
+// fully `.droplet-shell`-scoped, so importing them here styles only the
+// thread wrapper below and leaks nothing into the `.droplet-home` scope.
+import "@/components/shell/indigo-tokens.css";
+import "@/components/chat/chat-indigo.css";
 
 export interface WidgetProps {
   w: number;
@@ -163,10 +174,203 @@ function WEmpty({ children }: { children: React.ReactNode }) {
 }
 
 /* ─────────────────────────── Chat (centerpiece) ─────────────────────────── */
+
+/**
+ * WARP-1803 — the model the hero (and its inline conversation) answers with.
+ * Same preference order as the chat page (WARP-1112): the household's chosen
+ * default → first local (ollama) → first available. Null while the list is
+ * loading or when no model is configured.
+ */
+function usePreferredModel(): ModelInfo | null {
+  const { models, defaultModel } = useModels();
+  return useMemo(
+    () =>
+      (defaultModel && models.find((m) => m.id === defaultModel)) ||
+      models.find((m) => m.provider === "ollama") ||
+      models[0] ||
+      null,
+    [models, defaultModel],
+  );
+}
+
+/**
+ * WARP-1803 — the hero tile's inline conversation. Mounted only after the
+ * user submits a first prompt, so the chat machinery (and the /api/ws/events
+ * bridge inside useChat) doesn't run for everyone who merely looks at Home.
+ * The thread is the same server-persisted conversation the chat page reads
+ * (WARP-304), so "Open full chat" deep-links to /chat?c=<id> with history
+ * intact — and a stream in flight survives the jump (the orchestrator
+ * finishes and persists the turn server-side, WARP-329).
+ *
+ * `model` is snapshotted by the parent at submit time so a models refetch
+ * (or a transient empty list) can't yank a live conversation back to the
+ * hero mid-answer.
+ *
+ * The message-list wrapper carries `droplet-shell` purely as the chat
+ * surface's token/skin scope so ChatMessage renders exactly as it does on
+ * /chat; `w-chat-thread` (home-widgets.css) neutralizes the shell's
+ * page-level box styles so it behaves as a scroll region inside the tile.
+ */
+function InlineChat({
+  seed,
+  model,
+  onNewChat,
+}: {
+  seed: string;
+  model: ModelInfo;
+  onNewChat: () => void;
+}) {
+  const router = useRouter();
+  const { user } = useAuth();
+  const [chatId] = useState(() => `chat-${Date.now()}`);
+  const {
+    messages,
+    isStreaming,
+    sendMessage,
+    stop,
+    retryMessage,
+    approveScene,
+    conversationId,
+  } = useChat({ chatId, authReady: Boolean(user) });
+  const { scrollRef, onScroll, scrollToBottom, stickyScrollToBottom } =
+    useStickyScroll();
+  const [val, setVal] = useState("");
+
+  // Send the seeding prompt exactly once on mount. Guarded by a ref (not
+  // effect deps) because StrictMode double-invokes mount effects in dev.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    seededRef.current = true;
+    void sendMessage(seed, model.id, undefined, model.provider);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only seed
+  }, []);
+
+  // Same scroll contract as the chat page (WARP-295/331): follow the live
+  // tail only while the user is attached; always snap when a new bubble is
+  // appended (per-token growth keeps the sticky rule).
+  useEffect(() => {
+    stickyScrollToBottom();
+  }, [messages, stickyScrollToBottom]);
+  const prevLenRef = useRef(0);
+  useEffect(() => {
+    if (messages.length > prevLenRef.current) scrollToBottom();
+    prevLenRef.current = messages.length;
+  }, [messages, scrollToBottom]);
+
+  const send = () => {
+    const body = val.trim();
+    if (!body || isStreaming) return;
+    setVal("");
+    void sendMessage(body, model.id, undefined, model.provider);
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+  const handleRetry = (messageId: string) => {
+    void retryMessage(messageId, model.id, undefined, model.provider);
+  };
+  const handleCopy = (text: string) => {
+    try {
+      void navigator.clipboard?.writeText(text);
+    } catch {
+      /* clipboard unavailable — the button is best-effort */
+    }
+  };
+
+  return (
+    <div className="w-chat w-chat--conv">
+      <div className="w-chat-aurora" aria-hidden />
+      <div className="w-chat-conv-head">
+        <span className="w-chat-conv-title">
+          <Sparkles size={14} />
+          Ask AI
+        </span>
+        <button
+          className="w-chat-conv-btn"
+          onClick={() =>
+            conversationId &&
+            router.push(`/chat?c=${encodeURIComponent(conversationId)}`)
+          }
+          disabled={!conversationId}
+          title={
+            conversationId
+              ? "Continue this conversation on the full chat page"
+              : "Waiting for the conversation to be saved"
+          }
+          type="button"
+        >
+          <ArrowUpRight size={13} strokeWidth={2.2} />
+          Open full chat
+        </button>
+        <button className="w-chat-conv-btn" onClick={onNewChat} type="button">
+          <Plus size={13} strokeWidth={2.2} />
+          New chat
+        </button>
+      </div>
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="droplet-shell w-chat-thread"
+        data-testid="home-inline-thread"
+      >
+        <div className="w-chat-thread-inner">
+          {messages.map((msg, idx) => (
+            <ChatMessage
+              key={msg.id}
+              message={msg}
+              isStreaming={
+                isStreaming &&
+                idx === messages.length - 1 &&
+                msg.role === "assistant"
+              }
+              onRetry={handleRetry}
+              onCopy={handleCopy}
+              onApproveScene={approveScene}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="w-chat-capsule focus-within:ring-2 focus-within:ring-accent/40">
+        <textarea
+          rows={1}
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={onKey}
+          aria-label="Ask Droplet"
+          placeholder="Reply…"
+        />
+        <div className="w-chat-cap-row">
+          <span className="w-chat-model">
+            <span className="dot" />
+            {model.name}
+          </span>
+          {isStreaming ? (
+            <button
+              className="w-chat-send"
+              onClick={() => stop()}
+              title="Stop"
+              type="button"
+            >
+              <Square size={13} strokeWidth={2.4} />
+            </button>
+          ) : (
+            <button className="w-chat-send" onClick={send} title="Send" type="button">
+              <ArrowUpRight size={15} strokeWidth={2.4} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChatWidget({ w, h }: WidgetProps) {
   const router = useRouter();
-  const { models } = useModels();
-  const localModel = models.find((m) => m.provider === "ollama") ?? models[0];
+  const model = usePreferredModel();
   const greeting = greetingNow();
   const fs = w >= 6 ? 33 : w >= 5 ? 29 : w >= 4 ? 25 : 22;
   const nSug = h >= 6 ? 4 : h >= 5 ? 3 : h >= 4 ? 2 : 1;
@@ -177,17 +381,30 @@ function ChatWidget({ w, h }: WidgetProps) {
     "Dim the living-room lights to 30%",
   ].slice(0, nSug);
   const [val, setVal] = useState("");
+  // WARP-1803 — the prompt + model snapshot that flips the tile from hero to
+  // inline conversation. Answering happens right here on Home; the full chat
+  // page stays one click away ("Open full chat").
+  const [inline, setInline] = useState<{ seed: string; model: ModelInfo } | null>(
+    null,
+  );
 
   const go = (text?: string) => {
     const body = (text ?? val).trim();
-    if (body) {
+    if (!body) return;
+    if (!model) {
+      // Nothing to answer with — keep the legacy hand-off: /chat renders the
+      // "select a model" empty state and its pendingPrompt effect sends the
+      // prompt once a model is ready.
       try {
         window.sessionStorage.setItem("droplet.pendingPrompt", body);
       } catch {
         /* private mode — /chat still opens */
       }
+      router.push("/chat");
+      return;
     }
-    router.push("/chat");
+    setVal("");
+    setInline({ seed: body, model });
   };
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -195,6 +412,16 @@ function ChatWidget({ w, h }: WidgetProps) {
       go();
     }
   };
+
+  if (inline) {
+    return (
+      <InlineChat
+        seed={inline.seed}
+        model={inline.model}
+        onNewChat={() => setInline(null)}
+      />
+    );
+  }
 
   return (
     <div className="w-chat">
@@ -212,10 +439,10 @@ function ChatWidget({ w, h }: WidgetProps) {
           placeholder="Ask Droplet anything — your files, cameras, network, devices…"
         />
         <div className="w-chat-cap-row">
-          {localModel ? (
+          {model ? (
             <span className="w-chat-model">
               <span className="dot" />
-              {localModel.name}
+              {model.name}
               <ChevronDown size={10} />
             </span>
           ) : (
