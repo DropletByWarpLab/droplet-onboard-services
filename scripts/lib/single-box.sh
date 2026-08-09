@@ -872,18 +872,41 @@ EOF
   # on the single-box path.
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
-  upsert_env OLLAMA_URL          http://ollama:11434
-  # RAGAS judge → the same in-network `ollama` service. The compose default
-  # (http://host.docker.internal:11434/v1) targets a HOST-installed Ollama,
-  # but the bundled single-box container publishes only 127.0.0.1:11434 on
-  # the host — a loopback bind is unreachable from the bridge-gateway IP on
-  # Linux, so every judge call ECONNREFUSEDs. Point rag-eval straight at the
-  # compose service (OpenAI-compat /v1 path), same target as OLLAMA_URL above.
-  upsert_env RAGAS_OLLAMA_URL    http://ollama:11434/v1
+  # WARP-1772: the inference runtime is a durable, operator-set property, and
+  # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a
+  # DMR-flipped box silently pointed chat, the RAGAS judge, and the model id
+  # back at Ollama and logged success (the flip audit's nastiest finding: a
+  # factory re-provision that un-flips the box). INFERENCE_RUNTIME itself is
+  # never WRITTEN here — the flip runbook owns it (scripts/dmr/flip-single-box.sh);
+  # it is only READ so the three runtime-coupled values stay coherent with it.
+  _inference_runtime="$(grep -E '^INFERENCE_RUNTIME=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
+  if [ "$_inference_runtime" = "dmr" ]; then
+    log_info "single-box env: INFERENCE_RUNTIME=dmr detected — preserving the DMR wiring (WARP-1772)"
+    upsert_env OLLAMA_URL        http://dmr:12434
+    upsert_env RAGAS_OLLAMA_URL  http://dmr:12434/v1
+    # LLM_MODEL under DMR is the EXACT id the store reports (registry-
+    # qualified, derived live at flip time) — re-deriving it here would
+    # reintroduce the id-vocabulary gap, so preserve what the flip set.
+    _current_llm="$(grep -E '^LLM_MODEL=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+    if [ -n "$_current_llm" ]; then
+      upsert_env LLM_MODEL "$_current_llm"
+    else
+      log_warn "INFERENCE_RUNTIME=dmr but LLM_MODEL is unset — leaving it unset. Set it to the exact id DMR's /api/tags reports (docs/dmr-single-box.md)."
+    fi
+  else
+    upsert_env OLLAMA_URL          http://ollama:11434
+    # RAGAS judge → the same in-network `ollama` service. The compose default
+    # (http://host.docker.internal:11434/v1) targets a HOST-installed Ollama,
+    # but the bundled single-box container publishes only 127.0.0.1:11434 on
+    # the host — a loopback bind is unreachable from the bridge-gateway IP on
+    # Linux, so every judge call ECONNREFUSEDs. Point rag-eval straight at the
+    # compose service (OpenAI-compat /v1 path), same target as OLLAMA_URL above.
+    upsert_env RAGAS_OLLAMA_URL    http://ollama:11434/v1
+    upsert_env LLM_MODEL           gpt-oss:20b
+  fi
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
   upsert_env DROPLET_TPM_BACKEND mock
-  upsert_env LLM_MODEL           gpt-oss:20b
   upsert_env OPENWRT_HOST        127.0.0.1
   upsert_env OPENWRT_PORT        8181
   upsert_env OPENWRT_USERNAME    root

@@ -129,6 +129,7 @@ EXCLUDED_VOLUMES=(
   whisper-models     # STT model cache (~470MB) — re-downloaded
   piper-voices       # TTS voice cache — re-downloaded
   ollama-data        # local model blobs — re-pulled
+  dmr-models         # DMR OCI model store (WARP-1772) — re-pulled, like ollama-data
   openwrt-config     # single-box router config — re-provisioned
   openwrt-overlay    # single-box router overlay — re-provisioned
   switch-state       # managed-switch state — re-provisioned by setup
