@@ -386,9 +386,14 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         res.flushHeaders?.();
 
         let clientGone = false;
-        req.on("close", () => {
-          // "close" also fires after a NORMAL completion — only treat it as
-          // a disconnect while the response is still being written.
+        // Disconnect detection listens on the RESPONSE, not the request:
+        // since Node 16, an IncomingMessage's "close" fires when the request
+        // MESSAGE completes (measured here: +5ms into a still-streaming
+        // response), so `req.on("close")` would abort every pull the moment
+        // the body was parsed. `res`'s "close" fires exactly once at the true
+        // end — writableEnded=true after a normal end, false when the client
+        // walked away mid-stream. Only the latter aborts the upstream leg.
+        res.on("close", () => {
           if (!res.writableEnded) {
             clientGone = true;
             upstreamAbort.abort();

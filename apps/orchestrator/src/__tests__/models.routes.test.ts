@@ -761,8 +761,14 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     expect(recordActivityMock.mock.calls[1][0].what).toBe(
       "Model download finished",
     );
-    // The upstream stream is opened for the requested model.
+    // The upstream stream is opened for the requested model…
     expect(openPullStreamMock.mock.calls[0][0]).toBe("qwen3:14b");
+    // …and its abort signal is UNTOUCHED after a normal completion. Guards
+    // the Node ≥16 trap where the request's own "close" (which fires as soon
+    // as the request MESSAGE completes, mid-stream) was used for disconnect
+    // detection — that aborted every pull the moment the body was parsed.
+    const signal = openPullStreamMock.mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
   });
 
   it("audits a failed download (error line) and does NOT bust the cache", async () => {
