@@ -20,6 +20,7 @@ import { cacheGet } from "./cache.service.js";
 import {
   fetchLocalModelMetrics,
   metricsFor,
+  type MetricState,
 } from "./model-metrics.service.js";
 import {
   benchCacheKey,
@@ -45,15 +46,25 @@ export interface LocalModelInfo {
   /** 0-100 percentage for the on-disk usage bar — this model's share of the
    *  model store. Null until real disk sizes are known (WARP-836). */
   diskBarPct: number | null;
-  // ── WARP-836 honest metrics, measured from Ollama (/api/tags, /api/ps) ──
-  /** Parameter count as Ollama reports it, e.g. "20.9B". Null when unknown. */
+  // ── WARP-836 honest metrics, measured from the inference daemon ──
+  /** Parameter count as the daemon reports it, e.g. "20.9B". Null when unknown. */
   parameterSize?: string | null;
   /** Quantization level, e.g. "MXFP4" / "Q4_K_M". Null when unknown. */
   quantization?: string | null;
-  /** True when the model is currently resident in memory (Ollama /api/ps). */
+  /** True when the model is currently resident in memory (/api/ps). */
   loaded?: boolean;
-  /** Graphics memory the resident model uses (GB), or null when not loaded. */
+  /** Graphics memory the resident model uses (GB), or null when unmeasured. */
   vramGb?: number | null;
+  // ── WARP-1749 honesty, part two: WHY a number is missing ──────────────
+  // A null used to mean three different things at once. These say which,
+  // so the page can print "—" where a value may yet arrive and an explicit
+  // "this runtime doesn't report it" where one never will. Optional +
+  // additive: an older dashboard ignores them and renders exactly as before.
+  /** Why `gbOnDisk` is null, when it is. */
+  gbOnDiskState?: MetricState;
+  /** Why `vramGb` is null, when it is. `unsupported` on a DMR box: its
+   *  /api/ps never populates `size_vram` on any accelerator. */
+  vramState?: MetricState;
   /** ISO timestamp of the last on-demand throughput benchmark (drives
    *  `tokensPerSec`), or null when never measured. */
   benchmarkedAt?: string | null;
@@ -152,9 +163,14 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       quantization: null,
       loaded: false,
       vramGb: null,
+      // Nothing has been probed yet at this point in the compose. "unreported"
+      // is the truthful starting state: we have not asked the daemon, so we
+      // cannot claim either a number or that one is impossible.
+      gbOnDiskState: "unreported" as MetricState,
+      vramState: "unreported" as MetricState,
     }));
 
-    // WARP-836 — enrich local (ollama) rows with real Ollama metrics: disk
+    // WARP-836 — enrich local (ollama) rows with real daemon metrics: disk
     // size, parameter count, quantization, and resident/VRAM. Best-effort:
     // if the probe fails the rows keep their honest null placeholders ("—"),
     // never a fabricated number. A single extra call, behind the route's 30s
@@ -171,15 +187,32 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
           row.quantization = m.quantization;
           row.loaded = m.loaded;
           row.vramGb = m.vramGb;
+          // Carry the reason through. The `??` fallback keeps this tolerant of
+          // a metrics object from before WARP-1749 (or a partial test double):
+          // a number present means it was measured, otherwise we don't know
+          // why it's missing, which is exactly "unreported".
+          row.gbOnDiskState =
+            m.gbOnDiskState ?? (m.gbOnDisk != null ? "measured" : "unreported");
+          row.vramState =
+            m.vramState ?? (m.vramGb != null ? "measured" : "unreported");
         }
         // Disk bar = each model's share of the total on-disk model store.
-        const totalGb = local.reduce((s, r) => s + (r.gbOnDisk ?? 0), 0);
-        if (totalGb > 0) {
-          for (const row of local) {
-            row.diskBarPct =
-              row.gbOnDisk != null
-                ? Math.round((row.gbOnDisk / totalGb) * 100)
-                : null;
+        //
+        // WARP-1749: a "share of the store" is only meaningful when the WHOLE
+        // store is known. On a runtime that reports a size for some models and
+        // not others (DMR gives one only for models its native listing knows),
+        // dividing by a partial total inflates every bar — a 2 GB model would
+        // render as 100% of a store it is a tenth of. Rather than draw a
+        // confidently wrong bar we draw none, and the card says the usage
+        // breakdown isn't available. Ollama reports every size, so this
+        // condition is always true there and the bars are unchanged.
+        const localRows = local.filter((r) => r.provider === "ollama");
+        const everySizeKnown =
+          localRows.length > 0 && localRows.every((r) => r.gbOnDisk != null);
+        const totalGb = localRows.reduce((s, r) => s + (r.gbOnDisk ?? 0), 0);
+        if (everySizeKnown && totalGb > 0) {
+          for (const row of localRows) {
+            row.diskBarPct = Math.round(((row.gbOnDisk ?? 0) / totalGb) * 100);
           }
         }
       }

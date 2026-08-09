@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "tls-deregister": "node dist/cli/tls-deregister.js",
     "tls-release": "node dist/cli/tls-release.js",
+    "model-id-migrate": "node dist/cli/model-id-migrate.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
