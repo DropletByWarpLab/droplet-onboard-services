@@ -280,12 +280,59 @@ export interface LocalModelRow {
    *  graphics memory is genuinely unobtainable there — printing "0 GB" would
    *  be a confident wrong number on a page whose point is honesty. */
   vramState?: MetricState;
+  // WARP-1827 placement (additive/optional): where a LOADED model sits.
+  /** min(1, size_vram/size), 3 decimals, or null when unknowable. */
+  gpuFraction?: number | null;
+  /** "gpu" / "partial" / "cpu". Null when not loaded or the runtime can't
+   *  say — absence of data is NOT health, so the page only warns on an
+   *  explicit "cpu"/"partial", never on a missing value. */
+  placement?: ModelPlacement | null;
+  /** Why `placement` is null, when it is; null itself for an unloaded row. */
+  placementState?: MetricState | null;
 }
 
 /** Why a metric has no number. Mirrors the orchestrator's `MetricState`
  *  (model-metrics.service.ts) 1:1 — state is stated on the wire, never
  *  inferred by the dashboard from the absence of a value. */
 export type MetricState = "measured" | "unreported" | "unsupported";
+
+/** WARP-1827 — where a LOADED local model's weights actually sit. Mirrors the
+ *  orchestrator's `ModelPlacement`; the arithmetic (min(1, size_vram/size),
+ *  0.9 GPU threshold) matches the appliance-side enforcement (WARP-1825). */
+export type ModelPlacement = "gpu" | "partial" | "cpu";
+
+// ── WARP-1827: pull-from-catalog (`/api/models/catalog` + pull) ──
+
+/** One eligible catalog entry, as the box's inference-manager reports it via
+ *  the orchestrator proxy. Every descriptive field is nullable — a gap the
+ *  sidecar didn't fill stays a gap, never fabricated. */
+export interface CatalogModelEntry {
+  /** Catalog identity — also what POST /api/models/:name/pull takes. */
+  name: string;
+  /** The runtime tag the sidecar will pull (may differ from `name`). */
+  pull_tag: string | null;
+  min_vram_gb: number | null;
+  /** Sidecar's size class, e.g. "flagship" / "compact". */
+  class: string | null;
+  /** True for the catalog's default recommendation at this VRAM tier. */
+  default: boolean;
+  display_name: string | null;
+  maker: string | null;
+  description: string | null;
+  capabilities: string[];
+  roles: string[];
+  /** Approximate download size in GB, when the catalog knows it. */
+  disk_gb: number | null;
+  /** True when the model is already installed on this box. */
+  pulled: boolean;
+}
+
+/** Wire shape of `GET /api/models/catalog` — the ELIGIBLE set (VRAM-gated,
+ *  decided appliance-side by the inference-manager) with `pulled` flags. */
+export interface ModelsCatalogPayload {
+  detected_vram_gb: number | null;
+  models: CatalogModelEntry[];
+}
 
 /** One opt-in cloud provider. Read-only on this surface — enabling a provider
  *  happens in Settings (the off-LAN allowlist), never here. */

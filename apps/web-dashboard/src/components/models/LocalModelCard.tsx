@@ -18,6 +18,12 @@
  * differently from one it can never report (Docker Model Runner cannot report
  * per-model graphics memory at all — its /api/ps has no such field). The value
  * itself is unchanged: still "—", still never a fabricated 0.
+ *
+ * WARP-1827 — placement surfacing: when the box reports a LOADED model is
+ * running on the CPU ("cpu") or only partly on the GPU ("partial"), the card
+ * shows a warning badge. Only those two explicit states warn — a "gpu"
+ * placement is quiet, and a null/absent placement renders nothing (absence of
+ * data is not a health signal).
  */
 
 import { useState } from "react";
@@ -31,6 +37,7 @@ import {
   ShieldCheck,
   Zap,
 } from "lucide-react";
+import { Badge } from "@/components/shell/primitives";
 import { benchmarkModel } from "@/lib/api";
 import type { LocalModelRow } from "@/lib/types";
 
@@ -103,6 +110,15 @@ export function LocalModelCard({
   const status = STATUS_META[model.status];
   const diskState = stateOf(model.gbOnDiskState, model.gbOnDisk);
   const vramState = stateOf(model.vramState, model.vramGb);
+  // WARP-1827 — only an EXPLICIT degraded placement warns. "gpu" is quiet,
+  // and null/absent (not loaded, or a runtime that can't say) shows nothing:
+  // absence of data is not a health signal.
+  const placementWarning =
+    model.placement === "cpu"
+      ? "Running on CPU"
+      : model.placement === "partial"
+        ? "Partially on GPU"
+        : null;
   const gb = model.gbOnDisk != null ? `${model.gbOnDisk} GB` : DASH;
   // Tooltips carry the explanation; the visible value stays "—" so the stat row
   // reads the same at a glance. "unsupported" is the one worth spelling out —
@@ -191,6 +207,7 @@ export function LocalModelCard({
             {model.role ? ` · ${model.role}` : ""}
           </p>
         </div>
+        {placementWarning && <Badge kind="warn">{placementWarning}</Badge>}
         <span
           className={`
             inline-flex items-center gap-1.5 h-6 px-2 rounded-full

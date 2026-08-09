@@ -29,18 +29,31 @@
  * Topbar's per-page status chip becomes a Badge in the page header (`Phead`
  * actions) with the same tone logic.
  *
+ * WARP-1827 — the catalog work, part one: an "Available to install" section
+ * under the local models lists the ELIGIBLE catalog (VRAM-gated appliance-side
+ * by the inference-manager) minus what's already pulled. Owners/admins can
+ * download; the NDJSON progress stream renders live on the card, one download
+ * at a time. Pulls only INSTALL — the active model is untouched (ADR-003).
+ * The same ticket surfaces placement: a loaded model the box reports as
+ * running on the CPU (or only partly on the GPU) gets a warning badge on its
+ * card and ONE page banner. Absence of placement data shows nothing — absence
+ * is not health.
+ *
  * Data: `useModelsPage` → `GET /api/models` (distinct from `/api/llm/models`,
- * the chat model selector).
+ * the chat model selector); `useModelsCatalog` → `GET /api/models/catalog`.
  */
 
 import { Cpu, ServerCrash, XCircle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge } from "@/components/shell/primitives";
 import { useModelsPage } from "@/lib/hooks/useModelsPage";
+import { useModelsCatalog } from "@/lib/hooks/useModelsCatalog";
+import { useModelPull } from "@/lib/hooks/useModelPull";
 import { useAuth } from "@/lib/auth";
 import { KpiStrip } from "@/components/models/KpiStrip";
 import { LocalModelCard } from "@/components/models/LocalModelCard";
 import { ActiveModelPicker } from "@/components/models/ActiveModelPicker";
+import { CatalogModelCard } from "@/components/models/CatalogModelCard";
 import { CloudProviderRow } from "@/components/models/CloudProviderRow";
 
 // Honesty-contract copy — local-first framing. Owners/admins can change the
@@ -56,8 +69,22 @@ function isAdminRole(role?: string): boolean {
 
 export default function ModelsPage() {
   const { data, error, isLoading, refresh } = useModelsPage();
+  const catalog = useModelsCatalog();
   const { user } = useAuth();
   const canManage = isAdminRole(user?.role);
+
+  // WARP-1827 — one download at a time; a finished pull refreshes BOTH
+  // payloads so the model moves from "Available to install" to the local list.
+  const {
+    pulling,
+    progressPct,
+    progressStatus,
+    error: pullError,
+    startPull,
+  } = useModelPull(() => {
+    void refresh();
+    void catalog.refresh();
+  });
 
   const icon = <Cpu size={15} />;
 
@@ -125,6 +152,22 @@ export default function ModelsPage() {
   // failed during listing). Same pattern as the wizard's WARP-1284
   // model-degraded note: never render "no local models" for an outage.
   const degraded = data.degraded === true;
+
+  // WARP-1827 — the eligible catalog minus what's already installed. The
+  // section is an enhancement: while the catalog is loading/unreachable, or
+  // when every eligible model is pulled, it renders NOTHING (no empty shell —
+  // the page's own degraded state already tells the AI-service-down story).
+  const installable = (catalog.data?.models ?? []).filter((m) => !m.pulled);
+
+  // WARP-1827 — placement banner: ONE line for the whole page, and only on an
+  // EXPLICIT "cpu"/"partial" report. A missing placement (older orchestrator,
+  // unloaded model, a runtime that can't say) shows nothing — absence of data
+  // is not a health signal. Point at the active model when it's affected.
+  const misplaced = local.filter(
+    (m) => m.placement === "cpu" || m.placement === "partial",
+  );
+  const bannerModel =
+    misplaced.find((m) => m.name === data.activeModel) ?? misplaced[0] ?? null;
   const statusLabel = degraded
     ? "AI service unreachable"
     : localEmpty
@@ -153,6 +196,23 @@ export default function ModelsPage() {
           cloudSpendUsd={cloudSpendUsd}
           localCount={local.length}
         />
+
+        {/* WARP-1827 — degraded-placement banner. Same in-flow note idiom as
+            the WARP-1289 incomplete-list line, in the warning tone. */}
+        {bannerModel && (
+          <p
+            className="type-footnote"
+            role="status"
+            style={{ color: "var(--system-orange, #ff9500)", margin: 0 }}
+          >
+            {bannerModel.name === data.activeModel
+              ? `Your active model ${bannerModel.name}`
+              : bannerModel.name}
+            {bannerModel.placement === "cpu"
+              ? " is running on the CPU instead of the GPU right now, so replies will be slower than usual."
+              : " is running only partly on the GPU right now, so replies may be slower than usual."}
+          </p>
+        )}
 
         {/* WARP-1112 — active-model selector. Only shown when we actually
             know the installed set (not during an outage/empty state), so we
@@ -236,6 +296,44 @@ export default function ModelsPage() {
             </>
           )}
         </section>
+
+        {/* WARP-1827 — "Available to install": the eligible catalog minus
+            what's already on the box. Renders NOTHING when there's nothing
+            installable — no empty shell. */}
+        {installable.length > 0 && (
+          <section aria-labelledby="models-catalog-heading">
+            <div className="sect">
+              <h2 id="models-catalog-heading">Available to install</h2>
+              <span className="sx">Ready for this Droplet’s hardware</span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {installable.map((entry) => (
+                <CatalogModelCard
+                  key={entry.name}
+                  entry={entry}
+                  canManage={canManage}
+                  pulling={pulling === entry.name}
+                  pullBusy={pulling != null}
+                  progressPct={pulling === entry.name ? progressPct : null}
+                  progressStatus={pulling === entry.name ? progressStatus : null}
+                  error={pullError?.model === entry.name ? pullError.message : null}
+                  onDownload={() => {
+                    void startPull(entry.name);
+                  }}
+                />
+              ))}
+            </div>
+
+            <p
+              className="type-caption-1"
+              style={{ color: "var(--text-muted)", marginTop: 12 }}
+            >
+              Downloads come from the model registry and run on your Droplet —
+              once installed, a model works entirely on the box.
+            </p>
+          </section>
+        )}
 
         {/* Cloud section */}
         <section aria-labelledby="models-cloud-heading">

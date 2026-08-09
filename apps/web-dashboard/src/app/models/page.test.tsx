@@ -4,8 +4,11 @@
  * The page shows local LLMs + opt-in cloud providers + KPIs, all read-only.
  * These tests drive the data states (loading / error / empty-degraded /
  * populated) against a mocked `useModelsPage` hook, and — critically — pin the
- * one-model-rule guardrail (architecture-guard #13): there must be NO
- * pull / swap / benchmark / delete / add-model control anywhere on the page.
+ * one-model-rule guardrail (architecture-guard #13) on the MEMBER-visible
+ * surface: no pull / swap / benchmark / delete / add-model control renders
+ * for a non-admin (useAuth is mocked to user:null throughout, so admin-gated
+ * controls — "Measure speed" since WARP-836, "Download" since WARP-1827 —
+ * are exercised by their own component tests, not here).
  * They also pin the honest-placeholder contract: not-yet-wired metrics render
  * as "—"/"Unavailable", and cloud spend as "$0.00", never fabricated values.
  *
@@ -22,6 +25,13 @@ import type { ModelsPagePayload } from "@/lib/types";
 const useModelsPageMock = vi.fn();
 vi.mock("@/lib/hooks/useModelsPage", () => ({
   useModelsPage: () => useModelsPageMock(),
+}));
+
+// WARP-1827 — the catalog hook is mocked per-test; the default (no data)
+// renders no catalog section at all, keeping the pre-existing tests exact.
+const useModelsCatalogMock = vi.fn();
+vi.mock("@/lib/hooks/useModelsCatalog", () => ({
+  useModelsCatalog: () => useModelsCatalogMock(),
 }));
 
 // WARP-1340 — ShellPage is mocked to a passthrough that renders the real
@@ -103,8 +113,45 @@ function ready(over: Partial<ModelsPagePayload> = {}) {
  *  expose NONE of these as a control (button/link/menuitem). */
 const FORBIDDEN_MUTATION = /pull|swap|benchmark|delete|remove|add model|install|download|uninstall/i;
 
+/** WARP-1827 — one eligible catalog entry (not yet installed). */
+function catalogEntry(over: Record<string, unknown> = {}) {
+  return {
+    name: "qwen3:14b",
+    pull_tag: "qwen3:14b",
+    min_vram_gb: 12,
+    class: "flagship",
+    default: false,
+    display_name: "Qwen3 14B",
+    maker: "Alibaba",
+    description: "A capable multilingual model.",
+    capabilities: ["chat"],
+    roles: ["chat"],
+    disk_gb: 9,
+    pulled: false,
+    ...over,
+  };
+}
+
+function catalogReady(models: unknown[]) {
+  useModelsCatalogMock.mockReturnValue({
+    data: { detected_vram_gb: 16, models },
+    error: undefined,
+    isLoading: false,
+    refresh: vi.fn(),
+  });
+}
+
 beforeEach(() => {
   useModelsPageMock.mockReset();
+  useModelsCatalogMock.mockReset();
+  // Default: catalog not loaded → the section renders nothing, and every
+  // pre-WARP-1827 test sees exactly the page it always did.
+  useModelsCatalogMock.mockReturnValue({
+    data: undefined,
+    error: undefined,
+    isLoading: false,
+    refresh: vi.fn(),
+  });
 });
 
 describe("<ModelsPage /> (WARP-836)", () => {
@@ -399,5 +446,109 @@ describe("<ModelsPage /> indigo shell scope (WARP-1340)", () => {
     ready({ local: [], degraded: true });
     render(<ModelsPage />);
     expect(screen.getByText("AI service unreachable")).toBeInTheDocument();
+  });
+});
+
+// ── WARP-1827 — "Available to install" catalog section + placement banner ──
+
+describe("<ModelsPage /> catalog section (WARP-1827)", () => {
+  it("renders eligible not-yet-pulled entries under 'Available to install'", () => {
+    ready();
+    catalogReady([
+      catalogEntry(),
+      catalogEntry({ name: "gpt-oss:20b", display_name: "GPT-OSS 20B", pulled: true }),
+    ]);
+    render(<ModelsPage />);
+    expect(
+      screen.getByRole("heading", { name: /available to install/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Qwen3 14B")).toBeInTheDocument();
+    // Already-installed entries don't show as installable.
+    expect(screen.queryByText("GPT-OSS 20B")).toBeNull();
+    // The honesty note: where downloads come from, where they run.
+    expect(screen.getByText(/model registry/i)).toBeInTheDocument();
+  });
+
+  it("renders NOTHING when every eligible model is already pulled (no empty shell)", () => {
+    ready();
+    catalogReady([catalogEntry({ pulled: true })]);
+    render(<ModelsPage />);
+    expect(screen.queryByText(/available to install/i)).toBeNull();
+    expect(screen.queryByText(/model registry/i)).toBeNull();
+  });
+
+  it("renders NOTHING while the catalog is unavailable (error/loading)", () => {
+    ready();
+    useModelsCatalogMock.mockReturnValue({
+      data: undefined,
+      error: new Error("503"),
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expect(screen.queryByText(/available to install/i)).toBeNull();
+  });
+
+  it("member (no admin role) sees the metadata but NO download control", () => {
+    // useAuth is mocked to user:null at module level — a member-shaped view.
+    ready();
+    catalogReady([catalogEntry()]);
+    render(<ModelsPage />);
+    expect(screen.getByText("Qwen3 14B")).toBeInTheDocument();
+    for (const b of screen.queryAllByRole("button")) {
+      expect(b).not.toHaveTextContent(/download/i);
+      expect(b.getAttribute("aria-label") ?? "").not.toMatch(/download/i);
+    }
+  });
+});
+
+describe("<ModelsPage /> placement banner (WARP-1827)", () => {
+  const cpuRow = {
+    name: "llama3.1:70b",
+    family: "llama",
+    provider: "ollama",
+    contextLength: 131072,
+    gbOnDisk: null,
+    role: null,
+    status: "ready" as const,
+    tokensPerSec: null,
+    diskBarPct: null,
+    loaded: true,
+    placement: "cpu" as const,
+    gpuFraction: 0,
+    placementState: "measured" as const,
+  };
+
+  it("warns once when the active model runs on the CPU", () => {
+    ready({ local: [cpuRow], activeModel: "llama3.1:70b" });
+    render(<ModelsPage />);
+    const banner = screen.getByText(/running on the CPU/i);
+    expect(banner).toBeInTheDocument();
+    expect(banner.textContent).toMatch(/active model/i);
+    expect(banner.textContent).toMatch(/llama3\.1:70b/);
+    expect(banner.textContent).toMatch(/slower/i);
+  });
+
+  it("says 'partly on the GPU' for a partial placement", () => {
+    ready({
+      local: [{ ...cpuRow, placement: "partial" as const, gpuFraction: 0.5 }],
+      activeModel: "llama3.1:70b",
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText(/partly on the GPU/i)).toBeInTheDocument();
+  });
+
+  it("shows NO banner when placement is absent — absence of data is not health", () => {
+    ready(); // fixture row carries no placement fields
+    render(<ModelsPage />);
+    expect(screen.queryByText(/running on the CPU|partly on the GPU/i)).toBeNull();
+  });
+
+  it("shows NO banner when the loaded model is fully on the GPU", () => {
+    ready({
+      local: [{ ...cpuRow, placement: "gpu" as const, gpuFraction: 1 }],
+    });
+    render(<ModelsPage />);
+    expect(screen.queryByText(/running on the CPU|partly on the GPU/i)).toBeNull();
   });
 });
