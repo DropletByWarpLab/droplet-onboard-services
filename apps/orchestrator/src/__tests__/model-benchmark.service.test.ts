@@ -1,9 +1,11 @@
 /**
- * WARP-836 — model-benchmark.service: measured tokens/sec from Ollama.
+ * WARP-836 / WARP-1772 — model-benchmark.service: measured tokens/sec on the
+ * runtime-agnostic OpenAI chat path.
  *
- * Computes decode throughput from Ollama's own eval_count / eval_duration.
- * Any failure (non-2xx, missing timing, thrown) yields null — the card keeps
- * its honest "—", never a fabricated number.
+ * Computes wall-clock throughput from `usage.completion_tokens` — the only
+ * form both Ollama and DMR can answer (DMR has no /api/generate and no native
+ * timing fields). Any failure (non-2xx, missing usage, thrown) yields null —
+ * the card keeps its honest "—", never a fabricated number.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
@@ -27,29 +29,51 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("model-benchmark.service", () => {
-  it("computes tokens/sec from Ollama eval timing", async () => {
-    // 96 tokens in 2.259 s → ~42.5 tok/s.
+  it("POSTs the OpenAI chat path (both runtimes serve it) with a bounded budget", async () => {
     fetchMock.mockResolvedValue(
-      jsonResp({ eval_count: 96, eval_duration: 2_259_000_000 }),
+      jsonResp({ usage: { completion_tokens: 96 } }),
     );
     const r = await benchmarkModel("gpt-oss:20b");
     expect(r).not.toBeNull();
-    expect(r!.tokensPerSec).toBeCloseTo(42.5, 1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(String(url)).toMatch(/\/v1\/chat\/completions$/);
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.model).toBe("gpt-oss:20b");
+    expect(body.max_tokens).toBe(96);
+    expect(body.stream).toBe(false);
+  });
+
+  it("computes tokens/sec from usage.completion_tokens over wall clock", async () => {
+    // Simulate a generation that takes ~2s of wall clock.
+    let nowMs = 10_000;
+    vi.spyOn(performance, "now").mockImplementation(() => {
+      const v = nowMs;
+      nowMs += 2_000; // second call (after fetch) is 2s later
+      return v;
+    });
+    fetchMock.mockResolvedValue(
+      jsonResp({ usage: { completion_tokens: 96 } }),
+    );
+    const r = await benchmarkModel("gpt-oss:20b");
+    expect(r).not.toBeNull();
+    // 96 tokens / 2 s = 48.0 tok/s
+    expect(r!.tokensPerSec).toBeCloseTo(48.0, 1);
     expect(r!.evalCount).toBe(96);
-    expect(r!.evalDurationMs).toBe(2259);
+    expect(r!.evalDurationMs).toBe(2000);
     expect(typeof r!.measuredAt).toBe("string");
   });
 
-  it("returns null on a non-2xx generate", async () => {
+  it("returns null on a non-2xx response", async () => {
     fetchMock.mockResolvedValue(jsonResp({}, false));
     expect(await benchmarkModel("x:1b")).toBeNull();
   });
 
-  it("returns null when eval timing is missing (no fabrication)", async () => {
-    fetchMock.mockResolvedValue(jsonResp({ response: "hi" }));
+  it("returns null when usage tokens are missing (no fabrication)", async () => {
+    fetchMock.mockResolvedValue(jsonResp({ choices: [] }));
     expect(await benchmarkModel("x:1b")).toBeNull();
   });
 

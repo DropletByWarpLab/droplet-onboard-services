@@ -2736,9 +2736,9 @@ volumes:
   # WARP-1772 — Docker Model Runner's OCI model store (dark `dmr` profile).
   # Separate from ollama-data by construction: different on-disk formats, and
   # sharing a directory risks either runtime rewriting the other's store.
-  # Only materialized when the `dmr` profile is active. NOT in
-  # factory-reset.sh's wipe list until the flip ships — a dark profile's
-  # volume holds nothing customer-facing.
+  # Only materialized when the `dmr` profile is active. Classified everywhere
+  # ollama-data is: factory-reset.sh wipes it, device-backup.sh excludes it
+  # (model blobs are re-pulled, never customer data).
   dmr-models:
   openwrt-config:
   openwrt-overlay:

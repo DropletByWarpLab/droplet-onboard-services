@@ -52,10 +52,48 @@ Two traps measured on this box (details in ADR-036 §5a):
   wedge after an interrupted pull) — presence in `/api/tags` is not
   readiness.
 
-## What a real flip needs (do not improvise one)
+## The flip is now an executable runbook
 
-The serving flip is **not** an operator action on this box. Preconditions,
-verbatim from WARP-1749/WARP-1772:
+`scripts/dmr/flip-single-box.sh` **is** the flip — preflights (override file,
+soak marker, env snapshots), dark-service activation, store population,
+**`LLM_MODEL` derived from the id DMR itself reports** (never hardcoded — the
+id-vocabulary gap is the measured #1 failure class), the four runtime vars
+written to BOTH env files, `--force-recreate` of every consumer (ai-gateway,
+orchestrator, voice-io, rag-eval — env binds at import time), and a verify
+battery that fails loud: capability-table env present, context canary
+`n_ctx_slot`, no readiness re-pull, serving round-trip, Ollama demoted to
+empty standby. `scripts/dmr/rollback-single-box.sh` is the ~60 s inverse —
+DMR stopped FIRST (VRAM), both env files together, placement-verified re-warm
+(`size_vram`, not just presence — keep_alive pins a CPU placement otherwise).
+
+Setup re-runs are flip-durable: `scripts/lib/single-box.sh` reads
+`INFERENCE_RUNTIME` before writing `OLLAMA_URL` / `RAGAS_OLLAMA_URL` /
+`LLM_MODEL`, so a re-provision keeps the DMR wiring instead of silently
+reverting it.
+
+### The lifecycle decision — resolved for this shape
+
+The flip runs **option (b)**: lifecycle consumers (readiness, metrics, models
+summary) ride DMR's Ollama-compat surface, with WARP-1749's honest-metrics
+work (PR #1424) supplying serveability checks, id translation, and the honest
+Models-page display. No manager service joins the single-box compose. The
+out-of-band `droplet-local-llm` manager some lab boxes run keeps fronting the
+(empty-standby) Ollama store — benign, nothing on this shape consumes it
+(`INFERENCE_MANAGER_URL` unset); refreshing or retiring it is WARP-1748
+follow-up work, deliberately not coupled to the flip.
+
+### Known post-flip degradations (accepted, tracked)
+
+- Pre-warm and the Models-page "Measure speed" used Ollama's `/api/generate`,
+  which DMR does not serve — both are being made runtime-agnostic on the
+  WARP-1749 branch (OpenAI-path warm + wall-clock benchmark).
+- `prettify` renders the qualified id as `Docker.io/ai/gpt-oss 20B F16` —
+  cosmetic, display-polish follow-up.
+- The broad docs sweep (README, COMPONENTS, agentic-workflows, the
+  debug-ollama-call-path skill — all `:11434`-shaped) lands as its own PR
+  after the flip, when the described default actually changes.
+
+## Preconditions (unchanged, verbatim from WARP-1749/WARP-1772)
 
 1. WARP-1741 PASS — **done, 2026-08-08** (ADR-036 §5a).
 2. A lab **soak**, not just a bench run.

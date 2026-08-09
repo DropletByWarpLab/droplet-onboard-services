@@ -70,9 +70,15 @@ interface OllamaPullProgress {
 // WARP-1041 — model pre-warm. Pull ≠ load: a pulled model still costs
 // 30-90 s of GPU load on the first inference after a boot, and the
 // setup wizard's "Ask the AI" probe is exactly that first inference.
-// warmDefaultModel() fires Ollama's documented load-into-memory no-op
-// (POST /api/generate with a model name and NO prompt) so the load
-// happens in the background minutes before the customer asks.
+//
+// WARP-1772: the warm request is the OpenAI chat path with max_tokens=1,
+// NOT Ollama's empty-prompt /api/generate. Both runtimes serve
+// /v1/chat/completions; only Ollama serves /api/generate — under DMR the
+// old request 404'd, cleared the debounce, and pre-warm silently died at
+// debug level (the flip audit's "looks fine, is broken" #1). One token of
+// generation is the cost of being runtime-agnostic; on a reasoning model
+// that token lands in the reasoning channel and no content is produced,
+// which is fine — the warm needs the LOAD, not the output.
 // ──────────────────────────────────────────────────────────────────
 
 /** Skip re-warming when the last successful attempt was this recent.
@@ -90,23 +96,19 @@ export function resetWarmStateForTests(): void {
 }
 
 /**
- * Load the configured chat model (LLM_MODEL) into Ollama's memory
- * without generating anything. Fire-and-forget at every call site;
- * never throws. The request body is exactly `{model}`:
+ * Load the configured chat model (LLM_MODEL) into the serving runtime's
+ * memory. Fire-and-forget at every call site; never throws.
  *
- *   - NO prompt — empty-prompt /api/generate is Ollama's documented
- *     "just load the model" request; it returns after the load.
- *   - NO keep_alive — a body value would OVERRIDE the container's
- *     OLLAMA_KEEP_ALIVE env (24 h on the box); residency policy stays
- *     owned by the compose file, not this code path.
+ *   - OpenAI path, max_tokens=1 — the ONLY load-triggering request both
+ *     runtimes serve (Ollama and DMR). Ollama's nicer empty-prompt
+ *     /api/generate no-op is Ollama-only and 404s on DMR (WARP-1772).
+ *   - NO keep_alive — residency policy stays owned by the compose file
+ *     (OLLAMA_KEEP_ALIVE) or the runtime's own configuration, never
+ *     this code path.
  *
  * All failures (404 while the model is still pulling, ECONNREFUSED
- * while Ollama boots) are swallowed at debug level: warming is an
+ * while the runtime boots) are swallowed at debug level: warming is an
  * optimization, never a dependency.
- *
- * When the ollama-manager sidecar (droplet-local-LLM Phase 3c) lands,
- * prefer its lifecycle API over raw Ollama — same fall-through note as
- * the pull logic above.
  */
 export async function warmDefaultModel(): Promise<void> {
   const model = process.env.LLM_MODEL ?? "";
@@ -123,10 +125,15 @@ export async function warmDefaultModel(): Promise<void> {
   lastWarmAttemptAt = now;
   const startedAt = Date.now();
   try {
-    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const resp = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model }),
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        stream: false,
+      }),
     });
     if (!resp.ok) {
       // Drain the error body — under undici an unconsumed body can pin
@@ -137,7 +144,7 @@ export async function warmDefaultModel(): Promise<void> {
       lastWarmAttemptAt = 0;
       logger.debug(
         { model, status: resp.status },
-        "model_warm_skipped (Ollama non-2xx — model may still be pulling)",
+        "model_warm_skipped (runtime non-2xx — model may still be pulling)",
       );
       return;
     }
@@ -151,7 +158,7 @@ export async function warmDefaultModel(): Promise<void> {
     lastWarmAttemptAt = 0;
     logger.debug(
       { model, err: (err as Error).message },
-      "model_warm_failed (Ollama unreachable — will retry on next trigger)",
+      "model_warm_failed (runtime unreachable — will retry on next trigger)",
     );
   }
 }
