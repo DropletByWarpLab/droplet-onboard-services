@@ -1,0 +1,5 @@
+# The SAP SQL Anywhere client is license-governed and operator-supplied — it
+# must never be committed. Only this file and the README are tracked.
+*
+!.gitignore
+!README.md

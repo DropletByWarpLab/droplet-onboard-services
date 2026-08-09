@@ -22,7 +22,11 @@ name: ci
 #     voice-io, device-identity-svc), sysdeps and all, plus the WARP-970
 #     coverage-gate additions (email-indexer, ops-console, fleet-agent) —
 #     their path-filtered workflows can't catch cross-cutting breakage, so
-#     they must also be legs of the one always-reporting check.
+#     they must also be legs of the one always-reporting check, and
+#     WARP-1106's erp-sql-bridge. Its leg runs the PURE half only
+#     (connection-string assembly, redaction, route guards); the live-database
+#     half needs Postgres + psqlODBC and lives in erp-sql-bridge-tests.yml,
+#     the same "coverage no ci.yml leg has" split orchestrator-tests.yml uses.
 #     Deliberately NOT a leg: services/rag-eval — eval tooling, not an
 #     appliance service; its two lanes run from the repo root with an
 #     ad-hoc dep set (see rag-eval-tests.yml) and stay path-filtered +
@@ -144,6 +148,8 @@ jobs:
               - "services/switch/**"
             camera-discovery:
               - "services/camera-discovery/**"
+            erp-sql-bridge:
+              - "services/erp-sql-bridge/**"
             email-indexer:
               - "services/email-indexer/**"
             ops-console:
@@ -171,7 +177,7 @@ jobs:
           ALL_PYTHON: >-
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
-            "voice-io","device-identity-svc"]
+            "voice-io","device-identity-svc","erp-sql-bridge"]
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
@@ -202,7 +208,9 @@ jobs:
                then {sysdeps: "libportaudio2 alsa-utils"} else {} end)
             + (if . == "device-identity-svc"
                then {sysdeps: "libtss2-dev pkg-config", reqs: "requirements.txt",
-                     extra_pip: "pytest", needs_pythonpath: "1"} else {} end)]' \
+                     extra_pip: "pytest", needs_pythonpath: "1"} else {} end)
+            + (if . == "erp-sql-bridge"
+               then {sysdeps: "unixodbc"} else {} end)]' \
             <<<"$python")
           {
             echo "node-suites=$node"

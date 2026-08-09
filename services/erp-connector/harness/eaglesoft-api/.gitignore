@@ -1,0 +1,3 @@
+# Throwaway TLS material minted at run time by certs.mjs. A checked-in private
+# key is a checked-in private key even when it is "only for tests".
+.certs/

@@ -22,15 +22,18 @@
  *    stores a cleartext password (brief §7.4, invariant 10).
  *  • Every writeEnabled flip writes an append-only `ErpAuditLog` row (§14).
  */
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
 import { ErpError } from "./erp-error.js";
 import {
   connectorForProvider,
+  encodeApiCredentials,
   isKnownErpProvider,
+  parseRouteMap,
   EAGLESOFT_PROVIDER,
   EAGLESOFT_API_PROVIDER,
+  type ResolvedApiCredentials,
 } from "./erp-provider.js";
 
 const logger = createLogger("integrations-service");
@@ -93,6 +96,19 @@ export interface ConnectInput {
   /** Which ERP provider to connect ("eaglesoft" | "eaglesoft-api"). Defaults to
    *  the direct-SQL Eaglesoft provider when omitted (dual-track, WARP-1294). */
   provider?: string;
+
+  // --- REST-track material (ignored by the direct-SQL provider) -------------
+
+  /** CLEARTEXT vendor + provider login, supplied once at connect time. Stored
+   *  encrypted (`apiCredentialsEnc`) and never returned by any read path. */
+  apiCredentials?: ResolvedApiCredentials;
+  /** The route contract DISCOVERED from this box's /help page. Supplied by the
+   *  operator — deliberately not auto-parsed, because the real page's format is
+   *  Patterson's and unseen; a parser written against a synthetic one would be
+   *  a guess wearing the costume of discovery. */
+  apiRouteMap?: unknown;
+  /** PEM of the CA to trust for this box's certificate. */
+  apiCaCert?: string;
 }
 
 export interface TestResult {
@@ -127,6 +143,8 @@ function resolveProvider(provider: string | undefined): string {
 
 function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
   // Dual-track selection lives in erp-provider.ts; the SQL branch is unchanged.
+  // The REST material comes straight off the ConnectInput here (rather than the
+  // row) so `test()` can validate credentials BEFORE anything is persisted.
   return connectorForProvider({
     provider,
     host: input.host,
@@ -134,6 +152,9 @@ function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
     serverName: input.serverName,
     databaseName: input.databaseName,
     secretRef: input.secretRef,
+    apiCredentials: input.apiCredentials,
+    apiRouteMap: parseRouteMap(input.apiRouteMap),
+    apiCaCert: input.apiCaCert,
   });
 }
 
@@ -238,15 +259,29 @@ export function createIntegrationsService(
       const secretRef = input.secretRef ?? `${provider}:pending`;
       // Honor the wizard's connect-time write opt-in (default off / read-only).
       const writeEnabled = !!input.enableWrites;
+      // REST-track material. Each is written only when supplied, so a reconnect
+      // that changes just the host doesn't silently wipe the credentials or the
+      // discovered route map already on the row.
+      const apiMaterial = {
+        ...(input.apiCredentials
+          ? { apiCredentialsEnc: encodeApiCredentials(input.apiCredentials) }
+          : {}),
+        ...(input.apiRouteMap !== undefined
+          ? { apiRouteMap: input.apiRouteMap as Prisma.InputJsonValue }
+          : {}),
+        ...(input.apiCaCert !== undefined ? { apiCaCert: input.apiCaCert } : {}),
+      };
       const base = existing
         ? await prisma.integrationConnection.update({
             where: { id: existing.id },
             data: {
               host: input.host,
+              port: input.port ?? null,
               databaseName,
               secretRef,
               writeEnabled,
               status: "PROVISIONING",
+              ...apiMaterial,
             },
           })
         : await prisma.integrationConnection.create({
@@ -254,10 +289,12 @@ export function createIntegrationsService(
               provider,
               status: "PROVISIONING",
               host: input.host,
+              port: input.port ?? null,
               databaseName,
               // POINTER only — see module docstring / invariant 10.
               secretRef,
               writeEnabled,
+              ...apiMaterial,
             },
           });
 

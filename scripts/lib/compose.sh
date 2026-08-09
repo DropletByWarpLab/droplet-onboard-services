@@ -218,12 +218,22 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,web,*) build_services+=(web-fetch) ;;
   esac
+  # erp profile: erp-sql-bridge (WARP-1106 direct-SQL ERP bridge) is
+  # `["erp"]`-profiled and has a `build:` section, so the same "No such image"
+  # failure at `up` applies. Same build-only-when-active idiom: the profile is
+  # off on every box without an Eaglesoft install, and building an ODBC image
+  # there would be pure waste.
+  case ",${active_profiles}," in
+    *,erp,*) build_services+=(erp-sql-bridge) ;;
+  esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
   # Deliberately NOT in build_services (accounted for here, not built):
   #   rag-eval    — appended above only when the eval profile is active
   #   web-fetch   — appended above only when the web profile is active
   #                 (WARP-1436 screened ambient-data fetcher)
+  #   erp-sql-bridge — appended above only when the erp profile is active
+  #                 (WARP-1106 direct-SQL ERP bridge)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned
@@ -245,7 +255,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,openwrt,ops-console,fleet-agent" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then
@@ -264,6 +274,12 @@ prepare_and_build() {
   # only in build_services when its profile is enabled, so the extra --profile
   # flag is harmless otherwise.) Default-profile services are visible
   # regardless of --profile.
+  #
+  # WARP-1106 added --profile erp for erp-sql-bridge, and --profile web at the
+  # same time: web-fetch has been conditionally appended to build_services
+  # since WARP-1436 without its profile ever being listed here, so a box with
+  # the web profile active would have failed this loop with "no such service".
+  # Same one-word omission, caught while adding the adjacent one.
   # CI hook: when DROPLET_COMPOSE_BUILD_EXTRA_FILE is set (setup-e2e.yml),
   # merge that compose file on top of the main one so builds import the GHCR
   # BuildKit layer cache that docker-build.yml refreshes on every push to
@@ -274,7 +290,8 @@ prepare_and_build() {
   # devices → argv identical to before, production behavior untouched.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux --profile eval --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --profile eval \
+        --profile web --profile erp --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         ${DROPLET_COMPOSE_BUILD_EXTRA_FILE:+-f "$DROPLET_COMPOSE_BUILD_EXTRA_FILE"} \
         build "$svc"; then

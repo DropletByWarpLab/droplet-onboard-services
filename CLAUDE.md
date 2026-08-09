@@ -180,7 +180,7 @@ npm run test:ai-gateway     # ai-gateway only
 
 ## Docker stack
 
-29 compose services (13 default-on, the rest profile-gated) behind
+30 compose services (13 default-on, the rest profile-gated) behind
 nginx (dashboard at `/`, orchestrator at `/api/`, ai-gateway at `/ai/`,
 Nextcloud at `/nextcloud/`). Full service/port/profile table +
 .env-update procedure: the **`docker-stack`** skill. Two

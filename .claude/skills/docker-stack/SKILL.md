@@ -35,6 +35,7 @@ description: |
 | switch         | :8081 | `full`, `single-box` | Managed switch control       |
 | camera-discovery | —   | `full`, `single-box` | ONVIF/RTSP scanner           |
 | web-fetch      | —     | `web`  | Ambient-data fetcher (weather/rates) for LLM tools (WARP-1436) |
+| erp-sql-bridge | —     | `erp`  | Direct-SQL Eaglesoft bridge (unixODBC + pyodbc); needs an operator-vendored SAP client (WARP-1106) |
 | email-indexer  | —     | `full` | Mailbox indexer for RAG                    |
 | ollama         | 127.0.0.1:11434 | `single-box` | Local LLM inference on the single-box shape |
 | openwrt        | 127.0.0.1:8181→80 | `single-box` | In-container OpenWrt (router UI/ubus) |
@@ -43,7 +44,7 @@ description: |
 
 ## Profiles (`COMPOSE_PROFILES`)
 
-Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`.
+Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`, `erp`.
 `setup.sh` writes `COMPOSE_PROFILES` into `.env`:
 
 - **Linux:** `linux,display` — Frigate, the voice pipeline, and
