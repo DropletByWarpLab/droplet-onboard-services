@@ -27,6 +27,7 @@ import re
 import secrets
 import shlex
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -418,6 +419,17 @@ def _ssh_openwrt(remote_cmd, timeout=20):
         remote_cmd,
     ]
     if OPENWRT_PASS:
+        # WARP-1830: `sshpass` is an UNDOCUMENTED runtime dependency — it
+        # appears in no Dockerfile, no install script and no package manifest
+        # in this repo, and it is absent on the shipping box. Without this
+        # check the failure arrives as `_run`'s stringified OSError,
+        # "[Errno 2] No such file or directory: 'sshpass'", which reads like a
+        # missing *config file* and sent this bug's first triage after the
+        # wrong thing. Name the package and the alternative instead.
+        if shutil.which("sshpass") is None:
+            return 1, "", ("sshpass is not installed but OPENWRT_PASS is set "
+                           "— install sshpass, or clear OPENWRT_PASS and use "
+                           "a key-based SSH login")
         cmd = ["sshpass", "-p", OPENWRT_PASS] + ssh_args
     else:
         cmd = ssh_args
@@ -790,22 +802,50 @@ def scan_via_nmcli():
                       "connected_to": connected}
 
 
+def _uci_router_is_the_right_question():
+    """Whether asking an OpenWrt/UCI router over SSH makes sense on this box.
+
+    WARP-1830. `wifi_snapshot()` used to run `scan_via_openwrt()` on EVERY
+    shape. That is only correct on multi-box, where a router really does sit
+    at OPENWRT_HOST. On the other two it dials a phone number nobody owns:
+
+      * single-box  — the box's own hostapd is the AP; there is no UCI router
+      * edge-router — the Pi owns the fabric and an external AP serves Wi-Fi;
+                      the box is a wired DHCP client with its radio
+                      deactivated (ADR-033 §3, and the founder rule of
+                      2026-07-28 that onboard radios are never APs)
+
+    Reuses the SAME shape decision as the credential path (WARP-654/834) so
+    the scan can no longer disagree with the QR about what kind of box this
+    is — the two answering differently is what let this sit unnoticed.
+    """
+    return not _use_hostapd_mode()
+
+
 def wifi_snapshot():
     out = {
         "networks": [], "source": None, "adapter": None,
         "connected_to": None, "state": "unknown",
         "scanned_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "error": None,
+        "error": None, "detail": None,
     }
-    networks, err = scan_via_openwrt()
-    if networks is not None:
-        out["networks"] = networks[:20]
-        out["source"] = "openwrt"
-        out["adapter"] = OPENWRT_IFACE
-        out["connected_to"] = _openwrt_connected_ssid()
-        out["state"] = "connected" if out["connected_to"] else "ready"
-        return out
-    out["error"] = err
+    # WARP-1830 — shape first, transport second. On a box with no UCI router
+    # the SSH scan produced a failure that LOOKED like a broken dependency
+    # ("[Errno 2] ... 'sshpass'") while the real fault was that OPENWRT_HOST
+    # still pointed at the multi-box default, 192.168.50.1 — unreachable from
+    # behind the Pi. Not asking is the fix; installing the binary would only
+    # have swapped an instant honest error for a slow misleading one.
+    uci_shape = _uci_router_is_the_right_question()
+    if uci_shape:
+        networks, err = scan_via_openwrt()
+        if networks is not None:
+            out["networks"] = networks[:20]
+            out["source"] = "openwrt"
+            out["adapter"] = OPENWRT_IFACE
+            out["connected_to"] = _openwrt_connected_ssid()
+            out["state"] = "connected" if out["connected_to"] else "ready"
+            return out
+        out["error"] = err
     nets, meta = scan_via_nmcli()
     if nets is not None and meta:
         out["networks"] = nets[:20]
@@ -814,7 +854,17 @@ def wifi_snapshot():
         out["state"] = meta.get("state") or "unknown"
         out["connected_to"] = meta.get("connected_to")
         return out
-    out["state"] = "unavailable"
+    if uci_shape:
+        # A router we were right to ask, that did not answer. A real fault.
+        out["state"] = "unavailable"
+        return out
+    # Nothing to scan, and nothing broken. Report that plainly rather than
+    # borrowing the vocabulary of failure: on this shape an empty network list
+    # is the CORRECT answer, and `error` here would be a lie that costs
+    # somebody an afternoon.
+    out["state"] = "not-applicable"
+    out["detail"] = ("this box has no OpenWrt router of its own to scan — "
+                     "Wi-Fi is served by the external access point")
     return out
 
 

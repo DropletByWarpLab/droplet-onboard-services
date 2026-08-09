@@ -731,12 +731,20 @@ BRIDGE_QR_OK = {
 }
 
 # The bridge's GET /wifi — the CLIENT SCAN. This is what WARP-1782 actually
-# read. Note what is absent: ssid, key, payload. Captured off the live box.
+# read. Note what is absent: ssid, key, payload.
+#
+# Captured off the live box, then updated for WARP-1830: the box used to
+# answer `state: "unavailable"` with
+# `error: "[Errno 2] No such file or directory: 'sshpass'"`, because the scan
+# opened an SSH session on a shape that has no router. It now reports the
+# honest `not-applicable` instead. The credential fields are absent in BOTH
+# payloads — which is the point this fixture exists to pin.
 BRIDGE_WIFI_SCAN = {
     "adapter": None, "connected_to": None, "networks": [],
     "scanned_at": "2026-08-07T19:53:44Z", "source": None,
-    "state": "unavailable",
-    "error": "[Errno 2] No such file or directory: 'sshpass'",
+    "state": "not-applicable", "error": None,
+    "detail": ("this box has no OpenWrt router of its own to scan — "
+               "Wi-Fi is served by the external access point"),
 }
 
 

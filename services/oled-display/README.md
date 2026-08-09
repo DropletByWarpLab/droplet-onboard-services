@@ -188,6 +188,30 @@ so the bridge sources the QR creds differently per `DROPLET_AP_MODE`:
 | `hostapd` | single-box | `DROPLET_AP_SSID` / `DROPLET_AP_PSK` from the bridge env; falls back to parsing `/etc/hostapd.conf` inside the `droplet-openwrt` container |
 | `auto` | either | hostapd when `DROPLET_AP_SSID` is set or UCI wireless is empty/unreachable; otherwise uci |
 
+`DROPLET_AP_MODE` gates the **Wi-Fi scan** behind `GET /wifi` as well, not
+just the QR creds (WARP-1830). Only the `uci` shape has a router to ask, so
+only it opens the SSH `iwinfo` scan; the other shapes go straight to the host
+`nmcli` fallback. When neither can answer, the two cases are reported
+differently on purpose:
+
+| `state` | Meaning |
+|---------|---------|
+| `unavailable` | a router we were right to ask did not answer — a **fault**, with `error` set |
+| `not-applicable` | this shape has no router of its own to scan; Wi-Fi is served by the external AP. `error` is `null` and `detail` says so |
+
+That distinction matters on the `edge-router` shape (ADR-033 §3), where the
+box is a wired DHCP client with its radio deactivated and an **empty network
+list is the correct answer** — not a degraded one.
+
+> **`sshpass` is a runtime dependency of the `uci` shape only.** When
+> `OPENWRT_PASS` is set the bridge wraps `ssh` in `sshpass`, and that binary
+> is not installed by `install-device-bridge.sh` or any image build. Install
+> it (`apt-get install sshpass`) on a multi-box appliance, or leave
+> `OPENWRT_PASS` empty and give the `droplet` user a key-based login to the
+> router — the bridge already builds a plain `ssh` argv in that case. If it
+> is missing, `GET /wifi` and `GET /openwrt/qr` say so in `error` rather than
+> surfacing a bare `[Errno 2] ... 'sshpass'`.
+
 The single-box shape runs a **raw hostapd AP on the host** (via the
 `droplet-openwrt-attach` script), not OpenWrt/UCI — so `uci show wireless`
 is empty there and the multi-box lookup returns "no active AP", leaving
