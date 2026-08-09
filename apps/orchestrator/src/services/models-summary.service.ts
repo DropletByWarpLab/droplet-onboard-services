@@ -21,6 +21,7 @@ import {
   fetchLocalModelMetrics,
   metricsFor,
   type MetricState,
+  type ModelPlacement,
 } from "./model-metrics.service.js";
 import {
   benchCacheKey,
@@ -68,6 +69,16 @@ export interface LocalModelInfo {
   /** ISO timestamp of the last on-demand throughput benchmark (drives
    *  `tokensPerSec`), or null when never measured. */
   benchmarkedAt?: string | null;
+  // ── WARP-1827 placement of a LOADED model (additive/optional) ─────────
+  // The UI mirror of the appliance-side placement verdict (inference-manager
+  // /health.placement, WARP-1825) — same min(1, size_vram/size) arithmetic,
+  // same 0.9 GPU threshold, so the two surfaces can never disagree.
+  /** min(1, size_vram/size), 3 decimals, or null when unknowable. */
+  gpuFraction?: number | null;
+  /** "gpu" / "partial" / "cpu"; null when not loaded or inputs absent. */
+  placement?: ModelPlacement | null;
+  /** Why `placement` is null, when it is; null itself for an unloaded row. */
+  placementState?: MetricState | null;
 }
 
 export interface CloudProviderInfo {
@@ -168,6 +179,11 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       // cannot claim either a number or that one is impossible.
       gbOnDiskState: "unreported" as MetricState,
       vramState: "unreported" as MetricState,
+      // Placement is only ever a claim about a probed, LOADED model — the
+      // truthful starting state is "no claim at all" (WARP-1827).
+      gpuFraction: null,
+      placement: null,
+      placementState: null,
     }));
 
     // WARP-836 — enrich local (ollama) rows with real daemon metrics: disk
@@ -195,6 +211,12 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
             m.gbOnDiskState ?? (m.gbOnDisk != null ? "measured" : "unreported");
           row.vramState =
             m.vramState ?? (m.vramGb != null ? "measured" : "unreported");
+          // WARP-1827 placement — additive; `?? null` keeps this tolerant of
+          // a metrics object from before the field existed (or a partial test
+          // double): no claim survives that the probe didn't actually make.
+          row.gpuFraction = m.gpuFraction ?? null;
+          row.placement = m.placement ?? null;
+          row.placementState = m.placementState ?? null;
         }
         // Disk bar = each model's share of the total on-disk model store.
         //
