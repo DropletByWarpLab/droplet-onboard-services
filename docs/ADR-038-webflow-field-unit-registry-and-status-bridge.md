@@ -11,7 +11,11 @@
   tracks, so the two framings are one ticket, not a mismatch),
   WARP-1043 (duplicate telemetry agents), WARP-1179 (null-tier audit
   retention, HIPAA), WARP-420 (HIPAA v1.1 MFA step-up for SSH),
-  WARP-813 (trusted-proxy allowlist)
+  WARP-813 (trusted-proxy allowlist).
+  **Filed by this ADR:** WARP-1821 (the bridge route — blocked by
+  WARP-813, and gated on the security sign-off below), WARP-1822 (the
+  Webflow `Field Units` collection — blocked by WARP-1821 and
+  WARP-962), WARP-1823 (the stale `hosting.md` DNS section)
 - **Related ADRs / docs:**
   [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) (fleet
   telemetry v1, the metadata-only decision D4 and the tag-selector
@@ -252,19 +256,23 @@ checklist is the four bullets in §3.
 ## How to apply
 
 1. **Sign-off** on §3's public route (Romain) and the page shape
-   (Stefan). Until then, nothing is built.
+   (Stefan). Until then, nothing is built. This is the gate the
+   Proposed status encodes — the tickets below are filed but must not
+   start ahead of it.
 2. **`droplet-analytics`:** land WARP-813 (trusted-proxy allowlist), so
    the throttle's client-IP arm is sound before a public route exists.
-3. **`droplet-analytics`:** add `Machine.statusKey` (nullable, unique,
-   opaque 128-bit), the `/settings/tokens` mint/revoke control, the
-   `GET /api/v1/public/status/{statusKey}` route with the
-   deny-by-default serializer, and the field-allow-list unit test.
-4. **Webflow:** create the `Field Units` collection per §2 and the
-   per-unit status page that fetches the bridge route.
+3. **`droplet-analytics` — WARP-1821:** add `Machine.statusKey`
+   (nullable, unique, opaque 128-bit), the `/settings/tokens`
+   mint/revoke control, the `GET /api/v1/public/status/{statusKey}`
+   route with the deny-by-default serializer, and the field-allow-list
+   unit test.
+4. **Webflow — WARP-1822:** create the `Field Units` collection per §2
+   and the per-unit status page that fetches the bridge route.
    **Not created by this ADR** — it is a change to the live production
    site and needs an explicit go.
-5. **`droplet-analytics`:** correct `docs/superpowers/hosting.md` §1.3
-   — DNS for `warp-lab.ai` is Webflow, not Squarespace.
+5. **`droplet-analytics` — WARP-1823:** correct
+   `docs/superpowers/hosting.md` §1.3 — DNS for `warp-lab.ai` is
+   Webflow, not Squarespace.
 6. **Independently of all of the above:** WARP-962 still gates
    everything. A status page reads from a portal that has never seen a
    real box; commission one first.
