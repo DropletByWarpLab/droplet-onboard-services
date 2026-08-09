@@ -422,10 +422,14 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         try {
           for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
             const buf = Buffer.from(chunk);
-            res.write(buf);
-            // Express doesn't add flush(); compression middleware does. Call
-            // it when present so each progress line leaves immediately.
-            (res as unknown as { flush?: () => void }).flush?.();
+            // A chunk can already be in flight when the client disconnects —
+            // don't write into a destroyed response in that race window.
+            if (!clientGone) {
+              res.write(buf);
+              // Express doesn't add flush(); compression middleware does. Call
+              // it when present so each progress line leaves immediately.
+              (res as unknown as { flush?: () => void }).flush?.();
+            }
             lineBuffer += buf.toString("utf8");
             let newline: number;
             while ((newline = lineBuffer.indexOf("\n")) >= 0) {
@@ -467,7 +471,7 @@ export function createModelsRouter(prisma: PrismaClient): Router {
             refs: { actor: req.user?.username ?? null, model: name },
           });
         }
-        res.end();
+        if (!clientGone) res.end();
       } catch (err) {
         logger.warn({ err }, "POST /models/pull failed");
         next(err);
