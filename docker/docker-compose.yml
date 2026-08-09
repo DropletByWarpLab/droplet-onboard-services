@@ -2259,6 +2259,13 @@ services:
       # Host loopback for ollama-manager + host-side `ollama` CLI. Public
       # access goes through ai-gateway, not direct.
       - "127.0.0.1:11434:11434"
+    # SINGLE GPU OWNER (WARP-1826): exactly one inference runtime may hold
+    # these devices in production — this service, or the dark `dmr` profile
+    # INSTEAD of it, never both. Bench/soak stacks run as separate compose
+    # projects and are NOT covered by profiles: WARP-1824 happened because a
+    # bench project held ~10 GiB of the card while this service loaded the
+    # chat model, which landed 0/25 layers on the GPU and served from CPU.
+    # Do not run any GPU-resident stack against a box that is serving.
     devices:
       - "/dev/kfd:/dev/kfd"
       - "${OLLAMA_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128"
@@ -2268,7 +2275,14 @@ services:
     environment:
       ROCR_VISIBLE_DEVICES: "0"
       OLLAMA_HOST: "0.0.0.0:11434"
-      OLLAMA_KEEP_ALIVE: "24h"
+      # WARP-1826: 5m, matching the inference repo's own compose default
+      # (300 s). Placement is decided at LOAD time and pinned until unload —
+      # the previous "24h" here kept the WARP-1824 CPU placement alive for a
+      # day after VRAM freed. A short keep-alive means a bad placement
+      # self-heals within minutes, and an idle card between conversations
+      # costs one ~30 s warm-up (the UI owns the "warming up" honesty,
+      # WARP-836/1112). Raise via .env only with a reason written down.
+      OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:-5m}"
       # WARP-854: Ollama's baked-in default context is 4096 tokens. The
       # owner-role agent loop ships ~80 tool schemas (~11k tokens of
       # prompt), so the default overflowed before generation even began —

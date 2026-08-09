@@ -62,9 +62,10 @@ def _limits_payload(
 ) -> dict:
     """Build a /health-shaped body for tests.
 
-    By default includes ``schema_version: 1`` so existing tests assert the
-    happy path. Pass ``schema_version=None`` to omit the field (simulates a
-    pre-WARP-284 appliance) or any other int to force a drift case.
+    By default includes the current ``_KNOWN_SCHEMA_VERSION`` so existing
+    tests assert the happy path regardless of future bumps. Pass
+    ``schema_version=None`` to omit the field (simulates a pre-WARP-284
+    appliance) or any other int to force a drift case.
     """
     body: dict = {
         "limits": {
@@ -74,7 +75,7 @@ def _limits_payload(
         }
     }
     if schema_version is ...:
-        body["schema_version"] = 1
+        body["schema_version"] = _LimitsCache._KNOWN_SCHEMA_VERSION
     elif schema_version is not None:
         body["schema_version"] = schema_version
     # schema_version=None: omit the key entirely (pre-WARP-284 shape).

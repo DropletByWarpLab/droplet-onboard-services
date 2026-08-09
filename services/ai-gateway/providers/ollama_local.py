@@ -314,10 +314,13 @@ class _LimitsCache:
     """
 
     # Version of the /health schema this code knows. Bump in lockstep with
-    # ``services/ollama-manager/main.py::_HEALTH_SCHEMA_VERSION`` in the
+    # ``services/inference-manager/main.py::_HEALTH_SCHEMA_VERSION`` in the
     # appliance repo. See ``droplet-local-LLM/docs/model-management.md``
     # for the canonical schema-history table.
-    _KNOWN_SCHEMA_VERSION = 1
+    # v2 (WARP-1825/1826): appliance added the `placement` GPU-residency
+    # block. This cache still only consumes `limits`; the placement block
+    # is read by the orchestrator's model metrics path, not here.
+    _KNOWN_SCHEMA_VERSION = 2
 
     # Sentinel for "we haven't observed a schema_version yet" — distinct
     # from None ("appliance returned no schema_version key"). Without this,
