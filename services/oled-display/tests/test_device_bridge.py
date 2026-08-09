@@ -790,3 +790,130 @@ def test_no_token_means_no_call(monkeypatch: pytest.MonkeyPatch):
                             AssertionError("called with no token")))
     creds, err = bridge._orchestrator_household_wifi()
     assert creds is None and "no service token" in err
+
+
+# ---------------------------------------------------------------------------
+# GET /wifi — the SCAN path is shape-aware too (WARP-1830)
+# ---------------------------------------------------------------------------
+# WARP-654/834 taught the *credential* path which shape the box is. The *scan*
+# path never learned: `wifi_snapshot()` called `scan_via_openwrt()` on every
+# shape, so a box with no OpenWrt/UCI router still opened an SSH session to
+# OPENWRT_HOST. On the lab box that surfaced as
+# `[Errno 2] No such file or directory: 'sshpass'`, which masked the real
+# fault — OPENWRT_HOST was still the multi-box default 192.168.50.1, an
+# address that does not exist behind the Pi.
+
+def _no_nmcli(monkeypatch, bridge):
+    """Pin the host fallback to "no Wi-Fi adapter here" so these tests describe
+    the OpenWrt branch only. Without this the result depends on whether the
+    machine running pytest happens to have nmcli."""
+    monkeypatch.setattr(bridge, "scan_via_nmcli", lambda: (None, {}))
+
+
+def _explodes(what: str):
+    return lambda *a, **k: (_ for _ in ()).throw(AssertionError(what))
+
+
+def test_a_box_with_no_uci_router_never_opens_an_ssh_scan(
+        monkeypatch: pytest.MonkeyPatch):
+    """The single-box/edge-router shapes have no router to ask. Reaching for
+    SSH there is not a degraded read, it is the wrong question."""
+    bridge = _load_bridge(monkeypatch, {"DROPLET_AP_MODE": "hostapd"})
+    monkeypatch.setattr(bridge, "scan_via_openwrt",
+                        _explodes("SSH scan attempted with no UCI router"))
+    _no_nmcli(monkeypatch, bridge)
+
+    snap = bridge.wifi_snapshot()
+
+    assert snap["state"] == "not-applicable"
+    assert snap["networks"] == []
+    # Not an error: a box whose Wi-Fi is served by an external AP is behaving
+    # correctly. `error` is for faults, and a fault here would be a lie.
+    assert snap["error"] is None
+
+
+def test_the_no_router_state_says_why_at_the_rack(
+        monkeypatch: pytest.MonkeyPatch):
+    """`state` alone tells the panel to render empty; `detail` is what tells a
+    person standing at the rack that empty is the CORRECT answer here."""
+    bridge = _load_bridge(monkeypatch, {"DROPLET_AP_MODE": "hostapd"})
+    _no_nmcli(monkeypatch, bridge)
+
+    detail = bridge.wifi_snapshot()["detail"] or ""
+
+    assert "access point" in detail.lower()
+    assert "sshpass" not in detail
+
+
+def test_a_host_adapter_still_wins_on_a_routerless_box(
+        monkeypatch: pytest.MonkeyPatch):
+    """Skipping the SSH scan must not skip the *host* scan: a routerless box
+    that really does have a managed radio should still report it."""
+    bridge = _load_bridge(monkeypatch, {"DROPLET_AP_MODE": "hostapd"})
+    monkeypatch.setattr(bridge, "scan_via_openwrt",
+                        _explodes("SSH scan attempted with no UCI router"))
+    monkeypatch.setattr(bridge, "scan_via_nmcli", lambda: (
+        [{"ssid": "Home", "signal": 62, "security": "WPA2",
+          "connected": True, "bssid": ""}],
+        {"adapter": "wlp10s0", "state": "connected", "connected_to": "Home"}))
+
+    snap = bridge.wifi_snapshot()
+
+    assert snap["source"] == "host-nmcli"
+    assert snap["state"] == "connected"
+    assert snap["connected_to"] == "Home"
+
+
+def test_the_multibox_ssh_scan_is_left_alone(monkeypatch: pytest.MonkeyPatch):
+    """Regression guard: on a real multi-box the router IS the right thing to
+    ask, and this change must be invisible there."""
+    bridge = _load_bridge(monkeypatch, {})          # default AP_MODE == "uci"
+    monkeypatch.setattr(bridge, "scan_via_openwrt", lambda: (
+        [{"ssid": "Droplet-AI", "signal": 71, "security": "psk2",
+          "connected": False, "bssid": "aa:bb:cc:dd:ee:ff"}], None))
+    monkeypatch.setattr(bridge, "_openwrt_connected_ssid", lambda: "Droplet-AI")
+
+    snap = bridge.wifi_snapshot()
+
+    assert snap["source"] == "openwrt"
+    assert snap["state"] == "connected"
+    assert snap["adapter"] == bridge.OPENWRT_IFACE
+    assert snap["networks"][0]["ssid"] == "Droplet-AI"
+
+
+def test_a_missing_sshpass_reads_as_a_missing_package(
+        monkeypatch: pytest.MonkeyPatch):
+    """On a shape that SHOULD reach the router, a missing `sshpass` is a real
+    fault — but "[Errno 2] ... 'sshpass'" reads like a missing config file.
+    `sshpass` is in no Dockerfile, install script or package manifest in this
+    repo, so name the actual remedy."""
+    bridge = _load_bridge(monkeypatch, {})          # UCI shape
+    monkeypatch.setattr(bridge, "OPENWRT_PASS", "router-password")
+    monkeypatch.setattr(bridge.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(bridge, "_run",
+                        _explodes("subprocess spawned with no sshpass"))
+    _no_nmcli(monkeypatch, bridge)
+
+    snap = bridge.wifi_snapshot()
+
+    assert snap["state"] == "unavailable"
+    assert "sshpass" in (snap["error"] or "")
+    assert "not installed" in (snap["error"] or "")
+
+
+def test_key_based_ssh_does_not_need_sshpass(monkeypatch: pytest.MonkeyPatch):
+    """With no OPENWRT_PASS the bridge already uses a plain key-based `ssh`
+    argv. The missing-binary guard must not fire on that path."""
+    bridge = _load_bridge(monkeypatch, {})
+    monkeypatch.setattr(bridge, "OPENWRT_PASS", "")
+    monkeypatch.setattr(bridge.shutil, "which", lambda _name: None)
+    seen = {}
+
+    def _capture(cmd, timeout=15):
+        seen["argv"] = cmd
+        return 0, "", ""
+
+    monkeypatch.setattr(bridge, "_run", _capture)
+    bridge._ssh_openwrt("uci show wireless")
+
+    assert seen["argv"][0] == "ssh"
