@@ -2,12 +2,22 @@
  * WARP-836 — measured tokens/sec for a local model.
  *
  * There's no honest at-rest throughput number, so we MEASURE one: a short,
- * fixed generation against Ollama's own /api/generate, reading its reported
- * `eval_count` / `eval_duration` (decode-only timing — the real tok/s, not a
- * wall-clock estimate polluted by network or tool loops).
+ * fixed generation with a bounded token budget, timed by this harness.
+ *
+ * WARP-1772 made the measurement RUNTIME-AGNOSTIC: it runs on the OpenAI
+ * chat path (`/v1/chat/completions`), which both Ollama and Docker Model
+ * Runner serve — the previous `/api/generate` + `eval_count`/`eval_duration`
+ * form was Ollama-only (DMR 404s the endpoint and returns no native timing
+ * fields on any path; verified in the WARP-1741 bench). Throughput is
+ * `usage.completion_tokens / wall-clock`, one method on every runtime — the
+ * same one-method-or-it-isn't-a-comparison rule the Phase-0 harness used.
+ * The prompt is ~a dozen tokens, so prefill's contribution to the wall clock
+ * is noise at a 96-token budget; on reasoning models the budget lands in the
+ * reasoning channel, which counts toward `completion_tokens` and is exactly
+ * the decode work being measured.
  *
  * This is deliberately an EXPLICIT, owner/admin action, never automatic: with
- * OLLAMA_MAX_LOADED_MODELS=1 a benchmark of a non-resident model swaps VRAM and
+ * one resident model a benchmark of a non-resident model swaps VRAM and
  * evicts whatever chat model is loaded. The result is cached so the card can
  * show the last measurement without re-running the generation.
  */
@@ -18,10 +28,10 @@ const OLLAMA_URL =
   process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
 
 // A tiny, deterministic prompt + a bounded token count: enough tokens for a
-// stable decode-rate reading, short enough that the generation itself is quick
+// stable rate reading, short enough that the generation itself is quick
 // once the model is resident.
 const BENCH_PROMPT = "In one sentence, describe what a computer is.";
-const BENCH_NUM_PREDICT = 96;
+const BENCH_MAX_TOKENS = 96;
 // Generous — a cold load of a large model can take tens of seconds before the
 // first token; the read timeout must survive it (mirrors OLLAMA_READ_TIMEOUT).
 const BENCH_TIMEOUT_MS = 90_000;
@@ -31,11 +41,12 @@ const BENCH_TIMEOUT_MS = 90_000;
 export const BENCH_CACHE_TTL = 7 * 24 * 3600;
 
 export interface BenchmarkResult {
-  /** Decode throughput, tokens/sec, one decimal place. */
+  /** Wall-clock throughput, tokens/sec, one decimal place. */
   tokensPerSec: number;
-  /** Tokens generated in the sample (Ollama `eval_count`). */
+  /** Tokens generated in the sample (`usage.completion_tokens`). */
   evalCount: number;
-  /** Decode time for the sample, ms (Ollama `eval_duration` / 1e6). */
+  /** Wall-clock time for the sample, ms. (Field name kept for wire
+   *  compatibility with cached rows and the dashboard card.) */
   evalDurationMs: number;
   /** ISO timestamp the measurement was taken. */
   measuredAt: string;
@@ -49,51 +60,51 @@ export function benchCacheKey(name: string): string {
 }
 
 /**
- * Run one benchmark generation and compute tokens/sec from Ollama's own
- * decode timing. Returns null on any failure (unreachable, non-2xx, or a
- * response missing eval timing) — the caller surfaces an honest error, never
- * a fabricated number.
+ * Run one benchmark generation and compute tokens/sec from harness wall-clock
+ * over `usage.completion_tokens`. Returns null on any failure (unreachable,
+ * non-2xx, or a response missing usage) — the caller surfaces an honest
+ * error, never a fabricated number.
  */
 export async function benchmarkModel(
   name: string,
 ): Promise<BenchmarkResult | null> {
   try {
     const signal = AbortSignal.timeout(BENCH_TIMEOUT_MS);
-    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const startedAt = performance.now();
+    const resp = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: name,
-        prompt: BENCH_PROMPT,
+        messages: [{ role: "user", content: BENCH_PROMPT }],
+        max_tokens: BENCH_MAX_TOKENS,
         stream: false,
-        options: { num_predict: BENCH_NUM_PREDICT },
       }),
       signal,
     });
+    const elapsedMs = performance.now() - startedAt;
     if (!resp.ok) {
       await resp.json().catch(() => undefined);
       logger.debug({ model: name, status: resp.status }, "benchmark non-2xx");
       return null;
     }
     const data = (await resp.json()) as {
-      eval_count?: number;
-      eval_duration?: number;
+      usage?: { completion_tokens?: number };
     };
-    const evalCount = data.eval_count ?? 0;
-    const evalDuration = data.eval_duration ?? 0; // nanoseconds
-    if (evalCount <= 0 || evalDuration <= 0) {
+    const completionTokens = data.usage?.completion_tokens ?? 0;
+    if (completionTokens <= 0 || elapsedMs <= 0) {
       logger.debug(
-        { model: name, evalCount, evalDuration },
-        "benchmark missing eval timing",
+        { model: name, completionTokens, elapsedMs },
+        "benchmark missing usage tokens",
       );
       return null;
     }
     const tokensPerSec =
-      Math.round((evalCount / (evalDuration / 1e9)) * 10) / 10;
+      Math.round((completionTokens / (elapsedMs / 1000)) * 10) / 10;
     return {
       tokensPerSec,
-      evalCount,
-      evalDurationMs: Math.round(evalDuration / 1e6),
+      evalCount: completionTokens,
+      evalDurationMs: Math.round(elapsedMs),
       measuredAt: new Date().toISOString(),
     };
   } catch (err) {

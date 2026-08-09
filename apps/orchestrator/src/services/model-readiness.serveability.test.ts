@@ -86,7 +86,7 @@ function routedFetch(opts: {
         json: () => Promise.resolve({ models: opts.tags.map((name) => ({ name, size: 0 })) }),
       } as unknown as Response);
     }
-    if (u.endsWith("/api/generate")) {
+    if (u.endsWith("/v1/chat/completions")) {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -145,7 +145,7 @@ describe("Ollama — untouched (WARP-1749 acceptance)", () => {
     // WARP-1041 warm. No native listing, no pull.
     expect(callsTo(fetchMock, "/models")).toHaveLength(0);
     expect(callsTo(fetchMock, "/api/pull")).toHaveLength(0);
-    expect(callsTo(fetchMock, "/api/generate")).toHaveLength(1);
+    expect(callsTo(fetchMock, "/v1/chat/completions")).toHaveLength(1);
   });
 
   it("verifyListedModelServeable() answers serveable with no network at all", async () => {
@@ -175,7 +175,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
     await new Promise((r) => setTimeout(r, 0));
 
     expect(callsTo(fetchMock, "/api/pull")).toHaveLength(0);
-    expect(callsTo(fetchMock, "/api/generate")).toHaveLength(1);
+    expect(callsTo(fetchMock, "/v1/chat/completions")).toHaveLength(1);
     expect(loggerError).not.toHaveBeenCalled();
   });
 
@@ -191,7 +191,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
     expect(callsTo(fetchMock, "/api/pull")).toHaveLength(1);
     // Warming a model that cannot load just errors — and would mask the cause.
     // (Nothing warms off a FAILED pull either, which is the real sequence.)
-    expect(callsTo(fetchMock, "/api/generate")).toHaveLength(0);
+    expect(callsTo(fetchMock, "/v1/chat/completions")).toHaveLength(0);
     // The operator has to be told, with the only recovery that works.
     const [, message] = loggerError.mock.calls[0] as [unknown, string];
     expect(message).toContain("model_listed_but_not_serveable");
@@ -230,7 +230,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
       // A probe outage must never trigger a pull storm against a store that is
       // probably fine — probes here are optimisations, not dependencies.
       expect(callsTo(fetchMock, "/api/pull")).toHaveLength(0);
-      expect(callsTo(fetchMock, "/api/generate")).toHaveLength(1);
+      expect(callsTo(fetchMock, "/v1/chat/completions")).toHaveLength(1);
       expect(loggerError).not.toHaveBeenCalled();
       expect(loggerWarn).toHaveBeenCalled();
     }
