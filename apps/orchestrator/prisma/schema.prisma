@@ -793,34 +793,8 @@ model Camera {
   lastSeen       DateTime                 @default(now())
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
-
-  // WARP-1851 — storage allocation.
-  //
-  // `retentionMode` is an EXPLICIT enum rather than "budget is null =
-  // manual", per CLAUDE.md's no-guessing-from-absence rule. The two are
-  // not redundant: an operator can clear a budget while the column keeps
-  // the last value, and MANUAL must win unambiguously in that case.
-  //
-  // MANUAL — retention days are whatever the operator set on the camera
-  //          settings page. Nothing derives them.
-  // BUDGET — `storageBudgetBytes` is authoritative; the reconciler derives
-  //          retention days from it and the camera's measured bitrate, and
-  //          writes those days into Frigate's config.
-  retentionMode      CameraRetentionMode @default(MANUAL)
-  /// Target bytes of recordings for this camera. Only meaningful when
-  /// retentionMode = BUDGET. BigInt because a multi-TB budget overflows Int.
-  storageBudgetBytes BigInt?
-
   notifications  CameraNotificationPref[]
   groupMembers   CameraGroupMember[]
-}
-
-/// WARP-1851 — how a camera's retention window is decided.
-enum CameraRetentionMode {
-  /// Operator sets retention days directly.
-  MANUAL
-  /// Retention days are derived from a byte budget + measured bitrate.
-  BUDGET
 }
 
 model CameraNotificationPref {

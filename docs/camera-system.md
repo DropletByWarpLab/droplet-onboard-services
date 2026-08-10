@@ -244,37 +244,6 @@ container rather than the docs:
 docker exec droplet-frigate-1 python3 -c "from frigate.config.camera.record import RecordConfig; RecordConfig(**{'continuous':{'days':30}})"
 ```
 
-## Storage allocation (WARP-1851)
-
-An operator can give a camera **an amount of disk** instead of a number of
-days. The budget is not a hard cap — it is converted into the unit Frigate
-already enforces:
-
-```
-retention_days = budget_bytes / (measured_bytes_per_hour * 24)
-```
-
-`Camera.retentionMode` (`MANUAL` | `BUDGET`) decides whether the nightly
-reconciler manages a camera's `record.continuous.days`. It is an explicit
-enum, not "budget IS NULL means manual" — clearing a budget and never
-setting one must be distinguishable.
-
-**Why not enforce bytes directly.** Frigate has no per-camera quota, and
-the orchestrator does not mount the recordings volume. Deleting segments
-here would race Frigate's own storage maintainer and corrupt the recordings
-index it serves playback from. Budgets convert; Frigate enforces.
-
-**The refusal that matters.** Derivation divides by a measured bitrate.
-When that rate is unknown or zero — a newly added camera, one that hasn't
-recorded a segment — there is no honest answer, and the reconciler leaves
-the camera alone. Both plausible-looking wrong answers get written into
-config and *save successfully*:
-
-| Degenerate input | Naive result | What the operator gets |
-|---|---|---|
-| rate = 0 | `Infinity` → clamps to 365 | a year of footage nobody asked for |
-| budget = 0 | `0` days | Frigate keeps **nothing** and deletes the lot |
-
 ## Dashboard Features
 
 ### Camera Page (`/cameras`)
