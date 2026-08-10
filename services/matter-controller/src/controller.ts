@@ -28,7 +28,7 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import pino from "pino";
-import { Environment, type Duration } from "@matter/main";
+import { Environment, ServerAddress, type Duration } from "@matter/main";
 import { NodeId } from "@matter/main/types";
 import {
   CommissioningController,
@@ -880,6 +880,58 @@ export function createMatterControllerCore(
 
 // --- Pure helpers (ported verbatim from the orchestrator original) ---
 
+/**
+ * Project one matter.js `ServerAddress` onto the sidecar's wire shape.
+ *
+ * matter.js 0.17 restructured this union. In 0.16 every member carried a
+ * literal `type` discriminant (`"udp" | "tcp" | "ble"`), so the old code
+ * could read `a.type` straight through. 0.17 added a BARE `ServerAddressIp`
+ * member — `{ ip, port }` with NO `type` at all — and replaced the
+ * discriminant with the guards `ServerAddress.isIp()` / `.isBle()` and the
+ * total accessor `ServerAddress.protocolOf()`.
+ *
+ * Reading `a.type` under 0.17 therefore yields `undefined` for the new
+ * variant, which would have blanked the BLE-vs-IP transport signal on the
+ * commissioning path while every test stayed green — the same silent-degrade
+ * class as WARP-850. `protocolOf()` is total and never returns undefined:
+ *   BLE  → "ble"      (peripheralAddress present)
+ *   UDP  → "udp"      (explicit transport)
+ *   TCP  → "tcp"      (explicit transport)
+ *   bare → "ip"       (transport-agnostic DNS-SD record — the new variant)
+ * so "ble" still means BLE and everything else still means IP, which is the
+ * only distinction any consumer draws from this field.
+ *
+ * `ServerAddress` is imported from `@matter/main` — the same entrypoint as
+ * `Environment` above, NOT from `@matter/general` directly. Binding a second
+ * copy of `@matter/general` is precisely how WARP-850 split the
+ * `Environment.default` singleton and silently disabled BLE on a shipped box.
+ *
+ * BLE addresses have no `ip`/`port`; those keep their empty sentinels so the
+ * orchestrator-facing shape is unchanged, and the peripheral identity is
+ * carried in the additive optional `peripheralAddress` rather than being
+ * dropped (it is the only address information a BLE record actually has).
+ *
+ * Both arms use POSITIVE guards, with a sentinel fallback for anything the
+ * union grows next. The 0.16 code was defensive the same way (`"ip" in a ? …`)
+ * and that defensiveness is why this upgrade only had to change a mapping
+ * rather than chase undefined `ip`/`port` through the HTTP layer — keep it.
+ */
+function serverAddressToWire(
+  a: ServerAddress,
+): MatterDiscoveredDevice["addresses"][number] {
+  const type = ServerAddress.protocolOf(a);
+  if (ServerAddress.isIp(a)) {
+    return { ip: a.ip, port: a.port, type };
+  }
+  if (ServerAddress.isBle(a)) {
+    return { ip: "", port: 0, type, peripheralAddress: a.peripheralAddress };
+  }
+  // Unreachable for the 0.17 union. If matter.js adds a member, the wire
+  // contract still holds (`ip: string`, `port: number`) instead of leaking
+  // `undefined` into the orchestrator and everything downstream of it.
+  return { ip: "", port: 0, type };
+}
+
 function commissionableToDiscovered(
   device: CommissionableDevice,
 ): MatterDiscoveredDevice {
@@ -892,11 +944,7 @@ function commissionableToDiscovered(
     deviceName: device.DN,
     deviceType: device.DT,
     commissioningMode: device.CM,
-    addresses: device.addresses.map((a) => ({
-      ip: "ip" in a ? a.ip : "",
-      port: "port" in a ? a.port : 0,
-      type: a.type,
-    })),
+    addresses: device.addresses.map(serverAddressToWire),
   };
 }
 
