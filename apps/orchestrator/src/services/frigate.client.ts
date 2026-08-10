@@ -164,6 +164,40 @@ export async function fetchStats(): Promise<Record<string, unknown>> {
   return resp.json();
 }
 
+/**
+ * WARP-1850 — per-camera recording usage from `GET /api/recordings/storage`.
+ *
+ * Frigate computes this in `storage.py` (`calculate_camera_usages` +
+ * `calculate_camera_bandwidth`) and returns a map:
+ *
+ *   { "<key>": { usage: <MiB|null>, bandwidth: <MiB/hr>, usage_percent?: <%> } }
+ *
+ * Two shape traps, both from the Frigate source rather than the docs:
+ *
+ * 1. **The key is `friendly_name` when a camera defines one**, otherwise the
+ *    camera name (`camera_key = getattr(cam, "friendly_name", None) or camera`).
+ *    Joining these keys to camera names directly will silently drop any
+ *    camera with a friendly name — resolve through the config, don't assume.
+ *
+ * 2. **`usage` is `null`, not 0, for a camera with no segments** — it's a
+ *    SQL `SUM` over zero rows. `0` and "not yet recorded anything" are
+ *    different facts and the UI must not conflate them.
+ *
+ * Returns `{}` when Frigate has no recording stats yet (fresh boot, no
+ * cameras). Throws on transport/HTTP failure so callers can degrade
+ * honestly rather than render zeros.
+ */
+export async function fetchRecordingsStorage(): Promise<
+  Record<string, { usage: number | null; bandwidth: number; usage_percent?: number }>
+> {
+  const resp = await fetch(`${FRIGATE_URL}/api/recordings/storage`, {
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new Error(`Frigate recordings storage: ${resp.status}`);
+  const body = await resp.json();
+  return body && typeof body === "object" ? body : {};
+}
+
 /** Trigger a full Frigate restart. Use sparingly — every camera goes
  *  dark for 5–15 seconds while go2rtc + the detector re-init. */
 export async function restartFrigate(): Promise<void> {

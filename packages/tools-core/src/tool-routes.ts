@@ -216,6 +216,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "share_clip", client: "orchestrator", hops: [admit("post", "/api/cameras/clips/share")] },
   { tool: "search_camera_events", client: "orchestrator", hops: [admit("get", "/api/cameras/events/search")] },
   { tool: "get_camera_health", client: "orchestrator", hops: [admit("get", "/api/cameras/system")] },
+  { tool: "get_camera_storage", client: "orchestrator", hops: [admit("get", "/api/cameras/storage")] },
   { tool: "set_camera_detection", client: "orchestrator", hops: [
     admit("post", "/api/cameras/:name/enable"),
     admit("post", "/api/cameras/:name/disable"),

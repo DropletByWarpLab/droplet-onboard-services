@@ -9,6 +9,7 @@ import type {
   CameraSettings,
   CameraSettingsPatch,
   CameraSystemStatus,
+  CameraStorageSummary,
   EventDetail,
   EventFilter,
   FilteredEventsResult,
@@ -2416,6 +2417,22 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
+}
+
+/**
+ * WARP-1850 — per-camera storage breakdown.
+ *
+ * Unlike the system status, this deliberately throws when the orchestrator
+ * answers 503: an empty breakdown would read as "no camera is using disk",
+ * and the caller must show a degraded state instead of a reassuring zero.
+ */
+export async function fetchCameraStorage(): Promise<CameraStorageSummary> {
+  const res = await authFetch(`${BASE}/api/cameras/storage`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(body.message || `Failed to fetch camera storage: ${res.status}`);
+  }
+  return (await res.json()) as CameraStorageSummary;
 }
 
 // --- Face recognition + LPR (Phase 7.5 / 7.6) ---

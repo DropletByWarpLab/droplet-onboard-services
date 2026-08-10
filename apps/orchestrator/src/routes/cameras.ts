@@ -67,6 +67,7 @@ import {
   macFromCandidateId,
   mutateLiveCandidate,
 } from "../services/camera-candidates.service.js";
+import { getCameraStorage } from "../services/camera-storage.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
@@ -780,6 +781,33 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         logger.warn({ err }, "Frigate unreachable; serving empty system status");
         res.json({ status: EMPTY_SYSTEM_STATUS });
         return;
+      }
+      next(err);
+    }
+  });
+
+  // --- Storage breakdown (WARP-1850) ---
+  //
+  // Per-camera recording usage + measured bitrate, merged with the
+  // recordings-volume totals. Same fixed-path reasoning as /cameras/system
+  // above: `/cameras/storage` would otherwise match `/cameras/:name`.
+  //
+  // Deliberately NOT degraded to an empty payload the way /cameras/system
+  // is. An empty breakdown reads as "no camera is using disk", which is
+  // indistinguishable from a healthy idle system — the exact misreading
+  // that let WARP-1849's dead purge look fine for its entire life. A
+  // storage surface that cannot reach Frigate must say so.
+  router.get("/cameras/storage", async (_req, res, next) => {
+    try {
+      const storage = await getCameraStorage();
+      res.json(storage);
+    } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; cannot report camera storage");
+        return res.status(503).json({
+          error: "storage_unavailable",
+          message: "Storage usage is unavailable while the camera service is unreachable.",
+        });
       }
       next(err);
     }

@@ -137,6 +137,7 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1440 — camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
   "search_camera_events",
   "get_camera_health",
+  "get_camera_storage",
   "set_camera_detection",
   "set_detection_zones",
   "delete_clip",
@@ -252,6 +253,9 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("search_camera_events")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("get_camera_health")?.requiresWrite).toBe(false);
     expect(TOOLS.get("get_camera_health")?.requiresConfirmation).toBe(false);
+    // WARP-1850 — read-only storage reporting; never mutates retention.
+    expect(TOOLS.get("get_camera_storage")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_camera_storage")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("set_camera_detection")?.requiresWrite).toBe(true);
     expect(TOOLS.get("set_camera_detection")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("set_detection_zones")?.requiresWrite).toBe(true);
