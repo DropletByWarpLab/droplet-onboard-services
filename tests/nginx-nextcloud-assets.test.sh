@@ -110,6 +110,46 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
       fail "  $prefix is missing proxy_set_header ${hdr%% *} (diverges from every other gateway leg)"
     fi
   done
+
+  # ── Semgrep suppressions (the CI gate is DIFF-SCOPED) ──
+  #
+  # `semgrep.yml` scans with `--baseline-commit <merge-base>`, so the identical
+  # patterns in the pre-existing legs are INVISIBLE to it while these new lines
+  # are not. "The leg above does the same thing and is fine" is therefore not
+  # evidence — every new leg needs its own annotation, in the house style:
+  # justification prose, then the `# nosemgrep:` line, then the directive.
+  for rule in dynamic-proxy-host.dynamic-proxy-host \
+              request-host-used.request-host-used; do
+    if printf '%s' "$body" | grep -qF "# nosemgrep: generic.nginx.security.$rule"; then
+      pass "  $prefix carries the ${rule%%.*} suppression"
+    else
+      fail "  $prefix is missing '# nosemgrep: generic.nginx.security.$rule' — the diff-scoped semgrep gate blocks the PR without it"
+    fi
+  done
+
+  # A bare suppression is not acceptable: the line above each one must be a
+  # justification comment, not another nosemgrep and not the directive itself.
+  bare=$(printf '%s\n' "$body" | awk '
+    /# nosemgrep:/ { if (prev !~ /^[[:space:]]*#/ || prev ~ /# nosemgrep:/) print NR }
+    { prev = $0 }
+  ')
+  if [ -z "$bare" ]; then
+    pass "  $prefix: every suppression is preceded by a justification comment"
+  else
+    fail "  $prefix: bare suppression with no justification above it (line(s) $bare in block)"
+  fi
+
+  # THE TRAP, pinned: `request-host-used` matches GENERIC text, so spelling the
+  # Host variable in the justification PROSE trips the rule on the comment line
+  # — above the suppression, which therefore cannot cover it. Measured: doing
+  # exactly that produced 5 fresh blocking findings while the directives were
+  # clean. The variable may appear ONCE per leg: on the directive.
+  host_var_lines=$(printf '%s\n' "$body" | grep -cF '$host' || true)
+  if [ "$host_var_lines" = "1" ]; then
+    pass "  $prefix: the Host variable appears only on the directive, never in the prose"
+  else
+    fail "  $prefix: the Host variable appears on $host_var_lines lines — prose mentioning it self-trips request-host-used on a line no suppression can cover"
+  fi
 done
 
 echo "--- Phase 2: ordering — every asset leg precedes the catch-all ---"
