@@ -35,6 +35,12 @@ OLLAMA_LOCAL_URL="${OLLAMA_LOCAL_URL:-http://127.0.0.1:11434}"
 MODEL_REPO_KEY="${MODEL_REPO_KEY:-gpt-oss}"   # repository to serve, tag-free
 DMR_PULL_REF="${DMR_PULL_REF:-ai/gpt-oss:20B-F16}"
 EXPECTED_CTX="${EXPECTED_CTX:-16384}"
+# Pins the DRM card whose VRAM the two runtimes contend for, e.g.
+# FLIP_GPU_CARD=card1. Empty (the default) discovers it — see
+# resolve_vram_node() in step 4. Set it when a box carries more than one
+# VRAM-reporting GPU and discovery lands on the wrong one. The rack panel's
+# PANEL_GPU_CARD is the same knob for the same reason.
+FLIP_GPU_CARD="${FLIP_GPU_CARD:-}"
 COMPOSE_DIR="$REPO_ROOT/docker"
 ROOT_ENV="$REPO_ROOT/.env"
 COMPOSE_ENV="$COMPOSE_DIR/.env"
@@ -128,10 +134,62 @@ ok "DMR reports the model as: ${NEW_LLM_MODEL}  <- this exact string becomes LLM
 log "evicting the serving model for the canary window (self-heals on abort)"
 curl -s --max-time 60 -X POST "$OLLAMA_LOCAL_URL/api/generate" -H 'Content-Type: application/json' \
   -d '{"model":"gpt-oss:20b","keep_alive":0}' >/dev/null 2>&1 || true
-for _ in $(seq 1 24); do
-  [ "$(cat /sys/class/drm/card1/device/mem_info_vram_used 2>/dev/null || echo 0)" -lt 2147483648 ] && break
-  sleep 5
-done
+
+# Which card do we watch? Discovered, never hardcoded: a single box carries a
+# discrete GPU AND an iGPU, and `cardN` numbering is not guaranteed stable
+# across units — poll the wrong node and the read fails, "0" reads as free, and
+# the wait becomes a silent no-op on exactly the hardware most likely to race
+# the eviction. Mirrors _get_gpu() in services/oled-display/display.py: an
+# explicit pin wins outright, indices sort numerically (card10 after card2),
+# and a card only qualifies if it actually exposes the node we read. Among real
+# candidates the largest VRAM pool wins — that is the discrete card, not the
+# APU's small carve-out, which would otherwise sit under the threshold forever.
+# `SYS_DRM_ROOT` is not an operator knob: it exists so this can be driven
+# against a fixture tree, the same reason display.py names `_SYS_DRM`.
+resolve_vram_node() {   # -> path to mem_info_vram_used, or empty if none
+  local root="${SYS_DRM_ROOT:-/sys/class/drm}" idx n path total best="" best_total=-1
+  if [ -n "$FLIP_GPU_CARD" ]; then
+    # An explicit pin is honoured exactly — never fall back to another card,
+    # the operator named that one on purpose.
+    path="$root/$FLIP_GPU_CARD/device/mem_info_vram_used"
+    [ -r "$path" ] && printf '%s' "$path"
+    return 0
+  fi
+  idx="$(for d in "$root"/card*; do
+           n="${d##*/card}"
+           # `card1` yes; `card1-HDMI-A-3` (a connector) and an unmatched glob no.
+           case "$n" in ''|*[!0-9]*) continue ;; esac
+           printf '%s\n' "$n"
+         done | sort -n)"
+  for n in $idx; do
+    path="$root/card$n/device/mem_info_vram_used"
+    [ -r "$path" ] || continue
+    total="$(cat "$root/card$n/device/mem_info_vram_total" 2>/dev/null || echo 0)"
+    case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    [ "$total" -gt "$best_total" ] && { best="$path"; best_total="$total"; }
+  done
+  printf '%s' "$best"
+}
+
+vram_node="$(resolve_vram_node)"
+if [ -n "$vram_node" ]; then
+  log "watching $vram_node for the eviction (up to 120s)"
+  evicted=0
+  for _ in $(seq 1 24); do
+    # A read that fails or comes back unparseable must NOT count as "free" —
+    # that is the silent no-op this step exists to prevent — so anything we
+    # cannot read as a number keeps us waiting instead.
+    used="$(cat "$vram_node" 2>/dev/null || true)"
+    case "$used" in ''|*[!0-9]*) used=9999999999 ;; esac
+    [ "$used" -lt 2147483648 ] && { evicted=1; break; }
+    sleep 5
+  done
+  [ "$evicted" = 1 ] || log "WARN: $vram_node never dropped below 2 GiB in 120s — the card still looks occupied. Proceeding; the --fail load probe below is the gate, and an allocation failure there means the eviction never took."
+else
+  log "WARN: no readable device/mem_info_vram_used under /sys/class/drm${FLIP_GPU_CARD:+ for the pinned FLIP_GPU_CARD=$FLIP_GPU_CARD} — the eviction CANNOT be verified on this host."
+  log "WARN: waiting the same 120s blind rather than treating an unreadable card as free. If the load probe below reports an allocation failure, pin the discrete GPU (FLIP_GPU_CARD=cardN) and re-run."
+  sleep 120
+fi
 log "loading the model once for the context canary (~15-60s)"
 # --fail is load-bearing: without it a 5xx from a failed load exits 0 and the
 # failure surfaces one step later as a missing-log-line mystery.
