@@ -18,6 +18,11 @@ on:
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
       - "tests/nginx-canonical-host.test.sh"
+      # WARP-1688: the every-boot trusted_domains reconcile + the gateway's
+      # Nextcloud asset legs the embedded editor loads from.
+      - "tests/nextcloud-trusted-domains.test.sh"
+      - "tests/nginx-nextcloud-assets.test.sh"
+      - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
@@ -39,6 +44,11 @@ on:
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
       - "tests/nginx-canonical-host.test.sh"
+      # WARP-1688: the every-boot trusted_domains reconcile + the gateway's
+      # Nextcloud asset legs the embedded editor loads from.
+      - "tests/nextcloud-trusted-domains.test.sh"
+      - "tests/nginx-nextcloud-assets.test.sh"
+      - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
@@ -78,6 +88,19 @@ jobs:
         # entrypoint selector, and nginx.conf's first-party-only
         # $internal_scheme legs. Pure bash, no Docker.
         run: bash tests/nginx-internal-scheme.test.sh
+      - name: Run Nextcloud trusted-domains reconcile tests
+        # WARP-1688: the stock image applies NEXTCLOUD_TRUSTED_DOMAINS only on
+        # the install boot, so a box renamed afterwards answers 400 "untrusted
+        # domain" on its own FQDN. Runs the extracted reconcile against a stub
+        # occ: add-on-rename, zero writes when converged, no empty domain, and
+        # errexit survival when the key is unset. Pure bash, no Docker.
+        run: bash tests/nextcloud-trusted-domains.test.sh
+      - name: Run nginx Nextcloud asset-routing unit tests
+        # WARP-1688: the editor page emits root-absolute /apps/, /core/, /dist/
+        # and /index.php/apps/{richdocuments,theming}/ URLs. Asserts those legs
+        # exist, forward the prefix unstripped, sit before the catch-all, and
+        # that the whole /index.php/ leg stays UNrouted. Pure bash, no Docker.
+        run: bash tests/nginx-nextcloud-assets.test.sh
       - name: Run nginx canonical-host unit tests
         # Warning-free droplet.local: render decisions (authority knob +
         # cert-artifact gates), variant contents, nginx.conf/Dockerfile/
