@@ -643,6 +643,72 @@ else
 fi
 
 # =============================================================================
+# Phase 6b: mtime moved, bytes did not
+# =============================================================================
+# setup.sh rewrites unit files and /usr/local/sbin copies UNCONDITIONALLY
+# (`sed > "$dst"`, `install -m 0644`), so their mtime moves on every provision
+# whether or not the content changed. mtime alone would therefore restart
+# droplet-host-net on every single setup.sh run — a br-lan DHCP blip for
+# nothing, and precisely the "blanket restart" the design forbids.
+#
+# So mtime is the CHEAP TRIGGER and a content digest is the CONFIRMATION: a
+# unit is only stale if the bytes it would read now differ from the bytes it
+# was last known to be running.
+echo "--- Phase 6b: mtime moved, bytes did not ---"
+
+reset_work; mk_systemctl_stub
+mk_current_host_net
+# Run once while the unit is genuinely current: that is the moment the process
+# is provably at or ahead of its sources, so the digest recorded here is what
+# it is running.
+run_hu -- check >/dev/null 2>&1
+# Now a provision rewrites the same bytes to a new mtime.
+touch -d "@$BRIDGE_SRC_EPOCH" "$WORK/sbin/droplet-host-net" \
+         "$WORK/units.d/droplet-host-net.service"
+run_hu -- check --json > "$WORK/c9.json" 2>/dev/null
+rc=$?
+if [ "$(unit_state "$WORK/c9.json" droplet-host-net.service)" = "current" ]; then
+  pass "an identical rewrite (mtime moved, bytes did not) is NOT stale"
+else
+  fail "identical rewrite flagged stale: state=$(unit_state "$WORK/c9.json" droplet-host-net.service)"
+fi
+if [ "$rc" -eq 0 ]; then
+  pass "an identical rewrite does not fail the check"
+else
+  fail "identical rewrite set a failing exit code ($rc)"
+fi
+: > "$WORK/log/actions.log"
+run_hu -- refresh >/dev/null 2>&1
+if actions | grep -q '^restart '; then
+  fail "refresh restarted a unit whose bytes never changed:"
+  actions | sed 's/^/      /'
+else
+  pass "refresh leaves a unit alone when only its mtime moved"
+fi
+
+# Same setup, but the bytes DID change — that must still be stale.
+printf '#!/bin/bash\nexec /usr/sbin/dnsmasq -k --changed\n' > "$WORK/sbin/droplet-host-net"
+touch -d "@$BRIDGE_SRC_EPOCH" "$WORK/sbin/droplet-host-net"
+run_hu -- check --json > "$WORK/c10.json" 2>/dev/null
+if [ "$(unit_state "$WORK/c10.json" droplet-host-net.service)" = "stale" ]; then
+  pass "a real content change is still stale"
+else
+  fail "real content change missed: state=$(unit_state "$WORK/c10.json" droplet-host-net.service)"
+fi
+
+# With no digest ever recorded, a newer mtime must be treated as stale. Being
+# conservative on the very first run costs one restart; guessing "probably
+# fine" costs another multi-hour misdiagnosis.
+reset_work; mk_systemctl_stub
+mk_stale_bridge
+run_hu -- check --json > "$WORK/c11.json" 2>/dev/null
+if [ "$(unit_state "$WORK/c11.json" droplet-device-bridge.service)" = "stale" ]; then
+  pass "no recorded digest + newer sources = stale (conservative on first run)"
+else
+  fail "first-run staleness missed: state=$(unit_state "$WORK/c11.json" droplet-device-bridge.service)"
+fi
+
+# =============================================================================
 # Phase 7: portability — older systemd, decorated list-units output
 # =============================================================================
 echo "--- Phase 7: portability ---"

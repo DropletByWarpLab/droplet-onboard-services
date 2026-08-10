@@ -97,12 +97,12 @@ no-op because the installers it just ran restarted those units themselves).
 
 ### What counts as a source
 
-mtime of the files the unit **actually executes** — not a git diff of the
-pulled range. The checkout moves by pull, bundle apply, rsync and the odd
-hand-edit, so a range is often undefined; and the question being answered is
-"is this process older than its own code", which the standalone check has to
-answer anyway. Git only rewrites files whose content changed, so checkout mtime
-is a faithful "this pull touched this file".
+mtime of the files the unit **actually executes**, confirmed by a content
+digest — not a git diff of the pulled range. The checkout moves by pull, bundle
+apply, rsync and the odd hand-edit, so a range is often undefined; and the
+question being answered is "is this process older than its own code", which the
+standalone check has to answer anyway. Git only rewrites files whose content
+changed, so checkout mtime is a faithful "this pull touched this file".
 
 | Included | Why |
 |---|---|
@@ -115,6 +115,19 @@ is a faithful "this pull touched this file".
 its own `/var/lib/droplet-bridge/openwrt-attach.env`, so counting it would have
 the unit restart itself on every key rotation. Credential changes have their own
 restart path (`droplet-openwrt-attach.path`).
+
+**mtime is the trigger, a content digest is the confirmation.** `setup.sh`
+rewrites unit files and `/usr/local/sbin` copies unconditionally (`sed > "$dst"`,
+`install -m 0644`), so their mtime moves on every provision whether or not a
+byte changed — mtime alone would restart `droplet-host-net` on every single
+`setup.sh` run for nothing. A unit is stale only when the bytes it would read
+now differ from the bytes it was last known to be running. That digest
+(`/var/lib/droplet/host-units/digests/<unit>`) is recorded at exactly the two
+moments the process is *provably* at or ahead of its sources: when a sweep
+observes `start >= newest source mtime`, and after a restart this script
+verified came back. With no digest on file (fresh install) a newer mtime reads
+as stale — being conservative on the first run costs one restart; guessing
+"probably fine" costs another multi-hour misdiagnosis.
 
 ### Which units are in scope
 

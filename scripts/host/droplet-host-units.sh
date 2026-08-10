@@ -79,13 +79,20 @@
 # belongs in DROPLET_HOST_UNITS_NEVER_RESTART).
 #
 # ── WHAT COUNTS AS "SOURCE" ──────────────────────────────────────────────────
-# mtime of the files the unit ACTUALLY EXECUTES, not a git diff of the pulled
-# range. Reasons: the box's checkout moves by pull, bundle apply, rsync and
-# the occasional hand-edit, so "the pulled range" is often undefined; and the
-# question being asked is not "what changed in git" but "is this process
-# older than its own code" — which is exactly what the standalone check in
-# AC4 must answer. Git only rewrites files whose content actually changed, so
-# checkout mtime is a faithful signal for "this pull touched this file".
+# mtime of the files the unit ACTUALLY EXECUTES, confirmed by a content
+# digest — not a git diff of the pulled range. Reasons: the box's checkout
+# moves by pull, bundle apply, rsync and the occasional hand-edit, so "the
+# pulled range" is often undefined; and the question being asked is not "what
+# changed in git" but "is this process older than its own code" — which is
+# exactly what the standalone check in AC4 must answer. Git only rewrites
+# files whose content actually changed, so checkout mtime is a faithful
+# signal for "this pull touched this file".
+#
+# mtime is the cheap TRIGGER; the digest is the CONFIRMATION. setup.sh
+# rewrites unit files and /usr/local/sbin copies UNCONDITIONALLY, so their
+# mtime moves on every provision whether or not a byte changed — mtime alone
+# would restart droplet-host-net on every setup.sh run for nothing. See the
+# "Content digest" section below for when a digest may honestly be recorded.
 #
 #   sources(unit) =
 #     FragmentPath + DropInPaths                 (a changed unit definition
@@ -182,6 +189,16 @@ HU_PAYLOAD_ROOTS="${DROPLET_HOST_UNITS_PAYLOAD_ROOTS:-/usr/local/lib /usr/local/
 HU_REPO_ROOT="${DROPLET_HOST_UNITS_REPO_ROOT:-}"
 
 SUSPENDED_FILE="$HU_STATE_DIR/suspended"
+DIGEST_DIR="$HU_STATE_DIR/digests"
+
+# Hasher for the content-confirmation step below. sha256sum ships in coreutils
+# on every appliance; the fallbacks exist so a stripped host degrades to
+# "mtime only" (conservative — more restarts, never fewer) instead of crashing.
+HU_HASHER=""
+for _h in sha256sum shasum cksum; do
+  if command -v "$_h" >/dev/null 2>&1; then HU_HASHER="$_h"; break; fi
+done
+unset _h
 
 # --- logging ----------------------------------------------------------------
 now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
@@ -404,6 +421,53 @@ repo_source_for() { # <installed path>
 }
 
 # =============================================================================
+# Content digest — the confirmation step behind the mtime trigger
+# =============================================================================
+# setup.sh rewrites unit files and /usr/local/sbin copies UNCONDITIONALLY
+# (`sed > "$dst"`, `install -m 0644`), so their mtime moves on every provision
+# whether or not a byte changed. mtime alone would restart droplet-host-net on
+# every single setup.sh run — a br-lan DHCP blip for nothing, and exactly the
+# blanket restart this design forbids. So mtime is the cheap TRIGGER and the
+# digest is the CONFIRMATION: a unit is stale only when the bytes it would read
+# now differ from the bytes it was last known to be running.
+#
+# The digest is recorded at the only two moments the process is PROVABLY at or
+# ahead of its sources: when the sweep observes start >= newest source mtime,
+# and after a restart this script verified came back. Never otherwise — a
+# digest recorded at any other moment could certify code the process never read.
+#
+# No digest on file (fresh install) + a newer mtime = stale. Being conservative
+# on the first run costs one restart; guessing "probably fine" costs another
+# multi-hour misdiagnosis.
+
+DIGEST_WARNED=false
+
+sources_digest() { # <file...>
+  [ -n "$HU_HASHER" ] || return 1
+  [ "$#" -gt 0 ] || return 1
+  # Two forks total regardless of source count: hash the files, then hash the
+  # listing (which carries the names, so a rename is a change too).
+  "$HU_HASHER" "$@" 2>/dev/null | "$HU_HASHER" 2>/dev/null | cut -d' ' -f1
+}
+
+recorded_digest() { # <unit>
+  cat "$DIGEST_DIR/$1" 2>/dev/null
+}
+
+record_digest() { # <unit> <digest>
+  [ -n "$2" ] || return 0
+  if ! mkdir -p "$DIGEST_DIR" 2>/dev/null || ! printf '%s' "$2" > "$DIGEST_DIR/$1" 2>/dev/null; then
+    # Without a writable state dir the confirmation step is unavailable and
+    # every mtime move reads as stale. Say so once — a non-root run silently
+    # disagreeing with the root run is its own misdiagnosis.
+    if [ "$DIGEST_WARNED" != true ]; then
+      log "cannot write $DIGEST_DIR — content confirmation unavailable, falling back to mtime only (run with sudo)"
+      DIGEST_WARNED=true
+    fi
+  fi
+}
+
+# =============================================================================
 # Suspension ledger
 # =============================================================================
 # One `<unit> <source-epoch-that-failed>` line per suspended unit. Keyed on the
@@ -437,6 +501,7 @@ unsuspend_unit() { # <unit>
 # indexed arrays keep this readable and portable to /bin/sh-ish environments.
 R_UNIT=(); R_STATE=(); R_REASON=(); R_START=(); R_SRC_EPOCH=()
 R_SRC_PATH=(); R_DRIFT=(); R_DRIFT_SRC=(); R_NSOURCES=(); R_UNITFILE_CHANGED=()
+R_DIGEST=()
 
 is_listed() { # <needle> <space-separated haystack>
   local item
@@ -465,7 +530,7 @@ sweep() {
     start="$(unit_start_epoch)"
 
     local state="" reason="" src_epoch=0 src_path="" nsources=0
-    local drift="false" drift_src="" unitfile_changed="false"
+    local drift="false" drift_src="" unitfile_changed="false" digest=""
     local running="false" suspended_at=""
     if [ "$active" = "active" ] && [ -n "$mainpid" ] && [ "$mainpid" != "0" ]; then
       running="true"
@@ -489,11 +554,13 @@ sweep() {
     if [ -z "$state" ]; then
       # Resolve sources and find the newest.
       local sources newest_epoch=0 newest_path="" f mt frag
+      local src_files=()
       sources="$(unit_sources | sort -u)"
       frag="$(prop FragmentPath)"
       while IFS= read -r f; do
         [ -n "$f" ] || continue
         nsources=$((nsources + 1))
+        src_files+=("$f")
         resolve_repo_root "$(dirname "$f")" >/dev/null 2>&1 || true
         mt="$(stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null)"
         [ -n "$mt" ] || continue
@@ -514,6 +581,8 @@ sweep() {
       done <<< "$sources"
 
       src_epoch="$newest_epoch"; src_path="$newest_path"
+      digest="$(sources_digest ${src_files[@]+"${src_files[@]}"} || true)"
+
       if [ "$nsources" -eq 0 ]; then
         state="skipped"; reason="no source files resolved from its Exec lines"
       elif [ "$running" != "true" ]; then
@@ -523,10 +592,22 @@ sweep() {
         state="failed"
         reason="DOWN — droplet-host-units restarted it and it did not come back (ActiveState=$active). Inspect: systemctl status $unit; journalctl -u $unit -n 100"
       elif [ "$newest_epoch" -gt "$start" ]; then
-        state="stale"
-        reason="running process started $(date -u -d "@$start" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null), sources modified $(date -u -d "@$newest_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
+        # mtime says maybe. Confirm against the digest recorded the last time
+        # this process was provably at or ahead of its sources — setup.sh
+        # rewrites unit files and installed copies byte-identically on every
+        # run, and restarting for that is churn, not a fix.
+        if [ -n "$digest" ] && [ "$digest" = "$(recorded_digest "$unit")" ]; then
+          state="current"
+          reason="sources rewritten with identical content since the process started (mtime moved, bytes did not)"
+        else
+          state="stale"
+          reason="running process started $(date -u -d "@$start" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null), sources modified $(date -u -d "@$newest_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
+        fi
       else
+        # Provably at or ahead of its sources: what is on disk right now IS
+        # what this process read. The only safe moment to record the digest.
         state="current"
+        record_digest "$unit" "$digest"
       fi
     fi
 
@@ -535,6 +616,7 @@ sweep() {
     R_SRC_EPOCH+=("$src_epoch"); R_SRC_PATH+=("$src_path")
     R_DRIFT+=("$drift");      R_DRIFT_SRC+=("$drift_src")
     R_NSOURCES+=("$nsources"); R_UNITFILE_CHANGED+=("$unitfile_changed")
+    R_DIGEST+=("$digest")
   done < <(list_units)
 }
 
@@ -691,6 +773,9 @@ do_refresh() { # <force>
       R_REASON[$idx]="restarted at $(iso_or_dash "${new_start:-0}") (PID $mainpid)"
       R_START[$idx]="${new_start:-0}"
       unsuspend_unit "$unit"
+      # The new process read the sources as they are right now — the second of
+      # the two moments a digest may honestly be recorded.
+      record_digest "$unit" "${R_DIGEST[$idx]}"
       log "$unit is back up (PID $mainpid)"
     else
       R_STATE[$idx]="failed"
