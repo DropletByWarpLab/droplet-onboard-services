@@ -113,7 +113,8 @@ Each phase ships as its own milestone. Each PR within a phase has a single coher
 *The config surface; biggest UI-design lift.*
 
 - [ ] **Detection settings** form per camera — object filter list (multi-select w/ Frigate's known classes), min/max area, threshold, hysteresis, FPS.
-- [ ] **Recording settings** — retention days for alerts vs detections, audio recording on/off, pre/post-roll seconds.
+- [x] **Recording settings — retention** (WARP-1849). All four windows are per-camera editable: `record.continuous.days`, `record.motion.days`, `record.alerts.retain.days`, `record.detections.retain.days`, plus `snapshots.retain.default`. Frigate enforces them natively; the orchestrator no longer attempts its own deletion. See "Retention — who deletes what" in `camera-system.md`.
+- [ ] **Recording settings — remainder** — audio recording on/off, pre/post-roll seconds.
 - [ ] **Zone editor** — polygon drawing on the live snapshot canvas; per-zone required-objects + inertia.
 - [ ] **Mask editor** — same canvas, multi-polygon for motion masks + per-object-class masks.
 - [ ] **Audio rules** — toggle audio detection + per-class thresholds (cry, dog bark, etc.).

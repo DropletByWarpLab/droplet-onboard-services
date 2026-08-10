@@ -99,12 +99,6 @@ vi.mock("../middleware/auth.js", () => ({
       next(),
 }));
 
-vi.mock("../services/camera-retention-purge.service.js", () => ({
-  loadCameraRetentionPolicy: vi
-    .fn()
-    .mockResolvedValue({ clipDays: 14, eventDays: null }),
-}));
-
 vi.mock("../services/frigate.client.js", () => ({
   fetchSnapshot: vi.fn(),
   fetchEventThumbnail: vi.fn(),

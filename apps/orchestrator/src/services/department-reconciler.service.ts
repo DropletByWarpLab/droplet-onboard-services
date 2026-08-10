@@ -975,7 +975,7 @@ async function sweepDirectoryStatusMirror(
  * next tick retries; a Prisma-connectivity-level failure at the
  * `findMany` level is the one case that propagates (there is nothing
  * useful to converge without a DB), matching cron-runtime's `safeRun`
- * canary contract (guest-expiry-sweep, camera-retention-purge follow the
+ * canary contract (guest-expiry-sweep, audit-retention-purge follow the
  * same posture).
  */
 export async function reconcileDepartments(

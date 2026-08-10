@@ -39,12 +39,6 @@ vi.mock("../middleware/auth.js", () => ({
       next(),
 }));
 
-vi.mock("../services/camera-retention-purge.service.js", () => ({
-  loadCameraRetentionPolicy: vi
-    .fn()
-    .mockResolvedValue({ clipDays: 14, eventDays: null }),
-}));
-
 const getEventsFiltered = vi.fn();
 const getReviewsFiltered = vi.fn();
 const getRecentEvents = vi.fn();

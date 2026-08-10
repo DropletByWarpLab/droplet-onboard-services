@@ -14,7 +14,6 @@ import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
-import { loadCameraRetentionPolicy } from "../services/camera-retention-purge.service.js";
 import {
   getCameras,
   getEventsFiltered,
@@ -821,23 +820,24 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- List all cameras ---
   router.get("/cameras", async (_req, res, next) => {
     try {
-      // WARP-475 (G3): expose retention block so the §2.5 retention
-      // notice has a backing value to render. The retention window is
-      // operator-editable via the dashboard — clip days come from the
-      // `hardware.camera_retention_days` WorkspaceSetting row (seeded
-      // to 14 by workspace-settings.service.ts, then mutable through
-      // `PATCH /api/settings`); event retention comes from
-      // `hardware.event_retention_days` (seeded `null` = "kept
-      // forever"). loadCameraRetentionPolicy() reads both rows fresh
-      // on every request — no in-process cache that could drift past
-      // a dashboard edit. Loaded BEFORE the Frigate check so the
-      // disconnected case still surfaces the operator-visible policy.
-      const retention = await loadCameraRetentionPolicy(prisma);
+      // WARP-475 (G3) shipped a `retention` block here, read from the
+      // `hardware.camera_retention_days` / `hardware.event_retention_days`
+      // WorkspaceSetting rows. WARP-1849 removed it: those rows fed only
+      // the nightly purge cron, which called Frigate endpoints that do not
+      // exist (405) and so enforced nothing. Nothing rendered the block
+      // either — the §2.5 notice it was built for was never wired up.
+      //
+      // Retention now lives in exactly one place: Frigate's own config,
+      // which Frigate enforces per camera. Keeping a second copy in
+      // WorkspaceSetting is the drift that produced this bug. Per-camera
+      // windows are served by `GET /api/cameras/:name/settings`; the
+      // appliance-wide defaults are the top-level `record:` block in
+      // docker/frigate/config.yml, inherited by every camera.
       if (!isInitialized()) {
-        return res.json({ cameras: [], retention, _status: "disconnected" });
+        return res.json({ cameras: [], _status: "disconnected" });
       }
       const cameras = await getCameras(prisma);
-      res.json({ cameras, retention });
+      res.json({ cameras });
     } catch (err) {
       next(err);
     }
@@ -2354,13 +2354,21 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         }
         patch.recordEnabled = body.recordEnabled;
       }
-      if ("recordRetainDays" in body) {
-        if (!isFiniteNum(body.recordRetainDays)) {
-          return res
-            .status(400)
-            .json({ error: "recordRetainDays must be a number" });
+      // WARP-1849: the four retention windows Frigate 0.17 enforces.
+      // The old single `recordRetainDays` mapped to `record.retain`,
+      // a key 0.17 rejects outright — see camera-settings.service.ts.
+      for (const field of [
+        "continuousRetainDays",
+        "motionRetainDays",
+        "alertsRetainDays",
+        "detectionsRetainDays",
+      ] as const) {
+        if (field in body) {
+          if (!isFiniteNum(body[field])) {
+            return res.status(400).json({ error: `${field} must be a number` });
+          }
+          patch[field] = body[field] as number;
         }
-        patch.recordRetainDays = body.recordRetainDays;
       }
       if ("snapshotsEnabled" in body) {
         if (!isBool(body.snapshotsEnabled)) {

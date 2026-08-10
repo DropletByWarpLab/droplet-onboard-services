@@ -2006,7 +2006,13 @@ export interface CameraSettings {
   trackedLabels: string[];
   objectFilters: Record<string, ObjectFilter>;
   recordEnabled: boolean;
-  recordRetainDays: number;
+  /** WARP-1849 — the four retention windows Frigate 0.17 enforces. The
+   *  old single `recordRetainDays` wrote `record.retain`, a key 0.17
+   *  rejects outright, which failed the whole save. */
+  continuousRetainDays: number;
+  motionRetainDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
   snapshotsEnabled: boolean;
   snapshotRetainDays: number;
   zones: CameraZone[];
@@ -2019,7 +2025,10 @@ export interface CameraSettingsPatch {
   trackedLabels?: string[];
   objectFilters?: Record<string, Partial<ObjectFilter>>;
   recordEnabled?: boolean;
-  recordRetainDays?: number;
+  continuousRetainDays?: number;
+  motionRetainDays?: number;
+  alertsRetainDays?: number;
+  detectionsRetainDays?: number;
   snapshotsEnabled?: boolean;
   snapshotRetainDays?: number;
   zones?: CameraZone[];

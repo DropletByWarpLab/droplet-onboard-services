@@ -45,7 +45,6 @@ import {
   initReconcileKick,
 } from "./services/department-reconciler.service.js";
 import { seedHouseholdDepartment } from "./services/household-seed.service.js";
-import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
 import { getUpdateAgentSettings } from "./services/update-agent/settings.js";
@@ -1027,42 +1026,24 @@ async function main() {
     { lockKey: "droplet:team-chat-meeting-reminders" },
   );
 
-  // WARP-475 (G3): nightly camera-retention purge. Fires at 03:30 so
-  // it doesn't contend with the 03:00 daily purge or the 03:15 guest
-  // sweep on the advisory-lock pool. Reads retention from
-  // WorkspaceSetting on every tick (no in-process cache that could
-  // drift past a dashboard edit) and calls Frigate's delete API.
+  // WARP-475's nightly camera-retention purge used to fire here at 03:30.
+  // WARP-1849 removed it: both endpoints it called —
+  // `DELETE /api/recordings?before=` and `DELETE /api/events?before=` —
+  // return 405 on Frigate 0.17. They do not exist and, per Frigate's
+  // route table, never did in the form this cron assumed. The purge had
+  // therefore deleted nothing for its entire lifetime while writing a
+  // nightly ActivityRow that read "0 clips · 0 events" — indistinguishable
+  // from a healthy no-op run.
   //
-  // Let errors propagate naked to cron-runtime's `safeRun` — same
-  // posture as the pattern-miner above and every other cron handler
-  // in this file. Swallowing here would zero out the per-handler
-  // `consecutiveFailures` counter that downstream alerting reads.
-  // Per-call Frigate API failures are already absorbed inside
-  // `purgeCameraArtifacts` (the service logs WARN and returns a
-  // result with `clipsSkipped/eventsSkipped` flags), so this only
-  // bubbles up the unexpected — Prisma down, programming errors —
-  // which are exactly what the canary should escalate. Romain on
-  // PR #292 round 2 caught the inner try/catch wrapper that
-  // contradicted this convention.
-  cronRuntime.scheduleCron(
-    "30 3 * * *",
-    async () => {
-      const result = await purgeCameraArtifacts(prisma);
-      if (
-        result.clipsDeleted > 0 ||
-        result.eventsDeleted > 0 ||
-        !result.clipsSkipped ||
-        !result.eventsSkipped
-      ) {
-        logger.info(result, "camera-retention-purge complete");
-      }
-    },
-    { lockKey: "droplet:camera-retention-purge" },
-  );
+  // Retention is not reimplemented here. Frigate expires recordings per
+  // camera natively (`frigate/record/cleanup.py`) from the config keys
+  // camera-settings.service.ts now writes, and evicts on a full disk via
+  // `frigate/storage.py`. The orchestrator's job is to set that config,
+  // not to duplicate the deletion.
 
   // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
-  // doesn't contend with the 03:00 daily purge, 03:15 guest sweep, or 03:30
-  // camera purge on the advisory-lock pool. Reads the explicit TlsCert state
+  // doesn't contend with the 03:00 daily purge or the 03:15 guest sweep on the
+  // advisory-lock pool. Reads the explicit TlsCert state
   // row + the installed cert: a BOOTSTRAP_SELF_SIGNED box issues a publicly-
   // trusted cert now; an LE_ISSUED cert renews when <=30 days remain. HQ-
   // unreachable keeps the current cert and sets LE_RENEW_FAILED inside the

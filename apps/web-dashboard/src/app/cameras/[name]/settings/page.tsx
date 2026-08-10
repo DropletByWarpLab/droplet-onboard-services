@@ -159,8 +159,13 @@ export default function CameraSettingsPage() {
     }
     if (Object.keys(filterPatch).length > 0) patch.objectFilters = filterPatch;
     if (draft.recordEnabled !== fetched.recordEnabled) patch.recordEnabled = draft.recordEnabled;
-    if (draft.recordRetainDays !== fetched.recordRetainDays) {
-      patch.recordRetainDays = draft.recordRetainDays;
+    for (const field of [
+      "continuousRetainDays",
+      "motionRetainDays",
+      "alertsRetainDays",
+      "detectionsRetainDays",
+    ] as const) {
+      if (draft[field] !== fetched[field]) patch[field] = draft[field];
     }
     if (draft.snapshotsEnabled !== fetched.snapshotsEnabled) {
       patch.snapshotsEnabled = draft.snapshotsEnabled;
@@ -285,20 +290,66 @@ export default function CameraSettingsPage() {
               <h2 className="type-headline text-label-primary">Recording</h2>
             </div>
             <ToggleRow
-              label="Continuous recording"
+              label="Recording"
               value={draft.recordEnabled}
               onChange={(v) => update("recordEnabled", v)}
             />
+            {/* WARP-1849: Frigate keeps four independent retention windows.
+                Continuous and motion cover raw footage; alerts and
+                detections cover the clips that show up in the events list.
+                A single "Retention" control could only ever set one of
+                them, which is how the previous version silently kept
+                nothing. */}
             <SliderRow
-              label="Retention"
+              label="Keep 24/7 footage"
               min={0}
               max={90}
               step={1}
-              value={draft.recordRetainDays}
-              onChange={(v) => update("recordRetainDays", v)}
-              format={(v) => (v === 0 ? "Off" : `${v} day${v === 1 ? "" : "s"}`)}
+              value={draft.continuousRetainDays}
+              onChange={(v) => update("continuousRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
               disabled={!draft.recordEnabled}
             />
+            <SliderRow
+              label="Keep footage with motion"
+              min={0}
+              max={90}
+              step={1}
+              value={draft.motionRetainDays}
+              onChange={(v) => update("motionRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
+              disabled={!draft.recordEnabled}
+            />
+            <p className="type-caption-1 text-label-tertiary">
+              24/7 footage is by far the largest consumer of disk. Keeping
+              only motion gives you most of what you&apos;d go looking for at
+              a fraction of the space.
+            </p>
+            <SliderRow
+              label="Keep alert clips"
+              min={0}
+              max={90}
+              step={1}
+              value={draft.alertsRetainDays}
+              onChange={(v) => update("alertsRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
+              disabled={!draft.recordEnabled}
+            />
+            <SliderRow
+              label="Keep other detections"
+              min={0}
+              max={90}
+              step={1}
+              value={draft.detectionsRetainDays}
+              onChange={(v) => update("detectionsRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
+              disabled={!draft.recordEnabled}
+            />
+            <p className="type-caption-1 text-label-tertiary">
+              Alerts are the clips worth your attention — a person or car
+              your camera is watching for. Other detections are everything
+              else it noticed.
+            </p>
             <ToggleRow
               label="Save event snapshots"
               value={draft.snapshotsEnabled}
