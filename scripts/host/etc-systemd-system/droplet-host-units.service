@@ -1,0 +1,43 @@
+[Unit]
+# WARP-1829 — bring running host units back in line with the checkout.
+#
+# Host units execute their source straight out of the git working tree
+# (droplet-device-bridge.service runs `/usr/bin/python3
+# <repo>/services/oled-display/device-bridge.py`). The box's refresh pulls
+# main and restarts CONTAINERS — nothing restarted host units — so a merged
+# fix could sit inert in a running process indefinitely while the repo, the
+# file on disk and `systemctl status` all looked correct.
+#
+# This unit is the one-line hook for anything that updates the checkout:
+#
+#   systemctl start droplet-host-units.service
+#
+# It restarts ONLY units whose sources actually moved, ordered, one attempt
+# each, verified — see scripts/host/droplet-host-units.sh. `setup.sh` calls
+# the same executable directly at the end of a provision run.
+Description=Droplet host-unit refresh (restart units running stale code)
+Documentation=https://github.com/DropletByWarpLab/droplet-onboard-services/blob/main/scripts/host/README.md
+# The refresh only ever restarts units that are already running, so it has no
+# ordering needs of its own beyond systemd being ready to talk to.
+After=basic.target
+
+[Service]
+Type=oneshot
+# Restarting a unit needs root; everything else it does is reads.
+User=root
+ExecStart=/usr/local/sbin/droplet-host-units refresh
+# Bounded by construction: the script makes ONE restart attempt per unit per
+# invocation and suspends any unit that does not come back, so it cannot sit
+# here retrying. This ceiling only covers a unit that hangs on start.
+TimeoutStartSec=300
+# Exit 1 means "a unit did not come back" — that must show as a failed unit in
+# `systemctl --failed`, not be swallowed. The journal carries the CRITICAL
+# line naming the unit.
+SuccessExitStatus=0
+
+# Deliberately NO [Install] section and NO timer. This is an on-demand action
+# invoked by the refresh flow (or an operator), exactly like
+# droplet-panel-console.service and droplet-storage-pool-apply.service.
+# The STANDING detection lives in the existing droplet-watchdog.timer pass as
+# the `host_unit_staleness` check — one scheduler, not two, and the box
+# reports the condition without ever restarting the panel feed on a cadence.
