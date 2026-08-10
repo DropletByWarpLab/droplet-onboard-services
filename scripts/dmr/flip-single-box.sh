@@ -119,16 +119,34 @@ NEW_LLM_MODEL="$(printf '%s\n' "$names" | head -1)"
 ok "DMR reports the model as: ${NEW_LLM_MODEL}  <- this exact string becomes LLM_MODEL"
 
 # --- 4. context canary BEFORE any consumer moves -------------------------------
+# EVICT THE SERVING MODEL FIRST. Two 20Bs cannot share the 16 GiB card: the
+# first execution (2026-08-10) ran this canary with Ollama still resident and
+# the DMR load OOM'd (cudaMalloc 12036 MiB beside an 11.87 GiB resident) — the
+# canary aborted correctly but blamed LLAMA_ARG_CTX_SIZE. Evict-first is safe
+# here: env is untouched at this point, so on any abort the orchestrator's
+# readiness warm restores the serving model unaided.
+log "evicting the serving model for the canary window (self-heals on abort)"
+curl -s --max-time 60 -X POST "$OLLAMA_LOCAL_URL/api/generate" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-oss:20b","keep_alive":0}' >/dev/null 2>&1 || true
+for _ in $(seq 1 24); do
+  [ "$(cat /sys/class/drm/card1/device/mem_info_vram_used 2>/dev/null || echo 0)" -lt 2147483648 ] && break
+  sleep 5
+done
 log "loading the model once for the context canary (~15-60s)"
-curl -sS --max-time 600 -X POST "$DMR_URL/engines/v1/chat/completions" -H 'Content-Type: application/json' \
+# --fail is load-bearing: without it a 5xx from a failed load exits 0 and the
+# failure surfaces one step later as a missing-log-line mystery.
+curl -sS --fail --max-time 600 -X POST "$DMR_URL/engines/v1/chat/completions" -H 'Content-Type: application/json' \
   -d "{\"model\":\"${NEW_LLM_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":4}" >/dev/null \
-  || die "load probe failed against ${NEW_LLM_MODEL}"
+  || die "load probe FAILED against ${NEW_LLM_MODEL} — read 'docker logs droplet-dmr' first:
+    an out-of-memory allocation there means something still holds the card."
 ctx_line="$(docker logs --since 15m droplet-dmr 2>&1 | grep 'n_ctx_slot' | tail -1 || true)"
 case "$ctx_line" in
   *"n_ctx_slot = ${EXPECTED_CTX}"*) ok "context canary: n_ctx_slot = ${EXPECTED_CTX}" ;;
   *) die "context canary FAILED — wanted n_ctx_slot = ${EXPECTED_CTX}, log says: ${ctx_line:-<no line>}
-    LLAMA_ARG_CTX_SIZE should have applied from the compose env. Do not proceed
-    on a wrong window: the ~80-schema owner prompt would truncate silently (WARP-854)." ;;
+    NO line at all means llama-server never spawned — check 'docker logs
+    droplet-dmr' for an allocation failure before suspecting the env. A WRONG
+    value means LLAMA_ARG_CTX_SIZE did not apply. Either way do not proceed:
+    the ~80-schema owner prompt would truncate silently (WARP-854)." ;;
 esac
 
 # --- 5. write the four vars into BOTH env files --------------------------------
