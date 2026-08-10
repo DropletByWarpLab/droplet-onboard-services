@@ -181,12 +181,68 @@ Base config at `docker/frigate/config.yml`:
 | Setting | Value | Notes |
 |---------|-------|-------|
 | Detector | TensorRT (NVIDIA GPU) | Hardware-accelerated AI detection |
-| Record retention | 7 days (motion), 14 days (events) | Configurable |
-| Snapshot retention | 14 days | |
+| Alert clip retention | 14 days | `record.alerts.retain.days` |
+| Detection clip retention | 14 days | `record.detections.retain.days` |
+| 24/7 footage retention | 0 days (not kept) | `record.continuous.days` — Frigate's default; raise per camera |
+| Motion footage retention | 0 days (not kept) | `record.motion.days` |
+| Snapshot retention | 14 days | `snapshots.retain.default` |
 | Detection FPS | 5 | Per camera |
 | Detection resolution | 1280x720 | |
 | Objects tracked | person, car, dog, cat, package | |
 | MQTT | Connected to broker | Events published for orchestrator |
+
+## Retention — who deletes what
+
+**Frigate owns expiry. The orchestrator only sets the policy.**
+
+Frigate keeps four independent retention windows per camera, and its own
+`RecordingCleanup` (`frigate/record/cleanup.py`) expires against them:
+
+| Key | Covers |
+|-----|--------|
+| `record.continuous.days` | 24/7 footage — by far the largest consumer of disk |
+| `record.motion.days` | segments containing motion |
+| `record.alerts.retain.days` | review items escalated to alerts |
+| `record.detections.retain.days` | lower-confidence review items |
+
+Snapshots retain separately via `snapshots.retain.default`. On top of the
+age windows, Frigate evicts oldest-first when the volume runs low
+(`frigate/storage.py`).
+
+The orchestrator writes these keys through
+`PATCH /api/cameras/:name/settings` and otherwise stays out of the way.
+
+**Three traps, all of which shipped once (WARP-1849):**
+
+0. **Never save the resolved `/api/config` back.** `/api/config` returns the
+   *resolved* tree, which carries computed-only fields (`model.colormap`,
+   `model.all_attributes`, `auth.roles` filled with the reserved names, …).
+   The config models are `extra="forbid"`, so posting it back fails — an
+   untouched resolved config produces **42** validation errors. Any code
+   that writes a whole config must start from the *authored* yaml at
+   `/api/config/raw` (`fetchRawConfigYaml` / `saveRawConfig`). Read from
+   resolved, write to authored.
+
+
+1. **There is no delete-by-window API.** `DELETE /api/recordings?before=`
+   and `DELETE /api/events?before=` both return **405** on Frigate 0.17 —
+   they do not exist. Only `DELETE /api/events/{id}` and the bulk
+   `DELETE /api/events/` (body of ids) do. A cron that "purges by age"
+   against Frigate cannot work; age-based expiry is Frigate's job.
+
+2. **`record.retain` is not a valid key and is not ignored.** Frigate 0.17
+   removed it, and `FrigateBaseModel` is declared
+   `ConfigDict(extra="forbid")` — so a camera block carrying `record.retain`
+   fails validation and Frigate rejects the **entire** config save, silently
+   discarding whatever else was batched into it. `camera-settings.service.ts`
+   strips the key on every write for exactly this reason.
+
+Before changing any retention behaviour, verify the key against the running
+container rather than the docs:
+
+```bash
+docker exec droplet-frigate-1 python3 -c "from frigate.config.camera.record import RecordConfig; RecordConfig(**{'continuous':{'days':30}})"
+```
 
 ## Dashboard Features
 

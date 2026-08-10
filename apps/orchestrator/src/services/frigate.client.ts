@@ -338,8 +338,14 @@ export async function setEventRetain(
 /**
  * WARP-1440 — permanently delete a single Frigate event (the event row
  * plus its saved clip + snapshot on disk). Frigate 0.17 exposes
- * DELETE /api/events/<id> for exactly this; it's the per-event sibling
- * of the delete-by-window purge in camera-retention-purge.service.ts.
+ * DELETE /api/events/<id> for exactly this.
+ *
+ * This is the ONLY event-delete route Frigate 0.17 offers besides
+ * `DELETE /api/events/` (bulk, by a body of ids). There is no
+ * delete-by-window form: `DELETE /api/events?before=` returns 405, as
+ * does `DELETE /api/recordings?before=`. WARP-1849 removed the purge
+ * cron that assumed otherwise — age-based expiry is Frigate's own job,
+ * driven by the retention keys in its config.
  *
  * NOT idempotent: a second delete of the same id is a Frigate 404,
  * surfaced as the `event_not_found` sentinel (same sentinel-message
@@ -785,7 +791,7 @@ export async function disableRecording(cameraName: string): Promise<void> {
  * that saves a whole config must start from the authored YAML, which
  * round-trips cleanly.
  */
-async function fetchRawConfigYaml(): Promise<string> {
+export async function fetchRawConfigYaml(): Promise<string> {
   const resp = await fetch(`${FRIGATE_URL}/api/config/raw`, { signal: timeout() });
   if (!resp.ok) throw new Error(`Fetch raw config: ${resp.status}`);
   const text = await resp.text();
@@ -799,7 +805,7 @@ async function fetchRawConfigYaml(): Promise<string> {
 }
 
 /** Persist authored YAML and reload Frigate. text/plain so safe_load parses it. */
-async function saveRawConfig(yamlText: string): Promise<Response> {
+export async function saveRawConfig(yamlText: string): Promise<Response> {
   return fetch(`${FRIGATE_URL}/api/config/save?save_option=restart`, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },

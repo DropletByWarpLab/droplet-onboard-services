@@ -46,9 +46,6 @@ vi.mock("../services/frigate.client.js", () => ({
   ptzGoToPreset: vi.fn(), ptzMove: vi.fn(), restartFrigate: vi.fn(),
 }));
 vi.mock("../services/camera-system.service.js", () => ({ getCameraSystemStatus: vi.fn() }));
-vi.mock("../services/camera-retention-purge.service.js", () => ({
-  loadCameraRetentionPolicy: vi.fn().mockResolvedValue({}),
-}));
 vi.mock("../services/camera-groups.service.js", () => ({
   isValidGroupName: () => true, isValidGroupIcon: () => true,
   listGroups: vi.fn(), createGroup: vi.fn(), updateGroup: vi.fn(), deleteGroup: vi.fn(),
