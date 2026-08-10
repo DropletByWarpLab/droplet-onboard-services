@@ -263,6 +263,31 @@ _td_read() {
     | grep -v '^$' || true
 }
 
+# Advance $1 to the first index at which trusted_domains has NO element, and
+# echo it.
+#
+# Why not just use the element COUNT? Because an array with a HOLE (an index
+# deleted by hand at some point) makes the count collide with a live index, and
+# writing there would silently REPLACE a domain the box currently answers on —
+# the exact data loss the add-only posture exists to avoid. `occ
+# config:system:get <name> <index>` exits non-zero when that index is unset,
+# which is precisely the probe needed.
+#
+# On the overwhelmingly common contiguous array this probes exactly once and
+# finds the slot free. The bound stops a pathological/misbehaving occ from
+# spinning; on exhaustion we return the last probed index (best effort) and the
+# read-back assertion below is what reports the outcome either way.
+_td_next_free_index() {
+  _td_idx="$1"
+  _td_probe=0
+  while [ "$_td_probe" -lt 64 ] \
+    && occ_www config:system:get trusted_domains "$_td_idx" >/dev/null 2>&1; do
+    _td_idx=$((_td_idx + 1))
+    _td_probe=$((_td_probe + 1))
+  done
+  printf '%s' "$_td_idx"
+}
+
 reconcile_trusted_domains() {
   td_want_raw="${NEXTCLOUD_TRUSTED_DOMAINS:-}"
 
@@ -300,6 +325,7 @@ reconcile_trusted_domains() {
     case "$td_flat" in
       *" $td_want "*) continue ;;
     esac
+    td_next="$(_td_next_free_index "$td_next")"
     if occ_www config:system:set trusted_domains "$td_next" --value="$td_want"; then
       echo "[droplet] WARP-1688: trusted_domains += '${td_want}' (index ${td_next})"
       td_flat="${td_flat}${td_want} "

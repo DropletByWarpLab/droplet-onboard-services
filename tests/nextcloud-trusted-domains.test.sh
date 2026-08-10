@@ -141,6 +141,16 @@ STATE="${STUB_STATE:?STUB_STATE unset}"
 occ_www() {
   sub="${1:-}"
   key="${2:-}"
+  # `config:system:get trusted_domains <index>` — the single-element probe.
+  # occ exits non-zero when that index is unset; that is how a caller learns an
+  # index is free. STATE/occupied lists the indices that ARE set.
+  if [ "$sub" = "config:system:get" ] && [ "$key" = "trusted_domains" ] && [ -n "${3:-}" ]; then
+    if grep -qx -- "$3" "$STATE/occupied" 2>/dev/null; then
+      echo "occupied-$3"
+      return 0
+    fi
+    return 1
+  fi
   if [ "$sub" = "config:system:get" ] && [ "$key" = "trusted_domains" ]; then
     if [ -s "$STATE/stored" ]; then
       if [ "${STUB_GET_PLAIN:-0}" = "1" ]; then
@@ -160,6 +170,7 @@ occ_www() {
     printf '%s %s\n' "$idx" "$val" >> "$STATE/writes"
     if [ "${STUB_WRITES_APPLY:-1}" = "1" ]; then
       printf '%s\n' "$val" >> "$STATE/stored"
+      printf '%s\n' "$idx" >> "$STATE/occupied"
     fi
     return 0
   fi
@@ -181,8 +192,18 @@ run_case() {
   mkdir -p "$WORK/state"
   : > "$WORK/state/writes"
   : > "$WORK/state/other"
+  : > "$WORK/state/occupied"
   if [ -n "${CASE_STORED:-}" ]; then
     printf '%s\n' "$CASE_STORED" > "$WORK/state/stored"
+  fi
+  # By default a stored array is CONTIGUOUS: indices 0..n-1 are occupied.
+  # CASE_OCCUPIED overrides that to model a hole / a longer sparse array.
+  if [ -n "${CASE_OCCUPIED:-}" ]; then
+    printf '%s\n' "$CASE_OCCUPIED" | tr ' ' '\n' | grep -v '^$' > "$WORK/state/occupied"
+  elif [ -s "$WORK/state/stored" ]; then
+    _n=$(grep -c '.' < "$WORK/state/stored")
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do echo "$_i" >> "$WORK/state/occupied"; _i=$((_i + 1)); done
   fi
   set +e
   STUB_STATE="$WORK/state" \
@@ -239,6 +260,19 @@ if [ ! -s "$WORK/state/other" ]; then
   pass "reconcile issues no delete/other occ subcommands (add-only)"
 else
   fail "reconcile issued unexpected occ subcommands: $(tr '\n' '|' < "$WORK/state/other")"
+fi
+
+# (3b) SPARSE ARRAY: an array with a hole makes the element COUNT collide with a
+#      live index. Writing there would silently REPLACE a domain the box
+#      currently answers on — the exact data loss "add-only" exists to avoid.
+#      Seven stored values but indices 0..8 occupied (a hole at some deleted
+#      slot): the new FQDN must land at 9, not at 7.
+CASE_STORED="$STORED_STALE" CASE_ENV_DOMAINS="$DESIRED" \
+  CASE_OCCUPIED="0 1 2 3 4 5 6 7 8" run_case
+if grep -qxF "9 warp-lab.droplet-us.com" "$WORK/state/writes"; then
+  pass "sparse array: the write skips occupied indices instead of clobbering one"
+else
+  fail "sparse array: expected the write at index 9, got: $(tr '\n' '|' < "$WORK/state/writes")"
 fi
 
 # (4) BLANK FQDN: compose renders `... droplet.lan ` with a trailing blank token
