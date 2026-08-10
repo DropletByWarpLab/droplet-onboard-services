@@ -59,6 +59,39 @@ End-to-end camera management for the Droplet edge platform — auto-discovery, N
 7. **MQTT event** published → orchestrator → dashboard shows toast notification
 8. **Recording + AI detection** starts immediately (person, car, animal, package)
 
+Step 6 only happens for a camera whose stream actually answers. Most cameras
+don't on first contact — they ship locked, or their real stream sits behind a
+vendor-specific path the prober can't guess — so they stay in the discovery
+service's **pending** list and are re-probed every 30 s. That list is what the
+dashboard shows (below); it is never auto-added, because promoting an unverified
+guess installs a permanently-0-fps camera that the sweep then skips forever.
+
+### Candidate states (WARP-1847)
+
+`GET /api/cameras/discovered` merges camera-discovery's live pending list with
+the orchestrator's DB rows and labels each one:
+
+| Status | Means | Operator action |
+|--------|-------|-----------------|
+| `ready` | ONVIF stream URI, or default credentials answered a real `DESCRIBE` | **Add** — adopts it into Frigate |
+| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — opens the manual form prefilled |
+| `unverified` | Something answered on a camera port; no stream confirmed | Investigate, or ignore the device |
+
+The response is an envelope — `{ cameras, discoveryOnline }`. `discoveryOnline`
+is false when camera-discovery itself is unreachable (it's profile-gated), which
+is what lets the dashboard distinguish "nothing on your network" from "nothing is
+scanning". `POST /api/cameras/scan` returns the same `cameras` array alongside its
+`{ known, pending }` counts, so the scan button renders its result directly.
+
+RTSP URLs are stripped of embedded credentials before leaving the orchestrator
+(NET-05: the prober writes working credentials into the URL, and camera-discovery
+gates its own endpoint behind `DEVICE_SECRET` for exactly that reason). Clients
+get a redacted URL plus a `hasCredentials` boolean.
+
+Accept/reject accept two id shapes: `mac:<MAC>` routes to camera-discovery (which
+verifies the stream before committing it to Frigate, answering 422 when it can't),
+and a uuid takes the DB path.
+
 ### Manual Flow (Dashboard)
 
 1. Go to **Cameras** page in the dashboard
@@ -160,7 +193,11 @@ Base config at `docker/frigate/config.yml`:
 ### Camera Page (`/cameras`)
 
 1. **Network Isolation card** — enable/disable camera VLAN with one click
-2. **Discovery banner** — "3 new cameras detected" with Accept All / Review
+2. **Available on your network** — one row per device the sweep found, with its
+   address, vendor and candidate status (see above); Add / Set up / Ignore per
+   row, and a Scan action that reports what it found. Doubles as the page's empty
+   state when no cameras are set up yet, and carries distinct copy for
+   "found nothing" vs "discovery isn't running"
 3. **Camera grid** — snapshot thumbnails (auto-refresh 10s), status badges, last detection
 4. **Events timeline** — recent detections with thumbnails, confidence, time
 5. **Detail panel** — larger live view, enable/disable/remove controls, Frigate UI link

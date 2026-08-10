@@ -63,6 +63,11 @@ import {
   type PtzAction,
 } from "../services/frigate.client.js";
 import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
+import {
+  getCameraCandidates,
+  macFromCandidateId,
+  mutateLiveCandidate,
+} from "../services/camera-candidates.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
@@ -921,11 +926,28 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!resp.ok) {
         return res.status(resp.status).json({ error: "Scan failed" });
       }
-      res.json(await resp.json());
+      const result = (await resp.json()) as Record<string, unknown>;
+
+      // WARP-1847: return what the scan actually found, not just how many.
+      // The scan runs synchronously upstream, so by here the pending map is
+      // already up to date and the caller can render a list without a second
+      // round-trip and without guessing when to poll. `known`/`pending` counts
+      // are preserved for the scan_for_cameras LLM tool, which passes this
+      // envelope straight through.
+      let cameras: unknown[] = [];
+      try {
+        cameras = (await getCameraCandidates(prisma)).candidates;
+      } catch (err) {
+        // A scan that ran is still a success; losing the list just means the
+        // client falls back to its GET /cameras/discovered poll.
+        logger.warn({ err }, "scan completed but candidate list could not be read");
+      }
+      res.json({ ...result, cameras });
     } catch {
       // Camera-discovery service may not be running (it's in full profile)
       res.json({
         status: "scan_unavailable",
+        cameras: [],
         message: "Camera discovery service is not running. Start it with: docker compose --profile full up camera-discovery",
       });
     }
@@ -1407,32 +1429,67 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // --- Discovered cameras (pending acceptance) ---
+  // --- Discovered cameras (found on the network, not yet adopted) ---
+  //
+  // WARP-1847: live-first. This used to answer from Postgres alone, filtering
+  // `enabled: false, autoDiscovered: true` — rows the discovery upsert never
+  // wrote in that shape (Camera.enabled defaults to true), so the list was
+  // structurally always empty and the operator had no way to see what was on
+  // the network. getCameraCandidates() reads camera-discovery's live pending
+  // map and falls back to those DB rows when the service isn't running.
+  //
+  // Response is an envelope, not a bare array: `discoveryOnline` is the
+  // difference between "nothing on your network" and "the scanner isn't
+  // running", and the dashboard must be able to say which.
   router.get("/cameras/discovered", async (_req, res, next) => {
     try {
-      const pending = await prisma.camera.findMany({
-        where: { enabled: false, autoDiscovered: true },
-        orderBy: { createdAt: "desc" },
-      });
-      res.json(
-        pending.map((c) => ({
-          id: c.id,
-          name: c.name,
-          ip: c.ipAddress,
-          mac: c.macAddress,
-          manufacturer: c.manufacturer,
-          model: c.model,
-          discoveredAt: c.createdAt.toISOString(),
-        }))
-      );
+      const { candidates, discoveryOnline } = await getCameraCandidates(prisma);
+      res.json({ cameras: candidates, discoveryOnline });
     } catch (err) {
       next(err);
     }
   });
 
-  // --- Accept a discovered camera ---
-  router.post("/cameras/discovered/:id/accept", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // --- Accept a discovered camera (adopt it into Frigate) ---
+  //
+  // Two id shapes, because there are two sources of truth (WARP-1847):
+  //   `mac:<MAC>` → a live camera-discovery record. Only that service holds the
+  //                 probed RTSP URL, and it verifies the stream before adding,
+  //                 so the accept has to happen there.
+  //   <uuid>      → a legacy DB row (or the DB-only fallback list).
+  //
+  // requireRoleOrMcpService, not requireRole: the accept_discovered_camera LLM
+  // tool now dispatches through here (WARP-1847 — it can't flip `enabled` on a
+  // `mac:` id that has no row), and it arrives as `_service:mcp`. A plain
+  // requireRole would 403 it, shipping the tool registered but dead — the exact
+  // class WARP-1462 fixed for /cameras/scan, and what tools-mcp-admission.test.ts
+  // exists to catch. requiresWrite is enforced tool-side.
+  router.post("/cameras/discovered/:id/accept", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
+      const mac = macFromCandidateId(req.params.id);
+      if (mac) {
+        const result = await mutateLiveCandidate(mac, "accept");
+        if (!result.ok) {
+          // Mirror the upstream status so a 422 ("stream did not verify — needs
+          // credentials or a corrected path") reads as an actionable message
+          // instead of a generic failure. 5xx is normalised to 502: the caller
+          // didn't do anything wrong, the upstream did.
+          const status = result.status >= 500 ? 502 : result.status;
+          return res.status(status).json({
+            error: result.message ?? "Camera discovery could not add this camera",
+          });
+        }
+        // The camera is in Frigate now; keep the DB in step. The MQTT
+        // camera_accepted event upserts the row too, but that's asynchronous —
+        // doing it here means the very next GET /api/cameras reflects the add.
+        await prisma.camera.updateMany({
+          where: { macAddress: { in: [mac, mac.toLowerCase()] } },
+          data: { enabled: true },
+        });
+        await reconcileFrigateCameras();
+        return res.json({ status: "accepted" });
+      }
+
       const camera = await prisma.camera.update({
         where: { id: req.params.id },
         data: { enabled: true },
@@ -1444,9 +1501,32 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // --- Reject a discovered camera ---
+  // --- Reject a discovered camera (stop offering it) ---
   router.post("/cameras/discovered/:id/reject", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
+      const mac = macFromCandidateId(req.params.id);
+      if (mac) {
+        const result = await mutateLiveCandidate(mac, "reject");
+        if (!result.ok) {
+          const status = result.status >= 500 ? 502 : result.status;
+          return res.status(status).json({
+            error: result.message ?? "Camera discovery could not reject this camera",
+          });
+        }
+        // Discovery remembers the rejected MAC, but a DB row for the same
+        // camera would keep it in the fallback list — the rejection has to
+        // clear both or the camera reappears.
+        await prisma.camera.deleteMany({
+          where: {
+            macAddress: { in: [mac, mac.toLowerCase()] },
+            autoDiscovered: true,
+            enabled: false,
+          },
+        });
+        await reconcileFrigateCameras();
+        return res.json({ status: "rejected" });
+      }
+
       await prisma.camera.delete({ where: { id: req.params.id } });
       await reconcileFrigateCameras();
       res.json({ status: "rejected" });
