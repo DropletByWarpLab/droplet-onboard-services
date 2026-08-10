@@ -152,6 +152,35 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
   fi
 done
 
+echo "--- Phase 1b: the Host variable never appears in PROSE (file-wide) ---"
+
+# The per-leg check above only covers the five new blocks. This is the same
+# invariant across the WHOLE file, because the trap bit twice: once in the legs'
+# justification comments, and again in the explanatory note above the dashboard
+# catch-all, where quoting the directive inside a sentence produced a fresh
+# blocking finding on the comment line itself.
+#
+# `request-host-used` matches GENERIC text, so ANY line carrying the Host
+# variable is a finding — a comment cannot be covered by a `# nosemgrep:` line
+# beneath it, because the finding lands above the suppression. The rule is
+# therefore simple and absolute: that token may appear ONLY on a real
+# `proxy_set_header` directive line.
+prose_hits=""
+while IFS=: read -r lineno _; do
+  [ -n "$lineno" ] || continue
+  if ! sed -n "${lineno}p" "$CONF" \
+     | grep -qE '^[[:space:]]*proxy_set_header Host \$host;$'; then
+    prose_hits="$prose_hits $lineno"
+  fi
+done <<EOF
+$(grep -n 'Host \$host' "$CONF")
+EOF
+if [ -z "$prose_hits" ]; then
+  pass "the Host variable appears only on proxy_set_header directives, never in prose"
+else
+  fail "the Host variable appears in non-directive (comment) text at line(s):$prose_hits — that self-trips request-host-used on a line no suppression can cover"
+fi
+
 echo "--- Phase 2: ordering — every asset leg precedes the catch-all ---"
 
 CATCHALL_LINE=$(grep -nE '^[[:space:]]*location / \{' "$CONF" | head -1 | cut -d: -f1)
