@@ -1995,6 +1995,35 @@ export interface StorageStat {
   mountType: string;
 }
 
+/**
+ * WARP-1850 — per-camera NVR storage. `null` is load-bearing throughout:
+ * it means "not known", which the UI must render differently from zero.
+ */
+export interface CameraStorageRow {
+  camera: string;
+  /** Bytes used, or null when Frigate has no segments for this camera yet. */
+  usedBytes: number | null;
+  /** Measured bytes/hour, or null when not yet measured. */
+  bytesPerHour: number | null;
+  /** Share of the recordings volume, 0–100, or null if uncomputable. */
+  sharePercent: number | null;
+  /** Days of footage the current usage represents at the measured rate. */
+  daysAtCurrentRate: number | null;
+}
+
+export interface CameraStorageSummary {
+  volume: {
+    path: string;
+    totalBytes: number;
+    usedBytes: number;
+    freeBytes: number;
+    usedPercent: number;
+  } | null;
+  cameras: CameraStorageRow[];
+  nearFull: boolean;
+  totalBytesPerHour: number | null;
+}
+
 export interface CameraSystemStatus {
   version: string;
   uptimeSec: number;

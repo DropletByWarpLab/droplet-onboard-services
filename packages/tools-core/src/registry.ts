@@ -81,6 +81,7 @@ import shareClip from "./handlers/cameras/share-clip.js";
 // toggle, zones, clip deletion (all via ctx.http.orchestrator).
 import searchCameraEvents from "./handlers/cameras/search-camera-events.js";
 import getCameraHealth from "./handlers/cameras/get-camera-health.js";
+import getCameraStorage from "./handlers/cameras/get-camera-storage.js";
 import setCameraDetection from "./handlers/cameras/set-camera-detection.js";
 import setDetectionZones from "./handlers/cameras/set-detection-zones.js";
 import deleteClip from "./handlers/cameras/delete-clip.js";
@@ -275,6 +276,7 @@ const allTools: Tool[] = [
   // WARP-1440: camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
   searchCameraEvents,
   getCameraHealth,
+  getCameraStorage,
   setCameraDetection,
   setDetectionZones,
   deleteClip,

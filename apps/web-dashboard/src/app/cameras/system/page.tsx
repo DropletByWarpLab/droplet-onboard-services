@@ -16,7 +16,8 @@ import {
   Video,
   Zap,
 } from "lucide-react";
-import { fetchCameraSystemStatus, restartFrigate } from "@/lib/api";
+import { fetchCameraSystemStatus, fetchCameraStorage, restartFrigate } from "@/lib/api";
+import type { CameraStorageSummary } from "@/lib/types";
 import { confirmNetworkCommand } from "@/lib/api";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -42,6 +43,19 @@ export default function CameraSystemPage() {
     "/api/cameras/system",
     fetchCameraSystemStatus,
     { refreshInterval: 5000 },
+  );
+
+  // WARP-1850: per-camera storage. Polled slower than the system status —
+  // Frigate recomputes usage by summing segment sizes, so hammering it at
+  // 5s buys nothing but load. `storageError` is surfaced rather than
+  // swallowed: an empty breakdown reads as "nothing is using disk".
+  const {
+    data: storage,
+    error: storageError,
+  } = useSWR<CameraStorageSummary>(
+    "/api/cameras/storage",
+    fetchCameraStorage,
+    { refreshInterval: 60_000 },
   );
 
   const [restarting, setRestarting] = useState(false);
@@ -378,6 +392,85 @@ export default function CameraSystemPage() {
               </ul>
             </Card>
           )}
+
+          {/* Per-camera storage (WARP-1850) */}
+          <Card
+            icon={<HardDrive size={15} />}
+            title="Storage by camera"
+            className="span2"
+            style={{ marginBottom: 16 }}
+          >
+            {storageError ? (
+              <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Storage usage is unavailable right now, so this list may be
+                incomplete. It isn&apos;t a sign that your cameras are using no
+                space.
+              </p>
+            ) : !storage ? (
+              <div style={{ height: 64, background: "var(--surface-2)", borderRadius: 8 }} />
+            ) : storage.cameras.length === 0 ? (
+              <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                No cameras are recording yet.
+              </p>
+            ) : (
+              <>
+                {storage.nearFull && (
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                      marginBottom: 12,
+                      color: "#d9a35c",
+                      fontSize: 12,
+                    }}
+                  >
+                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>
+                      This drive is {storage.volume?.usedPercent.toFixed(0)}% full.
+                      When it fills, the oldest footage is deleted first — every
+                      camera quietly keeps less than you asked for. Lower a
+                      retention window, or add storage.
+                    </span>
+                  </div>
+                )}
+                <ul style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {storage.cameras.map((c) => (
+                    <li key={c.camera} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <span className="nm" style={{ minWidth: 0 }}>{c.camera}</span>
+                        <span className="rmeta mono">
+                          {/* null ≠ 0: say we don't know, don't imply empty. */}
+                          {c.usedBytes === null ? "not recorded yet" : fmtBytes(c.usedBytes)}
+                          {c.bytesPerHour !== null && (
+                            <> · {fmtBytes(c.bytesPerHour)}/hr</>
+                          )}
+                        </span>
+                      </div>
+                      {c.sharePercent !== null && <Meter pct={c.sharePercent} />}
+                    </li>
+                  ))}
+                </ul>
+                {storage.totalBytesPerHour !== null && storage.volume && (
+                  <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 12 }}>
+                    All cameras together are writing about{" "}
+                    {fmtBytes(storage.totalBytesPerHour)} an hour.
+                    {storage.totalBytesPerHour > 0 && (
+                      <>
+                        {" "}
+                        At that rate the free space lasts roughly{" "}
+                        {Math.max(
+                          0,
+                          Math.round(storage.volume.freeBytes / (storage.totalBytesPerHour * 24)),
+                        )}{" "}
+                        more days before the oldest footage starts being deleted.
+                      </>
+                    )}
+                  </p>
+                )}
+              </>
+            )}
+          </Card>
 
           {/* Restart card */}
           <Card className="span2">

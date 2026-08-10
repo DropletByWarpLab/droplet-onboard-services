@@ -45,6 +45,7 @@ import {
   initReconcileKick,
 } from "./services/department-reconciler.service.js";
 import { seedHouseholdDepartment } from "./services/household-seed.service.js";
+import { checkStorageNearFull } from "./services/camera-storage.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
 import { getUpdateAgentSettings } from "./services/update-agent/settings.js";
@@ -1040,6 +1041,30 @@ async function main() {
   // camera-settings.service.ts now writes, and evicts on a full disk via
   // `frigate/storage.py`. The orchestrator's job is to set that config,
   // not to duplicate the deletion.
+
+  // WARP-1850: hourly near-full check on the recordings volume. Edge-
+  // triggered inside the service — one ActivityRow per crossing, not one
+  // per tick — so the warning still means something when it appears.
+  //
+  // Hourly rather than by-the-minute because Frigate recomputes usage by
+  // summing segment sizes; the volume cannot go from healthy to full in
+  // under an hour on any realistic camera count, and Frigate evicts
+  // oldest-first before anything is actually lost.
+  //
+  // Errors propagate naked to cron-runtime's `safeRun`, matching every
+  // other handler here: an unreachable Frigate SHOULD increment the
+  // canary rather than be silently absorbed. That is the direct lesson of
+  // WARP-1849, where swallowed failures read as healthy for months.
+  cronRuntime.scheduleCron(
+    "20 * * * *",
+    async () => {
+      const result = await checkStorageNearFull();
+      if (result.warned) {
+        logger.warn(result, "camera storage near-full warning raised");
+      }
+    },
+    { lockKey: "droplet:camera-storage-near-full" },
+  );
 
   // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
   // doesn't contend with the 03:00 daily purge or the 03:15 guest sweep on the
