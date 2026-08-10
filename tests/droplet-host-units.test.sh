@@ -643,9 +643,66 @@ else
 fi
 
 # =============================================================================
-# Phase 7: usage
+# Phase 7: portability — older systemd, decorated list-units output
 # =============================================================================
-echo "--- Phase 7: usage ---"
+echo "--- Phase 7: portability ---"
+
+# systemd < 247 has no --timestamp=unix: `show` FAILS outright rather than
+# ignoring the flag, which would make every unit report skipped with an empty
+# Type — a silent total no-op, the worst possible failure for a detector whose
+# entire job is to break a silence. Retry without the flag and parse the human
+# timestamp `date -d` understands.
+reset_work
+mk_systemctl_stub
+mk_stale_bridge
+# Rewrite the stub: reject --timestamp=unix, emit systemd's human form. Also
+# decorate the list-units output with the `●` marker some versions print for
+# a unit in a non-running state.
+cat > "$WORK/bin/systemctl" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [ "\$a" = "--timestamp=unix" ] && { echo "Unknown option --timestamp" >&2; exit 1; }
+done
+verb=""
+for a in "\$@"; do case "\$a" in -*) ;; *) [ -z "\$verb" ] && verb="\$a" ;; esac; done
+target=""
+for a in "\$@"; do target="\$a"; done
+case "\$target" in -*) target="" ;; esac
+[ "\$target" = "\$verb" ] && target=""
+case "\$verb" in
+  list-units)
+    while IFS= read -r u; do
+      [ -n "\$u" ] || continue
+      printf '● %s loaded active running fixture unit\n' "\$u"
+    done < "$WORK/units"
+    exit 0 ;;
+  show)
+    [ -f "$WORK/show/\$target" ] || exit 0
+    sed 's/^ExecMainStartTimestamp=@\(.*\)/ExecMainStartTimestamp=Mon 2026-08-03 22:22:39 UTC/' \
+      "$WORK/show/\$target"
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$WORK/bin/systemctl"
+run_hu -- check --json > "$WORK/c8.json" 2>/dev/null
+if [ "$(unit_state "$WORK/c8.json" droplet-device-bridge.service)" = "stale" ]; then
+  pass "detects staleness on systemd without --timestamp=unix (human timestamp)"
+else
+  fail "old-systemd path broken: state=$(unit_state "$WORK/c8.json" droplet-device-bridge.service)"
+  cat "$WORK/c8.json" 2>/dev/null | sed 's/^/      /'
+fi
+if [ "$(unit_field "$WORK/c8.json" droplet-device-bridge.service unit)" \
+      = "droplet-device-bridge.service" ]; then
+  pass "the list-units status marker is stripped from the unit name"
+else
+  fail "unit name carries decoration: $(unit_field "$WORK/c8.json" droplet-device-bridge.service unit)"
+fi
+
+# =============================================================================
+# Phase 8: usage
+# =============================================================================
+echo "--- Phase 8: usage ---"
 
 run_hu -- --help >/dev/null 2>&1
 if [ $? -eq 0 ]; then pass "--help exits 0"; else fail "--help did not exit 0"; fi

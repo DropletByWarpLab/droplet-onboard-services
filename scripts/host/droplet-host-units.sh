@@ -114,6 +114,13 @@
 # bridge restart itself every time it rotated a key. Credential rotation has
 # its own restart path (droplet-openwrt-attach.path).
 #
+# LIMITATION: argv tokens are split on spaces, so a source path CONTAINING a
+# space is not resolved. systemd renders `argv[]=` as a plain space-joined list
+# with no quoting, so there is no way to disambiguate one from the outside; the
+# unit would report `no source files resolved from its Exec lines` rather than
+# claiming a false verdict. No path on the appliance has a space, and a new one
+# that did would show up in `check` output as an unresolved unit.
+#
 # ── INSTALL DRIFT (reported, never restarted for) ────────────────────────────
 # A unit executing /usr/local/sbin/<name> runs a COPY installed by setup.sh.
 # If the repo pulled but setup.sh has not re-run, the copy is behind the tree
@@ -207,9 +214,14 @@ USAGE
 # systemd interrogation
 # =============================================================================
 
-# All matching units systemd currently knows about.
+# All matching units systemd currently knows about. Some systemd versions
+# decorate the first column with a status marker (`●` for a unit that is not
+# running) even with --plain, so strip anything before the first unit-name
+# character — otherwise the marker becomes the "unit name" and the whole sweep
+# silently enumerates nothing.
 list_units() {
   systemctl list-units --type=service --all --no-legend --plain "$HU_MATCH" 2>/dev/null \
+    | sed -e 's/^[^A-Za-z0-9_.@-]*//' \
     | awk '{ print $1 }' \
     | grep -E '\.service$' \
     | sort -u
@@ -218,13 +230,23 @@ list_units() {
 # Cache of `systemctl show` output for the unit currently being examined.
 UNIT_SHOW=""
 
+SHOW_PROPS="-p Id -p Type -p RemainAfterExit -p ActiveState -p SubState \
+-p MainPID -p FragmentPath -p DropInPaths -p ExecMainStartTimestamp \
+-p ExecStartPre -p ExecStart -p ExecStartPost"
+
 load_unit() { # <unit>
-  UNIT_SHOW="$(systemctl show \
-    --timestamp=unix \
-    -p Id -p Type -p RemainAfterExit -p ActiveState -p SubState -p MainPID \
-    -p FragmentPath -p DropInPaths \
-    -p ExecMainStartTimestamp -p ExecStartPre -p ExecStart -p ExecStartPost \
-    "$1" 2>/dev/null)"
+  # --timestamp=unix (systemd >= 247) makes ExecMainStartTimestamp trivially
+  # parseable. Older systemd REJECTS the flag outright rather than ignoring it,
+  # which would leave UNIT_SHOW empty and make every unit report `skipped` with
+  # an empty Type — a silent total no-op, the worst possible failure mode for a
+  # detector whose whole job is to break a silence. Retry without it; the human
+  # timestamp is parsed by `date -d` in unit_start_epoch.
+  # shellcheck disable=SC2086 # SHOW_PROPS is a deliberate word-split flag list
+  UNIT_SHOW="$(systemctl show --timestamp=unix $SHOW_PROPS "$1" 2>/dev/null)"
+  if [ -z "$UNIT_SHOW" ]; then
+    # shellcheck disable=SC2086 # same deliberate word-split
+    UNIT_SHOW="$(systemctl show $SHOW_PROPS "$1" 2>/dev/null)"
+  fi
 }
 
 # First value of a property from the cached show output. Pure bash on purpose:
