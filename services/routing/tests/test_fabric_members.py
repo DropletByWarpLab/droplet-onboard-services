@@ -241,6 +241,26 @@ class TestFabricMembersEndpoint:
         assert resp.status_code == 200, resp.text
         assert {m["role"] for m in resp.json()["members"]} == {"ap", "switch"}
 
+    def test_synthesizes_from_bridge_member_when_named_devices_lack_mac(
+        self, connected_client, mock_router
+    ) -> None:
+        """DSA hardware (RB5009): `network.device status` may carry no
+        macaddr on br-lan and there is no eth0 at all — the anchor falls back
+        to a current member of the management bridge, whose burned-in MAC is
+        an equally stable identity (ADR-035 §2)."""
+        mock_router.fabric.browse_members.return_value = []
+        mock_router.network.device_status.return_value = {
+            "br-lan": {"up": True, "bridge-members": ["p2", "p3"]},
+            "p2": {"macaddr": "d4:01:c3:aa:bb:02", "up": True},
+            "p3": {"macaddr": "d4:01:c3:aa:bb:03", "up": True},
+        }
+        resp = connected_client.get("/fabric/members", headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        routers = [m for m in resp.json()["members"] if m["role"] == "router"]
+        assert len(routers) == 1
+        # First bridge member wins — deterministic anchor across polls.
+        assert routers[0]["mac"] == "d4:01:c3:aa:bb:02"
+
     def test_synthesis_dropped_without_anchor_mac(self, connected_client, mock_router) -> None:
         mock_router.fabric.browse_members.return_value = []
         mock_router.network.device_status.return_value = {}
