@@ -2011,18 +2011,6 @@ export interface CameraStorageRow {
   daysAtCurrentRate: number | null;
 }
 
-/** WARP-1851 — result of setting a camera's storage budget. */
-export interface CameraBudgetResult {
-  retentionMode: "MANUAL" | "BUDGET";
-  budgetBytes: number | null;
-  /** Days the budget buys at the measured rate; null when unmeasurable. */
-  projectedDays?: number | null;
-  /** False when the camera has no measured bitrate yet. */
-  measurable?: boolean;
-  /** Operator-facing note — present when there's something to say. */
-  note?: string;
-}
-
 export interface CameraStorageSummary {
   volume: {
     path: string;

@@ -68,7 +68,6 @@ import {
   mutateLiveCandidate,
 } from "../services/camera-candidates.service.js";
 import { getCameraStorage } from "../services/camera-storage.service.js";
-import { deriveRetentionDays } from "../services/camera-budget.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
@@ -813,101 +812,6 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
-
-  // --- Storage budget (WARP-1851) ---
-  //
-  // PATCH { budgetBytes: number | null } on a camera.
-  //
-  // `budgetBytes: null` clears the budget and returns the camera to MANUAL —
-  // its retention keeps whatever value it currently has in Frigate rather
-  // than snapping back to a default. Clearing an allocation must never be
-  // the thing that deletes footage.
-  //
-  // Setting a budget does NOT write retention inline. The reconciler owns
-  // that, because deriving days needs a measured bitrate the camera may not
-  // have yet — and a route that returned 200 after silently failing to
-  // derive would be exactly the WARP-1849 failure shape. The response says
-  // what will happen, including when it can't happen yet.
-  router.patch(
-    "/cameras/:name/budget",
-    requireRole("owner", "admin"),
-    async (req, res, next) => {
-      try {
-        const name = req.params.name;
-        if (!CAMERA_NAME_RE.test(name)) {
-          return res.status(400).json({ error: "invalid camera name" });
-        }
-
-        const camera = await prisma.camera.findUnique({ where: { name } });
-        if (!camera) {
-          return res.status(404).json({ error: "camera not found" });
-        }
-
-        const raw = (req.body ?? {}) as { budgetBytes?: unknown };
-        if (!("budgetBytes" in raw)) {
-          return res.status(400).json({ error: "budgetBytes is required" });
-        }
-
-        if (raw.budgetBytes === null) {
-          await prisma.camera.update({
-            where: { name },
-            data: { retentionMode: "MANUAL", storageBudgetBytes: null },
-          });
-          return res.json({
-            retentionMode: "MANUAL",
-            budgetBytes: null,
-            // Say plainly that nothing was deleted — the operator's most
-            // likely worry when clearing an allocation.
-            note: "Retention stays where it is; clearing a budget deletes nothing.",
-          });
-        }
-
-        const budget = Number(raw.budgetBytes);
-        if (!Number.isFinite(budget) || budget <= 0) {
-          return res
-            .status(400)
-            .json({ error: "budgetBytes must be a positive number of bytes, or null" });
-        }
-
-        await prisma.camera.update({
-          where: { name },
-          data: {
-            retentionMode: "BUDGET",
-            storageBudgetBytes: BigInt(Math.round(budget)),
-          },
-        });
-
-        // Report the projection now so the UI can state the trade, and be
-        // explicit when the rate isn't known yet instead of implying a
-        // window that hasn't been derived.
-        let projectedDays: number | null = null;
-        let measurable = false;
-        try {
-          const storage = await getCameraStorage();
-          const rate =
-            storage.cameras.find((c) => c.camera === name)?.bytesPerHour ?? null;
-          const derived = deriveRetentionDays(BigInt(Math.round(budget)), rate);
-          projectedDays = derived?.days ?? null;
-          measurable = derived !== null;
-        } catch {
-          // Frigate down: the budget is still saved and the reconciler will
-          // apply it later. Don't fail the write over a projection.
-        }
-
-        res.json({
-          retentionMode: "BUDGET",
-          budgetBytes: budget,
-          projectedDays,
-          measurable,
-          note: measurable
-            ? undefined
-            : "Saved. This camera hasn't recorded enough yet to measure its rate, so its retention is unchanged until it has.",
-        });
-      } catch (err) {
-        next(err);
-      }
-    },
-  );
 
   // WARP-171: per-route guard. owner ONLY — restarting the Frigate
   // container drops every active stream and pauses event recording
