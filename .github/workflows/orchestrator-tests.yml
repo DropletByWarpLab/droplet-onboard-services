@@ -117,7 +117,7 @@ jobs:
       # another, which is the exact fragility this change removes.
       - name: Log in to GHCR (Postgres image mirror)
         continue-on-error: true
-        uses: docker/login-action@v4.5.2
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
