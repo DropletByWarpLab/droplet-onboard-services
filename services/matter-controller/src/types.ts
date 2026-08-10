@@ -32,7 +32,22 @@ export interface MatterDiscoveredDevice {
   deviceName?: string;
   deviceType?: number;
   commissioningMode: number;
-  addresses: Array<{ ip: string; port: number; type: string }>;
+  /**
+   * `type` is the transport label — "udp" | "tcp" | "ble" | "ip". It is
+   * derived via matter.js's `ServerAddress.protocolOf()` and is ALWAYS a
+   * non-empty string. "ip" appears from matter.js 0.17 onward, where a
+   * transport-agnostic DNS-SD address record carries no explicit transport;
+   * treat anything other than "ble" as an IP address.
+   *
+   * `peripheralAddress` is present only on BLE records, which have no
+   * `ip`/`port` (those stay at "" / 0 so the shape is uniform).
+   */
+  addresses: Array<{
+    ip: string;
+    port: number;
+    type: string;
+    peripheralAddress?: string;
+  }>;
 }
 
 export interface MatterCommissionedDevice {

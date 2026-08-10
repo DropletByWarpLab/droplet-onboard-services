@@ -832,6 +832,86 @@ describe("createMatterControllerCore", () => {
       ]);
     });
 
+    // --- matter.js 0.17 ServerAddress migration (WARP-850 failure class) ---
+    //
+    // 0.17 dropped the literal `type` discriminant from the IP variant:
+    // `ServerAddress` gained a BARE `ServerAddressIp` member carrying only
+    // `{ ip, port }`. Reading `a.type` off it yields `undefined`, which would
+    // have silently blanked the BLE-vs-IP transport signal on the wire — the
+    // exact class of regression WARP-850 shipped to a box. The replacement is
+    // `ServerAddress.protocolOf()`, which is total: "udp" | "tcp" | "ble" |
+    // "ip". These cases pin each arm of that union.
+    const discoverOne = async (addresses: unknown[]) => {
+      (
+        controller.discoverCommissionableDevices as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([
+        { deviceIdentifier: "ABCD", D: 3840, CM: 1, addresses },
+      ]);
+      const [device] = await core.discover(5000);
+      return device.addresses;
+    };
+
+    it("maps a bare 0.17 ServerAddressIp (no `type` field) to type 'ip', never undefined", async () => {
+      // The new 0.17 variant. Pre-migration this produced `type: undefined`.
+      expect(await discoverOne([{ ip: "192.168.20.51", port: 5540 }])).toEqual([
+        { ip: "192.168.20.51", port: 5540, type: "ip" },
+      ]);
+    });
+
+    it("preserves the explicit udp/tcp transport labels", async () => {
+      expect(
+        await discoverOne([
+          { ip: "192.168.20.52", port: 5540, type: "udp" },
+          { ip: "192.168.20.53", port: 5541, type: "tcp" },
+        ]),
+      ).toEqual([
+        { ip: "192.168.20.52", port: 5540, type: "udp" },
+        { ip: "192.168.20.53", port: 5541, type: "tcp" },
+      ]);
+    });
+
+    it("keeps a BLE address distinguishable and surfaces its peripheralAddress", async () => {
+      // A BLE address has NO ip/port — it carries `peripheralAddress`. The
+      // ip/port stay at their empty sentinels so the wire shape is stable for
+      // the orchestrator, but the peripheral identity is no longer dropped on
+      // the floor: BLE-first commissioning is the one path WARP-850 broke.
+      expect(
+        await discoverOne([
+          { type: "ble", peripheralAddress: "AA:BB:CC:DD:EE:FF" },
+        ]),
+      ).toEqual([
+        {
+          ip: "",
+          port: 0,
+          type: "ble",
+          peripheralAddress: "AA:BB:CC:DD:EE:FF",
+        },
+      ]);
+    });
+
+    it("keeps ip/port at their sentinels for an address matter.js may add later", async () => {
+      // Neither isIp() nor isBle() — a shape the 0.17 union does not have.
+      // The wire contract (`ip: string`, `port: number`) must still hold
+      // rather than leaking undefined into the orchestrator.
+      expect(await discoverOne([{ type: "future-transport" }])).toEqual([
+        { ip: "", port: 0, type: "future-transport" },
+      ]);
+    });
+
+    it("never emits an address whose transport label is empty or undefined", async () => {
+      // Guards the whole union at once: whatever matter.js hands us, the
+      // orchestrator-facing `type` is always a non-empty string.
+      const addresses = await discoverOne([
+        { ip: "192.168.20.54", port: 5540 },
+        { ip: "192.168.20.55", port: 5540, type: "udp" },
+        { type: "ble", peripheralAddress: "11:22:33:44:55:66" },
+      ]);
+      for (const a of addresses) {
+        expect(typeof a.type).toBe("string");
+        expect(a.type.length).toBeGreaterThan(0);
+      }
+    });
+
     it("passes the timeout to matter.js as milliseconds, not seconds", async () => {
       const discover = controller.discoverCommissionableDevices as ReturnType<
         typeof vi.fn
