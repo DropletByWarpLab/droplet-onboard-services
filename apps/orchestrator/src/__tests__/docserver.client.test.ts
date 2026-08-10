@@ -367,6 +367,41 @@ describe("ncMintEditorSession — session-free direct-editing URL (WARP-1688)", 
     );
   });
 
+  // The shape check must test the PATH, not the whole path+query+fragment
+  // string. Testing the concatenation makes the guard bypassable: the literal
+  // only has to appear SOMEWHERE, so a query or fragment suffix smuggles an
+  // arbitrary path into the iframe `src` while the check still passes. Not
+  // reachable today (the input is Nextcloud's own OCS response and the origin
+  // is discarded regardless), but this is the one function whose entire job is
+  // shape verification.
+  it("falls back when the direct-view literal appears only in the QUERY", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      "http://localhost/index.php/settings/admin?next=/apps/richdocuments/direct/",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    const session = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+    expect(session.editorUrl).toBe(
+      "/nextcloud/index.php/apps/richdocuments/index?fileId=4242",
+    );
+    expect(session.editorUrl).not.toContain("settings/admin");
+  });
+
+  it("falls back when the direct-view literal appears only in the FRAGMENT", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      "http://localhost/index.php/login#/apps/richdocuments/direct/",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    const session = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+    expect(session.editorUrl).toBe(
+      "/nextcloud/index.php/apps/richdocuments/index?fileId=4242",
+    );
+    expect(session.editorUrl).not.toContain("login");
+  });
+
   it("falls back when the minted URL is not a richdocuments direct-view path", async () => {
     ncGetFileIdMock.mockResolvedValue(4242);
     ncDirectUrlMock.mockResolvedValue("http://localhost/index.php/settings/admin");

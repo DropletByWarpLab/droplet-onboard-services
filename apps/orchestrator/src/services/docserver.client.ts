@@ -64,23 +64,33 @@ const RICHDOCUMENTS_DIRECT_PATH = "/apps/richdocuments/direct/";
  * URL. An off-origin absolute URL likewise cannot survive, since only the path
  * is carried over — and a path that does not match the direct-view prefix is
  * refused outright.
+ *
+ * The check is on `pathname` ALONE, deliberately. Testing the concatenated
+ * path+query+fragment would only require the literal to appear SOMEWHERE, so
+ * `/index.php/settings/admin?next=/apps/richdocuments/direct/` and
+ * `/index.php/login#/apps/richdocuments/direct/` would both pass and land in
+ * the iframe — the exact opposite of "refused outright". The query and fragment
+ * are still carried into the RETURNED value (richdocuments' route is
+ * `directView#show`, so the fragment is load-bearing); they just get no say in
+ * whether the URL is accepted.
  */
 function rebaseDirectEditorUrl(
   mintedUrl: string,
   ncPublicBase: string,
 ): string | null {
-  let pathAndQuery: string;
+  let parsed: URL;
   try {
     // The base is a throwaway: it only lets a path-relative mint parse. Any
     // absolute input keeps its OWN path, and its origin is discarded below.
-    const parsed = new URL(mintedUrl, "http://nextcloud.invalid");
-    pathAndQuery = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    parsed = new URL(mintedUrl, "http://nextcloud.invalid");
   } catch {
     return null;
   }
-  if (!pathAndQuery.startsWith("/")) return null;
-  if (!pathAndQuery.includes(RICHDOCUMENTS_DIRECT_PATH)) return null;
-  return `${ncPublicBase}${pathAndQuery}`;
+  // Decide on the PATH only…
+  if (!parsed.pathname.startsWith("/")) return null;
+  if (!parsed.pathname.includes(RICHDOCUMENTS_DIRECT_PATH)) return null;
+  // …then carry the query + fragment through untouched.
+  return `${ncPublicBase}${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
 /**

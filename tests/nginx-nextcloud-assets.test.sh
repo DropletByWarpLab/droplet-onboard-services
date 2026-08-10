@@ -183,6 +183,17 @@ fi
 
 echo "--- Phase 2: ordering — every asset leg precedes the catch-all ---"
 
+# READABILITY, not correctness. An earlier version of this file claimed the
+# catch-all would 'swallow' a leg declared after it — that model is WRONG.
+# nginx prefix locations are ORDER-INDEPENDENT: the longest matching prefix
+# wins regardless of declaration order, and `^~` additionally short-circuits
+# the regex phase. `location /` can never take a request that `^~ /apps/`
+# matches, wherever either sits in the file.
+#
+# The assertion is kept anyway because the house convention is specific-first
+# and a leg that drifts below the catch-all is a review smell worth catching —
+# but nobody should read this and think it is preventing a routing bug.
+
 CATCHALL_LINE=$(grep -nE '^[[:space:]]*location / \{' "$CONF" | head -1 | cut -d: -f1)
 if [ -n "$CATCHALL_LINE" ]; then
   pass "found the dashboard catch-all 'location /' at line $CATCHALL_LINE"
@@ -204,19 +215,67 @@ echo "--- Phase 3: the tight scope holds (no whole-/index.php/ leg) ---"
 # Explicitly rejected design: routing all of /index.php/. Nextcloud's dynamic
 # surface is live behind it (/index.php/login → 200), so a blanket leg would
 # publish NC's login/settings/admin UI at the dashboard's origin.
-if grep -qE '^[[:space:]]*location[[:space:]]+(\^~[[:space:]]+)?/index\.php/[[:space:]]*\{' "$CONF"; then
-  fail "a blanket 'location /index.php/' leg exists — that publishes Nextcloud's login/settings/admin surface at the dashboard origin (explicitly rejected scope)"
+#
+# The guard has to cover every SHAPE that reintroduces it, not just the one
+# spelling we happened to reject:
+#   location /index.php/        prefix, with or without ^~
+#   location /index.php         NO trailing slash — matches MORE, /index.phpfoo
+#                               included
+#   location ~ ^/index\.php/    regex form (and ~* case-insensitive)
+# A guard that only knows one spelling is a guard that will be walked around.
+blanket_hits=""
+if grep -qE '^[[:space:]]*location[[:space:]]+(\^~[[:space:]]+)?/index\.php/?[[:space:]]*\{' "$CONF"; then
+  blanket_hits="$blanket_hits prefix-form"
+fi
+# Any REGEX location mentioning php at all. Deliberately broader than
+# `^/index\.php/`: `location ~ \.php$` reintroduces exactly the same exposure by
+# a different spelling. This gateway proxies everything and runs no fastcgi, so
+# there is no legitimate php regex leg for this to false-positive on.
+if grep -qE '^[[:space:]]*location[[:space:]]+~\*?[[:space:]]+[^{]*php' "$CONF"; then
+  blanket_hits="$blanket_hits regex-form"
+fi
+if [ -z "$blanket_hits" ]; then
+  pass "no blanket /index.php leg in any form (prefix, slash-less, or regex)"
 else
-  pass "no blanket /index.php/ leg — only the two prefixes the editor needs are exposed"
+  fail "a blanket /index.php leg exists ($blanket_hits) — that publishes Nextcloud's login/settings/admin surface at the dashboard origin (explicitly rejected scope)"
 fi
 
-for denied in /index.php/login /index.php/settings /index.php/apps/files /apps/files; do
+# What is genuinely UNREACHABLE at this origin: paths under /index.php/ that are
+# not one of the two allowed editor prefixes. `/apps/files` is deliberately NOT
+# in this list — see the note below; it IS reachable, and claiming otherwise
+# would be a guard that lies.
+for denied in /index.php/login /index.php/settings /index.php/apps/files; do
+  case "$denied" in
+    /index.php/apps/richdocuments/*|/index.php/apps/theming/*)
+      fail "$denied is inside an allowed editor prefix — the denied list is wrong"
+      continue
+      ;;
+  esac
   if grep -qF "location ^~ $denied" "$CONF"; then
-    fail "$denied is routed — Nextcloud's own UI must stay unreachable at this origin"
+    fail "$denied is routed explicitly — Nextcloud's own UI must stay unreachable at this origin"
   else
-    pass "$denied is NOT routed at the gateway"
+    pass "$denied is not routed (no /index.php/ leg reaches it)"
   fi
 done
+
+# HONESTY, not enforcement (WARP-1688 review C2). `^~ /apps/` is a
+# WHOLE-NAMESPACE leg, so /apps/files IS routed to Nextcloud — the earlier
+# version of this test grepped for an explicit `location ^~ /apps/files` leg,
+# found none, and printed "/apps/files is NOT routed", which was simply false.
+# A guard that does not guard is worse than no guard.
+#
+# What is true: reaching it still requires Nextcloud's own authn (measured:
+# /apps/files/ → 401), and the exposure delta is ZERO — every one of those paths
+# was already reachable at /nextcloud/apps/… on the same origin and cookie
+# scope, because the /nextcloud/ leg strips its prefix and Nextcloud believes
+# its webroot is /. Narrowing these legs (e.g. a static-file-extension regex) is
+# tracked separately; it is a real tightening, not a fix for a hole this PR
+# opened.
+if grep -qE '^[[:space:]]*location \^~ /apps/ \{' "$CONF"; then
+  pass "/apps/ is a whole-namespace leg (so /apps/files IS routed — NC authn still applies; zero delta vs the pre-existing /nextcloud/ leg)"
+else
+  fail "the /apps/ leg changed shape — re-check what this test claims about /apps/files"
+fi
 
 # Regression guard: the pre-existing /nextcloud/ leg DOES strip its prefix.
 # The new legs must not have been "fixed" to match it, nor it to match them.
@@ -228,19 +287,48 @@ fi
 
 echo "--- Phase 4: no collision with a dashboard surface ---"
 
-# The dashboard's 12 surfaces plus its Next.js asset roots. None may be
-# shadowed by a new asset leg.
-for surface in home chat files email cameras network devices tools activity \
-               people models settings _next api ai docs nextcloud; do
-  for prefix in "${ASSET_PREFIXES[@]}"; do
-    case "/$surface/" in
-      "$prefix"*)
-        fail "asset leg $prefix shadows the dashboard/gateway surface /$surface/"
-        ;;
+# Read the REAL route tree instead of restating a hardcoded list that drifts the
+# first time someone adds a surface. Every top-level directory under the app
+# router is a route segment the dashboard owns; none may be shadowed by an
+# asset leg. Route groups `(name)` and private `_dirs` are not URL segments, so
+# they are skipped.
+APP_DIR="$REPO_ROOT_REAL/apps/web-dashboard/src/app"
+collision=""
+checked=0
+if [ -d "$APP_DIR" ]; then
+  for entry in "$APP_DIR"/*/; do
+    [ -d "$entry" ] || continue
+    surface=$(basename "$entry")
+    case "$surface" in
+      \(*\)|_*) continue ;;
     esac
+    checked=$((checked + 1))
+    for prefix in "${ASSET_PREFIXES[@]}"; do
+      case "/$surface/" in
+        "$prefix"*) collision="$collision /$surface(vs $prefix)" ;;
+      esac
+    done
   done
-done
-pass "no asset leg shadows any dashboard surface or existing gateway leg"
+  # Plus the gateway legs and Next.js asset root, which are not app-router dirs.
+  for surface in _next api ai docs nextcloud; do
+    checked=$((checked + 1))
+    for prefix in "${ASSET_PREFIXES[@]}"; do
+      case "/$surface/" in
+        "$prefix"*) collision="$collision /$surface(vs $prefix)" ;;
+      esac
+    done
+  done
+else
+  fail "dashboard app router not found at $APP_DIR — cannot check for route collisions"
+fi
+
+if [ "$checked" -eq 0 ]; then
+  fail "no dashboard surfaces were checked — the collision test would pass vacuously"
+elif [ -n "$collision" ]; then
+  fail "asset leg shadows dashboard/gateway surface(s):$collision"
+else
+  pass "no asset leg shadows any of the $checked real dashboard/gateway surfaces"
+fi
 
 echo "--- Phase 5: the config is parse-gated at image build ---"
 
@@ -262,30 +350,12 @@ else
   fail "Dockerfile does not stage the certs the full-config parse needs"
 fi
 
-echo "--- Phase 6: structural sanity (balanced braces) ---"
-
-OPEN=$(tr -cd '{' < "$CONF" | wc -c | tr -d ' ')
-CLOSE=$(tr -cd '}' < "$CONF" | wc -c | tr -d ' ')
-if [ "$OPEN" = "$CLOSE" ]; then
-  pass "braces are balanced ($OPEN open / $CLOSE close)"
-else
-  fail "brace imbalance: $OPEN open vs $CLOSE close"
-fi
-
-# Every directive line inside the new legs must be terminated. An unterminated
-# proxy_pass is the classic copy-paste break.
-for prefix in "${ASSET_PREFIXES[@]}"; do
-  body="$(location_body "$prefix")"
-  bad=$(printf '%s\n' "$body" \
-    | grep -vE '^[[:space:]]*(#.*)?$' \
-    | grep -vE ';[[:space:]]*$' \
-    | head -3)
-  if [ -z "$bad" ]; then
-    pass "$prefix: every directive line is terminated with ';'"
-  else
-    fail "$prefix: unterminated directive line(s): $(printf '%s' "$bad" | tr '\n' '|')"
-  fi
-done
+# NOTE: there is deliberately no brace-balance / directive-terminator phase.
+# Counting braces over a file this comment-dense red-lights CI on one future
+# `{` in prose, with a misleading message, and the terminator loop it sat
+# beside passed vacuously for any leg that did not exist. `nginx -t` on the
+# REAL config is the actual syntax gate — it runs in the image build, and
+# Phase 5 above asserts that gate is still wired.
 
 echo ""
 echo "  $((TESTS - FAILURES))/$TESTS passed"
