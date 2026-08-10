@@ -85,6 +85,41 @@ per-box VNET, ADR-025A — proposed, sign-offs pending on WARP-1000).
 | T1.4 | E | nginx CVE → edge RCE pivots into bridge net | High | Non-privileged container, bridge isolation, resource caps; image patching cadence = **WARP-259** (CVE scanner + patch agent); SBOM per release = **WARP-245** | Partial → tickets |
 | T1.5 | S/E | Cloudflare ZT misconfig routes user A to box B (fleet remote access) | High | ADR-025A design: one VNET per box + per-user Gateway allow rule over org-wide catch-all block, fail-closed provisioning order; **pending sign-off + spike-object re-provisioning (WARP-1000, 5 listed items)** | Open → WARP-1000 |
 | T1.6 | I | Cloudflare sees traffic metadata; must never see plaintext | High | ADR-025A trust invariant: L3/L4 only, TLS decryption OFF, end-to-end phone↔box TLS (ADR-023 padlock survives); release-gate check specified | Open → WARP-1000 (gate not yet implemented) |
+| T1.7 | I/E | **Widened gateway surface for the embedded editor (WARP-1688)**: five new `location` legs publish Nextcloud paths at the dashboard's own origin (`/apps/`, `/core/`, `/dist/`, `/index.php/apps/richdocuments/`, `/index.php/apps/theming/`) | Med | Scope deliberately tight (§3a); every one of those paths still runs through Nextcloud's own authn/authz (verified: `/apps/files/` → 401); the whole-`/index.php/` option was rejected so NC's login/settings/admin UI stays unreachable at this origin | Mitigated (documented) |
+| T1.8 | S/I | **Unauthenticated richdocuments direct-editing URL (WARP-1688)**: `/index.php/apps/richdocuments/direct/<token>` renders the editor with NO cookie and NO Authorization header — whoever holds the URL holds that file until the token expires | Med | Token is minted server-side ONLY after the orchestrator's own gate chain (auth middleware → ADR-029 department space-access → NC share-permission mode decision), is bound to ONE file and ONE minting user, is short-lived (richdocuments TTL), and is returned only to the authenticated caller that asked for it. Residual: the URL is bearer-equivalent while it lives — it must never be logged, screenshotted into a ticket, or pasted into chat. See §9 R6 | Mitigated w/ residual |
+
+### 3a. Why the editor's gateway scope is narrow (WARP-1688)
+
+The dashboard embeds the document editor in an iframe served from the
+**dashboard's** origin. The richdocuments page inside that iframe
+requests every asset by ROOT-ABSOLUTE path (`/apps/…`, `/core/…`,
+`/dist/…`, plus two dynamic `/index.php/apps/…` prefixes), none of
+which carried the `/nextcloud/` prefix the gateway routes — so they
+404'd and the editor rendered unstyled and script-less.
+
+The obvious fix is to route the whole `/index.php/` leg. That was
+**considered and rejected**. Nextcloud's dynamic surface is live behind
+that prefix — `/index.php/login` answers 200 — so a blanket leg would
+publish Nextcloud's own login, settings and admin UI at the same origin
+as a dashboard the user is already signed in to. That is a second,
+independent authentication surface on the box's only inbound listener,
+with its own session cookies and its own account model, for no product
+benefit: the Droplet dashboard is the product's UI, and Nextcloud is a
+headless backend by design (`docker/nginx/nginx.conf`, ADR-009).
+
+What is exposed instead is the minimum the editor page actually loads,
+enumerated from the rendered page rather than guessed. What stays
+UNREACHABLE at this origin: `/index.php/login`, `/index.php/settings`,
+`/index.php/apps/files` and every other `/index.php/…` path, plus
+Nextcloud's WOPI callback endpoint (the engine→Nextcloud callback is
+server-to-server over the compose network — `wopi_callback_url=http://
+nextcloud/` — and never a browser request, so it needs no gateway leg
+at all). Nextcloud remains reachable in full under the existing
+`/nextcloud/` leg, which is unchanged.
+
+Enforcement: `tests/nginx-nextcloud-assets.test.sh` fails the build if a
+blanket `/index.php/` leg appears, if any of the named denied paths gets
+a leg, or if an asset leg is declared after the dashboard catch-all.
 
 ## 4. TB2 — LAN clients ↔ box services
 
@@ -186,6 +221,7 @@ staged cap reduction (single-box compose):
 | R3 | Bearer-token concentration in the orchestrator | It is the control plane by design (ADR-009); compensated by no-docker-socket, limits, CI gates |
 | R4 | WARP-232 LUKS2/Argon2id data partition + `.env`/`data/secrets` relocation shipped (pending WARP-966 hardware verify) | Physical theft covered by TPM-sealed LUKS2 (disk removed → ciphertext only) + A8 encrypted off-box backups; no-TPM dev boxes stay plain with a loud warning |
 | R5 | WebAuthn/SIEM/DLP/pen-test deferred post-GA | WARP-328 long-tail bucket, per the GA cut-line decision |
+| R6 | The richdocuments direct-editing URL is bearer-equivalent for its lifetime (T1.8) | It is the only session-free path richdocuments offers, and a session-free path is what an iframe on a different origin requires; the alternative (embedding Nextcloud's login) is a worse posture. Scoped to one file, one user, short TTL, minted only behind the orchestrator's gates |
 
 ## 10. Critical/High register (roll-up)
 

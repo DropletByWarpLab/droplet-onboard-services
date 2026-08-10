@@ -129,10 +129,24 @@ RUN set -eu; \
       printf 'events{}\nhttp{\n map $http_upgrade $connection_upgrade { default upgrade; "" close; }\n server{\n  listen 8080;\n  include /etc/nginx/docs-engine.%s.conf;\n }\n}\n' "$eng" > /tmp/test-nginx.conf; \
       nginx -t -c /tmp/test-nginx.conf; \
     done; \
+    # WARP-1688: and finally the REAL /etc/nginx/nginx.conf, end to end.
+    # Everything above validates an INCLUDE variant in a throwaway config —
+    # nothing validated nginx.conf itself, because its server block loads TLS
+    # certs that are runtime volume mounts. So a syntax error added directly to
+    # nginx.conf (a location block, say) shipped unparsed and only surfaced when
+    # the gateway refused to start on a customer's box. Stage the throwaway pair
+    # at the runtime cert path, parse the real config, then remove them — the
+    # image still ships with no certs baked in.
+    mkdir -p /etc/nginx/certs; \
+    cp /tmp/t.crt /etc/nginx/certs/droplet.crt; \
+    cp /tmp/t.key /etc/nginx/certs/droplet.key; \
+    nginx -t -c /etc/nginx/nginx.conf; \
+    rm -rf /etc/nginx/certs; \
     rm -f /tmp/t.key /tmp/t.crt /tmp/test-nginx.conf; \
     echo "WARP-1021 nginx cipher-profile self-test OK — default + fips profiles parse"; \
     echo "WARP-1061 internal-scheme self-test OK — default + mtls variants parse"; \
-    echo "WARP-1686 docs-engine self-test OK — collabora + onlyoffice variants parse"
+    echo "WARP-1686 docs-engine self-test OK — collabora + onlyoffice variants parse"; \
+    echo "WARP-1688 full-config self-test OK — /etc/nginx/nginx.conf parses"
 
 # nginx:1.27-bookworm already EXPOSEs 80/443 and ships the stock entrypoint that
 # runs /docker-entrypoint.d/*.sh before starting nginx — our profile-selector
