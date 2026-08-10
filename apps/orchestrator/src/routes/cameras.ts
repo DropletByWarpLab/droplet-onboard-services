@@ -1457,7 +1457,14 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   //                 probed RTSP URL, and it verifies the stream before adding,
   //                 so the accept has to happen there.
   //   <uuid>      → a legacy DB row (or the DB-only fallback list).
-  router.post("/cameras/discovered/:id/accept", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  //
+  // requireRoleOrMcpService, not requireRole: the accept_discovered_camera LLM
+  // tool now dispatches through here (WARP-1847 — it can't flip `enabled` on a
+  // `mac:` id that has no row), and it arrives as `_service:mcp`. A plain
+  // requireRole would 403 it, shipping the tool registered but dead — the exact
+  // class WARP-1462 fixed for /cameras/scan, and what tools-mcp-admission.test.ts
+  // exists to catch. requiresWrite is enforced tool-side.
+  router.post("/cameras/discovered/:id/accept", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const mac = macFromCandidateId(req.params.id);
       if (mac) {
