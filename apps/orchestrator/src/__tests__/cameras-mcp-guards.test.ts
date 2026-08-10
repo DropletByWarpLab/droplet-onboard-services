@@ -212,7 +212,15 @@ describe("POST /cameras/scan guard admits the MCP service principal (WARP-1462)"
 
     const denied = await request(buildApp(guest)).post("/api/cameras/scan");
     expect(denied.status).toBe(403);
-    // Guest is rejected at the guard — the proxy only ran for the owner call.
-    expect(mockInternalFetch).toHaveBeenCalledTimes(1);
+    // Guest is rejected at the guard — the sweep only ran for the owner call.
+    // Asserted on the URL rather than a total call count: WARP-1847 made an
+    // authorized scan also read back the candidate list (/cameras/discovered +
+    // /cameras/known) so the response can carry what it found, so the total is
+    // no longer 1-per-scan. The guard contract is that /scan itself is reached
+    // exactly once — by the owner, never by the guest.
+    const scanCalls = mockInternalFetch.mock.calls.filter(([url]) =>
+      String(url).endsWith("/scan"),
+    );
+    expect(scanCalls).toHaveLength(1);
   });
 });

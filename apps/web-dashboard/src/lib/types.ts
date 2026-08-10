@@ -2026,14 +2026,50 @@ export interface CameraSettingsPatch {
   motionMasks?: MotionMaskPolygon[];
 }
 
+/**
+ * How far along a camera found on the network is toward being usable (WARP-1847).
+ *  - `ready`             — a stream we can reach; adding it should just work.
+ *  - `needs_credentials` — it's a camera, but the stream wants a username /
+ *                          password or a vendor-specific RTSP path.
+ *  - `unverified`        — something answered on a camera port, nothing has
+ *                          confirmed a stream yet.
+ */
+export type CameraCandidateStatus = "ready" | "needs_credentials" | "unverified";
+
 export interface DiscoveredCamera {
+  /** `mac:<MAC>` for a live discovery record, a uuid for a database row. */
   id: string;
   name: string;
   ip: string;
   mac: string | null;
   manufacturer: string | null;
   model: string | null;
-  discoveredAt: string;
+  discoveredAt: string | null;
+  /** Absent on older payloads — treat a missing status as `unverified`. */
+  status?: CameraCandidateStatus;
+  displayName?: string;
+  /** RTSP URL with credentials already stripped server-side; never a password. */
+  rtspUrl?: string | null;
+  /** True when discovery holds working credentials for the stream. */
+  hasCredentials?: boolean;
+  detectionMethod?: string | null;
+  source?: "live" | "database";
+}
+
+export interface CameraCandidateList {
+  cameras: DiscoveredCamera[];
+  /**
+   * False when the camera-discovery service couldn't be reached — the
+   * difference between "nothing is on your network" and "nothing is looking".
+   */
+  discoveryOnline: boolean;
+}
+
+export interface CameraScanResult extends CameraCandidateList {
+  status: string;
+  known?: number;
+  pending?: number;
+  message?: string;
 }
 
 // --- Camera groups ---

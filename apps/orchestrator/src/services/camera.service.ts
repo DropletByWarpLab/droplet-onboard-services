@@ -270,6 +270,21 @@ async function upsertCameraRecord(
   const name = String(camera.name || "");
   if (!name) return;
 
+  // WARP-1847: a discovery event covers two very different things, and the row
+  // has to say which. `status: "active"` means camera-discovery verified the
+  // stream and committed it to Frigate — a real camera. Anything else
+  // (`needs_setup`, `pending`) is a candidate still being re-probed every 30 s,
+  // and creating it as `enabled: true` (the schema default this code used to
+  // inherit) both put an un-streamable camera in the operator's grid and made
+  // the `enabled: false` filter behind GET /cameras/discovered unmatchable.
+  //
+  // `enabled` is set on CREATE only. On update it is deliberately left alone:
+  // POST /cameras/:name/disable writes `enabled: false` for a working camera,
+  // and discovery re-publishes that same camera as active every sweep — echoing
+  // status into `enabled` here would silently undo the operator's disable.
+  // Promotion from candidate to camera is the accept path's job.
+  const isAdopted = camera.status === "active";
+
   await prisma.camera.upsert({
     where: { name },
     create: {
@@ -279,6 +294,7 @@ async function upsertCameraRecord(
       model: (camera.model as string) || null,
       ipAddress: String(camera.ip || ""),
       macAddress: (camera.mac as string) || null,
+      enabled: isAdopted,
       autoDiscovered: true,
       lastSeen: new Date(),
     },

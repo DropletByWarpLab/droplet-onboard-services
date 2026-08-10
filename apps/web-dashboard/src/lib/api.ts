@@ -25,6 +25,8 @@ import type {
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
+  CameraCandidateList,
+  CameraScanResult,
   MatterCapabilities,
   MatterDevice,
   MatterDiscoveredDevice,
@@ -2716,20 +2718,50 @@ export async function fetchEventsFiltered(
   return res.json();
 }
 
-export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {
+/**
+ * Cameras found on the network but not yet added, plus whether the scanner is
+ * even running (WARP-1847). Use this over fetchDiscoveredCameras() anywhere the
+ * "discovery isn't running" case has to read differently from "found nothing".
+ */
+export async function fetchCameraCandidates(): Promise<CameraCandidateList> {
   const res = await authFetch(`${BASE}/api/cameras/discovered`);
   if (!res.ok) throw new Error(`Failed to fetch discovered cameras: ${res.status}`);
-  return res.json();
+  const body = await res.json();
+  // Tolerate the pre-WARP-1847 bare-array shape so a dashboard newer than the
+  // orchestrator it's talking to still renders (mixed-version box mid-deploy).
+  if (Array.isArray(body)) return { cameras: body, discoveryOnline: true };
+  return {
+    cameras: Array.isArray(body?.cameras) ? body.cameras : [],
+    discoveryOnline: body?.discoveryOnline !== false,
+  };
+}
+
+/** Candidate list only. Kept for callers that don't need the online flag. */
+export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {
+  return (await fetchCameraCandidates()).cameras;
 }
 
 export async function acceptDiscoveredCamera(id: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/accept`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to accept camera: ${res.status}`);
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/accept`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    // The orchestrator mirrors camera-discovery's 422 prose ("stream did not
+    // verify — the RTSP path or credentials are likely wrong"), which is the
+    // whole answer for the operator. Surface it instead of a status code.
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to accept camera: ${res.status}`);
+  }
 }
 
 export async function rejectDiscoveredCamera(id: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/reject`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to reject camera: ${res.status}`);
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to ignore camera: ${res.status}`);
+  }
 }
 
 export async function enableCamera(name: string): Promise<void> {
@@ -2953,10 +2985,25 @@ export async function addCameraManual(
   }
 }
 
-export async function triggerCameraScan(): Promise<{ status: string; known?: number; pending?: number; message?: string }> {
+/**
+ * Run a discovery sweep and return what it found. The scan is synchronous
+ * upstream, so `cameras` is already the post-scan list — no polling needed
+ * (WARP-1847; this used to return counts the caller couldn't act on).
+ */
+export async function triggerCameraScan(): Promise<CameraScanResult> {
   const res = await authFetch(`${BASE}/api/cameras/scan`, { method: "POST" });
   if (!res.ok) throw new Error(`Scan failed: ${res.status}`);
-  return res.json();
+  const body = await res.json();
+  return {
+    status: typeof body?.status === "string" ? body.status : "scan_complete",
+    known: body?.known,
+    pending: body?.pending,
+    message: body?.message,
+    cameras: Array.isArray(body?.cameras) ? body.cameras : [],
+    // A scan that reached camera-discovery proves it's running; the explicit
+    // scan_unavailable envelope is the one case where it isn't.
+    discoveryOnline: body?.status !== "scan_unavailable",
+  };
 }
 
 // --- Matter Devices ---
