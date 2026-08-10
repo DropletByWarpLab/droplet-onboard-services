@@ -334,6 +334,19 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           });
         }
 
+        // The identifier that goes ON THE WIRE is the catalog's `pull_tag`,
+        // not the `:name` the user clicked. inference-manager's POST
+        // /models/pull hands `body.model` straight to the runtime
+        // (`runtime.pull(...)`) — it does NOT resolve name → pull_tag for us;
+        // its own manifest lookup only feeds the disk preflight, which is why
+        // either identifier appears to work right up until the registry.
+        // droplet-local-LLM's docs/model-management.md is explicit: pull_tag
+        // is "what POST /api/pull is called with". An entry with no pull_tag
+        // is only addressable by its catalog name, so fall back to that.
+        // `name` stays the user-facing identity everywhere else — audit rows,
+        // progress events, error copy — so the tag never leaks into the UI.
+        const pullTag = entry.pull_tag ?? name;
+
         // Audit the ATTEMPT before opening the stream — mirrors the PATCH
         // handler. A later failure gets its own row; silence never means
         // "nothing happened".
@@ -352,7 +365,7 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         const upstreamAbort = new AbortController();
         let upstream: Awaited<ReturnType<typeof openPullStream>>;
         try {
-          upstream = await openPullStream(name, upstreamAbort.signal);
+          upstream = await openPullStream(pullTag, upstreamAbort.signal);
         } catch (err) {
           logger.warn({ err, model: name }, "POST /models/pull: open stream failed");
           return res.status(502).json({

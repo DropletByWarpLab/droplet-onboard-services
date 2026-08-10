@@ -44,9 +44,14 @@ function authHeaders(): Record<string, string> {
 const CATALOG_BUDGET_MS = 5000;
 
 export interface CatalogModelEntry {
-  /** Catalog identity — also the value POSTed to /models/pull. */
+  /** Catalog identity: how the user, the dashboard and the audit trail
+   *  address this model. NOT what goes on the wire to /models/pull. */
   name: string;
-  /** The runtime tag the sidecar will pull (may differ from `name`). */
+  /** The runtime tag the sidecar actually pulls, and therefore the value
+   *  POSTed to /models/pull (may differ from `name`; null when the catalog
+   *  didn't state one, in which case `name` is the only addressable id).
+   *  The sidecar passes whatever it's handed straight to the runtime — it
+   *  does NOT resolve `name` → `pull_tag` on our behalf. */
   pull_tag: string | null;
   min_vram_gb: number | null;
   /** Sidecar's size class, e.g. "flagship" / "compact". */
@@ -137,6 +142,10 @@ export async function fetchEligibleCatalog(): Promise<EligibleCatalog> {
  * via `signal` when that client goes away. Deliberately NO retry and NO
  * overall timeout: a multi-GB pull runs for minutes and progress lines keep
  * the connection demonstrably alive.
+ *
+ * @param model The catalog entry's `pull_tag` (falling back to `name` when the
+ *   catalog states none) — NOT the user-facing catalog name. The sidecar sends
+ *   this identifier straight to the runtime without consulting its manifest.
  */
 export async function openPullStream(
   model: string,
