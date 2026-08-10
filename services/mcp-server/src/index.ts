@@ -239,6 +239,10 @@ async function main(): Promise<void> {
     ? new Redis(redisUrl, {
         maxRetriesPerRequest: 3,
         lazyConnect: true,
+        // ioredis 6 defaults to RESP3 and throws (no fallback) when HELLO 3 is
+        // refused. Pin the v5 wire protocol so the bump stays behaviour-
+        // identical — matches apps/orchestrator/src/services/cache.service.ts.
+        protocol: 2,
         ...redisConnectionOptions(redisUrl),
       })
     : null;

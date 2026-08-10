@@ -168,7 +168,7 @@ export async function createSession(user: {
     // cap. Two racing logins can transiently exceed the cap by one — each
     // login re-enforces after adding itself, so the steady state converges;
     // a Lua script would close that window and is deliberately out of scope.
-    const members = await redis.zrange(idxKey, 0, -1); // ascending score = oldest first
+    const members = await redis.zrange(idxKey, 0, "-1"); // ascending score = oldest first
     const live: string[] = [];
     for (const member of members) {
       const exists = await redis.exists(SESSION_KEY_PREFIX + member);
@@ -313,7 +313,7 @@ export async function countLiveSessions(userId: string): Promise<number | null> 
   const idxKey = SESSION_INDEX_PREFIX + userId;
   try {
     const redis = getRedis();
-    const members = await redis.zrange(idxKey, 0, -1);
+    const members = await redis.zrange(idxKey, 0, "-1");
     let live = 0;
     for (const member of members) {
       const exists = await redis.exists(SESSION_KEY_PREFIX + member);
@@ -348,7 +348,7 @@ export async function revokeAllSessions(
   try {
     const redis = getRedis();
     const idxKey = SESSION_INDEX_PREFIX + userId;
-    const members = await redis.zrange(idxKey, 0, -1);
+    const members = await redis.zrange(idxKey, 0, "-1");
     for (const sid of members) {
       if (opts.exceptSid && sid === opts.exceptSid) continue;
       const removed = await redis.del(SESSION_KEY_PREFIX + sid);
