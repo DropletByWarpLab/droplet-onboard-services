@@ -1704,6 +1704,21 @@ export async function ncGetFileId(
 // ── Document editor: richdocuments direct-editing token (WARP-1688) ──
 
 /**
+ * Request budget for the direct-editing mint (WARP-1688).
+ *
+ * 5s, deliberately longer than docServerHealthy()'s 3s probe: the mint WRITES
+ * (richdocuments persists a token row), so it is legitimately slower than a
+ * read under load. Short enough that a wedged Nextcloud degrades the editor to
+ * the connector page inside a request the user is still waiting on, rather than
+ * stalling it.
+ *
+ * Scoped to THIS call. The other fetches in this module are unbounded and stay
+ * that way here — retrofitting them is its own change with its own blast
+ * radius, not a rider on this one.
+ */
+const NC_DIRECT_EDIT_MINT_TIMEOUT_MS = 5000;
+
+/**
  * WARP-1688 — mint a SESSION-FREE richdocuments editor URL for `fileId`.
  *
  * The dashboard embeds the editor in an iframe served from the DASHBOARD's
@@ -1738,6 +1753,19 @@ export async function ncCreateRichdocumentsDirectUrl(
   fileId: number
 ): Promise<string | null> {
   const url = ocsUrl("/ocs/v2.php/apps/richdocuments/api/v1/document");
+  // BOUNDED (WARP-1688). "Degrade to the connector URL instead of 500ing" holds
+  // for a Nextcloud that FAILS, but a bare fetch would not save us from one
+  // that HANGS: the whole editor-session request would stall behind it, which
+  // is a worse outcome for the user than the fallback this call exists to
+  // enable. The abort rejects into the catch below, so a hang takes the exact
+  // same degraded path as a refused connection. Same AbortController shape as
+  // docServerHealthy(), with a longer budget: minting writes a row in
+  // Nextcloud, where the health probe only reads.
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    NC_DIRECT_EDIT_MINT_TIMEOUT_MS
+  );
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -1746,6 +1774,7 @@ export async function ncCreateRichdocumentsDirectUrl(
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams({ fileId: String(fileId) }).toString(),
+      signal: controller.signal,
     });
     if (!resp.ok) {
       logger.warn(
@@ -1772,6 +1801,8 @@ export async function ncCreateRichdocumentsDirectUrl(
       "richdocuments createDirect errored — falling back to the connector page"
     );
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

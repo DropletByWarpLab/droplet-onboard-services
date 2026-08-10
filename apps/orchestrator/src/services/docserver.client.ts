@@ -83,6 +83,68 @@ function rebaseDirectEditorUrl(
   return `${ncPublicBase}${pathAndQuery}`;
 }
 
+/**
+ * WARP-1688 — the path words a minted URL may reveal in a log line.
+ *
+ * Fixed Nextcloud routing literals only. A direct-editing token can never BE
+ * one of these, which is what makes the redaction below safe by construction
+ * rather than by pattern-matching what a token "looks like".
+ */
+const LOGGABLE_PATH_SEGMENTS = new Set([
+  "index.php",
+  "apps",
+  "richdocuments",
+  "theming",
+  "direct",
+  "directedit",
+  "core",
+  "dist",
+  "ocs",
+  "v2.php",
+  "v1",
+  "document",
+]);
+
+/**
+ * WARP-1688 — describe a minted direct-editing URL for a LOG line without
+ * revealing it.
+ *
+ * The direct-editing URL is BEARER-EQUIVALENT for its lifetime: whoever holds
+ * it can open that file with no cookie and no Authorization header
+ * (docs/THREAT_MODEL.md T1.8, accepted risk R6 — "must never be logged,
+ * screenshotted into a ticket, or pasted into chat"). Logging it at warn level
+ * would put a working credential into the orchestrator's log.
+ *
+ * Today the only call site fires when the shape check REFUSED the URL, so a
+ * live token would not reach it — but that is INCIDENTAL. If richdocuments
+ * changes its path layout in a future Nextcloud major, EVERY mint fails the
+ * check and that same line starts emitting live tokens. So the redaction is
+ * unconditional and structural: each path segment survives only if it is a
+ * known Nextcloud routing literal, and everything else becomes `*`.
+ *
+ * The result is still diagnosable — an engineer sees WHICH shape was refused
+ * (`/index.php/apps/richdocuments/*`) plus the length, which is what the
+ * "richdocuments changed its route" investigation actually needs.
+ */
+function describeMintedUrl(mintedUrl: string | null): string {
+  if (mintedUrl === null) return "none";
+  let shape: string;
+  try {
+    const parsed = new URL(mintedUrl, "http://nextcloud.invalid");
+    shape = parsed.pathname
+      .split("/")
+      .map((segment) =>
+        segment === "" || LOGGABLE_PATH_SEGMENTS.has(segment) ? segment : "*",
+      )
+      .join("/");
+  } catch {
+    return `<unparseable ${mintedUrl.length} chars>`;
+  }
+  // The query string and fragment are dropped WHOLESALE — richdocuments carries
+  // a requesttoken there, and there is no diagnostic value worth the risk.
+  return `${shape} (${mintedUrl.length} chars)`;
+}
+
 /** Editor mode decided SERVER-SIDE by the route layer; never trusted from the client. */
 export type DocEditorMode = "edit" | "view";
 
@@ -265,8 +327,9 @@ export async function ncMintEditorSession(
       if (rebased) {
         editorUrl = rebased;
       } else {
+        // `mintedShape` is REDACTED, not the URL — see describeMintedUrl().
         logger.warn(
-          { ncFileId, ncUser, minted },
+          { ncFileId, ncUser, mintedShape: describeMintedUrl(minted) },
           "richdocuments direct-editing URL unusable — falling back to the session-bound connector page",
         );
       }

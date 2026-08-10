@@ -40,6 +40,22 @@ vi.mock("../services/nextcloud.client.js", () => ({
   ncCreateRichdocumentsDirectUrl: vi.fn(),
 }));
 
+// WARP-1688 (QA finding): the fallback warn line must never carry a live
+// direct-editing URL — that URL is bearer-equivalent (THREAT_MODEL T1.8 / R6).
+// Capture every log call so the assertions can inspect what was actually
+// emitted rather than trusting the call site by eye.
+// `vi.hoisted` because the vi.mock factory below is hoisted above this file's
+// const declarations — a plain const would not exist yet when it runs.
+const loggerSpy = vi.hoisted(() => ({
+  warn: vi.fn(),
+  debug: vi.fn(),
+  info: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock("../lib/logger.js", () => ({
+  createLogger: () => loggerSpy,
+}));
+
 import {
   ncMintEditorSession,
   docServerHealthy,
@@ -323,6 +339,34 @@ describe("ncMintEditorSession — session-free direct-editing URL (WARP-1688)", 
   // Shape guard: whatever comes back goes straight into an iframe `src`, so a
   // payload that is not a richdocuments direct-view path is REFUSED and the
   // known-good connector URL is used instead.
+  // richdocuments' route is `directView#show` — the fragment is part of the
+  // address the editor page expects, so it must survive the re-base intact.
+  it("preserves the #fragment through the re-base", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      "http://localhost/index.php/apps/richdocuments/direct/tok#show",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    const session = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+    expect(session.editorUrl).toBe(
+      "/nextcloud/index.php/apps/richdocuments/direct/tok#show",
+    );
+  });
+
+  it("preserves a query string AND a fragment together", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      "http://localhost/index.php/apps/richdocuments/direct/tok?requesttoken=xyz#show",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    const session = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+    expect(session.editorUrl).toBe(
+      "/nextcloud/index.php/apps/richdocuments/direct/tok?requesttoken=xyz#show",
+    );
+  });
+
   it("falls back when the minted URL is not a richdocuments direct-view path", async () => {
     ncGetFileIdMock.mockResolvedValue(4242);
     ncDirectUrlMock.mockResolvedValue("http://localhost/index.php/settings/admin");
@@ -372,6 +416,7 @@ describe("ncMintEditorSession — session-free direct-editing URL (WARP-1688)", 
 
   // The 503 gate runs BEFORE the mint: an unreachable engine must never cause a
   // direct-editing round-trip, and must still surface as DOCS_UNAVAILABLE.
+  // (continued below — the log-redaction block sits in its own describe.)
   it("does not mint a direct token when the engine is unreachable (503 gate first)", async () => {
     ncGetFileIdMock.mockResolvedValue(7);
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
@@ -390,6 +435,95 @@ describe("ncMintEditorSession — session-free direct-editing URL (WARP-1688)", 
       ncMintEditorSession("t", "bob", "/missing.docx", "edit"),
     ).rejects.not.toBeInstanceOf(DocServerUnavailableError);
     expect(ncDirectUrlMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-1688 (QA finding) — the direct-editing URL is BEARER-EQUIVALENT for its
+ * lifetime: whoever holds it can open that file with no cookie and no auth
+ * (THREAT_MODEL T1.8, accepted risk R6 — "must never be logged").
+ *
+ * Today the fallback warn line only fires when the shape check REFUSED the URL,
+ * so a live token never reaches it. That safety is INCIDENTAL: if richdocuments
+ * changes its path shape in a future Nextcloud major, every mint fails the
+ * check and the same line starts writing live tokens into the orchestrator log
+ * at warn level. These tests pin redaction so the property holds by
+ * construction rather than by luck.
+ */
+describe("ncMintEditorSession — the fallback log never carries a live token (WARP-1688)", () => {
+  const SECRET = "s3cr3t-direct-token-abcdefghijklmnop";
+
+  // Flatten every argument of every log call to one string — a leak anywhere
+  // in the structured payload or the message counts as a leak.
+  function loggedText(): string {
+    const calls = [
+      ...loggerSpy.warn.mock.calls,
+      ...loggerSpy.debug.mock.calls,
+      ...loggerSpy.info.mock.calls,
+      ...loggerSpy.error.mock.calls,
+    ];
+    return calls.map((args) => JSON.stringify(args)).join("\n");
+  }
+
+  it("does not log the token when the shape check refuses a NEW richdocuments path layout", async () => {
+    // Simulates the future-NC scenario: a real, live direct URL whose layout no
+    // longer matches the expected prefix, so it is refused AND logged.
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      `http://localhost/index.php/apps/richdocuments/directedit/${SECRET}`,
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    const session = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+
+    expect(session.editorUrl).toBe(
+      "/nextcloud/index.php/apps/richdocuments/index?fileId=4242",
+    );
+    expect(loggerSpy.warn).toHaveBeenCalled();
+    expect(loggedText()).not.toContain(SECRET);
+  });
+
+  it("does not log the token when the minted URL is off-origin and refused", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(`https://evil.example/nope/${SECRET}`);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+    expect(loggedText()).not.toContain(SECRET);
+  });
+
+  // Redaction must still be USEFUL: an engineer reading the log has to be able
+  // to tell WHICH shape was refused, or the line is noise.
+  it("still logs the refused path SHAPE so the failure is diagnosable", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      `http://localhost/index.php/apps/richdocuments/directedit/${SECRET}`,
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+
+    const text = loggedText();
+    // The fixed, non-secret path words survive; the variable segments do not.
+    expect(text).toContain("index.php");
+    expect(text).toContain("richdocuments");
+    expect(text).toContain("4242");
+  });
+
+  // Nothing about a SUCCESSFUL mint may be logged either — that is the case
+  // where the URL is definitely live.
+  it("logs nothing at warn level when the mint succeeds", async () => {
+    ncGetFileIdMock.mockResolvedValue(4242);
+    ncDirectUrlMock.mockResolvedValue(
+      `http://localhost/index.php/apps/richdocuments/direct/${SECRET}`,
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(discoveryOk()));
+
+    const session = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+
+    expect(session.editorUrl).toContain("/direct/");
+    expect(loggerSpy.warn).not.toHaveBeenCalled();
+    expect(loggedText()).not.toContain(SECRET);
   });
 });
 

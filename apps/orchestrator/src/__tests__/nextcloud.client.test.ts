@@ -1361,4 +1361,72 @@ describe("nextcloud.client — ncCreateRichdocumentsDirectUrl (WARP-1688)", () =
 
     await expect(ncCreateRichdocumentsDirectUrl("t", 1)).resolves.toBeNull();
   });
+
+  /**
+   * WARP-1688 (QA finding) — "degrade instead of 500" holds for a FAILING
+   * Nextcloud but not for a HUNG one: a bare fetch with no timeout leaves the
+   * whole editor-session request stalled behind it, which is worse for the user
+   * than the connector-page fallback this function exists to enable. Bound it,
+   * and let the abort land on the same fallback path as any other failure.
+   */
+  it("sends an AbortSignal so the mint can be bounded", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        json: { ocs: { data: { url: "http://localhost/x" } } },
+      })
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ncCreateRichdocumentsDirectUrl("t", 1);
+
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal.aborted).toBe(false);
+  });
+
+  it("degrades to null when Nextcloud HANGS — the request is aborted, not awaited forever", async () => {
+    vi.useFakeTimers();
+    try {
+      // A Nextcloud that accepts the connection and then never answers. The
+      // ONLY thing that can end this promise is our own abort.
+      const fetchMock = vi.fn(
+        (_url: unknown, init: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              const err = new Error("This operation was aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const pending = ncCreateRichdocumentsDirectUrl("t", 1);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await expect(pending).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the timeout on the success path (no dangling timer per mint)", async () => {
+    vi.useFakeTimers();
+    try {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { data: { url: "http://localhost/x" } } },
+        })
+      ) as unknown as typeof fetch;
+
+      await ncCreateRichdocumentsDirectUrl("t", 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

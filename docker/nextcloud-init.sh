@@ -274,18 +274,26 @@ _td_read() {
 # which is precisely the probe needed.
 #
 # On the overwhelmingly common contiguous array this probes exactly once and
-# finds the slot free. The bound stops a pathological/misbehaving occ from
-# spinning; on exhaustion we return the last probed index (best effort) and the
-# read-back assertion below is what reports the outcome either way.
+# finds the slot free.
+#
+# EVERY index this echoes has been probed and found free — the bound is a
+# give-up, never a guess. Returning `start + bound` unprobed (which an
+# increment-after-probe loop does) would hand the caller a possibly-OCCUPIED
+# index and reintroduce the very overwrite this function exists to prevent. On
+# exhaustion it prints nothing and returns non-zero; the caller refuses the
+# write and says so, and the read-back below reports the domain as missing.
 _td_next_free_index() {
   _td_idx="$1"
   _td_probe=0
-  while [ "$_td_probe" -lt 64 ] \
-    && occ_www config:system:get trusted_domains "$_td_idx" >/dev/null 2>&1; do
+  while [ "$_td_probe" -lt 64 ]; do
+    if ! occ_www config:system:get trusted_domains "$_td_idx" >/dev/null 2>&1; then
+      printf '%s' "$_td_idx"
+      return 0
+    fi
     _td_idx=$((_td_idx + 1))
     _td_probe=$((_td_probe + 1))
   done
-  printf '%s' "$_td_idx"
+  return 1
 }
 
 reconcile_trusted_domains() {
@@ -311,6 +319,11 @@ reconcile_trusted_domains() {
   td_flat=" $(printf '%s' "$td_have" | tr '\n' ' ') "
 
   td_added=0
+  # Domains we WANTED to add and could not. Tracked separately from td_added so
+  # a run that refused every write cannot fall into the "already converged"
+  # early return below and report "nothing to do" over a box that still answers
+  # 400 on its own FQDN.
+  td_refused=0
   for td_want in "$@"; do
     # Belt-and-braces: never write something that is not a hostname. A malformed
     # token in the env would otherwise land in the trust list verbatim.
@@ -325,7 +338,16 @@ reconcile_trusted_domains() {
     case "$td_flat" in
       *" $td_want "*) continue ;;
     esac
-    td_next="$(_td_next_free_index "$td_next")"
+    # No free slot within the probe bound → REFUSE. Writing at an index we
+    # never verified as free could replace a domain the box currently answers
+    # on; leaving this one unadded is recoverable (the next boot retries),
+    # clobbering a live domain is not.
+    if ! td_slot="$(_td_next_free_index "$td_next")"; then
+      echo "[droplet] WARP-1688: could not find a FREE trusted_domains index within 64 probes from ${td_next} — REFUSING to add '${td_want}' rather than risk overwriting a domain this box currently answers on. Inspect 'occ config:system:get trusted_domains'; the next boot retries." >&2
+      td_refused=$((td_refused + 1))
+      continue
+    fi
+    td_next="$td_slot"
     if occ_www config:system:set trusted_domains "$td_next" --value="$td_want"; then
       echo "[droplet] WARP-1688: trusted_domains += '${td_want}' (index ${td_next})"
       td_flat="${td_flat}${td_want} "
@@ -333,10 +355,15 @@ reconcile_trusted_domains() {
       td_added=$((td_added + 1))
     else
       echo "[droplet] WARP-1688: FAILED to add trusted domain '${td_want}' — Nextcloud will answer 400 'untrusted domain' for that host" >&2
+      td_refused=$((td_refused + 1))
     fi
   done
 
-  if [ "$td_added" -eq 0 ]; then
+  # "Nothing to do" is only true when nothing was NEEDED. A run that wanted to
+  # add something and could not must fall through to the read-back, which names
+  # the still-missing domain — otherwise the loudest line in the log is a
+  # reassuring one.
+  if [ "$td_added" -eq 0 ] && [ "$td_refused" -eq 0 ]; then
     echo "[droplet] WARP-1688: trusted_domains already converged (${td_next} entries) — nothing to do"
     return 0
   fi

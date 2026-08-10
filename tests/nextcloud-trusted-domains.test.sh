@@ -168,6 +168,10 @@ occ_www() {
     val="${4:-}"
     val="${val#--value=}"
     printf '%s %s\n' "$idx" "$val" >> "$STATE/writes"
+    # Model an occ that accepts the command but fails to apply it.
+    if [ "${STUB_SET_FAILS:-0}" = "1" ]; then
+      return 1
+    fi
     if [ "${STUB_WRITES_APPLY:-1}" = "1" ]; then
       printf '%s\n' "$val" >> "$STATE/stored"
       printf '%s\n' "$idx" >> "$STATE/occupied"
@@ -211,6 +215,7 @@ run_case() {
   NEXTCLOUD_TRUSTED_DOMAINS="${CASE_ENV_DOMAINS-}" \
   STUB_WRITES_APPLY="${CASE_WRITES_APPLY:-1}" \
   STUB_GET_PLAIN="${CASE_GET_PLAIN:-0}" \
+  STUB_SET_FAILS="${CASE_SET_FAILS:-0}" \
     bash "$WORK/harness.sh" > "$WORK/last.out" 2> "$WORK/last.err"
   LAST_RC=$?
   set -e
@@ -273,6 +278,47 @@ if grep -qxF "9 warp-lab.droplet-us.com" "$WORK/state/writes"; then
   pass "sparse array: the write skips occupied indices instead of clobbering one"
 else
   fail "sparse array: expected the write at index 9, got: $(tr '\n' '|' < "$WORK/state/writes")"
+fi
+
+# (3c) PROBE EXHAUSTION: every index within the probe bound is occupied. The
+#      reconcile must REFUSE to write rather than guess an index it never
+#      verified as free — writing blind is exactly the overwrite the probe
+#      exists to prevent. Fail safe, loudly, and let the read-back report it.
+CASE_STORED="$STORED_STALE" CASE_ENV_DOMAINS="$DESIRED" \
+  CASE_OCCUPIED="$(seq 0 70 | tr '\n' ' ')" run_case
+if [ ! -s "$WORK/state/writes" ]; then
+  pass "probe exhaustion: refuses to write rather than guess an unverified index"
+else
+  fail "probe exhaustion: wrote at an index it never probed: $(tr '\n' '|' < "$WORK/state/writes")"
+fi
+if grep -qi "free" "$WORK/last.err" && grep -qF "warp-lab.droplet-us.com" "$WORK/last.err"; then
+  pass "probe exhaustion: the refusal names the domain it could not add"
+else
+  fail "probe exhaustion: the refusal was silent — stderr: $(tr '\n' ' ' < "$WORK/last.err")"
+fi
+# And it must NOT then claim convergence: the missing domain has to reach the
+# read-back's drift report, or an operator reads "nothing to do" over a box
+# that still 400s on its own FQDN.
+if grep -qi "STILL missing" "$WORK/last.err" \
+   && ! grep -qi "already converged" "$WORK/last.out"; then
+  pass "probe exhaustion: reports drift, never 'already converged'"
+else
+  fail "probe exhaustion: claimed convergence while the FQDN was never added"
+fi
+
+# (3d) Same posture when occ ACCEPTS the write but fails to apply it: a failed
+#      write is not convergence either.
+CASE_STORED="$STORED_STALE" CASE_ENV_DOMAINS="$DESIRED" CASE_SET_FAILS=1 run_case
+if grep -qi "STILL missing" "$WORK/last.err" \
+   && ! grep -qi "already converged" "$WORK/last.out"; then
+  pass "failed write: reports drift, never 'already converged'"
+else
+  fail "failed write: claimed convergence while the write had failed"
+fi
+if grep -q "HOOK_REACHED_END" "$WORK/last.out" && [ "$LAST_RC" -eq 0 ]; then
+  pass "failed write: still non-fatal — the rest of the boot hook runs"
+else
+  fail "failed write: aborted the hook (rc=$LAST_RC)"
 fi
 
 # (4) BLANK FQDN: compose renders `... droplet.lan ` with a trailing blank token
