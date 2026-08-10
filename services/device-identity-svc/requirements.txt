@@ -1,6 +1,6 @@
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
-cryptography>=49.0.0
+cryptography>=50.0.0
 click>=8.4.2
 # Real backend dep — production only. Builds against libtss2-dev
 # from the Dockerfile's apt-get install. The mock backend never imports
