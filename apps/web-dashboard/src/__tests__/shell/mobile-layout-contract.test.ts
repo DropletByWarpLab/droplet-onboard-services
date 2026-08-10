@@ -95,4 +95,73 @@ describe("droplet-shell phone layout layer", () => {
     expect(body.startsWith("{")).toBe(true);
     expect(body).not.toMatch(/@media/);
   });
+
+  /* ── The slim top bar (measured 2026-08-10) ───────────────────────────────
+     `.pt-chip` is 282px of nowrap text with `flex-shrink: 0`; beside `.pt-id`
+     it made the DOCUMENT 390-437px wide at a 375px viewport on every route
+     built from ShellPage. Dropping the host is what buys the room back. */
+  it("drops the chip's host + separator so the top bar cannot widen the page", () => {
+    const { body } = phoneLayer();
+    expect(body).toMatch(/\.pt-chip \.pt-host[\s\S]{0,40}\.pt-sep\s*\{[^}]*display:\s*none/);
+  });
+
+  it("leaves the chip's STATUS label visible — the dot alone is colour-only", () => {
+    // WCAG 1.4.1: hiding the label too would leave the coloured dot as the
+    // sole carrier of health, which is exactly what 1.4.1 forbids.
+    const { body } = phoneLayer();
+    expect(body).not.toMatch(/\.pt-status\s*\{[^}]*display:\s*none/);
+  });
+
+  it("makes both halves of the top bar shrinkable as a backstop", () => {
+    const { body } = phoneLayer();
+    expect(body).toMatch(/\.pt-id\s*\{[^}]*min-width:\s*0/);
+    expect(body).toMatch(/\.pt-chip\s*\{[^}]*min-width:\s*0/);
+    // The base rule pins flex-shrink: 0; this must undo it or the chip still
+    // refuses to yield.
+    expect(body).toMatch(/\.pt-chip\s*\{[^}]*flex-shrink:\s*1/);
+  });
+
+  /* ── Touch targets ─────────────────────────────────────────────────────── */
+  it("raises the interactive primitives to the 44px touch minimum", () => {
+    const { body } = phoneLayer();
+    // Authored for a mouse: .btn 36, .btn.sm/.k-iconbtn 30, .chip 32,
+    // .cal-leg 28, .icon-btn 36, .tab 42, .search 38. /calendar rendered 99
+    // controls under 44px at 375px before this.
+    for (const sel of [".btn", ".icon-btn", ".k-iconbtn", ".chip", ".cal-leg", ".search"]) {
+      expect(body, `${sel} is not raised to 44px`).toMatch(
+        new RegExp(`\\${sel}\\s*\\{[^}]*(height|min-height):\\s*44px`),
+      );
+    }
+  });
+
+  it("gives the toggle a hit area without resizing the switch itself", () => {
+    const { body } = phoneLayer();
+    expect(body).toMatch(/\.sw::after\s*\{[^}]*position:\s*absolute/);
+    // `.sw` is also a 9px colour SWATCH inside the calendar/graph legends —
+    // those must NOT gain a 44px phantom target in the middle of their row.
+    expect(body).toMatch(/\.cal-leg \.sw::after[\s\S]{0,60}content:\s*none/);
+  });
+});
+
+/* ══ The 16px input floor ══════════════════════════════════════════════════
+   iOS Safari zooms on focus for any control under 16px and never zooms back;
+   in that state the page genuinely overflows and pans. WARP-1701 fixed five
+   controls at their call sites and they regressed — two are now set with an
+   inline `style`, which no selector can beat. Hence one global floor. */
+describe("phone input font floor", () => {
+  const GLOBALS = readFileSync(
+    path.resolve(__dirname, "../../app/globals.css"),
+    "utf8",
+  );
+
+  it("declares a 16px floor for every control below 720px", () => {
+    const i = GLOBALS.indexOf("@media (max-width: 720px)");
+    expect(i, "phone input floor is missing from globals.css").toBeGreaterThan(-1);
+    const block = GLOBALS.slice(i, GLOBALS.indexOf("}", GLOBALS.indexOf("{", i)) + 2);
+    expect(block).toMatch(/input[\s\S]*select[\s\S]*textarea/);
+    // `!important` is load-bearing: without it the rule loses to the inline
+    // styles in RoleBuilderSheet/SelectionToolbar and to the deeper component
+    // selectors (`.droplet-shell .search input` is (0,2,1)).
+    expect(block).toMatch(/font-size:\s*16px\s*!important/);
+  });
 });

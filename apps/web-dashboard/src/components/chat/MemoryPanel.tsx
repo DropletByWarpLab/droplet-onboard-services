@@ -176,7 +176,7 @@ export function MemoryPanel() {
         aria-haspopup="dialog"
         aria-expanded={open}
         title="What the assistant remembers"
-        className={`p-1.5 rounded-sm transition-colors ${
+        className={`p-1.5 rounded-sm max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11 transition-colors ${
           open
             ? "text-[var(--brand)] bg-[var(--brand-subtle)]"
             : "text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--hover)]"

@@ -66,7 +66,7 @@ export function CameraDiscoveryBanner({
             <div className="flex items-center gap-1 flex-shrink-0 ml-2">
               <button
                 onClick={() => onAccept(cam.id)}
-                className="p-1.5 rounded-sm hover:bg-[rgba(34,197,94,0.1)] transition-colors"
+                className="p-1.5 rounded-sm max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11 hover:bg-[rgba(34,197,94,0.1)] transition-colors"
                 style={{ color: "var(--success)" }}
                 title="Accept"
               >
@@ -74,7 +74,7 @@ export function CameraDiscoveryBanner({
               </button>
               <button
                 onClick={() => onReject(cam.id)}
-                className="p-1.5 rounded-sm hover:bg-[rgba(239,68,68,0.1)] transition-colors"
+                className="p-1.5 rounded-sm max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11 hover:bg-[rgba(239,68,68,0.1)] transition-colors"
                 style={{ color: "var(--danger)" }}
                 title="Reject"
               >

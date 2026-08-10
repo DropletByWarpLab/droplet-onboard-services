@@ -469,4 +469,81 @@ body:has(.droplet-shell) { background: #f5f6fb; }
      stretching the page behind it. */
   .droplet-shell .pills { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
   .droplet-shell .pills button { flex: 0 0 auto; }
+
+  /* ── 3. The page-top status chip was still widening every shell route ────
+     `.pt-chip` is `white-space: nowrap` + `flex-shrink: 0` and measures 282px
+     ("droplet.local · All systems operational"); `.pt-id` next to it had no
+     `min-width: 0`. So `.page-top`'s min-content became the DOCUMENT's width:
+     measured at 375px, the document came out 390-437px wide on /network,
+     /knowledge, /messages, /calendar, /users, /projects, /voice, /health,
+     /help, /tools and /admin/rag-eval — i.e. on essentially every page built
+     from `ShellPage`. That is the page-level overflow described in
+     `04-coding-standards/mobile-web-layout.md` §1: the gutters stay correct,
+     content drifts off the RIGHT edge, mobile Safari shrink-to-fits, and
+     `position: fixed; inset-x-0` chrome (the bottom tab bar) clips with it.
+
+     An earlier pass concluded `.pt-chip` did NOT widen the page. That was
+     measured on a transcribed harness with short page titles; against the real
+     app it reproduces on every route that renders a slim bar.
+
+     The host is dropped rather than truncated: at this width truncation would
+     leave it ~29px (three characters). It is long, is the least actionable
+     half on a phone, and is still shown on Health and Settings. The status
+     LABEL stays — the coloured dot alone would be a colour-only signal
+     (WCAG 1.4.1). Their display is owned only here: no Tailwind utility and no
+     `hidden` attribute touches them, so the WARP-1792 trap in §3 of that
+     document does not apply. */
+  .droplet-shell .pt-chip .pt-host,
+  .droplet-shell .pt-chip .pt-sep { display: none; }
+
+  /* Belt and braces. With the host gone the row fits with room to spare, but
+     nothing in this bar may ever be able to push the document again: both
+     sides become shrinkable and ellipsize, so an unusually long section label
+     or status string is absorbed instead of propagating outward. */
+  .droplet-shell .pt-id { min-width: 0; }
+  .droplet-shell .pt-id .pt-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .droplet-shell .pt-chip { min-width: 0; flex-shrink: 1; }
+  .droplet-shell .pt-chip .pt-status { overflow: hidden; text-overflow: ellipsis; }
+
+  /* ── 4. Touch targets ───────────────────────────────────────────────────
+     Every interactive primitive above was sized for a mouse: `.btn` 36px,
+     `.btn.sm` and `.k-iconbtn` 30px, `.chip` 32px, `.cal-leg` 28px,
+     `.icon-btn` 36x36, `.tab` 42px, `.search` 38px. Measured at 375px,
+     /calendar rendered 99 controls under 44px and / rendered 41. 44px is the
+     Apple HIG target and WCAG 2.5.5; it is what "the buttons don't scale or
+     have proper padding" refers to. Heights (and squares for icon-only
+     controls) only — widths still follow content. */
+  .droplet-shell .btn { height: 44px; padding: 0 18px; }
+  .droplet-shell .btn.sm { height: 44px; padding: 0 14px; }
+  .droplet-shell .icon-btn { width: 44px; height: 44px; }
+  .droplet-shell .k-iconbtn { width: 44px; height: 44px; }
+  .droplet-shell .tab { height: 46px; }
+  .droplet-shell .chip { height: 44px; }
+  .droplet-shell .cal-leg { height: 44px; }
+  .droplet-shell .search { height: 44px; }
+  .droplet-shell .pills button { min-height: 44px; }
+  .droplet-shell .ds-ios-nav .x { width: 44px; height: 44px; }
+  .droplet-shell .ds-ios-nav .edit { min-height: 44px; }
+
+  /* The toggle keeps its 38x22 look — a 44px-tall switch would read as a
+     button — and gains the missing hit area from a transparent overlay.
+     Excluded where `.sw` is a colour SWATCH rather than a control (inside
+     `.cal-leg` / `.gleg`), which would otherwise plant a 44px phantom target
+     in the middle of its own row. */
+  .droplet-shell .sw { position: relative; }
+  .droplet-shell .sw::after { content: ""; position: absolute; inset: -11px -4px; }
+  .droplet-shell .cal-leg .sw::after,
+  .droplet-shell .gleg .sw::after { content: none; }
+
+  /* ── 5. iOS Safari zooms on focus for any input under 16px and never zooms
+     back. In that zoomed state the page genuinely overflows and pans, which is
+     why static analysis and a photograph can disagree (mobile-web-layout §4).
+     WARP-1701 fixed five of these; `.search input` regressed back in at
+     13.5px. The global guard in `globals.css` covers the rest of the app. */
+  .droplet-shell .search input { font-size: 16px; }
+  .droplet-shell .ds-ios-note textarea { font-size: 16px; }
+
+  /* `.search` is a 44px box but the <input> inside it only rendered 24px, so
+     the top and bottom 10px of the control did nothing on tap. Fill it. */
+  .droplet-shell .search input { align-self: stretch; }
 }
