@@ -77,15 +77,20 @@ showdir="$WORK/show"
 units="$WORK/units"
 failfile="$WORK/restart_fail"
 
+# The verb is the first non-flag argument; the unit is always the LAST
+# argument (real systemctl takes it that way, and \`show -p A -p B <unit>\`
+# would otherwise make "A" look like the target).
 verb=""
-target=""
 for a in "\$@"; do
   case "\$a" in
-    --*) ;;
     -*) ;;
-    *) if [ -z "\$verb" ]; then verb="\$a"; else [ -z "\$target" ] && target="\$a"; fi ;;
+    *) [ -z "\$verb" ] && verb="\$a" ;;
   esac
 done
+target=""
+for a in "\$@"; do target="\$a"; done
+case "\$target" in -*) target="" ;; esac
+[ "\$target" = "\$verb" ] && target=""
 
 case "\$verb" in
   list-units)
