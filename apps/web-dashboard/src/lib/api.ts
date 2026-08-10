@@ -1,4 +1,7 @@
-import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
+import {
+  MAX_FILES_PER_UPLOAD,
+  MAX_UPLOAD_BATCH_BYTES,
+} from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -4460,13 +4463,20 @@ export async function getEditorSession(path: string): Promise<DocEditorSession> 
 // "personal" so the URL/body shape — and any test/cache assertions pinned
 // to it — stays byte-identical to before WARP-883 introduced spaces.
 /**
- * Thrown when an upload stops partway through a multi-batch selection.
+ * Thrown when part of a multi-batch selection failed to upload.
  *
  * WARP-1666: selections past `MAX_FILES_PER_UPLOAD` go out as several requests,
  * so "the upload failed" stopped being the whole truth — some files are already
  * on the box. `uploaded` is how many actually landed. Successful batches are
  * deliberately NOT rolled back: the caller surfaces the count and the user
  * retries to pick up the remainder.
+ *
+ * WARP-1843: a failed batch no longer aborts the run — the remaining batches
+ * are still attempted, so the files that didn't land can be a non-contiguous
+ * slice of the selection. `failedFiles` names them (in selection order) and
+ * `cause` carries the FIRST batch failure as the representative error. The
+ * original `uploaded` / `total` / `cause` shape is unchanged for existing
+ * callers.
  */
 export class UploadBatchError extends Error {
   readonly name = "UploadBatchError";
@@ -4474,7 +4484,9 @@ export class UploadBatchError extends Error {
   constructor(
     readonly uploaded: number,
     readonly total: number,
-    readonly cause: unknown
+    readonly cause: unknown,
+    /** Names of the files that did NOT land, in selection order (WARP-1843). */
+    readonly failedFiles: readonly string[] = []
   ) {
     super(`Uploaded ${uploaded} of ${total} files`);
   }
@@ -4525,21 +4537,64 @@ async function uploadBatch(
 }
 
 /**
+ * Split a selection into request-sized batches, preserving selection order.
+ *
+ * WARP-1843: a batch must respect BOTH caps the server side enforces —
+ * `MAX_FILES_PER_UPLOAD` files (multer) and `MAX_UPLOAD_BATCH_BYTES` summed
+ * file bytes (safely under nginx's `/api/` `client_max_body_size 100M`, which
+ * 413-rejects an over-cap request wholesale). Packing is first-fit
+ * sequential: each file joins the current batch unless doing so would break a
+ * cap, in which case the current batch is sealed and a new one starts. Files
+ * are never reordered.
+ *
+ * A single file larger than the whole byte ceiling still ships, alone in its
+ * own batch: the server is the authority on per-file / per-user size caps, so
+ * the client never pre-rejects — nginx / the orchestrator answer with the
+ * honest 413 / policy error for exactly that file.
+ */
+function packUploadBatches(all: File[]): File[][] {
+  const batches: File[][] = [];
+  let current: File[] = [];
+  let currentBytes = 0;
+
+  for (const file of all) {
+    const wouldBreakCap =
+      current.length >= MAX_FILES_PER_UPLOAD ||
+      currentBytes + file.size > MAX_UPLOAD_BATCH_BYTES;
+    if (current.length > 0 && wouldBreakCap) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(file);
+    currentBytes += file.size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+/**
  * Upload a selection to `path`, in batches the server will actually accept.
  *
  * WARP-1666: a folder-sized selection exceeds the per-request cap, and the
  * server rejects an over-cap request WHOLESALE — so posting everything at once
  * meant zero files landed. Batching is what makes large selections work at all.
  *
+ * WARP-1843: batches are packed by size as well as count (see
+ * {@link packUploadBatches}), and a failed batch no longer strands the ones
+ * behind it — the run continues, and the failure is reported at the end.
+ *
  * Batches run sequentially, not concurrently: each is buffered in the
  * orchestrator's memory before it reaches Nextcloud, so parallel batches would
  * multiply peak memory on the box for no user-visible gain.
  *
  * `onProgress` is weighted by bytes across the WHOLE selection, so the bar
- * advances monotonically to 100% instead of resetting once per batch.
+ * advances monotonically to 100% instead of resetting once per batch. A failed
+ * batch's bytes are counted as consumed, so later batches can only move the
+ * bar forward (never backwards past a batch that died mid-transfer).
  *
- * Throws {@link UploadBatchError} if a batch fails; earlier batches stay
- * uploaded.
+ * Throws {@link UploadBatchError} after all batches have been attempted if any
+ * of them failed; successful batches stay uploaded.
  */
 export async function uploadFiles(
   path: string,
@@ -4555,9 +4610,11 @@ export async function uploadFiles(
   const totalBytes = all.reduce((sum, f) => sum + f.size, 0);
   let uploaded = 0;
   let sentBytes = 0;
+  let lastPercent = 0;
+  const failedFiles: string[] = [];
+  let firstFailure: unknown;
 
-  for (let i = 0; i < all.length; i += MAX_FILES_PER_UPLOAD) {
-    const batch = all.slice(i, i + MAX_FILES_PER_UPLOAD);
+  for (const batch of packUploadBatches(all)) {
     const batchBytes = batch.reduce((sum, f) => sum + f.size, 0);
 
     try {
@@ -4567,17 +4624,29 @@ export async function uploadFiles(
         onProgress &&
           ((fraction) => {
             const done = sentBytes + fraction * batchBytes;
-            onProgress(
-              totalBytes > 0 ? Math.round((done / totalBytes) * 100) : 100
-            );
+            const percent =
+              totalBytes > 0 ? Math.round((done / totalBytes) * 100) : 100;
+            // Clamp: a batch that failed mid-transfer already advanced the
+            // bar with a partial fraction, and its bytes are counted as
+            // consumed below — never report a smaller number than before.
+            lastPercent = Math.max(lastPercent, Math.min(100, percent));
+            onProgress(lastPercent);
           })
       );
+      uploaded += batch.length;
     } catch (err) {
-      throw new UploadBatchError(uploaded, all.length, err);
+      // WARP-1843: don't strand the tail — record the failure, keep going.
+      if (failedFiles.length === 0) firstFailure = err;
+      failedFiles.push(...batch.map((f) => f.name));
     }
 
-    uploaded += batch.length;
+    // Failed or not, this batch's bytes are consumed for progress weighting;
+    // skipping them would make the next batch's progress step backwards.
     sentBytes += batchBytes;
+  }
+
+  if (failedFiles.length > 0) {
+    throw new UploadBatchError(uploaded, all.length, firstFailure, failedFiles);
   }
 }
 

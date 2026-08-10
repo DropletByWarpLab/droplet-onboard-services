@@ -466,13 +466,17 @@ export default function FilesPage() {
         // partway through still leaves earlier batches on the box. Refresh so
         // those files actually appear, and say how many landed rather than
         // implying the whole upload was lost. `translateError` deliberately
-        // never echoes a raw message, so the count is composed here from the
+        // never echoes a raw message, so the counts are composed here from the
         // typed error instead of read out of `err.message`.
+        //
+        // WARP-1843: batches continue past a failure now, so the files that
+        // didn't land can be a non-contiguous slice of the selection — "the
+        // rest" stopped being accurate. Say exactly how many didn't upload.
         if (err instanceof UploadBatchError && err.uploaded > 0) {
           console.error("partial upload", err.cause);
           await refresh();
           toast(
-            `Uploaded ${err.uploaded} of ${err.total} files. The rest didn't upload — try again to finish.`
+            `Uploaded ${err.uploaded} of ${err.total} files. ${err.total - err.uploaded} didn't upload — try again to finish.`
           );
         } else {
           toast(
