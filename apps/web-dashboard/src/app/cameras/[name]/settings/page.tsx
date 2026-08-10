@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   Camera,
   Check,
+  HardDrive,
   Loader2,
   Plus,
   RefreshCw,
@@ -16,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
-import { fetchCameraSettings, patchCameraSettings } from "@/lib/api";
+import { fetchCameraSettings, patchCameraSettings, setCameraBudget } from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -94,6 +95,37 @@ export default function CameraSettingsPage() {
 
   const update = <K extends keyof CameraSettings>(key: K, value: CameraSettings[K]) => {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
+  };
+
+  // WARP-1851 — storage budget. Kept out of `draft` because it is not part
+  // of the Frigate settings patch: it is orchestrator state that DERIVES a
+  // retention window, and it saves through its own endpoint.
+  const [budgetGb, setBudgetGb] = useState("");
+  const [budgetSaving, setBudgetSaving] = useState(false);
+  const [budgetMsg, setBudgetMsg] = useState<string | null>(null);
+
+  const saveBudget = async (bytes: number | null) => {
+    setBudgetSaving(true);
+    setBudgetMsg(null);
+    try {
+      const r = await setCameraBudget(name, bytes);
+      if (r.retentionMode === "MANUAL") {
+        setBudgetGb("");
+        setBudgetMsg(r.note ?? "Back to setting retention in days yourself.");
+      } else if (r.measurable && r.projectedDays != null) {
+        // State the trade out loud — a budget means nothing to the operator
+        // until it is expressed in days of footage.
+        setBudgetMsg(
+          `That's about ${r.projectedDays} day${r.projectedDays === 1 ? "" : "s"} of footage at this camera's current recording rate.`,
+        );
+      } else {
+        setBudgetMsg(r.note ?? "Saved.");
+      }
+    } catch (e) {
+      setBudgetMsg(e instanceof Error ? e.message : "Couldn't save the budget.");
+    } finally {
+      setBudgetSaving(false);
+    }
   };
 
   const updateFilter = (label: string, patch: Partial<ObjectFilter>) => {
@@ -365,6 +397,54 @@ export default function CameraSettingsPage() {
               format={(v) => (v === 0 ? "Off" : `${v} day${v === 1 ? "" : "s"}`)}
               disabled={!draft.snapshotsEnabled}
             />
+          </div>
+
+          {/* Storage budget (WARP-1851) */}
+          <div className="card space-y-3">
+            <div className="flex items-center gap-2">
+              <HardDrive size={16} className="text-accent" />
+              <h2 className="type-headline text-label-primary">Storage budget</h2>
+            </div>
+            <p className="type-caption-1 text-label-tertiary">
+              Give this camera an amount of disk instead of a number of days.
+              We measure how fast it actually records and keep as many days as
+              that budget covers, adjusting as the rate changes.
+            </p>
+            <label className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={budgetGb}
+                onChange={(e) => setBudgetGb(e.target.value)}
+                placeholder="e.g. 200"
+                className="input"
+                style={{ maxWidth: 140 }}
+                aria-label="Storage budget in gigabytes"
+              />
+              <span className="type-body text-label-secondary">GB</span>
+            </label>
+            {budgetMsg && (
+              <p className="type-caption-1 text-label-tertiary">{budgetMsg}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="btn"
+                disabled={budgetSaving || !budgetGb}
+                onClick={() => saveBudget(Number(budgetGb) * 1024 * 1024 * 1024)}
+              >
+                {budgetSaving ? "Saving…" : "Use this budget"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={budgetSaving}
+                onClick={() => saveBudget(null)}
+              >
+                Set days myself
+              </button>
+            </div>
           </div>
 
           {/* Tracked objects + filters — full-width on lg */}
