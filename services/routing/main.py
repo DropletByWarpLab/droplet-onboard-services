@@ -1388,6 +1388,28 @@ def get_camera_subnet():
         handle_router_error(exc)
 
 
+def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
+    """Every live member of *bridge*, tagged (``:t``), for a bridge-vlan write.
+
+    Port names differ per router hardware (Pi lab unit: eth2/eth0 in br-lan;
+    MikroTik RB5009: p2..p8), so VLAN membership is derived from
+    `network.device status` at call time, never hardcoded. A bridge-vlan that
+    names an absent port is silently inert: netifd accepts the config, no
+    traffic ever flows on the VLAN, and safe-apply's rollback never trips
+    because connectivity was not harmed — the worst kind of wrong.
+    """
+    devices = router.network.device_status()
+    dev = devices.get(bridge) if isinstance(devices, dict) else None
+    members = dev.get("bridge-members") if isinstance(dev, dict) else None
+    ports = [m for m in members if isinstance(m, str) and m] if isinstance(members, list) else []
+    if not ports:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot derive VLAN membership: bridge '{bridge}' reports no members",
+        )
+    return [f"{p}:t" for p in ports]
+
+
 @app.post("/network/subnets/cameras/setup")
 def setup_camera_subnet(req: CameraSubnetSetupRequest):
     """One-click camera subnet setup: VLAN + firewall zone + DHCP + isolation rules.
@@ -1399,6 +1421,10 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
     try:
         r = get_router()
 
+        # Resolved BEFORE the safe-apply window opens, so a derivation fault
+        # cannot leave a rollback timer armed with nothing applied.
+        tagged_ports = _bridge_vlan_tagged_members(r)
+
         with r.safe_apply(timeout=60):
             # 1. Create VLAN interface
             device_name = f"br-lan.{req.vlan_id}"
@@ -1409,11 +1435,11 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
                 "netmask": req.netmask,
             })
 
-            # 2. Create bridge-vlan entry
+            # 2. Create bridge-vlan entry, membership from the live bridge
             r.uci.add("network", "bridge-vlan", {
                 "device": "br-lan",
                 "vlan": str(req.vlan_id),
-                "ports": "eth1:t",
+                "ports": tagged_ports,
             })
             r.uci.commit("network")
 
@@ -3312,8 +3338,9 @@ def _synthesize_router_member(router) -> Optional[dict]:
     own browse results. When it's absent, the inventory would silently lose
     the one device the service is *connected to* — so synthesize the member
     from local facts instead: anchor MAC from the wired management bridge
-    (br-lan, falling back to eth0 — ADR-035 §2), model/version/hostname
-    from `system board`, and the connected host as its address.
+    (br-lan, falling back to eth0, then to any current br-lan member —
+    ADR-035 §2), model/version/hostname from `system board`, and the
+    connected host as its address.
 
     Best-effort by design: a ubus fault reading either fact (or a shape
     without the surfaces, e.g. the mock router) degrades to "no synthesized
@@ -3338,7 +3365,16 @@ def _synthesize_router_member(router) -> Optional[dict]:
 
     mac = None
     if isinstance(devices, dict):
-        for name in ("br-lan", "eth0"):
+        candidates = ["br-lan", "eth0"]
+        # Hardware-agnostic tail (ADR-011): on routers where neither named
+        # device carries a MAC — e.g. a DSA board (RB5009) whose conduit is
+        # not eth0 — any current member of the management bridge holds an
+        # equally stable burned-in identity, and is still "the wired
+        # management interface" in the ADR-035 §2 sense.
+        br = devices.get("br-lan")
+        if isinstance(br, dict) and isinstance(br.get("bridge-members"), list):
+            candidates.extend(m for m in br["bridge-members"] if isinstance(m, str))
+        for name in candidates:
             dev = devices.get(name)
             if isinstance(dev, dict):
                 candidate = dev.get("macaddr")
