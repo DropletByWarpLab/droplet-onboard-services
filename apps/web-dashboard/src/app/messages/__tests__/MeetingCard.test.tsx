@@ -34,7 +34,11 @@ function meeting(over: Partial<TeamChatMeeting> = {}): TeamChatMeeting {
     inviteMessageId: "m1",
     calendarEventId: null,
     title: "Budget review",
-    startsAt: "2026-08-10T14:30:00.000Z",
+    // Relative, never absolute: the card derives "Already started" from
+    // Date.now(), so a fixed date here ages out and silently flips every
+    // default-fixture render into the started state (WARP-1844). The
+    // already-began case overrides this with an explicit past startsAt.
+    startsAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     durationMinutes: 45,
     location: "Kitchen",
     note: null,
