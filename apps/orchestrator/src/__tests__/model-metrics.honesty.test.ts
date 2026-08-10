@@ -94,6 +94,26 @@ describe("DMR runtime — a structural gap is reported as unsupported, never as 
     expect(m.vramState).toBe("unsupported");
   });
 
+  it("never claims a placement for a resident model — the inputs are structurally absent (WARP-1827)", async () => {
+    // Even when DMR marshals literal zeros into the ps entry, a zero it
+    // hard-codes is not a measurement: claiming "cpu" from it would be the
+    // same confident lie as printing "0 GB".
+    routeFetch({
+      tags: DMR_TAGS,
+      ps: {
+        models: [
+          { name: "docker.io/ai/smollm2:latest", size: 0, size_vram: 0 },
+        ],
+      },
+      native: undefined,
+    });
+    const m = metricsFor(await fetchLocalModelMetrics(), "docker.io/ai/smollm2:latest")!;
+    expect(m.loaded).toBe(true);
+    expect(m.placement).toBeNull();
+    expect(m.gpuFraction).toBeNull();
+    expect(m.placementState).toBe("unsupported");
+  });
+
   it("recovers a real disk size from the native GET /models human string", async () => {
     routeFetch({
       tags: DMR_TAGS,

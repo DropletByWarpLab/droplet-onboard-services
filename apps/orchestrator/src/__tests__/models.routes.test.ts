@@ -64,6 +64,19 @@ vi.mock("../services/model-benchmark.service.js", async (importActual) => {
   };
 });
 
+// WARP-1827 — stub the inference-manager catalog proxy (network). The route
+// validates pulls against the eligible catalog and pipes the sidecar's NDJSON
+// stream through; both are exercised against these mocks.
+const { fetchEligibleCatalogMock, openPullStreamMock } = vi.hoisted(() => ({
+  fetchEligibleCatalogMock: vi.fn(),
+  openPullStreamMock: vi.fn(),
+}));
+vi.mock("../services/model-catalog.service.js", () => ({
+  fetchEligibleCatalog: () => fetchEligibleCatalogMock(),
+  openPullStream: (model: string, signal: AbortSignal) =>
+    openPullStreamMock(model, signal),
+}));
+
 import { createModelsRouter } from "../routes/models.js";
 import { getModelsPagePayload } from "../services/models-summary.service.js";
 import { benchCacheKey } from "../services/model-benchmark.service.js";
@@ -580,5 +593,402 @@ describe("WARP-836 — POST /api/models/:name/benchmark", () => {
     expect(res.status).toBe(200);
     expect(res.body.local[0].tokensPerSec).toBe(42.5);
     expect(res.body.local[0].benchmarkedAt).toBe(result.measuredAt);
+  });
+});
+
+// ── WARP-1827 — pull-from-catalog: GET /models/catalog + POST /models/:name/pull ──
+
+/** The sidecar's eligible catalog: one model installed, one available. */
+function eligibleCatalog() {
+  return {
+    detected_vram_gb: 16,
+    models: [
+      {
+        name: "gpt-oss:20b",
+        pull_tag: "gpt-oss:20b",
+        min_vram_gb: 13,
+        class: "flagship",
+        default: true,
+        display_name: "GPT-OSS 20B",
+        maker: "OpenAI",
+        description: "A strong general model.",
+        capabilities: ["chat", "tools"],
+        roles: ["chat"],
+        disk_gb: 14,
+        pulled: true,
+      },
+      {
+        name: "qwen3:14b",
+        pull_tag: "qwen3:14b",
+        min_vram_gb: 12,
+        class: "flagship",
+        default: false,
+        display_name: "Qwen3 14B",
+        maker: "Alibaba",
+        description: "A capable multilingual model.",
+        capabilities: ["chat"],
+        roles: ["chat"],
+        disk_gb: 9,
+        pulled: false,
+      },
+    ],
+  };
+}
+
+/**
+ * A catalog whose entries DIVERGE — the user-facing `name` is NOT the tag the
+ * sidecar pulls. droplet-local-LLM's inference-manager hands `body.model`
+ * straight to the runtime (`runtime.pull(body.model)`); its manifest lookup
+ * only feeds the disk preflight. So `pull_tag` is the identifier that has to
+ * go on the wire, per that repo's docs/model-management.md ("pull_tag — what
+ * POST /api/pull is called with"), while `name` stays the identity the user
+ * and the audit trail see.
+ *
+ * Deliberately a SEPARATE fixture from `eligibleCatalog()`: those tests assert
+ * the name === pull_tag path, and mutating the shared fixture would move that
+ * ground out from under them.
+ */
+function divergentCatalog() {
+  const base = {
+    min_vram_gb: 12,
+    class: "flagship",
+    default: false,
+    maker: "Alibaba",
+    description: "A capable multilingual model.",
+    capabilities: ["chat"],
+    roles: ["chat"],
+    disk_gb: 9,
+  };
+  return {
+    detected_vram_gb: 16,
+    models: [
+      // Divergent + available: the pull must go out as the pull_tag.
+      {
+        ...base,
+        name: "qwen3:14b",
+        pull_tag: "hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M",
+        display_name: "Qwen3 14B",
+        pulled: false,
+      },
+      // No pull_tag at all: the catalog identity is the only addressable
+      // thing, so the wire identifier falls back to `name`.
+      {
+        ...base,
+        name: "gemma3:12b",
+        pull_tag: null,
+        display_name: "Gemma 3 12B",
+        maker: "Google",
+        pulled: false,
+      },
+      // Divergent + already installed: the 409 arm must still speak `name`.
+      {
+        ...base,
+        name: "gpt-oss:20b",
+        pull_tag: "docker.io/ai/gpt-oss:20B-F16",
+        display_name: "GPT-OSS 20B",
+        maker: "OpenAI",
+        pulled: true,
+      },
+    ],
+  };
+}
+
+/** A mock upstream streaming response: NDJSON lines as an async iterable. */
+function streamResponse(lines: string[], status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    body: (async function* () {
+      for (const line of lines) {
+        yield Buffer.from(`${line}\n`);
+      }
+    })(),
+  };
+}
+
+describe("WARP-1827 — GET /api/models/catalog", () => {
+  it("returns the eligible catalog to any authenticated principal", async () => {
+    fetchEligibleCatalogMock.mockResolvedValue(eligibleCatalog());
+    // family (member) role — reads stay open per ADR-004 §3, same as GET /models.
+    const app = buildApp({ username: "kid", role: "family" });
+    const res = await request(app).get("/api/models/catalog");
+    expect(res.status).toBe(200);
+    expect(res.body.detected_vram_gb).toBe(16);
+    expect(res.body.models).toHaveLength(2);
+    expect(res.body.models[1].pulled).toBe(false);
+  });
+
+  it("503s ai_service_unreachable when the sidecar can't be reached", async () => {
+    fetchEligibleCatalogMock.mockRejectedValue(new Error("connection refused"));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).get("/api/models/catalog");
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("ai_service_unreachable");
+    expect(res.body.detail).toMatch(/AI service/i);
+  });
+});
+
+describe("WARP-1827 — POST /api/models/:name/pull", () => {
+  beforeEach(() => {
+    fetchEligibleCatalogMock.mockResolvedValue(eligibleCatalog());
+  });
+
+  it("members (family) are forbidden → 403, upstream never contacted", async () => {
+    const app = buildApp({ username: "kid", role: "family" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(403);
+    expect(fetchEligibleCatalogMock).not.toHaveBeenCalled();
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("503s when the catalog can't be read (can't confirm eligibility → refuse)", async () => {
+    fetchEligibleCatalogMock.mockRejectedValue(new Error("connection refused"));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("ai_service_unreachable");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("400s not_eligible for a model outside the eligible catalog", async () => {
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/llama3.1%3A405b/pull");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("not_eligible");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("409s already_pulled for a model whose catalog entry says pulled", async () => {
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/pull");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("already_pulled");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("passes an upstream 409 (disk preflight) through verbatim", async () => {
+    const preflight = {
+      error: "insufficient_disk",
+      detail: "Needs 9.0 GB free; 2.1 GB available.",
+    };
+    openPullStreamMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => preflight,
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual(preflight);
+    // The attempt was still audited as started — the sidecar refused it after.
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("502s pull_failed on any other upstream error", async () => {
+    openPullStreamMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => "boom",
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("pull_failed");
+  });
+
+  it("streams the NDJSON body through and busts the page cache on success", async () => {
+    const lines = [
+      '{"status":"pulling manifest"}',
+      '{"status":"success"}',
+    ];
+    openPullStreamMock.mockResolvedValue(streamResponse(lines));
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/application\/x-ndjson/);
+    // Both lines reached the client, in order.
+    expect(res.text).toBe(lines.map((l) => `${l}\n`).join(""));
+    // Terminal success → page cache busted + started/finished audited.
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[0][0].what).toBe(
+      "Model download started",
+    );
+    expect(recordActivityMock.mock.calls[1][0].what).toBe(
+      "Model download finished",
+    );
+    // The upstream stream is opened for the requested model…
+    expect(openPullStreamMock.mock.calls[0][0]).toBe("qwen3:14b");
+    // …and its abort signal is UNTOUCHED after a normal completion. Guards
+    // the Node ≥16 trap where the request's own "close" (which fires as soon
+    // as the request MESSAGE completes, mid-stream) was used for disconnect
+    // detection — that aborted every pull the moment the body was parsed.
+    const signal = openPullStreamMock.mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+  });
+
+  it("audits a failed download (error line) and does NOT bust the cache", async () => {
+    openPullStreamMock.mockResolvedValue(
+      streamResponse([
+        '{"status":"pulling manifest"}',
+        '{"error":"pull model manifest: file does not exist"}',
+      ]),
+    );
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    // The error line still reaches the client (it renders the honest message).
+    expect(res.text).toContain("file does not exist");
+    expect(vi.mocked(cacheDel)).not.toHaveBeenCalled();
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe(
+      "Model download failed",
+    );
+    expect(recordActivityMock.mock.calls[1][0].severity).toBe("warn");
+  });
+
+  it("tolerates unparseable NDJSON lines while watching for the terminal", async () => {
+    openPullStreamMock.mockResolvedValue(
+      streamResponse(["not-json-at-all", '{"status":"success"}']),
+    );
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+  });
+});
+
+// ── WARP-1827 — pull_tag is the WIRE identifier; name is the USER identity ──
+//
+// The sidecar does not resolve name → pull_tag for us: inference-manager's
+// POST /models/pull passes the caller's identifier straight through to the
+// runtime, so POSTing the catalog `name` when the two diverge pulls the wrong
+// tag (or dies at the registry) with nothing on this side anticipating it.
+// The divergent path was previously untested in BOTH directions — every
+// fixture kept name === pull_tag.
+
+describe("WARP-1827 — POST /api/models/:name/pull resolves the catalog pull_tag", () => {
+  beforeEach(() => {
+    fetchEligibleCatalogMock.mockResolvedValue(divergentCatalog());
+  });
+
+  it("POSTs the entry's pull_tag upstream, not the :name path param", async () => {
+    openPullStreamMock.mockResolvedValue(streamResponse(['{"status":"success"}']));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(openPullStreamMock).toHaveBeenCalledTimes(1);
+    expect(openPullStreamMock.mock.calls[0][0]).toBe(
+      "hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M",
+    );
+    // The bug this guards: the raw path param going out on the wire.
+    expect(openPullStreamMock.mock.calls[0][0]).not.toBe("qwen3:14b");
+  });
+
+  it("keeps `name` as the user-facing identity in the audit trail while pulling pull_tag", async () => {
+    openPullStreamMock.mockResolvedValue(streamResponse(['{"status":"success"}']));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    const [started, finished] = recordActivityMock.mock.calls.map((c) => c[0]);
+    expect(started.what).toBe("Model download started");
+    expect(started.sub).toBe("qwen3:14b");
+    expect(started.refs.model).toBe("qwen3:14b");
+    expect(finished.what).toBe("Model download finished");
+    expect(finished.sub).toBe("qwen3:14b");
+    expect(finished.refs.model).toBe("qwen3:14b");
+    // The registry tag is plumbing — it must not leak into the audit feed.
+    expect(JSON.stringify(recordActivityMock.mock.calls)).not.toContain("hf.co");
+  });
+
+  it("falls back to `name` when the catalog entry has no pull_tag", async () => {
+    openPullStreamMock.mockResolvedValue(streamResponse(['{"status":"success"}']));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gemma3%3A12b/pull");
+    expect(res.status).toBe(200);
+    expect(openPullStreamMock.mock.calls[0][0]).toBe("gemma3:12b");
+    expect(recordActivityMock.mock.calls[0][0].sub).toBe("gemma3:12b");
+  });
+
+  it("409 already_pulled still speaks the user-facing name, never the pull_tag", async () => {
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/pull");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("already_pulled");
+    expect(res.body.detail).toContain("gpt-oss:20b");
+    expect(res.body.detail).not.toContain("docker.io");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("400 not_eligible is unchanged — an unknown name never reaches the sidecar", async () => {
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post(
+      "/api/models/hf.co%2FQwen%2FQwen3-14B-GGUF%3AQ4_K_M/pull",
+    );
+    // Asking for the pull_tag itself is NOT a catalog identity: the lookup is
+    // by `name`, so this is out-of-catalog and must be refused, not pulled.
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("not_eligible");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-1827 — placement threading through the page payload ──
+
+describe("WARP-1827 — placement surfaced on LocalModelInfo", () => {
+  it("threads gpuFraction/placement/placementState from the metrics probe", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+      ],
+    });
+    fetchLocalModelMetricsMock.mockResolvedValue(
+      new Map([
+        [
+          "gpt-oss:20b",
+          {
+            gbOnDisk: 13.8,
+            parameterSize: "20.9B",
+            quantization: "MXFP4",
+            loaded: true,
+            vramGb: 6.9,
+            gpuFraction: 0.5,
+            placement: "partial",
+            placementState: "measured",
+          },
+        ],
+      ]),
+    );
+    const payload = await getModelsPagePayload();
+    const row = payload.local[0];
+    expect(row.gpuFraction).toBe(0.5);
+    expect(row.placement).toBe("partial");
+    expect(row.placementState).toBe("measured");
+  });
+
+  it("stays null against a metrics double that predates placement (additive)", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+      ],
+    });
+    fetchLocalModelMetricsMock.mockResolvedValue(
+      new Map([
+        [
+          "gpt-oss:20b",
+          { gbOnDisk: 13.8, parameterSize: "20.9B", quantization: "MXFP4", loaded: true, vramGb: 12.7 },
+        ],
+      ]),
+    );
+    const payload = await getModelsPagePayload();
+    const row = payload.local[0];
+    expect(row.gpuFraction).toBeNull();
+    expect(row.placement).toBeNull();
+    expect(row.placementState).toBeNull();
   });
 });

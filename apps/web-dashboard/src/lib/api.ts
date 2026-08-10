@@ -42,6 +42,7 @@ import type {
   HealthResponse,
   ModelsResponse,
   ModelsPagePayload,
+  ModelsCatalogPayload,
   NetworkCommandResult,
   NetworkOverview,
   StorageStats,
@@ -3253,6 +3254,34 @@ export async function benchmarkModel(
     throw new Error(detail);
   }
   return res.json();
+}
+
+/**
+ * WARP-1827 — the eligible model catalog (`GET /api/models/catalog`): what
+ * this box COULD run (VRAM-gated appliance-side by the inference-manager),
+ * with per-model `pulled` flags. Authenticated GET, open to any principal
+ * (ADR-004 §3, same as the page payload). Uncached end-to-end so `pulled`
+ * is always fresh.
+ */
+export async function fetchModelsCatalog(): Promise<ModelsCatalogPayload> {
+  const res = await authFetch(`${BASE}/api/models/catalog`);
+  if (!res.ok) throw new Error(`Failed to fetch model catalog: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-1827 — start a catalog download (`POST /api/models/:name/pull`,
+ * owner/admin) and hand back the RAW response: on 200 the body is an NDJSON
+ * progress stream the caller reads incrementally (same pattern as
+ * {@link sendChat}); non-2xx bodies carry the orchestrator's typed error
+ * (not_eligible / already_pulled / insufficient_disk / ai_service_unreachable)
+ * for the caller to word honestly.
+ */
+export async function startModelPull(name: string): Promise<Response> {
+  return authFetch(`${BASE}/api/models/${encodeURIComponent(name)}/pull`, {
+    method: "POST",
+    headers: { Accept: "application/x-ndjson" },
+  });
 }
 
 export async function sendChat(

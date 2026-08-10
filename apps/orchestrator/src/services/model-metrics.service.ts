@@ -57,6 +57,8 @@ interface OllamaTagEntry {
 }
 interface OllamaPsEntry {
   name: string;
+  /** Total bytes the loaded model occupies (RAM + VRAM). */
+  size?: number;
   size_vram?: number;
 }
 
@@ -74,6 +76,9 @@ interface OllamaPsEntry {
  */
 export type MetricState = "measured" | "unreported" | "unsupported";
 
+/** WARP-1827 — where a LOADED model's weights actually sit. */
+export type ModelPlacement = "gpu" | "partial" | "cpu";
+
 export interface LocalModelMetrics {
   /** GB on disk (decimal), or null when no size was measured. */
   gbOnDisk: number | null;
@@ -89,6 +94,16 @@ export interface LocalModelMetrics {
   vramGb: number | null;
   /** Why `vramGb` is null, when it is. Always `unsupported` under DMR. */
   vramState: MetricState;
+  // ── WARP-1827 — placement of a loaded model ──────────────────────────
+  /** min(1, size_vram/size) from /api/ps, 3 decimals; null when unknowable. */
+  gpuFraction: number | null;
+  /** "gpu" (fraction ≥ 0.9) / "partial" (0 < f < 0.9) / "cpu" (size_vram
+   *  reported 0). Null when the model isn't loaded or the inputs are absent. */
+  placement: ModelPlacement | null;
+  /** Why `placement` is null, when it is — same three-way as vramState.
+   *  Placement is a property of a RUNNING model, so an UNLOADED row carries
+   *  null here (there is nothing to state), not a MetricState. */
+  placementState: MetricState | null;
 }
 
 /**
@@ -225,6 +240,51 @@ function nativeFactsFor(
 }
 
 /**
+ * WARP-1827 — classify where a LOADED model's weights sit, from its /api/ps
+ * entry. `gpuFraction = min(1, size_vram / size)`, GPU threshold 0.9.
+ *
+ * The CANONICAL placement enforcement lives appliance-side — inference-manager
+ * `/health.placement` (WARP-1825). This is the UI's read-only mirror of that
+ * verdict, computed with the SAME arithmetic and the SAME 0.9 threshold so
+ * the two surfaces can never disagree about what counts as "on the GPU".
+ *
+ * Honesty rules mirror vramGb/vramState exactly:
+ *   - DMR can't report either input (structural) → null + "unsupported".
+ *   - Ollama omitted/degenerate inputs → null + "unreported", never guessed.
+ *   - `size_vram: 0` from Ollama IS a measurement (fully in system RAM) →
+ *     "cpu". The same zero under DMR is a hard-coded marshalling artefact and
+ *     is NOT trusted — that's what the isDmr gate is for.
+ */
+function classifyPlacement(
+  isLoaded: boolean,
+  isDmr: boolean,
+  psEntry: OllamaPsEntry | undefined,
+): Pick<LocalModelMetrics, "gpuFraction" | "placement" | "placementState"> {
+  if (!isLoaded) {
+    // Not resident: there is no placement to state — null, not a MetricState.
+    return { gpuFraction: null, placement: null, placementState: null };
+  }
+  if (isDmr) {
+    return { gpuFraction: null, placement: null, placementState: "unsupported" };
+  }
+  const size = psEntry?.size;
+  const sizeVram = psEntry?.size_vram;
+  const sizeReal =
+    typeof size === "number" && Number.isFinite(size) && size > 0;
+  const vramReal =
+    typeof sizeVram === "number" && Number.isFinite(sizeVram) && sizeVram >= 0;
+  if (!sizeReal || !vramReal) {
+    return { gpuFraction: null, placement: null, placementState: "unreported" };
+  }
+  const fraction = Math.min(1, sizeVram / size);
+  return {
+    gpuFraction: Math.round(fraction * 1000) / 1000,
+    placement: sizeVram === 0 ? "cpu" : fraction >= 0.9 ? "gpu" : "partial",
+    placementState: "measured",
+  };
+}
+
+/**
  * Best-effort snapshot of per-model metrics, keyed by normalised name.
  * Empty map on any probe failure — callers keep their honest "—".
  */
@@ -286,14 +346,17 @@ export async function fetchLocalModelMetrics(): Promise<
       }
     }
 
-    const vramByName = new Map<string, number | null>();
+    // Keep the WHOLE ps entry: vramGb reads size_vram (as always), and the
+    // WARP-1827 placement classifier additionally needs its `size`.
+    const psByName = new Map<string, OllamaPsEntry>();
     for (const m of ps.models ?? []) {
-      vramByName.set(norm(m.name), bytesToGb(m.size_vram));
+      psByName.set(norm(m.name), m);
     }
     for (const m of tags.models ?? []) {
       const key = norm(m.name);
-      const isLoaded = vramByName.has(key);
-      const vramGb = isLoaded ? (vramByName.get(key) ?? null) : null;
+      const psEntry = psByName.get(key);
+      const isLoaded = psByName.has(key);
+      const vramGb = isLoaded ? bytesToGb(psEntry?.size_vram) : null;
 
       // ── disk size ──
       // Ollama: /api/tags carries the real byte count. DMR: it is structurally
@@ -340,6 +403,8 @@ export async function fetchLocalModelMetrics(): Promise<
         loaded: isLoaded,
         vramGb,
         vramState,
+        // ── placement (WARP-1827) ──
+        ...classifyPlacement(isLoaded, isDmr, psEntry),
       });
     }
   } catch (err) {

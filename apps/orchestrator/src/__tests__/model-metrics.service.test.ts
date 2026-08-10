@@ -106,3 +106,87 @@ describe("model-metrics.service", () => {
     expect(x.quantization).toBeNull();
   });
 });
+
+// ── WARP-1827 — placement: where the loaded weights actually sit ──
+//
+// gpuFraction = min(1, size_vram/size) from /api/ps, threshold 0.9 — the SAME
+// arithmetic as the appliance-side enforcement (inference-manager
+// /health.placement, WARP-1825), so the two surfaces can never disagree.
+// Placement is a property of a RUNNING model: unloaded rows carry null state.
+
+describe("WARP-1827 — placement classification (Ollama)", () => {
+  function route(ps: unknown, tags: unknown) {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith("/api/ps")) return Promise.resolve(jsonResp(ps));
+      if (url.endsWith("/api/tags")) return Promise.resolve(jsonResp(tags));
+      return Promise.reject(new Error("unexpected url"));
+    });
+  }
+  const TAGS = { models: [{ name: "gpt-oss:20b", size: 13_800_000_000 }] };
+
+  it("fully on the GPU (fraction ≥ 0.9) → placement 'gpu', measured", async () => {
+    route(
+      { models: [{ name: "gpt-oss:20b", size: 13_000_000_000, size_vram: 12_700_000_000 }] },
+      TAGS,
+    );
+    const m = metricsFor(await fetchLocalModelMetrics(), "gpt-oss:20b")!;
+    expect(m.placement).toBe("gpu");
+    expect(m.gpuFraction).toBe(0.977);
+    expect(m.placementState).toBe("measured");
+  });
+
+  it("split across GPU and CPU (0 < fraction < 0.9) → 'partial'", async () => {
+    route(
+      { models: [{ name: "gpt-oss:20b", size: 13_000_000_000, size_vram: 6_500_000_000 }] },
+      TAGS,
+    );
+    const m = metricsFor(await fetchLocalModelMetrics(), "gpt-oss:20b")!;
+    expect(m.placement).toBe("partial");
+    expect(m.gpuFraction).toBe(0.5);
+    expect(m.placementState).toBe("measured");
+  });
+
+  it("size_vram === 0 → 'cpu' with a measured zero fraction", async () => {
+    route(
+      { models: [{ name: "gpt-oss:20b", size: 13_000_000_000, size_vram: 0 }] },
+      TAGS,
+    );
+    const m = metricsFor(await fetchLocalModelMetrics(), "gpt-oss:20b")!;
+    expect(m.placement).toBe("cpu");
+    expect(m.gpuFraction).toBe(0);
+    expect(m.placementState).toBe("measured");
+    // Existing vram semantics DON'T move: bytesToGb still folds 0 → null.
+    expect(m.vramGb).toBeNull();
+  });
+
+  it("caps the fraction at 1 when size_vram exceeds size", async () => {
+    route(
+      { models: [{ name: "gpt-oss:20b", size: 13_000_000_000, size_vram: 13_500_000_000 }] },
+      TAGS,
+    );
+    const m = metricsFor(await fetchLocalModelMetrics(), "gpt-oss:20b")!;
+    expect(m.gpuFraction).toBe(1);
+    expect(m.placement).toBe("gpu");
+  });
+
+  it("a loaded model whose ps entry omits size → null + 'unreported', never guessed", async () => {
+    route(
+      { models: [{ name: "gpt-oss:20b", size_vram: 12_700_000_000 }] },
+      TAGS,
+    );
+    const m = metricsFor(await fetchLocalModelMetrics(), "gpt-oss:20b")!;
+    expect(m.loaded).toBe(true);
+    expect(m.placement).toBeNull();
+    expect(m.gpuFraction).toBeNull();
+    expect(m.placementState).toBe("unreported");
+  });
+
+  it("an unloaded model has no placement at all (null state — not a claim)", async () => {
+    route({ models: [] }, TAGS);
+    const m = metricsFor(await fetchLocalModelMetrics(), "gpt-oss:20b")!;
+    expect(m.loaded).toBe(false);
+    expect(m.placement).toBeNull();
+    expect(m.gpuFraction).toBeNull();
+    expect(m.placementState).toBeNull();
+  });
+});
