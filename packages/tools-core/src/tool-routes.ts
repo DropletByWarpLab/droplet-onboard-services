@@ -191,13 +191,24 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── cameras ─────────────────────────────────────────────────────────────
   { tool: "list_cameras", client: "orchestrator", hops: [admit("get", "/api/cameras")] },
-  none("list_discovered_cameras"), // ctx.prisma
+  // WARP-1847: was `none` (ctx.prisma). The direct
+  // `{ enabled: false, autoDiscovered: true }` query could never match a
+  // freshly discovered camera, so this now reads the orchestrator's merged
+  // live + DB candidate list — the same one the dashboard renders.
+  { tool: "list_discovered_cameras", client: "orchestrator", hops: [
+    admit("get", "/api/cameras/discovered"),
+  ] },
   { tool: "list_camera_events", client: "orchestrator", hops: [
     admit("get", "/api/cameras/:name/events"),
     admit("get", "/api/cameras/events/recent"),
   ] },
   { tool: "scan_for_cameras", client: "orchestrator", hops: [admit("post", "/api/cameras/scan")] },
-  none("accept_discovered_camera"), // ctx.prisma
+  // WARP-1847: was `none` (ctx.prisma). A live candidate's id is `mac:<MAC>`,
+  // which has no camera row to flip `enabled` on — and only camera-discovery
+  // holds the probed RTSP URL and verifies the stream before the Frigate write.
+  { tool: "accept_discovered_camera", client: "orchestrator", hops: [
+    admit("post", "/api/cameras/discovered/:id/accept"),
+  ] },
   none("get_camera_snapshot"), // returns a URL string (no ctx.http hop)
   { tool: "list_clips", client: "orchestrator", hops: [admit("get", "/api/cameras/clips")] },
   { tool: "export_clip", client: "orchestrator", hops: [admit("post", "/api/cameras/:name/clips/export")] },
