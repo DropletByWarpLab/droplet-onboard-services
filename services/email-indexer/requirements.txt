@@ -7,7 +7,7 @@ APScheduler==3.11.3
 aioimaplib==2.0.1
 # Fernet decryption of EmailAccount.passwordEnc. Key lives at
 # /data/secrets/email.key (mode 0600, setup.sh-generated).
-cryptography==49.0.0
+cryptography==50.0.0
 # Service-principal POST to the orchestrator's ingest endpoint +
 # outbound SMTP status callback.
 httpx==0.28.1
