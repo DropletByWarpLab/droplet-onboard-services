@@ -258,6 +258,99 @@ _CHAT_PATH = _resolve_chat_path(os.getenv("OLLAMA_CHAT_PATH"))
 # violation, and "provably off" beats "argued to be equivalent".
 _STATIC_CAPABILITY_TABLE = os.getenv("INFERENCE_RUNTIME", "ollama").strip().lower() == "dmr"
 
+# WARP-1839 — grammar-safe tool schemas for the DMR runtime.
+#
+# llama.cpp (DMR's inference backend) compiles the request's `tools` JSON
+# schemas into a GBNF grammar for constrained tool-call decoding, and bounded
+# schema keywords (`minLength`/`maxLength`, `minItems`/`maxItems`, `pattern`,
+# `format`) expand into repeated rule copies at grammar-build time. One real
+# tool — `memory_extract_fact`, whose `fact` field carries `maxLength: 2000` —
+# multiplies past llama.cpp's "sane defaults" repetition guard, the sampler
+# fails to initialize, and the whole request 400s ("Failed to initialize
+# samplers: failed to parse grammar"). With the full catalog attached that
+# meant EVERY tools-bearing chat on the box failed. Ollama does not
+# grammar-constrain tool calls, so the identical catalog worked before the
+# flip; the WARP-1839 bisect on the live box pins all of this.
+#
+# Same gate word as the capability table above, for the same reason: with the
+# flag off the ollama wire shape stays provably byte-identical (rollback stays
+# honest), and one env word migrates the whole box.
+#
+# Nothing is lost by stripping: tools-core handlers re-validate these bounds
+# at execution time (memory/extract.ts rejects >2000-char facts with
+# INVALID_ARGS), which is exactly where they were enforced under Ollama too —
+# the model never saw grammar-enforced bounds before the flip either.
+_GRAMMAR_SAFE_TOOL_SCHEMAS = (
+    os.getenv("INFERENCE_RUNTIME", "ollama").strip().lower() == "dmr"
+)
+
+# JSON Schema keywords that generate bounded repetitions in llama.cpp's
+# json-schema→GBNF conversion. `format` is included because llama.cpp expands
+# known formats (date-time, uuid, …) into pattern-like bounded grammars.
+_GRAMMAR_UNSAFE_KEYWORDS = frozenset(
+    {"pattern", "format", "minLength", "maxLength", "minItems", "maxItems"}
+)
+
+# Keys whose values are maps of NAMES to subschemas — a child key here is a
+# property/definition name, never a schema keyword. The catalog really does
+# ship a tool (`regex_test`) with a property literally named `pattern`; it
+# must survive sanitization.
+_SCHEMA_NAME_MAPS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions"}
+)
+
+# Keys whose values are DATA, not schema — never recursed into (an enum
+# member or default object could legitimately contain a key named
+# `maxLength`) and never stripped.
+_SCHEMA_DATA_KEYS = frozenset({"enum", "const", "default", "examples"})
+
+
+def _strip_grammar_unsafe(schema: object) -> object:
+    """Return ``schema`` minus grammar-unsafe keywords, recursively."""
+    if isinstance(schema, list):
+        return [_strip_grammar_unsafe(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for key, value in schema.items():
+        if key in _GRAMMAR_UNSAFE_KEYWORDS:
+            continue
+        if key in _SCHEMA_DATA_KEYS:
+            out[key] = value
+        elif key in _SCHEMA_NAME_MAPS and isinstance(value, dict):
+            out[key] = {
+                name: _strip_grammar_unsafe(sub) for name, sub in value.items()
+            }
+        else:
+            out[key] = _strip_grammar_unsafe(value)
+    return out
+
+
+def grammar_safe_tools(tools: list) -> list:
+    """Sanitize OpenAI-format tool definitions for a grammar-compiling runtime.
+
+    Only ``function.parameters`` is rewritten — that is the sole input to
+    llama.cpp's grammar builder. Names and descriptions pass through, and the
+    caller's dicts are never mutated in place.
+    """
+    safe: list = []
+    for tool in tools:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(fn, dict) and "parameters" in fn:
+            safe.append(
+                {
+                    **tool,
+                    "function": {
+                        **fn,
+                        "parameters": _strip_grammar_unsafe(fn["parameters"]),
+                    },
+                }
+            )
+        else:
+            safe.append(tool)
+    return safe
+
+
 # WARP-1333: gpt-oss's harmony parser intermittently 500s when the model
 # emits a tool call whose function name carries channel tokens
 # (harmonyparser.go "no reverse mapping found for function name"); the
@@ -690,10 +783,16 @@ class OllamaLocalProvider(BaseProvider):
         if reasoning_effort is not None and model_supports_reasoning_effort(model):
             body["reasoning_effort"] = reasoning_effort
         if has_tools:
-            body["tools"] = [
+            tools_payload = [
                 t.model_dump() if hasattr(t, "model_dump") else t
                 for t in kwargs["tools"]
             ]
+            # WARP-1839: DMR's llama.cpp compiles these schemas into a GBNF
+            # grammar and bounded keywords blow its complexity guard — see
+            # _GRAMMAR_SAFE_TOOL_SCHEMAS above.
+            if _GRAMMAR_SAFE_TOOL_SCHEMAS:
+                tools_payload = grammar_safe_tools(tools_payload)
+            body["tools"] = tools_payload
 
         if not stream:
             rid = get_request_id()
