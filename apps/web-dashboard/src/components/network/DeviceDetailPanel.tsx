@@ -221,7 +221,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
                 type="button"
                 onClick={() => void handleRemoveGroup(g.id)}
                 aria-label={`Remove from ${g.name}`}
-                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
               >
                 <Icons.X className="w-3 h-3" />
               </button>

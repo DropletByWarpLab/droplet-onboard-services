@@ -417,7 +417,7 @@ export default function CalendarPage() {
                     <button
                       onClick={() => toggleCal(c.key)}
                       aria-pressed={on}
-                      className="w-full flex items-center gap-2.5 px-1 py-1.5 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      className="w-full flex items-center gap-2.5 px-1 py-1.5 max-lg:min-h-[44px] rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                       style={{ background: "transparent" }}
                       type="button"
                     >

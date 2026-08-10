@@ -86,7 +86,7 @@ async function performRemove() {
         </div>
         <button
           onClick={() => setShowNew((v) => !v)}
-          className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
+          className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
           title={showNew ? "Cancel" : "New reminder"}
         >
           {showNew ? <X size={16} /> : <Plus size={16} />}

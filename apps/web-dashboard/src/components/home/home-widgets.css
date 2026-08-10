@@ -1111,3 +1111,29 @@
   flex-shrink: 0;
   margin-top: 1px;
 }
+
+/* ── Phone touch targets ──────────────────────────────────────────────────
+   Measured on Home at 375px: 41 controls under the 44px Apple HIG / WCAG
+   2.5.5 minimum, the bulk of them the calendar widget's day cells (33px) plus
+   the chat capsule's attach/mic (32x29), send (36), suggestion chips (32) and
+   the month arrows (26x26). See 04-coding-standards/mobile-web-layout.md in
+   the engineering handbook.
+
+   Breakpoint matches `.dh-m-board` in home-bento.css — below 1024px the bento
+   is already in its single-column mobile board, so these controls are being
+   driven by touch from exactly that width down. */
+@media (max-width: 1023px) {
+  /* Cells are ~44px wide in the 7-column grid; a square makes them 44 tall
+     without changing the grid's column maths. */
+  /* The square lands a fraction under 44 when the grid's column width is
+     fractional (43.98px), so pin the floor explicitly too. */
+  .droplet-home .w-cal-cell { aspect-ratio: 1; min-height: 44px; }
+  .droplet-home .w-cal-nav { width: 44px; height: 44px; }
+  .droplet-home .w-chat-iconbtn { width: 44px; height: 44px; }
+  .droplet-home .w-chat-send { height: 44px; }
+  .droplet-home .w-sug { height: 44px; }
+  .droplet-home .w-notes-new { min-height: 44px; }
+  /* The base rule already supplies inline-flex + centring; only the height
+     is missing, so don't restate display here. */
+  .droplet-home .w-remote-link { min-height: 44px; }
+}
