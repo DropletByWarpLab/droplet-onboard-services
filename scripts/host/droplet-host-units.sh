@@ -25,9 +25,11 @@
 # misdiagnosis; WARP-1830 was inert the hour it merged).
 #
 # ── SUBCOMMANDS ──────────────────────────────────────────────────────────────
-#   check    Read-only. For every matching host unit, compare its
-#            ExecMainStartTimestamp against the mtime of the sources it
-#            executes and report any unit older than its own code.
+#   check    For every matching host unit, compare its ExecMainStartTimestamp
+#            against the mtime of the sources it executes and report any unit
+#            older than its own code. It never touches systemd — no restart,
+#            no daemon-reload, no unit state — though it does maintain its own
+#            digest baseline under $STATE_DIR (see "Content digest" below).
 #            Exit 0 = every running unit is at or ahead of its code.
 #            Exit 1 = at least one unit is running stale code.
 #            This is the piece that turns the next occurrence from a
@@ -210,7 +212,8 @@ usage() {
 Usage: droplet-host-units <check|refresh> [--json] [--force]
 
   check     Report every host systemd unit whose running process started
-            BEFORE the sources it executes were last modified. Read-only.
+            BEFORE the sources it executes were last modified. Never touches
+            systemd — no restart, no daemon-reload.
             Exit 0 = all current, 1 = at least one stale, 2 = usage error.
 
   refresh   Restart exactly those units — ordered, one attempt each,

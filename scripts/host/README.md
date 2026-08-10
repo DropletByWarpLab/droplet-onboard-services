@@ -81,8 +81,10 @@ WARP-1830 was inert the hour it merged.
 `setup.sh` → `scripts/lib/single-box.sh`) and has two subcommands:
 
 ```bash
-# The detection check. Read-only, stands entirely on its own, and is the
-# ONE-LINE answer next time a merged fix "isn't working" on the box.
+# The detection check. Stands entirely on its own, never touches systemd
+# (no restart, no daemon-reload — it does keep its own digest baseline under
+# /var/lib/droplet/host-units), and is the ONE-LINE answer next time a merged
+# fix "isn't working" on the box.
 sudo droplet-host-units check          # exit 1 if any unit runs stale code
 sudo droplet-host-units check --json
 
