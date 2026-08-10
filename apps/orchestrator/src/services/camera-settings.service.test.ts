@@ -293,3 +293,147 @@ describe("unknown camera", () => {
     expect(saveRawConfigMock).not.toHaveBeenCalled();
   });
 });
+
+describe("the save never reads back from a restarting Frigate", () => {
+  it("returns the projected state without a post-save config read", async () => {
+    // /api/config/save?save_option=restart makes Frigate reload. A GET
+    // straight after is answered by the pre-restart process (stale) or
+    // refused (turning a save that LANDED into a 500). So exactly one
+    // config read is allowed, and it must happen before the write.
+    await updateCameraSettings("front_door", { continuousRetainDays: 7 });
+
+    expect(fetchConfigMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the value the operator just set, not the pre-save one", async () => {
+    // The fixture's resolved config says continuous = 7. If the function
+    // read back from the restarting process it would return 7 and the
+    // dashboard would snap the slider back.
+    const result = await updateCameraSettings("front_door", {
+      continuousRetainDays: 30,
+    });
+
+    expect(result.continuousRetainDays).toBe(30);
+  });
+
+  it("still surfaces a Frigate rejection rather than a projection", async () => {
+    saveRawConfigMock.mockImplementation(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => "validation error",
+    }));
+
+    await expect(
+      updateCameraSettings("front_door", { continuousRetainDays: 30 }),
+    ).rejects.toThrow(/Frigate rejected the config: 400/);
+  });
+
+  it("carries unpatched fields through untouched", async () => {
+    const result = await updateCameraSettings("front_door", { detectFps: 8 });
+
+    expect(result.detectFps).toBe(8);
+    expect(result.alertsRetainDays).toBe(30); // from the fixture
+    expect(result.snapshotRetainDays).toBe(10);
+  });
+});
+
+describe("clearing motion masks on a camera with no motion block", () => {
+  it("does not throw — deleteIn rejects a missing intermediate node", async () => {
+    // addCamera authors ffmpeg/detect/record/snapshots and no `motion:`
+    // key, so this is the shape of EVERY appliance-provisioned camera.
+    // yaml's deleteIn throws "Expected YAML collection at motion" here.
+    fetchRawConfigYamlMock.mockImplementation(
+      async () => `cameras:
+  front_door:
+    detect:
+      enabled: true
+`,
+    );
+
+    await expect(
+      updateCameraSettings("front_door", { motionMasks: [] }),
+    ).resolves.toBeDefined();
+
+    expect(saveRawConfigMock).toHaveBeenCalled();
+  });
+
+  it("still removes an existing mask", async () => {
+    fetchRawConfigYamlMock.mockImplementation(
+      async () => `cameras:
+  front_door:
+    motion:
+      threshold: 30
+      mask:
+        - "0.1,0.1,0.9,0.1,0.9,0.9"
+`,
+    );
+
+    await updateCameraSettings("front_door", { motionMasks: [] });
+
+    const cam = saved().cameras.front_door;
+    expect(cam.motion).not.toHaveProperty("mask");
+    // A sibling under motion must survive the mask removal.
+    expect(cam.motion.threshold).toBe(30);
+  });
+});
+
+describe("zone edits preserve fields the dashboard doesn't model", () => {
+  it("keeps loitering_time / speed_threshold on an edited zone", async () => {
+    // getCameraSettings models only coordinates/objects/inertia. Rebuilding
+    // the zones block from that reduced shape would delete every other
+    // Frigate 0.17 ZoneConfig field the operator authored by hand.
+    fetchRawConfigYamlMock.mockImplementation(
+      async () => `cameras:
+  front_door:
+    zones:
+      driveway:
+        coordinates: "0.1,0.1,0.9,0.1,0.9,0.9"
+        inertia: 3
+        loitering_time: 12
+        speed_threshold: 4
+`,
+    );
+
+    await updateCameraSettings("front_door", {
+      zones: [
+        {
+          name: "driveway",
+          coordinates: [0.2, 0.2, 0.8, 0.2, 0.8, 0.8],
+          objects: ["person"],
+          inertia: 5,
+        },
+      ],
+    });
+
+    const z = saved().cameras.front_door.zones.driveway;
+    expect(z.coordinates).toBe("0.2,0.2,0.8,0.2,0.8,0.8"); // updated
+    expect(z.inertia).toBe(5); // updated
+    expect(z.loitering_time).toBe(12); // preserved
+    expect(z.speed_threshold).toBe(4); // preserved
+  });
+
+  it("still deletes a zone the operator removed", async () => {
+    fetchRawConfigYamlMock.mockImplementation(
+      async () => `cameras:
+  front_door:
+    zones:
+      keep_me:
+        coordinates: "0.1,0.1,0.9,0.1,0.9,0.9"
+        inertia: 3
+      drop_me:
+        coordinates: "0.2,0.2,0.8,0.2,0.8,0.8"
+        inertia: 3
+        loitering_time: 9
+`,
+    );
+
+    await updateCameraSettings("front_door", {
+      zones: [
+        { name: "keep_me", coordinates: [0.1, 0.1, 0.9, 0.1, 0.9, 0.9], objects: [], inertia: 3 },
+      ],
+    });
+
+    const zones = saved().cameras.front_door.zones;
+    expect(Object.keys(zones)).toEqual(["keep_me"]);
+  });
+});

@@ -354,6 +354,11 @@ export async function updateCameraSettings(
     throw new Error(`camera ${cameraName} not found`);
   }
 
+  // Snapshot the effective settings BEFORE the write, while Frigate is
+  // definitely up. The post-save read is unavailable (see the note at the
+  // end of this function), so this is what the returned projection builds on.
+  const before = await getCameraSettings(cameraName);
+
   const at = (...rest: string[]) => ["cameras", cameraName, ...rest];
 
   // ── validate ─────────────────────────────────────────────────────────
@@ -509,18 +514,56 @@ export async function updateCameraSettings(
   }
 
   if (newZones !== undefined) {
-    // Wholesale-replace: the editor sends the full list each save, so the
-    // diff lives in the UI. Delete first — setIn alone would merge and
-    // leave removed zones behind.
-    doc.deleteIn(at("zones"));
-    if (Object.keys(newZones).length > 0) {
-      doc.setIn(at("zones"), doc.createNode(newZones));
+    // The editor sends the full zone list each save, so a zone absent from
+    // the payload was deleted. But do NOT rebuild the block wholesale:
+    // getCameraSettings models only coordinates/objects/inertia, while
+    // Frigate 0.17's ZoneConfig also carries loitering_time,
+    // speed_threshold, distances and filters. Rewriting from the reduced
+    // shape would silently delete operator-authored fields the dashboard
+    // cannot even display.
+    //
+    // So: drop only the zones that actually went away, and merge the three
+    // fields we own into the survivors, leaving their other keys intact.
+    if (Object.keys(newZones).length === 0) {
+      // All zones removed — drop the parent key rather than leaving an
+      // empty `zones: {}` map behind.
+      doc.deleteIn(at("zones"));
+    } else {
+      const existing = doc.getIn(at("zones"));
+      if (isMap(existing)) {
+        for (const item of existing.items) {
+          const key = item.key;
+          const zoneName = isScalar(key) ? String(key.value) : String(key);
+          if (!(zoneName in newZones)) doc.deleteIn(at("zones", zoneName));
+        }
+      }
+    }
+    for (const [zoneName, entry] of Object.entries(newZones)) {
+      const e = entry as Record<string, unknown>;
+      doc.setIn(at("zones", zoneName, "coordinates"), e.coordinates);
+      doc.setIn(at("zones", zoneName, "inertia"), e.inertia);
+      if (e.objects !== undefined) {
+        doc.setIn(at("zones", zoneName, "objects"), doc.createNode(e.objects));
+      } else if (doc.getIn(at("zones", zoneName)) !== undefined) {
+        // Objects cleared to "any tracked label" — remove the key rather
+        // than writing an empty list, matching Frigate's default.
+        doc.deleteIn(at("zones", zoneName, "objects"));
+      }
     }
   }
 
   if (newMasks !== undefined) {
     if (newMasks.length === 0) {
-      doc.deleteIn(at("motion", "mask"));
+      // `deleteIn` THROWS when an intermediate node is missing ("Expected
+      // YAML collection at motion"), and addCamera authors camera blocks
+      // with no `motion:` key at all — so clearing masks on an
+      // appliance-provisioned camera would 500 and take the zones edit in
+      // the same patch down with it. Only delete when the parent exists.
+      // (`setIn` auto-creates intermediates, so the write path below is
+      // unaffected; this asymmetry is the whole trap.)
+      if (doc.getIn(at("motion")) !== undefined) {
+        doc.deleteIn(at("motion", "mask"));
+      }
     } else {
       // Always an array, even single-entry, so a future polygon append
       // doesn't have to special-case the string form.
@@ -551,7 +594,70 @@ export async function updateCameraSettings(
     throw new Error(`Frigate rejected the config: ${resp.status}`);
   }
 
-  // Frigate restarts the camera asynchronously; the next read reflects the
-  // merged config even if the camera process is still booting.
-  return getCameraSettings(cameraName);
+  // Do NOT read back from Frigate here.
+  //
+  // `save_option=restart` tells Frigate to persist and reload. `/api/config`
+  // is served from the running process's in-memory config, so an immediate
+  // GET either (a) hits a socket that is refused mid-restart — turning a save
+  // that LANDED into a 500 the operator reads as "couldn't save" — or (b) is
+  // answered by the pre-restart process and returns the OLD values, which the
+  // dashboard pins with `mutate(next, { revalidate: false })`, snapping the
+  // slider the operator just moved back to where it was.
+  //
+  // Instead, project the result from the settings we read before the write
+  // plus the patch we know we applied. Frigate has accepted the config (a
+  // non-2xx already threw above), so this is the state it is booting into.
+  return projectSettings(before, patch);
+}
+
+/**
+ * Apply a validated patch to a settings snapshot, producing the state the
+ * appliance is converging on.
+ *
+ * This is NOT a guess: every field here was just written to the authored
+ * yaml and accepted by Frigate's validator. It exists so the caller never
+ * has to read from a process that is mid-restart.
+ */
+function projectSettings(
+  before: CameraSettings,
+  patch: CameraSettingsPatch,
+): CameraSettings {
+  const next: CameraSettings = {
+    ...before,
+    zones: before.zones.map((z) => ({ ...z })),
+    motionMasks: before.motionMasks.map((m) => ({ ...m })),
+    objectFilters: { ...before.objectFilters },
+  };
+
+  if (patch.detectEnabled !== undefined) next.detectEnabled = patch.detectEnabled;
+  if (patch.detectFps !== undefined) next.detectFps = patch.detectFps;
+  if (patch.trackedLabels !== undefined) next.trackedLabels = [...patch.trackedLabels];
+  if (patch.objectFilters !== undefined) {
+    for (const [label, f] of Object.entries(patch.objectFilters)) {
+      const cur = next.objectFilters[label] ?? { threshold: 0.7, minScore: 0.5 };
+      next.objectFilters[label] = {
+        threshold: f.threshold ?? cur.threshold,
+        minScore: f.minScore ?? cur.minScore,
+      };
+    }
+  }
+  if (patch.recordEnabled !== undefined) next.recordEnabled = patch.recordEnabled;
+  if (patch.continuousRetainDays !== undefined) {
+    next.continuousRetainDays = patch.continuousRetainDays;
+  }
+  if (patch.motionRetainDays !== undefined) next.motionRetainDays = patch.motionRetainDays;
+  if (patch.alertsRetainDays !== undefined) next.alertsRetainDays = patch.alertsRetainDays;
+  if (patch.detectionsRetainDays !== undefined) {
+    next.detectionsRetainDays = patch.detectionsRetainDays;
+  }
+  if (patch.snapshotsEnabled !== undefined) next.snapshotsEnabled = patch.snapshotsEnabled;
+  if (patch.snapshotRetainDays !== undefined) {
+    next.snapshotRetainDays = patch.snapshotRetainDays;
+  }
+  if (patch.zones !== undefined) next.zones = patch.zones.map((z) => ({ ...z }));
+  if (patch.motionMasks !== undefined) {
+    next.motionMasks = patch.motionMasks.map((m) => ({ ...m }));
+  }
+
+  return next;
 }
