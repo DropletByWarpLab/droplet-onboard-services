@@ -23,7 +23,7 @@
     "@grpc/proto-loader": "^0.8.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@prisma/client": "^5.14.0",
-    "ioredis": "^5.4.1",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "undici": "^6",
     "zod": "^3.23.8"

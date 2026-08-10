@@ -81,13 +81,30 @@ function makeFakeRedis() {
       z.set(member, Number(score));
       return 1;
     }),
-    zrange: vi.fn(async (k: string, start: number, stop: number) => {
-      const z = zsets.get(k);
-      if (!z) return [];
-      const sorted = [...z.entries()].sort((a, b) => a[1] - b[1]).map(([m]) => m);
-      const end = stop === -1 ? sorted.length : stop + 1;
-      return sorted.slice(start, end);
-    }),
+    // Bounds are accepted as number OR string because that is what the wire
+    // does: ioredis stringifies every argument and redis re-parses the index
+    // as an integer, so ZRANGE k 0 -1 and ZRANGE k "0" "-1" are the same
+    // command. Coercing here (rather than strict-comparing a number) keeps the
+    // fake honest against ioredis 6, whose `stop` parameter is typed
+    // `string | Buffer` only.
+    zrange: vi.fn(
+      async (k: string, start: number | string, stop: number | string) => {
+        const z = zsets.get(k);
+        if (!z) return [];
+        const from = Number(start);
+        const to = Number(stop);
+        if (Number.isNaN(from) || Number.isNaN(to)) {
+          throw new Error(
+            `fake zrange: non-integer index bounds (${String(start)}, ${String(stop)})`,
+          );
+        }
+        const sorted = [...z.entries()]
+          .sort((a, b) => a[1] - b[1])
+          .map(([m]) => m);
+        const end = to === -1 ? sorted.length : to + 1;
+        return sorted.slice(from, end);
+      },
+    ),
     zrem: vi.fn(async (k: string, member: string) => {
       const z = zsets.get(k);
       if (!z) return 0;
@@ -357,5 +374,62 @@ describe("countLiveSessions", () => {
   it("returns null when Redis is unreachable (caller picks the failure posture)", async () => {
     fake.zrange.mockRejectedValueOnce(new Error("connection refused"));
     expect(await countLiveSessions("u-alice")).toBe(null);
+  });
+});
+
+/**
+ * ioredis 6 narrowed ZRANGE's `stop` parameter to `string | Buffer` (v5
+ * accepted `number` on both bounds), so the three session-index sweeps had to
+ * restate `-1` as `"-1"`. That is a pure type-level change — the wire bytes are
+ * identical — but getting the coercion wrong here is silent and severe: a stop
+ * bound that no longer means "last element" truncates the index walk, so the
+ * concurrent-session cap stops evicting and countLiveSessions under-reports
+ * (which would leak a Nextcloud app-password past the last logout). These
+ * assertions pin the index semantics rather than the literal argument type.
+ */
+describe("session-index ZRANGE bounds (ioredis 6 compat)", () => {
+  it("enumerates the WHOLE index — every sweep asks for [0, -1]", async () => {
+    await createSession(alice);
+    advanceSeconds(1);
+    await createSession(alice);
+    advanceSeconds(1);
+    await createSession(alice);
+
+    fake.zrange.mockClear();
+    expect(await countLiveSessions(alice.id)).toBe(3);
+
+    expect(fake.zrange).toHaveBeenCalled();
+    for (const [, start, stop] of fake.zrange.mock.calls) {
+      // Redis parses these as integers regardless of JS type; assert the
+      // VALUES, so `"-1"`, `-1` all pass and `0`/`1`/`"0"` all fail.
+      expect(Number(start)).toBe(0);
+      expect(Number(stop)).toBe(-1);
+    }
+  });
+
+  it("still evicts past the cap with the restated bound", async () => {
+    // Cap is 3 (mocked config). A 4th login must evict the oldest — this is
+    // the path that silently dies if the stop bound stops meaning "last".
+    const s1 = await createSession(alice);
+    advanceSeconds(1);
+    await createSession(alice);
+    advanceSeconds(1);
+    await createSession(alice);
+    advanceSeconds(1);
+    const s4 = await createSession(alice);
+
+    expect(s4.evictedSids).toEqual([s1.sid]);
+    expect(await countLiveSessions(alice.id)).toBe(3);
+  });
+
+  it("revokeAllSessions sees every member of the index", async () => {
+    await createSession(alice);
+    advanceSeconds(1);
+    await createSession(alice);
+    advanceSeconds(1);
+    await createSession(alice);
+
+    expect(await revokeAllSessions(alice.id)).toBe(3);
+    expect(await countLiveSessions(alice.id)).toBe(0);
   });
 });
