@@ -350,3 +350,71 @@ describe("redactSecretParams", () => {
     expect(redactSecretParams({})).toEqual({});
   });
 });
+
+/**
+ * WARP-1688 — the richdocuments DIRECT-EDITING token.
+ *
+ * It is bearer-equivalent for its lifetime: whoever holds the URL opens that
+ * file with no cookie and no Authorization header (docs/THREAT_MODEL.md T1.8,
+ * accepted risk R6 — "must never be logged, screenshotted into a ticket, or
+ * pasted into chat").
+ *
+ * The credential rides in a URL PATH SEGMENT, which is a shape none of the
+ * rules above model: not a Bearer header, not an auth header, not KEY=value,
+ * not URI userinfo. It reaches the downloadable log bundle by two routes — the
+ * gateway logs `$request` verbatim (no `access_log` directive), and
+ * `nextcloud:29-apache` symlinks its Apache access log to stdout while
+ * `nextcloud` sits in the collector's DEFAULT_SERVICES. So a bundle pulled
+ * during an active editing session would ship live credentials off the box.
+ */
+describe("redactSecrets — richdocuments direct-editing token (WARP-1688)", () => {
+  const ACCESS_LOG =
+    '192.168.9.14 - - [09/Aug/2026:21:15:04 +0000] "GET ' +
+    "/index.php/apps/richdocuments/direct/pLaNtEdDiReCtToKeN0123456789abcd" +
+    ' HTTP/1.1" 200 31842 "-" "Mozilla/5.0"';
+
+  it("removes the token from a realistic Apache/nginx access-log line", () => {
+    const out = redactSecrets(ACCESS_LOG);
+    expect(out).not.toContain("pLaNtEdDiReCtToKeN0123456789abcd");
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+  });
+
+  it("keeps the route visible so the line is still diagnosable", () => {
+    const out = redactSecrets(ACCESS_LOG);
+    // Redaction, not deletion: an access log with the path scrubbed away is
+    // useless for the editor problem these bundles get pulled for.
+    expect(out).toContain("/index.php/apps/richdocuments/direct/");
+    expect(out).toContain("200 31842");
+  });
+
+  it("redacts the pretty-URL route shape too (no /index.php prefix)", () => {
+    const out = redactSecrets(
+      'GET /apps/richdocuments/direct/pRettyUrlDirectToken9876543210zyxw HTTP/1.1',
+    );
+    expect(out).not.toContain("pRettyUrlDirectToken9876543210zyxw");
+  });
+
+  it("redacts the token when a query string follows it", () => {
+    const out = redactSecrets(
+      "/index.php/apps/richdocuments/direct/tOkEnWithQuery12345678?requesttoken=abc",
+    );
+    expect(out).not.toContain("tOkEnWithQuery12345678");
+  });
+
+  it("redacts a bare URL with no surrounding log furniture", () => {
+    const out = redactSecrets(
+      "http://localhost/index.php/apps/richdocuments/direct/bAreUrlToken0987654321",
+    );
+    expect(out).not.toContain("bAreUrlToken0987654321");
+  });
+
+  it("leaves the ordinary richdocuments connector URL alone (no credential in it)", () => {
+    const connector = "/nextcloud/index.php/apps/richdocuments/index?fileId=4242";
+    expect(redactSecrets(connector)).toBe(connector);
+  });
+
+  it("is idempotent — re-running over redacted output changes nothing", () => {
+    const once = redactSecrets(ACCESS_LOG);
+    expect(redactSecrets(once)).toBe(once);
+  });
+});

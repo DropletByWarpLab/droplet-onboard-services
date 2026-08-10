@@ -214,6 +214,188 @@ nc_app_install() {
   return 1
 }
 
+# ── WARP-1688 — reconcile trusted_domains from the container env, every boot ──
+#
+# Nextcloud answers HTTP 400 "Access through untrusted domain" for any request
+# whose Host is absent from its STORED `trusted_domains`. docker-compose.yml
+# already renders the correct list into NEXTCLOUD_TRUSTED_DOMAINS — including
+# ADR-023's publicly-trusted per-device FQDN (${DROPLET_PUBLIC_FQDN}) — but the
+# stock `nextcloud:29-apache` image consumes that env var ONLY inside its
+# install branch. A box that learns its FQDN AFTER install (every box does — HQ
+# issues the name later) therefore freezes its stored list at install time and
+# never trusts its own public name.
+#
+# Measured on the box: the container env carried the FQDN, `occ
+# config:system:get trusted_domains` stopped at droplet.lan, and the gateway's
+# /nextcloud/ leg answered 400 for `Host: <fqdn>`. Because the friendly
+# .local/.lan names 307 to that same FQDN, there was NO hostname at which a
+# browser-facing Nextcloud page could render — the dashboard's embedded editor
+# included. Same "set once, never reconciled" class as WARP-1694, and the same
+# fix shape: converge it here, in the every-boot before-starting hook.
+#
+# ADD-ONLY, deliberately. Entries are never removed: a stale name after a
+# rename no longer resolves to the box (inert), whereas a reconcile that
+# deletes could take a live box off the air over a transient env glitch.
+# Add-only is also what makes a converged boot write nothing at all.
+#
+# Sits BEFORE the connector block below because that block's appstore retries
+# can burn a minute per app, and trusted_domains is what makes the box
+# browsable at all — it must not queue behind them.
+# >>> reconcile_trusted_domains (WARP-1688)
+# Read the stored trusted_domains as one domain per line.
+#
+# The `|| true` INSIDE the substitution is load-bearing, not style (the
+# WARP-1694 lesson, restated): `occ config:system:get` EXITS NON-ZERO for an
+# unset key, and a failing command substitution carries that status into the
+# assignment — so under `set -euo pipefail` a box with no stored list would
+# abort the whole hook right here.
+#
+# occ prints an array value one element per line, prefixed with "  - " in its
+# plain output format. The sed tolerates BOTH that and a bare value, so a
+# future format change degrades to "re-add" rather than to "mis-parse and stack
+# duplicates".
+_td_read() {
+  { occ_www config:system:get trusted_domains 2>/dev/null || true; } \
+    | sed -e 's/\r$//' \
+          -e 's/^[[:space:]]*-[[:space:]]*//' \
+          -e 's/^[[:space:]]*//' \
+          -e 's/[[:space:]]*$//' \
+    | grep -v '^$' || true
+}
+
+# Advance $1 to the first index at which trusted_domains has NO element, and
+# echo it.
+#
+# Why not just use the element COUNT? Because an array with a HOLE (an index
+# deleted by hand at some point) makes the count collide with a live index, and
+# writing there would silently REPLACE a domain the box currently answers on —
+# the exact data loss the add-only posture exists to avoid. `occ
+# config:system:get <name> <index>` exits non-zero when that index is unset,
+# which is precisely the probe needed.
+#
+# On the overwhelmingly common contiguous array this probes exactly once and
+# finds the slot free.
+#
+# EVERY index this echoes has been probed and found free — the bound is a
+# give-up, never a guess. Returning `start + bound` unprobed (which an
+# increment-after-probe loop does) would hand the caller a possibly-OCCUPIED
+# index and reintroduce the very overwrite this function exists to prevent. On
+# exhaustion it prints nothing and returns non-zero; the caller refuses the
+# write and says so, and the read-back below reports the domain as missing.
+_td_next_free_index() {
+  _td_idx="$1"
+  _td_probe=0
+  while [ "$_td_probe" -lt 64 ]; do
+    if ! occ_www config:system:get trusted_domains "$_td_idx" >/dev/null 2>&1; then
+      printf '%s' "$_td_idx"
+      return 0
+    fi
+    _td_idx=$((_td_idx + 1))
+    _td_probe=$((_td_probe + 1))
+  done
+  return 1
+}
+
+reconcile_trusted_domains() {
+  td_want_raw="${NEXTCLOUD_TRUSTED_DOMAINS:-}"
+
+  # Pathname expansion is ON in this script. The unquoted word-split below IS
+  # how the space-separated env list is meant to be read, but a token carrying
+  # a glob metacharacter would otherwise expand against the CWD — so split with
+  # globbing off. `set --` touches only this function's positional parameters,
+  # and empty tokens (the trailing blank when DROPLET_PUBLIC_FQDN is unset) are
+  # dropped by the split itself, so no empty domain can reach a write.
+  set -f
+  # shellcheck disable=SC2086
+  set -- $td_want_raw
+  set +f
+  if [ "$#" -eq 0 ]; then
+    echo "[droplet] WARP-1688: NEXTCLOUD_TRUSTED_DOMAINS is empty — leaving the stored trusted_domains untouched" >&2
+    return 0
+  fi
+
+  td_have="$(_td_read)"
+  td_next="$(printf '%s\n' "$td_have" | grep -c '.' || true)"
+  td_flat=" $(printf '%s' "$td_have" | tr '\n' ' ') "
+
+  td_added=0
+  # Domains we WANTED to add and could not. Tracked separately from td_added so
+  # a run that refused every write cannot fall into the "already converged"
+  # early return below and report "nothing to do" over a box that still answers
+  # 400 on its own FQDN.
+  td_refused=0
+  for td_want in "$@"; do
+    # Belt-and-braces: never write something that is not a hostname. A malformed
+    # token in the env would otherwise land in the trust list verbatim.
+    case "$td_want" in
+      ""|*[!a-zA-Z0-9._:-]*)
+        echo "[droplet] WARP-1688: skipping malformed trusted-domain token '${td_want}'" >&2
+        continue
+        ;;
+    esac
+    # Already trusted → no write. This is the whole idempotence story: a
+    # converged box issues zero writes, so repeat boots cannot stack duplicates.
+    case "$td_flat" in
+      *" $td_want "*) continue ;;
+    esac
+    # No free slot within the probe bound → REFUSE. Writing at an index we
+    # never verified as free could replace a domain the box currently answers
+    # on; leaving this one unadded is recoverable (the next boot retries),
+    # clobbering a live domain is not.
+    if ! td_slot="$(_td_next_free_index "$td_next")"; then
+      echo "[droplet] WARP-1688: could not find a FREE trusted_domains index within 64 probes from ${td_next} — REFUSING to add '${td_want}' rather than risk overwriting a domain this box currently answers on. Inspect 'occ config:system:get trusted_domains'; the next boot retries." >&2
+      td_refused=$((td_refused + 1))
+      continue
+    fi
+    td_next="$td_slot"
+    if occ_www config:system:set trusted_domains "$td_next" --value="$td_want"; then
+      echo "[droplet] WARP-1688: trusted_domains += '${td_want}' (index ${td_next})"
+      td_flat="${td_flat}${td_want} "
+      td_next=$((td_next + 1))
+      td_added=$((td_added + 1))
+    else
+      echo "[droplet] WARP-1688: FAILED to add trusted domain '${td_want}' — Nextcloud will answer 400 'untrusted domain' for that host" >&2
+      td_refused=$((td_refused + 1))
+    fi
+  done
+
+  # "Nothing to do" is only true when nothing was NEEDED. A run that wanted to
+  # add something and could not must fall through to the read-back, which names
+  # the still-missing domain — otherwise the loudest line in the log is a
+  # reassuring one.
+  if [ "$td_added" -eq 0 ] && [ "$td_refused" -eq 0 ]; then
+    echo "[droplet] WARP-1688: trusted_domains already converged (${td_next} entries) — nothing to do"
+    return 0
+  fi
+
+  # Read back and ASSERT, exactly like the WARP-1686 URL-trio check below. The
+  # failure this catches is silent by nature: the writes above are best-effort,
+  # the hook exits 0 regardless, and the only other symptom is a 400 in
+  # someone's browser hours later.
+  td_after_flat=" $(_td_read | tr '\n' ' ') "
+  td_drift=0
+  for td_want in "$@"; do
+    case "$td_want" in
+      ""|*[!a-zA-Z0-9._:-]*) continue ;;
+    esac
+    case "$td_after_flat" in
+      *" $td_want "*) ;;
+      *)
+        echo "[droplet] WARP-1688: trusted_domains is STILL missing '${td_want}' after the reconcile — Nextcloud will answer HTTP 400 'Access through untrusted domain' on that host, so every browser-facing Nextcloud page (the dashboard's embedded editor included) fails to render there." >&2
+        td_drift=1
+        ;;
+    esac
+  done
+  if [ "$td_drift" -eq 0 ]; then
+    echo "[droplet] WARP-1688: trusted_domains reconciled (+${td_added}); every configured domain verified"
+  else
+    echo "[droplet] WARP-1688: trusted_domains did NOT verify — see the lines above. Non-fatal; the next boot re-runs this hook." >&2
+  fi
+}
+# <<< reconcile_trusted_domains (WARP-1688)
+
+reconcile_trusted_domains
+
 if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
   # Connector wiring must not abort shared-space provisioning above; every
   # step is isolated (`if` + `|| true`) so a missing/incompatible connector

@@ -120,6 +120,31 @@ const RULES: readonly RedactionRule[] = [
       `${header}${sep}${REDACTION_PLACEHOLDER}`,
   },
   {
+    // WARP-1688 — the richdocuments DIRECT-EDITING token, which lives in a URL
+    // PATH SEGMENT rather than a header or an assignment: none of the shapes
+    // above can see it.
+    //
+    // `/…/apps/richdocuments/direct/<token>` renders the editor with NO cookie
+    // and NO Authorization header, so the URL IS the credential for as long as
+    // it lives (docs/THREAT_MODEL.md T1.8, accepted risk R6 — "must never be
+    // logged"). It lands in logs without anyone writing a log statement: the
+    // gateway has no `access_log` directive so nginx logs `$request` verbatim,
+    // and `nextcloud:29-apache` symlinks its Apache access log to stdout while
+    // `nextcloud` sits in the collector's DEFAULT_SERVICES. A bundle pulled
+    // during an active editing session would otherwise carry live credentials
+    // into a downloadable ZIP.
+    //
+    // The ROUTE is preserved and only the token replaced — an access log with
+    // the path scrubbed away is useless for the editor problem the bundle was
+    // pulled for. Matches both route shapes (`/index.php/apps/…` and the
+    // pretty-URL `/apps/…`); the token class stops at `?`, `#`, quote or
+    // whitespace so a following query string or the access log's ` HTTP/1.1"`
+    // stays readable.
+    name: "richdocuments-direct-token",
+    pattern: /((?:\/index\.php)?\/apps\/richdocuments\/direct\/)([^\s"'?#]+)/gi,
+    replace: (_m, route: string) => `${route}${REDACTION_PLACEHOLDER}`,
+  },
+  {
     // Sensitive KEY=value or KEY: value (env dumps, structured logs). The value
     // may be bare, single- or double-quoted. We keep the key + the operator so
     // the line stays legible; only the value is replaced.

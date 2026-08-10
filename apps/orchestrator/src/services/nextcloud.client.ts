@@ -1701,6 +1701,111 @@ export async function ncGetFileId(
   return m ? parseInt(m[1], 10) : null;
 }
 
+// ── Document editor: richdocuments direct-editing token (WARP-1688) ──
+
+/**
+ * Request budget for the direct-editing mint (WARP-1688).
+ *
+ * 5s, deliberately longer than docServerHealthy()'s 3s probe: the mint WRITES
+ * (richdocuments persists a token row), so it is legitimately slower than a
+ * read under load. Short enough that a wedged Nextcloud degrades the editor to
+ * the connector page inside a request the user is still waiting on, rather than
+ * stalling it.
+ *
+ * Scoped to THIS call. The other fetches in this module are unbounded and stay
+ * that way here — retrofitting them is its own change with its own blast
+ * radius, not a rider on this one.
+ */
+const NC_DIRECT_EDIT_MINT_TIMEOUT_MS = 5000;
+
+/**
+ * WARP-1688 — mint a SESSION-FREE richdocuments editor URL for `fileId`.
+ *
+ * The dashboard embeds the editor in an iframe served from the DASHBOARD's
+ * origin, where the browser holds no Nextcloud session cookie. The ordinary
+ * connector page (`/index.php/apps/richdocuments/index?fileId=…`) therefore
+ * bounces to Nextcloud's login instead of rendering — which is what made the
+ * embed unusable even after WARP-1686 landed the engine itself.
+ *
+ * richdocuments ships the escape hatch: its OCS `createDirect` endpoint
+ * (`POST /ocs/v2.php/apps/richdocuments/api/v1/document`, route table
+ * `apps/richdocuments/appinfo/routes.php`) mints a short-lived direct-editing
+ * token and returns `ocs.data.url` pointing at `directView#show`
+ * (`GET /index.php/apps/richdocuments/direct/{token}`). That page renders the
+ * real editor with NO cookies and NO Authorization header.
+ *
+ * The mint is performed AS THE CALLER (their per-user token — the same
+ * credential `ncGetFileId` uses), never with the admin credential, so the
+ * token inherits exactly that user's permissions on the file. Nextcloud, not
+ * the orchestrator, remains the authority on what the token may do.
+ *
+ * Returns `null` — never throws — on ANY failure (non-2xx, non-JSON body,
+ * missing `data.url`, transport error). The caller degrades to the ordinary
+ * connector URL: a degraded editor beats a hard 500.
+ *
+ * NOTE: the returned URL is ABSOLUTE against Nextcloud's INTERNAL origin
+ * (observed: `http://localhost/…`), which no browser can resolve. Callers MUST
+ * re-base it onto the gateway's browser-facing Nextcloud path — see
+ * `docserver.client.ts`.
+ */
+export async function ncCreateRichdocumentsDirectUrl(
+  token: string,
+  fileId: number
+): Promise<string | null> {
+  const url = ocsUrl("/ocs/v2.php/apps/richdocuments/api/v1/document");
+  // BOUNDED (WARP-1688). "Degrade to the connector URL instead of 500ing" holds
+  // for a Nextcloud that FAILS, but a bare fetch would not save us from one
+  // that HANGS: the whole editor-session request would stall behind it, which
+  // is a worse outcome for the user than the fallback this call exists to
+  // enable. The abort rejects into the catch below, so a hang takes the exact
+  // same degraded path as a refused connection. Same AbortController shape as
+  // docServerHealthy(), with a longer budget: minting writes a row in
+  // Nextcloud, where the health probe only reads.
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    NC_DIRECT_EDIT_MINT_TIMEOUT_MS
+  );
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...ocsHeaders(token),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ fileId: String(fileId) }).toString(),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      logger.warn(
+        { status: resp.status, fileId },
+        "richdocuments createDirect failed — falling back to the connector page"
+      );
+      return null;
+    }
+    const body = (await resp.json()) as {
+      ocs?: { data?: { url?: unknown } };
+    };
+    const direct = body?.ocs?.data?.url;
+    if (typeof direct !== "string" || direct.length === 0) {
+      logger.warn(
+        { fileId },
+        "richdocuments createDirect returned no data.url — falling back to the connector page"
+      );
+      return null;
+    }
+    return direct;
+  } catch (err) {
+    logger.warn(
+      { err, fileId },
+      "richdocuments createDirect errored — falling back to the connector page"
+    );
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * WARP-883 (ADR-027 WS-5) — does a directory exist in this user's WebDAV home?
  *

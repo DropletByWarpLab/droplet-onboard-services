@@ -70,9 +70,26 @@ MIIEPLANTEDprivatekeymaterialmustnotleak0000000000
 -----END PRIVATE KEY-----
 EOF
 
+# WARP-1688 — the richdocuments DIRECT-EDITING token is bearer-equivalent for
+# its lifetime (docs/THREAT_MODEL.md T1.8 / accepted risk R6: "must never be
+# logged"), and it rides in a URL PATH SEGMENT — a shape none of the rules
+# above match. It reaches logs by two routes, so both are planted here as REAL
+# access-log lines rather than a synthetic string:
+#   * the gateway has no `access_log` directive, so nginx logs `$request`
+#     verbatim in the combined format, and
+#   * nextcloud:29-apache symlinks its Apache access log to stdout, and
+#     `nextcloud` is in DEFAULT_SERVICES.
+# A bundle pulled during an active editing session would otherwise carry live
+# credentials into a downloadable ZIP.
+cat > "$FIXDIR/nextcloud.log" <<'EOF'
+nextcloud apache up
+192.168.9.14 - - [09/Aug/2026:21:15:04 +0000] "GET /index.php/apps/richdocuments/direct/pLaNtEdDiReCtToKeN0123456789abcd HTTP/1.1" 200 31842 "-" "Mozilla/5.0"
+192.168.9.14 - - [09/Aug/2026:21:15:05 +0000] "GET /apps/richdocuments/direct/pRettyUrlDirectToken9876543210zyxw?requesttoken=abc HTTP/1.1" 200 512 "-" "Mozilla/5.0"
+EOF
+
 run_collect() {
   DROPLET_LOGS_FIXTURE_DIR="$FIXDIR" \
-  DROPLET_LOGS_SERVICES="orchestrator ai-gateway" \
+  DROPLET_LOGS_SERVICES="orchestrator ai-gateway nextcloud" \
     bash "$COLLECT" "$@"
 }
 
@@ -88,8 +105,8 @@ fi
 # Capture once for the content assertions.
 OUT="$(run_collect 24 "" 2>/dev/null || true)"
 
-if echo "$OUT" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert isinstance(d.get("services"),list) and len(d["services"])==2' 2>/dev/null; then
-  pass "bundle has both services"
+if echo "$OUT" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert isinstance(d.get("services"),list) and len(d["services"])==3' 2>/dev/null; then
+  pass "bundle has all three services"
 else
   fail "bundle missing services array / wrong count"
 fi
@@ -110,6 +127,10 @@ assert_absent "pgpass-supersecret"                                  "DB URL pass
 assert_absent "redis-empty-user-pw-5544"                            "REDIS_URL empty-username password"
 assert_absent "Sup3rSecretValue!"                                   "password= value"
 assert_absent "MIIEPLANTEDprivatekeymaterialmustnotleak0000000000"  "PEM key body"
+# WARP-1688 — bearer-equivalent credential in a URL PATH SEGMENT (both the
+# index.php and pretty-URL route shapes).
+assert_absent "pLaNtEdDiReCtToKeN0123456789abcd"                    "richdocuments direct token (index.php route)"
+assert_absent "pRettyUrlDirectToken9876543210zyxw"                  "richdocuments direct token (pretty-URL route)"
 
 if echo "$OUT" | grep -qF "[REDACTED]"; then
   pass "redaction placeholder present"
@@ -122,6 +143,15 @@ if echo "$OUT" | grep -qF "orchestrator listening on"; then
   pass "non-secret log context preserved"
 else
   fail "non-secret context was lost"
+fi
+
+# The direct-editing redaction must keep the ROUTE visible — an access log with
+# the path scrubbed away is useless for diagnosing the editor, which is exactly
+# what these bundles get pulled for.
+if echo "$OUT" | grep -qF "apps/richdocuments/direct/"; then
+  pass "direct-editing route still visible after redaction (token only)"
+else
+  fail "redaction removed the whole route, not just the token"
 fi
 
 # --- Phase 3: service filter -------------------------------------------------

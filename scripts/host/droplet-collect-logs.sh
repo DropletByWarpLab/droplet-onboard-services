@@ -97,9 +97,23 @@ redact() {
   #    line so no base64 key body survives. The range match spans lines.
   # 2) Single-line shapes: Bearer tokens, auth headers, sensitive KEY=value /
   #    KEY: value (PASSWORD|PASSWD|SECRET|TOKEN|KEY|PSK|CREDENTIAL|AUTH, with a
-  #    PUBLIC_KEY / KEY_ID carve-out), and URI userinfo credentials.
+  #    PUBLIC_KEY / KEY_ID carve-out), URI userinfo credentials, and the
+  #    richdocuments direct-editing token.
+  #
+  # WARP-1688 — that last one lives in a URL PATH SEGMENT, which none of the
+  # other shapes can see. `/…/apps/richdocuments/direct/<token>` renders the
+  # editor with NO cookie and NO Authorization header, so the URL IS the
+  # credential while it lives (docs/THREAT_MODEL.md T1.8 / R6 — "must never be
+  # logged"). It arrives here unwritten-by-anyone: the gateway has no
+  # `access_log` directive so nginx logs `$request` verbatim, and
+  # `nextcloud:29-apache` symlinks its Apache access log to stdout while
+  # `nextcloud` is in DEFAULT_SERVICES above. The ROUTE is kept and only the
+  # token replaced, so the line still says what was requested.
+  # Mirrors the `richdocuments-direct-token` rule in log-redaction.ts — keep
+  # the two in sync.
   sed -E \
     -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\'"$REDACT_PLACEHOLDER (private key)" \
+    -e 's@((/index\.php)?/apps/richdocuments/direct/)[^[:space:]"'"'"'?#]+@\1'"$REDACT_PLACEHOLDER"'@gI' \
     -e 's/(\bBearer[[:space:]]+)[A-Za-z0-9._+/=-]{8,}/\1'"$REDACT_PLACEHOLDER"'/g' \
     -e 's/((X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)[[:space:]]*[:=][[:space:]]*)[^[:space:]",;]{6,}/\1'"$REDACT_PLACEHOLDER"'/gI' \
     -e 's/(([A-Za-z][A-Za-z0-9+.-]*):\/\/[^[:space:]:\/@]*:)[^[:space:]@\/]+(@)/\1'"$REDACT_PLACEHOLDER"'\3/g' \

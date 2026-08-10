@@ -31,10 +31,129 @@
 import { createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { config } from "../config.js";
-import { ncGetFileId } from "./nextcloud.client.js";
+import {
+  ncGetFileId,
+  ncCreateRichdocumentsDirectUrl,
+} from "./nextcloud.client.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("docserver-client");
+
+/**
+ * WARP-1688 — the ONLY path shape accepted from a richdocuments direct-editing
+ * mint. Matches both the default (`/index.php/apps/richdocuments/direct/…`) and
+ * the pretty-URL (`/apps/richdocuments/direct/…`) forms.
+ */
+const RICHDOCUMENTS_DIRECT_PATH = "/apps/richdocuments/direct/";
+
+/**
+ * WARP-1688 — re-base a richdocuments direct-editing URL onto the gateway's
+ * browser-facing Nextcloud path.
+ *
+ * richdocuments returns the URL ABSOLUTE against Nextcloud's own configured
+ * origin (observed on the box: `http://localhost/index.php/apps/richdocuments/
+ * direct/<token>`), which is a compose-internal address no browser can resolve
+ * — the exact WARP-882 class of bug WARP-1686 fixed for the connector URL. So
+ * only the PATH (+ query/fragment) survives, re-prefixed with
+ * NEXTCLOUD_PUBLIC_PATH. Staying path-relative keeps the editor same-origin
+ * with whatever hostname the user browsed in on (FQDN, .local, .lan).
+ *
+ * The result is fed straight into the dashboard's iframe `src`, so the shape is
+ * VERIFIED rather than trusted: anything that is not a richdocuments
+ * direct-view path returns null and the caller keeps the known-good connector
+ * URL. An off-origin absolute URL likewise cannot survive, since only the path
+ * is carried over — and a path that does not match the direct-view prefix is
+ * refused outright.
+ *
+ * The check is on `pathname` ALONE, deliberately. Testing the concatenated
+ * path+query+fragment would only require the literal to appear SOMEWHERE, so
+ * `/index.php/settings/admin?next=/apps/richdocuments/direct/` and
+ * `/index.php/login#/apps/richdocuments/direct/` would both pass and land in
+ * the iframe — the exact opposite of "refused outright". The query and fragment
+ * are still carried into the RETURNED value (richdocuments' route is
+ * `directView#show`, so the fragment is load-bearing); they just get no say in
+ * whether the URL is accepted.
+ */
+function rebaseDirectEditorUrl(
+  mintedUrl: string,
+  ncPublicBase: string,
+): string | null {
+  let parsed: URL;
+  try {
+    // The base is a throwaway: it only lets a path-relative mint parse. Any
+    // absolute input keeps its OWN path, and its origin is discarded below.
+    parsed = new URL(mintedUrl, "http://nextcloud.invalid");
+  } catch {
+    return null;
+  }
+  // Decide on the PATH only…
+  if (!parsed.pathname.startsWith("/")) return null;
+  if (!parsed.pathname.includes(RICHDOCUMENTS_DIRECT_PATH)) return null;
+  // …then carry the query + fragment through untouched.
+  return `${ncPublicBase}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+/**
+ * WARP-1688 — the path words a minted URL may reveal in a log line.
+ *
+ * Fixed Nextcloud routing literals only. A direct-editing token can never BE
+ * one of these, which is what makes the redaction below safe by construction
+ * rather than by pattern-matching what a token "looks like".
+ */
+const LOGGABLE_PATH_SEGMENTS = new Set([
+  "index.php",
+  "apps",
+  "richdocuments",
+  "theming",
+  "direct",
+  "directedit",
+  "core",
+  "dist",
+  "ocs",
+  "v2.php",
+  "v1",
+  "document",
+]);
+
+/**
+ * WARP-1688 — describe a minted direct-editing URL for a LOG line without
+ * revealing it.
+ *
+ * The direct-editing URL is BEARER-EQUIVALENT for its lifetime: whoever holds
+ * it can open that file with no cookie and no Authorization header
+ * (docs/THREAT_MODEL.md T1.8, accepted risk R6 — "must never be logged,
+ * screenshotted into a ticket, or pasted into chat"). Logging it at warn level
+ * would put a working credential into the orchestrator's log.
+ *
+ * Today the only call site fires when the shape check REFUSED the URL, so a
+ * live token would not reach it — but that is INCIDENTAL. If richdocuments
+ * changes its path layout in a future Nextcloud major, EVERY mint fails the
+ * check and that same line starts emitting live tokens. So the redaction is
+ * unconditional and structural: each path segment survives only if it is a
+ * known Nextcloud routing literal, and everything else becomes `*`.
+ *
+ * The result is still diagnosable — an engineer sees WHICH shape was refused
+ * (`/index.php/apps/richdocuments/*`) plus the length, which is what the
+ * "richdocuments changed its route" investigation actually needs.
+ */
+function describeMintedUrl(mintedUrl: string | null): string {
+  if (mintedUrl === null) return "none";
+  let shape: string;
+  try {
+    const parsed = new URL(mintedUrl, "http://nextcloud.invalid");
+    shape = parsed.pathname
+      .split("/")
+      .map((segment) =>
+        segment === "" || LOGGABLE_PATH_SEGMENTS.has(segment) ? segment : "*",
+      )
+      .join("/");
+  } catch {
+    return `<unparseable ${mintedUrl.length} chars>`;
+  }
+  // The query string and fragment are dropped WHOLESALE — richdocuments carries
+  // a requesttoken there, and there is no diagnostic value worth the risk.
+  return `${shape} (${mintedUrl.length} chars)`;
+}
 
 /** Editor mode decided SERVER-SIDE by the route layer; never trusted from the client. */
 export type DocEditorMode = "edit" | "view";
@@ -185,10 +304,52 @@ export async function ncMintEditorSession(
   // path-relative by default so the editor stays same-origin with whatever
   // hostname the user browsed in on (FQDN, droplet-ai.local, .lan).
   const ncPublicBase = config.NEXTCLOUD_PUBLIC_PATH.replace(/\/$/, "");
-  const editorUrl =
+  const connectorUrl =
     config.DOCS_ENGINE === "onlyoffice"
       ? `${ncPublicBase}/index.php/apps/onlyoffice/${ncFileId}?mode=${requestedMode}`
       : `${ncPublicBase}/index.php/apps/richdocuments/index?fileId=${ncFileId}`;
+
+  // WARP-1688 — SESSION-FREE embed, COLLABORA ONLY.
+  //
+  // The connector page above is session-bound: it needs a Nextcloud session
+  // cookie. The dashboard iframes it from the DASHBOARD's origin, where the
+  // browser has no such cookie, so the embed renders Nextcloud's LOGIN page
+  // instead of the document. richdocuments ships the way out — an OCS
+  // direct-editing token whose `/direct/{token}` page renders with no cookies
+  // and no auth at all (verified on the box: 200, the real editor, no login
+  // bounce). We mint one AS THE USER and iframe that instead.
+  //
+  // The OnlyOffice connector has NO equivalent direct-editing API, so its leg
+  // is deliberately left EXACTLY as WARP-882/WARP-1686 built it. There is no
+  // honest way to give that engine the same session-free embed here; faking
+  // one would only move the failure. DOCS_ENGINE=onlyoffice therefore keeps
+  // the session-bound connector page — a known, documented limitation rather
+  // than a silent difference.
+  //
+  // Every failure DEGRADES to the connector URL: a session-bound editor still
+  // works for a user who happens to hold a Nextcloud cookie, and it is always
+  // better than a 500 on a file the user asked to open.
+  let editorUrl = connectorUrl;
+  if (config.DOCS_ENGINE !== "onlyoffice") {
+    try {
+      const minted = await ncCreateRichdocumentsDirectUrl(token, ncFileId);
+      const rebased = minted ? rebaseDirectEditorUrl(minted, ncPublicBase) : null;
+      if (rebased) {
+        editorUrl = rebased;
+      } else {
+        // `mintedShape` is REDACTED, not the URL — see describeMintedUrl().
+        logger.warn(
+          { ncFileId, ncUser, mintedShape: describeMintedUrl(minted) },
+          "richdocuments direct-editing URL unusable — falling back to the session-bound connector page",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, ncFileId, ncUser },
+        "richdocuments direct-editing mint threw — falling back to the session-bound connector page",
+      );
+    }
+  }
 
   // `documentKey` namespaces the co-authoring session in the engine: the engine
   // treats two opens with the SAME documentKey as ONE shared live document

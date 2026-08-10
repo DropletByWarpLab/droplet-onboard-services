@@ -43,6 +43,7 @@ import {
   ncListOutboundShares,
   ncEnsureGroup,
   ncDeleteFile,
+  ncCreateRichdocumentsDirectUrl,
 } from "../services/nextcloud.client.js";
 
 /**
@@ -1269,5 +1270,163 @@ describe("nextcloud.client — WebDAV URL percent-encoding", () => {
       expect(entries[0].name).toBe("résumé #1 100%.txt");
       expect(entries[0].path).toBe("/docs/résumé #1 100%.txt");
     });
+  });
+});
+
+/**
+ * WARP-1688 — richdocuments DIRECT-EDITING token.
+ *
+ * The dashboard's embedded editor iframes a Nextcloud page from the DASHBOARD's
+ * origin, where the user has no Nextcloud session cookie — so the connector page
+ * (`/index.php/apps/richdocuments/index?fileId=…`) bounces to NC's login. The
+ * richdocuments app ships a session-free path for exactly this: OCS
+ * `POST /ocs/v2.php/apps/richdocuments/api/v1/document` with a `fileId` mints a
+ * one-shot direct-editing token, and `GET /direct/{token}` renders the real
+ * editor with NO cookies and NO auth.
+ *
+ * Verified against the live connector (richdocuments appinfo/routes.php:
+ * `OCS#createDirect` = POST /api/v1/document; `directView#show` = GET
+ * /direct/{token}); the minting call is made AS THE USER (their app-password
+ * token), so the resulting token carries that user's permissions.
+ */
+describe("nextcloud.client — ncCreateRichdocumentsDirectUrl (WARP-1688)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("POSTs fileId to the richdocuments OCS endpoint with the OCS headers and the caller's token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        json: {
+          ocs: {
+            meta: { status: "ok", statuscode: 200 },
+            data: { url: "http://localhost/index.php/apps/richdocuments/direct/abc123" },
+          },
+        },
+      })
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const url = await ncCreateRichdocumentsDirectUrl("token123", 4242);
+
+    expect(url).toBe("http://localhost/index.php/apps/richdocuments/direct/abc123");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, init] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe(
+      "http://nextcloud.test/ocs/v2.php/apps/richdocuments/api/v1/document"
+    );
+    expect(init.method).toBe("POST");
+    // As the USER — never the admin basic credential: the direct token
+    // inherits the minting account's permissions.
+    expect(init.headers.Authorization).toBe("Bearer token123");
+    expect(init.headers["OCS-APIRequest"]).toBe("true");
+    expect(init.headers.Accept).toBe("application/json");
+    expect(init.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(String(init.body)).toBe("fileId=4242");
+  });
+
+  it("returns null on a non-2xx OCS response (caller falls back, never 500s)", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 403 })) as unknown as typeof fetch;
+
+    await expect(ncCreateRichdocumentsDirectUrl("t", 1)).resolves.toBeNull();
+  });
+
+  it("returns null when the OCS envelope carries no data.url", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      mockResponse({ ok: true, status: 200, json: { ocs: { meta: { statuscode: 200 } } } })
+    ) as unknown as typeof fetch;
+
+    await expect(ncCreateRichdocumentsDirectUrl("t", 1)).resolves.toBeNull();
+  });
+
+  it("returns null (never throws) when the response is not JSON", async () => {
+    const resp = mockResponse({ ok: true, status: 200 });
+    (resp.json as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new SyntaxError("Unexpected token <")
+    );
+    global.fetch = vi.fn().mockResolvedValue(resp) as unknown as typeof fetch;
+
+    await expect(ncCreateRichdocumentsDirectUrl("t", 1)).resolves.toBeNull();
+  });
+
+  it("returns null (never throws) when the fetch itself rejects", async () => {
+    global.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+
+    await expect(ncCreateRichdocumentsDirectUrl("t", 1)).resolves.toBeNull();
+  });
+
+  /**
+   * WARP-1688 (QA finding) — "degrade instead of 500" holds for a FAILING
+   * Nextcloud but not for a HUNG one: a bare fetch with no timeout leaves the
+   * whole editor-session request stalled behind it, which is worse for the user
+   * than the connector-page fallback this function exists to enable. Bound it,
+   * and let the abort land on the same fallback path as any other failure.
+   */
+  it("sends an AbortSignal so the mint can be bounded", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        json: { ocs: { data: { url: "http://localhost/x" } } },
+      })
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ncCreateRichdocumentsDirectUrl("t", 1);
+
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal.aborted).toBe(false);
+  });
+
+  it("degrades to null when Nextcloud HANGS — the request is aborted, not awaited forever", async () => {
+    vi.useFakeTimers();
+    try {
+      // A Nextcloud that accepts the connection and then never answers. The
+      // ONLY thing that can end this promise is our own abort.
+      const fetchMock = vi.fn(
+        (_url: unknown, init: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              const err = new Error("This operation was aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const pending = ncCreateRichdocumentsDirectUrl("t", 1);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await expect(pending).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the timeout on the success path (no dangling timer per mint)", async () => {
+    vi.useFakeTimers();
+    try {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { data: { url: "http://localhost/x" } } },
+        })
+      ) as unknown as typeof fetch;
+
+      await ncCreateRichdocumentsDirectUrl("t", 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
