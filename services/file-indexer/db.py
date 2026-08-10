@@ -214,17 +214,22 @@ def delete_index_status(user_id: str, path: str) -> None:
         )
 
 
-def fetch_index_status_map() -> dict[tuple[str, str], tuple[str, float]]:
-    """Return {(userId, path): (status, updatedAt-epoch-seconds)} for every
-    row. Used by the startup reconcile scan to decide which on-disk files
-    still need indexing without a per-file query."""
+def fetch_index_status_map() -> dict[tuple[str, str], tuple[str, float, Optional[str]]]:
+    """Return {(userId, path): (status, updatedAt-epoch-seconds, reason)}
+    for every row. Used by the startup reconcile scan to decide which
+    on-disk files still need indexing without a per-file query.
+
+    WARP-1842: `reason` rides along so the scan can retry `skipped` rows
+    selectively (only reasons the current code genuinely resolves, e.g.
+    `unknown_type` after the Office/ODF MIME registration) — never the
+    whole skipped corpus."""
     with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             'SELECT "userId", "path", "status"::text, '
-            'EXTRACT(EPOCH FROM "updatedAt") FROM "FileIndexStatus"'
+            'EXTRACT(EPOCH FROM "updatedAt"), "reason" FROM "FileIndexStatus"'
         )
         rows = cur.fetchall()
-    return {(r[0], r[1]): (r[2], float(r[3])) for r in rows}
+    return {(r[0], r[1]): (r[2], float(r[3]), r[4]) for r in rows}
 
 
 def delete_chunks_for_brain_item(brain_item_id: str) -> None:

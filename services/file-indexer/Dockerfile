@@ -23,6 +23,12 @@ WORKDIR /app
 #  - tesseract-ocr + tesseract-ocr-eng: WARP-201 image OCR extractor
 #  - ffmpeg: WARP-197 audio extractor (faster-whisper decodes via ffmpeg)
 #  - libmagic1: WARP-199 email + WARP-200 archive (python-magic content-sniff)
+#  - media-types: WARP-1842 — /etc/mime.types for `mimetypes`; the slim base
+#    ships NO system MIME tables and Python 3.12's built-in table lacks
+#    OOXML/ODF, so Office docs guessed (None, None) and skipped as
+#    unknown_type. watcher.py registers the Office/ODF types in code (the
+#    real fix); this keeps the rest of the OS table populated for
+#    everything else.
 #  - openssl + ca-certificates: WARP-229 FIPS provider activation
 # WARP-1065: BuildKit cache mounts — apt archives + lists persist across
 # rebuilds, so a layer-busted rebuild re-executes every instruction but skips
@@ -41,6 +47,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       tesseract-ocr tesseract-ocr-eng \
       ffmpeg \
       libmagic1 \
+      media-types \
       openssl ca-certificates
 
 COPY services/file-indexer/requirements.txt .
