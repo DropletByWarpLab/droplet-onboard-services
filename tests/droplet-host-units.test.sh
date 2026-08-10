@@ -14,7 +14,8 @@
 # These tests drive the detector + refresher against a PATH-stubbed systemctl
 # and a fixture tree with controlled mtimes — no root, no systemd, no box.
 #
-# Runtime: < 20 seconds.
+# Runtime: < 10 seconds. (The suite is fork-bound, not compute-bound — on a
+# slow-fork host like Windows Git Bash the same run takes ~2 minutes.)
 # =============================================================================
 set -uo pipefail
 

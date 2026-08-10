@@ -227,14 +227,28 @@ load_unit() { # <unit>
     "$1" 2>/dev/null)"
 }
 
-# First value of a property from the cached show output.
+# First value of a property from the cached show output. Pure bash on purpose:
+# this runs ~10x per unit and a grep+cut pair per call turned a 10-second sweep
+# into a two-minute one on a slow-fork host.
 prop() { # <name>
-  printf '%s\n' "$UNIT_SHOW" | grep -m1 "^$1=" | cut -d= -f2-
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "$1="*) printf '%s' "${line#*=}"; return 0 ;;
+    esac
+  done <<< "$UNIT_SHOW"
+  return 0
 }
 
 # Every value line of a (possibly repeated) property.
 prop_all() { # <name>
-  printf '%s\n' "$UNIT_SHOW" | grep "^$1=" | cut -d= -f2-
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "$1="*) printf '%s\n' "${line#*=}" ;;
+    esac
+  done <<< "$UNIT_SHOW"
+  return 0
 }
 
 # systemd renders Exec* as:
@@ -273,7 +287,12 @@ py_tree() { # <dir>
 }
 
 is_shell_script() { # <file>
-  head -c 200 "$1" 2>/dev/null | head -1 | grep -qE '^#!.*\b(ba)?sh\b'
+  local first=""
+  read -r first < "$1" 2>/dev/null || return 1
+  case "$first" in
+    '#!'*sh | '#!'*sh\ *) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Absolute paths under the payload roots that a launcher script references.

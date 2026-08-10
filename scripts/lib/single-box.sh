@@ -318,6 +318,26 @@ EOF
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
 
+  # --- WARP-1829 host-unit refresh ----------------------------------------
+  # Host units execute their source out of the git working tree
+  # (droplet-device-bridge.service runs `/usr/bin/python3
+  # <repo>/services/oled-display/device-bridge.py`), and the box's refresh
+  # restarts CONTAINERS only — so a merged fix could sit inert in a running
+  # process indefinitely while the repo, the file on disk and `systemctl
+  # status` all looked correct. This ships BOTH halves:
+  #   * /usr/local/sbin/droplet-host-units — `check` is the standalone
+  #     detector (ExecMainStartTimestamp vs the mtime of the sources the
+  #     unit executes); `refresh` restarts exactly what is stale.
+  #   * droplet-host-units.service — the on-demand hook the refresh flow
+  #     starts. Deliberately NOT enabled and given NO timer: the standing
+  #     detection rides the existing droplet-watchdog.timer pass as the
+  #     `host_unit_staleness` check, so there is one scheduler, not two.
+  sudo install -m 0755 "$host_src/droplet-host-units.sh" \
+    /usr/local/sbin/droplet-host-units
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-units.service" \
+    /etc/systemd/system/droplet-host-units.service
+  log_success "Installed /usr/local/sbin/droplet-host-units (+ on-demand unit)"
+
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
   # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged

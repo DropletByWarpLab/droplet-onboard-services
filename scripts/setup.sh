@@ -613,6 +613,34 @@ main() {
     install_systemd_service
   fi
 
+  # --- Leave no host unit running stale code (WARP-1829) ---
+  # Host units execute their source straight out of THIS checkout —
+  # droplet-device-bridge.service runs
+  # `/usr/bin/python3 $REPO_ROOT/services/oled-display/device-bridge.py` —
+  # and everything above has just refreshed that source. Python reads a file
+  # once, at process start, so a host unit still running from before this
+  # provision would keep running the old code forever, silently: the file on
+  # disk is correct and `systemctl status` says active (running). Only the
+  # process disagrees.
+  #
+  # This restarts ONLY units whose sources actually moved, one attempt each,
+  # verifying every one came back (scripts/host/droplet-host-units.sh). On a
+  # normal provision it is a NO-OP — install-device-bridge.sh already
+  # restarted the bridge and install_single_box_host_integration already
+  # restarted host-net/egress-audit, so nothing is stale by the time we get
+  # here. It earns its keep on every path that updates the checkout WITHOUT
+  # re-running those installers, which is how the bug shipped in the first
+  # place.
+  #
+  # Non-fatal: the script logs CRITICAL for any unit that does not come back
+  # and the droplet-watchdog `host_unit_staleness` check keeps reporting it —
+  # that must not flip an otherwise-good provision into a failed run.
+  if [ -x /usr/local/sbin/droplet-host-units ]; then
+    log_info "Checking for host units left running stale code (WARP-1829)..."
+    sudo /usr/local/sbin/droplet-host-units refresh \
+      || log_warn "A host unit did not come back after its restart — run 'sudo droplet-host-units check' and 'systemctl status <unit>'"
+  fi
+
   # --- Leave nothing stale on the box ---
   # The .env safety copies secrets.sh writes mid-run (pre-migration backups,
   # torn-file quarantines, staging strays) exist so an INTERRUPTED run can
