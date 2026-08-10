@@ -17,4 +17,4 @@ qrcode>=7.4
 # "FIPS not enabled" even where OpenSSL is genuinely enforcing. Same
 # fix class as WARP-1018 (file-indexer); kept in lockstep with
 # services/ai-gateway's pin.
-cryptography>=49.0.0
+cryptography>=50.0.0
