@@ -167,7 +167,7 @@ jobs:
       # docker-build.yml writes to ghcr.io/<repo>/buildcache:<image> on every
       # push to main. Best-effort: a cold/missing cache only slows the build.
       - name: Log in to GHCR (layer cache, read-only)
-        uses: docker/login-action@v4.5.2
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
