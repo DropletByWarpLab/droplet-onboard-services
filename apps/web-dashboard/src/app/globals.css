@@ -868,3 +868,34 @@
     box-shadow: 0 0 0 1px var(--brand) !important;
   }
 }
+
+/* ============================================================
+   Phone form controls — the 16px floor
+   ============================================================ */
+
+/* iOS Safari zooms the viewport when a control under 16px takes focus, and it
+   does NOT zoom back when the control blurs. Everything genuinely overflows and
+   pans in that state, which is why a photograph can show overflow the CSS says
+   is impossible (04-coding-standards/mobile-web-layout.md §4).
+
+   WARP-1701 fixed five controls at their source; they came back. Measured at
+   375px on this build: the /chat composer 15px and its search 13px and model
+   select 12px, the Home composer 15px and its notes widget 14px, the shell
+   `.search` 13.5px — i.e. the two PRIMARY input surfaces of the product both
+   trip it. Two more are set with an inline `style` (RoleBuilderSheet,
+   SelectionToolbar), which no selector can beat.
+
+   Hence one floor, declared once, rather than a per-control chase that has now
+   regressed twice. `!important` is what makes it hold against both the inline
+   styles and the deeper component selectors; it is scoped to phone widths, so
+   the desktop type scale is untouched. Matches the reduced-motion block above,
+   which takes the same approach for the same reason.
+
+   Guarded by src/__tests__/shell/mobile-layout-contract.test.ts. */
+@media (max-width: 720px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}

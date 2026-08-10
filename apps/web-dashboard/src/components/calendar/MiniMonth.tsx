@@ -39,21 +39,29 @@ export function MiniMonth({ cursor, eventDays, onCursor, onMonthNav }: Props) {
           <button
             onClick={() => navCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}
             aria-label="Previous month"
-            className="inline-flex items-center justify-center h-6 w-6 rounded text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
+            className="inline-flex items-center justify-center h-6 w-6 max-lg:h-11 max-lg:w-11 rounded text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
           >
             <ChevronLeft size={13} />
           </button>
           <button
             onClick={() => navCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}
             aria-label="Next month"
-            className="inline-flex items-center justify-center h-6 w-6 rounded text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
+            className="inline-flex items-center justify-center h-6 w-6 max-lg:h-11 max-lg:w-11 rounded text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
           >
             <ChevronRight size={13} />
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-7 gap-0.5">
+      {/* The gap is set here rather than left to `gap-0.5` because this grid
+          renders inside `.droplet-shell`, whose `.grid { gap: 16px }` primitive
+          is specificity (0,2,0) and silently beats the (0,1,0) utility — the
+          same collision class as WARP-1792. Measured at 375px the 16px gap
+          squeezed each day cell to 29.5px instead of 41.6px. Inline is the
+          idiom already used for this card's padding, and it is the only thing
+          that outranks the primitive without restyling the 58 other files that
+          ask for a grid gap this way (tracked separately). */}
+      <div className="grid grid-cols-7" style={{ gap: "2px" }}>
         {DOW.map((d, i) => (
           <div
             key={i}
@@ -77,7 +85,9 @@ export function MiniMonth({ cursor, eventDays, onCursor, onMonthNav }: Props) {
               aria-label={d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
               aria-current={isToday ? "date" : undefined}
               className={[
-                "relative text-center type-caption-1 tabular-nums py-1 rounded transition-colors",
+                // max-lg:min-h-[44px] — 24px tall on a phone, under the 44px
+                // touch minimum (04-coding-standards/mobile-web-layout.md).
+                "relative text-center type-caption-1 tabular-nums py-1 rounded transition-colors max-lg:min-h-[44px]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]",
                 isToday
                   ? "font-semibold"

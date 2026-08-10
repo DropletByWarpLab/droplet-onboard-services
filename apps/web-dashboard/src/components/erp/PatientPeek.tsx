@@ -66,7 +66,7 @@ export function PatientPeek({
               {full?.name ?? "Patient"}
             </h2>
           </div>
-          <button type="button" className="p-1.5 rounded-sm text-label-tertiary hover:text-label-primary" onClick={onClose} aria-label="Close">
+          <button type="button" className="p-1.5 rounded-sm max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11 text-label-tertiary hover:text-label-primary" onClick={onClose} aria-label="Close">
             <X size={18} />
           </button>
         </div>

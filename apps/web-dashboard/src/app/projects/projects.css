@@ -264,6 +264,10 @@
 
 @media (max-width: 720px) {
   .pm-scope .pm-grid-kpi { grid-template-columns: repeat(2, 1fr); }
+  /* 34px is under the 44px touch minimum — see
+     04-coding-standards/mobile-web-layout.md. */
+  .pm-scope .pm-btn { height: 44px; }
+  .pm-scope .pm-search { height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

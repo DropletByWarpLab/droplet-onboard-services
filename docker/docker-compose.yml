@@ -1233,6 +1233,16 @@ services:
       - OPENWRT_HOST=${OPENWRT_HOST:-192.168.50.1}
       - OPENWRT_PORT=${OPENWRT_PORT:-80}
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
+      # Hardware-agnostic escape hatches (WARP-1845). WAN_DEVICE_NAME: empty =
+      # resolve the WAN netdev live from `network.interface.wan status` (the
+      # right answer on every shape; Pi=eth1, RB5009=p1) — set only if that
+      # resolution ever fails. DROPLET_MGMT_INTERFACES gates which interfaces
+      # the write routes refuse to touch without `force`; the fallback here
+      # must be the REAL default `lan,mgmt`, never empty — an empty value
+      # would silently disable the management-interface guard (the compose
+      # `${VAR:-}` empty-string-defeats-default trap).
+      - WAN_DEVICE_NAME=${WAN_DEVICE_NAME:-}
+      - DROPLET_MGMT_INTERFACES=${DROPLET_MGMT_INTERFACES:-lan,mgmt}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
       # No longer exposed via `docker inspect`.
       # WARP-1675 (ADR-033 edge-router shape): rpcd account for addressing an
