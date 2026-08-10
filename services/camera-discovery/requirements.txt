@@ -10,4 +10,4 @@ wsdiscovery==2.1.2
 # Pinned to the same version services/routing/requirements.txt uses.
 APScheduler==3.11.3
 # RSA-OAEP/PKCS1v15 for vendor_init.py (Hanwha first-run password encryption)
-cryptography==49.0.0
+cryptography==50.0.0
