@@ -260,7 +260,7 @@ export async function checkStorageNearFull(): Promise<NearFullCheck> {
   const biggest = summary.cameras.find((c) => c.usedBytes !== null);
   await recordActivity({
     kind: "camera",
-    severity: "warning",
+    severity: "warn",
     sourceIcon: "video",
     what: "Camera storage is nearly full",
     actor: { type: "system" },

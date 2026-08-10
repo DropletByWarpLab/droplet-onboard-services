@@ -257,7 +257,10 @@ describe("near-full warning is edge-triggered", () => {
     await checkStorageNearFull();
 
     const row = recordActivityMock.mock.calls[0][0];
-    expect(row.severity).toBe("warning");
+    // "warn", not "warning" — ActivitySeverityName is "ok"|"warn"|"err"|"info".
+    // Asserting the literal here is what keeps the mocked recordActivity from
+    // hiding a contract mismatch the way it did on the first pass.
+    expect(row.severity).toBe("warn");
     expect(row.refs.largestCamera).toBe("front_door");
     expect(row.refs.thresholdPercent).toBe(NEAR_FULL_RATIO * 100);
   });
