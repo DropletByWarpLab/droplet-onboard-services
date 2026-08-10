@@ -27,6 +27,16 @@ const PARTICIPANTS = [
   { userId: "u-carol", displayName: "Carol C", username: "carol" },
 ];
 
+// The card derives `started` from wall-clock time
+// (`new Date(startsAt).getTime() <= Date.now()`), which gates the Going /
+// Can't go buttons. An absolute default here is a time bomb: it passes until
+// the moment it names, then fails forever on every branch. That is exactly
+// what happened — a hardcoded 2026-08-10T14:30Z default went red at 14:30Z
+// and reded `main` plus every open PR's `node / web-dashboard` leg. Keep the
+// default RELATIVE and comfortably in the future; the tests that need a
+// started meeting already override it with an explicit `Date.now() - …`.
+const DEFAULT_STARTS_IN_MS = 60 * 60_000;
+
 function meeting(over: Partial<TeamChatMeeting> = {}): TeamChatMeeting {
   return {
     id: "meet-1",
@@ -34,7 +44,7 @@ function meeting(over: Partial<TeamChatMeeting> = {}): TeamChatMeeting {
     inviteMessageId: "m1",
     calendarEventId: null,
     title: "Budget review",
-    startsAt: "2026-08-10T14:30:00.000Z",
+    startsAt: new Date(Date.now() + DEFAULT_STARTS_IN_MS).toISOString(),
     durationMinutes: 45,
     location: "Kitchen",
     note: null,
