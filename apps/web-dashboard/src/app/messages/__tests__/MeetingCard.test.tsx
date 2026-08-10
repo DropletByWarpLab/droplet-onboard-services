@@ -27,6 +27,15 @@ const PARTICIPANTS = [
   { userId: "u-carol", displayName: "Carol C", username: "carol" },
 ];
 
+// The card hides the RSVP pills once a meeting has begun
+// (`started = startsAt <= Date.now()`, MeetingCard.tsx), so the default
+// fixture has to stay in the FUTURE relative to the run — an absolute
+// literal here silently becomes a past meeting the moment wall-clock
+// passes it, and every RSVP assertion below starts failing on a codebase
+// nobody touched. Cases that WANT a started/imminent meeting override
+// `startsAt` with their own relative offset, same as here.
+const ONE_HOUR_MS = 60 * 60_000;
+
 function meeting(over: Partial<TeamChatMeeting> = {}): TeamChatMeeting {
   return {
     id: "meet-1",
@@ -34,7 +43,7 @@ function meeting(over: Partial<TeamChatMeeting> = {}): TeamChatMeeting {
     inviteMessageId: "m1",
     calendarEventId: null,
     title: "Budget review",
-    startsAt: "2026-08-10T14:30:00.000Z",
+    startsAt: new Date(Date.now() + ONE_HOUR_MS).toISOString(),
     durationMinutes: 45,
     location: "Kitchen",
     note: null,
