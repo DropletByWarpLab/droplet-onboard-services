@@ -66,6 +66,20 @@ DEFAULT_CLOUD_JUDGE_MODEL = os.environ.get(
 )
 SEARCH_TIMEOUT_SEC = float(os.environ.get("RAGAS_SEARCH_TIMEOUT_SEC", "30"))
 
+# WARP-1860 — consecutive retrieval failures that abort the run.
+#
+# Auth, URL, and network breakage fail EVERY query identically, so once a
+# streak forms there is nothing left to measure: continuing spends the
+# synthesis LLM — the expensive part — on empty context and scores the lot
+# 0.0. A blanked SERVICE_TOKEN_RAG_EVAL did exactly that for 15 consecutive
+# nightly runs, each pinning the GPU for ~10 minutes to write an all-zero
+# baseline that reads identically to a genuine zero score.
+#
+# 3 tolerates the odd flaky query while catching systematic failure inside
+# the first few seconds. 0 disables the breaker, for lanes that legitimately
+# expect most queries to fail.
+SEARCH_ABORT_AFTER = int(os.environ.get("RAGAS_SEARCH_ABORT_AFTER", "3"))
+
 # WARP-1407 — baseline-envelope containment margin. aggregate_runs() clamps
 # every envelope's floor to min(sample means) − FLOOR_MARGIN (never above),
 # so a floor built from correlated back-to-back bootstrap runs (IQR ≈ 0)
@@ -153,6 +167,82 @@ def _internal_tls_context() -> ssl.SSLContext | None:
     return ctx
 
 
+class SearchUnavailable(Exception):
+    """Retrieval is systematically unavailable — abort instead of scoring.
+
+    Raised once SEARCH_ABORT_AFTER consecutive searches have failed. main()
+    turns it into a non-zero exit, so the appliance's run_once() raises
+    CalledProcessError and the scheduler records a durable FAILED record
+    carrying the reason — instead of a "successful" run full of zeros.
+
+    Deliberately NOT a RuntimeError: call_search() raises RuntimeError for a
+    single failed query and run()'s loop catches exactly that. Sharing the
+    base class would mean any future refactor that raised the breaker one
+    line further up got it silently swallowed by the very handler it exists
+    to escape.
+    """
+
+
+def _check_search_failure_streak(
+    consecutive: int, last_error: str, threshold: int | None = None
+) -> None:
+    """Trip the breaker once `consecutive` search failures reach the limit.
+
+    `threshold` defaults to SEARCH_ABORT_AFTER, resolved at call time rather
+    than as a default argument — Python would freeze the value at import and
+    make the constant untunable by tests and by env.
+    """
+    limit = SEARCH_ABORT_AFTER if threshold is None else threshold
+    if limit > 0 and consecutive >= limit:
+        raise SearchUnavailable(
+            f"{consecutive} consecutive retrieval failures — aborting before "
+            f"the synthesis LLM scores an empty corpus. Last error: "
+            f"{last_error}"
+        )
+
+
+# Env names carrying the service bearer, in precedence order. Compose hands
+# the rag-eval container the SAME secret under both: SERVICE_TOKEN_RAG_EVAL
+# arrives straight from `env_file: ../.env`, while ORCHESTRATOR_SERVICE_TOKEN
+# is an `environment:` entry resolved by ${...} substitution against
+# docker/.env. When that second file lacks the key the substitution yields ""
+# and — because `environment:` outranks `env_file:` — shadows a perfectly good
+# value sitting right there under the other name. WARP-1860: 15 consecutive
+# nightly runs 401'd on exactly that, so we read through to the survivor.
+_BEARER_ENV_NAMES = ("ORCHESTRATOR_SERVICE_TOKEN", "SERVICE_TOKEN_RAG_EVAL")
+
+
+def _resolve_bearer() -> tuple[str, str]:
+    """Return (token, source_env_name); ("", "") when no bearer is available.
+
+    Whitespace-only is not a credential — an env var set to spaces is a
+    misconfiguration, and sending `Bearer    ` just turns a clear 401
+    "missing" into a confusing 401 "invalid".
+    """
+    for name in _BEARER_ENV_NAMES:
+        token = (os.environ.get(name) or "").strip()
+        if token:
+            return token, name
+    return "", ""
+
+
+def _describe_auth_posture() -> str:
+    """One-line summary of how this run will authenticate — never the values.
+
+    An appliance running AUTH_ENABLED=true with no bearer 401s on every
+    query. Stating the posture up front means the first log line already
+    narrows the cause when a run trips the breaker seconds later, and naming
+    the SOURCE distinguishes "no secret anywhere" from "the expected env name
+    was blanked and we fell through to the other one".
+    """
+    _, source = _resolve_bearer()
+    eval_user = (os.environ.get("RAGAS_EVAL_USER") or "").strip()
+    return (
+        f"bearer={source or 'ABSENT'} "
+        f"eval_user={eval_user or 'ABSENT'}"
+    )
+
+
 def _build_search_request(
     api_url: str, variant: str, query: str, limit: int
 ) -> urllib.request.Request:
@@ -165,6 +255,9 @@ def _build_search_request(
 
       - ORCHESTRATOR_SERVICE_TOKEN: set and non-empty → sent as
         "Authorization: Bearer <token>" (the rag-eval service principal).
+        Falls back to SERVICE_TOKEN_RAG_EVAL, which compose delivers to the
+        same container via env_file and which therefore survives the
+        substitution blanking described on _BEARER_ENV_NAMES (WARP-1860).
       - RAGAS_EVAL_USER: set and non-empty → `user=<value>` joins the query
         string. The search route scopes retrieval to the CALLER's corpus and
         the service principal owns none, so the orchestrator accepts an
@@ -182,7 +275,7 @@ def _build_search_request(
     qs = urllib.parse.urlencode(params)
     url = f"{api_url}/api/admin/retrieval-eval/search?{qs}"
     headers: dict[str, str] = {}
-    token = os.environ.get("ORCHESTRATOR_SERVICE_TOKEN")
+    token, _source = _resolve_bearer()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return urllib.request.Request(url, headers=headers)
@@ -351,6 +444,7 @@ def run(
     print(f"   variant   = {variant}")
     print(f"   limit     = {limit}")
     print(f"   judge     = {judge}")
+    print(f"   auth      = {_describe_auth_posture()}")
 
     merged = load_queries_and_goldens(repo_root)
     print(f"   loaded    = {len(merged)} (query, golden) pairs")
@@ -364,16 +458,26 @@ def run(
     # down with no breadcrumb.
     n_search_errors = 0
     n_synthesis_errors = 0
+    # WARP-1860: a streak, not the total, is what proves systematic breakage
+    # — scattered failures across an otherwise healthy run are ordinary.
+    consecutive_search_errors = 0
     for i, row in enumerate(merged, 1):
         print(
             f"   [{i:>2}/{len(merged)}] {row['id']}: {row['user_input'][:60]}"
         )
         try:
             hits = call_search(api_url, variant, row["user_input"], limit)
+            consecutive_search_errors = 0
         except RuntimeError as e:
             print(f"      ! {e}", file=sys.stderr)
             hits = []
             n_search_errors += 1
+            consecutive_search_errors += 1
+            # Raises SearchUnavailable once the streak hits the limit, which
+            # propagates out of run() to main()'s non-zero exit. Deliberately
+            # BEFORE synthesize_answer below: the whole point is to not spend
+            # the LLM on a query whose context we already know is empty.
+            _check_search_failure_streak(consecutive_search_errors, str(e))
         # RAGAS context fields: retrieved_contexts (what the retriever
         # actually returned). When snippets are empty (older orchestrator
         # build, or chunk text was filtered), fall back to a path tag so
@@ -812,15 +916,24 @@ def main() -> int:
         else repo_root / args.out_md
     )
 
-    return run(
-        api_url=args.api_url,
-        variant=args.variant,
-        limit=args.limit,
-        judge=args.judge,
-        out_json=out_json,
-        out_md=out_md,
-        repo_root=repo_root,
-    )
+    try:
+        return run(
+            api_url=args.api_url,
+            variant=args.variant,
+            limit=args.limit,
+            judge=args.judge,
+            out_json=out_json,
+            out_md=out_md,
+            repo_root=repo_root,
+        )
+    except SearchUnavailable as e:
+        # WARP-1860: exit non-zero and write NO results pair. run_once()
+        # turns this into CalledProcessError, whose `.output` tail carries
+        # this message into the durable failed record — so the run shows up
+        # as failed-with-a-reason instead of a successful wall of zeros.
+        print(f"\n!! retrieval unavailable: {e}", file=sys.stderr)
+        print(f"!! auth posture: {_describe_auth_posture()}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
