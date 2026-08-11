@@ -1,6 +1,12 @@
 # ADR-036: The inference runtime becomes an abstraction — Docker Model Runner as a second backend behind one contract
 
-**Status:** Proposed (the Phase-0 hardware gate has not run — see §5. Nothing here is Accepted, and no default changes on merge.)
+**Status:** Accepted — and shipped as the default (WARP-1870, 2026-08-11).
+
+The Phase-0 hardware gate **has** run: it passed on the lab box 2026-08-08,
+measured in §5a. The lab box was flipped 2026-08-10, and WARP-1870 made DMR
+what a freshly provisioned box gets. §8's "ships dark" posture below describes
+the WARP-1772 state and is retained as history, not as current behaviour —
+see the note at the head of §8.
 **Date:** 2026-08-04
 **Deciders:** Engineering (WARP-1740 epic) — human gate required before any phase past 0b
 **Builds on:** [ADR-003 (LLM appliance simplification)](../../droplet-local-LLM/docs/ADR-003-llm-appliance-simplification.md) — **generalized, not superseded** (§1), [ADR-004 (tool-aware resilience)](../../droplet-local-LLM/docs/ADR-004-tool-aware-resilience.md)
@@ -166,7 +172,17 @@ DMR accepts `keep_alive` on `/api/chat`, and per-model context is configurable v
 
 **Decision:** residency policy becomes part of the runtime contract, not a compose env var. Each backend adapter is responsible for realising "keep the default model resident" using its own mechanism — daemon env for Ollama, per-model configuration for DMR. Phase 0's bench must measure **cold-start latency after idle** explicitly, because a runtime that is faster per token and colder on first touch is slower to the user, and the current benchmark would not notice.
 
-### 8. Ships dark — the constraint that governs every phase
+### 8. Ships dark — the constraint that governed every phase up to the flip
+
+> **SUPERSEDED 2026-08-11 (WARP-1870).** This section describes the WARP-1772
+> posture and is retained as the record of how the change was staged. It is no
+> longer current: Phase 0 passed (§5a), the lab box was flipped 2026-08-10, and
+> DMR is now what a freshly provisioned box gets. The reviewer test below —
+> *"grep the diff for any default that resolves to DMR and find none"* — was
+> the correct gate for Phase 1 and is exactly what WARP-1870 deliberately
+> inverted, with `scripts/lib/secrets.sh` writing `INFERENCE_RUNTIME=dmr`.
+> The discriminator discipline in this section still holds and still binds: the
+> backend is chosen by an explicit named value, never inferred from absence.
 
 Every change up to and including Phase 1 is **additive and opt-in**. With no configuration change, behaviour is byte-identical to today: the default backend is Ollama, the DMR path exists in code but is never taken, no default value anywhere selects it, and no existing call site changes shape. The backend is chosen by an **explicit discriminator** — a named value, never inferred from the absence of a setting, never from `is None`, never from "a DMR URL happens to be set" (the ApOnboardBackend discipline from ADR-035 §2, and the `compose ${VAR:-}` trap: an explicitly-empty env var is not an unset one). A reviewer should be able to `grep` the diff for any default that resolves to DMR and find none. **Flipping the default is Phase 2, it is its own ticket (WARP-1749), and it is gated on Phase 0 passing.**
 
