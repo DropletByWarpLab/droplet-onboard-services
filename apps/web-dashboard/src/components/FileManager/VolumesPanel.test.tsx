@@ -226,3 +226,62 @@ describe("VolumesPanel — clickable tiles (WARP-1338)", () => {
     expect(card.className).toMatch(/relative/);
   });
 });
+
+/**
+ * WARP-1876 — "there's a large empty region to the right of the Nvr
+ * storage card". The grid reserved three columns at xl regardless of how
+ * many volumes exist, so a box with one drive rendered a card and two
+ * columns of nothing. Columns are capped at the tile count.
+ */
+describe("VolumesPanel — the grid never reserves empty columns (WARP-1876)", () => {
+  function gridOf(): HTMLElement {
+    return screen.getByRole("list", { name: "Storage volumes" });
+  }
+
+  it("stays single-column for a single volume", () => {
+    useDrivesMock.mockReturnValue({
+      drives: [makeDrive({ displayName: "Nvr" })],
+      isLoading: false,
+      bridgeError: null,
+    });
+    usePoolsMock.mockReturnValue({ pools: [] });
+    render(<VolumesPanel />);
+
+    const cls = gridOf().className;
+    expect(cls).not.toMatch(/sm:grid-cols-2/);
+    expect(cls).not.toMatch(/xl:grid-cols-3/);
+  });
+
+  it("goes to two columns for two volumes, never three", () => {
+    useDrivesMock.mockReturnValue({
+      drives: [
+        makeDrive({ displayName: "Nvr", device: "/dev/sdb1", mount: "/mnt/a" }),
+        makeDrive({ displayName: "Media", device: "/dev/sdc1", mount: "/mnt/b" }),
+      ],
+      isLoading: false,
+      bridgeError: null,
+    });
+    usePoolsMock.mockReturnValue({ pools: [] });
+    render(<VolumesPanel />);
+
+    const cls = gridOf().className;
+    expect(cls).toMatch(/sm:grid-cols-2/);
+    expect(cls).not.toMatch(/xl:grid-cols-3/);
+  });
+
+  it("uses the full three columns once there are three volumes", () => {
+    useDrivesMock.mockReturnValue({
+      drives: [
+        makeDrive({ displayName: "Nvr", device: "/dev/sdb1", mount: "/mnt/a" }),
+        makeDrive({ displayName: "Media", device: "/dev/sdc1", mount: "/mnt/b" }),
+        makeDrive({ displayName: "Backups", device: "/dev/sdd1", mount: "/mnt/c" }),
+      ],
+      isLoading: false,
+      bridgeError: null,
+    });
+    usePoolsMock.mockReturnValue({ pools: [] });
+    render(<VolumesPanel />);
+
+    expect(gridOf().className).toMatch(/xl:grid-cols-3/);
+  });
+});
