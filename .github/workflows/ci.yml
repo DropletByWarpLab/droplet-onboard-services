@@ -283,6 +283,16 @@ jobs:
         if: matrix.suite != 'web-dashboard'
         run: npm run -w @droplet/fips-selftest build
 
+      # WARP-1874: tools-core imports @droplet/shared-types (the meeting-link
+      # parser). shared-types' package.json points `types` at ./src/index.ts,
+      # so a typecheck resolves from source — but tools-core's EMITTED JS
+      # resolves `exports["."].require` at ./dist/index.js, so the built
+      # output needs shared-types' dist to exist. Same reason as the
+      # erp-connector step below. Must run before the tools-core build.
+      - name: Build @droplet/shared-types
+        if: matrix.suite == 'orchestrator' || matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/shared-types build
+
       # mcp-client / stdio-roundtrip tests spawn the built
       # services/mcp-server/dist/index.js as a child process.
       - name: Build @droplet/tools-core
