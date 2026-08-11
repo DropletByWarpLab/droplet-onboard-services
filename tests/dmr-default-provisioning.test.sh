@@ -126,19 +126,31 @@ llm_after_dmr_branch() {
   printf 'INFERENCE_RUNTIME=dmr\n' > "$env_target"
   [ -n "$existing_llm" ] && printf 'LLM_MODEL=%s\n' "$existing_llm" >> "$env_target"
 
-  # Minimal upsert_env: record what the branch decided.
+  # Run the REAL branch out of the shipped file, never a copy of it.
+  #
+  # The first version of this helper reimplemented the if/else inline, and that
+  # made these assertions theatre: reverting single-box.sh's fix left the suite
+  # fully green because the test was exercising its own copy, not the code.
+  # Extract the block instead, as the sibling dmr-profile-survives-setup.test.sh
+  # does — a test that reimplements the logic keeps passing when the fix is
+  # reverted, which is the one thing a regression test must never do.
+  local block
+  block="$(awk '/^    _current_llm=/,/^    fi$/' "$SINGLEBOX")"
+  # An anchor that silently matched nothing would make this vacuous in a NEW
+  # way. Make that failure loud instead of green.
+  if [ -z "$block" ]; then
+    rm -rf "$tmp"
+    printf '__NO_BLOCK_EXTRACTED__'
+    return
+  fi
+
   local out
   out="$(
     log_info() { :; }
     log_warn() { :; }
     upsert_env() { [ "$1" = "LLM_MODEL" ] && printf '%s' "$2"; }
-    _current_llm="$(grep -E '^LLM_MODEL=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-    if [ -n "$_current_llm" ]; then
-      upsert_env LLM_MODEL "$_current_llm"
-    else
-      _default_dmr_model="${DROPLET_DEFAULT_DMR_MODEL:-$DMR_MODEL}"
-      upsert_env LLM_MODEL "$_default_dmr_model"
-    fi
+    local _current_llm _default_dmr_model
+    eval "$block"
   )"
   rm -rf "$tmp"
   printf '%s' "$out"
@@ -156,6 +168,57 @@ if [ "$got" = "docker.io/ai/some-other:tag" ]; then
   ok "an operator's existing LLM_MODEL is preserved, never overwritten by the default"
 else
   bad "the default clobbered an explicitly-set LLM_MODEL (got '$got')"
+fi
+
+# --- 6b. A remote inference host must not be guessed at ---------------------
+#
+# OLLAMA_URL is independently overridable, and on the multi-box path nothing
+# downstream can repair a wrong runtime: detect_single_box_mode() probes that
+# very host, finds it reachable, classifies the box multi-box, and skips
+# configure_single_box_env — the only code that would clobber the URL back.
+# So `OLLAMA_URL=<remote> ./scripts/setup.sh` would otherwise write a dmr
+# runtime and a docker.io/... model id pointed at a remote Ollama.
+
+if grep -qE 'OLLAMA_URL is overridden' "$SECRETS"; then
+  ok "setup refuses to guess the runtime when OLLAMA_URL is overridden alone"
+else
+  bad "no guard: OLLAMA_URL alone would silently provision a dmr runtime at a remote Ollama"
+fi
+
+# The documented multi-box command must satisfy the guard it now trips.
+if grep -q 'OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh' "$SECRETS" \
+   && ! grep -q 'INFERENCE_RUNTIME=ollama OLLAMA_URL=http://192.168.50.197:11434' "$SECRETS"; then
+  bad "the documented multi-box command omits INFERENCE_RUNTIME — copy-pasting it now exits 1"
+else
+  ok "the documented multi-box command names the runtime explicitly"
+fi
+
+# --- 6c. The rollback script survives the profile split ---------------------
+#
+# WARP-1869 moved ollama off the always-active `single-box` profile, which is
+# the standby rollback-single-box.sh was built around. It must now swap the
+# token and start the container, or it strands the box with no runtime after
+# it has already stopped dmr and rewritten both env files.
+
+ROLLBACK="$REPO_ROOT/scripts/dmr/rollback-single-box.sh"
+if [ -f "$ROLLBACK" ]; then
+  if grep -qE "upsert +\"\\\$f\" +INFERENCE_RUNTIME +\"ollama\"" "$ROLLBACK"; then
+    ok "rollback SETS INFERENCE_RUNTIME=ollama (a dropped key re-flips on the next setup run)"
+  else
+    bad "rollback drops INFERENCE_RUNTIME instead of setting it — the next setup.sh re-flips the box to DMR"
+  fi
+  if grep -q "newprofiles=\"\${newprofiles:+\$newprofiles,}ollama\"" "$ROLLBACK"; then
+    ok "rollback swaps the profile token dmr->ollama (not just deletes dmr)"
+  else
+    bad "rollback deletes dmr without adding ollama — box ends with NO runtime profile"
+  fi
+  if grep -q 'dc --profile ollama up -d --no-deps ollama' "$ROLLBACK"; then
+    ok "rollback actually starts the ollama container"
+  else
+    bad "rollback never starts ollama — it is no longer running by default"
+  fi
+else
+  bad "rollback script not found at $ROLLBACK"
 fi
 
 # --- 7. The ollama opt-out still writes ollama values -----------------------

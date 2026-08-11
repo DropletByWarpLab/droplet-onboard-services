@@ -665,6 +665,17 @@ configure_single_box_env() {
         log_info "single-box env: INFERENCE_RUNTIME=dmr — dropped the stale ollama profile (single GPU owner, WARP-1826)" ;;
     esac
   else
+    # The mirror strip. Without it the exclusion is one-directional: the dmr
+    # arm above drops a stale `ollama`, but a box carrying `dmr` whose runtime
+    # is ollama (or unset) would keep `dmr` AND gain `ollama` — both runtimes
+    # on one card, the very WARP-1826 violation this block exists to prevent,
+    # arriving from the rollback direction instead of the flip direction.
+    # Strip BEFORE the add so the add sees an already-cleaned list.
+    case ",${merged_profiles}," in
+      *,dmr,*)
+        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'dmr' | paste -sd, -)"
+        log_info "single-box env: INFERENCE_RUNTIME is not dmr — dropped the stale dmr profile (single GPU owner, WARP-1826)" ;;
+    esac
     case ",${merged_profiles}," in
       *,ollama,*) : ;;
       ,,)         merged_profiles="ollama" ;;

@@ -423,7 +423,9 @@ generate_env() {
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box). Override before running setup.sh for a multi-box
   # deployment with a separate inference host on the LAN, e.g.
-  # `OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`.
+  # `INFERENCE_RUNTIME=ollama OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`
+  # (the runtime is REQUIRED alongside an OLLAMA_URL override — setup refuses
+  # to guess which engine a remote host runs; see the guard in generate_env).
   # NEVER set this to `inference-engine.local:11434` — mDNS does not
   # resolve from inside Docker containers and you'll get
   # "Temporary failure in name resolution" on every chat.
@@ -444,6 +446,27 @@ generate_env() {
   # an interpolation that resolves against the wrong env file.
   #
   # Overridable for an Ollama box: `INFERENCE_RUNTIME=ollama ./scripts/setup.sh`.
+  # Refuse to GUESS when the operator points us at a remote inference host but
+  # says nothing about which engine runs there.
+  #
+  # The remote host decides the model-id vocabulary, and nothing downstream can
+  # repair a wrong guess on this path: `configure_single_box_env` — the only
+  # code that would clobber OLLAMA_URL back to a coherent value — is skipped
+  # entirely, because detect_single_box_mode() probes that very host, finds it
+  # reachable, and classifies the box as multi-box. So the (dmr runtime,
+  # remote-Ollama URL, docker.io/... model id) triple lands in .env unmodified
+  # and the orchestrator re-pulls ~13.79 GB on every boot forever.
+  #
+  # Refusing beats sniffing the port: a `*:12434 -> dmr` heuristic is still a
+  # guess, and an operator proxying DMR on 11434 gets the same silent mismatch.
+  if [ -n "${OLLAMA_URL:-}" ] && [ -z "${INFERENCE_RUNTIME:-}" ]; then
+    log_error "OLLAMA_URL is overridden (${OLLAMA_URL}) but INFERENCE_RUNTIME is unset."
+    log_error "The remote inference host decides the model-id vocabulary; guessing wrong re-pulls ~13.79 GB on every orchestrator boot."
+    log_error "Re-run with the runtime stated explicitly, e.g.:"
+    log_error "  INFERENCE_RUNTIME=ollama OLLAMA_URL=${OLLAMA_URL} ./scripts/setup.sh"
+    exit 1
+  fi
+
   inference_runtime="${INFERENCE_RUNTIME:-dmr}"
 
   # OLLAMA_URL — the CHAT endpoint, whichever engine serves it. The name is
@@ -453,7 +476,9 @@ generate_env() {
   #
   # Override before running setup.sh for a multi-box deployment with a separate
   # inference host on the LAN, e.g.
-  # `OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`.
+  # `INFERENCE_RUNTIME=ollama OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`
+  # (the runtime is REQUIRED alongside an OLLAMA_URL override — setup refuses
+  # to guess which engine a remote host runs; see the guard in generate_env).
   # NEVER set this to `inference-engine.local:11434` — mDNS does not
   # resolve from inside Docker containers and you'll get
   # "Temporary failure in name resolution" on every chat.
@@ -535,7 +560,7 @@ AI_GATEWAY_URL=http://ai-gateway:8000
 # default network — works out of the box on the single-box deployment where
 # Ollama runs alongside the rest of the stack. Override BEFORE running
 # setup.sh if you're deploying against a separate inference host on the
-# LAN (\`OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh\`).
+# LAN (\`INFERENCE_RUNTIME=ollama OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh\`).
 # The old \`inference-engine.local\` mDNS name does NOT resolve from
 # inside Docker containers on Linux/macOS, which is why every fresh
 # single-box install used to come up with a broken model list and ai-gateway logs
