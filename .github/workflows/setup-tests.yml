@@ -24,6 +24,7 @@ on:
       - "tests/nginx-nextcloud-assets.test.sh"
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
+      - "tests/dmr-default-provisioning.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -52,6 +53,7 @@ on:
       - "tests/nginx-nextcloud-assets.test.sh"
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
+      - "tests/dmr-default-provisioning.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -117,6 +119,13 @@ jobs:
         # while starting ollama and never starting dmr — inference pointed at a
         # container that wasn't running, and setup logged success. Pure bash.
         run: bash tests/dmr-profile-survives-setup.test.sh
+      - name: Run DMR default-provisioning unit tests
+        # WARP-1870: a freshly provisioned box must come up on DMR WITH a model
+        # id that matches DMR's /api/tags byte-for-byte. An empty LLM_MODEL is a
+        # dead appliance out of the crate; a mis-spelled one re-pulls ~13.79 GB
+        # on every orchestrator boot. Also pins that a setup re-run can never
+        # flip or un-flip an existing box. Pure bash.
+        run: bash tests/dmr-default-provisioning.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean
