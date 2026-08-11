@@ -102,7 +102,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
+.droplet-home .w-chat-cap-row .w-chat-iconbtn,
+.droplet-home .w-chat-cap-row .w-chat-send {
+  flex-shrink: 0;
+}
+/* The model name is arbitrary length (e.g. "docker.io/ai/gpt-oss 20B F16") and
+   the row is tight on a phone, so the pill shrinks and the name ellipsises
+   inside it — never wraps out of the capsule. */
 .droplet-home .w-chat-model {
   display: inline-flex;
   align-items: center;
@@ -115,6 +123,19 @@
   font-size: 12px;
   color: var(--text-muted);
   font-family: var(--font-mono);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.droplet-home .w-chat-model .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-chat-model .dot,
+.droplet-home .w-chat-model svg {
+  flex-shrink: 0;
 }
 .droplet-home .w-chat-model .dot {
   width: 6px;
@@ -209,6 +230,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .droplet-home .w-chat-conv-title {
   display: inline-flex;
@@ -218,9 +241,14 @@
   font-weight: 500;
   color: var(--text);
   margin-right: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .droplet-home .w-chat-conv-title svg {
   color: var(--brand);
+  flex-shrink: 0;
 }
 .droplet-home .w-chat-conv-btn {
   display: inline-flex;
@@ -228,6 +256,8 @@
   gap: 6px;
   height: 28px;
   padding: 0 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: var(--radius-pill);
   background: var(--card-inner);
   border: 1px solid var(--card-bd);
@@ -432,6 +462,8 @@
   gap: 10px;
   height: 100%;
 }
+/* Each cell is a <button> that opens the surface it summarises, so it needs
+   the button reset (font/text-align/width) on top of the card styling. */
 .droplet-home .w-stat-cell {
   background: color-mix(in srgb, var(--text) 2.2%, transparent);
   border: 1px solid var(--card-bd);
@@ -441,8 +473,26 @@
   flex-direction: column;
   justify-content: center;
   gap: 1px;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 200ms var(--ease), background 200ms var(--ease);
+}
+.droplet-home .w-stat-cell:hover {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  background: color-mix(in srgb, var(--text) 4.5%, transparent);
+}
+.droplet-home .w-stat-cell:active {
+  transform: scale(0.985);
+}
+@media (prefers-reduced-motion: reduce) {
+  .droplet-home .w-stat-cell:active {
+    transform: none;
+  }
 }
 .droplet-home .w-stat-cell .e {
   display: flex;
@@ -497,6 +547,16 @@
   gap: 10px;
   padding: 7px 2px;
   min-height: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.droplet-home .w-stat-row:hover .lbl,
+.droplet-home .w-stat-row:hover .val {
+  color: var(--text);
 }
 .droplet-home .w-stat-row .ico {
   width: 26px;
@@ -553,11 +613,22 @@
   height: 100%;
   grid-auto-rows: 1fr;
 }
+/* A <button> that opens the Cameras page — needs the button reset alongside
+   the tile styling. */
 .droplet-home .w-cam {
   position: relative;
   border-radius: 12px;
   overflow: hidden;
   min-height: 0;
+  padding: 0;
+  border: none;
+  font: inherit;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}
+.droplet-home .w-cam:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 55%, transparent);
 }
 .droplet-home .w-cam::after {
   content: "";
@@ -1133,6 +1204,8 @@
   .droplet-home .w-chat-send { height: 44px; }
   .droplet-home .w-sug { height: 44px; }
   .droplet-home .w-notes-new { min-height: 44px; }
+  .droplet-home .w-stat-row { min-height: 44px; }
+  .droplet-home .w-chat-conv-btn { height: 44px; }
   /* The base rule already supplies inline-flex + centring; only the height
      is missing, so don't restate display here. */
   .droplet-home .w-remote-link { min-height: 44px; }

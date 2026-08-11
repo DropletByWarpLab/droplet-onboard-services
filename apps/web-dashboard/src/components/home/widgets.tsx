@@ -346,7 +346,7 @@ function InlineChat({
         <div className="w-chat-cap-row">
           <span className="w-chat-model">
             <span className="dot" />
-            {model.name}
+            <span className="nm">{model.name}</span>
           </span>
           {isStreaming ? (
             <button
@@ -440,15 +440,15 @@ function ChatWidget({ w, h }: WidgetProps) {
         />
         <div className="w-chat-cap-row">
           {model ? (
-            <span className="w-chat-model">
+            <span className="w-chat-model" title={model.name}>
               <span className="dot" />
-              {model.name}
+              <span className="nm">{model.name}</span>
               <ChevronDown size={10} />
             </span>
           ) : (
             <span className="w-chat-model" style={{ opacity: 0.6 }}>
               <span className="dot" style={{ background: "var(--text-muted)" }} />
-              No model
+              <span className="nm">No model</span>
             </span>
           )}
           <button className="w-chat-iconbtn" tabIndex={-1} aria-label="Attach" type="button">
@@ -618,7 +618,21 @@ export function CalendarWidget({ h }: WidgetProps) {
 }
 
 /* ─────────────────────────── System status ─────────────────────────── */
+/**
+ * One System-status stat. `href` is the surface the stat summarises — every
+ * cell/row is a tap target that opens it, so the tile is a set of links into
+ * the app rather than a dead read-out.
+ */
+type StatRow = {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  sub: string;
+  dot: string;
+  href: string;
+};
 function StatusWidget({ w, h }: WidgetProps) {
+  const router = useRouter();
   const { items: recents } = useRecents(50);
   const { models } = useModels();
   const { totalCameras } = useCameras();
@@ -631,56 +645,71 @@ function StatusWidget({ w, h }: WidgetProps) {
   const local = models.filter((m) => m.provider === "ollama").length;
   const cloud = models.length - local;
 
-  const voiceRow: [LucideIcon, string, string, string, string] =
+  const voice = (value: string, sub: string, dot: string): StatRow => ({
+    icon: Mic, label: "Voice", value, sub, dot, href: "/voice",
+  });
+  const voiceRow: StatRow =
     // Review F7 — voice-io not deployed (macOS/dev installs) is not a
     // fault: render a quiet em-dash row, never a permanent red.
     voiceUnavailable
-      ? [Mic, "Voice", "—", "not available", "var(--color-label-quaternary)"]
+      ? voice("—", "not available", "var(--color-label-quaternary)")
       : voiceState == null
-        ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
+        ? voice("—", "checking…", "var(--color-label-quaternary)")
         : // WARP-1599 — an admin switched voice off: a deliberate,
           // persisted silence, so the row stays quiet grey and says so
           // rather than reporting on a pipeline that isn't running.
           voiceState.kind === "off"
-          ? [Mic, "Voice", "Off", "not listening", "var(--color-label-quaternary)"]
+          ? voice("Off", "not listening", "var(--color-label-quaternary)")
           : voiceState.kind === "calibrated"
-            ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+            ? voice("Calibrated", "wake word ready", "var(--success)")
             : voiceState.kind === "attention"
-              ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+              ? voice("Attention", "needs attention", "var(--color-system-orange)")
               : voiceState.kind === "broken"
-                ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
-                : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
+                ? voice("Not working", "microphone not working", "var(--color-system-red)")
+                : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
-  const stats: [LucideIcon, string, string, string, string][] = [
-    [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],
-    [Video, "Cameras", totalCameras ? String(totalCameras) : "—", totalCameras ? "live feeds" : "none yet", "var(--brand)"],
-    [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart devices online", "var(--success)"],
-    [Cpu, "AI models", models.length ? String(models.length) : "—", `${local} local · ${cloud} cloud`, "var(--success)"],
+  const stats: StatRow[] = [
+    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
+    { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
+    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "smart devices online", dot: "var(--success)", href: "/devices" },
+    { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     voiceRow,
   ];
 
   if (w <= 2 || h <= 2) {
     return (
       <div className="w-stat-list">
-        {stats.map(([Ic, e, v, , dot]) => (
-          <div className="w-stat-row" key={e}>
+        {stats.map(({ icon: Ic, label, value, dot, href }) => (
+          <button
+            className="w-stat-row"
+            key={label}
+            type="button"
+            onClick={() => router.push(href)}
+            aria-label={`Open ${label}`}
+          >
             <span className="ico"><Ic size={14} /></span>
-            <span className="lbl">{e}</span>
+            <span className="lbl">{label}</span>
             <span className="dot" style={{ background: dot }} />
-            <span className="val">{v}</span>
-          </div>
+            <span className="val">{value}</span>
+          </button>
         ))}
       </div>
     );
   }
   return (
     <div className="w-stat">
-      {stats.map(([Ic, e, v, s, dot]) => (
-        <div className="w-stat-cell" key={e}>
-          <span className="e"><Ic size={12} />{e}</span>
-          <span className="v">{v}</span>
-          <span className="s"><span className="dot" style={{ background: dot }} />{s}</span>
-        </div>
+      {stats.map(({ icon: Ic, label, value, sub, dot, href }) => (
+        <button
+          className="w-stat-cell"
+          key={label}
+          type="button"
+          onClick={() => router.push(href)}
+          aria-label={`Open ${label}`}
+        >
+          <span className="e"><Ic size={12} />{label}</span>
+          <span className="v">{value}</span>
+          <span className="s"><span className="dot" style={{ background: dot }} />{sub}</span>
+        </button>
       ))}
     </div>
   );
@@ -813,6 +842,7 @@ const CAM_TINTS = [
   "linear-gradient(135deg,#1a1d27,#242a38)",
 ];
 function CamerasWidget({ w, h }: WidgetProps) {
+  const router = useRouter();
   const { cameras } = useCameras();
   const names = cameras.map((c) => c.displayName || c.name);
   const motionSet = new Set(
@@ -828,13 +858,20 @@ function CamerasWidget({ w, h }: WidgetProps) {
   return (
     <div className="w-cams" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
       {names.slice(0, n).map((nm, i) => (
-        <div className="w-cam" key={nm + i} style={{ background: CAM_TINTS[i % CAM_TINTS.length] }}>
+        <button
+          className="w-cam"
+          key={nm + i}
+          type="button"
+          style={{ background: CAM_TINTS[i % CAM_TINTS.length] }}
+          onClick={() => router.push("/cameras")}
+          aria-label={`Open ${nm} in Cameras`}
+        >
           <span className="rec" />
           <span className="ts">{ts}</span>
           <span className="lb">{nm}</span>
           {motionSet.has(nm) && <span className="mo">motion</span>}
           {tiny && names.length > 1 && i === 0 && <span className="cam-more">+{names.length - 1}</span>}
-        </div>
+        </button>
       ))}
     </div>
   );
