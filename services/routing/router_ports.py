@@ -74,6 +74,32 @@ _ROLE_BY_NETWORK = {
 #: Ports whose name marks them as a fibre cage rather than a copper jack.
 _SFP_RE = re.compile(r"^(sfp|fiber|fibre)", re.IGNORECASE)
 
+#: netifd's universal sub-interface convention: `<parent>.<vid>`.
+#:
+#: 🔴 A VLAN does NOT have to have a `config device` section. netifd creates the
+#: sub-device implicitly from the name alone, and both shipping shapes rely on
+#: that: the Pi edge router's config carries `option device 'eth1.100'` with no
+#: device section (deliberately — see the comment above `config interface
+#: 'cameras'` in openwrt/files/etc/config/network), and this service's own
+#: `setup_camera_subnet` writes `network.cameras.device = 'br-lan.100'` plus a
+#: `config bridge-vlan` — a section type that is neither a bridge nor a VLAN
+#: device section. Keying "is this logical?" off the presence of a uci section
+#: therefore MISSES both, and the missing name falls through to "it's a jack",
+#: putting a VLAN on the faceplate as physical hardware. Match the name.
+_VLAN_SUFFIX_RE = re.compile(r"^(?P<parent>.+)\.(?P<vid>\d+)$")
+
+#: netifd `devtype` / `type` values that prove a netdev is logical. Belt and
+#: braces alongside the name test: the status payload we already fetch says so
+#: outright, and reading it costs nothing.
+_LOGICAL_DEVTYPES = frozenset({"bridge", "vlan"})
+_LOGICAL_TYPES = frozenset({"bridge", "8021q", "8021ad"})
+
+
+def vlan_parent(name: str) -> Optional[str]:
+    """`"eth1.100"` → `"eth1"`; a name with no VLAN suffix → ``None``."""
+    m = _VLAN_SUFFIX_RE.fullmatch(name or "")
+    return m.group("parent") if m else None
+
 
 def is_sfp(name: str) -> bool:
     """True for a fibre cage — it renders differently and, when empty, reports
@@ -172,9 +198,17 @@ def resolve_members(
 ) -> list[str]:
     """Resolve a netdev name to the physical jacks that carry its traffic.
 
-    A bridge resolves to its member ports; a VLAN device resolves to whatever
-    its parent resolves to (the VLAN rides the parent's jacks); anything else
-    is a jack and resolves to itself.
+    A bridge resolves to its member ports; a VLAN resolves to whatever its
+    parent resolves to (the VLAN rides the parent's jacks); anything else is a
+    jack and resolves to itself.
+
+    A VLAN is recognised two ways, and BOTH are load-bearing: an explicit uci
+    ``config device`` of type 8021q/8021ad, and — the case that shipped as a
+    bug — the implicit ``<parent>.<vid>`` name with no section at all. Falling
+    through to "it's a jack" on the implicit form put a VLAN sub-interface on
+    the faceplate as physical hardware, and it also mis-attributed the parent:
+    the real jack carrying the camera VLAN reported only ``lan``, never
+    ``cameras``. Resolving to the parent fixes both halves at once.
 
     ``_seen`` breaks a cycle in a hand-edited config — a VLAN whose parent
     chain loops back would otherwise recurse forever on a live router.
@@ -189,6 +223,11 @@ def resolve_members(
 
     section = devices.get(device)
     if section is None:
+        # No uci section. Before calling it a jack, check the name for netifd's
+        # implicit VLAN form — the parent is the thing that has a socket on it.
+        parent = vlan_parent(device)
+        if parent:
+            return resolve_members(parent, devices, seen)
         return [device]
 
     section_type = str(section.get("type") or "")
@@ -276,11 +315,27 @@ def derive_ports(
     for name in [*board_roster(board), *networks_by_port]:
         if not name or name in _NEVER_A_PORT or name in roster:
             continue
-        # A name that IS a uci bridge/VLAN device is logical, not a jack. It can
-        # reach here from board.json on a board whose factory config bridges in
+        # A name that IS a bridge or a VLAN is logical, not a jack. It can reach
+        # here from board.json on a board whose factory config bridges in
         # software; its members are already in the roster via resolve_members.
+        #
+        # Tested three ways, because no single one of them covers every config:
+        #   1. an explicit uci `config device` section type;
+        #   2. netifd's implicit `<parent>.<vid>` name — the form with NO
+        #      section, which both shipping shapes use (see _VLAN_SUFFIX_RE);
+        #   3. what the device itself reports. `network.device status` already
+        #      told us `devtype: "vlan"` / `type: "8021q"`; the first version of
+        #      this module never read it, and paid for it.
         section_type = str(devices.get(name, {}).get("type") or "")
         if section_type in _BRIDGE_TYPES or section_type in _VLAN_TYPES:
+            continue
+        if vlan_parent(name):
+            continue
+        reported = statuses.get(name) if isinstance(statuses.get(name), dict) else {}
+        if (
+            str(reported.get("devtype") or "") in _LOGICAL_DEVTYPES
+            or str(reported.get("type") or "") in _LOGICAL_TYPES
+        ):
             continue
         roster.append(name)
 
@@ -358,8 +413,26 @@ def get_router_ports(router) -> dict:
     real ubus fault on the two required reads propagates — an unreachable
     router must surface as unreachable, never as an all-dark faceplate.
     """
-    device_status = router.network.device_status()
-    uci_network = router.uci.get("network")
+    try:
+        device_status = router.network.device_status()
+        uci_network = router.uci.get("network")
+    except AttributeError:
+        # A router shape with no device_status surface at all — ROUTING_MODE=mock,
+        # whose MockRouter implements the wireless/dhcp/firewall reads but not
+        # this one. Same degradation the fabric synthesis already does
+        # (main.py's `except AttributeError` on the identical call). Without
+        # this the route 500s, and the panel's error branch fires BEFORE its
+        # `supported` branch — so a shape limitation would render as "we can't
+        # reach the router", the exact conflation this contract forbids.
+        logger.info("router shape exposes no device_status; reporting no port map")
+        return {
+            "supported": False,
+            "detail": (
+                "This deployment's router doesn't report a physical port map."
+            ),
+            "model": None,
+            "ports": [],
+        }
 
     try:
         board = router.system.board_json()

@@ -89,12 +89,24 @@ export function RouterFaceplate({ ports }: Props) {
           <span className={[styles.led, styles.ledLinkOn, styles.ledInline].join(" ")} aria-hidden="true" />
           link up
         </span>
+        {/* The unlit swatches need their OWN ink, not the in-jack styling.
+            `.led`'s idle fill is rgba(255,255,255,0.18), which is designed to
+            sit on the dark jack body — out here on `--card-bg` that is white
+            on white in the light theme (1.00:1) and 1.74:1 in dark, so both
+            of these legend keys rendered as blank space and the faceplate's
+            vocabulary went unexplained. Token-based ink, ≥3:1 in both themes. */}
         <span className="inline-flex items-center gap-1.5">
-          <span className={[styles.led, styles.ledInline].join(" ")} aria-hidden="true" />
+          <span
+            className="inline-block w-[7px] h-[7px] rounded-full bg-[var(--text-muted)]"
+            aria-hidden="true"
+          />
           no cable
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-[3px] border border-dashed border-[var(--card-bd)]" aria-hidden="true" />
+          <span
+            className="inline-block w-2.5 h-2.5 rounded-[3px] border border-dashed border-[var(--text-muted)]"
+            aria-hidden="true"
+          />
           no reading
         </span>
       </div>
