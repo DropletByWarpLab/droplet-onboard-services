@@ -39,7 +39,6 @@ import {
   toSpaceRelativePath,
 } from "@/components/FileManager/search-target";
 import {
-  groupByDirectory,
   requiredDirectories,
   type DroppedUpload,
 } from "@/components/FileManager/dropped-entries";
@@ -56,8 +55,6 @@ import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import { useSpaces } from "@/lib/hooks/useSpaces";
 import {
-  uploadFiles,
-  UploadBatchError,
   deleteFile,
   createDirectory,
   getDownloadUrl,
@@ -71,6 +68,7 @@ import {
 import { authFetch, useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { uploadOutcomeMessage, uploadProgressLabel } from "@/lib/upload-feedback";
+import { runUpload } from "@/lib/run-upload";
 import { Dialog } from "@/components/Dialog";
 import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
 
@@ -79,13 +77,6 @@ const READER_TOOLBAR_TOOLTIP =
   "You can view and download here. Ask a manager for edit access.";
 const ADMIN_FOREIGN_LIBRARY_COPY =
   "You're viewing this library as an administrator. This visit is logged.";
-
-/** WARP-1876 — join a dropped folder's relative directory onto the current
- *  space-relative path. `rel` is "" for a file dropped at the top level. */
-function joinRelativePath(base: string, rel: string): string {
-  if (!rel) return base;
-  return base === "/" ? `/${rel}` : `${base}/${rel}`;
-}
 
 // ── WARP-1540: sharing a multi-file selection ────────────────────────────────
 //
@@ -457,81 +448,31 @@ export default function FilesPage() {
   // ── Upload ──
   //
   // WARP-1876: the input is a relative-path list, not a raw FileList, so a
-  // dropped FOLDER survives as a tree. The upload route writes FLAT (target
-  // dir from `?path=`, basename from `originalname`) and this ticket does
-  // not add a nested-path field to it, so the tree is composed from the two
-  // calls that already ship: mkdir shallow-first, then ONE upload call per
-  // directory. Each of those keeps its own batching, progress and
-  // partial-failure contract; the counts are summed across them so the
-  // WARP-1666 / WARP-1843 copy stays true for a run spanning several.
+  // dropped FOLDER survives as a tree. `runUpload` composes it out of the
+  // mkdir + upload calls that already ship (the upload route has no
+  // nested-path field and this ticket did not add one) and sums the
+  // per-directory `UploadBatchError` counts, so the WARP-1666 / WARP-1843
+  // copy stays true for a run spanning several directories.
   const handleUpload = useCallback(
     async (uploads: DroppedUpload[]) => {
       if (uploads.length === 0) return;
       setIsUploading(true);
       setError(null);
       setUploadPercent(0);
-
-      const total = uploads.length;
-      const dirs = requiredDirectories(uploads);
-      const groups = groupByDirectory(uploads);
-      setUploadProgress(uploadProgressLabel(total, dirs.length));
-
-      const totalBytes = uploads.reduce((sum, u) => sum + u.file.size, 0);
-      let sentBytes = 0;
-      let uploaded = 0;
-      let firstFailure: unknown;
-      const noteFailure = (err: unknown) => {
-        if (firstFailure === undefined) {
-          firstFailure = err instanceof UploadBatchError ? err.cause : err;
-        }
-      };
+      setUploadProgress(
+        uploadProgressLabel(uploads.length, requiredDirectories(uploads).length)
+      );
 
       try {
-        // MKCOL tolerates 405 "already exists" server-side, so re-dropping a
-        // folder onto the same location is idempotent. A directory that fails
-        // is NOT fatal to the run — only its own group can't land, and that
-        // group reports itself below.
-        for (const dir of dirs) {
-          try {
-            await createDirectory(joinRelativePath(currentPath, dir), space);
-          } catch (err) {
-            console.error("upload: mkdir failed", dir, err);
-            noteFailure(err);
-          }
-        }
-
-        for (const group of groups) {
-          const groupBytes = group.files.reduce((sum, f) => sum + f.size, 0);
-          const before = sentBytes;
-          try {
-            await uploadFiles(
-              joinRelativePath(currentPath, group.dir),
-              group.files,
-              (percent) => {
-                const done = before + (percent / 100) * groupBytes;
-                setUploadPercent(
-                  totalBytes > 0
-                    ? Math.min(100, Math.round((done / totalBytes) * 100))
-                    : 100
-                );
-              },
-              space
-            );
-            uploaded += group.files.length;
-          } catch (err) {
-            // A failed group still uploaded whatever its own batches got
-            // through — count those, don't write them off.
-            if (err instanceof UploadBatchError) uploaded += err.uploaded;
-            console.error("partial upload", group.dir, err);
-            noteFailure(err);
-          }
-          sentBytes += groupBytes;
-        }
-
+        const { uploaded, total, cause } = await runUpload(uploads, {
+          basePath: currentPath,
+          space,
+          onProgress: setUploadPercent,
+        });
         // Anything that landed IS on the box — make it visible before the
         // message that talks about it.
         if (uploaded > 0) await refresh();
-        const message = uploadOutcomeMessage(uploaded, total, firstFailure);
+        const message = uploadOutcomeMessage(uploaded, total, cause);
         if (message) toast(message);
       } finally {
         setUploadProgress(null);

@@ -46,6 +46,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Department, DepartmentDetail, DepartmentRight, RosterUser } from "@/lib/types";
+import { CreateLibraryDialog, slugPreview } from "./CreateLibraryDialog";
 import {
   formatStorageBytes,
   storageInputToBytes,
@@ -134,16 +135,6 @@ function quotaBand(usedBytes: string | null, quotaBytes: string | null): "" | "o
   return "ok";
 }
 
-/** Client-side slug preview only — the server (nameToSlug in
- *  routes/departments.ts) is the authoritative slug generator. */
-function slugPreview(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 function StateChip({ state }: { state: Department["state"] }) {
   const map: Record<Department["state"], { label: string; kind: BadgeKind; icon?: LucideIcon }> = {
     active: { label: "Active", kind: "ok" },
@@ -187,18 +178,6 @@ function Avatar({ name }: { name: string }) {
     .join("")
     .toUpperCase();
   return <span className="ava">{initials || "?"}</span>;
-}
-
-interface QuotaFormState {
-  value: string;
-  unit: StorageUnit;
-}
-
-/** `undefined` (omit the field) rather than the shared encoder's `null`: the
- *  create payload has no "clear the quota" case, so an empty field means
- *  "don't send one" — the server default applies. */
-function quotaToBytes(q: QuotaFormState): string | undefined {
-  return storageInputToBytes(q.value, q.unit) ?? undefined;
 }
 
 const fieldStyle: React.CSSProperties = {
@@ -286,12 +265,6 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   // ── Create department / team modal state ──
   const [createOpen, setCreateOpen] = useState(false);
   const [createParent, setCreateParent] = useState<Department | null>(null); // null = new department
-  const [createName, setCreateName] = useState("");
-  const [createDescription, setCreateDescription] = useState("");
-  const [createQuota, setCreateQuota] = useState<QuotaFormState>({ value: "", unit: "GB" });
-  const [createBusy, setCreateBusy] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const createHeadingId = useId();
   const createTriggerRef = useRef<HTMLButtonElement | null>(null);
   const newDeptTriggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -372,63 +345,23 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   function openCreateDepartment() {
     createTriggerRef.current = newDeptTriggerRef.current;
     setCreateParent(null);
-    setCreateName("");
-    setCreateDescription("");
-    setCreateQuota({ value: "", unit: "GB" });
-    setCreateError(null);
     setCreateOpen(true);
   }
 
   function openCreateTeam(parent: Department, trigger: HTMLButtonElement | null) {
     createTriggerRef.current = trigger;
     setCreateParent(parent);
-    setCreateName("");
-    setCreateDescription("");
-    setCreateQuota({ value: "", unit: "GB" });
-    setCreateError(null);
     setCreateOpen(true);
   }
 
-  const closeCreate = useCallback(() => {
-    if (createBusy) return;
-    setCreateOpen(false);
-  }, [createBusy]);
-
-  async function handleCreateSubmit() {
-    const name = createName.trim();
-    if (!name) {
-      setCreateError("Name is required.");
-      return;
-    }
-    setCreateBusy(true);
-    setCreateError(null);
-    // Optimistic: an interim "Setting up…" card appears via the reload
-    // below once the server responds with state=pending — the design
-    // brief's "optimistic row, honest state" (no fabricated active state).
-    try {
-      const payload = {
-        name,
-        description: createDescription.trim() || undefined,
-        quotaBytes: quotaToBytes(createQuota),
-      };
-      if (createParent) {
-        const { team } = await createTeam(createParent.id, payload);
-        setCreateOpen(false);
-        await reload();
-        setSelectedId(team.id);
-        toast(`${team.name} is setting up…`, "success");
-      } else {
-        const { department } = await createDepartment(payload);
-        setCreateOpen(false);
-        await reload();
-        setSelectedId(department.id);
-        toast(`${department.name} is setting up…`, "success");
-      }
-    } catch (err: any) {
-      setCreateError(err?.message || "Failed to create");
-    } finally {
-      setCreateBusy(false);
-    }
+  /** The dialog owns the form and the create call; what happens AFTER a
+   *  successful create is this panel's own posture — reload (the server
+   *  returns state=pending and a reconciler provisions the groupfolder, so
+   *  never fabricate an active row), select it, say it's setting up. */
+  async function handleCreated(created: Department) {
+    await reload();
+    setSelectedId(created.id);
+    toast(`${created.name} is setting up…`, "success");
   }
 
   // ── Rights / membership ──
@@ -955,103 +888,15 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
     </div>
   );
 
-  // WARP-1353 (WCAG 2.4.7): every control below wears `fieldStyle`, which sets
-  // `border: 1px solid var(--border)` INLINE — an inline declaration outranks any
-  // stylesheet rule, so the `focus:border-[var(--brand)]` idiom used on
-  // stylesheet-bordered inputs elsewhere in the dashboard would render as a
-  // silent no-op here. The affordance therefore has to be a ring (box-shadow),
-  // which an inline border cannot defeat — same conclusion WARP-1347 reached for
-  // the three converted selects above.
   function renderCreateDialog() {
-    const headingLabel = createParent ? `New team in ${createParent.name}` : "New department";
     return (
-      <Dialog
+      <CreateLibraryDialog
         open={createOpen}
-        onClose={closeCreate}
+        parent={createParent}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleCreated}
         triggerRef={createTriggerRef}
-        labelledBy={createHeadingId}
-        maxWidth="sm"
-      >
-        <div className="space-y-3">
-          <h2 id={createHeadingId} style={DIALOG_HEADING_STYLE}>
-            {headingLabel}
-          </h2>
-          <div>
-            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
-              Name
-            </label>
-            <input
-              autoFocus
-              value={createName}
-              onChange={(e) => setCreateName(e.target.value)}
-              placeholder={createParent ? "Platform" : "Finance"}
-              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-              style={fieldStyle}
-            />
-            {createName.trim() && (
-              <p className="mt-1.5" style={FIELD_LABEL_STYLE}>
-                <span className="mono">
-                  {createParent ? `${createParent.slug}-` : ""}
-                  <b style={{ color: "var(--brand)" }}>{slugPreview(createName)}</b>
-                </span>
-              </p>
-            )}
-          </div>
-          <div>
-            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
-              Description (optional)
-            </label>
-            <input
-              value={createDescription}
-              onChange={(e) => setCreateDescription(e.target.value)}
-              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-              style={fieldStyle}
-            />
-          </div>
-          <div>
-            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
-              Storage quota (optional)
-            </label>
-            <div className="flex gap-1.5">
-              <input
-                type="number"
-                min={0}
-                step="any"
-                inputMode="decimal"
-                value={createQuota.value}
-                onChange={(e) => setCreateQuota((q) => ({ ...q, value: e.target.value }))}
-                placeholder="No limit"
-                aria-label="Quota amount"
-                className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-                style={fieldStyle}
-              />
-              <select
-                value={createQuota.unit}
-                onChange={(e) => setCreateQuota((q) => ({ ...q, unit: e.target.value as StorageUnit }))}
-                aria-label="Quota unit"
-                className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-                style={fieldStyle}
-              >
-                <option value="GB">GB</option>
-                <option value="TB">TB</option>
-              </select>
-            </div>
-          </div>
-          {createError && (
-            <p role="alert" className="text-system-red" style={FOOTNOTE_STYLE}>
-              {createError}
-            </p>
-          )}
-          <div className="flex items-center justify-end gap-2 pt-1">
-            <button type="button" onClick={closeCreate} className="btn ghost" disabled={createBusy}>
-              Cancel
-            </button>
-            <button type="button" onClick={handleCreateSubmit} className="btn primary" disabled={createBusy}>
-              {createBusy ? "Creating…" : createParent ? "Create team" : "Create department"}
-            </button>
-          </div>
-        </div>
-      </Dialog>
+      />
     );
   }
 }
