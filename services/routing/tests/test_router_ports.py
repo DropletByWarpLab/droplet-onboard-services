@@ -30,6 +30,7 @@ from router_ports import (
     parse_speed,
     parse_traffic,
     resolve_members,
+    vlan_parent,
 )
 
 from tests.fixtures_rb5009 import BOARD_JSON, DEVICE_STATUS, UCI_NETWORK
@@ -221,6 +222,113 @@ def test_loopback_is_never_a_port_even_though_uci_configures_it():
 # resolve_members
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# The OTHER shipping shapes. These are the tests the first version of this
+# module didn't have, and it shipped a phantom jack on BOTH of them.
+# --------------------------------------------------------------------------
+
+# The Pi edge router config this repo ships (openwrt/files/etc/config/network):
+# plain-ethernet jacks, a software bridge, and — the trap — a camera VLAN
+# declared as `option device 'eth1.100'` with NO `config device` section, on
+# purpose (netifd 24.10 breaks the bridge-vlan form there).
+PI_BOARD = {
+    "model": {"name": "Raspberry Pi 5"},
+    "network": {"lan": {"device": "br-lan"}, "wan": {"device": "eth0"}},
+}
+PI_UCI = {"values": {
+    "loopback": {".type": "interface", ".name": "loopback", "device": "lo"},
+    "br_lan": {".type": "device", ".name": "br_lan", "name": "br-lan",
+               "type": "bridge", "ports": ["eth1"]},
+    "lan": {".type": "interface", ".name": "lan", "device": "br-lan"},
+    "wan": {".type": "interface", ".name": "wan", "device": "eth0"},
+    "cameras": {".type": "interface", ".name": "cameras", "device": "eth1.100"},
+}}
+PI_DEVICE_STATUS = {
+    "lo": {"up": True, "carrier": True, "type": "Network device"},
+    "br-lan": {"up": True, "carrier": True, "devtype": "bridge", "type": "bridge"},
+    "eth0": {"up": True, "carrier": True, "speed": "1000F", "devtype": "ethernet",
+             "type": "Network device", "macaddr": "aa:00:00:00:00:01",
+             "statistics": {"rx_bytes": 10, "tx_bytes": 20}},
+    "eth1": {"up": True, "carrier": True, "speed": "1000F", "devtype": "ethernet",
+             "type": "Network device", "macaddr": "aa:00:00:00:00:02",
+             "statistics": {"rx_bytes": 30, "tx_bytes": 40}},
+    "eth1.100": {"up": True, "carrier": True, "speed": "1000F", "devtype": "vlan",
+                 "type": "8021q", "macaddr": "aa:00:00:00:00:02",
+                 "statistics": {"rx_bytes": 50, "tx_bytes": 60}},
+}
+
+
+def test_plain_ethernet_board_reports_exactly_its_two_jacks():
+    """A non-DSA board. This is the test that fails if anyone "simplifies" the
+    conduit exclusion into a name blocklist (`_NEVER_A_PORT` += "eth0") or a
+    `devtype == "dsa"` filter — both of which pass the RB5009 suite and make
+    the Pi's WAN jack vanish."""
+    ports = derive_ports(PI_BOARD, PI_UCI, PI_DEVICE_STATUS)
+    assert [p["id"] for p in ports] == ["eth0", "eth1"]
+    assert by_id(ports)["eth0"]["role"] == "wan"
+    assert by_id(ports)["eth1"]["role"] == "lan"
+
+
+def test_implicit_dotted_vlan_is_not_a_jack():
+    """`eth1.100` has NO uci device section — netifd creates it from the name.
+    Treating "no section" as "must be a jack" drew a third RJ45 on a two-NIC
+    board, lit, at 1 Gb, and the panel read "3 of 3 ports connected"."""
+    ports = derive_ports(PI_BOARD, PI_UCI, PI_DEVICE_STATUS)
+    assert "eth1.100" not in by_id(ports)
+    assert len(ports) == 2
+
+
+def test_a_vlans_traffic_is_attributed_to_the_jack_that_carries_it():
+    """The other half of the same bug: because the VLAN resolved to itself, the
+    REAL jack under it never reported the camera network."""
+    ports = by_id(derive_ports(PI_BOARD, PI_UCI, PI_DEVICE_STATUS))
+    assert ports["eth1"]["networks"] == ["lan", "cameras"]
+
+
+def test_camera_subnet_setup_does_not_add_a_tenth_jack_to_a_nine_jack_box():
+    """Regression for the RB5009. This service's OWN `setup_camera_subnet`
+    (main.py) writes `network.cameras.device = "br-lan.100"` plus a `config
+    bridge-vlan` — a section type that is neither a bridge nor a VLAN *device*
+    — and creates no `config device`. The first version of this module then
+    drew a phantom jack, and `_sort_key` put it FIRST, ahead of the WAN."""
+    uci = {"values": {**UCI_NETWORK["values"],
+        "cameras": {".type": "interface", ".name": "cameras",
+                    "device": "br-lan.100", "proto": "static"},
+        "cfg99": {".type": "bridge-vlan", ".name": "cfg99", "device": "br-lan",
+                  "vlan": "100", "ports": ["p2", "p3"]},
+    }}
+    devices = {**DEVICE_STATUS, "br-lan.100": {
+        "up": True, "carrier": True, "speed": "1000F", "devtype": "vlan",
+        "type": "8021q", "macaddr": "d0:ea:11:41:67:2d",
+        "statistics": {"rx_bytes": 4211, "tx_bytes": 990},
+    }}
+    ports = derive_ports(BOARD_JSON, uci, devices)
+    assert [p["id"] for p in ports] == [
+        "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "sfp",
+    ]
+    # ...and the bridge members correctly pick the camera VLAN up.
+    assert by_id(ports)["p2"]["networks"] == ["lan", "guest", "cameras"]
+
+
+def test_a_vlan_the_device_reports_is_rejected_even_with_an_odd_name():
+    """Third line of defence: whatever the name looks like and whatever uci
+    says, netifd already told us `devtype: vlan`. Read it."""
+    devices = {
+        "p1": {"up": True, "carrier": True, "speed": "1000F", "devtype": "dsa"},
+        "weird0": {"up": True, "carrier": True, "devtype": "vlan", "type": "8021q"},
+    }
+    board = {"network": {"lan": {"ports": ["p1", "weird0"]}}}
+    assert [p["id"] for p in derive_ports(board, {}, devices)] == ["p1"]
+
+
+@pytest.mark.parametrize("name,parent", [
+    ("eth1.100", "eth1"), ("br-lan.30", "br-lan"), ("eth0.2", "eth0"),
+    ("p1", None), ("sfp", None), ("br-lan", None), ("eth1.abc", None),
+])
+def test_vlan_parent(name, parent):
+    assert vlan_parent(name) == parent
+
+
 def test_resolve_members_walks_bridge_and_vlan():
     devices = {
         "br-lan": {"name": "br-lan", "type": "bridge", "ports": ["p2", "p3"]},
@@ -237,6 +345,14 @@ def test_resolve_members_accepts_a_whitespace_joined_ports_string():
     devices = {"br-lan": {"name": "br-lan", "type": "bridge",
                           "ports": "p2 p3 p4"}}
     assert resolve_members("br-lan", devices) == ["p2", "p3", "p4"]
+
+
+def test_resolve_members_walks_an_implicit_dotted_vlan_to_its_parent():
+    """No `config device` section anywhere — the parent is found from the name.
+    A bridge parent resolves on through to the member jacks."""
+    devices = {"br-lan": {"name": "br-lan", "type": "bridge", "ports": ["p2", "p3"]}}
+    assert resolve_members("eth1.100", {}) == ["eth1"]
+    assert resolve_members("br-lan.100", devices) == ["p2", "p3"]
 
 
 def test_resolve_members_survives_a_config_cycle():
@@ -321,6 +437,29 @@ def test_a_shape_with_no_physical_ports_says_so():
     """Not an empty faceplate — an empty faceplate reads as "your router has no
     ports", which is a claim we have no basis for."""
     result = get_router_ports(FakeRouter(board={}, uci={"values": {}}, devices={}))
+    assert result["supported"] is False
+    assert result["ports"] == []
+    assert "doesn't report a physical port map" in result["detail"]
+
+
+def test_a_router_shape_with_no_device_status_surface_says_so_not_500s():
+    """ROUTING_MODE=mock: MockRouter implements the wireless/dhcp/firewall
+    reads but has no `device_status`, so the call raises AttributeError. That
+    must degrade to `supported: false`, not escape as a 500 — the panel's error
+    branch fires BEFORE its `supported` branch, so a shape limitation would
+    render as "we can't reach the router". Mirrors the same `except
+    AttributeError` the fabric synthesis already uses on this exact call."""
+
+    class NoDeviceStatus(FakeRouter):
+        def __init__(self):
+            super().__init__()
+
+            class _Network:  # no device_status attribute at all
+                pass
+
+            self.network = _Network()
+
+    result = get_router_ports(NoDeviceStatus())
     assert result["supported"] is False
     assert result["ports"] == []
     assert "doesn't report a physical port map" in result["detail"]
