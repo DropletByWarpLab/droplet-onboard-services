@@ -2,9 +2,20 @@
 
 import { useCallback, useRef, useState } from "react";
 import { Upload } from "lucide-react";
+import {
+  readDroppedUploads,
+  uploadsFromFileList,
+  type DroppedUpload,
+} from "./FileManager/dropped-entries";
 
 interface UploadZoneProps {
-  onUpload: (files: FileList) => void;
+  /**
+   * WARP-1876 — receives relative paths, not a raw `FileList`. A dropped
+   * FOLDER expands to its real tree ("Invoices/jan.pdf"); a flat drop or a
+   * multi-select is just bare file names. The caller decides how to turn
+   * that into mkdir + upload calls.
+   */
+  onUpload: (uploads: DroppedUpload[]) => void;
   children: React.ReactNode;
   /**
    * WARP-1267 — true inside a `reader`-right department/team library.
@@ -14,11 +25,19 @@ interface UploadZoneProps {
    * caller (My Files / Household, always writable) is unaffected.
    */
   disabled?: boolean;
+  /** Extra classes on the drop wrapper. `/files` passes `page-dropzone`,
+   *  which re-emits the shell's staggered page entrance to the wrapper's
+   *  children (WARP-1876 — see droplet-shell.css). */
+  className?: string;
 }
 
-export function UploadZone({ onUpload, children, disabled = false }: UploadZoneProps) {
+export function UploadZone({
+  onUpload,
+  children,
+  disabled = false,
+  className = "",
+}: UploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
 
   const handleDragEnter = useCallback(
@@ -43,9 +62,13 @@ export function UploadZone({ onUpload, children, disabled = false }: UploadZoneP
       dragCounter.current = 0;
       setIsDragging(false);
       if (disabled) return;
-      if (e.dataTransfer.files.length > 0) {
-        onUpload(e.dataTransfer.files);
-      }
+      // WARP-1876: the overlay is dismissed synchronously above — the gesture
+      // is over the moment the pointer releases, and the tree walk below can
+      // take a beat on a deep folder. Only the reporting is async.
+      const { dataTransfer } = e;
+      void readDroppedUploads(dataTransfer).then((uploads) => {
+        if (uploads.length > 0) onUpload(uploads);
+      });
     },
     [onUpload, disabled]
   );
@@ -54,7 +77,7 @@ export function UploadZone({ onUpload, children, disabled = false }: UploadZoneP
 
   return (
     <div
-      className="relative"
+      className={`relative ${className}`.trim()}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -62,36 +85,27 @@ export function UploadZone({ onUpload, children, disabled = false }: UploadZoneP
     >
       {children}
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files && e.target.files.length > 0) {
-            onUpload(e.target.files);
-            e.target.value = "";
-          }
-        }}
-      />
-
       {isDragging && (
         <div
-          className="absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-200"
+          // `sticky`-free, pointer-events-none: the overlay is pure feedback
+          // — it must never eat the drop event it is describing.
+          data-dropzone-overlay=""
+          // z-50 clears the two stacking contexts the Files page lifts for
+          // its own dropdowns (search z-40, spaces z-30, WARP-1139/1667) —
+          // an overlay that paints under them reads as a broken drop target.
+          className="pointer-events-none absolute inset-0 z-50 flex items-start justify-center ds-dropzone-in"
           style={{
             background: "var(--brand-subtle)",
             border: "2px dashed var(--brand)",
             borderRadius: "var(--radius-card)",
           }}
         >
-          <div className="text-center">
-            <Upload
-              size={32}
-              className="mx-auto mb-2"
-              style={{ color: "var(--brand)" }}
-            />
+          {/* Sticky inside a full-page overlay so the prompt stays in view
+              on a long file list instead of centring somewhere off-screen. */}
+          <div className="sticky top-1/3 text-center px-4 py-3">
+            <Upload size={32} className="mx-auto mb-2" style={{ color: "var(--brand)" }} />
             <p className="type-subheadline" style={{ color: "var(--text)" }}>
-              Drop files to upload
+              Drop files or folders to upload
             </p>
           </div>
         </div>
@@ -100,30 +114,75 @@ export function UploadZone({ onUpload, children, disabled = false }: UploadZoneP
   );
 }
 
-// Rendered only inside ShellPage's `.phead-actions` slot on /files, so the
-// indigo `.btn` classes (scoped under `.droplet-shell`) always apply.
+/**
+ * The header Upload control. WARP-1876: `multiple` was already set, but the
+ * picker could not take a FOLDER — the second input carries `webkitdirectory`
+ * so "an office moving its existing documents onto the Droplet" has a
+ * keyboard-reachable path to the same bulk upload the dropzone offers.
+ *
+ * Rendered only inside ShellPage's `.phead-actions` slot on /files, so the
+ * indigo `.btn` classes (scoped under `.droplet-shell`) always apply.
+ */
 export function UploadButton({
-  onClick,
+  onUpload,
   disabled = false,
   title,
 }: {
-  onClick: () => void;
+  onUpload: (uploads: DroppedUpload[]) => void;
   /** WARP-1267 — true inside a `reader`-right space; the tooltip carries
    *  the shipped reader-posture copy (design brief §2). */
   disabled?: boolean;
   title?: string;
 }) {
+  const filesRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
+
+  const pick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0 && !disabled) {
+      onUpload(uploadsFromFileList(e.target.files));
+    }
+    e.target.value = "";
+  };
+
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      aria-disabled={disabled || undefined}
-      title={title}
-      className="btn primary"
-      type="button"
-    >
-      <Upload size={14} />
-      Upload
-    </button>
+    <>
+      <button
+        onClick={() => folderRef.current?.click()}
+        disabled={disabled}
+        aria-disabled={disabled || undefined}
+        // The label collapses to icon-only below `sm`, so the accessible
+        // name has to come from the attribute, not the hidden span.
+        aria-label="Upload folder"
+        title={title}
+        className="btn ghost"
+        type="button"
+      >
+        <Upload size={14} />
+        <span className="hidden sm:inline">Upload folder</span>
+      </button>
+      <button
+        onClick={() => filesRef.current?.click()}
+        disabled={disabled}
+        aria-disabled={disabled || undefined}
+        title={title}
+        className="btn primary"
+        type="button"
+      >
+        <Upload size={14} />
+        Upload
+      </button>
+
+      <input ref={filesRef} type="file" multiple className="hidden" onChange={pick} />
+      <input
+        ref={folderRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={pick}
+        // Non-standard but universally shipped; React needs the lowercase
+        // DOM attribute names, hence the cast.
+        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+      />
+    </>
   );
 }
