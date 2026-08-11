@@ -16,6 +16,7 @@
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import { bytesToGib, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import { cacheGet } from "./cache.service.js";
 import {
   fetchLocalModelMetrics,
@@ -97,8 +98,13 @@ export interface CloudProviderInfo {
 export interface GpuInfo {
   name: string;
   vramGb: number;
-  utilPct: number;
-  tempC: number;
+  // WARP-1861: nullable because the bridge legitimately cannot always read
+  // them. When nothing holds the card, amdgpu runtime-SUSPENDS it and the
+  // sysfs reads return EBUSY rather than a number — so on an idle appliance
+  // this is the common case, not an edge case. `0` would be a lie a threshold
+  // check would happily pass.
+  utilPct: number | null;
+  tempC: number | null;
 }
 
 export interface ModelsPagePayload {
@@ -271,13 +277,43 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
   ];
 
+  // WARP-1861 — GPU counters via the host device-bridge. Never throws;
+  // an absent bridge or an unresolvable card yields null, which the tile
+  // already renders as "Unavailable".
+  const telemetry = await fetchGpuTelemetry();
+  const vramGb = bytesToGib(telemetry?.vramTotalBytes ?? null);
+  const gpu: GpuInfo | null =
+    telemetry?.available && telemetry.card && vramGb !== null
+      ? {
+          // The DRM node name is what the operator can act on — it is the
+          // same identifier BRIDGE_GPU_CARD pins and the same one that
+          // appears in the flip script's resolver.
+          name: telemetry.card,
+          vramGb,
+          // Nullable by design: a runtime-suspended card reports neither,
+          // and 0% on a card nothing can currently read would be a lie.
+          utilPct: telemetry.busyPercent,
+          tempC: telemetry.tempC,
+        }
+      : null;
+
   return {
     local,
     cloud,
-    // GPU probe: ai-gateway doesn't expose one yet. Returning null is
-    // documented in FEATURES.md §2.11 — the dashboard renders a
-    // "GPU info unavailable" tile.
-    gpu: null,
+    // WARP-1861 — real GPU counters, from the host device-bridge.
+    //
+    // The note that used to sit here planned an ai-gateway `/gpu` probe. That
+    // would have been drift: ai-gateway is a thin provider router, and the
+    // handbook bans the orchestrator from reading /dev/dri itself (see the
+    // header of hardware-summary.service.ts). device-bridge is the
+    // host-privileged surface that already exists for exactly this, behind
+    // the same token.
+    //
+    // Still null when the bridge is absent or no card resolves — it is
+    // profile-gated, so "not running" is ordinary — and the dashboard's
+    // existing "GPU info unavailable" tile stays the honest fallback rather
+    // than a fabricated zero.
+    gpu,
     // Avg latency: requires a metrics aggregation surface that doesn't
     // exist yet. 0 until ai-gateway exports a /metrics summary.
     avgLatencyMs: 0,
