@@ -19,7 +19,8 @@
 #   (OLLAMA_URL=http://dmr:12434, RAGAS_OLLAMA_URL, LLM_MODEL) but the
 #   *profile* was left to the flip runbook. So a re-run against the root .env:
 #
-#     - starts ollama          (its compose profile is `single-box`, active)
+#     - starts ollama          (at the time, ollama rode the `single-box`
+#                               profile, which is always active on this shape)
 #     - does NOT start dmr     (its profile is `dmr`, absent)
 #     - keeps OLLAMA_URL=http://dmr:12434, now dangling
 #
@@ -112,6 +113,60 @@ got="$(merged_for 'linux,display' '')"
 case ",$got," in
   *,dmr,*) bad "no INFERENCE_RUNTIME: dmr was added (got '$got')" ;;
   *)       ok  "no INFERENCE_RUNTIME: dmr correctly absent (got '$got')" ;;
+esac
+
+# ── mutual exclusion: exactly ONE inference runtime token ──────────────────
+#
+# `ollama` moved off the `single-box` profile onto its own, so the runtime is
+# now chosen by a single token. Two failure modes matter equally: a box with
+# BOTH tokens puts two runtimes on one card (SINGLE GPU OWNER, WARP-1826 — the
+# WARP-1824 shape where a 20B model landed 0/25 layers on the GPU and served
+# from CPU), and a box with NEITHER has no inference at all.
+
+got="$(merged_for 'linux,display,eval,single-box,docs' 'ollama')"
+case ",$got," in
+  *,ollama,*) ok "un-flipped box: ollama profile added — the box has a runtime (got '$got')" ;;
+  *)          bad "un-flipped box: NO runtime profile — box would start with no inference (got '$got')" ;;
+esac
+
+got="$(merged_for 'linux,display,eval,single-box,docs' 'dmr')"
+case ",$got," in
+  *,ollama,*) bad "flipped box: ollama present alongside dmr — two runtimes, one GPU (got '$got')" ;;
+  *)          ok  "flipped box: ollama correctly absent (got '$got')" ;;
+esac
+
+# A half-finished flip leaves ollama in the list while INFERENCE_RUNTIME=dmr.
+# Both tokens present is the one outcome worse than either alone, so the guard
+# must strip the loser rather than merely skip adding it.
+got="$(merged_for 'linux,single-box,ollama' 'dmr')"
+case ",$got," in
+  *,ollama,*) bad "half-flipped box: stale ollama NOT stripped (got '$got')" ;;
+  *)          ok  "half-flipped box: stale ollama stripped (got '$got')" ;;
+esac
+case ",$got," in
+  *,dmr,*) ok "half-flipped box: dmr present after the strip (got '$got')" ;;
+  *)       bad "half-flipped box: strip removed dmr too (got '$got')" ;;
+esac
+# The strip must not eat the unrelated profiles around it.
+for p in linux single-box; do
+  case ",$got," in
+    *,"$p",*) : ;;
+    *)        bad "half-flipped box: strip dropped '$p' (got '$got')" ;;
+  esac
+done
+
+got="$(merged_for 'linux,single-box,ollama' 'ollama')"
+count="$(printf '%s' "$got" | tr ',' '\n' | grep -c '^ollama$')"
+if [ "$count" = "1" ]; then
+  ok "idempotent: ollama appears exactly once on re-run (got '$got')"
+else
+  bad "ollama appears $count times — re-running setup duplicates it (got '$got')"
+fi
+
+got="$(merged_for 'linux,display' '')"
+case ",$got," in
+  *,ollama,*) ok "no INFERENCE_RUNTIME: defaults to the ollama runtime (got '$got')" ;;
+  *)          bad "no INFERENCE_RUNTIME: no runtime profile at all (got '$got')" ;;
 esac
 
 # Idempotency — a second run must not duplicate the entry.
