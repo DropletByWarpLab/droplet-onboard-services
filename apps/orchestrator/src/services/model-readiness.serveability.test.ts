@@ -150,10 +150,64 @@ describe("Ollama — untouched (WARP-1749 acceptance)", () => {
 
   it("verifyListedModelServeable() answers serveable with no network at all", async () => {
     vi.stubEnv("INFERENCE_RUNTIME", "ollama");
+    vi.stubEnv("OLLAMA_URL", "http://ollama:11434");
     const fetchMock = vi.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
     await expect(verifyListedModelServeable("gpt-oss:20b")).resolves.toBe("serveable");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-1870 — a self-contradicting runtime config must not claim health", () => {
+  // The runtime selector defaults to "ollama" when INFERENCE_RUNTIME is
+  // absent, and losing that variable is a real failure mode: a compose
+  // `${VAR:-}` interpolating against an env file that lacks the key (the
+  // WARP-1860 shape). A DMR box in that state lands in the Ollama branch and
+  // returns a confident "serveable" for a model nothing ever asked about —
+  // the exact phantom the DMR branch exists to catch. The tell is free: the
+  // chat URL still points at DMR.
+
+  it("returns unverified when the runtime says ollama but the URL is DMR", async () => {
+    vi.stubEnv("INFERENCE_RUNTIME", "ollama");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(verifyListedModelServeable(MODEL)).resolves.toBe("unverified");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(loggerWarn).toHaveBeenCalled();
+  });
+
+  it("detects DMR by port alone, not just by hostname", async () => {
+    vi.stubEnv("INFERENCE_RUNTIME", "ollama");
+    vi.stubEnv("OLLAMA_URL", "http://127.0.0.1:12434");
+    global.fetch = vi.fn() as unknown as typeof fetch;
+    await expect(verifyListedModelServeable(MODEL)).resolves.toBe("unverified");
+  });
+
+  it("says so out loud, naming the variable and the fix", async () => {
+    vi.stubEnv("INFERENCE_RUNTIME", "ollama");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+    global.fetch = vi.fn() as unknown as typeof fetch;
+    await verifyListedModelServeable(MODEL);
+
+    const msg = loggerWarn.mock.calls.map((c) => String(c[1] ?? "")).join(" ");
+    expect(msg).toContain("INFERENCE_RUNTIME");
+    // `docker restart` does not re-read env; only --force-recreate does. An
+    // operator who restarts and sees no change would otherwise conclude the
+    // diagnosis was wrong.
+    expect(msg).toContain("force-recreate");
+  });
+
+  it("leaves a coherent Ollama box on the fast path", async () => {
+    vi.stubEnv("INFERENCE_RUNTIME", "ollama");
+    vi.stubEnv("OLLAMA_URL", "http://ollama:11434");
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(verifyListedModelServeable(MODEL)).resolves.toBe("serveable");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(loggerWarn).not.toHaveBeenCalled();
   });
 });
 

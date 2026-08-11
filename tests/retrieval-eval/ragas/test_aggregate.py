@@ -23,8 +23,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from ragas_runner import (
     FLOOR_MARGIN,
+    JudgeUnavailable,
     SearchUnavailable,
     _build_search_request,
+    _check_judge_failure_streak,
     _check_search_failure_streak,
     _render_markdown,
     _sanitize_nonfinite,
@@ -475,6 +477,57 @@ def test_search_streak_threshold_defaults_to_module_constant(monkeypatch) -> Non
         _check_search_failure_streak(2, "boom")
     monkeypatch.setattr(ragas_runner, "SEARCH_ABORT_AFTER", 0)
     _check_search_failure_streak(50, "boom")
+
+
+# ─── judge circuit breaker (WARP-1870) ─────────────────────────────────────
+#
+# The WARP-1860 breaker counts RETRIEVAL failures only. A broken judge is the
+# mirror failure and was still silent: synthesize_answer() swallows every
+# exception into a "[synthesis_error: ...]" string, the run scores that text,
+# and the metrics land as 0.0/NaN in a file marked successful. That matters
+# more under DMR, where the judge URL (RAGAS_OLLAMA_URL) is repointed at a
+# different container — one typo and every score is meaningless.
+
+def test_judge_streak_below_threshold_does_not_abort() -> None:
+    """The odd judge blip is normal — a single failure must not abort."""
+    for consecutive in range(1, 3):
+        _check_judge_failure_streak(consecutive, "boom", threshold=3)
+
+
+def test_judge_streak_at_threshold_aborts() -> None:
+    with pytest.raises(JudgeUnavailable):
+        _check_judge_failure_streak(3, "ConnectionError: [Errno 111]", threshold=3)
+
+
+def test_judge_streak_threshold_zero_disables_breaker() -> None:
+    _check_judge_failure_streak(999, "boom", threshold=0)
+
+
+def test_judge_abort_message_names_the_cause() -> None:
+    """The message must reach the durable failed record, like the search one."""
+    with pytest.raises(JudgeUnavailable) as excinfo:
+        _check_judge_failure_streak(
+            4, "[synthesis_error: ConnectionError: refused]", threshold=3)
+    msg = str(excinfo.value)
+    assert "4" in msg
+    assert "ConnectionError" in msg
+
+
+def test_judge_breaker_is_not_a_search_breaker() -> None:
+    """Distinct types: a dead judge and dead retrieval are different faults
+    with different fixes, and the durable record must say which."""
+    assert not issubclass(JudgeUnavailable, SearchUnavailable)
+    assert not issubclass(SearchUnavailable, JudgeUnavailable)
+
+
+def test_judge_streak_defaults_to_module_constant(monkeypatch) -> None:
+    import ragas_runner
+
+    monkeypatch.setattr(ragas_runner, "JUDGE_ABORT_AFTER", 2)
+    with pytest.raises(JudgeUnavailable):
+        _check_judge_failure_streak(2, "boom")
+    monkeypatch.setattr(ragas_runner, "JUDGE_ABORT_AFTER", 0)
+    _check_judge_failure_streak(50, "boom")
 
 
 # ─── NaN → null write sanitizer ─────────────────────────────────────────────

@@ -80,6 +80,21 @@ SEARCH_TIMEOUT_SEC = float(os.environ.get("RAGAS_SEARCH_TIMEOUT_SEC", "30"))
 # expect most queries to fail.
 SEARCH_ABORT_AFTER = int(os.environ.get("RAGAS_SEARCH_ABORT_AFTER", "3"))
 
+# WARP-1870 — the same breaker for the JUDGE side.
+#
+# WARP-1860 stopped a dead retriever from scoring an empty corpus, but the
+# mirror failure was still silent: synthesize_answer() catches every exception
+# and returns a "[synthesis_error: ...]" STRING, which then gets scored like a
+# real answer. A judge that is simply unreachable therefore produced a full
+# run of 0.0/NaN metrics in a file marked successful — indistinguishable from
+# a genuinely bad model.
+#
+# This matters more under the Docker Model Runner: the judge is reached via
+# RAGAS_OLLAMA_URL, which the flip repoints at a DIFFERENT container
+# (http://dmr:12434/v1). One wrong port there and every score is meaningless
+# while every run still reports success.
+JUDGE_ABORT_AFTER = int(os.environ.get("RAGAS_JUDGE_ABORT_AFTER", "3"))
+
 # WARP-1407 — baseline-envelope containment margin. aggregate_runs() clamps
 # every envelope's floor to min(sample means) − FLOOR_MARGIN (never above),
 # so a floor built from correlated back-to-back bootstrap runs (IQR ≈ 0)
@@ -181,6 +196,35 @@ class SearchUnavailable(Exception):
     line further up got it silently swallowed by the very handler it exists
     to escape.
     """
+
+
+class JudgeUnavailable(Exception):
+    """The judge LLM is systematically unreachable — abort instead of scoring.
+
+    Deliberately a SIBLING of SearchUnavailable, not a subclass: a dead
+    retriever and a dead judge are different faults with different fixes
+    (retrieval auth/corpus vs RAGAS_OLLAMA_URL/runtime), and the durable
+    failed record has to say which one happened. Same reason it does not
+    subclass RuntimeError — see SearchUnavailable.
+    """
+
+
+def _check_judge_failure_streak(
+    consecutive: int, last_error: str, threshold: int | None = None
+) -> None:
+    """Trip the judge breaker once `consecutive` synthesis failures hit the limit.
+
+    Mirrors _check_search_failure_streak, including resolving the threshold at
+    call time so the module constant stays tunable.
+    """
+    limit = JUDGE_ABORT_AFTER if threshold is None else threshold
+    if limit > 0 and consecutive >= limit:
+        raise JudgeUnavailable(
+            f"{consecutive} consecutive judge failures — aborting rather than "
+            f"scoring synthesis-error strings as if they were answers. "
+            f"Check RAGAS_OLLAMA_URL and that the runtime is serving. "
+            f"Last error: {last_error}"
+        )
 
 
 def _check_search_failure_streak(
@@ -461,6 +505,7 @@ def run(
     # WARP-1860: a streak, not the total, is what proves systematic breakage
     # — scattered failures across an otherwise healthy run are ordinary.
     consecutive_search_errors = 0
+    consecutive_judge_errors = 0
     for i, row in enumerate(merged, 1):
         print(
             f"   [{i:>2}/{len(merged)}] {row['id']}: {row['user_input'][:60]}"
@@ -489,6 +534,13 @@ def run(
         response = synthesize_answer(chat_llm, row["user_input"], ctxs)
         if response.startswith("[synthesis_error:"):
             n_synthesis_errors += 1
+            consecutive_judge_errors += 1
+            # WARP-1870: synthesize_answer() swallows the exception into a
+            # STRING, so without this the run would score that string as if it
+            # were an answer and write a full sheet of 0.0/NaN as a success.
+            _check_judge_failure_streak(consecutive_judge_errors, response)
+        else:
+            consecutive_judge_errors = 0
         rows.append(
             {
                 "user_input": row["user_input"],
@@ -934,6 +986,14 @@ def main() -> int:
         print(f"\n!! retrieval unavailable: {e}", file=sys.stderr)
         print(f"!! auth posture: {_describe_auth_posture()}", file=sys.stderr)
         return 2
+    except JudgeUnavailable as e:
+        # WARP-1870: same contract, different fault. Exit 3 rather than 2 so
+        # the durable record distinguishes "retrieval is down" from "the judge
+        # is down" without parsing prose — they have different owners and
+        # different fixes.
+        print(f"\n!! judge unavailable: {e}", file=sys.stderr)
+        print(f"!! judge endpoint: {DEFAULT_OLLAMA_URL}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

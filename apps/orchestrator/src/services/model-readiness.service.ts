@@ -333,7 +333,27 @@ export async function verifyListedModelServeable(
 ): Promise<ServeabilityVerdict> {
   // Default runtime: a listing IS the corroboration (see the block comment).
   // No request is made, so an Ollama box behaves byte-for-byte as before.
-  if (inferenceRuntime() !== "dmr") return "serveable";
+  //
+  // WARP-1870 — except when the configuration contradicts itself. The runtime
+  // selector defaults to "ollama" when INFERENCE_RUNTIME is absent, and losing
+  // that variable is a real failure mode (a compose `${VAR:-}` resolving
+  // against an env file that lacks the key — the WARP-1860 shape). On a DMR
+  // box that lands here and returns a confident "serveable" for a model this
+  // code never asked about, which is the exact phantom the DMR branch below
+  // exists to catch. The tell is free: the chat URL still points at DMR.
+  // Report "unverified" — we genuinely could not corroborate — rather than
+  // asserting health we have no evidence for.
+  if (inferenceRuntime() !== "dmr") {
+    const url = inferenceRuntimeUrl();
+    if (/dmr|:12434/i.test(url)) {
+      logger.warn(
+        { model, url, runtime: inferenceRuntime() },
+        "serveability_unverified (runtime is not dmr but the chat URL points at DMR — INFERENCE_RUNTIME was likely lost; a docker restart does not re-read it, use --force-recreate)",
+      );
+      return "unverified";
+    }
+    return "serveable";
+  }
 
   const url = `${inferenceRuntimeUrl()}/models`;
   try {
