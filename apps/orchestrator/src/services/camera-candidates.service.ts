@@ -182,8 +182,21 @@ function toCandidate(record: DiscoveryRecord): CameraCandidate | null {
   };
 }
 
-function discoveryAuthHeaders(): Record<string, string> {
-  const secret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
+/**
+ * Bearer for camera-discovery's DEVICE_SECRET-gated routes (`/scan`,
+ * `/cameras/discovered`, `/cameras/known`, `/drivers*`).
+ *
+ * DEVICE_SECRET is the ONLY accepted value — `services/camera-discovery/main.py`
+ * compares against `os.getenv("DEVICE_SECRET")` and nothing else. This used to
+ * prefer DEVICE_SECRET_KEY, which is a *different* random value on every
+ * provisioned box (scripts/lib/secrets.sh generates `device_secret` and
+ * `device_secret_key` independently), so the preferred branch always won and
+ * always sent a secret camera-discovery would never accept: 403 on every
+ * privileged call. Do not re-add a DEVICE_SECRET_KEY fallback — it is not a
+ * weaker-but-valid credential here, it is the wrong one.
+ */
+export function discoveryAuthHeaders(): Record<string, string> {
+  const secret = process.env.DEVICE_SECRET || "";
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
