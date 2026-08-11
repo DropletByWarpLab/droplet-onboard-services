@@ -142,11 +142,27 @@ export function labelForMime(
     if (exact) return exact;
   }
 
-  // The MIME was absent, opaque, or unmapped — try the file name.
+  // The MIME was absent, opaque, or unmapped — try the file name. The derived
+  // label is a guess: `EXT_TO_MIME` is icon-oriented, so it resolves container
+  // extensions toward audio (".ogg" → audio/ogg, ".webm" → audio/webm) because
+  // headphones-vs-film is the only call it was built to make. It is not
+  // authoritative. So when the server did give us an informative MIME, the
+  // guess is accepted only if its family agrees — "video/ogg" on "movie.ogg"
+  // must not become "Ogg audio". The no-MIME sibling case is NOT fixable here:
+  // labelForMime("", "clip.webm") still says "WebM audio" for a video, because
+  // with no MIME there is nothing to disagree with. That is the accepted cost
+  // of one table serving both icons and labels — don't trust this branch's
+  // output as a statement about the file.
   const ext = extensionOf(fileName);
   if (ext) {
-    const derived = MIME_TO_LABEL[mimeFromPath(`x.${ext}`)];
-    if (derived) return derived;
+    const derivedMime = mimeFromPath(`x.${ext}`);
+    const derived = MIME_TO_LABEL[derivedMime];
+    if (
+      derived &&
+      (!informative || derivedMime.split("/")[0] === normalized.split("/")[0])
+    ) {
+      return derived;
+    }
   }
 
   if (informative) {
@@ -154,7 +170,12 @@ export function labelForMime(
     if (family) return family;
   }
 
-  if (ext) return `${ext.toUpperCase()} file`;
+  // Last resort: name the extension itself. Only when it contains a letter —
+  // "Backup 2026.01" and "report 1.28" are version-ish file names, not files
+  // of type "01", and Nextcloud sends octet-stream often enough to route them
+  // here. "7z" still qualifies. A purely numeric segment is better left
+  // unnamed than confidently mislabelled.
+  if (ext && /[a-z]/.test(ext)) return `${ext.toUpperCase()} file`;
 
   return "Unknown";
 }

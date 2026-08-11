@@ -80,8 +80,12 @@ export function iconForMime(mime: string): LucideIcon {
  * SearchTab where the orchestrator's KnowledgeChunkItem doesn't carry a
  * mimeType (the row is keyed by `path`). This keeps WARP-214 frontend-only —
  * no extra orchestrator-side fetch.
+ *
+ * Exported only so mime-labels.test.ts can pin the table-agreement invariant:
+ * every value here needs a `MIME_TO_LABEL` entry, or the Files panel silently
+ * degrades to "XYZ file". Read it through `mimeFromPath`, not directly.
  */
-const EXT_TO_MIME: Record<string, string> = {
+export const EXT_TO_MIME: Record<string, string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   doc: "application/msword",

@@ -13,6 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { labelForMime } from "@/lib/mime-labels";
+import { EXT_TO_MIME } from "@/lib/mime-icons";
 
 describe("labelForMime — known types", () => {
   it.each([
@@ -108,6 +109,40 @@ describe("labelForMime — fallbacks", () => {
     );
   });
 
+  it("does not let the extension override an informative MIME family", () => {
+    // `EXT_TO_MIME` is icon-oriented: it resolves the container extensions
+    // toward audio, so ".ogg" reads as audio/ogg. When the server told us the
+    // file is video, that guess must not win.
+    expect(labelForMime("video/ogg", "movie.ogg")).toBe("Video");
+    expect(labelForMime("video/webm", "clip.webm")).toBe("WebM video");
+    expect(labelForMime("audio/ogg", "song.ogg")).toBe("Ogg audio");
+  });
+
+  it("documented limitation: no MIME means the container guess stands", () => {
+    // With nothing but the name, ".webm" resolves through the icon table's
+    // audio-leaning entry. Ordering cannot fix this — it is the accepted cost
+    // of reusing one table for icons and labels. Pinned so the miss is a known
+    // one rather than a surprise.
+    expect(labelForMime("", "clip.webm")).toBe("WebM audio");
+  });
+
+  it("does not name a purely numeric last segment as an extension", () => {
+    // Nextcloud sends "application/octet-stream" when getcontenttype is
+    // absent, so these reach the file-name path in production. "01 file" is a
+    // confident lie; "Unknown" is honest.
+    expect(labelForMime("application/octet-stream", "Backup 2026.01")).toBe(
+      "Unknown"
+    );
+    expect(labelForMime("application/octet-stream", "report 1.28")).toBe(
+      "Unknown"
+    );
+    // Extensions containing a letter still resolve, including "7z".
+    expect(labelForMime("application/octet-stream", "archive.7z")).toBe(
+      "7z archive"
+    );
+    expect(labelForMime("", "Budget 2026.v2")).toBe("V2 file");
+  });
+
   it("never returns an empty string, and never throws", () => {
     for (const [mime, name] of [
       [undefined, undefined],
@@ -124,4 +159,23 @@ describe("labelForMime — fallbacks", () => {
     }
     expect(labelForMime(undefined)).toBe("Unknown");
   });
+});
+
+describe("labelForMime — the two tables agree", () => {
+  // The extension path only produces a name if the MIME that `EXT_TO_MIME`
+  // yields also has a `MIME_TO_LABEL` entry. Add an extension to mime-icons.ts
+  // alone and the Files panel silently degrades to "XYZ file" — this is the
+  // test that turns that into a red build.
+  //
+  // The assertion is that both routes to a type — the MIME and the file name —
+  // land on the same words. Drop the label entry and they diverge: the name
+  // route falls through to "XYZ file" while the MIME route lands on the family
+  // fallback or "Unknown". (Asserting `not.toBe("XYZ file")` directly would
+  // false-positive on json/xml, whose real labels are "JSON file"/"XML file".)
+  it.each(Object.entries(EXT_TO_MIME))(
+    "%s and %s resolve to the same label",
+    (ext, mime) => {
+      expect(labelForMime("", `x.${ext}`)).toBe(labelForMime(mime));
+    }
+  );
 });
