@@ -3330,6 +3330,208 @@ def services_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# GPU telemetry (WARP-1861)
+# ---------------------------------------------------------------------------
+#
+# The bridge runs on the host, so it can read both halves of "why is the GPU
+# busy": the card's counters under /sys/class/drm, and the processes holding
+# it under /sys/class/kfd. Container attribution comes from /proc/<pid>/cgroup,
+# whose path already carries the container id — no Docker socket, so this stays
+# a read-only probe with no privilege beyond what the bridge already has.
+#
+# Module-level so tests can repoint them at a fixture tree.
+_SYS_DRM = "/sys/class/drm"
+_SYS_KFD_PROC = "/sys/class/kfd/kfd/proc"
+_PROC = "/proc"
+
+# `card1` yes; `card1-HDMI-A-3` (a connector) no.
+_DRM_CARD_RE = re.compile(r"card(\d+)$")
+# The 12-char short id, as `docker ps` shows it, out of a cgroup path like
+# /system.slice/docker-<64 hex>.scope or /docker/<64 hex>.
+_CGROUP_CONTAINER_RE = re.compile(r"(?:docker[-/]|containerd.*?[-/])([0-9a-f]{64})")
+
+
+def _read_sysfs_int(path):
+    """Read a single integer from sysfs, or None if it isn't readable.
+
+    None — never 0. A missing counter and an idle card are different facts,
+    and the `|| echo 0` reflex collapses them into a reading that every
+    threshold check happily passes.
+    """
+    try:
+        with open(path, "r") as fh:
+            return int(fh.read().strip().split()[0])
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+def _drm_cards():
+    """DRM card node names, numerically sorted, connector entries excluded.
+
+    Numeric sort so card10 doesn't precede card2 — lexical order would make
+    the enumeration depend on how many cards happen to be present.
+    """
+    try:
+        names = os.listdir(_SYS_DRM)
+    except Exception:                                                # noqa: BLE001
+        return []
+    cards = []
+    for name in names:
+        m = _DRM_CARD_RE.match(name)
+        if not m:
+            continue
+        if not os.path.isdir(os.path.join(_SYS_DRM, name, "device")):
+            continue
+        cards.append((int(m.group(1)), name))
+    return [name for _, name in sorted(cards)]
+
+
+def resolve_gpu_card():
+    """Return the discrete GPU's card node name, or None.
+
+    Resolved by LARGEST mem_info_vram_total — not lowest index, and not a
+    hardcoded name. The mini-rack exposes a 15.9 GiB discrete card alongside
+    a 512 MiB iGPU carve-out, and the iGPU publishes the same attributes;
+    its ~17 MiB of usage sits permanently below any multi-GiB "is the card
+    free?" threshold. A lowest-index resolver therefore reports a card that
+    is idle by construction while the real one is saturated. Same rule as
+    scripts/dmr/flip-single-box.sh's resolve_vram_node().
+
+    BRIDGE_GPU_CARD pins a specific node. A pin naming a card that isn't
+    present resolves to None rather than falling back: an operator who
+    mistyped the pin should get "unavailable", not plausible numbers from a
+    different device.
+    """
+    cards = _drm_cards()
+    pinned = os.environ.get("BRIDGE_GPU_CARD", "").strip()
+    if pinned:
+        return pinned if pinned in cards else None
+    best, best_size = None, -1
+    for name in cards:
+        size = _read_sysfs_int(
+            os.path.join(_SYS_DRM, name, "device", "mem_info_vram_total"))
+        if size is not None and size > best_size:
+            best, best_size = name, size
+    return best
+
+
+def _hwmon_value(device_dir, filename):
+    """Read a hwmon attribute from whichever hwmonN subdir exposes it."""
+    hwmon_root = os.path.join(device_dir, "hwmon")
+    try:
+        subdirs = sorted(os.listdir(hwmon_root))
+    except Exception:                                                # noqa: BLE001
+        return None
+    for sub in subdirs:
+        val = _read_sysfs_int(os.path.join(hwmon_root, sub, filename))
+        if val is not None:
+            return val
+    return None
+
+
+def gpu_processes():
+    """Processes currently holding the GPU, newest-listed first.
+
+    Sourced from /sys/class/kfd/kfd/proc, whose entries are named by pid.
+    A pid can exit between listing and reading — that race is ordinary, so
+    the entry is dropped rather than surfacing a half-null row.
+    """
+    try:
+        entries = os.listdir(_SYS_KFD_PROC)
+    except Exception:                                                # noqa: BLE001
+        return []
+    procs = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        base = os.path.join(_PROC, entry)
+        try:
+            with open(os.path.join(base, "comm"), "r") as fh:
+                comm = fh.read().strip()
+        except Exception:                                            # noqa: BLE001
+            continue                    # exited between listing and read
+        try:
+            with open(os.path.join(base, "cmdline"), "r") as fh:
+                # /proc renders argv NUL-separated; spaces make it readable
+                # and keep it a single JSON string.
+                cmdline = fh.read().replace("\x00", " ").strip()
+        except Exception:                                            # noqa: BLE001
+            cmdline = ""
+        container_id = None
+        try:
+            with open(os.path.join(base, "cgroup"), "r") as fh:
+                m = _CGROUP_CONTAINER_RE.search(fh.read())
+                if m:
+                    container_id = m.group(1)[:12]
+        except Exception:                                            # noqa: BLE001
+            pass
+        procs.append({
+            "pid": pid,
+            "comm": comm,
+            # Bounded: a llama-server argv with a long model path is fine to
+            # truncate, and an unbounded string here would be echoed into
+            # every dashboard poll.
+            "cmdline": cmdline[:300],
+            "container_id": container_id,
+        })
+    procs.sort(key=lambda p: p["pid"])
+    return procs
+
+
+def gpu_snapshot():
+    """Read-only GPU telemetry: card counters plus who is holding it.
+
+    `available: false` when no card resolves — with every counter null and a
+    `reason`, so a caller can never mistake "nothing found" for "idle".
+    """
+    card = resolve_gpu_card()
+    if not card:
+        pinned = os.environ.get("BRIDGE_GPU_CARD", "").strip()
+        reason = (
+            f"BRIDGE_GPU_CARD={pinned} names a card that is not present"
+            if pinned else "no DRM card exposing mem_info_vram_total"
+        )
+        return {
+            "available": False,
+            "card": None,
+            "reason": reason,
+            "busy_percent": None,
+            "vram_total_bytes": None,
+            "vram_used_bytes": None,
+            "vram_used_fraction": None,
+            "power_watts": None,
+            "temp_c": None,
+            "processes": [],
+        }
+
+    dev = os.path.join(_SYS_DRM, card, "device")
+    total = _read_sysfs_int(os.path.join(dev, "mem_info_vram_total"))
+    used = _read_sysfs_int(os.path.join(dev, "mem_info_vram_used"))
+    power_uw = _hwmon_value(dev, "power1_average")
+    temp_mc = _hwmon_value(dev, "temp1_input")
+
+    # Derived here rather than in each consumer so the dashboard tile and the
+    # assistant tool can never disagree on the arithmetic.
+    fraction = None
+    if total and used is not None:
+        fraction = round(used / total, 3)
+
+    return {
+        "available": True,
+        "card": card,
+        "reason": None,
+        "busy_percent": _read_sysfs_int(os.path.join(dev, "gpu_busy_percent")),
+        "vram_total_bytes": total,
+        "vram_used_bytes": used,
+        "vram_used_fraction": fraction,
+        "power_watts": round(power_uw / 1_000_000, 1) if power_uw is not None else None,
+        "temp_c": round(temp_mc / 1000, 1) if temp_mc is not None else None,
+        "processes": gpu_processes(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 
@@ -3455,6 +3657,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, host_topology_snapshot())
+            if path == "/gpu":
+                # WARP-1861: read-only GPU telemetry — card counters plus the
+                # processes holding it. Auth-gated like /host/topology: the
+                # snapshot names running processes and their command lines,
+                # which is box-internal detail, and with BRIDGE_BIND=0.0.0.0
+                # this is LAN-reachable.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, gpu_snapshot())
             if path == "/logs/bundle":
                 # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
                 # and /drives — the logs can carry box-internal (and, pre-host-
