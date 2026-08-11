@@ -29,7 +29,7 @@
  *     falls out of that for free, no extra client-side filtering needed.
  */
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -46,24 +46,17 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Department, DepartmentDetail, DepartmentRight, RosterUser } from "@/lib/types";
-import { CreateLibraryDialog, slugPreview } from "./CreateLibraryDialog";
-import {
-  formatStorageBytes,
-  storageInputToBytes,
-  type StorageUnit,
-} from "@/lib/storage-units";
+import { CreateLibraryDialog } from "./CreateLibraryDialog";
+import { formatStorageBytes } from "@/lib/storage-units";
 import {
   listDepartments,
   getDepartment,
-  createDepartment,
-  createTeam,
   archiveDepartment,
   restoreDepartment,
   addDepartmentMember,
   updateDepartmentMemberRight,
   removeDepartmentMember,
 } from "@/lib/api";
-import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { orgUnitDisplayName } from "@/lib/org-unit-name";
@@ -211,28 +204,6 @@ const RMETA_STYLE: React.CSSProperties = {
   color: "var(--text-muted)",
 };
 
-// Shell typography for the create dialog (WARP-1347 — indigo idiom, no
-// legacy `type-*` utilities). Metrics mirror the old `type-headline` /
-// `type-caption-1` / `type-footnote` classes 1:1 so the visual hierarchy
-// is unchanged.
-const DIALOG_HEADING_STYLE: React.CSSProperties = {
-  margin: 0,
-  fontSize: 17,
-  lineHeight: "22px",
-  fontWeight: 600,
-  letterSpacing: "-0.41px",
-  color: "var(--text)",
-};
-const FIELD_LABEL_STYLE: React.CSSProperties = {
-  fontSize: 12,
-  lineHeight: "16px",
-  color: "var(--text-muted)",
-};
-const FOOTNOTE_STYLE: React.CSSProperties = {
-  fontSize: 13,
-  lineHeight: "18px",
-  letterSpacing: "-0.08px",
-};
 
 export interface DepartmentsPanelProps {
   /** Roster used to populate the "add member" picker — passed down so this

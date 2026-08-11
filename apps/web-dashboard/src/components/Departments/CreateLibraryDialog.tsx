@@ -27,7 +27,7 @@ import type { Department } from "@/lib/types";
 
 /** Client-side slug preview only — the server (nameToSlug in
  *  routes/departments.ts) is the authoritative slug generator. */
-export function slugPreview(name: string): string {
+function slugPreview(name: string): string {
   return name
     .toLowerCase()
     .trim()
