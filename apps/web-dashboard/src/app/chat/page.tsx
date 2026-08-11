@@ -1056,7 +1056,14 @@ export default function ChatPage() {
         // (WARP-1153).
         flush
       >
-        <div className="flex flex-col h-full w-[320px] max-w-[85vw]">
+        {/* Width is the Dialog's to own, not this drawer's. The `w-[320px]
+            max-w-[85vw]` this used to carry never bought the nav-drawer
+            sliver it looks like it does — the panel container is already
+            100%-wide and painted with `--card-bg` at any viewport under
+            448px, so all it produced was 57px of empty card beside the list
+            at 375px (and 128px at 700px). WARP-1787 makes the container a
+            full-width sheet below 720px; filling it is the whole point. */}
+        <div className="flex flex-col h-full w-full">
           <h2 id="mobile-history-heading" className="sr-only">
             Chat history
           </h2>

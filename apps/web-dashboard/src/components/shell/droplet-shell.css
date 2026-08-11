@@ -546,4 +546,29 @@ body:has(.droplet-shell) { background: #f5f6fb; }
   /* `.search` is a 44px box but the <input> inside it only rendered 24px, so
      the top and bottom 10px of the control did nothing on tap. Fill it. */
   .droplet-shell .search input { align-self: stretch; }
+
+  /* ── 6. A side panel is a SHEET here, not a drawer ──────────────────────
+     `<Dialog placement="right">` is `w-full max-w-md`, and `max-w-md` is
+     448px — so between 448px and the desktop layout every detail panel in the
+     app renders as a partial-width drawer with the page left visible but
+     unusable beside it. Measured in Chrome against the production CSS bundle:
+     the switch port-detail panel came out 448px at a 700px viewport — 64% of
+     the screen, which is the "~60%" in Sam's report (WARP-1787). At 375px
+     `max-w-md` never binds, which is how a 375-only sweep missed it entirely.
+
+     `mobile-web-layout.md` §4 states the rule the other way round — "a
+     `max-w-md` drawer is a desktop drawer, not a mobile sheet" — and its
+     checklist item 7 has been unimplemented since it was written. This is it.
+
+     The rule lives here rather than at the call site because the shell's
+     breakpoint is 720px while Tailwind's are 640/768/1024, and mixing the two
+     leaves a dead zone (§4). The Dialog is portalled to <body> but carries
+     `droplet-shell` on its own backdrop, so this (0,2,0) selector reaches the
+     panel and outranks the (0,1,0) utility regardless of bundle order.
+
+     Only `.dlg-side-panel` (the `max-w-md` default) opts in. The 520px
+     `sheet` variant is left alone: its design packet locks
+     `min(520px, 100vw)`, which `w-full max-w-[520px]` already is, and
+     widening it between 520 and 720px would contradict the packet. */
+  .droplet-shell .dlg-side-panel { max-width: none; }
 }

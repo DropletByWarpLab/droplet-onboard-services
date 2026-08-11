@@ -88,7 +88,26 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
 
   return (
     <div className="card overflow-hidden" style={{ padding: 0 }}>
-      <div className="grid grid-cols-7" style={{ borderBottom: "1px solid var(--card-bd)" }}>
+      {/* `gap: 0` is pinned inline rather than left to a utility, because this
+          grid renders inside `.droplet-shell` — whose `.grid { gap: 16px }`
+          primitive is specificity (0,2,0) and applies to any bare `grid` in
+          here (04-coding-standards/mobile-web-layout.md §4). MiniMonth pins
+          its own gap the same way (WARP-1848); this is the big grid's turn.
+
+          Measured in Chrome at 375px against the production CSS bundle: the
+          seven day columns came out **35px each with 16px of dead space
+          between them** (7×35 + 6×16 = 341). All of the slack sat BETWEEN the
+          columns, which pinned the outer two hard against the card walls —
+          Sam's "the 22/29/5 column sits flush against the screen edge" — and
+          left every cell's `border-r` floating 16px from the cell it is meant
+          to divide, so the lattice read as clipped rather than intentional.
+          With gap 0 the cells measure 48.7px, the borders form one grid, and
+          the card keeps the page's 16px gutter like every other card on the
+          screen. WARP-1786. */}
+      <div
+        className="grid grid-cols-7"
+        style={{ gap: "0px", borderBottom: "1px solid var(--card-bd)" }}
+      >
         {WEEKDAYS.map((w) => (
           <div
             key={w}
@@ -101,7 +120,8 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
         ))}
       </div>
 
-      <div className="grid grid-cols-7">
+      {/* Same pin as the weekday row above — see the note there. */}
+      <div className="grid grid-cols-7" style={{ gap: "0px" }}>
         {days.map((d, i) => {
           const k = dayKey(d);
           const inMonth = d.getMonth() === month;

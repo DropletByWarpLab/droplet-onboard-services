@@ -349,7 +349,18 @@ export function Dialog({
     background: "var(--scrim)",
   };
 
-  const sideWidthClass = sideWidth === "sheet" ? "max-w-[520px]" : "max-w-md";
+  // `dlg-side` / `dlg-side-panel` are hooks for the shell's phone layer, not
+  // styling of their own — see the phone-sheet block in `droplet-shell.css`.
+  // `max-w-md` is 448px, so a right panel stays a desktop drawer at every
+  // width above it: measured in Chrome at a 700px viewport the switch
+  // port-detail panel covered 64% of the screen and left the Network page
+  // visible-but-dead beside it — Sam's "~60% of the screen width"
+  // (WARP-1787). Below the shell's own 720px breakpoint the default panel
+  // drops its cap and becomes a full-width sheet. The 520px `sheet` variant
+  // keeps its cap: its packet already specifies `min(520px, 100vw)`, which is
+  // exactly what `w-full max-w-[520px]` expresses.
+  const sideWidthClass =
+    sideWidth === "sheet" ? "max-w-[520px] dlg-side" : "max-w-md dlg-side dlg-side-panel";
   const containerClass = isSide
     ? `relative w-full ${sideWidthClass} h-full overflow-y-auto overflow-x-hidden`
     : `${widthClass} w-full overflow-hidden`;
