@@ -511,6 +511,46 @@ async def resolve_camera_network_auto() -> None:
             )
 
 
+def _synthetic_lease_records(swept: list[str], leases: list[dict]) -> list[dict]:
+    """Build ``ip:<addr>``-keyed pseudo-leases for swept hosts DHCP doesn't know.
+
+    This is what lets a static-IP camera be adopted at all, so the sweep must
+    keep producing records for genuinely new hosts. Two exclusions apply:
+
+    * hosts that already have a DHCP lease — the real MAC is better, and
+    * hosts whose IP we have ALREADY adopted under any key.
+
+    The second exclusion is the fix for one physical camera appearing twice.
+    ``_reconcile_synthetic_macs`` only repairs synthetic-first-then-real; the
+    reverse happens too — a camera adopted under its real MAC whose lease later
+    stops being visible (the appliance moving between its wired and Wi-Fi legs
+    is enough, since the camera segment sits behind the edge router). The sweep
+    still sees the host, mints ``ip:<addr>``, and it flows through as a NEW
+    camera.
+
+    Observed on the box: 192.168.9.219 adopted 08-10 as
+    ``xnv_c8083r_e43022502afd`` (``e4:30:22:50:2a:fd``), then re-added 08-11 as
+    ``camera_192_168_9_219`` (``ip:192.168.9.219``).
+    """
+    known_lease_ips = {l.get("ipaddr") for l in leases}
+    adopted_ips = {
+        record.get("ip")
+        for bucket in (known_cameras, pending_cameras)
+        for record in bucket.values()
+        if record.get("ip")
+    }
+    return [
+        {
+            "ipaddr": ip,
+            "macaddr": f"ip:{ip}",
+            "hostname": "",
+            "source": "sweep",
+        }
+        for ip in swept
+        if ip not in known_lease_ips and ip not in adopted_ips
+    ]
+
+
 async def scan_and_discover() -> None:
     """Main discovery loop iteration.
 
@@ -536,17 +576,7 @@ async def scan_and_discover() -> None:
         except Exception as exc:
             logger.warning("Subnet sweep raised: %s", exc)
             swept = []
-        known_lease_ips = {l.get("ipaddr") for l in leases}
-        synthetic = [
-            {
-                "ipaddr": ip,
-                "macaddr": f"ip:{ip}",
-                "hostname": "",
-                "source": "sweep",
-            }
-            for ip in swept
-            if ip not in known_lease_ips
-        ]
+        synthetic = _synthetic_lease_records(swept, leases)
         if synthetic:
             logger.info(
                 "Subnet sweep found %d static-IP host(s) not in DHCP leases",
