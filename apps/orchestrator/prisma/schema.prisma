@@ -793,8 +793,50 @@ model Camera {
   lastSeen       DateTime                 @default(now())
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
+
+  // WARP-1851 — storage allocation.
+  //
+  // `retentionMode` is an EXPLICIT enum rather than "budget is null =
+  // manual", per CLAUDE.md's no-guessing-from-absence rule. The two are
+  // not redundant: an operator can clear a budget while the column keeps
+  // the last value, and MANUAL must win unambiguously in that case.
+  //
+  // MANUAL — retention days are whatever the operator set on the camera
+  //          settings page. Nothing derives them.
+  // BUDGET — `storageBudgetBytes` is authoritative; the reconciler derives
+  //          retention days from it and the camera's measured bitrate, and
+  //          writes those days into Frigate's config.
+  retentionMode      CameraRetentionMode @default(MANUAL)
+  /// Target bytes of recordings for this camera. Only meaningful when
+  /// retentionMode = BUDGET. BigInt because a multi-TB budget overflows Int.
+  storageBudgetBytes BigInt?
+  /// The operator's PREFERRED retention windows — the ceiling the budget
+  /// controller scales down from and grows back toward:
+  ///   { continuous, motion, alerts, detections }  (days)
+  ///
+  /// Needed because enforcement is a feedback loop, not a formula. Without a
+  /// remembered ceiling the controller cannot tell "I reduced this to fit the
+  /// budget" from "the operator wants it low", so it could never restore
+  /// retention after the camera's usage drops.
+  ///
+  /// A window recorded as 0 stays 0 forever: scaling never ENABLES a window
+  /// the operator has switched off. That is what made the first cut of this
+  /// feature turn 24/7 recording on when asked to cap storage.
+  ///
+  /// Null while retentionMode = MANUAL, and captured from the camera's live
+  /// Frigate config the moment a budget is set.
+  retentionCeiling   Json?
+
   notifications  CameraNotificationPref[]
   groupMembers   CameraGroupMember[]
+}
+
+/// WARP-1851 — how a camera's retention window is decided.
+enum CameraRetentionMode {
+  /// Operator sets retention days directly.
+  MANUAL
+  /// Retention days are derived from a byte budget + measured bitrate.
+  BUDGET
 }
 
 model CameraNotificationPref {
