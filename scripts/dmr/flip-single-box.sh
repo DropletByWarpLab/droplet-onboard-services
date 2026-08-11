@@ -68,7 +68,26 @@ log "=== WARP-1772 single-box flip: Ollama -> DMR ==="
 # --- 1. Preflights -----------------------------------------------------------
 [ -f "$COMPOSE_DIR/docker-compose.yml" ] || die "run from the repo root on the box"
 grep -q '^  dmr:' "$COMPOSE_DIR/docker-compose.yml" || die "this tree has no dmr service — deploy a main that includes WARP-1772 first"
-docker ps --format '{{.Names}}' | grep -q '^droplet-ollama$' || die "droplet-ollama is not running — is this the single-box shape?"
+# WARP-1870: this used to `die` unless droplet-ollama was RUNNING, as a proxy
+# for "is this the single-box shape?". That proxy inverted the day DMR became
+# the provisioning default: a fresh box comes up on DMR with no ollama
+# container at all, and an already-flipped box has none either — so the check
+# refused to run on exactly the boxes it exists to serve, while blaming the
+# shape.
+#
+# Assert the SHAPE directly instead. The in-container router is what the
+# `single-box` profile actually gates (with the switch and camera-discovery),
+# and it is present regardless of which inference runtime is selected.
+docker ps --format '{{.Names}}' | grep -q '^droplet-openwrt$' \
+  || die "droplet-openwrt is not running — is this the single-box shape? (the flip does not apply to multi-box)"
+
+# Already on DMR? Nothing to flip, and continuing would stop the runtime that
+# is currently serving.
+if [ "$(grep -E '^INFERENCE_RUNTIME=' "$ROOT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"')" = "dmr" ] \
+   && docker ps --format '{{.Names}}' | grep -q '^droplet-dmr$'; then
+  die "already on DMR (INFERENCE_RUNTIME=dmr and droplet-dmr is running) — nothing to flip.
+    To go the other way: scripts/dmr/rollback-single-box.sh"
+fi
 
 if [ -f "$COMPOSE_DIR/docker-compose.override.yml" ] && [ "${DROPLET_OVERRIDE_ACK:-}" != "1" ]; then
   die "docker/docker-compose.override.yml exists. Recreating services without it
