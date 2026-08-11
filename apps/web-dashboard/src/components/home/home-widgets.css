@@ -270,6 +270,50 @@
   max-height: min(52vh, 420px);
 }
 
+/* ---------- Chat: compact conversation (WARP-1875) ----------
+   Keyed to the TILE's own inline size (`.bento` is the `bento` query
+   container, home-bento.css), never the viewport: after a layout rearrange
+   two tiles on the same screen can be 820px and 240px wide, and Samantha's
+   report was precisely that the widget kept behaving as if it were still its
+   old size. Below ~460px the desktop chrome — an 80% column cap plus 16px
+   bubble gutters plus a 30px avatar — eats more of the tile than the answer
+   text gets, so the same content reads as "flush against the edges".
+
+   Every selector here is three classes deep on purpose. It overrides
+   `.droplet-shell`-scoped rules that live in chat-indigo.css, a different
+   stylesheet; winning by source order would depend on CSS chunk ordering we
+   don't control, so these win on specificity instead. `ask-ai-reflow.test.tsx`
+   guards that. */
+@container bento (max-width: 460px) {
+  /* An 80% cap reserves ~48px of dead gutter on a 240px tile — space the
+     answer needs more than the layout does. */
+  .droplet-home .w-chat-thread .msg-col {
+    max-width: 100%;
+  }
+  .droplet-home .w-chat-thread .msg {
+    gap: 8px;
+  }
+  .droplet-home .w-chat-thread .msg-ava {
+    width: 24px;
+    height: 24px;
+  }
+  .droplet-home .w-chat-thread .msg-bubble {
+    padding: 10px 12px;
+  }
+  .droplet-home .w-chat--conv .w-chat-thread-inner {
+    gap: 10px;
+  }
+  .droplet-home .w-chat--conv .w-chat-capsule {
+    padding: 8px 8px 8px 12px;
+  }
+  /* Three controls at 12.5px do not fit one row on a narrow tile; wrapping
+     keeps the labels readable instead of hyphenating them inside the pills. */
+  .droplet-home .w-chat--conv .w-chat-conv-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+}
+
 /* ---------- Calendar ---------- */
 .droplet-home .w-cal {
   height: 100%;
