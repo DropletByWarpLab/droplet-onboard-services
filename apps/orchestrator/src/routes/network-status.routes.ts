@@ -56,7 +56,11 @@ import {
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 // WARP-1703 — band steering is Tier 2, so its write executes on the confirm
 // path rather than in the PUT handler.
-import { setBandSteering, setApWifi } from "../services/ap-onboard.service.js";
+import {
+  setBandSteering,
+  setApWifi,
+  getApRadioSummary,
+} from "../services/ap-onboard.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -75,7 +79,13 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       // WARP-39: typed Result — on error, surface the RouterError code to the
       // dashboard so it can render per-code messaging instead of a generic
       // "Router Not Connected".
-      const result = await getNetworkOverview();
+      //
+      // The AP source makes `wirelessRadios` whole-fabric. Without it the
+      // summary counts only the router's own radios, which is zero on every
+      // shape where the SSID lives on the access point — the RB5009 edge
+      // router has no radio hardware at all. Counts only: this route is open
+      // to every authenticated principal, so no SSID or PSK rides along.
+      const result = await getNetworkOverview(() => getApRadioSummary(prisma));
       if (result.ok) {
         res.json(result.value);
       } else {
