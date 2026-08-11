@@ -256,7 +256,47 @@ _CHAT_PATH = _resolve_chat_path(os.getenv("OLLAMA_CHAT_PATH"))
 # gap-filler condition in `_capabilities`. The switch exists because three
 # independent reviewers flagged an earlier table-first draft as a ships-dark
 # violation, and "provably off" beats "argued to be equivalent".
-_STATIC_CAPABILITY_TABLE = os.getenv("INFERENCE_RUNTIME", "ollama").strip().lower() == "dmr"
+def _resolve_inference_runtime(runtime: str | None = None, url: str | None = None) -> str:
+    """The selected runtime, shouting when the configuration is incoherent.
+
+    WARP-1870. `INFERENCE_RUNTIME` is read ONCE, at module import, by both
+    module constants below, and it defaults to "ollama". On a DMR box that
+    default is a silent trap: lose the variable — a compose `${VAR:-}` that
+    resolves against the wrong env file, or a `docker restart`, which re-reads
+    nothing at all (only `--force-recreate` does) — and both flags quietly flip
+    off. Every DMR model then reports `tools=false` with no error anywhere, and
+    the WARP-1839 grammar outage returns.
+
+    The contradiction is cheap to spot: `OLLAMA_URL` still points at DMR.
+    Runtime "ollama" plus a DMR chat URL cannot both be true, and the only way
+    to reach it is a lost variable. Log it at ERROR rather than degrade in
+    silence — a box serving without tools looks "up" from every angle except
+    the one that matters.
+
+    Returns the runtime string. Deliberately does NOT auto-correct: inferring
+    the runtime from a URL would be its own guessing game, and an operator who
+    genuinely wants Ollama against a DMR-shaped URL deserves to be obeyed and
+    warned, not overridden.
+    """
+    resolved = (runtime if runtime is not None else os.getenv("INFERENCE_RUNTIME", "ollama"))
+    resolved = (resolved or "").strip().lower() or "ollama"
+    chat_url = (url if url is not None else OLLAMA_URL) or ""
+    looks_like_dmr = "dmr" in chat_url.lower() or ":12434" in chat_url
+    if resolved != "dmr" and looks_like_dmr:
+        logger.error(
+            "INFERENCE_RUNTIME=%r but OLLAMA_URL=%r points at the Docker Model "
+            "Runner. The runtime variable was almost certainly lost (a compose "
+            "${VAR:-} resolving against the wrong env file, or a `docker "
+            "restart`, which re-reads nothing — use --force-recreate). Serving "
+            "with DMR support OFF: every model will report tools=false and "
+            "tool schemas will not be grammar-stripped (WARP-1839).",
+            resolved,
+            chat_url,
+        )
+    return resolved
+
+
+_STATIC_CAPABILITY_TABLE = _resolve_inference_runtime() == "dmr"
 
 # WARP-1839 — grammar-safe tool schemas for the DMR runtime.
 #
@@ -280,9 +320,7 @@ _STATIC_CAPABILITY_TABLE = os.getenv("INFERENCE_RUNTIME", "ollama").strip().lowe
 # at execution time (memory/extract.ts rejects >2000-char facts with
 # INVALID_ARGS), which is exactly where they were enforced under Ollama too —
 # the model never saw grammar-enforced bounds before the flip either.
-_GRAMMAR_SAFE_TOOL_SCHEMAS = (
-    os.getenv("INFERENCE_RUNTIME", "ollama").strip().lower() == "dmr"
-)
+_GRAMMAR_SAFE_TOOL_SCHEMAS = _resolve_inference_runtime() == "dmr"
 
 # JSON Schema keywords that generate bounded repetitions in llama.cpp's
 # json-schema→GBNF conversion. `format` is included because llama.cpp expands
