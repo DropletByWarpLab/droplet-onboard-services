@@ -22,6 +22,8 @@ on:
       # Nextcloud asset legs the embedded editor loads from.
       - "tests/nextcloud-trusted-domains.test.sh"
       - "tests/nginx-nextcloud-assets.test.sh"
+      # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
+      - "tests/dmr-profile-survives-setup.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -48,6 +50,8 @@ on:
       # Nextcloud asset legs the embedded editor loads from.
       - "tests/nextcloud-trusted-domains.test.sh"
       - "tests/nginx-nextcloud-assets.test.sh"
+      # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
+      - "tests/dmr-profile-survives-setup.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -106,6 +110,13 @@ jobs:
         # cert-artifact gates), variant contents, nginx.conf/Dockerfile/
         # compose wiring, tls-reload render hook. Pure bash, no Docker.
         run: bash tests/nginx-canonical-host.test.sh
+      - name: Run DMR profile-preservation unit tests
+        # WARP-1865: on a box with INFERENCE_RUNTIME=dmr, a setup re-run must
+        # keep `dmr` in COMPOSE_PROFILES. The WARP-1772 guard preserved the DMR
+        # URLs but not the profile, so a re-run kept OLLAMA_URL=http://dmr:12434
+        # while starting ollama and never starting dmr — inference pointed at a
+        # container that wasn't running, and setup logged success. Pure bash.
+        run: bash tests/dmr-profile-survives-setup.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean

@@ -623,6 +623,32 @@ configure_single_box_env() {
     *)              merged_profiles="${existing_profiles},single-box" ;;
   esac
 
+  # WARP-1865: keep the `dmr` profile when the box is flipped to DMR.
+  #
+  # The WARP-1772 guard below preserves the DMR *URLs* on a re-run, but the
+  # *profile* was left to the flip runbook — and flip-single-box.sh writes
+  # COMPOSE_PROFILES into docker/.env while setup.sh runs compose with
+  # --env-file $REPO_ROOT/.env. The two disagreed, so a re-run kept
+  # OLLAMA_URL=http://dmr:12434 while never starting the dmr service, and
+  # started ollama instead (its profile is `single-box`). Chat, the RAGAS
+  # judge and LLM_MODEL all ended up pointing at a container that wasn't
+  # running — the same un-flip failure the URL guard was written to stop,
+  # arriving through the other half of the flip.
+  #
+  # Read from $env_target (what this run is writing) rather than $env_file:
+  # INFERENCE_RUNTIME is a durable operator-set property and is what decides
+  # this, exactly as it decides the URLs below. Never ADDS dmr on a box that
+  # isn't flipped — an accidental flip is as bad as an accidental un-flip.
+  local _profiles_runtime
+  _profiles_runtime="$(grep -E '^INFERENCE_RUNTIME=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
+  if [ "$_profiles_runtime" = "dmr" ]; then
+    case ",${merged_profiles}," in
+      *,dmr,*) : ;;
+      *)       merged_profiles="${merged_profiles},dmr"
+               log_info "single-box env: INFERENCE_RUNTIME=dmr — kept the dmr profile in COMPOSE_PROFILES (WARP-1865)" ;;
+    esac
+  fi
+
   # RAG eval (RAGAS retrieval-quality scoring) — enabled by DEFAULT on the
   # single-box shape (bug #15). The `rag-eval` service is `["eval"]`-profiled,
   # so it's reached by APPENDING `eval` to COMPOSE_PROFILES here — the same
