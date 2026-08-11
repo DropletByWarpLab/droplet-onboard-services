@@ -193,6 +193,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   system: [
     "get_system_health",
+    "get_gpu_status",
     "list_drives",
     "list_storage_pools",
     "get_drive_health",
@@ -331,6 +332,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   list_notifications: "See notifications you've received",
   // System
   get_system_health: "Check that your Droplet is running smoothly",
+  get_gpu_status: "See what's using your Droplet's graphics chip right now",
   list_drives: "See your storage drives and free space",
   list_storage_pools: "Check your storage pools and whether any need attention",
   get_drive_health: "Check your drives' health and temperature",

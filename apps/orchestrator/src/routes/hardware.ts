@@ -7,7 +7,7 @@
 import { Router } from "express";
 import { fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import {
   getHardwarePayload,
@@ -58,7 +58,14 @@ export function createHardwareRouter(prisma: PrismaClient): Router {
    */
   router.get(
     "/hardware/gpu",
-    requireRole("owner", "admin"),
+    // `requireRoleOrMcpService`, not `requireRole`: the get_gpu_status LLM tool
+    // dispatches through the mcp-server, which presents `_service:mcp` — a
+    // principal that is neither owner nor admin. Under plain requireRole the
+    // tool ships registered and 403s on every call, which is exactly the
+    // dead-tool class WARP-1455's TOOL_ROUTES manifest exists to catch. The
+    // read is counters plus process names; /hardware above stays owner/admin
+    // because nothing dispatches a tool at it.
+    requireRoleOrMcpService("owner", "admin"),
     async (_req, res, next) => {
       try {
         const telemetry = await fetchGpuTelemetry();

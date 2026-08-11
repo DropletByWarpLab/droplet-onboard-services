@@ -160,6 +160,8 @@ const EXPECTED_TOOL_NAMES = [
   "restore_file_version",
   "share_file",
   "create_document",
+  // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
+  "get_gpu_status",
 ];
 
 describe("TOOLS registry", () => {
