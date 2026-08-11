@@ -53,6 +53,7 @@ const logger = createLogger("network-service");
 const CACHE_KEYS = {
   overview: "network:overview",
   interfaces: "network:interfaces",
+  ports: "network:ports",
   wireless: "network:wireless",
   leases: "network:leases",
   firewall: "network:firewall",
@@ -151,6 +152,21 @@ export async function getAllInterfaces(): Promise<openwrt.NetworkInterfaceRow[]>
   const rows = await openwrt.fetchAllInterfaces();
   await cacheSet(CACHE_KEYS.interfaces, rows, CACHE_TTL_SHORT);
   return rows;
+}
+
+/**
+ * The router's physical port map (WARP-1866) — the jacks behind the logical
+ * interfaces above. Cached on the SHORT TTL: a cable being plugged in is the
+ * one thing this panel exists to show, and it must not lag behind the switch
+ * port map (10s) that sits directly under it on the page.
+ */
+export async function getRouterPorts(): Promise<openwrt.RouterPortMap> {
+  const cached = await cacheGet<openwrt.RouterPortMap>(CACHE_KEYS.ports);
+  if (cached) return cached;
+
+  const map = await openwrt.fetchRouterPorts();
+  await cacheSet(CACHE_KEYS.ports, map, CACHE_TTL_SHORT);
+  return map;
 }
 
 // --- Interface write path (KAN-10) ---

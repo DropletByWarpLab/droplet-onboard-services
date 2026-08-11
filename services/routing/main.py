@@ -42,6 +42,7 @@ from droplet_openwrt_sdk import (
     detect_deployment_topology,
     parse_ai_acl_scopes,
 )
+from router_ports import get_router_ports
 import json
 from schemas import (
     HealthResponse,
@@ -721,6 +722,27 @@ def _is_management_interface(name: str) -> bool:
 def network_interfaces():
     try:
         return get_router().network.get_all_interface_statuses()
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# Sits beside the interface reads because it answers the physical half of the
+# same question: those enumerate the logical interfaces, this the jacks.
+@app.get("/network/ports")
+def network_ports():
+    """The router's PHYSICAL port map (WARP-1866).
+
+    Read-only, and deliberately so: the interface routes above can bring a
+    link down, but there is no equivalent here. Disabling a router jack from
+    the dashboard would sever the WAN or the switch trunk with no safe-apply
+    arm to undo it, and it answers no question the port map is being asked.
+
+    Degrades on shape (`supported: false` + a reason), never on reachability —
+    an unreachable router still surfaces as an error, so the panel can say the
+    router is offline instead of drawing every jack dark.
+    """
+    try:
+        return get_router_ports(get_router())
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

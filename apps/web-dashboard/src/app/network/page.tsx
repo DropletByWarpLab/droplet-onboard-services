@@ -42,6 +42,7 @@ import { UpnpCard } from "@/components/network/UpnpCard";
 import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/FirewallRuleForm";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
+import { RouterPortsPanel } from "@/components/network/router/RouterPortsPanel";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import { DnsServersForm } from "@/components/network/DnsServersForm";
@@ -734,11 +735,15 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
         />
       </div>
 
-      {/* ADR-018 item 12 — managed-switch panel. Sits below the KPI strip
-          (the design's "throughput chart" anchor doesn't exist on this tabbed
-          page; Overview is only visible in Advanced mode — in Simple mode the
-          wrapper div is hidden and NetworkSimple renders instead). Renders
-          its own empty/loading/error states and self-gates RBAC. */}
+      {/* The two port maps, in the order the cable runs: WARP-1866's router
+          panel, then ADR-018 item 12's managed-switch panel. Both sit below
+          the KPI strip (the design's "throughput chart" anchor doesn't exist
+          on this tabbed page; Overview is only visible in Advanced mode — in
+          Simple mode the wrapper div is hidden and NetworkSimple renders
+          instead). Each renders its own empty/loading/error states; the switch
+          panel additionally self-gates RBAC for its writes, where the router
+          panel is read-only. */}
+      <RouterPortsPanel />
       <SwitchPanel />
     </div>
   );

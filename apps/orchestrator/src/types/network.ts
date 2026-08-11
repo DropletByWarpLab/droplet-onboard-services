@@ -44,6 +44,51 @@ export interface NetworkInterfaces {
   wan: InterfaceStatus;
 }
 
+/**
+ * One PHYSICAL jack on the router — WARP-1866, the router's answer to the
+ * switch's §7 `SwitchPort`. Derived by the routing service from
+ * `network.device status` + board.json + uci; see services/routing/
+ * router_ports.py for the derivation and the honesty rules behind it.
+ */
+export interface RouterPort {
+  /** netdev name — "p1", "sfp", "eth0". The port's stable identity. */
+  id: string;
+  role: "wan" | "lan" | "guest" | "other" | "unused";
+  /** uci interfaces whose traffic reaches this jack, in config order. A bridge
+   *  member carries both `lan` and the `guest` VLAN riding the bridge. */
+  networks: string[];
+  /** netifd reports a device object for this jack. `false` = an empty SFP cage
+   *  or a jack the running config never realised — absent, NOT down. */
+  present: boolean;
+  /** Admin state (`up`). `null` when absent. NEVER the link indicator — on a
+   *  DSA port this is true for every jack, cable or not. */
+  admin_up: boolean | null;
+  /** The real link: netifd `carrier`. */
+  link_up: boolean;
+  /** "2.5 Gb" / "1 Gb" / "100 Mb". Null when there is no link. */
+  speed: string | null;
+  duplex: "full" | "half" | null;
+  mac: string | null;
+  is_sfp: boolean;
+  traffic: { rx_bytes: number; tx_bytes: number } | null;
+  /** online = carrier · offline = admin up, no cable · disabled = admin down ·
+   *  absent = no reading at all. */
+  status: "online" | "offline" | "disabled" | "absent";
+}
+
+/**
+ * `GET /network/ports`. `supported: false` means this router shape reports no
+ * physical port map (with `detail` saying so) — distinct from an unreachable
+ * router, which surfaces as an error. Neither may render as an all-dark
+ * faceplate.
+ */
+export interface RouterPortMap {
+  supported: boolean;
+  detail: string | null;
+  model: string | null;
+  ports: RouterPort[];
+}
+
 export interface WirelessInterfaceConfig {
   mode: string;
   ssid: string;

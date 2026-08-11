@@ -1,0 +1,103 @@
+"use client";
+
+import { X } from "lucide-react";
+import type { RouterPort } from "@/lib/types/router-ports";
+import { ROLE, portName } from "./helpers";
+// The hardware-look vocabulary (RJ45/SFP jack gradients, link LED) is shared
+// with the switch faceplate on purpose — the two port maps sit one above the
+// other on the Network tab and a second, near-identical jack would read as a
+// different kind of thing. Imported rather than copied so they can't drift.
+import styles from "../switch/switch.module.css";
+
+interface Props {
+  ports: RouterPort[];
+}
+
+function Cell({ p }: { p: RouterPort }) {
+  const { Icon } = ROLE[p.role];
+  return (
+    <div
+      title={`${p.id} — ${portName(p)}${p.link_up && p.speed ? ` · ${p.speed}` : ""}`}
+      className={[
+        "flex flex-col items-center gap-1.5 rounded-[9px] border border-[var(--card-bd)]",
+        "bg-[var(--card-bg)] px-1.5 pt-2.5 pb-2 min-w-0",
+        // An unreadable jack is dimmed rather than drawn as a dark-but-normal
+        // port — it looks unmeasured because it is.
+        p.present ? "" : "opacity-[0.55] border-dashed",
+      ].join(" ")}
+    >
+      <span className={[styles.jack, p.is_sfp ? styles.jackSfp : "", p.link_up ? styles.up : ""].join(" ")}>
+        <span
+          className={[styles.led, styles.ledLink, p.link_up ? styles.ledLinkOn : ""].join(" ")}
+          aria-hidden="true"
+        />
+        {p.status === "disabled" && (
+          <span className={styles.jackX}>
+            <X size={11} aria-hidden="true" />
+          </span>
+        )}
+      </span>
+      <span className="type-caption-2 font-semibold text-[color:var(--text-muted)] font-mono">
+        {p.id}
+      </span>
+      <span className="text-[color:var(--text-muted)] flex">
+        <Icon size={11} aria-hidden="true" />
+      </span>
+      <span className="type-caption-2 max-w-full truncate text-[color:var(--text)]">
+        {portName(p)}
+      </span>
+      <span className="text-[10px] leading-none text-[color:var(--text-muted)] font-mono">
+        {p.link_up ? (p.speed ?? "up") : "—"}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The router faceplate — "feels like real hardware", mirroring the switch's
+ * layout A. Desktop-only (the panel collapses to the table below md).
+ *
+ * Static, unlike the switch faceplate: those cells are buttons because a
+ * switch port opens a write drawer. Router ports are read-only, so a button
+ * that opens nothing would be a keyboard trap for no payoff — everything a
+ * cell can say is already in its label, its title, and the table view.
+ */
+export function RouterFaceplate({ ports }: Props) {
+  const copper = ports.filter((p) => !p.is_sfp);
+  const fibre = ports.filter((p) => p.is_sfp);
+  return (
+    <div>
+      <div className="flex gap-[18px] items-stretch bg-[var(--card-inner)] border border-[var(--card-bd)] rounded-[12px] p-3.5">
+        <div className="grid grid-flow-col auto-cols-fr gap-2 flex-1">
+          {copper.map((p) => (
+            <Cell key={p.id} p={p} />
+          ))}
+        </div>
+        {fibre.length > 0 && (
+          <>
+            <div className="w-px bg-[var(--card-bd)]" aria-hidden="true" />
+            <div className="grid grid-flow-col gap-2 flex-none" style={{ gridAutoColumns: "110px" }}>
+              {fibre.map((p) => (
+                <Cell key={p.id} p={p} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+      <div className="flex items-center gap-4 mt-2.5 type-caption-2 text-[color:var(--text-muted)] flex-wrap">
+        <span className="inline-flex items-center gap-1.5">
+          <span className={[styles.led, styles.ledLinkOn, styles.ledInline].join(" ")} aria-hidden="true" />
+          link up
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className={[styles.led, styles.ledInline].join(" ")} aria-hidden="true" />
+          no cable
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="w-2.5 h-2.5 rounded-[3px] border border-dashed border-[var(--card-bd)]" aria-hidden="true" />
+          no reading
+        </span>
+      </div>
+    </div>
+  );
+}

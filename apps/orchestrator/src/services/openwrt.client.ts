@@ -18,6 +18,7 @@ import type {
   NetworkSummary,
   NetworkInterfaces,
   NetworkInterfaceRow,
+  RouterPortMap,
   AiNetworkAccess,
   InterfaceStatus,
   WirelessStatus,
@@ -39,7 +40,13 @@ import { createLogger } from "../lib/logger.js";
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
-export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../types/network.js";
+export type {
+  SystemControls,
+  NetworkInterfaceRow,
+  RouterPort,
+  RouterPortMap,
+  AiNetworkAccess,
+} from "../types/network.js";
 
 const logger = createLogger("openwrt-client");
 
@@ -342,6 +349,15 @@ export async function fetchAllInterfaces(): Promise<NetworkInterfaceRow[]> {
     { label: "Interface enumeration" },
   );
   return data.interfaces;
+}
+
+/**
+ * The router's PHYSICAL port map (WARP-1866) — the jacks, not the interfaces.
+ * Read-only; there is no write counterpart by design (disabling a router jack
+ * from the dashboard would sever the WAN or the switch trunk).
+ */
+export async function fetchRouterPorts(): Promise<RouterPortMap> {
+  return routingFetchJson<RouterPortMap>("/network/ports", { label: "Router ports" });
 }
 
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {
