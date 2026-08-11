@@ -196,6 +196,8 @@ banner explaining how to enable the `eval` Compose profile.
 | `RAG_EVAL_CRON_HOUR` | `22-23,0-5` | Local-time hour window for the scheduled run. Default = 22:00–05:00 (8 slots/night). |
 | `RAG_EVAL_CRON_MINUTE` | `0` | Local-time minute. |
 | `RAG_EVAL_DISABLED` | `0` | Set to `1` to skip registering the scheduler's cron job. The HTTP trigger server STILL serves so dashboard/`docker exec` ad-hoc runs work — "disabled" = "no automatic schedule", not "no service". |
+| `RAG_EVAL_CORPUS_GATE_DISABLED` | `0` | WARP-1868: set to `1` to run every scheduled slot regardless of whether the corpus changed. The gate exists because a healthy pass pins the GPU at 98–100% for ~10 minutes and the cron fires 8×/night whether or not a file was indexed. Disable it when you are deliberately holding the corpus constant and varying something else — bisecting a judge or model change, where skipping would defeat the exercise. Never affects the HTTP trigger, which is always unconditional. |
+| `RAG_EVAL_FINGERPRINT_TIMEOUT_SEC` | `10` | WARP-1868: how long to wait for the orchestrator's `/api/admin/retrieval-eval/corpus-fingerprint`. Bounded so a slow answer cannot wedge the scheduler ahead of a ~10-minute job. On timeout the gate **fails open** and the run proceeds — skipping on an unreadable fingerprint would silently stop measuring retrieval quality. |
 | `RAG_EVAL_HTTP_PORT` | `8090` | Port the FastAPI HTTP trigger server binds on the internal Docker network. The orchestrator proxies here via `RAG_EVAL_URL`. |
 | `OPENAI_API_KEY` | `""` | Only required when `RAGAS_JUDGE=cloud`. |
 

@@ -35,6 +35,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from tzlocal import get_localzone
 
+import corpus_fingerprint
 import runner
 from config import CRON_HOUR, CRON_MINUTE
 from run_state import STORE, RunStatus
@@ -52,6 +53,34 @@ async def _scheduled_run() -> None:
     cron tick still fires.
     """
     run_id = runner._utc_stamp()
+    loop = asyncio.get_running_loop()
+
+    # WARP-1868 — corpus gate, deliberately BEFORE admission.
+    #
+    # A skip does no work, so it must not occupy the busy flag even briefly:
+    # a manual /run arriving in the same instant should win, not collide with
+    # a tick that was about to decide it had nothing to do.
+    #
+    # Only the SCHEDULED path is gated. server.py's /run is a separate entry
+    # into the same store and stays unconditional — an operator asking for a
+    # run gets one, whatever the corpus says.
+    #
+    # Both calls are I/O, so they go to the executor like the run itself
+    # rather than blocking the loop that is also serving HTTP.
+    current_fp = await loop.run_in_executor(None, corpus_fingerprint.fetch_fingerprint)
+    last_fp = await loop.run_in_executor(None, corpus_fingerprint.load_last)
+    run_it, reason = corpus_fingerprint.should_run(current_fp, last_fp)
+    if not run_it:
+        logger.info("scheduled run SKIPPED — %s", reason)
+        # Record it. An unexplained gap in the run history is
+        # indistinguishable from a missed slot or a dead container, and the
+        # dashboard would have nothing to render but absence.
+        skip_admitted, _ = STORE.try_begin(run_id, kind="run")
+        if skip_admitted:
+            STORE.finish(run_id, RunStatus.SKIPPED, error=reason)
+        return
+    logger.info("scheduled run proceeding — %s", reason)
+
     admitted, current = STORE.try_begin(run_id, kind="run")
     if not admitted:
         logger.warning(
@@ -59,7 +88,6 @@ async def _scheduled_run() -> None:
         )
         return
 
-    loop = asyncio.get_running_loop()
     logger.info("scheduled RAGAS run starting (run_id=%s)", run_id)
     try:
         # Pass our run_id as the results-file stamp so runId ==
@@ -76,6 +104,11 @@ async def _scheduled_run() -> None:
         STORE.finish(run_id, RunStatus.FAILED, error=runner.error_summary(exc))
         return
     STORE.finish(run_id, RunStatus.SUCCEEDED)
+    # Record the fingerprint only AFTER the run completed. Storing it up front
+    # would make a crashed or aborted run look measured, and the next tick
+    # would skip a corpus that nothing actually scored.
+    if current_fp:
+        corpus_fingerprint.save(current_fp, run_id)
     logger.info("scheduled RAGAS run complete (run_id=%s)", run_id)
 
 
