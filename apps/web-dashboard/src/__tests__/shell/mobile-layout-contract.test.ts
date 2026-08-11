@@ -121,6 +121,33 @@ describe("droplet-shell phone layout layer", () => {
     expect(body).toMatch(/\.pt-chip\s*\{[^}]*flex-shrink:\s*1/);
   });
 
+  /* ── Side panels are sheets on a phone (WARP-1787) ──────────────────────
+     Sam reported the switch port-detail panel as "a right-hand drawer taking
+     ~60% of the screen width" with the Network page visible-but-dead behind
+     it. `<Dialog placement="right">` is `w-full max-w-md`; measured in Chrome
+     against the production CSS bundle it renders 448px at a 700px viewport —
+     64%, the number in the report. At 375px `max-w-md` never binds, which is
+     how a 375-only sweep missed it.
+
+     The override belongs here, at the shell's own 720px breakpoint, rather
+     than at the call site: Tailwind's boundaries are 640/768/1024 and mixing
+     them with the shell's leaves a dead zone (mobile-web-layout §4). */
+  it("makes the default right-side panel a full-width sheet below 720px", () => {
+    const { body } = phoneLayer();
+    // `.droplet-shell` is on the dialog's own backdrop (it is portalled to
+    // <body>), so the (0,2,0) selector reaches the panel and outranks the
+    // (0,1,0) `max-w-md` utility.
+    expect(body).toMatch(/\.dlg-side-panel\s*\{[^}]*max-width:\s*none/);
+  });
+
+  it("leaves the 520px sheet variant alone", () => {
+    // RoleBuilderSheet's packet locks `min(520px, 100vw)`, which `w-full
+    // max-w-[520px]` already expresses. Widening it to the viewport between
+    // 520 and 720px would contradict the packet.
+    const { body } = phoneLayer();
+    expect(body).not.toMatch(/\.dlg-side\s*\{[^}]*max-width:\s*none/);
+  });
+
   /* ── Touch targets ─────────────────────────────────────────────────────── */
   it("raises the interactive primitives to the 44px touch minimum", () => {
     const { body } = phoneLayer();

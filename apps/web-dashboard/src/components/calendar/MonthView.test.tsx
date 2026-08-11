@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { render } from "@testing-library/react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
-import { monthGridDays, monthGridRange, eventsByDay } from "./MonthView";
+import { MonthView, monthGridDays, monthGridRange, eventsByDay } from "./MonthView";
 
 describe("monthGridDays", () => {
   it("returns 42 days starting on the Sunday on/before the 1st", () => {
@@ -76,5 +77,51 @@ describe("eventsByDay", () => {
     const m = eventsByDay([ev("lunch", new Date(2026, 4, 15, 12), new Date(2026, 4, 15, 13))]);
     expect([...m.keys()]).toEqual(["2026-05-15"]);
     expect(m.get("2026-05-15")).toHaveLength(1);
+  });
+});
+
+/* ══ WARP-1786 — the month grid's own gap ══════════════════════════════════
+   Sam reported the month grid "runs nearly edge-to-edge", its outer columns
+   flush against the screen edges with cell borders clipped, while the
+   "August 2026" mini-month directly below it sits on the normal page gutter.
+
+   The cause is the specificity collision in
+   `04-coding-standards/mobile-web-layout.md` §4: `.droplet-shell .grid`
+   is (0,2,0) and declares `gap: 16px`, so it silently beats every (0,1,0)
+   `gap-*` utility inside the shell. Measured in Chrome at a 375px viewport
+   against the production CSS bundle: the 7 day columns rendered **35px**
+   each with **16px of dead space between them** (7×35 + 6×16 = 341). All the
+   slack lives BETWEEN the columns, which pins the outer two hard against the
+   card walls and leaves each cell's `border-r` floating 16px away from the
+   cell it is supposed to divide — a bordered lattice blown apart.
+
+   MiniMonth already pins its gap inline for exactly this reason (WARP-1848);
+   this is the same call-site fix for the big grid. jsdom has no layout engine
+   (mobile-web-layout §5), so what is asserted here is the declaration, not
+   the geometry. */
+describe("MonthView — phone gutter (WARP-1786)", () => {
+  it("pins its own gap so the shell's `.grid { gap: 16px }` cannot blow the columns apart", () => {
+    const { container } = render(<MonthView events={[]} cursor={new Date(2026, 7, 15)} />);
+    const grids = container.querySelectorAll<HTMLElement>(".grid.grid-cols-7");
+    // Weekday header row + the 42-cell day grid.
+    expect(grids).toHaveLength(2);
+    for (const g of grids) {
+      // Inline is the only thing that outranks the (0,2,0) primitive without
+      // restyling the 58 other files that ask for a grid gap this way.
+      expect(g.style.gap).toBe("0px");
+    }
+  });
+
+  it("keeps the day cells contiguous so their borders form one lattice", () => {
+    const { container } = render(<MonthView events={[]} cursor={new Date(2026, 7, 15)} />);
+    const cells = container.querySelectorAll<HTMLElement>(".grid.grid-cols-7 button");
+    expect(cells).toHaveLength(42);
+    // Every cell except the last column draws the vertical divider, and every
+    // row except the last draws the horizontal one. With a gap those borders
+    // are decorative lines in empty space; with gap 0 they are the grid.
+    expect(cells[0].className).toContain("border-r");
+    expect(cells[6].className).not.toContain("border-r");
+    expect(cells[0].className).toContain("border-b");
+    expect(cells[41].className).not.toContain("border-b");
   });
 });

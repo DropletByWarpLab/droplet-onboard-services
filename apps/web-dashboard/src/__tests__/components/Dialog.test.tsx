@@ -37,12 +37,14 @@ function Harness({
   closeOnBackdrop = true,
   withDescribedBy = false,
   placement,
+  sideWidth,
   flush,
 }: {
   initiallyOpen?: boolean;
   closeOnBackdrop?: boolean;
   withDescribedBy?: boolean;
   placement?: "center" | "right";
+  sideWidth?: "default" | "sheet";
   flush?: boolean;
 }) {
   const [open, setOpen] = React.useState(initiallyOpen);
@@ -60,6 +62,7 @@ function Harness({
         describedBy={withDescribedBy ? "dialog-desc" : undefined}
         closeOnBackdrop={closeOnBackdrop}
         placement={placement}
+        sideWidth={sideWidth}
         flush={flush}
       >
         <h2 id="dialog-heading">Confirm</h2>
@@ -182,6 +185,42 @@ describe("<Dialog> primitive", () => {
     expect(backdrop.style.background).toBe("var(--scrim)");
     expect(backdrop.className).toContain("droplet-shell");
     expect(backdrop.className).not.toContain("backdrop-blur-sm");
+  });
+
+  /* ══ WARP-1787 — a side panel is a SHEET on a phone, not a drawer ═══════
+     Sam reported the switch port-detail panel opening as "a right-hand drawer
+     taking ~60% of the screen width", with the Network page left visible but
+     unusable behind it. Measured in Chrome against the production CSS bundle:
+     the panel is `w-full max-w-md`, so at a 700px viewport it renders 448px —
+     **64% of the screen**, which is the number in the report. At 375px
+     `max-w-md` never binds, which is why the defect hid from a 375-only pass.
+
+     `max-w-md` is 448px and a 448px overlay is a desktop drawer, not a mobile
+     sheet (`04-coding-standards/mobile-web-layout.md` §4 + checklist 7). The
+     override lives in the shell's phone layer at the shell's own 720px
+     breakpoint — Tailwind's md is 768 and sm is 640, and mixing the two
+     leaves a dead zone (§4). This asserts the hook the stylesheet needs;
+     `src/__tests__/shell/mobile-layout-contract.test.ts` asserts the rule. */
+  it("marks a right-placement panel so the phone layer can make it full-width", () => {
+    render(<Harness initiallyOpen placement="right" />);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("dlg-side");
+    // The desktop cap stays a utility — the phone layer overrides it.
+    expect(dialog.className).toContain("max-w-md");
+  });
+
+  it("leaves the 520px `sheet` width alone — its packet already locks min(520px, 100vw)", () => {
+    render(<Harness initiallyOpen placement="right" sideWidth="sheet" />);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("dlg-side");
+    // Only the default (max-w-md) panel opts into the full-width phone sheet.
+    expect(dialog.className).not.toContain("dlg-side-panel");
+    expect(dialog.className).toContain("max-w-[520px]");
+  });
+
+  it("does not mark a CENTERED dialog — it keeps its 24px backdrop inset", () => {
+    render(<Harness initiallyOpen />);
+    expect(screen.getByRole("dialog").className).not.toContain("dlg-side");
   });
 
   it("traps Tab forward: from last focusable wraps to first", async () => {
