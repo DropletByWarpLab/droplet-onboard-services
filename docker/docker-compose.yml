@@ -2336,7 +2336,22 @@ services:
     # (RDNA4), so the no-HSA_OVERRIDE note above still holds.
     image: ollama/ollama:0.30.8-rocm
     container_name: droplet-ollama
-    profiles: ["single-box"]
+    # Its OWN profile, deliberately not `single-box`.
+    #
+    # `single-box` is a four-service bundle — it also carries `openwrt` (2557),
+    # `switch` (1541) and `camera-discovery` (1792). While ollama shared that
+    # token there was no way to stop serving Ollama without also dropping the
+    # in-container router, the switch agent and camera discovery with it. On a
+    # DMR-flipped box that left a model-less daemon holding /dev/kfd and
+    # renderD128 open next to the runtime actually serving — precisely the
+    # "never both" the SINGLE GPU OWNER note below forbids.
+    #
+    # Splitting it out makes the runtime choice a single token:
+    #   Ollama box -> COMPOSE_PROFILES=...,single-box,ollama
+    #   DMR box    -> COMPOSE_PROFILES=...,single-box,dmr
+    # `scripts/lib/single-box.sh` appends whichever matches INFERENCE_RUNTIME,
+    # so neither a fresh provision nor a setup re-run can start both or neither.
+    profiles: ["ollama"]
     restart: unless-stopped
     <<: *default-logging
     expose:

@@ -639,6 +639,16 @@ configure_single_box_env() {
   # INFERENCE_RUNTIME is a durable operator-set property and is what decides
   # this, exactly as it decides the URLs below. Never ADDS dmr on a box that
   # isn't flipped — an accidental flip is as bad as an accidental un-flip.
+  #
+  # The `ollama` arm is the mirror image, added when the ollama service moved
+  # off the `single-box` profile onto its own. `single-box` is a four-service
+  # bundle (openwrt, switch, camera-discovery, and formerly ollama), so while
+  # ollama rode that token there was no way to stop serving Ollama without
+  # dropping the router and camera discovery too — which is why a flipped box
+  # kept a model-less daemon holding /dev/kfd and renderD128 open beside DMR.
+  # Now exactly one runtime token is appended, so a box can never start both
+  # runtimes (the SINGLE GPU OWNER violation, WARP-1826) nor neither (no
+  # inference at all). Un-flipped boxes keep today's behaviour verbatim.
   local _profiles_runtime
   _profiles_runtime="$(grep -E '^INFERENCE_RUNTIME=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
   if [ "$_profiles_runtime" = "dmr" ]; then
@@ -646,6 +656,20 @@ configure_single_box_env() {
       *,dmr,*) : ;;
       *)       merged_profiles="${merged_profiles},dmr"
                log_info "single-box env: INFERENCE_RUNTIME=dmr — kept the dmr profile in COMPOSE_PROFILES (WARP-1865)" ;;
+    esac
+    # Belt and braces: if a half-finished flip left `ollama` in the list, drop
+    # it. Leaving both is the one outcome worse than either alone.
+    case ",${merged_profiles}," in
+      *,ollama,*)
+        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'ollama' | paste -sd, -)"
+        log_info "single-box env: INFERENCE_RUNTIME=dmr — dropped the stale ollama profile (single GPU owner, WARP-1826)" ;;
+    esac
+  else
+    case ",${merged_profiles}," in
+      *,ollama,*) : ;;
+      ,,)         merged_profiles="ollama" ;;
+      *)          merged_profiles="${merged_profiles},ollama"
+                  log_info "single-box env: INFERENCE_RUNTIME is not dmr — added the ollama profile so the box has an inference runtime" ;;
     esac
   fi
 
