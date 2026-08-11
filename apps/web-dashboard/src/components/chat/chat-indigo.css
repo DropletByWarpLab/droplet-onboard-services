@@ -383,9 +383,17 @@
   max-width: 560px;
   padding: 0 20px;
 }
+/* These carry whole prompts ("Summarize the files I uploaded today"), which
+   don't fit on one line on a phone. A fixed `height` made the text wrap out
+   of the pill; `min-height` + symmetric padding lets the chip grow to hold
+   its own text instead. */
 .droplet-shell .chat-sugg {
-  height: 34px;
-  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  text-align: left;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 14px;
   border-radius: 9999px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -475,6 +483,8 @@
   gap: 5px;
   height: 26px;
   padding: 0 9px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: 7px;
   border: 0;
   background: transparent;
@@ -626,7 +636,9 @@
      and the empty-state suggestion chips were both 34px. */
   .droplet-shell .chat-iconbtn { width: 44px; height: 44px; }
   .droplet-shell .chat-send { height: 44px; }
-  .droplet-shell .chat-sugg { height: 44px; }
+  /* min-height, not height — a chip whose prompt needs two lines has to grow
+     rather than spill its text out of the pill. */
+  .droplet-shell .chat-sugg { min-height: 44px; }
 
   /* The model picker's <select> rendered 21px tall — it is a real control, not
      a label, so it owes the same 44px. The wrapper grows with it. */
