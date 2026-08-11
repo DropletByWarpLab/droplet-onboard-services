@@ -1740,6 +1740,21 @@ class SystemApi:
         """Get hardware and OS info (kernel, hostname, model, release)."""
         return self._r._call("system", "board")
 
+    def board_json(self) -> dict:
+        """The board's factory hardware description (`/etc/board.json`).
+
+        WARP-1866: the only source that knows a physical jack exists when the
+        running config does not use it — the RB5009's SFP cage is in this
+        roster and appears nowhere in uci. Served over `luci-rpc getBoardJSON`,
+        which the droplet-ai ACL already grants; a build without luci-rpc
+        raises, and the caller degrades to the uci-derived roster.
+
+        Distinct from :meth:`board_info` (ubus `system board`), which reports
+        the RUNNING kernel/release and carries no port layout at all.
+        """
+        result = self._r._call("luci-rpc", "getBoardJSON")
+        return result if isinstance(result, dict) else {}
+
     def firmware_version_check(self, pinned_image: str) -> dict:
         """Read the running firmware version and compare it to the pinned image.
 

@@ -16,6 +16,7 @@ import {
   getDhcpLeases,
   getSystemInfo,
   getAllInterfaces,
+  getRouterPorts,
   addStaticDhcpLease,
   setDnsServers,
   getTopology,
@@ -154,6 +155,23 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     try {
       const interfaces = await getAllInterfaces();
       res.json({ interfaces });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Physical ports (read-only) — WARP-1866 ---
+  // The jacks behind the interfaces above, to the same standard the managed
+  // switch has had since WARP-1674. No write counterpart exists or should:
+  // disabling a router jack from the dashboard severs the WAN or the switch
+  // trunk, with no safe-apply arm to undo it.
+  //
+  // A `supported: false` map (this router shape reports no port roster) is a
+  // 200 — it's an answer. Only an unreachable router is an error, and it must
+  // stay one so the panel says "offline" instead of drawing every jack dark.
+  router.get("/network/ports", async (_req, res, next) => {
+    try {
+      res.json(await getRouterPorts());
     } catch (err) {
       next(err);
     }
