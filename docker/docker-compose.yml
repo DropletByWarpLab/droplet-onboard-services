@@ -242,11 +242,20 @@ services:
       # binds matches to the `_service:mcp` AuthUser. Rotate
       # independently of SERVICE_TOKEN_VOICE.
       - SERVICE_TOKEN_MCP=${SERVICE_TOKEN_MCP:-}
-      # Same shape for the rag-eval runner's calls to
-      # /api/admin/retrieval-eval/search (WARP-449 role gate). MUST equal
-      # the rag-eval container's ORCHESTRATOR_SERVICE_TOKEN (wired below
-      # to the same source) or every RAGAS run 401s at the first query.
-      - SERVICE_TOKEN_RAG_EVAL=${SERVICE_TOKEN_RAG_EVAL:-}
+      # SERVICE_TOKEN_RAG_EVAL — the rag-eval runner's bearer for
+      # /api/admin/retrieval-eval/search (WARP-449 role gate). MUST equal the
+      # rag-eval container's ORCHESTRATOR_SERVICE_TOKEN (wired below) or every
+      # RAGAS run 401s at the first query.
+      #
+      # WARP-1860: deliberately NOT re-declared here. It arrives via the
+      # `env_file: ../.env` above. Re-declaring it as
+      # `SERVICE_TOKEN_RAG_EVAL=${SERVICE_TOKEN_RAG_EVAL:-}` resolved the
+      # substitution against docker/.env — a DIFFERENT file from the env_file
+      # above — which does not carry the key. That yielded "", and because
+      # `environment:` outranks `env_file:`, the empty string shadowed the
+      # real token. Both ends went blank and 15 consecutive nightly evals
+      # 401'd on every query while pinning the GPU. Only use ${...}
+      # substitution here for values that genuinely need renaming.
       # WARP-44: `real` (default) / `mock` / `disabled`. When disabled the
       # orchestrator short-circuits router calls and the dashboard surfaces a
       # "Router supervision disabled" banner. `mock` is handled on the routing
