@@ -65,6 +65,7 @@ import {
 } from "@/lib/api";
 import { authFetch, useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
+import { labelForMime } from "@/lib/mime-labels";
 import { Dialog } from "@/components/Dialog";
 import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
 
@@ -158,6 +159,49 @@ function formatBytes(bytes: number): string {
   const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+// WARP-1877 — one row shape for the detail panel's metadata block.
+//
+// The Type row's value can be arbitrarily long (a .docx MIME is 71 chars). The
+// value gets `min-w-0 truncate` so it clips inside its own column instead of
+// spilling past the card's padding, and the label gets `shrink-0` so the value
+// can never eat into it. `gap-3` (12px, on the spacing scale) is the
+// label→value separation that was missing when the two collided. `title`
+// carries the unabridged value for anyone who needs it.
+function MetaRow({
+  id,
+  label,
+  value,
+  title,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  title?: string;
+}) {
+  return (
+    <div
+      data-meta-row={id}
+      className="flex items-baseline justify-between gap-3 type-footnote"
+    >
+      <span
+        data-meta-label
+        className="shrink-0"
+        style={{ color: "var(--text-muted)" }}
+      >
+        {label}
+      </span>
+      <span
+        data-meta-value
+        className="min-w-0 truncate text-right"
+        title={title ?? value}
+        style={{ color: "var(--text)" }}
+      >
+        {value}
+      </span>
+    </div>
+  );
 }
 
 // WARP-1547 — the Files page's address is the (space, path) PAIR, and this is
@@ -1542,20 +1586,23 @@ export default function FilesPage() {
               </div>
 
               <div className="space-y-2">
-                <div className="flex justify-between type-footnote">
-                  <span style={{ color: "var(--text-muted)" }}>Size</span>
-                  <span style={{ color: "var(--text)" }}>{formatBytes(selectedFile.size)}</span>
-                </div>
-                <div className="flex justify-between type-footnote">
-                  <span style={{ color: "var(--text-muted)" }}>Type</span>
-                  <span style={{ color: "var(--text)" }}>{selectedFile.mimeType || "Unknown"}</span>
-                </div>
-                <div className="flex justify-between type-footnote">
-                  <span style={{ color: "var(--text-muted)" }}>Modified</span>
-                  <span style={{ color: "var(--text)" }}>
-                    {new Date(selectedFile.modifiedAt).toLocaleDateString()}
-                  </span>
-                </div>
+                <MetaRow
+                  id="size"
+                  label="Size"
+                  value={formatBytes(selectedFile.size)}
+                />
+                <MetaRow
+                  id="type"
+                  label="Type"
+                  value={labelForMime(selectedFile.mimeType, selectedFile.name)}
+                  // The raw MIME is the tooltip, never the visible value.
+                  title={selectedFile.mimeType || undefined}
+                />
+                <MetaRow
+                  id="modified"
+                  label="Modified"
+                  value={new Date(selectedFile.modifiedAt).toLocaleDateString()}
+                />
               </div>
 
               <div className="flex flex-col gap-2 pt-2">
