@@ -665,6 +665,17 @@ configure_single_box_env() {
         log_info "single-box env: INFERENCE_RUNTIME=dmr — dropped the stale ollama profile (single GPU owner, WARP-1826)" ;;
     esac
   else
+    # The mirror strip. Without it the exclusion is one-directional: the dmr
+    # arm above drops a stale `ollama`, but a box carrying `dmr` whose runtime
+    # is ollama (or unset) would keep `dmr` AND gain `ollama` — both runtimes
+    # on one card, the very WARP-1826 violation this block exists to prevent,
+    # arriving from the rollback direction instead of the flip direction.
+    # Strip BEFORE the add so the add sees an already-cleaned list.
+    case ",${merged_profiles}," in
+      *,dmr,*)
+        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'dmr' | paste -sd, -)"
+        log_info "single-box env: INFERENCE_RUNTIME is not dmr — dropped the stale dmr profile (single GPU owner, WARP-1826)" ;;
+    esac
     case ",${merged_profiles}," in
       *,ollama,*) : ;;
       ,,)         merged_profiles="ollama" ;;
@@ -961,7 +972,19 @@ EOF
     if [ -n "$_current_llm" ]; then
       upsert_env LLM_MODEL "$_current_llm"
     else
-      log_warn "INFERENCE_RUNTIME=dmr but LLM_MODEL is unset — leaving it unset. Set it to the exact id DMR's /api/tags reports (docs/dmr-single-box.md)."
+      # WARP-1870: never leave it unset. That branch predates DMR being a
+      # provisioning target — it assumed a human had flipped the box and set
+      # the id by hand, so "leave it alone" was the safe move. Now that a FRESH
+      # box provisions to DMR, an unset LLM_MODEL means the orchestrator has
+      # nothing to acquire on first boot: a dead appliance out of the crate,
+      # which is strictly worse than a default that can be corrected.
+      #
+      # Falls back to the same constant secrets.sh writes. The `:-` literal is
+      # the sourcing-order belt-and-braces; tests/dmr-default-provisioning.test.sh
+      # asserts the two files agree so this copy cannot drift.
+      _default_dmr_model="${DROPLET_DEFAULT_DMR_MODEL:-docker.io/ai/gpt-oss:20B-F16}"
+      upsert_env LLM_MODEL "$_default_dmr_model"
+      log_info "single-box env: INFERENCE_RUNTIME=dmr and LLM_MODEL was unset — defaulted to $_default_dmr_model (must match DMR's /api/tags exactly, or first boot re-pulls ~13.79 GB every time)"
     fi
   else
     upsert_env OLLAMA_URL          http://ollama:11434

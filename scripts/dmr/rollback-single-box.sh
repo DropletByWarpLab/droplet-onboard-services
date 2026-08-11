@@ -56,16 +56,61 @@ ok "dmr stopped and removed (the dmr-models volume is KEPT — never 'down -v' h
 
 # --- 2. env: both files, all four vars ----------------------------------------
 for f in "$ROOT_ENV" "$COMPOSE_ENV"; do
-  drop_key "$f" INFERENCE_RUNTIME
+  # SET it, don't DROP it (WARP-1870). Dropping used to be equivalent because
+  # absent defaulted to ollama everywhere. It no longer does: a fresh box now
+  # provisions to dmr, ai-gateway reads the key at import with an "ollama"
+  # default that is now a LIE about intent, and single-box.sh derives the
+  # compose profile from it — so an absent key means the next setup.sh re-run
+  # re-flips the box straight back to DMR, undoing this rollback silently.
+  upsert  "$f" INFERENCE_RUNTIME "ollama"
   upsert  "$f" OLLAMA_URL       "http://ollama:11434"
   upsert  "$f" RAGAS_OLLAMA_URL "http://ollama:11434/v1"
   upsert  "$f" LLM_MODEL        "$OLLAMA_MODEL"
 done
-# COMPOSE_PROFILES: drop the dmr token so nothing resurrects the service.
+# COMPOSE_PROFILES: SWAP the runtime token, don't just delete dmr.
+#
+# Before WARP-1869 deleting `dmr` was enough, because `ollama` rode the
+# always-active `single-box` profile and was therefore already running. Now
+# ollama has its OWN profile, so dropping dmr without adding ollama leaves the
+# box with NO runtime token at all — no inference, and nothing to warm two
+# steps below, which is exactly where this script would then die with dmr
+# already stopped and both env files already rewritten.
 profiles="$(grep -E '^COMPOSE_PROFILES=' "$COMPOSE_ENV" | tail -1 | cut -d= -f2- || true)"
-newprofiles="$(printf '%s' "$profiles" | tr ',' '\n' | grep -vx 'dmr' | paste -sd, - || true)"
+newprofiles="$(printf '%s' "$profiles" | tr ',' '\n' | grep -vx 'dmr' | grep -vx 'ollama' | paste -sd, - || true)"
+newprofiles="${newprofiles:+$newprofiles,}ollama"
 [ "$profiles" != "$newprofiles" ] && upsert "$COMPOSE_ENV" COMPOSE_PROFILES "$newprofiles"
-ok "env restored in $ROOT_ENV and $COMPOSE_ENV (INFERENCE_RUNTIME dropped, URLs and LLM_MODEL back to Ollama)"
+# The root .env is what setup.sh runs compose with (--env-file $REPO_ROOT/.env),
+# so the token has to be in BOTH files or the next scripted run disagrees with
+# this one. That split is what WARP-1865 was.
+rprofiles="$(grep -E '^COMPOSE_PROFILES=' "$ROOT_ENV" | tail -1 | cut -d= -f2- || true)"
+rnew="$(printf '%s' "$rprofiles" | tr ',' '\n' | grep -vx 'dmr' | grep -vx 'ollama' | paste -sd, - || true)"
+rnew="${rnew:+$rnew,}ollama"
+[ "$rprofiles" != "$rnew" ] && upsert "$ROOT_ENV" COMPOSE_PROFILES "$rnew"
+ok "env restored in $ROOT_ENV and $COMPOSE_ENV (INFERENCE_RUNTIME=ollama, profile token swapped dmr->ollama, URLs and LLM_MODEL back to Ollama)"
+
+# --- 2b. START Ollama — it is no longer running by default ---------------------
+# Pre-WARP-1869 this step did not exist because ollama rode `single-box` and
+# was always up. Now it must be brought up explicitly, BEFORE anything tries to
+# warm it.
+dc --profile ollama up -d --no-deps ollama
+for _ in $(seq 1 60); do
+  curl -sf --max-time 3 "$OLLAMA_LOCAL_URL/api/tags" >/dev/null 2>&1 && break
+  sleep 2
+done
+curl -sf --max-time 3 "$OLLAMA_LOCAL_URL/api/tags" >/dev/null 2>&1 \
+  || die "ollama did not become reachable at $OLLAMA_LOCAL_URL — cannot roll back onto a runtime that will not start"
+ok "ollama started and answering"
+
+# The store may be EMPTY: the flip does not populate it, and a box that has
+# been on DMR for a while has never pulled this model. Warming an absent model
+# fails in a way that reads like a placement problem, so pull first if needed.
+if ! curl -s --max-time 5 "$OLLAMA_LOCAL_URL/api/tags" | grep -qF "\"${OLLAMA_MODEL}\""; then
+  log "${OLLAMA_MODEL} is not in the Ollama store — pulling (~13 GB, several minutes)"
+  curl -sS --max-time 3600 -X POST "$OLLAMA_LOCAL_URL/api/pull" \
+    -H 'Content-Type: application/json' -d "{\"model\":\"${OLLAMA_MODEL}\"}" >/dev/null \
+    || die "pull of ${OLLAMA_MODEL} failed — the rollback cannot complete without weights"
+  ok "pulled ${OLLAMA_MODEL}"
+fi
 
 # --- 3. recreate every consumer -------------------------------------------------
 recreate="ai-gateway orchestrator voice-io"

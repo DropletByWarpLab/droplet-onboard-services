@@ -135,6 +135,31 @@ case ",$got," in
   *)          ok  "flipped box: ollama correctly absent (got '$got')" ;;
 esac
 
+# The MIRROR direction — a rollback, not a flip. A box still carrying `dmr`
+# whose runtime is now ollama (or unset) must not keep dmr AND gain ollama.
+# The exclusion has to be two-directional or it only half-works: the flip
+# direction was covered from the start, this one was not, and both tokens
+# present is the SINGLE GPU OWNER violation regardless of which way you
+# arrived at it.
+for rt in ollama ''; do
+  label="${rt:-<unset>}"
+  got="$(merged_for 'linux,display,eval,single-box,docs,dmr' "$rt")"
+  case ",$got," in
+    *,dmr,*) bad "rollback direction (runtime=$label): stale dmr NOT stripped — two runtimes, one GPU (got '$got')" ;;
+    *)       ok  "rollback direction (runtime=$label): stale dmr stripped (got '$got')" ;;
+  esac
+  case ",$got," in
+    *,ollama,*) ok "rollback direction (runtime=$label): ollama present so the box has a runtime (got '$got')" ;;
+    *)          bad "rollback direction (runtime=$label): NO runtime token at all (got '$got')" ;;
+  esac
+  for p in linux single-box docs; do
+    case ",$got," in
+      *,"$p",*) : ;;
+      *)        bad "rollback direction (runtime=$label): strip dropped '$p' (got '$got')" ;;
+    esac
+  done
+done
+
 # A half-finished flip leaves ollama in the list while INFERENCE_RUNTIME=dmr.
 # Both tokens present is the one outcome worse than either alone, so the guard
 # must strip the loser rather than merely skip adding it.
@@ -187,6 +212,48 @@ for p in linux display eval docs single-box dmr; do
   esac
 done
 ok "existing profiles all preserved alongside single-box + dmr (got '$got')"
+
+# ── the compose half of the invariant ──────────────────────────────────────
+#
+# Everything above exercises the COMPOSE_PROFILES *string* single-box.sh emits.
+# None of it reads docker-compose.yml — so reverting the one line that moved
+# `ollama` off the `single-box` profile left every assertion above green while
+# restoring the two-runtimes-on-one-GPU shape. The token strip cannot cover it
+# either: it operates on COMPOSE_PROFILES, and is structurally incapable of
+# stopping a service gated on `single-box`, a token unconditionally active on
+# this shape. Assert the compose file directly.
+
+COMPOSE="$REPO_ROOT/docker/docker-compose.yml"
+svc_profiles() {
+  # The `profiles:` line inside one service block, up to the next service key.
+  awk -v s="  $1:" '$0==s{f=1;next} f&&/^  [a-z0-9_-]+:/{exit} f' "$COMPOSE" \
+    | grep -oE '^[[:space:]]*profiles: \[.*\]' | head -1
+}
+
+if [ -f "$COMPOSE" ]; then
+  ollama_profiles="$(svc_profiles ollama)"
+  case "$ollama_profiles" in
+    *'"ollama"'*)
+      ok "compose: ollama is gated on its OWN profile ($ollama_profiles)" ;;
+    *'"single-box"'*)
+      bad "compose: ollama is back on the single-box profile — it starts beside dmr on every flipped box (SINGLE GPU OWNER, WARP-1826)" ;;
+    *)
+      bad "compose: could not read ollama's profiles (got '$ollama_profiles')" ;;
+  esac
+
+  # The bundle must NOT have followed it off. Dropping single-box from these
+  # takes out the router, the switch agent and camera discovery — compose
+  # 1783-1791 records that exact edit shipping an outage once already.
+  for svc in openwrt switch camera-discovery; do
+    prof="$(svc_profiles "$svc")"
+    case "$prof" in
+      *'"single-box"'*) ok "compose: $svc still carries the single-box profile" ;;
+      *)                bad "compose: $svc LOST single-box (got '$prof') — router/switch/cameras would not start" ;;
+    esac
+  done
+else
+  bad "compose file not found at $COMPOSE"
+fi
 
 printf '\n  %d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
