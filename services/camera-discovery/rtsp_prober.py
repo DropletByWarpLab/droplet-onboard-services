@@ -24,6 +24,26 @@ logger = logging.getLogger(__name__)
 # Common RTSP ports used by IP cameras
 RTSP_PORTS = [554, 8554, 8080]
 
+# Characters that must survive un-escaped in the credential half of an RTSP URL.
+#
+# RFC 3986 defines userinfo as `*( unreserved / pct-encoded / sub-delims / ":" )`,
+# so every sub-delim below is already legal there and never needed escaping. That
+# matters because the consumer of this URL is Frigate's bundled ffmpeg, and ffmpeg
+# does NOT percent-decode userinfo before authenticating — whatever we write goes
+# on the wire literally. Encoding a legal character (quote(pw, safe="") turning
+# `Droplet123!` into `Droplet123%21`) therefore sends the wrong password: the
+# camera answers 401, ffmpeg retries, and a Hanwha locks the account after ~5
+# attempts. docker/frigate/config.yml carries the same warning for hand-written
+# camera entries. (WARP-1873)
+#
+# Anything outside this set stays encoded. `@` and `/` would otherwise terminate
+# the userinfo, and `%` or whitespace would corrupt the parse — a password using
+# those cannot be expressed in an ffmpeg RTSP URL at all, so escaping them is
+# both correct per spec and the best available answer for any consumer that does
+# decode. `:` is deliberately excluded: a literal one would split user from
+# password on the wrong boundary.
+RTSP_USERINFO_SAFE = "!$&'()*+,;="
+
 # Common RTSP stream paths by manufacturer/convention.
 # Paths are ordered by observed hit rate; Hanwha Wisenet lives near the
 # top because those rigs reject OPTIONS without auth, which makes the
@@ -468,7 +488,8 @@ async def probe_camera(ip: str) -> dict | None:
         creds = await probe_rtsp_with_credentials(ip, port)
         if creds:
             path, user, pw = creds
-            url = (f"rtsp://{quote(user, safe='')}:{quote(pw, safe='')}"
+            url = (f"rtsp://{quote(user, safe=RTSP_USERINFO_SAFE)}"
+                   f":{quote(pw, safe=RTSP_USERINFO_SAFE)}"
                    f"@{ip}:{port}{path}")
             return {
                 "ip": ip,
