@@ -43,6 +43,7 @@ import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/Firewal
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { RouterPortsPanel } from "@/components/network/router/RouterPortsPanel";
+import { describeWifi } from "@/components/network/wifi-tile-copy";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import { DnsServersForm } from "@/components/network/DnsServersForm";
@@ -658,6 +659,8 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const wan = overview?.interfaces?.wan;
   const system = overview?.system;
 
+  const wifi = describeWifi(overview?.wirelessRadios);
+
   const lanIp = lan?.["ipv4-address"]?.[0]?.address ?? "N/A";
   const wanIp = wan?.["ipv4-address"]?.[0]?.address ?? "N/A";
   const wanProto = wan?.proto ?? "unknown";
@@ -722,9 +725,9 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
         <StatusCard
           icon={Wifi}
           title="WiFi"
-          value={overview?.wireless ? "Active" : "Inactive"}
-          subtitle={Object.keys(overview?.wireless ?? {}).length + " radio(s)"}
-          status={Object.keys(overview?.wireless ?? {}).length > 0 ? "ok" : "warning"}
+          value={wifi.value}
+          subtitle={wifi.subtitle}
+          status={wifi.status}
         />
         <StatusCard
           icon={Monitor}

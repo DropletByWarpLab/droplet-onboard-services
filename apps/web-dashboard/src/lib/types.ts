@@ -2252,6 +2252,35 @@ export interface NetworkOverview {
   };
   connectedDeviceCount: number;
   routerConnected: boolean;
+  /**
+   * Whole-fabric radio rollup — mirrors the orchestrator's
+   * `WirelessRadioSummary` (apps/orchestrator/src/types/network.ts).
+   *
+   * Read this, NOT `wireless`, for anything that counts radios or decides
+   * whether Wi-Fi is up. `wireless` above is the router's own netifd status
+   * and nothing else, so it is `{}` on every shape where the household SSID
+   * is broadcast by the access point rather than the router — which is the
+   * shipping fabric, and is how the Overview tile came to report "0 radio(s)"
+   * over a live two-radio network.
+   *
+   * Optional: an orchestrator that predates the rollup omits it, and absent
+   * means UNKNOWN, not zero.
+   */
+  wirelessRadios?: WirelessRadioSummary;
+}
+
+/** Counts only — no SSID or passphrase crosses this boundary. */
+export interface WirelessRadioSummary {
+  /** Radios the router itself hosts. Zero on every edge-router shape. */
+  router: number;
+  /** Radios reported by online Droplet access points. */
+  ap: number;
+  /** `router + ap`. */
+  total: number;
+  /** Of `total`, how many are actually broadcasting. */
+  active: number;
+  /** Online APs that didn't answer — `total` is then a floor, not a census. */
+  apsNotReporting: number;
 }
 
 export interface ConnectedDevice {

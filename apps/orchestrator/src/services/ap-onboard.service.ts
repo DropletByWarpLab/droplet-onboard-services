@@ -1154,6 +1154,74 @@ export async function getApWifi(prisma: PrismaClient): Promise<ApWifiState> {
 }
 
 /**
+ * Radio COUNTS off the household's access points — no SSID, no passphrase.
+ *
+ * `getApWifi` above already fans out to the same APs, but its body carries the
+ * live PSK, which is why `GET /network/wifi/ap` is owner/admin. The network
+ * overview is readable by every authenticated principal, so it needs a
+ * count-only projection rather than an RBAC hole: this returns numbers and
+ * nothing else, and deliberately does not reach for `ssid`/`key` at all.
+ *
+ * Never throws. The overview is a summary that must still render when an AP is
+ * mid-reboot, so an unreachable AP degrades to "didn't report" rather than
+ * taking the whole read down. That is NOT the same as "no radios", which is
+ * why `apsNotReporting` is surfaced instead of being folded into a zero — a
+ * caller that can't tell those apart would draw "no Wi-Fi" over a household
+ * whose AP is simply busy.
+ */
+export interface ApRadioSummary {
+  /** ONLINE Droplet-image AP rows we asked. */
+  apCount: number;
+  /** Of those, how many answered with a usable wireless state. */
+  reporting: number;
+  /** Radios those reporting APs configure, on the air or not. */
+  radioCount: number;
+  /** Of `radioCount`, how many are actually broadcasting. */
+  activeRadioCount: number;
+}
+
+const EMPTY_AP_RADIOS: ApRadioSummary = {
+  apCount: 0,
+  reporting: 0,
+  radioCount: 0,
+  activeRadioCount: 0,
+};
+
+export async function getApRadioSummary(
+  prisma: PrismaClient,
+): Promise<ApRadioSummary> {
+  let rows: { mac: string }[];
+  try {
+    rows = await onlineDropletImageAps(prisma);
+  } catch (err) {
+    logger.warn({ err }, "AP radio summary: could not list access points");
+    return EMPTY_AP_RADIOS;
+  }
+  if (rows.length === 0) return EMPTY_AP_RADIOS;
+
+  // Settled, not `all`: one unreachable AP must not blank the radios of the
+  // others. Each rejection lands as its own not-reporting row.
+  const states = await Promise.allSettled(
+    rows.map((row) => routingGetApWireless({ mac: row.mac })),
+  );
+
+  const summary: ApRadioSummary = { ...EMPTY_AP_RADIOS, apCount: rows.length };
+  for (const settled of states) {
+    if (settled.status !== "fulfilled" || !settled.value.supported) continue;
+    const radios = settled.value.radios ?? [];
+    summary.reporting += 1;
+    summary.radioCount += radios.length;
+    // `up` is null on an AP image that doesn't report link state. Treat that
+    // as on-air when uci hasn't disabled it — the alternative reads a missing
+    // field as "off", which is the guessing the no-IS-NULL-state rule bans.
+    summary.activeRadioCount += radios.filter(
+      (radio) => !radio.disabled && radio.up !== false,
+    ).length;
+  }
+  return summary;
+}
+
+/**
  * Set the household network name / passphrase on every ONLINE Droplet-image
  * AP. Reads first so an unsupported shape gets the honest 422 instead of a
  * confusing write failure, then fans out sequentially — one AP at a time so a

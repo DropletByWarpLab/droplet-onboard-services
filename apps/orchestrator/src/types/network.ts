@@ -320,12 +320,50 @@ export interface FirewallConfig {
   redirects: FirewallRedirects;
 }
 
+/**
+ * Where the household's Wi-Fi radios actually live.
+ *
+ * `NetworkOverview.wireless` is the ROUTER's own netifd wireless status and
+ * nothing else, so on every shape where the router hosts no Wi-Fi it is `{}`.
+ * That is the shipping fabric, not a fault: the RB5009 edge router has no
+ * radio hardware at all and the household SSID is broadcast by the Droplet
+ * access point (see ADR-005 / the "radios never live on the router" rule).
+ * Summarising the router alone therefore reported "0 radios" for a network
+ * that was broadcasting on two — which is what this rollup exists to fix.
+ *
+ * Counts only. The overview is readable by every authenticated principal,
+ * unlike the owner/admin `GET /network/wifi/ap`, so no name or passphrase
+ * crosses this boundary.
+ */
+export interface WirelessRadioSummary {
+  /** Radios the router itself hosts. Zero on every edge-router shape. */
+  router: number;
+  /** Radios reported by ONLINE Droplet-image access points. */
+  ap: number;
+  /** `router + ap` — every radio we can account for. */
+  total: number;
+  /** Of `total`, how many are actually on the air. */
+  active: number;
+  /**
+   * ONLINE APs that did NOT answer. Greater than zero means `total` is a
+   * FLOOR, not a census — the honest "we can't see them right now" that a
+   * plain zero would misreport as "there is no Wi-Fi".
+   */
+  apsNotReporting: number;
+}
+
 export interface NetworkOverview {
   interfaces: NetworkInterfaces;
   wireless: WirelessStatus;
   system: RouterSystemInfo;
   connectedDeviceCount: number;
   routerConnected: boolean;
+  /**
+   * Optional so an older orchestrator build (or a caller that constructs an
+   * overview without an AP source) stays type-compatible; consumers must
+   * handle its absence rather than assuming zero radios.
+   */
+  wirelessRadios?: WirelessRadioSummary;
 }
 
 export interface NetworkCommandResult {
