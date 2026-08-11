@@ -22,6 +22,7 @@ import {
   markReviewViewed,
   searchEventsSemantic,
   setEventRetain,
+  syncCamerasFromDb,
   type FrigateEventFilter,
   type FrigateReviewFilter,
   type FrigateSearchFilter,
@@ -263,6 +264,32 @@ function handleMqttMessage(
   }
 }
 
+function toDisplayName(name: string): string {
+  return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * The camera's hardware address, or null when camera-discovery only had a
+ * placeholder.
+ *
+ * `_synthetic_lease_records` / the ONVIF branch in
+ * `services/camera-discovery/main.py` key a camera by `ip:<addr>` or
+ * `onvif_<addr>` when DHCP hasn't produced a real MAC yet. Those tokens are
+ * per-IP, not per-device: the same camera carries `ip:192.168.9.219` on one
+ * sweep and `e4:30:22:50:2a:fd` on the next. Storing them in `macAddress`
+ * made them look like two different cameras to every reader.
+ */
+function realMac(mac: unknown): string | null {
+  const m = typeof mac === "string" ? mac.trim().toLowerCase() : "";
+  if (!m || m.startsWith("ip:") || m.startsWith("onvif_")) return null;
+  return m;
+}
+
+/** `camera_<ip>` is `_sanitize_camera_name`'s no-hostname fallback, not a name. */
+function isPlaceholderName(name: string): boolean {
+  return /^camera_\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3}$/.test(name);
+}
+
 async function upsertCameraRecord(
   prisma: PrismaClient,
   camera: Record<string, unknown>
@@ -284,27 +311,106 @@ async function upsertCameraRecord(
   // status into `enabled` here would silently undo the operator's disable.
   // Promotion from candidate to camera is the accept path's job.
   const isAdopted = camera.status === "active";
+  const ip = String(camera.ip || "");
+  const mac = realMac(camera.mac);
 
-  await prisma.camera.upsert({
-    where: { name },
-    create: {
-      name,
-      displayName: name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-      manufacturer: (camera.manufacturer as string) || null,
-      model: (camera.model as string) || null,
-      ipAddress: String(camera.ip || ""),
-      macAddress: (camera.mac as string) || null,
-      enabled: isAdopted,
-      autoDiscovered: true,
-      lastSeen: new Date(),
+  // A camera's identity is its hardware, not the name discovery derived for it
+  // this sweep. `_sanitize_camera_name(hostname, ip)` returns `camera_<ip>`
+  // until DHCP knows the hostname and the hostname afterwards, so a single
+  // camera legitimately arrives under two names over its life — and a
+  // `where: { name }` upsert answered that by minting a second row. That is
+  // the "one camera, two tiles, neither with a feed" the operator sees:
+  // 192.168.9.219 as both `xnv_c8083r_e43022502afd` and `camera_192_168_9_219`.
+  //
+  // Match on MAC first, then on IP for the window where one side of the pair
+  // is still a placeholder. `name` stays in the OR so a row this name already
+  // owns is found even when its IP moved — without it the create below would
+  // hit the unique constraint on `name`.
+  const matches = await prisma.camera.findMany({
+    where: {
+      OR: [
+        ...(mac ? [{ macAddress: { equals: mac, mode: "insensitive" as const } }] : []),
+        ...(ip ? [{ ipAddress: ip }] : []),
+        { name },
+      ],
     },
-    update: {
-      ipAddress: String(camera.ip || ""),
+    orderBy: { createdAt: "asc" },
+  });
+
+  // An IP match alone is not proof: DHCP recycles addresses. When both sides
+  // carry a real MAC, the MAC is the only thing that decides.
+  const sameDevice = matches.filter((row) => {
+    if (row.name === name) return true;
+    const rowMac = realMac(row.macAddress);
+    if (mac && rowMac) return rowMac === mac;
+    return true;
+  });
+
+  if (sameDevice.length === 0) {
+    await prisma.camera.create({
+      data: {
+        name,
+        displayName: toDisplayName(name),
+        manufacturer: (camera.manufacturer as string) || null,
+        model: (camera.model as string) || null,
+        ipAddress: ip,
+        macAddress: mac,
+        enabled: isAdopted,
+        autoDiscovered: true,
+        lastSeen: new Date(),
+      },
+    });
+    cacheDel(CACHE_KEY_CAMERAS);
+    return;
+  }
+
+  // Oldest row wins: it is the one carrying the operator's history — group
+  // membership, retention budget, and the Frigate recordings filed under its
+  // name. Everything newer for the same hardware is a duplicate this function
+  // used to mint.
+  const [survivor, ...duplicates] = sameDevice;
+
+  // Frigate is keyed by the camera's exact name and reconcileFrigateCameras()
+  // prunes any Frigate entry missing from this table, so renaming an adopted
+  // row would delete the live camera out from under the operator. Only a row
+  // that was never adopted may take the new name, and only when that name is
+  // an actual hostname rather than the `camera_<ip>` fallback.
+  const rename =
+    !survivor.enabled && survivor.name !== name && !isPlaceholderName(name);
+
+  await prisma.camera.update({
+    where: { id: survivor.id },
+    data: {
+      ...(rename ? { name, displayName: toDisplayName(name) } : {}),
+      ipAddress: ip || survivor.ipAddress,
+      // Only ever upgrade toward a real MAC — a sweep that lost the DHCP lease
+      // must not wipe the hardware address we already learned.
+      ...(mac ? { macAddress: mac } : {}),
       manufacturer: (camera.manufacturer as string) || undefined,
       model: (camera.model as string) || undefined,
       lastSeen: new Date(),
     },
   });
+
+  if (duplicates.length > 0) {
+    await prisma.camera.deleteMany({
+      where: { id: { in: duplicates.map((d) => d.id) } },
+    });
+    logger.info(
+      { kept: survivor.name, removed: duplicates.map((d) => d.name), mac, ip },
+      "Merged duplicate camera rows for one physical camera"
+    );
+    // getCameras() re-adds any Frigate camera absent from the DB, so a merge
+    // that only touched the DB would see the duplicate reappear as a phantom
+    // tile on the next poll. Best-effort: a Frigate that is down just means
+    // the next add/accept/reject/delete reconcile picks this up.
+    try {
+      const all = await prisma.camera.findMany({ select: { name: true } });
+      await syncCamerasFromDb(all.map((c) => c.name));
+    } catch (err) {
+      logger.warn({ err }, "Frigate prune after duplicate merge failed (non-fatal)");
+    }
+  }
 
   cacheDel(CACHE_KEY_CAMERAS);
 }

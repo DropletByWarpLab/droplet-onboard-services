@@ -63,6 +63,7 @@ import {
 } from "../services/frigate.client.js";
 import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
 import {
+  discoveryAuthHeaders,
   getCameraCandidates,
   macFromCandidateId,
   mutateLiveCandidate,
@@ -1142,14 +1143,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // NET-05: camera-discovery now gates /scan behind DEVICE_SECRET.
       // Forward it like /drivers/fix below, else this proxied call 403s and
       // the manual-scan button breaks.
-      const headers: Record<string, string> = {};
-      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
-      if (deviceSecret) {
-        headers["Authorization"] = `Bearer ${deviceSecret}`;
-      }
       const resp = await internalFetch(`${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/scan`, {
         method: "POST",
-        headers,
+        headers: discoveryAuthHeaders(),
         signal: AbortSignal.timeout(30_000),
       });
       if (!resp.ok) {
@@ -1780,13 +1776,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // NET-05: /drivers is now auth-gated on camera-discovery. Forward
       // DEVICE_SECRET (same pattern as /drivers/fix) so the driver status
       // panel doesn't 403.
-      const headers: Record<string, string> = {};
-      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
-      if (deviceSecret) {
-        headers["Authorization"] = `Bearer ${deviceSecret}`;
-      }
       const resp = await internalFetch(`${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/drivers`, {
-        headers,
+        headers: discoveryAuthHeaders(),
         signal: AbortSignal.timeout(5000),
       });
       if (!resp.ok) {
@@ -1818,15 +1809,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     try {
       // Forward DEVICE_SECRET for authentication (the discovery service
       // requires it for kernel module operations like modprobe)
-      const headers: Record<string, string> = {};
-      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
-      if (deviceSecret) {
-        headers["Authorization"] = `Bearer ${deviceSecret}`;
-      }
-
       const resp = await internalFetch(`${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/drivers/fix`, {
         method: "POST",
-        headers,
+        headers: discoveryAuthHeaders(),
         signal: AbortSignal.timeout(15000),
       });
       if (!resp.ok) {

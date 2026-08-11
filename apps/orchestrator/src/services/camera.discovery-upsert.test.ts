@@ -17,6 +17,12 @@
  * `enabled: false` for a working camera and discovery keeps re-publishing that
  * camera as active every sweep, so echoing status into `enabled` on update
  * would silently undo an operator's disable.
+ *
+ * The second half of this file covers camera identity: the row is keyed by the
+ * camera's hardware (MAC, falling back to IP), not by the name discovery
+ * derived for it this sweep. A `where: { name }` upsert minted a second row
+ * every time `_sanitize_camera_name` changed its answer — the "one camera, two
+ * tiles, neither with a feed" the operator sees.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -57,6 +63,7 @@ vi.mock("./frigate.client.js", () => ({
   markReviewViewed: vi.fn(),
   searchEventsSemantic: vi.fn(),
   setEventRetain: vi.fn(),
+  syncCamerasFromDb: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("./cache.service.js", () => ({
@@ -70,9 +77,25 @@ vi.mock("./push-dispatch.service.js", () => ({
 }));
 
 import { initCameraService, shutdownCameraService } from "./camera.service.js";
+import { syncCamerasFromDb } from "./frigate.client.js";
 
-const upsert = vi.fn().mockResolvedValue({});
-const prisma = { camera: { upsert } } as never;
+interface Row {
+  id: string;
+  name: string;
+  ipAddress: string;
+  macAddress: string | null;
+  enabled: boolean;
+  createdAt: Date;
+}
+
+/** Rows the fake `findMany` will match against; set per test. */
+let rows: Row[] = [];
+
+const findMany = vi.fn(async () => rows);
+const create = vi.fn().mockResolvedValue({});
+const update = vi.fn().mockResolvedValue({});
+const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+const prisma = { camera: { findMany, create, update, deleteMany } } as never;
 
 /** Publish one discovery message through the real MQTT handler. */
 async function publishDiscovery(camera: Record<string, unknown>): Promise<void> {
@@ -81,11 +104,26 @@ async function publishDiscovery(camera: Record<string, unknown>): Promise<void> 
     Buffer.from(JSON.stringify({ event: "camera_discovered", camera })),
   );
   // upsertCameraRecord is fire-and-forget inside the handler.
-  await vi.waitFor(() => expect(upsert).toHaveBeenCalled());
+  await vi.waitFor(() => expect(create.mock.calls.length + update.mock.calls.length).toBeGreaterThan(0));
+}
+
+function row(overrides: Partial<Row> & Pick<Row, "id" | "name">): Row {
+  return {
+    ipAddress: "",
+    macAddress: null,
+    enabled: false,
+    createdAt: new Date("2026-08-10T00:00:00Z"),
+    ...overrides,
+  };
 }
 
 beforeEach(async () => {
-  upsert.mockClear();
+  rows = [];
+  findMany.mockClear();
+  create.mockClear();
+  update.mockClear();
+  deleteMany.mockClear();
+  vi.mocked(syncCamerasFromDb).mockClear();
   await initCameraService(prisma);
 });
 
@@ -104,12 +142,10 @@ describe("discovery upsert", () => {
       detection_method: "rtsp_default_credentials",
     });
 
-    const arg = upsert.mock.calls[0][0];
-    expect(arg.where).toEqual({ name: "XNV_C8083R" });
-    expect(arg.create).toMatchObject({
+    expect(create.mock.calls[0][0].data).toMatchObject({
       name: "XNV_C8083R",
       ipAddress: "192.168.9.219",
-      macAddress: "E4:30:22:50:2A:FD",
+      macAddress: "e4:30:22:50:2a:fd",
       enabled: false,
       autoDiscovered: true,
     });
@@ -123,7 +159,7 @@ describe("discovery upsert", () => {
       detection_method: "rtsp_port_open",
     });
 
-    expect(upsert.mock.calls[0][0].create.enabled).toBe(false);
+    expect(create.mock.calls[0][0].data.enabled).toBe(false);
   });
 
   it("creates a camera that verified and reached Frigate as enabled", async () => {
@@ -134,17 +170,19 @@ describe("discovery upsert", () => {
       status: "active",
     });
 
-    expect(upsert.mock.calls[0][0].create.enabled).toBe(true);
+    expect(create.mock.calls[0][0].data.enabled).toBe(true);
   });
 
   it("never writes enabled on update, so an operator's disable survives rediscovery", async () => {
+    rows = [row({ id: "c1", name: "front_door", ipAddress: "192.168.9.60", enabled: false })];
+
     await publishDiscovery({
       name: "front_door",
       ip: "192.168.9.60",
       status: "active",
     });
 
-    expect(upsert.mock.calls[0][0].update).not.toHaveProperty("enabled");
+    expect(update.mock.calls[0][0].data).not.toHaveProperty("enabled");
   });
 
   it("ignores a discovery event with no camera name", async () => {
@@ -154,6 +192,149 @@ describe("discovery upsert", () => {
     );
     // Give the fire-and-forget upsert a chance to run before asserting absence.
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(upsert).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("camera identity", () => {
+  it("stores a synthetic sweep key as no MAC rather than a fake one", async () => {
+    await publishDiscovery({
+      name: "camera_192_168_9_219",
+      ip: "192.168.9.219",
+      mac: "ip:192.168.9.219",
+      status: "pending",
+    });
+
+    expect(create.mock.calls[0][0].data.macAddress).toBeNull();
+  });
+
+  it("updates the existing row when the same MAC arrives under a new name", async () => {
+    rows = [
+      row({
+        id: "c1",
+        name: "camera_192_168_9_219",
+        ipAddress: "192.168.9.219",
+        macAddress: "e4:30:22:50:2a:fd",
+      }),
+    ];
+
+    await publishDiscovery({
+      name: "xnv_c8083r",
+      ip: "192.168.9.219",
+      mac: "E4:30:22:50:2A:FD",
+      status: "needs_setup",
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][0].where).toEqual({ id: "c1" });
+    // The placeholder name gives way to the real hostname once DHCP knows it.
+    expect(update.mock.calls[0][0].data).toMatchObject({
+      name: "xnv_c8083r",
+      displayName: "Xnv C8083r",
+    });
+  });
+
+  it("matches on IP when the sweep lost the DHCP lease and only has a placeholder", async () => {
+    rows = [
+      row({
+        id: "c1",
+        name: "xnv_c8083r_e43022502afd",
+        ipAddress: "192.168.9.219",
+        macAddress: "e4:30:22:50:2a:fd",
+        enabled: true,
+      }),
+    ];
+
+    await publishDiscovery({
+      name: "camera_192_168_9_219",
+      ip: "192.168.9.219",
+      mac: "ip:192.168.9.219",
+      status: "pending",
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(update.mock.calls[0][0].where).toEqual({ id: "c1" });
+    // Adopted row: Frigate is keyed by this exact name, so it must not move,
+    // and the real MAC must not be wiped by the placeholder.
+    expect(update.mock.calls[0][0].data).not.toHaveProperty("name");
+    expect(update.mock.calls[0][0].data).not.toHaveProperty("macAddress");
+  });
+
+  it("never renames a row to the camera_<ip> fallback", async () => {
+    rows = [
+      row({
+        id: "c1",
+        name: "xnv_c8083r",
+        ipAddress: "192.168.9.219",
+        macAddress: "e4:30:22:50:2a:fd",
+        enabled: false,
+      }),
+    ];
+
+    await publishDiscovery({
+      name: "camera_192_168_9_219",
+      ip: "192.168.9.219",
+      mac: "E4:30:22:50:2A:FD",
+      status: "pending",
+    });
+
+    expect(update.mock.calls[0][0].data).not.toHaveProperty("name");
+  });
+
+  it("collapses an existing duplicate pair onto the oldest row and prunes Frigate", async () => {
+    rows = [
+      row({
+        id: "c1",
+        name: "xnv_c8083r_e43022502afd",
+        ipAddress: "192.168.9.219",
+        macAddress: "e4:30:22:50:2a:fd",
+        enabled: true,
+        createdAt: new Date("2026-08-10T00:00:00Z"),
+      }),
+      row({
+        id: "c2",
+        name: "camera_192_168_9_219",
+        ipAddress: "192.168.9.219",
+        macAddress: null,
+        createdAt: new Date("2026-08-11T00:00:00Z"),
+      }),
+    ];
+
+    await publishDiscovery({
+      name: "camera_192_168_9_219",
+      ip: "192.168.9.219",
+      mac: "E4:30:22:50:2A:FD",
+      status: "active",
+    });
+
+    expect(update.mock.calls[0][0].where).toEqual({ id: "c1" });
+    expect(deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["c2"] } } });
+    // Without the prune, getCameras() re-adds the orphaned Frigate entry as a
+    // phantom tile on the next poll and the duplicate is back.
+    expect(syncCamerasFromDb).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a recycled DHCP address alone — a different MAC is a different camera", async () => {
+    rows = [
+      row({
+        id: "c1",
+        name: "old_cam",
+        ipAddress: "192.168.9.219",
+        macAddress: "aa:bb:cc:dd:ee:ff",
+      }),
+    ];
+
+    await publishDiscovery({
+      name: "new_cam",
+      ip: "192.168.9.219",
+      mac: "E4:30:22:50:2A:FD",
+      status: "pending",
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(deleteMany).not.toHaveBeenCalled();
   });
 });

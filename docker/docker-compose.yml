@@ -273,6 +273,14 @@ services:
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
+      # camera-discovery is `network_mode: host` like routing/switch/display,
+      # so it needs the same host-gateway address. Without this the
+      # orchestrator fell through to config.ts's `http://localhost:8085`
+      # default, which inside this bridge-network container is the
+      # orchestrator itself — every call ECONNREFUSED, and the cameras page
+      # rendered "Camera discovery service is not running" on a box whose
+      # camera-discovery container was up and publishing to MQTT the whole time.
+      - CAMERA_DISCOVERY_URL=${CAMERA_DISCOVERY_URL:-http://host.docker.internal:8085}
       # WARP-165: orchestrator → oled-display bearer. Read by
       # display.client.ts; must equal the oled-display container's
       # SERVICE_SECRET env (wired below to the same source).
