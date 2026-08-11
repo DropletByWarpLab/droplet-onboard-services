@@ -46,6 +46,7 @@ import {
 } from "./services/department-reconciler.service.js";
 import { seedHouseholdDepartment } from "./services/household-seed.service.js";
 import { checkStorageNearFull } from "./services/camera-storage.service.js";
+import { reconcileCameraBudgets } from "./services/camera-budget.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
 import { getUpdateAgentSettings } from "./services/update-agent/settings.js";
@@ -1064,6 +1065,42 @@ async function main() {
       }
     },
     { lockKey: "droplet:camera-storage-near-full" },
+  );
+
+  // WARP-1851: re-derive budget-managed retention windows. Fires at 03:40,
+  // after the near-full check has settled and clear of the 03:00/03:15
+  // purges on the advisory-lock pool.
+  //
+  // Daily, not hourly: the input is a camera's average bitrate over its
+  // last 100 segments, which moves slowly. Reconciling more often would
+  // restart budgeted cameras (every Frigate config write does) for
+  // sub-percent drift.
+  //
+  // The pass is idempotent — a camera already at its derived window is
+  // skipped, so a steady system issues no writes at all.
+  cronRuntime.scheduleCron(
+    "40 3 * * *",
+    async () => {
+      const result = await reconcileCameraBudgets(prisma);
+      if (result.applied.length > 0 || result.held.length > 0) {
+        logger.info(result, "camera storage budget reconcile complete");
+      }
+      // A pass where every camera failed must NOT look like a quiet success.
+      // The service collects per-camera errors so one broken camera can't
+      // strand the rest, but a pass that achieved nothing has to reach the
+      // cron canary — reporting success never achieved is the failure mode
+      // this whole epic was created by (WARP-1849).
+      if (result.failed.length > 0) {
+        throw new Error(
+          `camera storage budget reconcile: ${result.failed.length} of ` +
+            `${result.failed.length + result.applied.length + result.held.length} ` +
+            `camera(s) failed — ${result.failed
+              .map((f) => `${f.camera}: ${f.error}`)
+              .join("; ")}`,
+        );
+      }
+    },
+    { lockKey: "droplet:camera-budget-reconcile" },
   );
 
   // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it

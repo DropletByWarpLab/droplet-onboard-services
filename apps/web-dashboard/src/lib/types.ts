@@ -2011,6 +2011,27 @@ export interface CameraStorageRow {
   daysAtCurrentRate: number | null;
 }
 
+/** WARP-1851 — retention windows the budget controller manages, in days. */
+export interface RetentionWindows {
+  continuous: number;
+  motion: number;
+  alerts: number;
+  detections: number;
+}
+
+/** WARP-1851 — a camera's current storage allocation. */
+export interface CameraBudget {
+  retentionMode: "MANUAL" | "BUDGET";
+  budgetBytes: number | null;
+  /** The operator's preferred windows; the controller scales down from here
+   *  and never raises a window stored as 0. */
+  retentionCeiling: RetentionWindows | null;
+  /** Windows written by the immediate reconcile, when one was applied. */
+  applied?: RetentionWindows | null;
+  /** Operator-facing note — present when there's something to say. */
+  note?: string;
+}
+
 export interface CameraStorageSummary {
   volume: {
     path: string;

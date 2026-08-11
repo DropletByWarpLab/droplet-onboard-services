@@ -11,7 +11,7 @@
  */
 
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import {
@@ -68,6 +68,14 @@ import {
   mutateLiveCandidate,
 } from "../services/camera-candidates.service.js";
 import { getCameraStorage } from "../services/camera-storage.service.js";
+import {
+  reconcileCameraBudgets,
+  checkOverAllocation,
+  parseCeiling,
+  windowsFromSettings,
+  type OverAllocation,
+  type RetentionWindows,
+} from "../services/camera-budget.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
@@ -812,6 +820,199 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // --- Storage budget (WARP-1851) ---
+  //
+  // GET  /cameras/:name/budget  — current allocation state
+  // PATCH /cameras/:name/budget — set or clear it
+  //
+  // The GET exists because without it the allocation was write-only: nothing
+  // returned `retentionMode` / `storageBudgetBytes`, so the dashboard control
+  // rendered blank over a stored budget and the operator could not see what
+  // they had set.
+  router.get("/cameras/:name/budget", async (req, res, next) => {
+    try {
+      const name = req.params.name;
+      if (!CAMERA_NAME_RE.test(name)) {
+        return res.status(400).json({ error: "invalid camera name" });
+      }
+      const camera = await prisma.camera.findUnique({ where: { name } });
+      if (!camera) return res.status(404).json({ error: "camera not found" });
+
+      // Budgets are per-camera but the volume is shared, so this camera's
+      // allocation is not readable on its own: an operator who has promised
+      // 3 TB across a 2 TB drive will not get the per-camera retention shown
+      // here once the drive fills and Frigate starts evicting oldest-first.
+      // Reported alongside, so the number and its caveat arrive together.
+      //
+      // Advisory, so a Frigate outage degrades it to `null` rather than
+      // failing a read the DB could otherwise answer in full.
+      let overAllocation: OverAllocation | null = null;
+      try {
+        const [budgeted, storage] = await Promise.all([
+          prisma.camera.findMany({
+            where: { retentionMode: "BUDGET" },
+            select: { storageBudgetBytes: true },
+          }),
+          getCameraStorage(),
+        ]);
+        overAllocation = checkOverAllocation(
+          budgeted.map((c) => c.storageBudgetBytes),
+          storage.volume?.totalBytes ?? null,
+        );
+      } catch (err) {
+        logger.warn(
+          { camera: name, err },
+          "could not compute fleet over-allocation; reporting it as unknown",
+        );
+      }
+
+      res.json({
+        retentionMode: camera.retentionMode,
+        budgetBytes:
+          camera.storageBudgetBytes === null
+            ? null
+            : Number(camera.storageBudgetBytes),
+        retentionCeiling: parseCeiling(camera.retentionCeiling),
+        overAllocation,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // `budgetBytes: null` clears the budget and returns the camera to MANUAL.
+  // Its retention keeps whatever value it currently has — clearing an
+  // allocation must never be the thing that deletes footage.
+  //
+  // Setting a budget captures the camera's CURRENT windows as the ceiling the
+  // controller scales against, then runs one reconcile pass immediately. The
+  // earlier version deferred everything to the 03:40 cron while the response
+  // stated the new retention as fact, so for up to 24h the operator was told
+  // something Frigate was not doing.
+  router.patch(
+    "/cameras/:name/budget",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const name = req.params.name;
+        if (!CAMERA_NAME_RE.test(name)) {
+          return res.status(400).json({ error: "invalid camera name" });
+        }
+
+        const camera = await prisma.camera.findUnique({ where: { name } });
+        if (!camera) {
+          return res.status(404).json({ error: "camera not found" });
+        }
+
+        const raw = (req.body ?? {}) as { budgetBytes?: unknown };
+        if (!("budgetBytes" in raw)) {
+          return res.status(400).json({ error: "budgetBytes is required" });
+        }
+
+        if (raw.budgetBytes === null) {
+          await prisma.camera.update({
+            where: { name },
+            data: {
+              retentionMode: "MANUAL",
+              storageBudgetBytes: null,
+              retentionCeiling: Prisma.DbNull,
+            },
+          });
+          return res.json({
+            retentionMode: "MANUAL",
+            budgetBytes: null,
+            note: "Retention stays where it is; clearing a budget deletes nothing.",
+          });
+        }
+
+        // Typed check before the numeric one: `Number()` coerces `true` to 1
+        // and `[]` to 0, so a malformed client could otherwise store a 1-byte
+        // budget — which is "valid" to a `> 0` test and would drive every
+        // retention window to its floor on the next pass.
+        const budget = typeof raw.budgetBytes === "number" ? raw.budgetBytes : Number.NaN;
+        if (!Number.isFinite(budget) || budget <= 0) {
+          return res
+            .status(400)
+            .json({ error: "budgetBytes must be a positive number of bytes, or null" });
+        }
+
+        // Capture the ceiling from live config BEFORE switching mode, so the
+        // controller scales against what the operator actually had.
+        let ceiling: RetentionWindows | null = null;
+        try {
+          ceiling = windowsFromSettings(await getCameraSettings(name));
+        } catch (err) {
+          // Frigate unreachable: refuse rather than storing a budget with no
+          // ceiling. A ceiling guessed later could raise a window the
+          // operator had switched off, which is the defect this design
+          // exists to avoid.
+          logger.warn(
+            { camera: name, err },
+            "cannot read camera settings to capture a retention ceiling",
+          );
+          return res.status(503).json({
+            error: "camera_service_unavailable",
+            message:
+              "Couldn't read this camera's current retention, so the budget wasn't saved. Try again when the camera service is reachable.",
+          });
+        }
+
+        await prisma.camera.update({
+          where: { name },
+          data: {
+            retentionMode: "BUDGET",
+            storageBudgetBytes: BigInt(Math.round(budget)),
+            retentionCeiling: ceiling as unknown as object,
+          },
+        });
+
+        // Apply now rather than promising what the cron will do later.
+        //
+        // This is a FLEET pass, not a single-camera one — it reconciles every
+        // budget-managed camera, so editing one camera can also re-apply
+        // another that has drifted outside its dead band (and Frigate restarts
+        // a camera on every config write). Acceptable at appliance camera
+        // counts, and the alternative — a single-camera path — would be a
+        // second implementation of the same control loop to keep in step.
+        //
+        // The budget is ALREADY COMMITTED at this point. If the pass throws
+        // (Frigate dropping between the write above and the read inside), the
+        // request must not 500: that reads as "nothing was saved" when the
+        // allocation is in fact stored, and the 03:40 cron will apply it. Fail
+        // to an honest 200 that says exactly that.
+        let applied: { windows: RetentionWindows } | undefined;
+        let held: { reason: string } | undefined;
+        let failed: { error: string } | undefined;
+        try {
+          const pass = await reconcileCameraBudgets(prisma);
+          applied = pass.applied.find((a) => a.camera === name);
+          held = pass.held.find((h) => h.camera === name);
+          failed = pass.failed.find((f) => f.camera === name);
+        } catch (err) {
+          logger.warn(
+            { camera: name, err },
+            "budget stored but the immediate reconcile pass failed",
+          );
+          failed = { error: err instanceof Error ? err.message : String(err) };
+        }
+
+        res.json({
+          retentionMode: "BUDGET",
+          budgetBytes: budget,
+          retentionCeiling: ceiling,
+          applied: applied?.windows ?? null,
+          note: failed
+            ? `Budget saved, but adjusting retention failed: ${failed.error}`
+            : applied
+              ? undefined
+              : (held?.reason ?? "Budget saved; retention is already within it."),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // WARP-171: per-route guard. owner ONLY — restarting the Frigate
   // container drops every active stream and pauses event recording
@@ -2555,6 +2756,36 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
 
       const settings = await updateCameraSettings(req.params.name, patch);
+
+      // WARP-1851: if this camera is budget-managed and the operator just
+      // changed a retention window by hand, that edit IS their new ceiling.
+      // Without this the nightly controller would scale against the old
+      // ceiling and silently revert them — an edit that appears to save and
+      // then quietly undoes itself is worse than one that is refused.
+      const touchedRetention =
+        patch.continuousRetainDays !== undefined ||
+        patch.motionRetainDays !== undefined ||
+        patch.alertsRetainDays !== undefined ||
+        patch.detectionsRetainDays !== undefined;
+
+      if (touchedRetention) {
+        const cam = await prisma.camera.findUnique({
+          where: { name: req.params.name },
+          select: { retentionMode: true },
+        });
+        if (cam?.retentionMode === "BUDGET") {
+          const ceiling = windowsFromSettings(settings);
+          await prisma.camera.update({
+            where: { name: req.params.name },
+            data: { retentionCeiling: ceiling as unknown as object },
+          });
+          logger.info(
+            { camera: req.params.name, ceiling },
+            "manual retention edit raised the budget ceiling for this camera",
+          );
+        }
+      }
+
       res.json({ settings });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
