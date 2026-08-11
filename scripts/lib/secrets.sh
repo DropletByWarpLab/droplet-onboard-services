@@ -220,6 +220,23 @@ _env_file_is_torn() {
   return 1
 }
 
+# ─── Default serving model, per runtime (WARP-1870) ─────────────────────────
+#
+# File scope, not function scope, so scripts/lib/single-box.sh can read the
+# same constant instead of carrying a second copy that silently drifts.
+#
+# The DMR value MUST be the EXACT registry-qualified id the store reports —
+# verified live against `GET /api/tags`, which returns
+# "docker.io/ai/gpt-oss:20B-F16" byte-for-byte. This is not cosmetic: the
+# orchestrator's first-boot readiness compares raw strings, so any other
+# spelling of the same model reads as "absent" and kicks a background pull of
+# a 13.79 GB artifact on EVERY orchestrator boot, forever. That is the single
+# most expensive way to get this wrong.
+#
+# The Ollama value is the historic short tag, unchanged.
+: "${DROPLET_DEFAULT_DMR_MODEL:=docker.io/ai/gpt-oss:20B-F16}"
+: "${DROPLET_DEFAULT_OLLAMA_MODEL:=gpt-oss:20b}"
+
 generate_env() {
   local env_file="$REPO_ROOT/.env"
   local force_regen=false
@@ -410,7 +427,43 @@ generate_env() {
   # NEVER set this to `inference-engine.local:11434` — mDNS does not
   # resolve from inside Docker containers and you'll get
   # "Temporary failure in name resolution" on every chat.
-  ollama_url="${OLLAMA_URL:-http://droplet-ollama:11434}"
+  # INFERENCE_RUNTIME — which engine a FRESH box provisions to (WARP-1870).
+  #
+  # This key used to be absent from generate_env entirely, and that absence was
+  # the whole reason a new appliance came up on Ollama no matter what: both
+  # runtime guards in single-box.sh read the key, found an empty string, and
+  # took their ollama branches. WARP-1865's guard could only PRESERVE a flip
+  # someone had already performed by hand — its own comment says "Never ADDS
+  # dmr on a box that isn't flipped" — so nothing on the provision path could
+  # ever select DMR.
+  #
+  # Writing it explicitly also removes a silent-degradation class: ai-gateway
+  # reads INFERENCE_RUNTIME at module import and defaults to "ollama", so an
+  # absent key on a DMR box means every model reports tools=false with no
+  # error anywhere (WARP-1839's shape). An explicit value cannot be lost by
+  # an interpolation that resolves against the wrong env file.
+  #
+  # Overridable for an Ollama box: `INFERENCE_RUNTIME=ollama ./scripts/setup.sh`.
+  inference_runtime="${INFERENCE_RUNTIME:-dmr}"
+
+  # OLLAMA_URL — the CHAT endpoint, whichever engine serves it. The name is
+  # historical and deliberately kept: it is how DMR is consumed too (compose
+  # wires it, ai-gateway reads it), so renaming it would be a breaking change
+  # for zero benefit. Default tracks the runtime above.
+  #
+  # Override before running setup.sh for a multi-box deployment with a separate
+  # inference host on the LAN, e.g.
+  # `OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`.
+  # NEVER set this to `inference-engine.local:11434` — mDNS does not
+  # resolve from inside Docker containers and you'll get
+  # "Temporary failure in name resolution" on every chat.
+  if [ "$inference_runtime" = "dmr" ]; then
+    ollama_url="${OLLAMA_URL:-http://dmr:12434}"
+    llm_model="${LLM_MODEL:-$DROPLET_DEFAULT_DMR_MODEL}"
+  else
+    ollama_url="${OLLAMA_URL:-http://droplet-ollama:11434}"
+    llm_model="${LLM_MODEL:-$DROPLET_DEFAULT_OLLAMA_MODEL}"
+  fi
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   # WARP-595: stage to a temp file and rename into place. rename(2) is atomic
@@ -489,6 +542,22 @@ AI_GATEWAY_URL=http://ai-gateway:8000
 # full of "Temporary failure in name resolution". See CLAUDE.md
 # "Ollama call path" for the full rationale.
 OLLAMA_URL=${ollama_url}
+
+# --- Inference runtime (WARP-1870) ---
+# Which engine serves chat: \`dmr\` (Docker Model Runner, the default) or
+# \`ollama\`. Read by ai-gateway at module IMPORT — a \`docker restart\` does
+# not re-read it, only \`--force-recreate\` does — and by single-box.sh, which
+# derives the compose profile and the chat/judge URLs from it. Written
+# explicitly rather than left to a default so it can never be lost by an
+# interpolation resolving against the wrong env file.
+INFERENCE_RUNTIME=${inference_runtime}
+
+# LLM_MODEL — the one serving model (One-Model Rule). Under DMR this MUST be
+# the exact registry-qualified id \`GET /api/tags\` reports; the readiness
+# check compares raw strings, so any other spelling of the same model reads as
+# absent and re-pulls ~13.79 GB on every orchestrator boot. Written here so a
+# fresh box is never provisioned without a model to acquire.
+LLM_MODEL=${llm_model}
 
 # --- Device secrets (unique per device — do not share) ---
 DEVICE_SECRET=$device_secret
@@ -801,6 +870,20 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+  # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
+  # fresh-install default of `dmr` (WARP-1870).
+  #
+  # This asymmetry is the point. `_migrate_ensure_key` only writes when the key
+  # is absent, which partitions every box into exactly three cases:
+  #   - already flipped  → the key exists (dmr), untouched. No un-flip.
+  #   - legacy, un-flipped → key absent; it has been serving Ollama all along,
+  #     so `ollama` is the TRUTHFUL value. Backfilling `dmr` here would flip a
+  #     working box on its next setup run and take inference down — an
+  #     accidental flip is as bad as the accidental un-flip WARP-1865 fixed.
+  #   - fresh install    → never reaches migrate_env; generate_env writes dmr.
+  # Writing it explicitly also immunises legacy boxes against ai-gateway's
+  # import-time "ollama" default being mistaken for a deliberate choice.
+  _migrate_ensure_key INFERENCE_RUNTIME "ollama"
   # WARP-978: ensure the HQ issuance URL + relay tunnel token exist on re-run.
   # HQ_ISSUANCE_URL is seeded from the provisioning environment or the baked
   # PUBLIC fleet-HQ Worker default (non-secret) so a reflashed box self-provisions
