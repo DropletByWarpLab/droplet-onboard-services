@@ -97,6 +97,7 @@ fi
 ALL_CHECKS=(
   tsc-full
   compose-config
+  compose-env-shadow
   frigate-env-scan
   shellcheck
   matter-env-allowlist
@@ -414,6 +415,69 @@ run_check_compose_config() {
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (env-file: %s)\n" "$label" "${env_file#$REPO_ROOT/}"
+  CHECK_RESULTS[$label]=pass
+  return 0
+}
+
+run_check_compose_env_shadow() {
+  # WARP-1863 — a credential re-declared as `- X=${X:-}` in a service that ALSO
+  # has `env_file:` is a self-shadow, and it can only ever SUBTRACT.
+  #
+  # compose resolves `${...}` against the project .env beside the compose file
+  # (or whatever `--env-file` names), which is NOT the same file as `env_file:`.
+  # When that substitution source lacks the key it yields "", and because
+  # `environment:` outranks `env_file:` the empty string overwrites a perfectly
+  # good value compose had already loaded. WARP-1860 was exactly this: the
+  # rag-eval bearer went blank on both ends and 15 consecutive nightly evals
+  # 401'd on every query while reporting success.
+  #
+  # Scoped deliberately:
+  #   - CREDENTIALS only. Non-secrets with real defaults (${TZ:-UTC},
+  #     ${LOG_LEVEL:-INFO}) are intentional; there are ~200 self-shadows in
+  #     total and failing on all of them would be noise, not a gate.
+  #   - EMPTY default only (`:-}`). A non-empty default is a deliberate choice.
+  #   - Services WITH env_file only. Services without one (routing, switch,
+  #     matter-controller, ops-console — the host-network services) have NO
+  #     other delivery path, so for them the substitution is required, not a
+  #     bug. Removing it there breaks them outright.
+  local label="compose-env-shadow"
+  local compose="$REPO_ROOT/docker/docker-compose.yml"
+
+  if [ ! -f "$compose" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$compose"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # Walk with a service cursor: the same line can be legitimate in one service
+  # and a defect in another, so a repo-wide grep cannot decide this.
+  local offenders
+  offenders="$(awk '
+    /^  [a-z0-9_-]+:[[:space:]]*$/ { svc=$1; sub(/:$/,"",svc); has_ef=0; next }
+    /^    env_file:/               { has_ef=1; next }
+    {
+      line=$0
+      gsub(/^[[:space:]]+|[[:space:]]+$/,"",line)
+      if (has_ef && line ~ /^- [A-Z_][A-Z0-9_]*=\$\{[A-Z_][A-Z0-9_]*:-\}$/) {
+        k=line; sub(/^- /,"",k); sub(/=.*/,"",k)
+        v=line; sub(/^.*\$\{/,"",v); sub(/:-\}$/,"",v)
+        if (k == v && (k ~ /^SERVICE_TOKEN_/ || k ~ /_TOKEN$/ || k ~ /_SECRET$/ || k ~ /_PASSWORD$/ || k ~ /_KEY$/))
+          printf "    %s: %s\n", svc, k
+      }
+    }
+  ' "$compose")"
+
+  if [ -n "$offenders" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — credential self-shadow(s) that env_file already delivers:\n" "$label"
+    printf '%s\n' "$offenders"
+    printf "        Each resolves against the project .env, NOT the env_file above it.\n"
+    printf "        If that file lacks the key the value becomes \"\" and OVERWRITES the\n"
+    printf "        real one (WARP-1860). Delete the line — env_file already carries it.\n"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  printf "  ${_GREEN}PASS${_RESET}  %s — no credential is shadowed by an empty substitution\n" "$label"
   CHECK_RESULTS[$label]=pass
   return 0
 }
@@ -1649,6 +1713,7 @@ _dispatch_check() {
   case "$1" in
     tsc-full)             run_check_tsc_full ;;
     compose-config)       run_check_compose_config ;;
+    compose-env-shadow)   run_check_compose_env_shadow ;;
     frigate-env-scan)     run_check_frigate_env_scan ;;
     shellcheck)           run_check_shellcheck ;;
     matter-env-allowlist) run_check_matter_env_allowlist ;;
