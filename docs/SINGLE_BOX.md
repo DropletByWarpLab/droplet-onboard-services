@@ -92,7 +92,8 @@ From `docker/docker-compose.yml`:
 
 | Service | Image | Purpose |
 |---|---|---|
-| `ollama` (container_name `droplet-ollama`) | `ollama/ollama:rocm` | Local LLM inference on dGPU. ai-gateway reaches it via compose DNS at `http://ollama:11434`. |
+| `dmr` (container_name `droplet-dmr`) | `docker/model-runner:*-rocm` | **Default** local LLM inference on the dGPU (WARP-1870). ai-gateway reaches it via compose DNS at `http://dmr:12434`. Profile: `dmr`. |
+| `ollama` (container_name `droplet-ollama`) | `ollama/ollama:rocm` | Local LLM inference on dGPU, **opt-in** (`INFERENCE_RUNTIME=ollama`). Reached at `http://ollama:11434`. Profile: `ollama` — mutually exclusive with `dmr`: exactly one runtime may hold `/dev/kfd` and the render node (WARP-1826). |
 | `openwrt` (container_name `droplet-openwrt`) | `openwrt/rootfs:x86_64-24.10.2` | Router-in-container — Wi-Fi AP (after host-side `droplet-openwrt-attach` moves the MT7922 PHY into the container netns) + WireGuard endpoint. routing service talks to it via `127.0.0.1:8181`. |
 
 Plus 3 named volumes:

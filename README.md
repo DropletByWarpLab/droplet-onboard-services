@@ -11,7 +11,7 @@
   Orchestration, web dashboard, AI routing, file management, and file sync — all on-device.
 </p>
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
 
 ![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
@@ -431,7 +431,7 @@ npm run dev
 | `REDIS_URL` | `redis://cache:6379` | Redis 7 connection string |
 | `MQTT_BROKER` | `mqtt://broker:1883` | Mosquitto 2 broker URL |
 | `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway internal URL |
-| `OLLAMA_URL` | `http://host.docker.internal:11434` (multi-box) / `http://ollama:11434` (single-box) | Canonical chat path: direct to Ollama. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. The legacy `:8002/proxy` URL (ollama-manager) still exists as an opt-in observability layer — tool-call JSON repair + circuit breaker + concurrency limits via `/health.limits` — point this var there only if you want those signals and can tolerate the 120 s upstream read timeout that bites heavy agent-loop prompts on CPU. |
+| `OLLAMA_URL` | `http://dmr:12434` (single-box default) / `http://ollama:11434` (Ollama opt-in) / `http://host.docker.internal:11434` (multi-box) | Canonical chat path, direct to the inference runtime. **The name is historical: this is how DMR is consumed too** — judge it by its value, not its name. `INFERENCE_RUNTIME` selects the engine; a URL pointing at DMR while the runtime says otherwise means the runtime variable was lost, and ai-gateway logs it at ERROR. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. The legacy `:8002/proxy` URL (ollama-manager) still exists as an opt-in observability layer — tool-call JSON repair + circuit breaker + concurrency limits via `/health.limits` — point this var there only if you want those signals and can tolerate the 120 s upstream read timeout that bites heavy agent-loop prompts on CPU. |
 | `FILES_ROOT` | `/data/files` | File storage root |
 | `STORAGE_BACKEND` | `nextcloud` | `nextcloud` (WebDAV) or `legacy` (local filesystem) |
 | `NEXTCLOUD_URL` | `http://nextcloud:80` | Nextcloud 29 internal URL |
@@ -516,7 +516,7 @@ Everything Droplet runs on-device is open-source and free. No paid subscriptions
 | LiteLLM | MIT | Multi-provider LLM proxy. The operator brings their own LLM API keys (BYOK) — no Droplet-side subscription |
 | PostgreSQL / Redis / Mosquitto | OSS (PostgreSQL / BSD / EPL) | Self-hosted infra |
 
-**The operator's only out-of-pocket cost is their own LLM provider key** (OpenAI / Anthropic / Gemini etc.) if they want cloud LLMs — and that's optional, since the bundled inference engine runs Ollama locally.
+**The operator's only out-of-pocket cost is their own LLM provider key** (OpenAI / Anthropic / Gemini etc.) if they want cloud LLMs — and that's optional, since the box runs its own inference engine locally — Docker Model Runner by default (WARP-1870), Ollama when opted in.
 
 ---
 

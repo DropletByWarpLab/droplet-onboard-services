@@ -135,6 +135,24 @@ rationale, measured costs, and the cost-estimation formula:
 
 ## Ollama call path (chat vs lifecycle)
 
+> Heading kept verbatim on purpose: it is a named anchor cited from five
+> places, two of them live source comments (`scripts/lib/secrets.sh`,
+> `services/voice-io/voice/llm.py`). Renaming it dangles those references.
+>
+> **Read `INFERENCE_RUNTIME` before anything below applies (WARP-1870).** A box
+> provisioned after 2026-08-11 defaults to the **Docker Model Runner** on
+> `:12434` — no `ollama-manager`, no `:8002`, no `/proxy`, nothing on `:11434`,
+> and the whole proxy-timeout class below simply does not exist. The section
+> below describes the Ollama shape, still selectable with
+> `INFERENCE_RUNTIME=ollama ./scripts/setup.sh`.
+>
+> `OLLAMA_URL`, `RAGAS_OLLAMA_URL` and `OLLAMA_CHAT_PATH` are **how DMR is
+> consumed too** — the names are historical. Never infer the runtime from a
+> variable's name; read its value. A DMR-shaped URL with a non-dmr runtime
+> means the variable was lost, every model silently reports `tools=false`, and
+> `docker restart` will not fix it — only `--force-recreate` re-reads env.
+> Full debugging both ways: the `debug-ollama-call-path` skill.
+
 The inference host runs **Ollama** (`:11434`, inference) and
 **ollama-manager** (`:8002`, lifecycle + opt-in observability sidecar).
 They are NOT interchangeable:

@@ -1,14 +1,28 @@
 # Docker Model Runner on the single-box shape (WARP-1772)
 
-**State: DARK.** This repo's compose carries a `dmr` service (profile `dmr`,
-never default) so the shipping single-box shape is *flip-capable* — nothing
-more. With no configuration change the box behaves byte-identically to a tree
-without this service: `docker compose config --services` does not list `dmr`,
-no volume materializes, no port binds, and every chat still flows
-ai-gateway → `ollama`. The Phase-0 hardware gate (WARP-1741) **passed** on
-this box on 2026-08-08 — numbers and the run's operational findings live in
-[ADR-036 §5a](ADR-036-inference-runtime-abstraction.md); this doc is the
-operator side.
+**State: DEFAULT (WARP-1870).** DMR is what a freshly provisioned box comes up
+running. `scripts/lib/secrets.sh` writes `INFERENCE_RUNTIME=dmr` and a
+registry-qualified `LLM_MODEL`; `scripts/lib/single-box.sh` derives the compose
+profile and both the chat and RAGAS-judge URLs from that runtime. Chat flows
+ai-gateway → `dmr`.
+
+To provision an Ollama box instead: `INFERENCE_RUNTIME=ollama ./scripts/setup.sh`.
+The two runtime profiles are mutually exclusive — exactly one may hold
+`/dev/kfd` and the render node (SINGLE GPU OWNER, WARP-1826) — and
+`single-box.sh` appends whichever matches the runtime while stripping the
+other, in both directions.
+
+**An already-deployed box is never flipped by a setup re-run.** `migrate_env`
+only writes ABSENT keys, so a legacy box backfills `INFERENCE_RUNTIME=ollama`
+— the truth about what it has been serving. Boxes flipped by hand already
+carry the key and are untouched.
+
+History: this shipped dark under WARP-1772 (a `dmr` service on a non-default
+profile, so the box was merely *flip-capable*). The Phase-0 hardware gate
+(WARP-1741) **passed** on the lab box on 2026-08-08 — numbers and operational
+findings in [ADR-036 §5a](ADR-036-inference-runtime-abstraction.md). The lab
+box itself was flipped on 2026-08-10; the default followed under WARP-1870.
+This doc is the operator side.
 
 ## What exists after this change
 
