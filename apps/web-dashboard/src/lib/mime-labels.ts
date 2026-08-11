@@ -87,7 +87,7 @@ const MIME_TO_LABEL: Record<string, string> = {
   // Video
   "video/mp4": "MP4 video",
   "video/quicktime": "QuickTime video",
-  "video/x-matroska": "Matroska video",
+  "video/x-matroska": "MKV video",
   "video/webm": "WebM video",
   "video/x-msvideo": "AVI video",
   "video/mpeg": "MPEG video",

@@ -195,7 +195,10 @@ function MetaRow({
       <span
         data-meta-value
         className="min-w-0 truncate text-right"
-        title={title ?? value}
+        // Only rows that carry MORE than the visible value get a tooltip. A
+        // title that repeats its own text is read out twice by a screen reader
+        // and tells a sighted user nothing.
+        title={title}
         style={{ color: "var(--text)" }}
       >
         {value}
@@ -1602,6 +1605,9 @@ export default function FilesPage() {
                   id="modified"
                   label="Modified"
                   value={new Date(selectedFile.modifiedAt).toLocaleDateString()}
+                  // The visible value is date-only; the time of day is the part
+                  // a tooltip can actually add.
+                  title={new Date(selectedFile.modifiedAt).toLocaleString()}
                 />
               </div>
 

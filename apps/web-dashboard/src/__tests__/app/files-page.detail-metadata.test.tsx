@@ -12,7 +12,9 @@
  *   3. the value column is constrained (min-w-0 + truncate) and separated
  *      from the label by a token gap, so a long value can neither collide
  *      with the label nor escape the panel's padding;
- *   4. all three rows share the same label/value shape, so they stay aligned.
+ *   4. all three rows share the same label/value shape, so they stay aligned;
+ *   5. a row gets a tooltip only where one adds information the visible text
+ *      doesn't already carry (UX review N1).
  *
  * Mock scaffolding mirrors files-page.doubleclick-preview.test.tsx.
  */
@@ -146,6 +148,27 @@ describe("Files detail panel — metadata block (WARP-1877)", () => {
     const value = typeRow!.querySelector<HTMLElement>("[data-meta-value]");
     expect(value).not.toBeNull();
     expect(value!.getAttribute("title")).toBe(DOCX_MIME);
+  });
+
+  it("gives a row a tooltip only when it carries more than its visible text", () => {
+    const { container } = render(<FilesPage />);
+    const rows = openDetailPanel(container);
+    const valueOf = (id: string) =>
+      rows
+        .find((r) => r.dataset.metaRow === id)!
+        .querySelector<HTMLElement>("[data-meta-value]")!;
+
+    // Size is fully visible, so a tooltip would only repeat it — and a screen
+    // reader would then read the same string twice.
+    const size = valueOf("size");
+    expect(size.getAttribute("title")).toBeNull();
+
+    // Modified shows the date but drops the time of day, so its tooltip has
+    // something to add: it must differ from the visible value.
+    const modified = valueOf("modified");
+    const modifiedTitle = modified.getAttribute("title");
+    expect(modifiedTitle).toBeTruthy();
+    expect(modifiedTitle).not.toBe(modified.textContent?.trim());
   });
 
   it("constrains the value column so a long value cannot collide or escape", () => {
