@@ -17,7 +17,12 @@ import {
   X,
 } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
-import { fetchCameraSettings, patchCameraSettings, setCameraBudget } from "@/lib/api";
+import {
+  fetchCameraSettings,
+  patchCameraSettings,
+  fetchCameraBudget,
+  setCameraBudget,
+} from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -104,20 +109,36 @@ export default function CameraSettingsPage() {
   const [budgetSaving, setBudgetSaving] = useState(false);
   const [budgetMsg, setBudgetMsg] = useState<string | null>(null);
 
+  // WARP-1851: hydrate from the stored allocation. Without this the control
+  // rendered blank over a saved budget — the field contradicted the state.
+  const { data: budget, mutate: mutateBudget } = useSWR(
+    name ? ["camera-budget", name] : null,
+    () => fetchCameraBudget(name),
+    { revalidateOnFocus: false },
+  );
+  useEffect(() => {
+    if (budget?.retentionMode === "BUDGET" && budget.budgetBytes) {
+      setBudgetGb(String(Math.round(budget.budgetBytes / (1024 * 1024 * 1024))));
+    } else if (budget?.retentionMode === "MANUAL") {
+      setBudgetGb("");
+    }
+  }, [budget]);
+
   const saveBudget = async (bytes: number | null) => {
     setBudgetSaving(true);
     setBudgetMsg(null);
     try {
       const r = await setCameraBudget(name, bytes);
+      await mutateBudget();
       if (r.retentionMode === "MANUAL") {
         setBudgetGb("");
         setBudgetMsg(r.note ?? "Back to setting retention in days yourself.");
-      } else if (r.measurable && r.projectedDays != null) {
-        // State the trade out loud — a budget means nothing to the operator
-        // until it is expressed in days of footage.
+      } else if (r.applied) {
+        // Say what actually changed, not what will change later.
         setBudgetMsg(
-          `That's about ${r.projectedDays} day${r.projectedDays === 1 ? "" : "s"} of footage at this camera's current recording rate.`,
+          `Retention adjusted to fit: alerts ${r.applied.alerts}d, other detections ${r.applied.detections}d.`,
         );
+        void mutate();
       } else {
         setBudgetMsg(r.note ?? "Saved.");
       }
@@ -407,8 +428,9 @@ export default function CameraSettingsPage() {
             </div>
             <p className="type-caption-1 text-label-tertiary">
               Give this camera an amount of disk instead of a number of days.
-              We measure how fast it actually records and keep as many days as
-              that budget covers, adjusting as the rate changes.
+              We check what it&apos;s actually using and trim its retention to
+              fit, then give the days back if usage drops. Recording modes you
+              have switched off stay off.
             </p>
             <label className="flex items-center gap-2">
               <input

@@ -246,34 +246,49 @@ docker exec droplet-frigate-1 python3 -c "from frigate.config.camera.record impo
 
 ## Storage allocation (WARP-1851)
 
-An operator can give a camera **an amount of disk** instead of a number of
-days. The budget is not a hard cap — it is converted into the unit Frigate
-already enforces:
+An operator can give a camera **an amount of disk**. Enforcement is a
+**measured feedback controller**, not a formula.
 
-```
-retention_days = budget_bytes / (measured_bytes_per_hour * 24)
-```
+Nightly, per `retentionMode = BUDGET` camera:
 
-`Camera.retentionMode` (`MANUAL` | `BUDGET`) decides whether the nightly
-reconciler manages a camera's `record.continuous.days`. It is an explicit
-enum, not "budget IS NULL means manual" — clearing a budget and never
-setting one must be distinguishable.
+| condition | action |
+|---|---|
+| usage > budget | scale every **enabled** window down toward the target |
+| usage < 80% of budget | grow back one step toward the operator's ceiling |
+| otherwise | hold — no write, so no camera restart |
 
-**Why not enforce bytes directly.** Frigate has no per-camera quota, and
-the orchestrator does not mount the recordings volume. Deleting segments
-here would race Frigate's own storage maintainer and corrupt the recordings
-index it serves playback from. Budgets convert; Frigate enforces.
+`Camera.retentionCeiling` stores the operator's preferred windows. It is
+load-bearing: without it the controller cannot distinguish "I reduced this to
+fit" from "the operator wants it low", and could never restore retention.
 
-**The refusal that matters.** Derivation divides by a measured bitrate.
-When that rate is unknown or zero — a newly added camera, one that hasn't
-recorded a segment — there is no honest answer, and the reconciler leaves
-the camera alone. Both plausible-looking wrong answers get written into
-config and *save successfully*:
+**Two invariants, both scars.**
 
-| Degenerate input | Naive result | What the operator gets |
-|---|---|---|
-| rate = 0 | `Infinity` → clamps to 365 | a year of footage nobody asked for |
-| budget = 0 | `0` days | Frigate keeps **nothing** and deletes the lot |
+1. **A window at 0 is never raised.** Scaling is multiplicative over the
+   ceiling, and 0 scales to 0. The first cut of this feature derived a window
+   and wrote it to `record.continuous.days` — which is **0** on a default box —
+   so asking it to *cap* storage **switched 24/7 recording on** and drove usage
+   up.
+2. **All four windows move together.** Frigate keeps a segment if **any**
+   window still covers it: per `record/cleanup.py`, segments past
+   `max(continuous, motion)` days are deletion *candidates* but survive when
+   they overlap a non-expired alert/detection review. Bounding one window
+   cannot bound bytes.
+
+**Why measured, not predicted.** Frigate's `bandwidth` is MiB/hr *while a
+segment is being written*, not wall-clock growth. With continuous retention
+off, segments are only kept around review items, so `bandwidth × 24`
+describes a box that isn't this one. Measuring actual usage sidesteps the
+model entirely and converges whatever the recording mode.
+
+Convergence is deliberately gradual — Frigate deletes on its own schedule, so
+usage responds a day or so after a window changes. Steps are clamped so the
+loop damps rather than oscillates, and a dead band keeps it from restarting
+cameras to chase noise.
+
+**Hard cap?** No. Frigate has no per-camera quota, and the orchestrator must
+not delete segments behind Frigate's recordings DB — that races its storage
+maintainer and corrupts the index playback reads from. A budget is a target
+the controller converges on, and the UI says so.
 
 ## Dashboard Features
 

@@ -1082,8 +1082,22 @@ async function main() {
     "40 3 * * *",
     async () => {
       const result = await reconcileCameraBudgets(prisma);
-      if (result.applied.length > 0 || result.skippedNoRate.length > 0) {
+      if (result.applied.length > 0 || result.held.length > 0) {
         logger.info(result, "camera storage budget reconcile complete");
+      }
+      // A pass where every camera failed must NOT look like a quiet success.
+      // The service collects per-camera errors so one broken camera can't
+      // strand the rest, but a pass that achieved nothing has to reach the
+      // cron canary — reporting success never achieved is the failure mode
+      // this whole epic was created by (WARP-1849).
+      if (result.failed.length > 0) {
+        throw new Error(
+          `camera storage budget reconcile: ${result.failed.length} of ` +
+            `${result.failed.length + result.applied.length + result.held.length} ` +
+            `camera(s) failed — ${result.failed
+              .map((f) => `${f.camera}: ${f.error}`)
+              .join("; ")}`,
+        );
       }
     },
     { lockKey: "droplet:camera-budget-reconcile" },

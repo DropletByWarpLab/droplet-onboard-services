@@ -34,7 +34,12 @@ END$$;
 -- AlterTable
 ALTER TABLE "Camera"
   ADD COLUMN IF NOT EXISTS "retentionMode" "CameraRetentionMode" NOT NULL DEFAULT 'MANUAL',
-  ADD COLUMN IF NOT EXISTS "storageBudgetBytes" BIGINT;
+  ADD COLUMN IF NOT EXISTS "storageBudgetBytes" BIGINT,
+  -- The operator's preferred retention windows, captured when a budget is
+  -- set. The controller scales DOWN from this ceiling and grows back toward
+  -- it; a window stored as 0 is never raised, so enforcing a budget can
+  -- never switch on a recording mode the operator has off.
+  ADD COLUMN IF NOT EXISTS "retentionCeiling" JSONB;
 
 -- Partial index: the reconciler only ever scans BUDGET-mode rows, and on a
 -- household appliance that is a small minority of an already-small table.

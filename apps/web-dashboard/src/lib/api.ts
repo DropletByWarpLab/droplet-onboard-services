@@ -10,7 +10,7 @@ import type {
   CameraSettingsPatch,
   CameraSystemStatus,
   CameraStorageSummary,
-  CameraBudgetResult,
+  CameraBudget,
   EventDetail,
   EventFilter,
   FilteredEventsResult,
@@ -2420,6 +2420,13 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   return body.status;
 }
 
+/** WARP-1851 — read a camera's current storage allocation. */
+export async function fetchCameraBudget(name: string): Promise<CameraBudget> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/budget`);
+  if (!res.ok) throw new Error(`Failed to fetch camera budget: ${res.status}`);
+  return (await res.json()) as CameraBudget;
+}
+
 /**
  * WARP-1851 — set or clear a camera's storage budget.
  *
@@ -2429,7 +2436,7 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
 export async function setCameraBudget(
   name: string,
   budgetBytes: number | null,
-): Promise<CameraBudgetResult> {
+): Promise<CameraBudget> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/budget`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -2439,7 +2446,7 @@ export async function setCameraBudget(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error || `Failed to set budget: ${res.status}`);
   }
-  return (await res.json()) as CameraBudgetResult;
+  return (await res.json()) as CameraBudget;
 }
 
 /**

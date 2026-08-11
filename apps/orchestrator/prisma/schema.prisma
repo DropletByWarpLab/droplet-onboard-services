@@ -810,6 +810,22 @@ model Camera {
   /// Target bytes of recordings for this camera. Only meaningful when
   /// retentionMode = BUDGET. BigInt because a multi-TB budget overflows Int.
   storageBudgetBytes BigInt?
+  /// The operator's PREFERRED retention windows — the ceiling the budget
+  /// controller scales down from and grows back toward:
+  ///   { continuous, motion, alerts, detections }  (days)
+  ///
+  /// Needed because enforcement is a feedback loop, not a formula. Without a
+  /// remembered ceiling the controller cannot tell "I reduced this to fit the
+  /// budget" from "the operator wants it low", so it could never restore
+  /// retention after the camera's usage drops.
+  ///
+  /// A window recorded as 0 stays 0 forever: scaling never ENABLES a window
+  /// the operator has switched off. That is what made the first cut of this
+  /// feature turn 24/7 recording on when asked to cap storage.
+  ///
+  /// Null while retentionMode = MANUAL, and captured from the camera's live
+  /// Frigate config the moment a budget is set.
+  retentionCeiling   Json?
 
   notifications  CameraNotificationPref[]
   groupMembers   CameraGroupMember[]
