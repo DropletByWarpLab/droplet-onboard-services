@@ -350,8 +350,13 @@ export interface CloudProviderRow {
 export interface ModelsGpuInfo {
   name: string;
   vramGb: number;
-  utilPct: number;
-  tempC: number;
+  // WARP-1861: nullable because the bridge legitimately cannot always read
+  // them. When nothing holds the card, amdgpu runtime-SUSPENDS it and the
+  // sysfs reads return EBUSY rather than a number — so on an idle appliance
+  // this is the common case, not an edge case. `0` would be a lie a threshold
+  // check would happily pass.
+  utilPct: number | null;
+  tempC: number | null;
 }
 
 export interface ModelsPagePayload {

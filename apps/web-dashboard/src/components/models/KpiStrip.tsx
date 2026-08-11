@@ -48,7 +48,14 @@ export function KpiStrip({
         }
       />
 
-      {/* GPU — no probe yet. */}
+      {/* GPU — live counters via device-bridge (WARP-1861).
+
+          util and temp are nullable, and that is the NORMAL case rather
+          than a fault: with nothing holding the card the driver
+          runtime-suspends it and those readings cannot be taken at all.
+          Rendering 0% there would claim a measurement nobody made, so each
+          field degrades on its own and the tile still names the card and
+          its VRAM. */}
       <KpiTile
         icon={Cpu}
         label="GPU"
@@ -56,8 +63,16 @@ export function KpiStrip({
         valueMuted={!gpu}
         meta={
           gpu
-            ? `${gpu.vramGb} GB · ${gpu.tempC}°C · ${gpu.utilPct}% used`
-            : "Accelerator stats aren’t reported yet"
+            ? [
+                `${gpu.vramGb} GB`,
+                gpu.tempC !== null ? `${gpu.tempC}°C` : null,
+                gpu.utilPct !== null
+                  ? `${gpu.utilPct}% used`
+                  : "idle — not reporting",
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : "No accelerator detected"
         }
       />
 
