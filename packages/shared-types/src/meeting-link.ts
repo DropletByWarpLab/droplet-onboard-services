@@ -36,7 +36,12 @@ export interface MeetingLink {
   provider: MeetingProvider;
   /** Sentence-case action copy for the anchor, e.g. "Join Microsoft Teams". */
   label: string;
-  /** Bare host, for a quiet secondary line next to the action. */
+  /** Bare provider name, e.g. "Microsoft Teams". Empty for an
+   *  unrecognized host — callers show the host itself instead of
+   *  inventing a name for a service they did not recognize. */
+  providerName: string;
+  /** Bare host. Shown next to the action so a member can see where a link
+   *  someone else pasted actually goes before they follow it. */
   host: string;
 }
 
@@ -44,15 +49,15 @@ export interface MeetingLink {
  *  the database and out of the layout. */
 export const MEETING_URL_MAX_LENGTH = 2048;
 
-const PROVIDER_HOSTS: Array<{ provider: MeetingProvider; hosts: string[]; label: string }> = [
-  { provider: "zoom", hosts: ["zoom.us", "zoomgov.com"], label: "Join Zoom" },
+const PROVIDER_HOSTS: Array<{ provider: MeetingProvider; hosts: string[]; name: string }> = [
+  { provider: "zoom", hosts: ["zoom.us", "zoomgov.com"], name: "Zoom" },
   {
     provider: "teams",
     hosts: ["teams.microsoft.com", "teams.live.com", "teams.microsoft.us"],
-    label: "Join Microsoft Teams",
+    name: "Microsoft Teams",
   },
-  { provider: "meet", hosts: ["meet.google.com"], label: "Join Google Meet" },
-  { provider: "webex", hosts: ["webex.com"], label: "Join Webex" },
+  { provider: "meet", hosts: ["meet.google.com"], name: "Google Meet" },
+  { provider: "webex", hosts: ["webex.com"], name: "Webex" },
 ];
 
 const GENERIC_LABEL = "Join video call";
@@ -97,7 +102,8 @@ export function parseMeetingLink(raw: unknown): MeetingLink | null {
   return {
     url: parsed.href,
     provider: match?.provider ?? "other",
-    label: match?.label ?? GENERIC_LABEL,
+    label: match ? `Join ${match.name}` : GENERIC_LABEL,
+    providerName: match?.name ?? "",
     host,
   };
 }

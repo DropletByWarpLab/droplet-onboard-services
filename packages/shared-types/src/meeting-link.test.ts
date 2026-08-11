@@ -98,6 +98,18 @@ describe("parseMeetingLink — provider labels", () => {
     expect(link?.label).toBe(label);
   });
 
+  it("exposes the bare provider name and host for confirmation copy", () => {
+    const link = parseMeetingLink("https://warplab.zoom.us/j/1");
+    expect(link?.providerName).toBe("Zoom");
+    expect(link?.host).toBe("warplab.zoom.us");
+  });
+
+  it("leaves providerName empty for an unrecognized host rather than inventing one", () => {
+    const link = parseMeetingLink("https://vc.warp-lab.ai/room/kitchen");
+    expect(link?.providerName).toBe("");
+    expect(link?.host).toBe("vc.warp-lab.ai");
+  });
+
   it("accepts an unrecognized https URL with a generic label", () => {
     // An allowlist that silently drops a valid link is a worse bug than
     // the one this ticket fixes.

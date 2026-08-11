@@ -321,6 +321,42 @@
   border-color: color-mix(in srgb, var(--danger) 85%, #000);
 }
 
+/* WARP-1874 — "Join" on a meeting that carries a video-call link, and the
+   "Add / Remove video call link" affordances in the schedule dialog.
+
+   The pill is reused rather than re-invented so the meeting card keeps one
+   action vocabulary. An anchor needs the flex box a <button> got for free,
+   plus text-decoration reset. */
+.droplet-shell a.mx-pill,
+.droplet-shell button.mx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+}
+/* Join is the only FILLED pill on a scheduled meeting: on a remote
+   meeting it is the action, and RSVP is the earlier, quieter decision.
+   Brand fill + --on-brand ink is the same pairing as `.is-on`, which the
+   surface already measures as AA. */
+.droplet-shell .mx-pill.is-join {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+.droplet-shell .mx-pill.is-join:hover {
+  background: color-mix(in srgb, var(--brand) 88%, #000);
+  border-color: color-mix(in srgb, var(--brand) 88%, #000);
+}
+
+/* Field-level hint under an input — names the recognized provider back to
+   the author, or says what to paste. Quieter than .mx-error, which is for
+   things that went wrong. */
+.droplet-shell .mx-hint {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
 /* ── Composer ───────────────────────────────────────────────────── */
 
 .droplet-shell .mx-composer {

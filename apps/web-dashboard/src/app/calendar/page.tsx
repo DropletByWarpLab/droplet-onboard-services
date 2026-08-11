@@ -12,8 +12,10 @@ import {
   FileText,
   Clock,
   MapPin,
+  Video,
   X,
 } from "lucide-react";
+import { parseMeetingLink } from "@droplet/shared-types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import {
   useCalendarEvents,
@@ -573,6 +575,34 @@ export default function CalendarPage() {
                   <span className="il-v">{detail.location}</span>
                 </div>
               )}
+              {/* WARP-1874 — the video-call link, as a real anchor and as
+                  its own row, so a remote event reads as joinable rather
+                  than as a place. Re-parsed HERE even though the write
+                  path already refused non-https: this row can come from
+                  an external ICS feed, which no zod schema ever saw. An
+                  unparseable value renders nothing at all. */}
+              {(() => {
+                const link = parseMeetingLink(detail.meetingUrl);
+                if (!link) return null;
+                return (
+                  <div className="ds-ios-line">
+                    <span className="il-ic"><Video size={19} /></span>
+                    <span className="il-l">Video call</span>
+                    <span className="il-v">
+                      <a
+                        href={link.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={link.url}
+                        className="underline underline-offset-2"
+                        style={{ color: "var(--text)" }}
+                      >
+                        {link.label}
+                      </a>
+                    </span>
+                  </div>
+                );
+              })()}
               <div className="ds-ios-line">
                 <span className="il-ic"><CalendarIcon size={19} /></span>
                 <span className="il-l">Calendar</span>
