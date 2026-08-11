@@ -50,12 +50,15 @@ import {
   Network,
   Paperclip,
   PenLine,
+  Pin,
+  PinOff,
   Plus,
   Settings,
   ShieldOff,
   Sparkles,
   Square,
   Thermometer,
+  Trash2,
   Video,
   Wrench,
   X,
@@ -70,6 +73,13 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
+import {
+  useNotes,
+  createNote,
+  updateNote,
+  deleteNote,
+  type Note,
+} from "@/lib/hooks/useNotes";
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth";
@@ -969,88 +979,116 @@ function TasksWidget() {
 }
 
 /* ─────────────────────────── Notes ───────────────────────────
- * Single-note scratchpad backed by localStorage. The save is debounced
- * (~500ms) and surfaced through a small status line so the autosave is
- * legible — "Saving…" while a write is pending, "Saved" once it lands —
- * instead of writing on every keystroke with zero feedback. "New note"
- * flushes the pending save and starts a fresh, empty note.
+ * Notes live on the box (`/api/notes`), many per user, each pinnable. The
+ * tile has two views: a list (pinned first, pin/delete per row) and an
+ * editor for the note you tapped. Editing autosaves on a ~500ms debounce
+ * with a legible status line — "Saving…" while a write is pending, "Saved"
+ * once it lands — instead of writing on every keystroke with no feedback.
+ *
+ * Before this, the tile was a single string in this browser's localStorage:
+ * unsynced, unpinnable, and wiped by "New note". That key is uploaded once
+ * (see `useLegacyNoteImport`) so nobody's existing note disappears.
  */
 const NOTES_KEY = "droplet-home-notes";
+const NOTES_IMPORTED_KEY = "droplet-home-notes-imported";
 const NOTES_SAVE_DEBOUNCE_MS = 500;
 type NotesSaveStatus = "idle" | "saving" | "saved";
 
-export function NotesWidget() {
-  const [val, setVal] = useState("");
-  const [hydrated, setHydrated] = useState(false);
+/** One-time lift of the old browser-local note onto the box. Runs once per
+ *  browser (guarded by its own localStorage flag) and only when there is
+ *  something to move — then clears the legacy key so it can't be re-imported
+ *  as a duplicate if the flag is lost. */
+function useLegacyNoteImport(onImported: () => void) {
+  const ran = useRef(false);
+  useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+    let legacy: string | null = null;
+    try {
+      if (window.localStorage.getItem(NOTES_IMPORTED_KEY)) return;
+      legacy = window.localStorage.getItem(NOTES_KEY);
+    } catch {
+      return; // private mode — nothing to import from
+    }
+    const body = legacy?.trim();
+    if (!body) {
+      try {
+        window.localStorage.setItem(NOTES_IMPORTED_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    void createNote({ body })
+      .then(() => {
+        try {
+          window.localStorage.setItem(NOTES_IMPORTED_KEY, "1");
+          window.localStorage.removeItem(NOTES_KEY);
+        } catch {
+          /* ignore */
+        }
+        onImported();
+      })
+      // Offline / server down: leave the legacy key and the flag alone so the
+      // next mount tries again. Never drop the customer's text.
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
+/** The editor half of the tile: one note's body, debounced-autosaved. */
+function NoteEditor({
+  note,
+  onClose,
+  onSaved,
+}: {
+  note: Note;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [val, setVal] = useState(note.body);
   const [status, setStatus] = useState<NotesSaveStatus>("idle");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Mirror of `val` + a pending-save flag for the unmount flush, which can't
   // read the latest state through a stale `[]`-effect closure.
-  const valRef = useRef("");
+  const valRef = useRef(note.body);
   const pendingRef = useRef(false);
 
-  const writeStorage = (next: string) => {
-    try {
-      window.localStorage.setItem(NOTES_KEY, next);
-    } catch {
-      /* ignore — private-mode / quota; the in-memory note still works */
-    }
-  };
+  const save = useCallback(
+    (next: string) => {
+      pendingRef.current = false;
+      void updateNote(note.id, { body: next })
+        .then(() => {
+          setStatus("saved");
+          onSaved();
+        })
+        .catch(() => setStatus("idle"));
+    },
+    [note.id, onSaved],
+  );
 
-  // Persist `val` immediately and reflect the saved state. Used by both the
-  // debounced timer and the explicit "New note" flush so writes never race.
-  const flush = (next: string) => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    pendingRef.current = false;
-    writeStorage(next);
-    setStatus("saved");
-  };
-
-  useEffect(() => {
-    try {
-      setVal(window.localStorage.getItem(NOTES_KEY) ?? "");
-    } catch {
-      /* ignore */
-    }
-    setHydrated(true);
-  }, []);
-
-  // Debounced autosave: mark "Saving…" on each edit, then commit once the
-  // user pauses. The initial hydration pass is skipped so we don't flash
-  // a status on first paint.
+  // Debounced autosave. The first render is skipped (val === the note we were
+  // handed) so opening a note doesn't flash a status or write it back.
   useEffect(() => {
     valRef.current = val;
-    if (!hydrated) return;
+    if (val === note.body && !pendingRef.current) return;
     pendingRef.current = true;
     setStatus("saving");
-    timerRef.current = setTimeout(() => {
-      flush(val);
-    }, NOTES_SAVE_DEBOUNCE_MS);
+    timerRef.current = setTimeout(() => save(val), NOTES_SAVE_DEBOUNCE_MS);
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [val, hydrated]);
+  }, [val]);
 
-  // Unmount-only: if a debounced save is still in flight when the widget goes
-  // away (navigate off Home, remove the tile), commit the latest text so we
-  // don't drop up to ~500ms of typing — the old write-every-keystroke code
-  // never lost data on unmount.
+  // Unmount-only: commit a still-pending edit so navigating off Home (or
+  // closing the editor) never drops up to ~500ms of typing.
   useEffect(() => {
     return () => {
-      if (pendingRef.current) writeStorage(valRef.current);
+      if (pendingRef.current) void updateNote(note.id, { body: valRef.current });
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const newNote = () => {
-    // Flush first so the (now empty) note is committed — never silently
-    // discard the in-flight save.
-    flush("");
-    setVal("");
-  };
 
   return (
     <div className="w-notes-wrap">
@@ -1058,8 +1096,9 @@ export function NotesWidget() {
         className="w-notes"
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        aria-label="Notes"
+        aria-label="Note"
         placeholder="Jot something down…"
+        autoFocus
       />
       <div className="w-notes-bar">
         <span
@@ -1070,11 +1109,105 @@ export function NotesWidget() {
         >
           {status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}
         </span>
-        <button
-          className="w-notes-new"
-          type="button"
-          onClick={newNote}
-        >
+        <button className="w-notes-new" type="button" onClick={onClose}>
+          <ChevronLeft size={13} />
+          All notes
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function NotesWidget() {
+  const { notes, isLoading, refresh } = useNotes();
+  const [openId, setOpenId] = useState<string | null>(null);
+  useLegacyNoteImport(() => void refresh());
+
+  const open = notes.find((n) => n.id === openId) ?? null;
+  // The note was deleted in another tab while open — fall back to the list
+  // rather than editing a row that no longer exists.
+  useEffect(() => {
+    if (openId && !isLoading && !open) setOpenId(null);
+  }, [openId, isLoading, open]);
+
+  const addNote = async () => {
+    const { note } = await createNote({ body: "" });
+    await refresh();
+    setOpenId(note.id);
+  };
+
+  const togglePin = async (n: Note) => {
+    await updateNote(n.id, { pinned: !n.pinned });
+    await refresh();
+  };
+
+  const remove = async (n: Note) => {
+    await deleteNote(n.id);
+    if (openId === n.id) setOpenId(null);
+    await refresh();
+  };
+
+  if (open) {
+    return (
+      <NoteEditor
+        note={open}
+        onClose={() => setOpenId(null)}
+        onSaved={() => void refresh()}
+      />
+    );
+  }
+
+  return (
+    <div className="w-notes-wrap">
+      <div className="w-note-list">
+        {notes.length === 0 ? (
+          <WEmpty>{isLoading ? "Loading notes…" : "No notes yet"}</WEmpty>
+        ) : (
+          notes.map((n) => {
+            // The first non-empty line is the note's name in the list; a
+            // brand-new note has none yet.
+            const title =
+              n.body.split("\n").find((l) => l.trim().length > 0)?.trim() ??
+              "Empty note";
+            return (
+              <div className={"w-note" + (n.pinned ? " pinned" : "")} key={n.id}>
+                <button
+                  className="w-note-open"
+                  type="button"
+                  onClick={() => setOpenId(n.id)}
+                >
+                  {n.pinned && <Pin size={11} className="pin" aria-hidden />}
+                  <span className="nm">{title}</span>
+                </button>
+                <button
+                  className="w-note-act"
+                  type="button"
+                  onClick={() => void togglePin(n)}
+                  aria-label={n.pinned ? `Unpin ${title}` : `Pin ${title}`}
+                  aria-pressed={n.pinned}
+                >
+                  {n.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+                </button>
+                <button
+                  className="w-note-act"
+                  type="button"
+                  onClick={() => void remove(n)}
+                  aria-label={`Delete ${title}`}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })
+        )}
+      </div>
+      <div className="w-notes-bar">
+        <span className="w-notes-status">
+          {notes.some((n) => n.pinned)
+            ? `${notes.filter((n) => n.pinned).length} pinned`
+            : ""}
+        </span>
+        <button className="w-notes-new" type="button" onClick={() => void addNote()}>
           <FilePlus size={13} />
           New note
         </button>

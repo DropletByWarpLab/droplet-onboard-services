@@ -341,17 +341,22 @@ export function HelpLauncher() {
         </div>
       )}
 
-      {/* ── Persistent FAB ── */}
+      {/* ── Persistent FAB (desktop only) ── */}
       {/* Not `.droplet-shell`-scoped (see the file-level note) — the ring
           keeps the global `--color-accent` token, which resolves the same
-          indigo everywhere without needing the shell scope class. */}
+          indigo everywhere without needing the shell scope class.
+
+          Hidden below `lg` (the same 1024px line the mobile board uses): on a
+          phone the FAB sat on top of the chat composer's send button and
+          covered the bottom card on every scrolling page. Help stays one tap
+          away in the More tab, and `?` still opens it on a keyboard. */}
       <button
         type="button"
         onClick={() => setView((v) => (v === "closed" ? "menu" : "closed"))}
         aria-label={view === "closed" ? "Open help" : "Close help"}
         aria-expanded={view !== "closed"}
         aria-haspopup="menu"
-        className="aurora-brand fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-5 z-[55] flex h-[52px] w-[52px] items-center justify-center rounded-full text-white shadow-lg transition-transform duration-200 ease-smooth hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 motion-reduce:hover:scale-100 lg:bottom-7 lg:right-7"
+        className="aurora-brand fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-5 z-[55] hidden h-[52px] w-[52px] items-center justify-center rounded-full text-white shadow-lg transition-transform duration-200 ease-smooth hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:ring-offset-2 motion-reduce:hover:scale-100 lg:bottom-7 lg:right-7 lg:flex"
       >
         {view === "menu" ? <X size={22} /> : <HelpCircle size={22} />}
       </button>

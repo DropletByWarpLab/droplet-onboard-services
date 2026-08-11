@@ -1118,6 +1118,71 @@
   color: var(--brand);
 }
 
+/* ---------- Notes: the list view ---------- */
+.droplet-home .w-note-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+}
+.droplet-home .w-note {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-input);
+}
+.droplet-home .w-note:hover {
+  background: var(--card-inner);
+}
+.droplet-home .w-note-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.droplet-home .w-note-open .pin {
+  color: var(--brand);
+  flex-shrink: 0;
+}
+.droplet-home .w-note-open .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-note-act {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-input);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.droplet-home .w-note-act:hover {
+  color: var(--brand);
+  background: var(--brand-subtle);
+}
+.droplet-home .w-note.pinned .w-note-act[aria-pressed="true"] {
+  color: var(--brand);
+}
+
 /* ---------- Remote access (Connect toggle, WARP-1351) ---------- */
 .droplet-home .w-remote {
   display: flex;
@@ -1206,6 +1271,8 @@
   .droplet-home .w-notes-new { min-height: 44px; }
   .droplet-home .w-stat-row { min-height: 44px; }
   .droplet-home .w-chat-conv-btn { height: 44px; }
+  .droplet-home .w-note-act { width: 44px; height: 44px; }
+  .droplet-home .w-note-open { min-height: 44px; }
   /* The base rule already supplies inline-flex + centring; only the height
      is missing, so don't restate display here. */
   .droplet-home .w-remote-link { min-height: 44px; }
