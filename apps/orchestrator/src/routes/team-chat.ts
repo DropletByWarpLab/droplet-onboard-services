@@ -60,6 +60,8 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { checkSpaceAccess } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
 import { createLogger } from "../lib/logger.js";
+// WARP-1874 — the single https-only gate for a value that becomes an href.
+import { meetingUrlSchema } from "../lib/meeting-url.js";
 
 const logger = createLogger("team-chat");
 
@@ -143,6 +145,9 @@ const createMeetingSchema = z.object({
   startsAt: z.string().trim().min(1),
   durationMinutes: z.number().int().min(1).max(1440).optional(),
   location: z.string().trim().min(1).max(200).optional(),
+  // WARP-1874 — a video-call link, alongside (not instead of) the physical
+  // location. https only; the schema yields the normalized href.
+  meetingUrl: meetingUrlSchema.optional(),
   note: z.string().trim().min(1).max(2000).optional(),
   reminderMinutesBefore: z.number().int().min(1).max(10_080).optional(),
 });
@@ -170,6 +175,7 @@ interface MeetingRowLike {
   startsAt: Date;
   durationMinutes: number | null;
   location: string | null;
+  meetingUrl: string | null;
   note: string | null;
   createdById: string;
   status: string;
@@ -200,6 +206,7 @@ function toMeetingDto(m: MeetingRowLike, names?: Map<string, ContactDto>) {
     startsAt: m.startsAt.toISOString(),
     durationMinutes: m.durationMinutes,
     location: m.location,
+    meetingUrl: m.meetingUrl,
     note: m.note,
     createdById: m.createdById,
     status: m.status,
@@ -797,6 +804,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
               startsAt,
               durationMinutes,
               location: parsed.data.location ?? null,
+              meetingUrl: parsed.data.meetingUrl ?? null,
               note: parsed.data.note ?? null,
               createdById: me.id,
               reminderMinutesBefore: parsed.data.reminderMinutesBefore ?? 15,
@@ -837,6 +845,9 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
               title: parsed.data.title,
               description: parsed.data.note ?? null,
               location: parsed.data.location ?? null,
+              // The mirrored calendar copy keeps the link — otherwise the
+              // organizer's own calendar shows a meeting they can't join.
+              meetingUrl: parsed.data.meetingUrl ?? null,
               startsAt,
               endsAt,
               allDay: false,

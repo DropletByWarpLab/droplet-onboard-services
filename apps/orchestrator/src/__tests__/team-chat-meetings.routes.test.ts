@@ -121,6 +121,7 @@ interface MeetingRow {
   startsAt: Date;
   durationMinutes: number | null;
   location: string | null;
+  meetingUrl: string | null;
   note: string | null;
   createdById: string;
   status: "scheduled" | "cancelled";
@@ -142,6 +143,7 @@ interface CalendarEventRow {
   title: string;
   description: string | null;
   location: string | null;
+  meetingUrl: string | null;
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
@@ -325,6 +327,7 @@ function createStub(seed: {
             calendarEventId: null,
             durationMinutes: null,
             location: null,
+            meetingUrl: null,
             note: null,
             status: "scheduled",
             reminderMinutesBefore: 15,
@@ -535,6 +538,7 @@ function seedMeeting(over: Partial<MeetingRow> = {}): MeetingRow {
     startsAt: over.startsAt ?? new Date(Date.now() + 60 * 60_000),
     durationMinutes: over.durationMinutes ?? 30,
     location: over.location ?? null,
+    meetingUrl: over.meetingUrl ?? null,
     note: over.note ?? null,
     createdById: over.createdById ?? alice.id,
     status: over.status ?? "scheduled",
@@ -638,6 +642,85 @@ describe("POST /team-chat/threads/:id/meetings", () => {
     expect(res.body.meeting.id).toBe(meeting.id);
     expect(res.body.meeting.status).toBe("scheduled");
     expect(res.body.message.kind).toBe("meeting_invite");
+  });
+
+  // WARP-1874 — the video-call link. An https URL authored by one member
+  // becomes an href for every other member of the thread, so the scheme
+  // check runs on the write path (shared-types' parseMeetingLink, pinned
+  // exhaustively in packages/shared-types/src/meeting-link.test.ts).
+  it("stores a video-call link beside the physical location and carries it to the calendar mirror", async () => {
+    const prisma = baseSeed();
+    const res = await request(buildApp(prisma, asAlice))
+      .post(`/api/team-chat/threads/${THREAD.id}/meetings`)
+      .send({
+        title: "Sprint sync",
+        startsAt: futureIso(),
+        location: "Living Room",
+        meetingUrl: "https://warplab.zoom.us/j/98765?pwd=abc",
+      });
+
+    expect(res.status).toBe(201);
+    expect(prisma.meetings[0].location).toBe("Living Room");
+    expect(prisma.meetings[0].meetingUrl).toBe(
+      "https://warplab.zoom.us/j/98765?pwd=abc",
+    );
+    // The organizer's mirrored calendar row keeps the link too — otherwise
+    // the calendar copy is a meeting you can't join.
+    expect(prisma.calendarEvents[0].meetingUrl).toBe(
+      "https://warplab.zoom.us/j/98765?pwd=abc",
+    );
+    // On the wire for the invite card, in the same fetch as the meeting.
+    expect(res.body.meeting.meetingUrl).toBe(
+      "https://warplab.zoom.us/j/98765?pwd=abc",
+    );
+    expect(res.body.message.meeting.meetingUrl).toBe(
+      "https://warplab.zoom.us/j/98765?pwd=abc",
+    );
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "JavaScript:alert(1)",
+    "java\nscript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+    "vbscript:msgbox(1)",
+    "file:///etc/passwd",
+    "http://zoom.us/j/1",
+    "//evil.example/j/1",
+    "the kitchen",
+  ])("refuses the non-https meetingUrl %s with 400 before any write", async (hostile) => {
+    const prisma = baseSeed();
+    const res = await request(buildApp(prisma, asAlice))
+      .post(`/api/team-chat/threads/${THREAD.id}/meetings`)
+      .send({ title: "Sprint sync", startsAt: futureIso(), meetingUrl: hostile });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_meeting");
+    expect(prisma.teamChatMeeting.create).not.toHaveBeenCalled();
+    expect(prisma.calendarEvents).toHaveLength(0);
+  });
+
+  it("accepts an unrecognized https link — provider detection is for the label, not admission", async () => {
+    const prisma = baseSeed();
+    const res = await request(buildApp(prisma, asAlice))
+      .post(`/api/team-chat/threads/${THREAD.id}/meetings`)
+      .send({
+        title: "Family call",
+        startsAt: futureIso(),
+        meetingUrl: "https://vc.warp-lab.ai/room/kitchen",
+      });
+    expect(res.status).toBe(201);
+    expect(prisma.meetings[0].meetingUrl).toBe("https://vc.warp-lab.ai/room/kitchen");
+  });
+
+  it("leaves meetingUrl null when the organizer doesn't add one", async () => {
+    const prisma = baseSeed();
+    const res = await request(buildApp(prisma, asAlice))
+      .post(`/api/team-chat/threads/${THREAD.id}/meetings`)
+      .send({ title: "Sprint sync", startsAt: futureIso(), location: "Kitchen" });
+    expect(res.status).toBe(201);
+    expect(prisma.meetings[0].meetingUrl).toBeNull();
+    expect(res.body.meeting.meetingUrl).toBeNull();
   });
 
   it("still 201s when the calendar mirror fails — the meeting stands", async () => {
@@ -779,6 +862,7 @@ describe("POST /team-chat/meetings/:id/cancel", () => {
       title: meeting.title,
       description: null,
       location: null,
+      meetingUrl: null,
       startsAt: meeting.startsAt,
       endsAt: new Date(meeting.startsAt.getTime() + 30 * 60_000),
       allDay: false,
