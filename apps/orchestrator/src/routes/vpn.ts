@@ -593,7 +593,18 @@ export function createVpnRouter(
         }
 
         const user = getUser(req);
-        const owner = req.user?.id ?? user.username;
+        // Provenance and audit keep the ACCOUNT ID, matching every other
+        // `clientId:`/`actor:`/`linkTokenEnrolledBy` in this file.
+        const actorId = req.user?.id ?? user.username;
+        // Ownership on the peer row is keyed by USERNAME, and it has to be:
+        // `GET /api/vpn/peers` narrows a non-admin with `{ userId:
+        // user.username }`, and the revoke route's non-admin escape hatch is
+        // `peer.userId !== user.username`. `AuthUser.id` is the local row id
+        // (or the JWT `sub`) and is never the username, so stamping it here
+        // would leave a family member's own device invisible in their device
+        // list and unrevocable without an admin — the exact two things this
+        // route exists to deliver.
+        const owner = user.username;
 
         // The device's key may already belong to somebody else's peer. Refuse
         // rather than silently re-home it — a key collision is either a bug or
@@ -648,7 +659,7 @@ export function createVpnRouter(
             method: req.method,
             route: "/vpn/overlay/devices",
             status: 202,
-            clientId: owner,
+            clientId: actorId,
             refs: { pending_id: pending.id, fingerprint: fp },
           });
           // Same shape the QR redeem returns, so a client polls the existing
@@ -693,12 +704,12 @@ export function createVpnRouter(
               // device list can attribute it (WARP-1763) instead of showing a
               // bare synthetic id.
               linkTokenId: null,
-              linkTokenEnrolledBy: owner,
+              linkTokenEnrolledBy: actorId,
             },
           );
         } catch (provisionErr) {
           logger.error(
-            { err: provisionErr, clientId: owner },
+            { err: provisionErr, clientId: actorId },
             "overlay sign-in enroll: peer provisioning failed — device is registered but cannot connect yet",
           );
           return res.status(503).json({
@@ -731,7 +742,7 @@ export function createVpnRouter(
           sourceIcon: "shield",
           what: `${parsed.data.label} set up remote access`,
           sub: `${owner} signed in on this device`,
-          actor: { type: "user", id: owner },
+          actor: { type: "user", id: actorId },
           refs: { assigned_ip: provisioned.assignedIp },
         });
 

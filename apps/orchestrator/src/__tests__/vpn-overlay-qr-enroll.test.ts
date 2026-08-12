@@ -1336,7 +1336,16 @@ describe("request-logging redaction — routes driven THROUGH the logger (WARP-1
 // gave it no way to build a tunnel — the same "two halves never joined" shape
 // the epic already hit, in the path that should be primary.
 describe("POST /api/vpn/overlay/devices — sign-in enrollment (WARP-1882)", () => {
-  const FAMILY = { id: "bob", username: "bob", role: "family" };
+  // `id` is deliberately NOT the username. In production `AuthUser.id` is the
+  // local user-row id (or the JWT `sub`) and never equals `username`, while
+  // `VpnPeer.userId` is keyed by username — `GET /api/vpn/peers` narrows a
+  // non-admin with `{ userId: user.username }` and revoke's non-admin escape
+  // hatch is `peer.userId !== user.username`.
+  //
+  // A fixture that sets both to "bob" makes the ownership assertion below pass
+  // whichever of the two the route happens to stamp, i.e. it cannot fail. Keep
+  // them distinct so it discriminates.
+  const FAMILY = { id: "u-bob-42", username: "bob", role: "family" };
   // A real SPKI PEM: the route's schema only checks it says PUBLIC KEY, but
   // generating a genuine one keeps the fixture honest if that ever tightens.
   const SIGN_PEM = generateKeyPairSync("ec", { namedCurve: "P-256" })
@@ -1415,7 +1424,10 @@ describe("POST /api/vpn/overlay/devices — sign-in enrollment (WARP-1882)", () 
     await enroll(buildApp({ prisma, user: FAMILY }).app);
 
     const res = await enroll(
-      buildApp({ prisma, user: { id: "mallory", username: "mallory", role: "family" } }).app,
+      buildApp({
+        prisma,
+        user: { id: "u-mallory-77", username: "mallory", role: "family" },
+      }).app,
     );
     expect(res.status).toBe(409);
     expect(res.body.error).toBe("wg_key_conflict");
@@ -1437,7 +1449,8 @@ describe("POST /api/vpn/overlay/devices — sign-in enrollment (WARP-1882)", () 
 // staged into the SAME queue QR-linked devices use, so an owner has one place
 // to look rather than two.
 describe("POST /api/vpn/overlay/devices — approval gate (WARP-1882)", () => {
-  const FAMILY = { id: "bob", username: "bob", role: "family" };
+  // Distinct id/username for the same reason as the block above.
+  const FAMILY = { id: "u-bob-42", username: "bob", role: "family" };
   const SIGN_PEM = generateKeyPairSync("ec", { namedCurve: "P-256" })
     .publicKey.export({ type: "spki", format: "pem" })
     .toString();
