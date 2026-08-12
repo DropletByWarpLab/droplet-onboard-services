@@ -292,6 +292,13 @@ export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;
   version: string;
+  /**
+   * WARP-1926 — the local inference runtime this box serves from: `dmr`
+   * (Docker Model Runner, the shipped default since WARP-1870) or `ollama`.
+   * Distinct from the `provider` on a model row, which is always `local` for
+   * on-box inference regardless of which of these two answers it.
+   */
+  inferenceRuntime: "dmr" | "ollama";
   services: {
     db: boolean;
     redis: boolean;

@@ -3,15 +3,26 @@
  * small amount of parsing that only the non-default backend needs.
  *
  * WARP-1749 (ADR-005 §1). The appliance can serve local models from either
- * Ollama (the default, unchanged) or Docker Model Runner ("DMR"). ONE env var
- * selects it — `INFERENCE_RUNTIME` — the same word that selects the backend in
+ * Docker Model Runner ("DMR") or Ollama. ONE env var selects it —
+ * `INFERENCE_RUNTIME` — the same word that selects the backend in
  * droplet-local-LLM's `ollama-manager` runtime adapter and that switches on
  * ai-gateway's static capability table. A box therefore cannot end up
  * half-migrated: either everything reads `dmr` or nothing does.
  *
- * Nothing in this module changes what an Ollama box does. `inferenceRuntime()`
- * answers "ollama" for an unset/empty value, and every DMR-only code path in
- * the orchestrator is gated on an explicit `=== "dmr"`.
+ * WHICH ONE IS THE DEFAULT — two different questions, two different answers:
+ *   • PROVISIONING: DMR, since WARP-1870. `scripts/lib/secrets.sh` writes
+ *     `INFERENCE_RUNTIME=dmr` on a fresh box, so a new appliance serves from
+ *     Docker Model Runner and never installs Ollama.
+ *   • THIS FUNCTION'S FALLBACK: `ollama`, deliberately and unchanged. An
+ *     unset value here means a box PROVISIONED BEFORE the key existed —
+ *     `_migrate_ensure_key` backfills those to `ollama` because that is the
+ *     truth about them. Reading an absent key as `dmr` would claim DMR
+ *     semantics for a box actually running Ollama.
+ * (This header claimed "Ollama (the default, unchanged)" until WARP-1926;
+ * that conflated the two and read as though new boxes still ship Ollama.)
+ *
+ * Every DMR-only code path in the orchestrator is gated on an explicit
+ * `=== "dmr"`, so an Ollama box's behaviour is untouched either way.
  *
  * Why the orchestrator needs its own copy of this knowledge
  * --------------------------------------------------------

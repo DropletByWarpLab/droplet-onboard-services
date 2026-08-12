@@ -86,6 +86,7 @@ import {
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth";
+import { isLocalProvider } from "@/lib/provider";
 import {
   createVpnPeer,
   deleteVpnPeer,
@@ -192,7 +193,7 @@ function WEmpty({ children }: { children: React.ReactNode }) {
 /**
  * WARP-1803 — the model the hero (and its inline conversation) answers with.
  * Same preference order as the chat page (WARP-1112): the household's chosen
- * default → first local (ollama) → first available. Null while the list is
+ * default → first local (on-box) → first available. Null while the list is
  * loading or when no model is configured.
  */
 function usePreferredModel(): ModelInfo | null {
@@ -200,7 +201,7 @@ function usePreferredModel(): ModelInfo | null {
   return useMemo(
     () =>
       (defaultModel && models.find((m) => m.id === defaultModel)) ||
-      models.find((m) => m.provider === "ollama") ||
+      models.find((m) => isLocalProvider(m.provider)) ||
       models[0] ||
       null,
     [models, defaultModel],
@@ -656,7 +657,7 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { state: voiceState, unavailable: voiceUnavailable } =
     useVoiceHealthSummary();
 
-  const local = models.filter((m) => m.provider === "ollama").length;
+  const local = models.filter((m) => isLocalProvider(m.provider)).length;
   const cloud = models.length - local;
 
   const voice = (value: string, sub: string, dot: string): StatRow => ({
@@ -895,7 +896,7 @@ function CamerasWidget({ w, h }: WidgetProps) {
 function ModelsWidget() {
   const { models } = useModels();
   const rows: [boolean, string, string, "local" | "cloud"][] = models.map((m) => {
-    const isLocal = m.provider === "ollama";
+    const isLocal = isLocalProvider(m.provider);
     return [
       !isLocal,
       m.name,

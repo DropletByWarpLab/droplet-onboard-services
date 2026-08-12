@@ -1675,6 +1675,14 @@ export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;
   version: string;
+  /**
+   * WARP-1926 — the local inference runtime this box serves from: `dmr`
+   * (Docker Model Runner, the shipped default since WARP-1870) or `ollama`.
+   * Optional because a box running an orchestrator older than WARP-1926 does
+   * not send it; `inferenceRuntimeLabel` renders a generic truth in that case
+   * rather than guessing a daemon name.
+   */
+  inferenceRuntime?: "dmr" | "ollama";
   services: {
     db: boolean;
     redis: boolean;

@@ -289,7 +289,7 @@ app.add_middleware(RequestIdMiddleware)
 async def health():
     inference_reachable = False
     if provider_router:
-        inference_reachable = await provider_router.ollama.is_reachable()
+        inference_reachable = await provider_router.local.is_reachable()
     return {"status": "ok", "inference_reachable": inference_reachable}
 
 
@@ -308,7 +308,7 @@ async def readiness():
     """
     if provider_router is None:
         return {"status": "starting", "appliance": None}
-    health_url = provider_router.ollama._limits.health_url
+    health_url = provider_router.local._limits.health_url
     if health_url is None:
         # No ollama-manager configured (direct path). Gateway-side readiness is
         # governed by /ai/health; nothing to probe here.

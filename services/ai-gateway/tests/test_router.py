@@ -13,7 +13,7 @@ class TestProviderResolution:
         router = ProviderRouter()
         for model in ["llama3:8b", "mistral:7b", "phi3:mini", "gemma:2b", "deepseek-coder:6.7b"]:
             provider = router.resolve_provider(model)
-            assert provider is router.ollama, f"Expected ollama for {model}"
+            assert provider is router.local, f"Expected ollama for {model}"
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_resolve_anthropic_by_prefix(self, mock_key):
@@ -39,7 +39,7 @@ class TestProviderResolution:
         router = ProviderRouter()
         for model in ["gpt-oss:20b", "gpt-oss:120b", "gpt-oss", "GPT-OSS:20B"]:
             provider = router.resolve_provider(model)
-            assert provider is router.ollama, f"Expected ollama for {model}, got cloud"
+            assert provider is router.local, f"Expected ollama for {model}, got cloud"
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_real_openai_models_still_route_to_cloud(self, mock_key):
@@ -59,7 +59,7 @@ class TestProviderResolution:
         Here the name would otherwise match the anthropic 'claude' prefix."""
         router = ProviderRouter()
         provider = router.resolve_provider("claude-distill-local:7b")
-        assert provider is router.ollama, "configured LLM_MODEL must route local"
+        assert provider is router.local, "configured LLM_MODEL must route local"
         # A genuine cloud model is unaffected by the local-model guard.
         assert router.resolve_provider("claude-sonnet-4-20250514") is router.anthropic
 
@@ -80,7 +80,7 @@ class TestProviderResolution:
             (n for n, p in router._providers.items() if p is provider),
             "unknown",
         )
-        assert provider_name == "ollama"
+        assert provider_name == "local"
         assert is_local_provider(provider_name) is True
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
@@ -93,7 +93,7 @@ class TestProviderResolution:
     async def test_unknown_model_defaults_to_ollama(self, mock_key):
         router = ProviderRouter()
         provider = router.resolve_provider("some-unknown-model")
-        assert provider is router.ollama
+        assert provider is router.local
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_case_insensitive_resolution(self, mock_key):
@@ -106,7 +106,7 @@ class TestProviderResolution:
         router = ProviderRouter()
         provider = router.resolve_provider("llama3:8b", explicit_provider="nonexistent")
         # Falls through to prefix matching since nonexistent is not in _providers
-        assert provider is router.ollama
+        assert provider is router.local
 
 
 class TestListAllModelsDegradedSignal:
@@ -119,19 +119,19 @@ class TestListAllModelsDegradedSignal:
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_names_provider_whose_listing_raised(self, mock_key):
         router = ProviderRouter()
-        router.ollama.list_models = AsyncMock(
+        router.local.list_models = AsyncMock(
             side_effect=RuntimeError("connection refused")
         )
         result = await router.list_all_models()
         assert result.models == []
-        assert result.degraded_providers == ["ollama"]
+        assert result.degraded_providers == ["local"]
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_empty_degraded_list_when_all_providers_succeed(self, mock_key):
         router = ProviderRouter()
-        router.ollama.list_models = AsyncMock(
+        router.local.list_models = AsyncMock(
             return_value=[
-                ModelInfo(id="gpt-oss:20b", provider="ollama", name="gpt-oss:20b")
+                ModelInfo(id="gpt-oss:20b", provider="local", name="gpt-oss:20b")
             ]
         )
         result = await router.list_all_models()
@@ -145,9 +145,9 @@ class TestListAllModelsDegradedSignal:
         """A dead Ollama must not hide the keyed cloud catalogues — the
         surviving providers' models still return, alongside the signal."""
         router = ProviderRouter()
-        router.ollama.list_models = AsyncMock(side_effect=RuntimeError("boom"))
+        router.local.list_models = AsyncMock(side_effect=RuntimeError("boom"))
         result = await router.list_all_models()
-        assert result.degraded_providers == ["ollama"]
+        assert result.degraded_providers == ["local"]
         assert len(result.models) > 0
         assert all(m.provider in ("anthropic", "openai") for m in result.models)
 
@@ -167,7 +167,7 @@ class TestReasoningEffortForwarding:
             captured.update(kwargs)
             return {"ok": True}
 
-        router.ollama.chat = fake_chat  # type: ignore[method-assign]
+        router.local.chat = fake_chat  # type: ignore[method-assign]
         return captured
 
     @patch("router.check_off_lan_gate", new_callable=AsyncMock)

@@ -1,6 +1,7 @@
 "use client";
 
 import { useModels } from "@/lib/hooks/useModels";
+import { isLocalProvider } from "@/lib/provider";
 
 interface ModelSelectorProps {
   value: string;
@@ -8,6 +9,9 @@ interface ModelSelectorProps {
 }
 
 const providerBadge: Record<string, { className: string; label: string }> = {
+  // Keyed by BOTH names: `local` is what the gateway emits now, `ollama`
+  // is what pre-WARP-1926 persisted rows still carry.
+  local: { className: "bg-system-green/15 text-system-green", label: "Local" },
   ollama: { className: "bg-system-green/15 text-system-green", label: "Local" },
   anthropic: { className: "bg-system-orange/15 text-system-orange", label: "Anthropic" },
   openai: { className: "bg-system-blue/15 text-system-blue", label: "OpenAI" },
@@ -51,7 +55,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
         </select>
       </label>
 
-      {provider && provider !== "ollama" && (
+      {provider && !isLocalProvider(provider) && (
         <span
           className={`px-2 py-0.5 rounded-full type-caption-2 font-medium ${
             providerBadge[provider]?.className ?? "bg-surface-tertiary text-label-secondary"
