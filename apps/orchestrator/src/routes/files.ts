@@ -1991,17 +1991,34 @@ export function createFilesRouter(
         });
       }
 
+      // RFC 6266 quoted-string: strip the two characters that would break
+      // out of (or escape within) the quoted filename parameter.
+      const dispositionFilename = filename.replace(/[\\"]/g, "");
+
       if (serveInline) {
-        res.setHeader("Content-Disposition", "inline");
+        // The filename matters on inline too: without it, saving from the
+        // browser's viewer yields a file literally named "download".
+        res.setHeader("Content-Disposition", `inline; filename="${dispositionFilename}"`);
         res.setHeader("Content-Type", inlineType);
         // Belt-and-braces for the safelist: `nosniff` stops a browser
         // re-interpreting safelisted bytes as markup, and the `sandbox` CSP
         // strips scripting/same-origin from the rendered document even if a
         // future edit widens the safelist by mistake.
         res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("Content-Security-Policy", "sandbox");
+        // application/pdf is EXEMPT from the sandbox CSP: Chromium's PDF
+        // viewer is plugin-backed and cannot run inside a sandboxed document —
+        // a sandboxed PDF response renders a blank frame (or forces a
+        // download), which is the exact regression WARP-1919 exists to fix.
+        // The exemption is safe: PDF is not same-origin-scriptable, and the
+        // safelist above already excludes every scriptable type, so the
+        // sandbox buys nothing for PDF while breaking its preview. (The
+        // app-level helmet() baseline CSP still applies to the PDF response;
+        // only the `sandbox` directive breaks the viewer.)
+        if (inlineType !== "application/pdf") {
+          res.setHeader("Content-Security-Policy", "sandbox");
+        }
       } else {
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+        res.setHeader("Content-Disposition", `attachment; filename="${dispositionFilename}"`);
         res.setHeader(
           "Content-Type",
           ext === ".pdf" ? "application/pdf" : "application/octet-stream"
