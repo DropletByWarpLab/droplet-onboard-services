@@ -33,6 +33,26 @@ export interface RouterPortTraffic {
   tx_bytes: number;
 }
 
+/**
+ * WARP-1907 — why turning THIS jack off needs a second acknowledgement.
+ *
+ * `WAN_PORT` and `MANAGEMENT_PORT` are not two wordings of one warning; they
+ * differ on the fact the user is about to rely on. Cutting a live management
+ * jack severs the routing service's own path to the router, so its safe-apply
+ * probe fails and OpenWrt restores the old config after a minute. Cutting the
+ * WAN leaves the router perfectly reachable on the LAN — the probe succeeds,
+ * the change is confirmed, and the house stays offline until somebody puts it
+ * back by hand.
+ *
+ * `reason` is the server's sentence and is rendered verbatim. The dashboard
+ * cannot derive it: which interfaces count as management is deployment
+ * configuration (`DROPLET_MGMT_INTERFACES`).
+ */
+export interface RouterPortDisableGuard {
+  code: "WAN_PORT" | "MANAGEMENT_PORT";
+  reason: string;
+}
+
 export interface RouterPort {
   /** netdev name — "p1", "sfp", "eth0". Stable identity and the mono label. */
   id: string;
@@ -54,6 +74,8 @@ export interface RouterPort {
   is_sfp: boolean;
   traffic: RouterPortTraffic | null;
   status: RouterPortStatus;
+  /** `null` when an ordinary confirm is enough to turn this jack off. */
+  disable_guard: RouterPortDisableGuard | null;
 }
 
 /** GET /api/network/ports */

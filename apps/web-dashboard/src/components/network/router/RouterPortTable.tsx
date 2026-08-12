@@ -15,6 +15,8 @@ import styles from "../switch/switch.module.css";
 
 interface Props {
   ports: RouterPort[];
+  /** WARP-1907 — open the detail drawer for a jack. */
+  onPick: (port: RouterPort) => void;
 }
 
 const GRID = "grid-cols-[1.5fr_1fr_1fr_1.2fr_1fr]";
@@ -53,15 +55,21 @@ const ROW_GAP = { gap: "12px" } as const;
  */
 const TRACK_MIN = "min-w-[480px]";
 
-function Row({ p }: { p: RouterPort }) {
+function Row({ p, onPick }: { p: RouterPort; onPick: (port: RouterPort) => void }) {
   const { Icon } = ROLE[p.role];
   const tone = STATUS_TONE[p.status];
   return (
-    <div
+    <button
+      type="button"
+      onClick={() => onPick(p)}
+      // Five columns of fragments would be read as one run-on string; name the
+      // control by what it does instead.
+      aria-label={`Port ${p.id} — ${portName(p)}. Open details`}
       style={ROW_GAP}
       className={`grid w-full items-center px-4 py-2.5 text-left border-t border-[var(--card-bd)] ${GRID} ${
-        p.present ? "" : "opacity-70"
-      }`}
+        // Colour only, 150ms — a row is a line of data, not a card that lifts.
+        "transition-colors duration-150 cursor-pointer hover:bg-[var(--brand-subtle)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-inset"
+      } ${p.present ? "" : "opacity-70"}`}
     >
       {/* Port — what it's for + the netdev name */}
       <span className="min-w-0">
@@ -110,14 +118,14 @@ function Row({ p }: { p: RouterPort }) {
         <span className={`w-1.5 h-1.5 rounded-full ${DOT_CLASS[tone]}`} aria-hidden="true" />
         {STATUS_LABEL[p.status]}
       </span>
-    </div>
+    </button>
   );
 }
 
 /**
  * Router port table — denser than the faceplate, the default on mobile, and
- * the screen-reader-friendly layout. Rows are static (read-only panel), so
- * they are plain elements rather than the switch table's buttons.
+ * the screen-reader-friendly layout. WARP-1907 made the rows buttons that open
+ * the detail drawer, matching `../switch/PortTable.tsx`.
  *
  * On a phone this table is not a choice the user made: `RouterPortsPanel`
  * renders it under `md:hidden` even when the Faceplate layout is selected, so
@@ -137,18 +145,17 @@ function Row({ p }: { p: RouterPort }) {
  * says the row scrolls (the same call QA made on the tab strip, guarded in
  * `src/__tests__/shell/mobile-layout-contract.test.ts`).
  *
- * One thing is NOT copied from the switch table, because copying it would
- * make the two tables identical in markup and unequal in outcome: the scroll
- * box is `role="region"` + `tabIndex={0}` + labelled. The switch table's rows
- * are `<button>`s, so tabbing into a row scrolls its box for free; these rows
- * are static (read-only panel), which leaves the scroller with no focusable
- * descendant at all. `components/setup/ScrollRegion.tsx` sets the house rule
- * for that shape — "a scrollable region with no focusable content is a WCAG
- * 2.1.1 keyboard trap otherwise, so the region itself is focusable and
- * announced". Without it this change would hand the recovered columns to
- * mouse and touch and to nobody else.
+ * The scroll box is `role="region"` + `tabIndex={0}` + labelled, which the
+ * switch table does not need. That started as a necessity — WARP-1787's rows
+ * were static, leaving the scroller with no focusable descendant, which is the
+ * WCAG 2.1.1 keyboard trap `components/setup/ScrollRegion.tsx` names. WARP-1907
+ * made the rows buttons, so axe's `scrollable-region-focusable` would now pass
+ * either way. It is kept because it still does something the rows don't: it
+ * announces the scroller as a labelled region, so a screen-reader user meets
+ * "Router port table" before eight unexplained rows, and it gives the box a
+ * focus target that doesn't require walking into a row to reach.
  */
-export function RouterPortTable({ ports }: Props) {
+export function RouterPortTable({ ports, onPick }: Props) {
   return (
     <div className="border border-[var(--card-bd)] rounded-[12px] overflow-hidden">
       <div
@@ -174,7 +181,7 @@ export function RouterPortTable({ ports }: Props) {
             <span>Status</span>
           </div>
           {ports.map((p) => (
-            <Row key={p.id} p={p} />
+            <Row key={p.id} p={p} onPick={onPick} />
           ))}
         </div>
       </div>

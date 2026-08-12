@@ -1,7 +1,12 @@
 "use client";
 
 import { Globe, Network, Radio, Cable, CircleDashed, type LucideIcon } from "lucide-react";
-import type { RouterPort, RouterPortRole, RouterPortStatus } from "@/lib/types/router-ports";
+import type {
+  RouterPort,
+  RouterPortDisableGuard,
+  RouterPortRole,
+  RouterPortStatus,
+} from "@/lib/types/router-ports";
 
 /**
  * Router port-map helpers (WARP-1866).
@@ -13,6 +18,24 @@ import type { RouterPort, RouterPortRole, RouterPortStatus } from "@/lib/types/r
  * here rather than widened over there: a shared map keyed by the union of both
  * vocabularies would let a switch port claim a status it can never have.
  */
+
+/**
+ * A write the drawer has asked for and the panel has yet to confirm (WARP-1907).
+ * Mirrors `../switch/helpers`' `SwitchAction`, minus the actions a router jack
+ * has no equivalent of (VLAN membership, PoE).
+ *
+ * `guard` is the SERVER's verdict, carried through untouched. Non-null means
+ * the panel shows a second, destructive acknowledgement, and only confirming
+ * THAT one sends `force: true`.
+ */
+export type RouterAction = {
+  kind: "enable";
+  port: RouterPort;
+  enabled: boolean;
+  what: string;
+  blast: string;
+  guard: RouterPortDisableGuard | null;
+};
 
 /** role → icon + plain label. `unused` is a real answer, not a fallback. */
 export const ROLE: Record<RouterPortRole, { Icon: LucideIcon; label: string }> = {

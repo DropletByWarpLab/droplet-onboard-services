@@ -2142,6 +2142,33 @@ export async function switchSetPortPoe(
   return data;
 }
 
+/**
+ * WARP-1907 — turn a physical ROUTER jack on or off.
+ *
+ * `force` is the user's second acknowledgement, and only ever set by the
+ * escalated confirm dialog. The routing service refuses a disable of the WAN
+ * jack or of a live management jack with 409 without it, so sending it
+ * speculatively would quietly delete that guard for every write.
+ */
+export async function routerSetPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(
+    `${BASE}/api/network/ports/${encodeURIComponent(port)}/enable`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, force }),
+    },
+  );
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to set port state: ${res.status}`);
+  return data;
+}
+
 export async function switchSetPortEnabled(
   port: number,
   enabled: boolean,

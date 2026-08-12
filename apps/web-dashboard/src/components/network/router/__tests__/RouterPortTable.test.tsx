@@ -44,6 +44,7 @@ function port(over: Partial<RouterPort> & { id: string }): RouterPort {
     is_sfp: false,
     traffic: null,
     status: "offline",
+    disable_guard: null,
     ...over,
   };
 }
@@ -73,7 +74,7 @@ const ports: RouterPort[] = [
 
 describe("RouterPortTable — phone gutter (WARP-1787)", () => {
   it("pins its own column gap so the shell's `.grid { gap: 16px }` cannot widen the row", () => {
-    const { container } = render(<RouterPortTable ports={ports} />);
+    const { container } = render(<RouterPortTable ports={ports} onPick={() => {}} />);
     const rows = container.querySelectorAll<HTMLElement>(".grid");
     // Header row + one row per port.
     expect(rows).toHaveLength(ports.length + 1);
@@ -83,14 +84,14 @@ describe("RouterPortTable — phone gutter (WARP-1787)", () => {
   it("uses the same pinned gap as the switch table it sits beside", () => {
     // Two port maps on one page that disagree about their column rhythm read
     // as a bug even when neither is clipped.
-    const { container } = render(<RouterPortTable ports={ports} />);
+    const { container } = render(<RouterPortTable ports={ports} onPick={() => {}} />);
     const header = container.querySelector<HTMLElement>(".grid")!;
     expect(header.style.gap).toBe("12px");
     expect(header.className).not.toContain("gap-3");
   });
 
   it("contains its own horizontal overflow instead of clipping it away", () => {
-    const { container } = render(<RouterPortTable ports={ports} />);
+    const { container } = render(<RouterPortTable ports={ports} onPick={() => {}} />);
     const scroller = container.querySelector<HTMLElement>("[data-port-table-scroll]");
     expect(scroller).not.toBeNull();
     expect(scroller!.className).toContain("overflow-x-auto");
@@ -116,7 +117,7 @@ describe("RouterPortTable — phone gutter (WARP-1787)", () => {
     // the clipped columns to mouse and touch and to nobody else — and axe's
     // `scrollable-region-focusable` would flag this table while passing its
     // sibling.
-    const { container } = render(<RouterPortTable ports={ports} />);
+    const { container } = render(<RouterPortTable ports={ports} onPick={() => {}} />);
     const scroller = container.querySelector<HTMLElement>("[data-port-table-scroll]")!;
     expect(scroller.tabIndex).toBe(0);
     expect(scroller.getAttribute("role")).toBe("region");
@@ -126,7 +127,7 @@ describe("RouterPortTable — phone gutter (WARP-1787)", () => {
   });
 
   it("does not hide the scrollbar — it is the only hint the row scrolls", () => {
-    const { container } = render(<RouterPortTable ports={ports} />);
+    const { container } = render(<RouterPortTable ports={ports} onPick={() => {}} />);
     const scroller = container.querySelector<HTMLElement>("[data-port-table-scroll]")!;
     expect(scroller.className).not.toContain("scrollbar-hide");
     expect(scroller.style.scrollbarWidth).not.toBe("none");
@@ -135,7 +136,7 @@ describe("RouterPortTable — phone gutter (WARP-1787)", () => {
   it("still renders every port row and its facts", () => {
     // Positive control — the layout assertions above are worthless if the
     // table stopped rendering.
-    const { getByText, container } = render(<RouterPortTable ports={ports} />);
+    const { getByText, container } = render(<RouterPortTable ports={ports} onPick={() => {}} />);
     expect(container.querySelectorAll(".grid").length).toBe(ports.length + 1);
     expect(getByText("p1")).toBeTruthy();
     expect(getByText("sfp · SFP")).toBeTruthy();
