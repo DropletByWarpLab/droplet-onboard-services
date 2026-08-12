@@ -101,6 +101,20 @@ function escapeText(value: string): string {
     .replace(/\r?\n/g, "\\n");
 }
 
+/** Escaper for URI-typed property values (URL, and any future ATTACH /
+ *  ORGANIZER / SOURCE line).
+ *
+ *  RFC 5545 §3.3.13 types these as URI, not TEXT — §3.3.11's backslash
+ *  escaping of `;` `,` and `\` does NOT apply, and applying it corrupts any
+ *  link that legitimately contains those characters (a self-hosted Jitsi room
+ *  at /Warp,Standup, say). We keep the CR/LF strip alone: stored values come
+ *  from the WHATWG URL parser, which already removes raw CR/LF, but this
+ *  module's interface is plain and a caller that skipped the parser must not
+ *  be able to inject a content line. Defense in depth — do not remove it. */
+function escapeUri(value: string): string {
+  return value.replace(/\r?\n/g, "\\n");
+}
+
 /** Parse an ICS document into a list of events. Drops malformed events
  *  silently — caller may log the dropped count if desired. */
 export function parseIcs(text: string): IcsEvent[] {
@@ -247,11 +261,12 @@ export function serializeIcs(
     if (ev.description) lines.push(`DESCRIPTION:${escapeText(ev.description)}`);
     if (ev.location) lines.push(`LOCATION:${escapeText(ev.location)}`);
     // URL is what Apple Calendar and Outlook render as a join target, and a
-    // subscriber's own client is where they actually are at 2:59. Stored
-    // values are already parser-normalized hrefs, but escapeText stays on:
-    // this interface is plain, and a caller that skipped the parser must
-    // not be able to inject a content line through it.
-    if (ev.meetingUrl) lines.push(`URL:${escapeText(ev.meetingUrl)}`);
+    // subscriber's own client is where they actually are at 2:59. It is a
+    // URI value (§3.8.4.6), so it takes escapeUri, not escapeText — a `,` or
+    // `;` in the link must survive verbatim or the subscriber joins a room
+    // that doesn't exist, while the dashboard's Join button stays healthy
+    // and hides the break.
+    if (ev.meetingUrl) lines.push(`URL:${escapeUri(ev.meetingUrl)}`);
     if (ev.updatedAt) lines.push(`LAST-MODIFIED:${fmtIcsDateTime(ev.updatedAt, false)}`);
     lines.push("END:VEVENT");
   }

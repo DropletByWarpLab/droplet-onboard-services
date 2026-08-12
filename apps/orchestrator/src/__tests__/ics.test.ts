@@ -206,11 +206,13 @@ describe("serializeIcs", () => {
     expect(out).not.toContain("URL:");
   });
 
-  it("escapes the link like every other text value", () => {
-    // Stored values are parser-normalized hrefs, so CR/LF are already
-    // percent-encoded — but serializeIcs takes a plain interface, and a
-    // caller that skipped the parser must not be able to inject a content
-    // line through it.
+  it("leaves ; and , verbatim in the link — URL is a URI value, not TEXT", () => {
+    // RFC 5545 §3.8.4.6 types URL as URI. URI values are NOT text-escaped, so
+    // the TEXT escaping of ; and , would corrupt the link. A self-hosted
+    // Jitsi room like /Warp,Standup — exactly what parseMeetingLink
+    // deliberately admits — must survive byte-for-byte, or the member who
+    // taps Join in Apple Calendar lands in a different (invalid) room while
+    // the dashboard Join button keeps working and hides the break.
     const out = serializeIcs([
       {
         uid: "ev-1",
@@ -221,7 +223,30 @@ describe("serializeIcs", () => {
         allDay: false,
       },
     ]);
-    expect(out).toContain("URL:https://vc.warp-lab.ai/room\\;a\\,b");
+    expect(out).toContain("URL:https://vc.warp-lab.ai/room;a,b");
+    expect(out).not.toContain("\\;");
+    expect(out).not.toContain("\\,");
+  });
+
+  it("still neutralizes CR/LF in the link so no content line can be injected", () => {
+    // Stored values are parser-normalized hrefs, so CR/LF are already gone —
+    // but serializeIcs takes a plain interface, and a caller that skipped the
+    // parser must not be able to inject a content line through it. This is
+    // the only part of TEXT escaping that ever served that defense.
+    const out = serializeIcs([
+      {
+        uid: "ev-1",
+        summary: "x",
+        meetingUrl: "https://vc.warp-lab.ai/r\r\nSUMMARY:pwned",
+        startsAt: new Date("2026-04-23T14:00:00Z"),
+        endsAt: new Date("2026-04-23T15:00:00Z"),
+        allDay: false,
+      },
+    ]);
+    expect(out).toContain("URL:https://vc.warp-lab.ai/r\\nSUMMARY:pwned");
+    // The injected SUMMARY never becomes a content line of its own.
+    expect(out).not.toContain("\r\nSUMMARY:pwned");
+    expect(out.split("\r\n").filter((l) => l.startsWith("SUMMARY:"))).toEqual(["SUMMARY:x"]);
   });
 
   it("round-trips: serialize then parse returns the same events", () => {
