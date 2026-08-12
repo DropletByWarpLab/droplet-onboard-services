@@ -410,17 +410,19 @@ body:has(.droplet-shell) { background: #f5f6fb; }
      wrapper opts out and re-emits the same stagger one level down, so the
      page enters exactly as it did before it became droppable. The drag-over
      overlay is excluded — it owns its own 120ms fade and must not inherit a
-     520ms rise. */
+     520ms rise, NOR one of the entrance delays below: it renders last, so an
+     unguarded :nth-child holds the drop feedback back by up to 380ms
+     (WARP-1876 review). EVERY rule in this block carries the same guard. */
   .droplet-shell .page-inner > .page-dropzone { animation: none; }
   .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]) { animation: ds-rise 520ms var(--ease) both; }
-  .droplet-shell .page-dropzone > *:nth-child(1) { animation-delay: 30ms; }
-  .droplet-shell .page-dropzone > *:nth-child(2) { animation-delay: 80ms; }
-  .droplet-shell .page-dropzone > *:nth-child(3) { animation-delay: 130ms; }
-  .droplet-shell .page-dropzone > *:nth-child(4) { animation-delay: 180ms; }
-  .droplet-shell .page-dropzone > *:nth-child(5) { animation-delay: 230ms; }
-  .droplet-shell .page-dropzone > *:nth-child(6) { animation-delay: 280ms; }
-  .droplet-shell .page-dropzone > *:nth-child(7) { animation-delay: 330ms; }
-  .droplet-shell .page-dropzone > *:nth-child(8) { animation-delay: 380ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(1) { animation-delay: 30ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(2) { animation-delay: 80ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(3) { animation-delay: 130ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(4) { animation-delay: 180ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(5) { animation-delay: 230ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(6) { animation-delay: 280ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(7) { animation-delay: 330ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(8) { animation-delay: 380ms; }
 }
 
 /* ── Severity icon tints (WARP-246 audit timeline) ─────────
