@@ -73,7 +73,9 @@ function createPrismaMock(over: { settings?: MockSetting[]; drives?: MockDrive[]
 
 function buildApp(
   prismaMock: ReturnType<typeof createPrismaMock>,
-  asUser: { username?: string; role?: string },
+  // `id` so a test can present the `_service:mcp` principal WARP-1861's
+  // /hardware/gpu guard admits.
+  asUser: { id?: string; username?: string; role?: string },
 ) {
   const app = express();
   app.use(express.json());
@@ -218,6 +220,19 @@ describe("WARP-1861 — /api/hardware/gpu", () => {
     const app = buildApp(prisma, { username: "sam", role: "family" });
     const res = await request(app).get("/api/hardware/gpu");
     expect(res.status).toBe(403);
+  });
+
+  it("admits the mcp service principal — which is why the HANDLER gates the role", async () => {
+    // `requireRoleOrMcpService` short-circuits here, so the owner/admin arm
+    // above never runs on a tool call. That is deliberate (otherwise
+    // get_gpu_status 403s on every call — the WARP-1455 dead-tool class), and
+    // it is exactly why the human-role check lives in the tools-core handler:
+    // packages/tools-core/src/handlers/system/get-gpu-status.ts.
+    fetchGpuTelemetryMock.mockResolvedValue(GPU_SNAPSHOT);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { id: "_service:mcp", role: "service" });
+    const res = await request(app).get("/api/hardware/gpu");
+    expect(res.status).toBe(200);
   });
 
   it("compute.ai/util/temp_c on /api/hardware come from the same probe", async () => {
