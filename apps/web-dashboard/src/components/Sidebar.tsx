@@ -3,7 +3,7 @@
 import { useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, MoreHorizontal } from "lucide-react";
+import { LogOut, MoreHorizontal, X } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
@@ -335,13 +335,32 @@ export function Sidebar() {
         flush
       >
         <div className="flex flex-col h-full">
-          <div className="flex items-center justify-between px-5 h-16 border-b border-separator">
+          <div className="flex items-center gap-3 px-5 h-16 border-b border-separator">
             <h2 id={moreHeadingId} className="type-headline text-label-primary">
               More
             </h2>
-            <span className="type-caption-2 px-2 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle">
+            <span className="type-caption-2 mr-auto px-2 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle">
               Business
             </span>
+            {/* WARP-1787: below 720px the drawer is a full-width sheet, so
+                the backdrop it used to be dismissed by is gone — and a phone
+                has no Escape key. Same glyph, placement and label as the
+                other side panels (e.g. ClientDetailPanel). `-mr-3` pulls the
+                44px box out so the glyph sits on the header's own 20px
+                inset. */}
+            <button
+              type="button"
+              onClick={() => setMoreOpen(false)}
+              aria-label="Close"
+              className="
+                -mr-3 inline-flex items-center justify-center h-11 w-11
+                rounded-lg text-label-tertiary
+                hover:bg-surface-secondary transition-colors duration-200 ease-smooth
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              "
+            >
+              <X size={20} aria-hidden="true" />
+            </button>
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">

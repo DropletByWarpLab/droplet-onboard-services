@@ -106,6 +106,41 @@ describe("ChatHistoryPanel", () => {
     expect(onNewChat).toHaveBeenCalled();
   });
 
+  // ── WARP-1787 ───────────────────────────────────────────────────────────
+  // The panel is the body of BOTH the desktop rail and the /chat mobile
+  // drawer. Only the drawer has something to close, so the control is opt-in:
+  // a Close button on the always-mounted desktop rail would do nothing.
+  it("renders no Close control for the desktop rail", async () => {
+    listConversationsMock.mockResolvedValue([]);
+    render(
+      <ChatHistoryPanel
+        activeConversationId={null}
+        onSelect={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/no chats yet/i)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^close$/i })).toBeNull();
+  });
+
+  it("renders a Close control in the header when onClose is provided", async () => {
+    const onClose = vi.fn();
+    listConversationsMock.mockResolvedValue([]);
+    render(
+      <ChatHistoryPanel
+        activeConversationId={null}
+        onSelect={vi.fn()}
+        onNewChat={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+    const close = await screen.findByRole("button", { name: /^close$/i });
+    // In the header row, where every other side panel puts it.
+    expect(close.closest(".conv-head")).not.toBeNull();
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("confirms before deleting and calls deleteConversation on confirm", async () => {
     listConversationsMock.mockResolvedValue([row("a")]);
     deleteConversationMock.mockResolvedValue(true);

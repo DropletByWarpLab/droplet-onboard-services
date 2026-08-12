@@ -40,6 +40,13 @@ export interface ChatHistoryPanelProps {
   /** When provided, the panel writes its imperative handle here so the
    *  parent (e.g. useChat) can drive optimistic insert + turn-completed. */
   handleRef?: React.MutableRefObject<ChatHistoryPanelHandle | null>;
+  /**
+   * WARP-1787 — dismiss the surface hosting this panel. Set ONLY by the
+   * mobile drawer: below 720px that drawer is a full-width sheet with no
+   * backdrop left to tap and no Escape key on a phone, so its header needs a
+   * Close button. The desktop rail passes nothing — it has nothing to close.
+   */
+  onClose?: () => void;
 }
 
 export function ChatHistoryPanel({
@@ -48,6 +55,7 @@ export function ChatHistoryPanel({
   onNewChat,
   onNewChatInProject,
   handleRef,
+  onClose,
 }: ChatHistoryPanelProps) {
   const {
     flat,
@@ -280,6 +288,20 @@ export function ChatHistoryPanel({
         >
           <Plus size={16} aria-hidden="true" />
         </button>
+        {/* WARP-1787 — the mobile drawer only. `chat-iconbtn` rather than
+            the bordered `conv-new-btn`: leaving is not a third creation
+            action, and the phone layer already takes that button to 44px. */}
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            title="Close"
+            className="chat-iconbtn"
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        )}
       </div>
       <div className="conv-search">
         <Search size={14} aria-hidden="true" />

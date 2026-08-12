@@ -1071,7 +1071,12 @@ export default function ChatPage() {
             activeConversationId={conversationId}
             onSelect={handleSelectConversation}
             onNewChat={handleNewChatFromPanel}
-          onNewChatInProject={handleNewChatInProject}
+            onNewChatInProject={handleNewChatInProject}
+            // WARP-1787: the drawer is a full-width sheet below 720px, so no
+            // backdrop is left to tap. The rail owns the header row the close
+            // belongs in — hence threading it down rather than floating a
+            // second button over `conv-head`.
+            onClose={() => setMobileHistoryOpen(false)}
           />
         </div>
       </Dialog>
