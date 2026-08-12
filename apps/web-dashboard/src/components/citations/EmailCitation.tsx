@@ -8,12 +8,27 @@
  * orchestrator currently doesn't ship a full message reconstruction
  * endpoint, so this is the smallest useful surface — enough for the
  * user to confirm *which* email is being cited.
+ *
+ * WARP-1875 — that modal PORTALS to document.body. A citation renders wherever
+ * an answer renders, and on Home that is inside a `.bento` widget shell, which
+ * is now a query container (`container-type: inline-size`, home-bento.css).
+ * Inline-size containment implies `contain: layout`, which makes the tile a
+ * containing block for `position: fixed` descendants — so rendered in place
+ * the backdrop would have resolved `inset: 0` against a ~240px tile and then
+ * been clipped by its `overflow: hidden`, instead of covering the viewport.
+ * Same escape hatch, same reason, as the <Dialog> primitive.
  */
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { Mail } from "lucide-react";
 import type { EmailPartAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";
+// Portal-mounted to document.body, OUTSIDE any page scope, so the backdrop
+// carries the `droplet-shell` class itself and imports the tokens it reads
+// (`--scrim`, `--card-bg`, `--card-bd`, `--lift`) — the WARP-1079 pattern the
+// <Dialog> primitive documents.
+import "@/components/shell/indigo-tokens.css";
 
 export interface EmailCitationProps {
   hit: CitationHit;
@@ -40,13 +55,13 @@ export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element 
           </span>
         </span>
       </button>
-      {open && (
+      {open && typeof document !== "undefined" && createPortal(
         <div
           role="dialog"
           aria-modal="true"
           aria-label="Email citation"
-          className="fixed inset-0 z-50 flex items-center justify-center"
-          style={{ background: "var(--scrim)" }}
+          className="droplet-shell fixed inset-0 z-50 flex items-center justify-center"
+          style={{ position: "fixed", background: "var(--scrim)" }}
           onClick={() => setOpen(false)}
         >
           <div
@@ -88,7 +103,8 @@ export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element 
               {hit.chunkText}
             </p>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

@@ -460,10 +460,16 @@ body:has(.droplet-home) {
    viewport media query is the wrong instrument here: two tiles at the same
    viewport can be 820px and 240px wide. `inline-size` containment only
    (no paint containment), so `.bento--hero`'s `overflow: visible` and the
-   aurora's negative inset still bleed exactly as before. Every fixed-position
-   Home element (.dh-modal-overlay, .dh-ambient, .dh-drop) is rendered at page
-   level, outside `.bento`, so nothing loses the viewport as its containing
-   block. */
+   aurora's negative inset still bleed exactly as before.
+
+   The cost to keep in mind when adding a widget: inline-size containment
+   implies `contain: layout`, which makes the tile a containing block for
+   `position: fixed` descendants — and since `.bento` also clips, a fixed
+   surface rendered INSIDE a widget is sized to the tile and then cut off by
+   it. Home's own fixed chrome (.dh-modal-overlay, .dh-ambient, .dh-drop) all
+   renders at page level, outside `.bento`, so it is unaffected; anything
+   full-screen opened FROM a widget must portal to document.body the way
+   <Dialog> and <EmailCitation> do. `ask-ai-reflow.test.tsx` guards that. */
 .droplet-home .bento {
   position: relative;
   width: 100%;
