@@ -5795,7 +5795,7 @@ export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
  * List the caller's devices.
  *
  * WARP-1763: `liveStateAvailable` is false when the orchestrator could not read
- * the running WireGuard interface. In that case every peer's `provisioned` and
+ * the router's WireGuard peer list. In that case every peer's `provisioned` and
  * `lastHandshakeAt` are absent, and the UI must say so rather than render the
  * devices as never-connected — a routing sidecar restarting is not a fleet of
  * dead phones. Older orchestrators omit the flag entirely; treat that as
@@ -5840,13 +5840,28 @@ export async function createVpnPeer(
   return res.json();
 }
 
+/**
+ * Revoke a device.
+ *
+ * Carries `code` and `status` onto the thrown error, because not every failure
+ * here means "nothing happened". `REVOKE_STAGED` (502) is the one where the
+ * router accepted the config change but never applied it — the device is still
+ * on the network — and `translateError` can only tell the owner that if the
+ * code survives the throw. A bare `new Error(message)` flattened it to the
+ * generic "we couldn't update remote access right now" retry copy.
+ */
 export async function deleteVpnPeer(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/vpn/peers/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to revoke peer: ${res.status}`);
+    const err = new Error(
+      body.error || `Failed to revoke peer: ${res.status}`,
+    ) as Error & { code?: string; status?: number };
+    if (typeof body.code === "string") err.code = body.code;
+    err.status = res.status;
+    throw err;
   }
 }
 

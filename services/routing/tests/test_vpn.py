@@ -441,6 +441,63 @@ class TestVpnPeersEndpoint:
         listed = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
         assert listed == []
 
+    def test_delete_reports_applied_true_on_the_happy_path(
+        self, vpn_client: TestClient,
+    ) -> None:
+        """The orchestrator's revoke route branches on `applied`.
+
+        WARP-1763: it now refuses to mark a peer revoked unless this field says
+        the removal actually took effect, so the happy path has to state it
+        positively — a response that merely omits `applied` is a different,
+        weaker claim (see the staged case below).
+        """
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        peer = vpn_client.post(
+            "/vpn/peers", json={"allowed_ips": ["10.13.13.2/32"]}, headers=AUTH,
+        ).json()
+
+        body = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"public_key": peer["public_key"]},
+            headers=AUTH,
+        ).json()
+        assert body["status"] == "ok"
+        assert body["applied"] is True
+
+    def test_delete_reports_staged_when_the_apply_fails(
+        self, vpn_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`uci.apply` failing leaves the peer LIVE on the interface.
+
+        The section is out of the config, but nothing reloaded wg0, so the
+        device still has a working tunnel until something else applies. This
+        endpoint deliberately answers 200 — the config write DID succeed — and
+        the honesty rides entirely on `status`/`applied`. The orchestrator
+        turns this into a 502 REVOKE_STAGED rather than telling an owner their
+        stolen phone is cut off; if this contract ever silently becomes
+        `applied: True`, that whole guard goes quiet. Hence this test.
+        """
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        peer = vpn_client.post(
+            "/vpn/peers", json={"allowed_ips": ["10.13.13.2/32"]}, headers=AUTH,
+        ).json()
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise TimeoutError("router busy; apply timed out")
+
+        monkeypatch.setattr(main.router_instance.uci, "apply", boom)
+
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"public_key": peer["public_key"]},
+            headers=AUTH,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "staged"
+        assert body["applied"] is False
+        assert body["removed"] == 1
+
     def test_delete_missing_returns_404(self, vpn_client: TestClient) -> None:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub_unknown = VPNApi.generate_keypair()

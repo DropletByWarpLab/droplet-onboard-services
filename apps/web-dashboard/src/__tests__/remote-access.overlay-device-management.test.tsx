@@ -14,7 +14,7 @@
  * wrong fix: a family user pressing it gets a 403.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 
 const fetchVpnStatusMock = vi.fn();
@@ -60,6 +60,7 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("qrcode.react", () => ({ QRCodeSVG: () => null }));
 
 import RemoteAccessPage from "@/app/remote-access/page";
+import { ToastProvider } from "@/components/Toast";
 
 /** A device linked by scanning the dashboard QR — the shape the approve path
  *  writes: synthetic userId, kind 'overlay', link-token provenance. */
@@ -71,7 +72,10 @@ function overlayPeer(over: Record<string, unknown> = {}) {
     publicKey: "pk-overlay-1",
     assignedIp: "10.66.0.5",
     status: "active",
-    mode: "overlay",
+    // `mode` is the reach-the-box axis ("away" | "home", CHECK-constrained in
+    // schema.prisma); "overlay" is the `kind` value on the line below. An
+    // overlay row is written with OVERLAY_PEER_MODE = "away".
+    mode: "away",
     kind: "overlay",
     createdAt: "2026-08-10T00:00:00.000Z",
     revokedAt: null,
@@ -203,5 +207,81 @@ describe("Remote Access — QR-linked device management (WARP-1763)", () => {
       expect(screen.getByText("Bob's laptop")).toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: /revoke device/i })).toBeNull();
+  });
+});
+
+/**
+ * The revoke that only half-happened (WARP-1763 review).
+ *
+ * Routing answers `DELETE /vpn/peers` with 200 + `applied: false` when its
+ * `uci.apply` fails: the peer is out of the config, still live on wg0. The
+ * orchestrator now refuses to call that "revoked" and answers 502
+ * REVOKE_STAGED instead. This surface is where the owner finds out — and the
+ * one thing it must not do is flatten that into the generic "we couldn't
+ * update remote access right now", which a person reads as "nothing happened,
+ * the device is still linked but harmless" rather than "the phone you are
+ * trying to cut off is still on your network".
+ */
+describe("Remote Access — a revoke the router staged but never applied", () => {
+  function stagedRevokeError() {
+    const err = new Error(
+      "We removed this device from the router's configuration, but the change didn't take effect — the device is still connected. Try revoking it again in a moment.",
+    ) as Error & { code?: string; status?: number };
+    err.code = "REVOKE_STAGED";
+    err.status = 502;
+    return err;
+  }
+
+  async function revokeTheDevice() {
+    fetchVpnPeersMock.mockResolvedValue({
+      peers: [overlayPeer()],
+      liveStateAvailable: true,
+    });
+    render(
+      <ToastProvider>
+        <RemoteAccessPage />
+      </ToastProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /revoke device alice's iphone/i }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /^revoke$/i }));
+  }
+
+  it("tells the owner the device is STILL CONNECTED, not a generic retry", async () => {
+    deleteVpnPeerMock.mockRejectedValue(stagedRevokeError());
+
+    await revokeTheDevice();
+
+    expect(
+      await screen.findByText(/still connected/i),
+    ).toBeInTheDocument();
+    // The generic vpn fallback would be the failure mode here.
+    expect(
+      screen.queryByText(/couldn't update remote access right now/i),
+    ).toBeNull();
+  });
+
+  it("never claims the device was revoked, and keeps the retry in reach", async () => {
+    deleteVpnPeerMock.mockRejectedValue(stagedRevokeError());
+
+    await revokeTheDevice();
+
+    await waitFor(() => expect(deleteVpnPeerMock).toHaveBeenCalled());
+    expect(screen.queryByText(/^Revoked "Alice's iPhone"\.$/)).toBeNull();
+    // The confirm dialog stays open on a rejected onConfirm, so the owner can
+    // press Revoke again without hunting for the row. Losing this would leave
+    // a still-connected device behind a closed dialog and a dismissed toast.
+    expect(
+      await screen.findByRole("button", { name: /^revoke$/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("still says 'Revoked' when the revoke really did apply", async () => {
+    deleteVpnPeerMock.mockResolvedValue(undefined);
+
+    await revokeTheDevice();
+
+    expect(await screen.findByText(/^Revoked "Alice's iPhone"\.$/)).toBeInTheDocument();
   });
 });

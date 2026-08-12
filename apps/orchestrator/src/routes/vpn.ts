@@ -25,6 +25,7 @@ import {
   vpnStatus,
   createVpnPeer,
   deleteVpnPeer,
+  isRevokeApplied,
   installOverlayVpnPeer,
   listVpnPeers,
   fetchNetworkSummary,
@@ -1386,8 +1387,9 @@ export function createVpnRouter(
   //     distinguishable from a legacy static peer. Overlay peers are written
   //     with the synthetic `userId: "overlay"`, which matches no real
   //     username — so without `kind` the dashboard had nothing to key on.
-  //   * `provisioned` and `lastHandshakeAt`, read from the ROUTER, so the UI
-  //     can separate *enrolled* from *provisioned* from *actually connected*.
+  //   * `provisioned` and `lastHandshakeAt`, read from the ROUTER rather than
+  //     from our own rows, so the UI can separate *enrolled* from
+  //     *provisioned* from *actually connected*.
   //
   // On that last point, deliberately NOT `lastSessionAt`: the ticket suggested
   // it, but `provisionOverlayPeer` stamps it at APPROVAL time (it is the
@@ -1395,7 +1397,10 @@ export function createVpnRouter(
   // forever). Handing it to the UI as liveness would render every
   // just-approved device "connected" before it has ever handshaken, which is
   // the exact lie this ticket exists to remove. The only honest source of
-  // handshake recency is the running interface, so that is what we read.
+  // handshake recency is the running interface, so that is what we read —
+  // `latest_handshake` comes from a ubus `network.interface.wg0 status` read.
+  // `provisioned` does NOT: it comes from the interface's UCI configuration.
+  // See the `vpn-live-peers.ts` header before treating the two as one fact.
   router.get("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
@@ -1661,7 +1666,26 @@ export function createVpnRouter(
       // intact so the user can retry. If it returns 404 (peer already gone
       // on the router side) we still mark our row revoked.
       try {
-        await deleteVpnPeer({ publicKey: peer.publicKey });
+        const removal = await deleteVpnPeer({ publicKey: peer.publicKey });
+        // A 200 from routing is not proof the tunnel is down. On `uci.apply`
+        // failure it answers `status: "staged" / applied: false` — the peer is
+        // out of the config but STILL LIVE on wg0 until a reload. Marking the
+        // row revoked here would tell an owner revoking a stolen phone that
+        // the device is cut off while it still holds a route into the LAN, and
+        // would then HIDE the retry (the row renders "· revoked" and the trash
+        // button disappears). So: leave the row active, and say so.
+        if (!isRevokeApplied(removal)) {
+          logger.error(
+            { peerId: id, publicKey: peer.publicKey, removed: removal.removed },
+            "vpn: router staged the peer removal but never applied it — peer is still live on the interface; row left active",
+          );
+          return res.status(502).json({
+            code: "REVOKE_STAGED",
+            error:
+              "We removed this device from the router's configuration, but the change didn't take effect — the device is still connected. Try revoking it again in a moment.",
+            id,
+          });
+        }
       } catch (err) {
         if (!(err instanceof RouterError && err.status === 404)) {
           throw err;
@@ -1672,10 +1696,23 @@ export function createVpnRouter(
         );
       }
 
-      await prisma.vpnPeer.update({
-        where: { id },
+      // Conditional write, not a blind `update` keyed on id alone. The read
+      // above, this check and this write are three statements, and the router
+      // call between them is the long pole — plenty of room for a concurrent
+      // writer to flip the row. Re-asserting `status: "active"` in the WHERE
+      // makes the transition atomic; `count === 0` means somebody else already
+      // revoked it, which is the same terminal state the caller asked for, so
+      // it stays a success and we do NOT re-stamp their `revokedAt`.
+      const { count } = await prisma.vpnPeer.updateMany({
+        where: { id, status: "active" },
         data: { status: "revoked", revokedAt: new Date() },
       });
+      if (count === 0) {
+        logger.warn(
+          { peerId: id },
+          "vpn: peer left active status concurrently during revoke — treating as already revoked",
+        );
+      }
 
       res.json({ status: "revoked", id });
     } catch (err) {

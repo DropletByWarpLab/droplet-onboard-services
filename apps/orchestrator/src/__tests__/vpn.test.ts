@@ -126,6 +126,19 @@ function createPrismaMock() {
         rows[idx] = { ...rows[idx], ...data };
         return rows[idx];
       }),
+      // WARP-1763 review: the revoke write is a CONDITIONAL update
+      // (`where: { id, status: "active" }`) so a concurrent reactivation can
+      // never be clobbered — the mock has to honour every clause in `where`,
+      // otherwise a test would pass against a filter the DB is actually
+      // applying. Returns `{ count }` like Prisma, and unlike `update` it does
+      // NOT throw P2025 on no-match.
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        const matches = rows.filter((r) =>
+          Object.entries(where ?? {}).every(([k, v]) => r[k] === v),
+        );
+        for (const row of matches) Object.assign(row, data);
+        return { count: matches.length };
+      }),
     },
   };
   return mock;
@@ -434,7 +447,13 @@ describe("GET /api/vpn/peers", () => {
       publicKey: "OVERLAY_KEY=",
       assignedIp: "10.13.13.9",
       status: "active",
-      mode: "overlay",
+      // `mode` and `kind` are different columns with different enums. `mode`
+      // is the reach-the-box axis, pinned by a CHECK constraint to
+      // "away"|"home" — and `OVERLAY_PEER_MODE` is "away", so an overlay row
+      // written by `provisionOverlayPeer` carries "away" here. "overlay" is
+      // the `kind` value, on the row below. A fixture with mode:"overlay"
+      // describes a row the DB would have rejected.
+      mode: "away",
       kind: "overlay",
       createdAt: new Date(3),
       revokedAt: null,
@@ -821,5 +840,119 @@ describe("DELETE /api/vpn/peers/:id", () => {
     const res = await request(app).delete("/api/vpn/peers/p1");
     expect(res.status).toBe(200);
     expect(openwrt.deleteVpnPeer).not.toHaveBeenCalled();
+  });
+
+  // ── staged-but-not-applied revoke (WARP-1763 review) ──
+  //
+  // `DELETE /vpn/peers` on the routing service answers 200 with
+  // `{"status":"staged","applied":false}` when `uci.apply` fails: the peer is
+  // out of the UCI config but STILL LIVE on the interface until something
+  // reloads it. Reporting that as "revoked" is the worst lie this surface can
+  // tell — the owner revoking a stolen phone watches the row go grey and the
+  // trash button disappear while the phone keeps a working tunnel into the
+  // LAN. The row must stay active (so the retry affordance survives) and the
+  // response must not be a success.
+  describe("routing staged the delete but never applied it", () => {
+    function stagedPeerRow() {
+      const prisma = createPrismaMock();
+      prisma.rows.push({
+        id: "p1", userId: "alice", deviceLabel: "stolen phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(), revokedAt: null,
+      });
+      (openwrt.deleteVpnPeer as any).mockResolvedValue({
+        status: "staged",
+        applied: false,
+        interface: "wg0",
+        removed: 1,
+      });
+      return prisma;
+    }
+
+    it("does NOT mark the row revoked", async () => {
+      const prisma = stagedPeerRow();
+      await request(buildApp(prisma)).delete("/api/vpn/peers/p1");
+      expect(prisma.rows[0].status).toBe("active");
+      expect(prisma.rows[0].revokedAt).toBeNull();
+    });
+
+    it("answers 502 REVOKE_STAGED, never a success", async () => {
+      const res = await request(buildApp(stagedPeerRow())).delete("/api/vpn/peers/p1");
+      expect(res.status).toBe(502);
+      expect(res.body.code).toBe("REVOKE_STAGED");
+      expect(res.body.status).not.toBe("revoked");
+      // The copy has to say the tunnel is live, or the owner reads a generic
+      // "try again" and walks away believing the device is off.
+      expect(res.body.error).toMatch(/still connected/i);
+    });
+
+    it("leaves the peer revocable — a retry that applies cleanly succeeds", async () => {
+      const prisma = stagedPeerRow();
+      const app = buildApp(prisma);
+      expect((await request(app).delete("/api/vpn/peers/p1")).status).toBe(502);
+
+      (openwrt.deleteVpnPeer as any).mockResolvedValue({
+        status: "ok", applied: true, interface: "wg0", removed: 1,
+      });
+      const retry = await request(app).delete("/api/vpn/peers/p1");
+      expect(retry.status).toBe(200);
+      expect(retry.body).toMatchObject({ status: "revoked", id: "p1" });
+      expect(prisma.rows[0].status).toBe("revoked");
+    });
+
+    it("treats an applied:true response as success (the ok path is unchanged)", async () => {
+      const prisma = createPrismaMock();
+      prisma.rows.push({
+        id: "p1", userId: "alice", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(), revokedAt: null,
+      });
+      (openwrt.deleteVpnPeer as any).mockResolvedValue({
+        status: "ok", applied: true, interface: "wg0", removed: 1,
+      });
+      const res = await request(buildApp(prisma)).delete("/api/vpn/peers/p1");
+      expect(res.status).toBe(200);
+      expect(prisma.rows[0].status).toBe("revoked");
+    });
+
+    it("treats an `applied`-less response as applied (older routing build)", async () => {
+      // Pre-audit routing builds return `{status:"ok"}` with no `applied` key.
+      // Absent must NOT read as false — that would 502 every revoke against an
+      // older sidecar, i.e. break revocation entirely to guard against a
+      // failure that build cannot report. Only an explicit `false` is staged.
+      const prisma = createPrismaMock();
+      prisma.rows.push({
+        id: "p1", userId: "alice", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(), revokedAt: null,
+      });
+      (openwrt.deleteVpnPeer as any).mockResolvedValue({
+        status: "ok", interface: "wg0", removed: 1,
+      });
+      const res = await request(buildApp(prisma)).delete("/api/vpn/peers/p1");
+      expect(res.status).toBe(200);
+      expect(prisma.rows[0].status).toBe("revoked");
+    });
+  });
+
+  // ── the findUnique → check → update race (WARP-1763 review) ──
+  it("does not clobber a row that stopped being active mid-revoke", async () => {
+    // The read, the status check and the write are three separate statements.
+    // Between them another writer can flip the row. The write must therefore
+    // re-assert `status: "active"` in its own WHERE and branch on the count,
+    // rather than blind-writing whatever it decided from the stale read.
+    const prisma = createPrismaMock();
+    prisma.rows.push({
+      id: "p1", userId: "alice", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(), revokedAt: null,
+    });
+    (openwrt.deleteVpnPeer as any).mockImplementation(async () => {
+      // Concurrent writer lands while we're out on the router call.
+      prisma.rows[0].status = "revoked";
+      prisma.rows[0].revokedAt = new Date(1);
+      return { status: "ok", applied: true, interface: "wg0", removed: 1 };
+    });
+
+    const res = await request(buildApp(prisma)).delete("/api/vpn/peers/p1");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "revoked", id: "p1" });
+    // Not re-stamped: the other writer's revokedAt survives.
+    expect(prisma.rows[0].revokedAt).toEqual(new Date(1));
+    expect(prisma.vpnPeer.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "p1", status: "active" } }),
+    );
   });
 });
