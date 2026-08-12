@@ -49,9 +49,15 @@ export async function createNote(input: { body: string; pinned?: boolean }) {
   });
 }
 
+/**
+ * `expectedUpdatedAt` is the `updatedAt` the edit was based on. Send it on
+ * body edits: the box refuses the write with 409 if the note has since changed
+ * elsewhere, instead of overwriting it. Without it this is last-write-wins, and
+ * since the move off localStorage there is no second copy to recover from.
+ */
 export async function updateNote(
   id: string,
-  patch: Partial<{ body: string; pinned: boolean }>,
+  patch: Partial<{ body: string; pinned: boolean; expectedUpdatedAt: string }>,
 ) {
   return apiFetch<{ note: Note }>(`${NOTES_URL}/${id}`, {
     method: "PATCH",
@@ -59,6 +65,19 @@ export async function updateNote(
     credentials: "same-origin",
     body: JSON.stringify(patch),
   });
+}
+
+/** True when a save was refused because the note changed somewhere else. */
+export function isNoteConflict(err: unknown): boolean {
+  return (err as { status?: number } | null | undefined)?.status === 409;
+}
+
+/** The note as the box actually holds it, off a rejected save. `null` when the
+ *  rejection wasn't a conflict or carried no body we can read. */
+export function conflictingNote(err: unknown): Note | null {
+  if (!isNoteConflict(err)) return null;
+  const note = (err as { body?: { note?: Note } } | null | undefined)?.body?.note;
+  return note && typeof note.body === "string" ? note : null;
 }
 
 export async function deleteNote(id: string) {

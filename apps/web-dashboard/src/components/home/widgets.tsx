@@ -78,6 +78,8 @@ import {
   createNote,
   updateNote,
   deleteNote,
+  isNoteConflict,
+  conflictingNote,
   NOTE_MAX_BODY,
   type Note,
 } from "@/lib/hooks/useNotes";
@@ -1013,7 +1015,7 @@ const NOTES_SAVE_DEBOUNCE_MS = 500;
 const NOTES_SAVE_RETRY_MS = 3000;
 /** Longest note name we render anywhere. */
 const NOTE_TITLE_MAX = 80;
-type NotesSaveStatus = "idle" | "saving" | "saved" | "error";
+type NotesSaveStatus = "idle" | "saving" | "saved" | "error" | "conflict";
 
 /** The first non-empty line names a note in the list; a brand-new one has none. */
 function noteTitle(n: Note): string {
@@ -1110,11 +1112,25 @@ function NoteEditor({
 }) {
   const [val, setVal] = useState(note.body);
   const [status, setStatus] = useState<NotesSaveStatus>("idle");
+  // The note as the box holds it, once a save has been refused for being stale.
+  // Non-null means we are showing the customer both versions and letting them
+  // choose — we never pick for them.
+  const [conflict, setConflict] = useState<Note | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Mirror of `val` + a pending-save flag for the unmount flush, which can't
   // read the latest state through a stale `[]`-effect closure.
   const valRef = useRef(note.body);
   const pendingRef = useRef(false);
+  // The version every write is based on. Advanced from each save's response, so
+  // a run of edits doesn't conflict with itself.
+  const baseRef = useRef(note.updatedAt);
+  // One PATCH at a time. Without this a keystroke landing mid-request queues a
+  // second write carrying the same base version — the two race, and with a
+  // precondition the loser is dropped rather than merged.
+  const inFlightRef = useRef(false);
+  // Set when we write the textarea ourselves (server refresh, conflict
+  // resolution) so the autosave effect doesn't read it back as typing.
+  const programmaticRef = useRef(false);
   // False once the editor is gone, so a request that fails after unmount can't
   // schedule a retry against a component nobody is looking at.
   const aliveRef = useRef(true);
@@ -1123,20 +1139,48 @@ function NoteEditor({
   // initializer, which tsc otherwise can't type.
   const save: (next: string) => void = useCallback(
     (next: string) => {
+      // Already writing: leave the edit pending and let the in-flight save
+      // pick it up when it settles, with a base version that's actually fresh.
+      if (inFlightRef.current) {
+        pendingRef.current = true;
+        return;
+      }
       pendingRef.current = false;
-      void updateNote(note.id, { body: next })
-        .then(() => {
+      inFlightRef.current = true;
+      void updateNote(note.id, { body: next, expectedUpdatedAt: baseRef.current })
+        .then(({ note: saved }) => {
+          inFlightRef.current = false;
+          baseRef.current = saved.updatedAt;
+          // A keystroke arrived while this was in flight — write it now. Done
+          // even after unmount: the edit matters more than the status line.
+          if (pendingRef.current) {
+            save(valRef.current);
+            return;
+          }
+          if (!aliveRef.current) return;
           setStatus("saved");
           onSaved();
         })
-        .catch(() => {
-          // A refused save must never eat the typing. Put the edit back in the
-          // pending slot so the unmount flush still carries it, say so on the
-          // status line instead of silently reading "idle", and keep trying
-          // while the editor is open — notes live only on the box now, so
-          // there is no localStorage copy left to recover from.
-          if (!aliveRef.current) return;
+        .catch((err: unknown) => {
+          inFlightRef.current = false;
+          // Refused as stale: the note changed somewhere else. Retrying would
+          // just 409 forever, and picking a winner is exactly the data loss
+          // this precondition exists to stop — so stop and ask.
+          const theirs = conflictingNote(err);
+          if (isNoteConflict(err)) {
+            pendingRef.current = false;
+            if (!aliveRef.current) return;
+            if (theirs) setConflict(theirs);
+            setStatus("conflict");
+            return;
+          }
+          // Any other refusal must never eat the typing. Put the edit back in
+          // the pending slot so the unmount flush still carries it, say so on
+          // the status line instead of silently reading "idle", and keep
+          // trying while the editor is open — notes live only on the box now,
+          // so there is no localStorage copy left to recover from.
           pendingRef.current = true;
+          if (!aliveRef.current) return;
           setStatus("error");
           timerRef.current = setTimeout(
             () => save(valRef.current),
@@ -1151,6 +1195,14 @@ function NoteEditor({
   // handed) so opening a note doesn't flash a status or write it back.
   useEffect(() => {
     valRef.current = val;
+    // We wrote this, the customer didn't — don't save it straight back.
+    if (programmaticRef.current) {
+      programmaticRef.current = false;
+      return;
+    }
+    // An unresolved conflict owns the note: autosaving through it would be the
+    // silent overwrite all of this exists to prevent.
+    if (conflict) return;
     if (val === note.body && !pendingRef.current) return;
     pendingRef.current = true;
     setStatus("saving");
@@ -1160,6 +1212,22 @@ function NoteEditor({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [val]);
+
+  // The note moved on the box (another device, another tab) while we were
+  // sitting here with nothing half-typed — take their version. This is the
+  // common case behind the conflict, closed before it can become one.
+  useEffect(() => {
+    if (pendingRef.current || inFlightRef.current || conflict) return;
+    // Only ever forward. SWR can hand back a cached row older than the version
+    // we just wrote (or just adopted), and rewinding the textarea to it would
+    // itself be the data loss.
+    const seen = new Date(note.updatedAt).getTime();
+    if (!(seen > new Date(baseRef.current).getTime())) return;
+    baseRef.current = note.updatedAt;
+    valRef.current = note.body;
+    programmaticRef.current = true;
+    setVal(note.body);
+  }, [note.updatedAt, note.body, conflict]);
 
   // Unmount-only: commit a still-pending edit so navigating off Home (or
   // closing the editor) never drops up to ~500ms of typing. The rejection is
@@ -1173,15 +1241,63 @@ function NoteEditor({
     aliveRef.current = true;
     return () => {
       aliveRef.current = false;
-      if (pendingRef.current) {
-        void updateNote(note.id, { body: valRef.current }).catch(() => {});
+      // Not while a save is in flight: that one's settle handler already
+      // carries the pending edit, and a second PATCH here would race it with a
+      // base version we know is about to be stale.
+      if (pendingRef.current && !inFlightRef.current) {
+        void updateNote(note.id, {
+          body: valRef.current,
+          expectedUpdatedAt: baseRef.current,
+        }).catch(() => {});
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Both versions are the customer's own writing — neither is "wrong", so the
+  // choice is theirs. Either way we rebase onto what the box holds now, so the
+  // next keystroke isn't refused all over again.
+  const keepMine = () => {
+    if (!conflict) return;
+    baseRef.current = conflict.updatedAt;
+    setConflict(null);
+    pendingRef.current = true;
+    setStatus("saving");
+    save(valRef.current);
+  };
+  const takeTheirs = () => {
+    if (!conflict) return;
+    baseRef.current = conflict.updatedAt;
+    valRef.current = conflict.body;
+    pendingRef.current = false;
+    programmaticRef.current = true;
+    setVal(conflict.body);
+    setConflict(null);
+    setStatus("idle");
+    onSaved();
+  };
+
   return (
     <div className="w-notes-wrap">
+      {conflict && (
+        <div className="w-notes-conflict" role="alert">
+          <span className="w-notes-conflict-msg">
+            <AlertTriangle size={12} aria-hidden />
+            <span>
+              This note changed on another device. Keep the version you typed
+              here, or open theirs — nothing is saved until you pick.
+            </span>
+          </span>
+          <span className="w-notes-conflict-acts">
+            <button type="button" onClick={keepMine}>
+              Keep mine
+            </button>
+            <button type="button" onClick={takeTheirs}>
+              Use theirs
+            </button>
+          </span>
+        </div>
+      )}
       <textarea
         className="w-notes"
         value={val}
@@ -1206,7 +1322,9 @@ function NoteEditor({
               ? "Saved"
               : status === "error"
                 ? "Not saved — retrying"
-                : ""}
+                : status === "conflict"
+                  ? "Not saved — changed elsewhere"
+                  : ""}
         </span>
         <button className="w-notes-new" type="button" onClick={onClose}>
           <ChevronLeft size={13} />

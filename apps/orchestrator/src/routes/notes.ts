@@ -18,6 +18,7 @@ import {
   createNote,
   updateNote,
   deleteNote,
+  NoteConflictError,
   NOTE_MAX_BODY,
 } from "../services/notes.service.js";
 
@@ -38,6 +39,9 @@ const notePatchSchema = z
   .object({
     body: z.string().max(NOTE_MAX_BODY).optional(),
     pinned: z.boolean().optional(),
+    // The version the edit was based on. Optional so pin/unpin — which doesn't
+    // race anything a customer would miss — stays a one-field PATCH.
+    expectedUpdatedAt: z.string().datetime().optional(),
   })
   .refine((v) => v.body !== undefined || v.pinned !== undefined, {
     message: "at least one of body or pinned is required",
@@ -78,6 +82,13 @@ export function createNotesRouter(prisma: PrismaClient): Router {
       const note = await updateNote(prisma, getUser(req), req.params.id, parsed.data);
       res.json({ note });
     } catch (err) {
+      // 409 carries the note as it actually stands, so the editor can offer the
+      // customer both versions rather than silently picking a winner.
+      if (err instanceof NoteConflictError) {
+        return void res
+          .status(409)
+          .json({ error: "note_conflict", note: err.current });
+      }
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "note_not_found") return void res.status(404).json({ error: msg });
       if (msg === "forbidden") return void res.status(403).json({ error: msg });

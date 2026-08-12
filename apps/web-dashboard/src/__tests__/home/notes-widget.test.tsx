@@ -61,16 +61,29 @@ import { NOTE_MAX_BODY } from "@/lib/hooks/useNotes";
 const LEGACY_KEY = "droplet-home-notes";
 const IMPORTED_KEY = "droplet-home-notes-imported";
 
+/** The version the editor opens on, and therefore the one every body save
+ *  declares it was based on (WARP-1885). */
+const BASE = "2026-08-11T00:00:00.000Z";
+
 function note(over: Partial<MockNote> = {}): MockNote {
   return {
     id: "n1",
     userId: "alice",
     body: "buy milk",
     pinned: false,
-    createdAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
+    createdAt: BASE,
+    updatedAt: BASE,
     ...over,
   };
+}
+
+/** A save the box refused because the note moved on — shaped like apiFetch's
+ *  TypedError, which carries `.status` and the parsed response `.body`. */
+function conflict(theirs: MockNote) {
+  return Object.assign(new Error("note_conflict"), {
+    status: 409,
+    body: { error: "note_conflict", note: theirs },
+  });
 }
 
 // fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
@@ -228,7 +241,7 @@ describe("editing a note", () => {
       vi.advanceTimersByTime(600);
     });
 
-    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "buy oat milk" });
+    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "buy oat milk", expectedUpdatedAt: BASE });
     expect(screen.getByText(/^saved$/i)).toBeInTheDocument();
   });
 
@@ -251,7 +264,7 @@ describe("editing a note", () => {
       unmount();
     });
 
-    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "half-typed" });
+    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "half-typed", expectedUpdatedAt: BASE });
   });
 
   it("caps the textarea at the length the box accepts", () => {
@@ -293,7 +306,7 @@ describe("editing a note", () => {
       vi.advanceTimersByTime(3100);
     });
     expect(updateNoteMock).toHaveBeenCalledTimes(2);
-    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", { body: "buy oat milk" });
+    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", { body: "buy oat milk", expectedUpdatedAt: BASE });
     expect(screen.getByText(/^saved$/i)).toBeInTheDocument();
   });
 
@@ -321,7 +334,7 @@ describe("editing a note", () => {
     // The failed attempt did NOT clear the pending flag, so the text the
     // customer typed still reaches the box on the way out.
     expect(updateNoteMock).toHaveBeenCalledTimes(2);
-    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", { body: "half-typed" });
+    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", { body: "half-typed", expectedUpdatedAt: BASE });
   });
 
   // Guard is the RUN, not the assertion: without a .catch on the flush this
@@ -345,7 +358,7 @@ describe("editing a note", () => {
       await Promise.resolve();
     });
 
-    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "half-typed" });
+    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "half-typed", expectedUpdatedAt: BASE });
   });
 
   it("'All notes' returns to the list", () => {
@@ -355,6 +368,174 @@ describe("editing a note", () => {
     });
     expect(screen.queryByLabelText("Note")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "buy milk" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-1885. The editor holds a copy of the note from the moment it opened. If
+ * the note changes elsewhere in the meantime — the other half of the "your data
+ * follows you between devices" promise this tile just gained — a blind save
+ * destroys that change, permanently, while reporting "Saved". These pin that
+ * the editor declares what it was based on, and that when the box refuses, the
+ * customer picks the winner rather than the race.
+ */
+describe("a note changed on another device", () => {
+  const THEIR_TIME = "2026-08-11T02:00:00.000Z";
+
+  function openNote() {
+    notesRef.current = [note({ body: "buy milk" })];
+    render(<NotesWidget />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "buy milk" }));
+    });
+    return screen.getByLabelText("Note") as HTMLTextAreaElement;
+  }
+
+  async function typeIntoAConflict() {
+    const ta = openNote();
+    updateNoteMock.mockRejectedValueOnce(
+      conflict(note({ body: "two more paragraphs", updatedAt: THEIR_TIME })),
+    );
+    act(() => {
+      fireEvent.change(ta, { target: { value: "laptop text" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    return ta;
+  }
+
+  it("says which version it was based on, so the box can refuse a stale one", async () => {
+    const ta = openNote();
+    act(() => {
+      fireEvent.change(ta, { target: { value: "buy oat milk" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(updateNoteMock).toHaveBeenCalledWith("n1", {
+      body: "buy oat milk",
+      expectedUpdatedAt: BASE,
+    });
+  });
+
+  it("a refused save shows both versions and stops — it never picks one", async () => {
+    await typeIntoAConflict();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /changed on another device/i,
+    );
+    expect(screen.getByText("Not saved — changed elsewhere")).toBeInTheDocument();
+    expect(screen.queryByText(/^saved$/i)).not.toBeInTheDocument();
+
+    // A conflict is not a blip. The generic retry would 409 forever and the
+    // customer would never be asked.
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(updateNoteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("'Keep mine' overwrites theirs deliberately, on top of what the box now holds", async () => {
+    await typeIntoAConflict();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Keep mine" }));
+    });
+
+    expect(updateNoteMock).toHaveBeenCalledTimes(2);
+    // Rebased onto the version that refused us — otherwise this second attempt
+    // is refused too and the choice goes nowhere.
+    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", {
+      body: "laptop text",
+      expectedUpdatedAt: THEIR_TIME,
+    });
+    expect(
+      screen.queryByText(/changed on another device/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("'Use theirs' loads the box's copy into the editor and writes nothing", async () => {
+    await typeIntoAConflict();
+    updateNoteMock.mockClear();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Use theirs" }));
+    });
+
+    expect((screen.getByLabelText("Note") as HTMLTextAreaElement).value).toBe(
+      "two more paragraphs",
+    );
+    // Adopting their version is not an edit; saving it back would be a write
+    // the customer never asked for.
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(updateNoteMock).not.toHaveBeenCalled();
+  });
+
+  it("a keystroke mid-save waits for the write in flight instead of racing it", async () => {
+    const ta = openNote();
+    let release!: (v: unknown) => void;
+    updateNoteMock.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          release = res;
+        }),
+    );
+
+    act(() => {
+      fireEvent.change(ta, { target: { value: "first" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(updateNoteMock).toHaveBeenCalledTimes(1);
+
+    // Types again while the first PATCH is still open.
+    act(() => {
+      fireEvent.change(ta, { target: { value: "first and second" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    // Still one. A second write now would carry the same base version as the
+    // one in flight, and the two would race — with a precondition, the loser is
+    // dropped rather than merged.
+    expect(updateNoteMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release({ note: note({ body: "first", updatedAt: THEIR_TIME }) });
+    });
+
+    expect(updateNoteMock).toHaveBeenCalledTimes(2);
+    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", {
+      body: "first and second",
+      expectedUpdatedAt: THEIR_TIME,
+    });
+  });
+
+  it("takes a newer version from the box when nothing is half-typed", async () => {
+    notesRef.current = [note({ body: "buy milk" })];
+    const { rerender } = render(<NotesWidget />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "buy milk" }));
+    });
+
+    // The phone saves; SWR revalidates under an editor sitting idle.
+    notesRef.current = [note({ body: "from the phone", updatedAt: THEIR_TIME })];
+    await act(async () => {
+      rerender(<NotesWidget />);
+    });
+
+    expect((screen.getByLabelText("Note") as HTMLTextAreaElement).value).toBe(
+      "from the phone",
+    );
+    // Adopting it is not an edit.
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(updateNoteMock).not.toHaveBeenCalled();
   });
 });
 
@@ -460,6 +641,9 @@ it("colors the failure states with the red-TEXT ramp, not the var(--danger) fill
   for (const selector of [
     '\\.w-notes-status\\[data-state="error"\\]',
     "\\.w-notes-err",
+    // A refused-as-stale save is a failure to save like any other (WARP-1885).
+    '\\.w-notes-status\\[data-state="conflict"\\]',
+    "\\.w-notes-conflict-msg",
   ]) {
     const light = css.match(new RegExp(`\\n\\.droplet-home ${selector}\\s*\\{[^}]*\\}`))?.[0] ?? "";
     const dark = css.match(new RegExp(`\\.dark \\.droplet-home ${selector}\\s*\\{[^}]*\\}`))?.[0] ?? "";

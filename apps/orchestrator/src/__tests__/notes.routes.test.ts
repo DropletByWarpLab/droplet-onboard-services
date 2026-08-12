@@ -270,6 +270,61 @@ describe("/api/notes — request validation", () => {
   });
 });
 
+/**
+ * WARP-1885 at the HTTP layer: the conditional write has to surface as its own
+ * status, with the current row attached. A 409 the client can't tell from a
+ * 500 — or one carrying no note — leaves the editor unable to show the
+ * customer what it would have overwritten.
+ */
+describe("/api/notes — a stale edit is refused, not applied", () => {
+  const CURRENT = "2026-08-11T10:00:00.000Z";
+  const STALE = "2026-08-11T09:00:00.000Z";
+
+  it("PATCH with an out-of-date expectedUpdatedAt → 409 carrying the live note", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, { username: ALICE }))
+      .patch("/api/notes/note-alice")
+      .send({ body: "laptop's stale text", expectedUpdatedAt: STALE });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("note_conflict");
+    expect(res.body.note.body).toBe("buy milk");
+    // The refusal is the point: nothing was written.
+    expect(prisma.note.update).not.toHaveBeenCalled();
+    expect(prisma.notes.find((n) => n.id === "note-alice")!.body).toBe("buy milk");
+  });
+
+  it("PATCH with the current expectedUpdatedAt → 200 and the write lands", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, { username: ALICE }))
+      .patch("/api/notes/note-alice")
+      .send({ body: "next line", expectedUpdatedAt: CURRENT });
+
+    expect(res.status).toBe(200);
+    expect(res.body.note.body).toBe("next line");
+  });
+
+  it("PATCH with no expectedUpdatedAt still writes — pinning stays one field", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, { username: ALICE }))
+      .patch("/api/notes/note-alice")
+      .send({ pinned: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.note.pinned).toBe(true);
+  });
+
+  it("PATCH with an unparseable expectedUpdatedAt → 400, not a conflict", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, { username: ALICE }))
+      .patch("/api/notes/note-alice")
+      .send({ body: "x", expectedUpdatedAt: "yesterday" });
+
+    expect(res.status).toBe(400);
+    expect(prisma.note.update).not.toHaveBeenCalled();
+  });
+});
+
 describe("/api/notes — the userId comes from the session", () => {
   it("POST ignores an attacker-supplied userId in the body", async () => {
     // Mass assignment: the zod schema strips unknown keys and the service is

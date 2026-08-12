@@ -1107,6 +1107,15 @@
 .dark .droplet-home .w-notes-status[data-state="error"] {
   color: #fca5a5;
 }
+.droplet-home .w-notes-status[data-state="conflict"] {
+  /* Same red-TEXT ramp, same reason as [data-state="error"] above: a save the
+     box refused because the note changed elsewhere is still a save that did
+     not happen, and reads as one. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-status[data-state="conflict"] {
+  color: #fca5a5;
+}
 .droplet-home .w-notes-new {
   display: inline-flex;
   align-items: center;
@@ -1127,6 +1136,69 @@
 }
 .droplet-home .w-notes-new svg {
   color: var(--brand);
+}
+
+/* ---------- Notes: "changed on another device" (WARP-1885) ---------- */
+/* Shown when the box refuses a save because the note moved under us. Both
+   versions are the customer's own writing, so this offers the choice instead
+   of picking one — it sits above the textarea because the text in that
+   textarea is one of the two things being chosen between. */
+.droplet-home .w-notes-conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+}
+.droplet-home .w-notes-conflict-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  /* Red-TEXT ramp, not var(--danger) — see [data-state="error"] above. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-conflict-msg {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-conflict-msg svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.droplet-home .w-notes-conflict-acts {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+.droplet-home .w-notes-conflict-acts button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--card-inner);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  /* These sit in a wrapping row; let the row wrap, not the label. */
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.18s var(--ease),
+    border-color 0.18s var(--ease),
+    background 0.18s var(--ease);
+}
+.droplet-home .w-notes-conflict-acts button:hover {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: var(--brand-subtle);
 }
 
 /* ---------- Notes: the list view ---------- */
@@ -1301,6 +1373,7 @@
   .droplet-home .w-stat-row { min-height: 44px; }
   .droplet-home .w-chat-conv-btn { height: 44px; }
   .droplet-home .w-note-act { width: 44px; height: 44px; }
+  .droplet-home .w-notes-conflict-acts button { min-height: 44px; }
   .droplet-home .w-note-open { min-height: 44px; }
   /* The base rule already supplies inline-flex + centring; only the height
      is missing, so don't restate display here. */
