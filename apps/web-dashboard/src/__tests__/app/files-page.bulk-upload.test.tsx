@@ -309,6 +309,65 @@ describe("Files page — a dropped folder arrives whole, or says why not", () =>
     ]);
   });
 
+  it("names the empty folder that never arrived, even though every file landed", async () => {
+    // WARP-1876 review round 2. The silent case, reproduced exactly: a
+    // `Clients/` tree whose only file lands while an EMPTY sibling folder
+    // fails its MKCOL (507 on a full box, or a transient 503 —
+    // `ncCreateDirectory` tolerates 201/405 and throws on anything else).
+    //
+    // A folder that HAS files fails loudly: the PUT into the missing
+    // collection 409s and the upload accounting reports it. A LEAF folder
+    // with nothing in it has no upload call to notice, so `total` (files
+    // only) came back 1 of 1 and the run said nothing at all.
+    vi.mocked(createDirectory).mockImplementation(async (path: string) => {
+      if (path === "/Clients/Bravo") throw new Error("507 Insufficient Storage");
+    });
+
+    render(<FilesPage />);
+
+    fireEvent.drop(
+      screen.getByLabelText("Breadcrumbs"),
+      folderDrop("Clients", { "": [], Acme: ["contract.pdf"], Bravo: [] })
+    );
+
+    await waitFor(() => expect(uploadFiles).toHaveBeenCalledTimes(1));
+    // contract.pdf really did land — this is not a failed run, which is
+    // exactly why the folder loss needs its own sentence.
+    expect(Array.from(vi.mocked(uploadFiles).mock.calls[0][1]).map((f) => f.name)).toEqual([
+      "contract.pdf",
+    ]);
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith(
+        "Uploaded 1 of 1 files. 1 folder couldn't be created — try again to add it."
+      )
+    );
+    // The no-echo rule still holds over the new sentence.
+    for (const [message] of toastSpy.mock.calls) {
+      expect(String(message)).not.toContain("507");
+    }
+  });
+
+  it("counts every folder a folders-only drop lost", async () => {
+    vi.mocked(createDirectory).mockImplementation(async (path: string) => {
+      if (path !== "/Clients") throw new Error("503 Service Unavailable");
+    });
+
+    render(<FilesPage />);
+
+    fireEvent.drop(
+      screen.getByLabelText("Breadcrumbs"),
+      folderDrop("Clients", { "": [], Acme: [], Bravo: [] })
+    );
+
+    await waitFor(() => expect(createDirectory).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith(
+        "2 folders couldn't be created — try again to add them."
+      )
+    );
+    expect(uploadFiles).not.toHaveBeenCalled();
+  });
+
   it("gives a folder-only drop a voice instead of doing nothing visible", async () => {
     render(<FilesPage />);
 

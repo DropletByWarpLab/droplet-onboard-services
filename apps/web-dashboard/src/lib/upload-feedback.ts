@@ -23,18 +23,22 @@ import { translateError } from "./friendly-errors";
  * @param cause    the first underlying failure (already unwrapped from
  *                 `UploadBatchError` by the caller)
  * @param skipped  of `total`, how many never reached an upload call
- * @returns the message to toast, or `null` when everything landed
+ * @param directoriesFailed how many mkdir calls the run lost — see the
+ *                 `lostFolders` clause below for why files alone can't
+ *                 stand in for this
+ * @returns the message to toast, or `null` when the whole drop landed
  */
 export function uploadOutcomeMessage(
   uploaded: number,
   total: number,
   cause: unknown,
   skipped = 0,
+  directoriesFailed = 0,
 ): string | null {
   // Files an upload call actually lost, as opposed to ones the browser never
   // handed over — the two have different sentences and different remedies.
   const failed = Math.max(0, total - uploaded - skipped);
-  if (failed === 0 && skipped === 0) return null;
+  if (failed === 0 && skipped === 0 && directoriesFailed === 0) return null;
 
   // WARP-1876 review: an unreadable file (an online-only OneDrive/iCloud
   // placeholder is the usual one) used to fall out of the totals entirely,
@@ -47,13 +51,30 @@ export function uploadOutcomeMessage(
         ? " 1 item couldn't be read and wasn't uploaded."
         : ` ${skipped} items couldn't be read and weren't uploaded.`;
 
+  // WARP-1876 review round 2: a LEAF folder holding no files is the one
+  // piece of a dropped tree that can fail with every file still landing.
+  // A folder that HAS files fails loudly — the PUT into the missing
+  // collection 409s and the per-group accounting above catches it — but an
+  // empty one has no upload call to notice, and `total` counts files only.
+  // So `Clients/` arrived a folder short and the run returned `null`.
+  const lostFolders =
+    directoriesFailed === 0
+      ? ""
+      : directoriesFailed === 1
+        ? " 1 folder couldn't be created — try again to add it."
+        : ` ${directoriesFailed} folders couldn't be created — try again to add them.`;
+
   // Nothing landed — there is no partial success to report, so fall back
-  // to the domain translator's fixed copy.
+  // to the domain translator's fixed copy. Folders get their own count
+  // rather than the translator's generic line: "3 folders couldn't be
+  // created" is both truer and more actionable than "we couldn't reach
+  // your files", and it still never echoes the server.
   if (uploaded === 0) {
-    return failed > 0 ? `${translateError(cause, "files")}${unread}` : unread.trim();
+    const lead = failed > 0 ? translateError(cause, "files") : "";
+    return `${lead}${unread}${lostFolders}`.trim();
   }
-  if (failed === 0) return `Uploaded ${uploaded} of ${total} files.${unread}`;
-  return `Uploaded ${uploaded} of ${total} files. ${failed} didn't upload — try again to finish.${unread}`;
+  if (failed === 0) return `Uploaded ${uploaded} of ${total} files.${unread}${lostFolders}`;
+  return `Uploaded ${uploaded} of ${total} files. ${failed} didn't upload — try again to finish.${unread}${lostFolders}`;
 }
 
 /**
@@ -63,9 +84,12 @@ export function uploadOutcomeMessage(
  * user dragged — so the run has something true to report. Saying nothing
  * reads as "the app ignored me", which is what a zero-file drop used to do
  * (WARP-1876 review).
+ *
+ * Only the all-succeeded case reaches here: any lost folder now makes
+ * `uploadOutcomeMessage` non-null via `directoriesFailed`, so this never
+ * has to guess a failure it cannot count.
  */
-export function folderOnlyOutcomeMessage(folderCount: number, cause: unknown): string {
-  if (cause !== undefined) return translateError(cause, "files");
+export function folderOnlyOutcomeMessage(folderCount: number): string {
   const folders = `${folderCount} folder${folderCount === 1 ? "" : "s"}`;
   return `Created ${folders}. There were no files in ${
     folderCount === 1 ? "it" : "them"

@@ -149,7 +149,7 @@ export default function AdminFilesPage() {
         ),
       );
       try {
-        const { uploaded, total, skipped, cause } = await runUpload(selection, {
+        const { uploaded, total, skipped, cause, directoriesFailed } = await runUpload(selection, {
           // The company space's own root — `rootForSpace` applies the mount
           // prefix server-side, so "/" here is the top of the shared library.
           basePath: "/",
@@ -157,7 +157,10 @@ export default function AdminFilesPage() {
           onProgress: setUploadPercent,
         });
         if (uploaded > 0) await reload().catch(() => undefined);
-        const failure = uploadOutcomeMessage(uploaded, total, cause, skipped);
+        // The folder picker can carry an empty subfolder here too, and its
+        // mkdir is just as invisible to the file counts (WARP-1876 review
+        // round 2) — so this surface reads the same clause /files does.
+        const failure = uploadOutcomeMessage(uploaded, total, cause, skipped, directoriesFailed);
         toast(
           failure ??
             `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"} to ${companySpace.name}.`,

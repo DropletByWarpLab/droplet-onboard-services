@@ -52,6 +52,15 @@ export interface UploadRunResult {
   cause: unknown;
   /** Directories the run had to create — drives the progress copy. */
   directoryCount: number;
+  /**
+   * Of `directoryCount`, how many mkdir calls failed. Separate from the
+   * file counts because a folder loss can be INVISIBLE to them: a leaf
+   * folder holding no files has no upload call to fail, so `total` still
+   * reads N of N while the tree arrives incomplete (WARP-1876 review
+   * round 2). A folder that holds files fails loudly instead — the PUT
+   * into the missing collection 409s and the group accounting catches it.
+   */
+  directoriesFailed: number;
 }
 
 /** Join a dropped folder's relative directory onto the target path. */
@@ -82,12 +91,16 @@ export async function runUpload(
   };
 
   // A directory that fails to create is NOT fatal to the run — only its own
-  // group can't land, and that group reports itself below.
+  // group can't land. A group WITH files reports itself below; a leaf folder
+  // with none has no group at all, so the count here is the only trace it
+  // ever leaves (WARP-1876 review round 2).
+  let directoriesFailed = 0;
   for (const dir of dirs) {
     try {
       await createDirectory(joinRelativePath(basePath, dir), space);
     } catch (err) {
       console.error("upload: mkdir failed", dir, err);
+      directoriesFailed++;
       noteFailure(err);
     }
   }
@@ -119,5 +132,12 @@ export async function runUpload(
     sentBytes += groupBytes;
   }
 
-  return { uploaded, total, skipped, cause, directoryCount: dirs.length };
+  return {
+    uploaded,
+    total,
+    skipped,
+    cause,
+    directoryCount: dirs.length,
+    directoriesFailed,
+  };
 }

@@ -523,21 +523,28 @@ export default function FilesPage() {
       );
 
       try {
-        const { uploaded, total, skipped: unread, cause, directoryCount } =
-          await runUpload(selection, {
-            basePath: currentPath,
-            space,
-            onProgress: setUploadPercent,
-          });
+        const {
+          uploaded,
+          total,
+          skipped: unread,
+          cause,
+          directoryCount,
+          directoriesFailed,
+        } = await runUpload(selection, {
+          basePath: currentPath,
+          space,
+          onProgress: setUploadPercent,
+        });
         // Anything that landed IS on the box — make it visible before the
         // message that talks about it. A rejected revalidation must not
         // swallow that message (nor escape as an unhandled rejection): the
         // listing being stale is the lesser failure.
         if (uploaded > 0 || directoryCount > 0) await refresh().catch(() => undefined);
         const message =
-          uploadOutcomeMessage(uploaded, total, cause, unread) ??
-          // No files either way — say what DID happen to the folders.
-          (total === 0 ? folderOnlyOutcomeMessage(directoryCount, cause) : null);
+          uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed) ??
+          // Everything the drop carried landed and none of it was a file —
+          // say what DID happen to the folders.
+          (total === 0 ? folderOnlyOutcomeMessage(directoryCount) : null);
         if (message) toast(message);
       } finally {
         setUploadProgress(null);
