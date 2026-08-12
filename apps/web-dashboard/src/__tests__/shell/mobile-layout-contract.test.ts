@@ -142,10 +142,19 @@ describe("droplet-shell phone layout layer", () => {
 
   it("leaves the 520px sheet variant alone", () => {
     // RoleBuilderSheet's packet locks `min(520px, 100vw)`, which `w-full
-    // max-w-[520px]` already expresses. Widening it to the viewport between
-    // 520 and 720px would contradict the packet.
+    // max-w-[520px]` already expresses (`Dialog.tsx` sideWidth="sheet",
+    // opted into at `components/access/RoleBuilderSheet.tsx`). Widening it to
+    // the viewport between 520 and 720px would contradict the packet.
+    //
+    // Keyed on the class the sheet actually carries. An earlier version of
+    // this guard keyed on `.dlg-side`, which nothing declares and nothing
+    // wears — `.dlg-side-panel` cannot match it either, because `-panel`
+    // intervenes before the `{`. It could not go red for any edit to this
+    // stylesheet. The Tailwind class escapes its brackets in the emitted
+    // selector (`.max-w-\[520px\]`); both spellings are matched so a
+    // hand-written rule cannot slip past on a technicality.
     const { body } = phoneLayer();
-    expect(body).not.toMatch(/\.dlg-side\s*\{[^}]*max-width:\s*none/);
+    expect(body).not.toMatch(/\.max-w-\\?\[520px\\?\]\s*\{[^}]*max-width:\s*none/);
   });
 
   /* ── Touch targets ─────────────────────────────────────────────────────── */
