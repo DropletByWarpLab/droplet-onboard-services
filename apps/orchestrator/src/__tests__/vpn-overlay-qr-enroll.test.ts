@@ -1323,3 +1323,110 @@ describe("request-logging redaction — routes driven THROUGH the logger (WARP-1
     expect(output).not.toContain("PUBLIC KEY");
   });
 });
+
+// ── WARP-1882 — signing in IS the enrollment ───────────────────────────────
+//
+// The QR flow above is for a device that will NOT sign in. A device whose user
+// just authenticated should not be asked to mint a code, scan it, and have a
+// fingerprint approved — so `POST /vpn/overlay/devices` now does the whole job
+// in one authenticated call.
+//
+// Before this, that route only vouched to HQ and returned HQ's raw result: no
+// address, no server key, no routes, no resolvers. It registered a device and
+// gave it no way to build a tunnel — the same "two halves never joined" shape
+// the epic already hit, in the path that should be primary.
+describe("POST /api/vpn/overlay/devices — sign-in enrollment (WARP-1882)", () => {
+  const FAMILY = { id: "bob", username: "bob", role: "family" };
+  // A real SPKI PEM: the route's schema only checks it says PUBLIC KEY, but
+  // generating a genuine one keeps the fixture honest if that ever tightens.
+  const SIGN_PEM = generateKeyPairSync("ec", { namedCurve: "P-256" })
+    .publicKey.export({ type: "spki", format: "pem" })
+    .toString();
+
+  function enroll(app: any, key = VALID_WG_KEY, label = "Bob's laptop") {
+    return request(app)
+      .post("/api/vpn/overlay/devices")
+      .send({
+        wg_public_key: key,
+        sign_public_key_pem: SIGN_PEM,
+        label,
+      });
+  }
+
+  it("returns a usable profile, not just the HQ vouch", async () => {
+    const { app } = buildApp({ user: FAMILY });
+    const res = await enroll(app);
+
+    expect(res.status).toBe(200);
+    // The half that was missing.
+    expect(res.body.profile).toBeTruthy();
+    expect(res.body.profile.address).toMatch(/^10\.13\.13\.\d+\/32$/);
+    expect(res.body.profile.server_public_key).toBe(
+      "SERVERPUBKEY0000000000000000000000000000000=",
+    );
+    expect(res.body.profile.allowed_ips.length).toBeGreaterThan(0);
+    expect(res.body.profile.dns.length).toBeGreaterThan(0);
+    // And the wg0 peer was actually installed — a profile whose address
+    // nothing on the interface accepts is the defect WARP-1757 fixed.
+    expect(installOverlayPeerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never offers an FQDN as a WireGuard endpoint", async () => {
+    // WARP-1391 class: <name>.droplet-us.com is public-NXDOMAIN by design and
+    // is the HTTPS address. Config above sets it as WIREGUARD_ENDPOINT_HOST,
+    // so a regression would surface right here.
+    const { app } = buildApp({ user: FAMILY });
+    const res = await enroll(app);
+    expect(JSON.stringify(res.body.profile)).not.toContain("droplet-us.com");
+  });
+
+  it("scopes the peer to the person who signed in, so it is THEIR device", async () => {
+    // The behaviour this buys: a family member sees and can manage their own
+    // device. A peer left on the synthetic 'overlay' userId is invisible to
+    // everyone but an admin (the WARP-1763 defect).
+    const prisma = createPrismaMock();
+    const { app } = buildApp({ prisma, user: FAMILY });
+    await enroll(app);
+
+    const mine = await request(app).get("/api/vpn/peers");
+    expect(mine.status).toBe(200);
+    expect(mine.body.peers).toHaveLength(1);
+    expect(mine.body.peers[0].userId).toBe("bob");
+  });
+
+  it("is idempotent — relaunching the app does not burn a second peer or address", async () => {
+    const prisma = createPrismaMock();
+    const { app } = buildApp({ prisma, user: FAMILY });
+
+    const first = await enroll(app);
+    const second = await enroll(app);
+
+    expect(second.status).toBe(200);
+    expect(second.body.profile.address).toBe(first.body.profile.address);
+    // One peer, not two — the cap is finite and a relaunch must not consume it.
+    const listed = await request(app).get("/api/vpn/peers");
+    expect(listed.body.peers).toHaveLength(1);
+  });
+
+  it("refuses a key that is already another account's active device", async () => {
+    // Not resolved in favour of whoever called last: a key collision is either
+    // a bug or an attempt to take over someone else's tunnel address.
+    const prisma = createPrismaMock();
+    await enroll(buildApp({ prisma, user: FAMILY }).app);
+
+    const res = await enroll(
+      buildApp({ prisma, user: { id: "mallory", username: "mallory", role: "family" } }).app,
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("wg_key_conflict");
+  });
+
+  it("says the tunnel is not ready — and does not claim success — when the router refuses", async () => {
+    installOverlayPeerMock.mockRejectedValueOnce(new Error("routing down"));
+    const { app } = buildApp({ user: FAMILY });
+    const res = await enroll(app);
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("tunnel_not_ready");
+    expect(res.body.profile).toBeUndefined();
+  });
+});

@@ -110,8 +110,25 @@ export interface OverlayProvisionPrisma {
 export interface ProvisionOverlayPeerInput {
   wgPublicKey: string;
   label: string;
-  /** Provenance stamped onto the peer row (who linked which QR). */
-  linkTokenId: string;
+  /**
+   * Who OWNS this peer.
+   *
+   * WARP-1882. Omitted for a QR-linked device, which belongs to no account —
+   * it was linked by a code, not by someone signing in — and so carries the
+   * synthetic {@link OVERLAY_PEER_USER}. Supplied for a device enrolled by
+   * signing in, where there IS a real account and the peer should be scoped to
+   * it: that is what makes `GET /api/vpn/peers` show a family member their own
+   * device, and what lets them revoke it without being an admin.
+   */
+  userId?: string;
+  /**
+   * Provenance stamped onto the peer row.
+   *
+   * `linkTokenId` is null on the sign-in path — there is no token. Left
+   * required-but-nullable rather than optional so a caller has to decide
+   * rather than forget.
+   */
+  linkTokenId: string | null;
   linkTokenEnrolledBy: string | null;
   /**
    * When the owner originally approved this enrollment. Defaults to `now`,
@@ -197,6 +214,12 @@ export async function provisionOverlayPeer(
       where: { publicKey: input.wgPublicKey },
       data: {
         assignedIp,
+        // WARP-1882: re-assert ownership on the refresh path too. A device
+        // first linked by QR (userId 'overlay') and later enrolled by its user
+        // signing in should become THEIRS — otherwise it stays invisible in
+        // their own device list forever, which is the WARP-1763 defect wearing
+        // a different hat.
+        userId: input.userId ?? OVERLAY_PEER_USER,
         kind: "overlay",
         status: "active",
         mode: OVERLAY_PEER_MODE,
@@ -212,7 +235,7 @@ export async function provisionOverlayPeer(
   } else {
     await prisma.vpnPeer.create({
       data: {
-        userId: OVERLAY_PEER_USER,
+        userId: input.userId ?? OVERLAY_PEER_USER,
         deviceLabel: input.label,
         publicKey: input.wgPublicKey,
         assignedIp,
