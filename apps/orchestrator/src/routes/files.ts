@@ -69,6 +69,7 @@ import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
   contentTypeForFilename,
+  inlinePreviewContentType,
   parseRangeHeader,
 } from "../lib/file-content.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -1933,7 +1934,20 @@ export function createFilesRouter(
     }
   });
 
-  // ── Download a file ──
+  // ── Download a file, or serve it inline for the preview modal ──
+  //
+  // `?disposition=inline` (PreviewPane's `getPreviewUrl`) flips this route from
+  // "save to disk" to "render in place". It exists because the preview modal
+  // feeds this URL to an `<object>`/`<video>`/`<audio>` tag, and a browser
+  // honours `Content-Disposition: attachment` inside `<object>` by DOWNLOADING —
+  // which is why clicking Preview on a PDF used to raise a Save-As dialog over
+  // an empty modal instead of showing the document.
+  //
+  // Inline is granted ONLY for `inlinePreviewContentType()`'s safelist, never
+  // for an arbitrary upload: `text/html` and `image/svg+xml` execute script, so
+  // rendering a user-supplied one inline on the dashboard origin would be stored
+  // XSS against the session cookie. An off-safelist file still downloads,
+  // exactly as before — the affordance degrades, the invariant does not.
   router.get("/files/download", async (req, res, next) => {
     try {
       const filePath = req.query.path as string;
@@ -1945,6 +1959,12 @@ export function createFilesRouter(
       const filename = path.basename(filePath);
       const ext = path.extname(filename).toLowerCase();
 
+      // Resolve the disposition BEFORE fetching bytes so the safelist decision
+      // is one branch, evaluated once, and visible in every header below.
+      const inlineType =
+        req.query.disposition === "inline" ? inlinePreviewContentType(filename) : null;
+      const serveInline = inlineType !== null;
+
       const stream = await ncDownloadFile(await getToken(req), getUser(req), filePath);
       if (!stream) {
         res.status(404).json({ error: "File not found" });
@@ -1954,21 +1974,56 @@ export function createFilesRouter(
       // WARP-237: file-level data-access record (chunk-level RAG reads are
       // deferred — see the WARP-237 gap analysis). Fire-and-forget so the
       // byte stream is not delayed by the append lock.
-      void recordActivity({
-        kind: "file",
-        severity: "info",
-        sourceIcon: "download",
-        what: "File downloaded",
-        sub: filePath,
-        refs: { path: filePath },
-        actor: actorFromRequest(req),
-      });
+      //
+      // Only a real download is recorded. Opening the preview modal is a read,
+      // not an export, and logging it as "File downloaded" would make the
+      // Activity feed's download trail useless for the question it exists to
+      // answer — which files actually left the box.
+      if (!serveInline) {
+        void recordActivity({
+          kind: "file",
+          severity: "info",
+          sourceIcon: "download",
+          what: "File downloaded",
+          sub: filePath,
+          refs: { path: filePath },
+          actor: actorFromRequest(req),
+        });
+      }
 
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      res.setHeader(
-        "Content-Type",
-        ext === ".pdf" ? "application/pdf" : "application/octet-stream"
-      );
+      // RFC 6266 quoted-string: strip the two characters that would break
+      // out of (or escape within) the quoted filename parameter.
+      const dispositionFilename = filename.replace(/[\\"]/g, "");
+
+      if (serveInline) {
+        // The filename matters on inline too: without it, saving from the
+        // browser's viewer yields a file literally named "download".
+        res.setHeader("Content-Disposition", `inline; filename="${dispositionFilename}"`);
+        res.setHeader("Content-Type", inlineType);
+        // Belt-and-braces for the safelist: `nosniff` stops a browser
+        // re-interpreting safelisted bytes as markup, and the `sandbox` CSP
+        // strips scripting/same-origin from the rendered document even if a
+        // future edit widens the safelist by mistake.
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        // application/pdf is EXEMPT from the sandbox CSP: Chromium's PDF
+        // viewer is plugin-backed and cannot run inside a sandboxed document —
+        // a sandboxed PDF response renders a blank frame (or forces a
+        // download), which is the exact regression WARP-1919 exists to fix.
+        // The exemption is safe: PDF is not same-origin-scriptable, and the
+        // safelist above already excludes every scriptable type, so the
+        // sandbox buys nothing for PDF while breaking its preview. (The
+        // app-level helmet() baseline CSP still applies to the PDF response;
+        // only the `sandbox` directive breaks the viewer.)
+        if (inlineType !== "application/pdf") {
+          res.setHeader("Content-Security-Policy", "sandbox");
+        }
+      } else {
+        res.setHeader("Content-Disposition", `attachment; filename="${dispositionFilename}"`);
+        res.setHeader(
+          "Content-Type",
+          ext === ".pdf" ? "application/pdf" : "application/octet-stream"
+        );
+      }
 
       const nodeStream = Readable.fromWeb(stream as any);
       nodeStream.pipe(res);

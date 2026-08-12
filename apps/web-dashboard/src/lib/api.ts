@@ -4505,6 +4505,24 @@ export function getDownloadUrl(path: string): string {
   return `${BASE}/api/files/download?path=${encodeURIComponent(path)}`;
 }
 
+/**
+ * Same bytes as `getDownloadUrl`, served for RENDERING rather than saving.
+ *
+ * The preview modal hands this URL to `<object>` / `<video>` / `<audio>`, and
+ * those tags obey `Content-Disposition: attachment` by downloading — so a
+ * preview built on the plain download URL pops a Save-As dialog over an empty
+ * modal instead of showing the file. `?disposition=inline` asks the orchestrator
+ * for `Content-Disposition: inline` plus a real Content-Type.
+ *
+ * The server grants inline only for a safelist of inert media types (no
+ * `text/html`, no `image/svg+xml` — both execute script on our own origin), and
+ * falls back to an attachment for anything else. So this is safe to use for any
+ * file: a non-previewable one simply behaves as it does today.
+ */
+export function getPreviewUrl(path: string): string {
+  return `${BASE}/api/files/download?path=${encodeURIComponent(path)}&disposition=inline`;
+}
+
 // --- WARP-882: in-browser editing + co-authoring ---
 
 /**

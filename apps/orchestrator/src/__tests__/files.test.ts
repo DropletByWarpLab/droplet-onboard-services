@@ -654,6 +654,76 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files/download?path=/ghost.txt");
       expect(res.status).toBe(404);
     });
+
+    // ── ?disposition=inline header contract (WARP-1919) ──
+    //
+    // These pin the route-level header behavior, not just the safelist helper:
+    // each one fails if inline were ever granted unconditionally, if the PDF
+    // sandbox-CSP exemption regressed, or if the sandbox CSP were dropped from
+    // the other inline types.
+    describe("?disposition=inline response headers (WARP-1919)", () => {
+      const bodyStream = () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("bytes"));
+            controller.close();
+          },
+        });
+
+      beforeEach(() => {
+        ncMock.ncDownloadFile.mockResolvedValue(bodyStream());
+      });
+
+      it("refuses inline for an off-safelist type (.html) — still attachment", async () => {
+        const res = await request(app).get(
+          "/api/files/download?path=/page.html&disposition=inline",
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers["content-disposition"]).toBe('attachment; filename="page.html"');
+      });
+
+      it("inline PDF gets nosniff but NO sandbox CSP (Chromium's PDF viewer cannot run sandboxed)", async () => {
+        const res = await request(app).get(
+          "/api/files/download?path=/report.pdf&disposition=inline",
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers["content-type"]).toBe("application/pdf");
+        expect(res.headers["content-disposition"]).toBe('inline; filename="report.pdf"');
+        expect(res.headers["x-content-type-options"]).toBe("nosniff");
+        // App-level helmet() still contributes its baseline CSP on every
+        // response — that one is harmless to the viewer. Only the `sandbox`
+        // directive blocks Chromium's plugin-backed PDF renderer, so the
+        // contract is "no sandbox directive", not "no CSP header at all".
+        expect(res.headers["content-security-policy"] ?? "").not.toMatch(/\bsandbox\b/);
+      });
+
+      it("inline text gets nosniff AND the sandbox CSP", async () => {
+        const res = await request(app).get(
+          "/api/files/download?path=/notes.txt&disposition=inline",
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers["content-disposition"]).toBe('inline; filename="notes.txt"');
+        expect(res.headers["x-content-type-options"]).toBe("nosniff");
+        expect(res.headers["content-security-policy"]).toBe("sandbox");
+      });
+
+      it("strips quotes/backslashes from the inline filename parameter", async () => {
+        // A quote-only fixture: a backslash in the path is a separator under
+        // win32 path.basename but a literal on Linux, so asserting on it would
+        // make the test platform-dependent. The sanitizer regex covers both.
+        const res = await request(app)
+          .get("/api/files/download")
+          .query({ path: '/we"ird.pdf', disposition: "inline" });
+        expect(res.status).toBe(200);
+        expect(res.headers["content-disposition"]).toBe('inline; filename="weird.pdf"');
+      });
+
+      it("no disposition param stays attachment (default unchanged)", async () => {
+        const res = await request(app).get("/api/files/download?path=/report.pdf");
+        expect(res.status).toBe(200);
+        expect(res.headers["content-disposition"]).toBe('attachment; filename="report.pdf"');
+      });
+    });
   });
 
   // ── DELETE /api/files ──
