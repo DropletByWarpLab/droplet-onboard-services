@@ -1135,6 +1135,21 @@ function NoteEditor({
   // schedule a retry against a component nobody is looking at.
   const aliveRef = useRef(true);
 
+  // Write the textarea ourselves — a server refresh or a resolved conflict —
+  // without the autosave effect reading it back as typing.
+  //
+  // The flag is only raised for a value that actually differs. React bails out
+  // of a `setVal` to the string already held, so the `[val]` effect never
+  // re-runs to lower the flag, and a flag left raised swallows the customer's
+  // NEXT keystroke instead. That is reachable without any conflict at all:
+  // pinning a note from another device bumps `updatedAt` (Prisma `@updatedAt`)
+  // while leaving the body identical, which lands here with nothing to change.
+  const writeTextarea = useCallback((next: string) => {
+    if (valRef.current !== next) programmaticRef.current = true;
+    valRef.current = next;
+    setVal(next);
+  }, []);
+
   // Annotated because the retry below references `save` from inside its own
   // initializer, which tsc otherwise can't type.
   const save: (next: string) => void = useCallback(
@@ -1224,10 +1239,8 @@ function NoteEditor({
     const seen = new Date(note.updatedAt).getTime();
     if (!(seen > new Date(baseRef.current).getTime())) return;
     baseRef.current = note.updatedAt;
-    valRef.current = note.body;
-    programmaticRef.current = true;
-    setVal(note.body);
-  }, [note.updatedAt, note.body, conflict]);
+    writeTextarea(note.body);
+  }, [note.updatedAt, note.body, conflict, writeTextarea]);
 
   // Unmount-only: commit a still-pending edit so navigating off Home (or
   // closing the editor) never drops up to ~500ms of typing. The rejection is
@@ -1268,10 +1281,8 @@ function NoteEditor({
   const takeTheirs = () => {
     if (!conflict) return;
     baseRef.current = conflict.updatedAt;
-    valRef.current = conflict.body;
     pendingRef.current = false;
-    programmaticRef.current = true;
-    setVal(conflict.body);
+    writeTextarea(conflict.body);
     setConflict(null);
     setStatus("idle");
     onSaved();

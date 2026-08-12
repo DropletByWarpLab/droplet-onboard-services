@@ -537,6 +537,40 @@ describe("a note changed on another device", () => {
     });
     expect(updateNoteMock).not.toHaveBeenCalled();
   });
+
+  // Pinning a note from another device bumps `updatedAt` (Prisma `@updatedAt`)
+  // without touching the body, so the adopt-forward effect above writes back
+  // the exact string the textarea already holds. React bails out of a `setVal`
+  // to an identical value, which means the `[val]` effect never re-runs to
+  // lower the "we wrote this, the customer didn't" flag — and the next real
+  // keystroke is read as ours and silently dropped. On a surface with no
+  // localStorage copy left behind it, that is lost writing.
+  it("still saves the next edit after the box moves on without changing the text", async () => {
+    notesRef.current = [note({ body: "buy milk" })];
+    const { rerender } = render(<NotesWidget />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "buy milk" }));
+    });
+
+    // Same body, newer version — a pin from the phone.
+    notesRef.current = [note({ body: "buy milk", updatedAt: THEIR_TIME })];
+    await act(async () => {
+      rerender(<NotesWidget />);
+    });
+
+    const ta = screen.getByLabelText("Note") as HTMLTextAreaElement;
+    act(() => {
+      fireEvent.change(ta, { target: { value: "buy oat milk" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+
+    expect(updateNoteMock).toHaveBeenCalledWith("n1", {
+      body: "buy oat milk",
+      expectedUpdatedAt: THEIR_TIME,
+    });
+  });
 });
 
 describe("the old browser-local note", () => {
