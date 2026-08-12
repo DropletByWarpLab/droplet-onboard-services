@@ -14,7 +14,9 @@
  *      with the label nor escape the panel's padding;
  *   4. all three rows share the same label/value shape, so they stay aligned;
  *   5. a row gets a tooltip only where one adds information the visible text
- *      doesn't already carry (UX review N1).
+ *      doesn't already carry (UX review N1);
+ *   6. the Type row still names the file when the MIME is absent or opaque —
+ *      driven through the panel, one case per step of the fallback chain.
  *
  * Mock scaffolding mirrors files-page.doubleclick-preview.test.tsx.
  */
@@ -25,20 +27,28 @@ import type { FileEntryInfo } from "@/lib/types";
 const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-const docxFile: FileEntryInfo = {
-  name: "Freud Biography SR 1.28.docx",
-  path: "/Freud Biography SR 1.28.docx",
-  size: 45678,
-  isDirectory: false,
-  mimeType: DOCX_MIME,
-  modifiedAt: new Date("2026-01-28T00:00:00Z").toISOString(),
-} as FileEntryInfo;
+function makeFile(overrides: Partial<FileEntryInfo> = {}): FileEntryInfo {
+  return {
+    name: "Freud Biography SR 1.28.docx",
+    path: "/Freud Biography SR 1.28.docx",
+    size: 45678,
+    isDirectory: false,
+    mimeType: DOCX_MIME,
+    modifiedAt: new Date("2026-01-28T00:00:00Z").toISOString(),
+    ...overrides,
+  } as FileEntryInfo;
+}
+
+// The listing is per-test: the Type row's whole point is that it survives a
+// MIME the server never sent, so the fallback chain has to be driven through
+// the rendered panel and not just through labelForMime's own unit test.
+let entries: FileEntryInfo[] = [makeFile()];
 
 // next/navigation is mocked globally in src/__tests__/setup.ts.
 
 vi.mock("@/lib/hooks/useFiles", () => ({
   useFiles: () => ({
-    files: [docxFile],
+    files: entries,
     error: null,
     isLoading: false,
     refresh: vi.fn(),
@@ -116,18 +126,26 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 
 import FilesPage from "@/app/files/page";
 
-/** Select the docx row and hand back the detail panel's metadata rows. */
+/** Select the listing's only file and hand back the detail panel's rows. */
 function openDetailPanel(container: HTMLElement): HTMLElement[] {
-  const row = screen.getByRole("button", { name: /file Freud Biography/i });
+  const row = screen.getByRole("button", { name: `File ${entries[0]!.name}` });
   fireEvent.click(row);
   return Array.from(
     container.querySelectorAll<HTMLElement>("[data-meta-row]")
   );
 }
 
+/** The Type row's value element, with the panel already open. */
+function typeValue(container: HTMLElement): HTMLElement {
+  return openDetailPanel(container)
+    .find((r) => r.dataset.metaRow === "type")!
+    .querySelector<HTMLElement>("[data-meta-value]")!;
+}
+
 describe("Files detail panel — metadata block (WARP-1877)", () => {
   beforeEach(() => {
     cleanup();
+    entries = [makeFile()];
   });
 
   it("shows a friendly type name instead of the raw MIME string", () => {
@@ -205,12 +223,41 @@ describe("Files detail panel — metadata block (WARP-1877)", () => {
     }
   });
 
-  it("never renders an empty Type for a file with no MIME", () => {
+  // The file-indexer skips Office documents as unknown_type when its MIME
+  // tables are missing, so an absent or opaque mimeType is a shape this panel
+  // renders in production. Each case below is driven through the panel, so
+  // deleting a step of labelForMime's fallback chain turns one of them red.
+  it("names the type from the file name when the listing sent no MIME", () => {
+    entries = [makeFile({ name: "scan.pdf", path: "/scan.pdf", mimeType: null })];
     const { container } = render(<FilesPage />);
-    const rows = openDetailPanel(container);
-    const value = rows
-      .find((r) => r.dataset.metaRow === "type")!
-      .querySelector<HTMLElement>("[data-meta-value]")!;
-    expect(value.textContent?.trim().length).toBeGreaterThan(0);
+    const value = typeValue(container);
+
+    expect(value.textContent).toBe("PDF document");
+    // No raw MIME to reveal, so the row carries nothing the words don't.
+    expect(value.getAttribute("title")).toBeNull();
+  });
+
+  it("says Unknown rather than naming a version number as a type", () => {
+    // Nextcloud sends application/octet-stream when getcontenttype is absent;
+    // "01" is a version segment, not a file type.
+    entries = [
+      makeFile({
+        name: "Backup 2026.01",
+        path: "/Backup 2026.01",
+        mimeType: "application/octet-stream",
+      }),
+    ];
+    const { container } = render(<FilesPage />);
+
+    expect(typeValue(container).textContent).toBe("Unknown");
+  });
+
+  it("says Unknown for a file with neither MIME nor extension", () => {
+    entries = [
+      makeFile({ name: "Household notes", path: "/Household notes", mimeType: null }),
+    ];
+    const { container } = render(<FilesPage />);
+
+    expect(typeValue(container).textContent).toBe("Unknown");
   });
 });
