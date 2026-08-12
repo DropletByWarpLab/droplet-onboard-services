@@ -102,7 +102,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
+.droplet-home .w-chat-cap-row .w-chat-iconbtn,
+.droplet-home .w-chat-cap-row .w-chat-send {
+  flex-shrink: 0;
+}
+/* The model name is arbitrary length (e.g. "docker.io/ai/gpt-oss 20B F16") and
+   the row is tight on a phone, so the pill shrinks and the name ellipsises
+   inside it — never wraps out of the capsule. */
 .droplet-home .w-chat-model {
   display: inline-flex;
   align-items: center;
@@ -115,6 +123,19 @@
   font-size: 12px;
   color: var(--text-muted);
   font-family: var(--font-mono);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.droplet-home .w-chat-model .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-chat-model .dot,
+.droplet-home .w-chat-model svg {
+  flex-shrink: 0;
 }
 .droplet-home .w-chat-model .dot {
   width: 6px;
@@ -209,6 +230,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .droplet-home .w-chat-conv-title {
   display: inline-flex;
@@ -218,9 +241,14 @@
   font-weight: 500;
   color: var(--text);
   margin-right: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .droplet-home .w-chat-conv-title svg {
   color: var(--brand);
+  flex-shrink: 0;
 }
 .droplet-home .w-chat-conv-btn {
   display: inline-flex;
@@ -228,6 +256,8 @@
   gap: 6px;
   height: 28px;
   padding: 0 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: var(--radius-pill);
   background: var(--card-inner);
   border: 1px solid var(--card-bd);
@@ -476,6 +506,8 @@
   gap: 10px;
   height: 100%;
 }
+/* Each cell is a <button> that opens the surface it summarises, so it needs
+   the button reset (font/text-align/width) on top of the card styling. */
 .droplet-home .w-stat-cell {
   background: color-mix(in srgb, var(--text) 2.2%, transparent);
   border: 1px solid var(--card-bd);
@@ -485,8 +517,26 @@
   flex-direction: column;
   justify-content: center;
   gap: 1px;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 200ms var(--ease), background 200ms var(--ease);
+}
+.droplet-home .w-stat-cell:hover {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  background: color-mix(in srgb, var(--text) 4.5%, transparent);
+}
+.droplet-home .w-stat-cell:active {
+  transform: scale(0.985);
+}
+@media (prefers-reduced-motion: reduce) {
+  .droplet-home .w-stat-cell:active {
+    transform: none;
+  }
 }
 .droplet-home .w-stat-cell .e {
   display: flex;
@@ -541,6 +591,16 @@
   gap: 10px;
   padding: 7px 2px;
   min-height: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.droplet-home .w-stat-row:hover .lbl,
+.droplet-home .w-stat-row:hover .val {
+  color: var(--text);
 }
 .droplet-home .w-stat-row .ico {
   width: 26px;
@@ -597,11 +657,22 @@
   height: 100%;
   grid-auto-rows: 1fr;
 }
+/* A <button> that opens the Cameras page — needs the button reset alongside
+   the tile styling. */
 .droplet-home .w-cam {
   position: relative;
   border-radius: 12px;
   overflow: hidden;
   min-height: 0;
+  padding: 0;
+  border: none;
+  font: inherit;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}
+.droplet-home .w-cam:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 55%, transparent);
 }
 .droplet-home .w-cam::after {
   content: "";
@@ -1069,6 +1140,26 @@
 .dark .droplet-home .w-notes-status[data-state="saved"] {
   color: #4ade80;
 }
+.droplet-home .w-notes-status[data-state="error"] {
+  /* Same red-TEXT ramp as .w-remote-err, and NOT var(--danger): the home
+     scope's --danger is a background-fill token (#b91c1c light, #7f1d1d
+     dark — see home-bento.css and .dh-tile-x:hover), and #7f1d1d as 12px
+     text on the dark card is unreadable. Same reasoning that put the
+     green-TEXT ramp on [data-state="saved"] above. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-status[data-state="error"] {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-status[data-state="conflict"] {
+  /* Same red-TEXT ramp, same reason as [data-state="error"] above: a save the
+     box refused because the note changed elsewhere is still a save that did
+     not happen, and reads as one. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-status[data-state="conflict"] {
+  color: #fca5a5;
+}
 .droplet-home .w-notes-new {
   display: inline-flex;
   align-items: center;
@@ -1089,6 +1180,152 @@
 }
 .droplet-home .w-notes-new svg {
   color: var(--brand);
+}
+
+/* ---------- Notes: "changed on another device" (WARP-1885) ---------- */
+/* Shown when the box refuses a save because the note moved under us. Both
+   versions are the customer's own writing, so this offers the choice instead
+   of picking one — it sits above the textarea because the text in that
+   textarea is one of the two things being chosen between. */
+.droplet-home .w-notes-conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+}
+.droplet-home .w-notes-conflict-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  /* Red-TEXT ramp, not var(--danger) — see [data-state="error"] above. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-conflict-msg {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-conflict-msg svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.droplet-home .w-notes-conflict-acts {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+.droplet-home .w-notes-conflict-acts button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--card-inner);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  /* These sit in a wrapping row; let the row wrap, not the label. */
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.18s var(--ease),
+    border-color 0.18s var(--ease),
+    background 0.18s var(--ease);
+}
+.droplet-home .w-notes-conflict-acts button:hover {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: var(--brand-subtle);
+}
+
+/* ---------- Notes: the list view ---------- */
+.droplet-home .w-note-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+}
+.droplet-home .w-note {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-input);
+}
+.droplet-home .w-note:hover {
+  background: var(--card-inner);
+}
+.droplet-home .w-note-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.droplet-home .w-note-open .pin {
+  color: var(--brand);
+  flex-shrink: 0;
+}
+.droplet-home .w-note-open .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-note-act {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-input);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.droplet-home .w-note-act:hover {
+  color: var(--brand);
+  background: var(--brand-subtle);
+}
+.droplet-home .w-note.pinned .w-note-act[aria-pressed="true"] {
+  color: var(--brand);
+}
+/* Notes we couldn't load. Same red-TEXT ramp as .w-remote-err (#b91c1c light
+   / #fca5a5 dark) so a failed read never gets mistaken for the muted
+   "No notes yet" empty state sitting in the same slot. Not var(--danger) —
+   that's a fill token and its dark value (#7f1d1d) is unreadable as text. */
+.droplet-home .w-notes-err {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  text-align: left;
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-err {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-err svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 /* ---------- Remote access (Connect toggle, WARP-1351) ---------- */
@@ -1188,7 +1425,28 @@
      more reason they cannot stay 28px. */
   .droplet-home .w-chat-conv-btn { height: 44px; }
   .droplet-home .w-notes-new { min-height: 44px; }
+  .droplet-home .w-stat-row { min-height: 44px; }
+  .droplet-home .w-chat-conv-btn { height: 44px; }
+  .droplet-home .w-note-act { width: 44px; height: 44px; }
+  .droplet-home .w-notes-conflict-acts button { min-height: 44px; }
+  .droplet-home .w-note-open { min-height: 44px; }
   /* The base rule already supplies inline-flex + centring; only the height
      is missing, so don't restate display here. */
   .droplet-home .w-remote-link { min-height: 44px; }
+  /* Each camera tile became a <button> opening that camera in this ticket, so
+     it is now a touch target and owes the 44px floor like any other. The base
+     rule sets `min-height: 0` and `.w-cams` uses `grid-auto-rows: 1fr`, so a
+     short widget (or a four-camera grid on a phone) divides the height down
+     past 44 with nothing stopping it. Raising the floor only — the tiles keep
+     filling the row when there is room. */
+  .droplet-home .w-cam { min-height: 44px; }
+  /* The status cell became tappable here (it deep-links to the surface it
+     reports on), so it owes the floor too — its base rule is `min-height: 0`
+     and the copy inside it can be a single short line. */
+  .droplet-home .w-stat-cell { min-height: 44px; }
+  /* The whole note row is the target, not just the two controls inside it.
+     `.w-note-open` and `.w-note-act` already carry 44px, so in practice the
+     row clears it — state that explicitly rather than leave it depending on a
+     child, which is what the contract is checking for. */
+  .droplet-home .w-note { min-height: 44px; }
 }

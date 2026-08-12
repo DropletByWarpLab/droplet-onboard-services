@@ -56,6 +56,7 @@ import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cam
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
+import { createNotesRouter } from "./routes/notes.js";
 import { createRemindersRouter } from "./routes/reminders.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createVpnRouter } from "./routes/vpn.js";
@@ -351,6 +352,7 @@ export function createApp(
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
+  app.use("/api", createNotesRouter(prisma));
   app.use("/api", createRemindersRouter(prisma));
   app.use("/api", createNotificationsRouter(prisma));
   app.use("/api", createVpnRouter(prisma));

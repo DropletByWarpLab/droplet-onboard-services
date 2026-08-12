@@ -56,6 +56,11 @@ export type ErrorDomain =
   | "device"
   | "storage"
   | "pairing"
+  // Home's notes tile. Notes moved off browser localStorage onto the box, so a
+  // failed READ is the only thing between the customer and text they wrote —
+  // the copy has to name notes, or an outage is indistinguishable from an
+  // empty account.
+  | "notes"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -110,6 +115,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
   // is reserved for the post-code handshake).
   pairing:
     "The Droplet couldn't create a pairing code right now. Try again in a moment.",
+  notes:
+    "We couldn't reach your notes. They're safe on your Droplet — try again in a moment.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -531,6 +538,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Device pairing isn't available on this Droplet right now. Ask an admin to check it's enabled, then try again.",
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  // Home's notes tile. A 401 here is a session that lapsed while the tile was
+  // mounted, not a lost note, so it must not read like data loss.
+  notes: {
+    "401":
+      "You've been signed out. Sign in again to see your notes — nothing has been lost.",
+    NETWORK:
+      "We can't reach this Droplet right now. Your notes are on it — check the connection and try again.",
     TIMEOUT: "That took too long. Try again in a moment.",
   },
   generic: {

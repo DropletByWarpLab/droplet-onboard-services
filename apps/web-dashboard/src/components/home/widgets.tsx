@@ -12,7 +12,7 @@
  *   · Recent files → useRecents
  *   · Cameras     → useCameras
  *   · Models      → useModels
- *   · Notes       → local scratchpad (localStorage; real per-device store)
+ *   · Notes       → useNotes (real /api/notes, stored on the box)
  *
  * Widgets whose backend doesn't exist yet (Tasks, Activity, Scenes, scheduled
  * Automations) are gated behind default-off feature flags and tracked in
@@ -50,12 +50,15 @@ import {
   Network,
   Paperclip,
   PenLine,
+  Pin,
+  PinOff,
   Plus,
   Settings,
   ShieldOff,
   Sparkles,
   Square,
   Thermometer,
+  Trash2,
   Video,
   Wrench,
   X,
@@ -70,6 +73,16 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
+import {
+  useNotes,
+  createNote,
+  updateNote,
+  deleteNote,
+  isNoteConflict,
+  conflictingNote,
+  NOTE_MAX_BODY,
+  type Note,
+} from "@/lib/hooks/useNotes";
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth";
@@ -347,7 +360,7 @@ function InlineChat({
         <div className="w-chat-cap-row">
           <span className="w-chat-model">
             <span className="dot" />
-            {model.name}
+            <span className="nm">{model.name}</span>
           </span>
           {isStreaming ? (
             <button
@@ -441,15 +454,15 @@ function ChatWidget({ w, h }: WidgetProps) {
         />
         <div className="w-chat-cap-row">
           {model ? (
-            <span className="w-chat-model">
+            <span className="w-chat-model" title={model.name}>
               <span className="dot" />
-              {model.name}
+              <span className="nm">{model.name}</span>
               <ChevronDown size={10} />
             </span>
           ) : (
             <span className="w-chat-model" style={{ opacity: 0.6 }}>
               <span className="dot" style={{ background: "var(--text-muted)" }} />
-              No model
+              <span className="nm">No model</span>
             </span>
           )}
           <button className="w-chat-iconbtn" tabIndex={-1} aria-label="Attach" type="button">
@@ -619,7 +632,21 @@ export function CalendarWidget({ h }: WidgetProps) {
 }
 
 /* ─────────────────────────── System status ─────────────────────────── */
+/**
+ * One System-status stat. `href` is the surface the stat summarises — every
+ * cell/row is a tap target that opens it, so the tile is a set of links into
+ * the app rather than a dead read-out.
+ */
+type StatRow = {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  sub: string;
+  dot: string;
+  href: string;
+};
 function StatusWidget({ w, h }: WidgetProps) {
+  const router = useRouter();
   const { items: recents } = useRecents(50);
   const { models } = useModels();
   const { totalCameras } = useCameras();
@@ -632,56 +659,71 @@ function StatusWidget({ w, h }: WidgetProps) {
   const local = models.filter((m) => m.provider === "ollama").length;
   const cloud = models.length - local;
 
-  const voiceRow: [LucideIcon, string, string, string, string] =
+  const voice = (value: string, sub: string, dot: string): StatRow => ({
+    icon: Mic, label: "Voice", value, sub, dot, href: "/voice",
+  });
+  const voiceRow: StatRow =
     // Review F7 — voice-io not deployed (macOS/dev installs) is not a
     // fault: render a quiet em-dash row, never a permanent red.
     voiceUnavailable
-      ? [Mic, "Voice", "—", "not available", "var(--color-label-quaternary)"]
+      ? voice("—", "not available", "var(--color-label-quaternary)")
       : voiceState == null
-        ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
+        ? voice("—", "checking…", "var(--color-label-quaternary)")
         : // WARP-1599 — an admin switched voice off: a deliberate,
           // persisted silence, so the row stays quiet grey and says so
           // rather than reporting on a pipeline that isn't running.
           voiceState.kind === "off"
-          ? [Mic, "Voice", "Off", "not listening", "var(--color-label-quaternary)"]
+          ? voice("Off", "not listening", "var(--color-label-quaternary)")
           : voiceState.kind === "calibrated"
-            ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+            ? voice("Calibrated", "wake word ready", "var(--success)")
             : voiceState.kind === "attention"
-              ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+              ? voice("Attention", "needs attention", "var(--color-system-orange)")
               : voiceState.kind === "broken"
-                ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
-                : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
+                ? voice("Not working", "microphone not working", "var(--color-system-red)")
+                : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
-  const stats: [LucideIcon, string, string, string, string][] = [
-    [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],
-    [Video, "Cameras", totalCameras ? String(totalCameras) : "—", totalCameras ? "live feeds" : "none yet", "var(--brand)"],
-    [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart devices online", "var(--success)"],
-    [Cpu, "AI models", models.length ? String(models.length) : "—", `${local} local · ${cloud} cloud`, "var(--success)"],
+  const stats: StatRow[] = [
+    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
+    { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
+    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "smart devices online", dot: "var(--success)", href: "/devices" },
+    { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     voiceRow,
   ];
 
   if (w <= 2 || h <= 2) {
     return (
       <div className="w-stat-list">
-        {stats.map(([Ic, e, v, , dot]) => (
-          <div className="w-stat-row" key={e}>
+        {stats.map(({ icon: Ic, label, value, dot, href }) => (
+          <button
+            className="w-stat-row"
+            key={label}
+            type="button"
+            onClick={() => router.push(href)}
+            aria-label={`Open ${label}`}
+          >
             <span className="ico"><Ic size={14} /></span>
-            <span className="lbl">{e}</span>
+            <span className="lbl">{label}</span>
             <span className="dot" style={{ background: dot }} />
-            <span className="val">{v}</span>
-          </div>
+            <span className="val">{value}</span>
+          </button>
         ))}
       </div>
     );
   }
   return (
     <div className="w-stat">
-      {stats.map(([Ic, e, v, s, dot]) => (
-        <div className="w-stat-cell" key={e}>
-          <span className="e"><Ic size={12} />{e}</span>
-          <span className="v">{v}</span>
-          <span className="s"><span className="dot" style={{ background: dot }} />{s}</span>
-        </div>
+      {stats.map(({ icon: Ic, label, value, sub, dot, href }) => (
+        <button
+          className="w-stat-cell"
+          key={label}
+          type="button"
+          onClick={() => router.push(href)}
+          aria-label={`Open ${label}`}
+        >
+          <span className="e"><Ic size={12} />{label}</span>
+          <span className="v">{value}</span>
+          <span className="s"><span className="dot" style={{ background: dot }} />{sub}</span>
+        </button>
       ))}
     </div>
   );
@@ -814,6 +856,7 @@ const CAM_TINTS = [
   "linear-gradient(135deg,#1a1d27,#242a38)",
 ];
 function CamerasWidget({ w, h }: WidgetProps) {
+  const router = useRouter();
   const { cameras } = useCameras();
   const names = cameras.map((c) => c.displayName || c.name);
   const motionSet = new Set(
@@ -829,13 +872,20 @@ function CamerasWidget({ w, h }: WidgetProps) {
   return (
     <div className="w-cams" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
       {names.slice(0, n).map((nm, i) => (
-        <div className="w-cam" key={nm + i} style={{ background: CAM_TINTS[i % CAM_TINTS.length] }}>
+        <button
+          className="w-cam"
+          key={nm + i}
+          type="button"
+          style={{ background: CAM_TINTS[i % CAM_TINTS.length] }}
+          onClick={() => router.push("/cameras")}
+          aria-label={`Open ${nm} in Cameras`}
+        >
           <span className="rec" />
           <span className="ts">{ts}</span>
           <span className="lb">{nm}</span>
           {motionSet.has(nm) && <span className="mo">motion</span>}
           {tiny && names.length > 1 && i === 0 && <span className="cam-more">+{names.length - 1}</span>}
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -933,97 +983,343 @@ function TasksWidget() {
 }
 
 /* ─────────────────────────── Notes ───────────────────────────
- * Single-note scratchpad backed by localStorage. The save is debounced
- * (~500ms) and surfaced through a small status line so the autosave is
- * legible — "Saving…" while a write is pending, "Saved" once it lands —
- * instead of writing on every keystroke with zero feedback. "New note"
- * flushes the pending save and starts a fresh, empty note.
+ * Notes live on the box (`/api/notes`), many per user, each pinnable. The
+ * tile has two views: a list (pinned first, pin/delete per row) and an
+ * editor for the note you tapped. Editing autosaves on a ~500ms debounce
+ * with a legible status line — "Saving…" while a write is pending, "Saved"
+ * once it lands, "Not saved — retrying" if the box refused it — instead of
+ * writing on every keystroke with no feedback.
+ *
+ * Every failure path here is a data-loss path, because the box is now the
+ * only copy: a failed LIST says so rather than rendering the empty state, a
+ * failed SAVE keeps the text pending and keeps trying, and DELETE is
+ * confirm-gated.
+ *
+ * Before this, the tile was a single string in this browser's localStorage:
+ * unsynced, unpinnable, and wiped by "New note". That key is uploaded once
+ * (see `useLegacyNoteImport`) so nobody's existing note disappears.
  */
 const NOTES_KEY = "droplet-home-notes";
+const NOTES_IMPORTED_KEY = "droplet-home-notes-imported";
+/** Prefix of the in-flight-import marker written to `NOTES_IMPORTED_KEY`,
+ *  followed by the epoch-ms the claim was taken. */
+const NOTES_IMPORT_CLAIM = "pending:";
+/** How long a claim is honoured before another tab may take it over. Must
+ *  outlast apiFetch's 20s request timeout (so a slow-but-live upload is never
+ *  raced), and be short enough that a tab closed mid-upload doesn't strand the
+ *  note for the rest of the session. */
+const NOTES_IMPORT_CLAIM_TTL_MS = 30_000;
 const NOTES_SAVE_DEBOUNCE_MS = 500;
-type NotesSaveStatus = "idle" | "saving" | "saved";
+/** Gap before an autosave the box refused (asleep, Wi-Fi dropped) tries
+ *  again. Long enough not to hammer a box that's down; short enough that a
+ *  blip clears itself while the customer is still looking at the tile. */
+const NOTES_SAVE_RETRY_MS = 3000;
+/** Longest note name we render anywhere. */
+const NOTE_TITLE_MAX = 80;
+type NotesSaveStatus = "idle" | "saving" | "saved" | "error" | "conflict";
 
-export function NotesWidget() {
-  const [val, setVal] = useState("");
-  const [hydrated, setHydrated] = useState(false);
-  const [status, setStatus] = useState<NotesSaveStatus>("idle");
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Mirror of `val` + a pending-save flag for the unmount flush, which can't
-  // read the latest state through a stale `[]`-effect closure.
-  const valRef = useRef("");
-  const pendingRef = useRef(false);
+/** The first non-empty line names a note in the list; a brand-new one has none. */
+function noteTitle(n: Note): string {
+  const first = n.body.split("\n").find((l) => l.trim().length > 0)?.trim();
+  if (!first) return "Empty note";
+  // The list ellipsises in CSS, but the delete confirmation echoes this name
+  // as a monospace identifier and screen readers read it out of an aria-label
+  // — neither wants a 2000-character first line.
+  return first.length > NOTE_TITLE_MAX
+    ? `${first.slice(0, NOTE_TITLE_MAX).trimEnd()}…`
+    : first;
+}
 
-  const writeStorage = (next: string) => {
-    try {
-      window.localStorage.setItem(NOTES_KEY, next);
-    } catch {
-      /* ignore — private-mode / quota; the in-memory note still works */
-    }
-  };
-
-  // Persist `val` immediately and reflect the saved state. Used by both the
-  // debounced timer and the explicit "New note" flush so writes never race.
-  const flush = (next: string) => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    pendingRef.current = false;
-    writeStorage(next);
-    setStatus("saved");
-  };
-
+/** One-time lift of the old browser-local note onto the box. Runs once per
+ *  browser (guarded by its own localStorage flag) and only when there is
+ *  something to move — then clears the legacy key so it can't be re-imported
+ *  as a duplicate if the flag is lost.
+ *
+ *  The flag is CLAIMED before the upload, not after: localStorage is shared
+ *  across tabs with no lock, so two tabs opening Home together would both read
+ *  an empty flag and both POST, landing the customer's one old note on the box
+ *  twice. A tab that finds a fresh claim stands down; a stale one (the holder
+ *  was closed mid-upload) is taken over so the note is never stranded. */
+function useLegacyNoteImport(onImported: () => void) {
+  const ran = useRef(false);
   useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+    let legacy: string | null = null;
     try {
-      setVal(window.localStorage.getItem(NOTES_KEY) ?? "");
+      const flag = window.localStorage.getItem(NOTES_IMPORTED_KEY);
+      // Anything that isn't a claim means the import already happened.
+      if (flag && !flag.startsWith(NOTES_IMPORT_CLAIM)) return;
+      if (flag) {
+        const claimedAt = Number(flag.slice(NOTES_IMPORT_CLAIM.length));
+        if (Date.now() - claimedAt < NOTES_IMPORT_CLAIM_TTL_MS) return;
+      }
+      legacy = window.localStorage.getItem(NOTES_KEY);
+    } catch {
+      return; // private mode — nothing to import from
+    }
+    const body = legacy?.trim();
+    if (!body) {
+      try {
+        window.localStorage.setItem(NOTES_IMPORTED_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        NOTES_IMPORTED_KEY,
+        `${NOTES_IMPORT_CLAIM}${Date.now()}`,
+      );
     } catch {
       /* ignore */
     }
-    setHydrated(true);
+    void createNote({ body })
+      .then(() => {
+        try {
+          window.localStorage.setItem(NOTES_IMPORTED_KEY, "1");
+          window.localStorage.removeItem(NOTES_KEY);
+        } catch {
+          /* ignore */
+        }
+        onImported();
+      })
+      // Offline / server down: drop our claim and leave the legacy key alone
+      // so the next mount tries again. Never drop the customer's text.
+      .catch(() => {
+        try {
+          const held = window.localStorage.getItem(NOTES_IMPORTED_KEY);
+          if (held?.startsWith(NOTES_IMPORT_CLAIM)) {
+            window.localStorage.removeItem(NOTES_IMPORTED_KEY);
+          }
+        } catch {
+          /* ignore */
+        }
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
+/** The editor half of the tile: one note's body, debounced-autosaved. */
+function NoteEditor({
+  note,
+  onClose,
+  onSaved,
+}: {
+  note: Note;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [val, setVal] = useState(note.body);
+  const [status, setStatus] = useState<NotesSaveStatus>("idle");
+  // The note as the box holds it, once a save has been refused for being stale.
+  // Non-null means we are showing the customer both versions and letting them
+  // choose — we never pick for them.
+  const [conflict, setConflict] = useState<Note | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of `val` + a pending-save flag for the unmount flush, which can't
+  // read the latest state through a stale `[]`-effect closure.
+  const valRef = useRef(note.body);
+  const pendingRef = useRef(false);
+  // The version every write is based on. Advanced from each save's response, so
+  // a run of edits doesn't conflict with itself.
+  const baseRef = useRef(note.updatedAt);
+  // One PATCH at a time. Without this a keystroke landing mid-request queues a
+  // second write carrying the same base version — the two race, and with a
+  // precondition the loser is dropped rather than merged.
+  const inFlightRef = useRef(false);
+  // Set when we write the textarea ourselves (server refresh, conflict
+  // resolution) so the autosave effect doesn't read it back as typing.
+  const programmaticRef = useRef(false);
+  // False once the editor is gone, so a request that fails after unmount can't
+  // schedule a retry against a component nobody is looking at.
+  const aliveRef = useRef(true);
+
+  // Write the textarea ourselves — a server refresh or a resolved conflict —
+  // without the autosave effect reading it back as typing.
+  //
+  // The flag is only raised for a value that actually differs. React bails out
+  // of a `setVal` to the string already held, so the `[val]` effect never
+  // re-runs to lower the flag, and a flag left raised swallows the customer's
+  // NEXT keystroke instead. That is reachable without any conflict at all:
+  // pinning a note from another device bumps `updatedAt` (Prisma `@updatedAt`)
+  // while leaving the body identical, which lands here with nothing to change.
+  const writeTextarea = useCallback((next: string) => {
+    if (valRef.current !== next) programmaticRef.current = true;
+    valRef.current = next;
+    setVal(next);
   }, []);
 
-  // Debounced autosave: mark "Saving…" on each edit, then commit once the
-  // user pauses. The initial hydration pass is skipped so we don't flash
-  // a status on first paint.
+  // Annotated because the retry below references `save` from inside its own
+  // initializer, which tsc otherwise can't type.
+  const save: (next: string) => void = useCallback(
+    (next: string) => {
+      // Already writing: leave the edit pending and let the in-flight save
+      // pick it up when it settles, with a base version that's actually fresh.
+      if (inFlightRef.current) {
+        pendingRef.current = true;
+        return;
+      }
+      pendingRef.current = false;
+      inFlightRef.current = true;
+      void updateNote(note.id, { body: next, expectedUpdatedAt: baseRef.current })
+        .then(({ note: saved }) => {
+          inFlightRef.current = false;
+          baseRef.current = saved.updatedAt;
+          // A keystroke arrived while this was in flight — write it now. Done
+          // even after unmount: the edit matters more than the status line.
+          if (pendingRef.current) {
+            save(valRef.current);
+            return;
+          }
+          if (!aliveRef.current) return;
+          setStatus("saved");
+          onSaved();
+        })
+        .catch((err: unknown) => {
+          inFlightRef.current = false;
+          // Refused as stale: the note changed somewhere else. Retrying would
+          // just 409 forever, and picking a winner is exactly the data loss
+          // this precondition exists to stop — so stop and ask.
+          const theirs = conflictingNote(err);
+          if (isNoteConflict(err)) {
+            pendingRef.current = false;
+            if (!aliveRef.current) return;
+            if (theirs) setConflict(theirs);
+            setStatus("conflict");
+            return;
+          }
+          // Any other refusal must never eat the typing. Put the edit back in
+          // the pending slot so the unmount flush still carries it, say so on
+          // the status line instead of silently reading "idle", and keep
+          // trying while the editor is open — notes live only on the box now,
+          // so there is no localStorage copy left to recover from.
+          pendingRef.current = true;
+          if (!aliveRef.current) return;
+          setStatus("error");
+          timerRef.current = setTimeout(
+            () => save(valRef.current),
+            NOTES_SAVE_RETRY_MS,
+          );
+        });
+    },
+    [note.id, onSaved],
+  );
+
+  // Debounced autosave. The first render is skipped (val === the note we were
+  // handed) so opening a note doesn't flash a status or write it back.
   useEffect(() => {
     valRef.current = val;
-    if (!hydrated) return;
+    // We wrote this, the customer didn't — don't save it straight back.
+    if (programmaticRef.current) {
+      programmaticRef.current = false;
+      return;
+    }
+    // An unresolved conflict owns the note: autosaving through it would be the
+    // silent overwrite all of this exists to prevent.
+    if (conflict) return;
+    if (val === note.body && !pendingRef.current) return;
     pendingRef.current = true;
     setStatus("saving");
-    timerRef.current = setTimeout(() => {
-      flush(val);
-    }, NOTES_SAVE_DEBOUNCE_MS);
+    timerRef.current = setTimeout(() => save(val), NOTES_SAVE_DEBOUNCE_MS);
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [val, hydrated]);
+  }, [val]);
 
-  // Unmount-only: if a debounced save is still in flight when the widget goes
-  // away (navigate off Home, remove the tile), commit the latest text so we
-  // don't drop up to ~500ms of typing — the old write-every-keystroke code
-  // never lost data on unmount.
+  // The note moved on the box (another device, another tab) while we were
+  // sitting here with nothing half-typed — take their version. This is the
+  // common case behind the conflict, closed before it can become one.
   useEffect(() => {
+    if (pendingRef.current || inFlightRef.current || conflict) return;
+    // Only ever forward. SWR can hand back a cached row older than the version
+    // we just wrote (or just adopted), and rewinding the textarea to it would
+    // itself be the data loss.
+    const seen = new Date(note.updatedAt).getTime();
+    if (!(seen > new Date(baseRef.current).getTime())) return;
+    baseRef.current = note.updatedAt;
+    writeTextarea(note.body);
+  }, [note.updatedAt, note.body, conflict, writeTextarea]);
+
+  // Unmount-only: commit a still-pending edit so navigating off Home (or
+  // closing the editor) never drops up to ~500ms of typing. The rejection is
+  // swallowed — there is no surface left to report it on, and an unhandled
+  // rejection here would surface as a console error on every offline close.
+  useEffect(() => {
+    // Re-armed on mount, not just initialised: React StrictMode (on by default
+    // in dev) mounts → unmounts → remounts, and a ref survives that round trip.
+    // Without this the editor would come back permanently "dead" and stop
+    // reporting or retrying failed saves for the rest of the dev session.
+    aliveRef.current = true;
     return () => {
-      if (pendingRef.current) writeStorage(valRef.current);
+      aliveRef.current = false;
+      // Not while a save is in flight: that one's settle handler already
+      // carries the pending edit, and a second PATCH here would race it with a
+      // base version we know is about to be stale.
+      if (pendingRef.current && !inFlightRef.current) {
+        void updateNote(note.id, {
+          body: valRef.current,
+          expectedUpdatedAt: baseRef.current,
+        }).catch(() => {});
+      }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const newNote = () => {
-    // Flush first so the (now empty) note is committed — never silently
-    // discard the in-flight save.
-    flush("");
-    setVal("");
+  // Both versions are the customer's own writing — neither is "wrong", so the
+  // choice is theirs. Either way we rebase onto what the box holds now, so the
+  // next keystroke isn't refused all over again.
+  const keepMine = () => {
+    if (!conflict) return;
+    baseRef.current = conflict.updatedAt;
+    setConflict(null);
+    pendingRef.current = true;
+    setStatus("saving");
+    save(valRef.current);
+  };
+  const takeTheirs = () => {
+    if (!conflict) return;
+    baseRef.current = conflict.updatedAt;
+    pendingRef.current = false;
+    writeTextarea(conflict.body);
+    setConflict(null);
+    setStatus("idle");
+    onSaved();
   };
 
   return (
     <div className="w-notes-wrap">
+      {conflict && (
+        <div className="w-notes-conflict" role="alert">
+          <span className="w-notes-conflict-msg">
+            <AlertTriangle size={12} aria-hidden />
+            <span>
+              This note changed on another device. Keep the version you typed
+              here, or open theirs — nothing is saved until you pick.
+            </span>
+          </span>
+          <span className="w-notes-conflict-acts">
+            <button type="button" onClick={keepMine}>
+              Keep mine
+            </button>
+            <button type="button" onClick={takeTheirs}>
+              Use theirs
+            </button>
+          </span>
+        </div>
+      )}
       <textarea
         className="w-notes"
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        aria-label="Notes"
+        aria-label="Note"
         placeholder="Jot something down…"
+        // Same ceiling the orchestrator enforces: stop the keystroke rather
+        // than let the autosave take a 400 the customer can't act on.
+        maxLength={NOTE_MAX_BODY}
+        autoFocus
       />
       <div className="w-notes-bar">
         <span
@@ -1032,17 +1328,153 @@ export function NotesWidget() {
           aria-live="polite"
           data-state={status}
         >
-          {status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}
+          {status === "saving"
+            ? "Saving…"
+            : status === "saved"
+              ? "Saved"
+              : status === "error"
+                ? "Not saved — retrying"
+                : status === "conflict"
+                  ? "Not saved — changed elsewhere"
+                  : ""}
         </span>
-        <button
-          className="w-notes-new"
-          type="button"
-          onClick={newNote}
-        >
+        <button className="w-notes-new" type="button" onClick={onClose}>
+          <ChevronLeft size={13} />
+          All notes
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function NotesWidget() {
+  const { notes, error, isLoading, refresh } = useNotes();
+  const [openId, setOpenId] = useState<string | null>(null);
+  // Delete-confirm state + the row button that opened it, so focus restores
+  // there on close — same pattern as CoverageExtendersPanel's remove confirm.
+  const [confirmDelete, setConfirmDelete] = useState<Note | null>(null);
+  const deleteTriggerRef = useRef<HTMLElement | null>(null);
+  useLegacyNoteImport(() => void refresh());
+
+  const open = notes.find((n) => n.id === openId) ?? null;
+  // The note was deleted in another tab while open — fall back to the list
+  // rather than editing a row that no longer exists.
+  useEffect(() => {
+    if (openId && !isLoading && !open) setOpenId(null);
+  }, [openId, isLoading, open]);
+
+  const addNote = async () => {
+    const { note } = await createNote({ body: "" });
+    await refresh();
+    setOpenId(note.id);
+  };
+
+  const togglePin = async (n: Note) => {
+    await updateNote(n.id, { pinned: !n.pinned });
+    await refresh();
+  };
+
+  const remove = async (n: Note) => {
+    await deleteNote(n.id);
+    if (openId === n.id) setOpenId(null);
+    await refresh();
+  };
+
+  if (open) {
+    return (
+      <NoteEditor
+        note={open}
+        onClose={() => setOpenId(null)}
+        onSaved={() => void refresh()}
+      />
+    );
+  }
+
+  return (
+    <div className="w-notes-wrap">
+      <div className="w-note-list">
+        {/* A failed load is NOT an empty account. Notes no longer have a
+            localStorage copy behind them, so rendering "No notes yet" over a
+            dead fetch reads as "the migration ate my notes". Branch on the
+            error first and say what actually happened. */}
+        {error ? (
+          <WEmpty>
+            <span className="w-notes-err" role="alert">
+              <AlertTriangle size={12} aria-hidden />
+              <span>{translateError(error, "notes")}</span>
+            </span>
+          </WEmpty>
+        ) : notes.length === 0 ? (
+          <WEmpty>{isLoading ? "Loading notes…" : "No notes yet"}</WEmpty>
+        ) : (
+          notes.map((n) => {
+            const title = noteTitle(n);
+            return (
+              <div className={"w-note" + (n.pinned ? " pinned" : "")} key={n.id}>
+                <button
+                  className="w-note-open"
+                  type="button"
+                  onClick={() => setOpenId(n.id)}
+                >
+                  {n.pinned && <Pin size={11} className="pin" aria-hidden />}
+                  <span className="nm">{title}</span>
+                </button>
+                <button
+                  className="w-note-act"
+                  type="button"
+                  onClick={() => void togglePin(n)}
+                  aria-label={n.pinned ? `Unpin ${title}` : `Pin ${title}`}
+                  aria-pressed={n.pinned}
+                >
+                  {n.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+                </button>
+                <button
+                  className="w-note-act"
+                  type="button"
+                  onClick={(e) => {
+                    deleteTriggerRef.current = e.currentTarget;
+                    setConfirmDelete(n);
+                  }}
+                  aria-label={`Delete ${title}`}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })
+        )}
+      </div>
+      <div className="w-notes-bar">
+        <span className="w-notes-status">
+          {notes.some((n) => n.pinned)
+            ? `${notes.filter((n) => n.pinned).length} pinned`
+            : ""}
+        </span>
+        <button className="w-notes-new" type="button" onClick={() => void addNote()}>
           <FilePlus size={13} />
           New note
         </button>
       </div>
+
+      {/* Delete is irreversible and its 44px target sits next to Pin at the
+          right edge of a scrollable list — on a phone a flick-scroll that
+          lands as a tap would destroy the note, and there is no localStorage
+          copy left to recover it from. Same ConfirmDialog gate every other
+          destructive action in the dashboard uses. */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        triggerRef={deleteTriggerRef}
+        title="Delete this note?"
+        description="The note will be removed from your Droplet and from every device you're signed in on. This can't be undone."
+        confirmLabel="Delete"
+        cancelLabel="Keep it"
+        variant="destructive"
+        confirmedIdentifier={confirmDelete ? noteTitle(confirmDelete) : undefined}
+        onConfirm={async () => {
+          if (confirmDelete) await remove(confirmDelete);
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

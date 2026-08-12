@@ -1340,6 +1340,30 @@ model ScheduleEvent {
   @@index([occurredAt])
 }
 
+// ── Notes ──
+//
+// The Home "Notes" tile used to keep a single string in the browser's
+// localStorage: per-browser, unsynced, and wiped by "New note". Notes now live
+// on the box like every other piece of customer data — many per user, each
+// pinnable, so the pinned ones can surface on Home from any device.
+//
+// `pinned` is an explicit column, not derived from ordering or a magic
+// position (CLAUDE.md — no guessing from absence).
+
+model Note {
+  id        String   @id @default(uuid())
+  userId    String // Nextcloud username — the note's owner
+  body      String
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Home reads "this user's pinned notes, newest first"; the notes surface
+  // reads "this user's notes, pinned first, newest first". One index serves
+  // both.
+  @@index([userId, pinned, updatedAt])
+}
+
 // ── Calendar / Reminders / Notifications (PR #2) ──
 //
 // One canonical calendar per user lives in CalendarEvent. External calendars
