@@ -41,6 +41,11 @@ const DOMAINS: ErrorDomain[] = [
   "projects",
   "device",
   "notes",
+  // WARP-1914 — the Files-page search bar's three modes. Narrow domains so
+  // a failed SEARCH never renders the file-LOADING fallback.
+  "search-name",
+  "search-keyword",
+  "search-semantic",
   "generic",
 ];
 
@@ -666,5 +671,70 @@ describe("translateError — projects domain (WARP-1154/1155)", () => {
       expect(result, code).not.toMatch(/[a-z]+_[a-z]+/);
       expect(result.length, code).toBeGreaterThan(0);
     }
+  });
+});
+
+// WARP-1914 — the Files-page search bar's three modes (Name / Keyword /
+// Semantic) used to translate every failure through the "files" domain, so a
+// broken semantic stack rendered the file-LOADING fallback ("We couldn't load
+// those files right now. Try again in a moment.") — the QA-reported generic
+// banner. The dedicated search domains must (1) never produce the file-loading
+// copy, (2) name the failing mode so the user can switch to one that works,
+// and (3) map the orchestrator's stable `semantic_unavailable` wire code.
+describe("translateError — search domains (WARP-1914)", () => {
+  const FILE_LOADING_COPY = translateError(
+    { code: "TOTALLY_UNKNOWN_CODE" },
+    "files",
+  );
+
+  it("never renders the file-loading copy for ANY search failure shape, in any mode", () => {
+    const shapes: unknown[] = [
+      null,
+      {},
+      new Error("boom"),
+      { status: 503, code: "semantic_unavailable", message: "Embedding service unavailable" },
+      { status: 500, message: "Internal Server Error" },
+    ];
+    for (const domain of ["search-name", "search-keyword", "search-semantic"] as const) {
+      for (const err of shapes) {
+        const result = translateError(err, domain);
+        expect(result, `${domain} ${JSON.stringify(err)}`).not.toBe(FILE_LOADING_COPY);
+        expect(result.toLowerCase(), `${domain} ${JSON.stringify(err)}`).not.toContain(
+          "load those files",
+        );
+      }
+    }
+  });
+
+  it("maps the semantic_unavailable wire code to copy naming Semantic search and the modes that still work", () => {
+    const copy = translateError(
+      {
+        code: "semantic_unavailable",
+        status: 503,
+        message: "AI gateway not available for semantic search",
+      },
+      "search-semantic",
+    );
+    expect(copy.toLowerCase()).toContain("semantic search");
+    expect(copy).not.toContain("semantic_unavailable");
+    expect(copy.toLowerCase()).toMatch(/name|keyword/);
+  });
+
+  it("maps a bare 503/502 in search-semantic (older orchestrator, no wire code) to the same semantic copy", () => {
+    for (const status of [503, 502]) {
+      const copy = translateError({ status }, "search-semantic");
+      expect(copy.toLowerCase(), `status=${status}`).toContain("semantic search");
+    }
+  });
+
+  it("search-keyword fallback names Keyword search, not file loading", () => {
+    const copy = translateError({ status: 500 }, "search-keyword");
+    expect(copy.toLowerCase()).toContain("keyword search");
+  });
+
+  it("search-name fallback talks about searching your files", () => {
+    const copy = translateError({ status: 500 }, "search-name");
+    expect(copy.toLowerCase()).toContain("search");
+    expect(copy.toLowerCase()).not.toContain("load those files");
   });
 });

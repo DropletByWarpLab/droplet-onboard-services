@@ -3676,30 +3676,55 @@ export function createFilesRouter(
       // Lazy-import the gRPC embedding function. It's optional — if gRPC
       // isn't available (e.g. ai-gateway down), we return a helpful error
       // rather than a generic 500.
+      //
+      // WARP-1914: every semantic-unavailable answer carries the stable wire
+      // code `semantic_unavailable`. The dashboard's translator
+      // (`translateError`) never surfaces `err.message`, so without a
+      // machine-readable code these specific errors all flattened into the
+      // generic "We couldn't load those files right now" banner.
       let embedVec: number[];
       try {
-        const { grpcEmbedText, isGrpcAvailable } = await import(
+        const { grpcEmbedText, initGrpcClient } = await import(
           "../services/ai-gateway.grpc-client.js"
         );
-        if (!isGrpcAvailable()) {
-          res.status(503).json({ error: "AI gateway not available for semantic search" });
+        // WARP-1914 root cause: nothing at runtime ever called
+        // `initGrpcClient()`, so `isGrpcAvailable()` reported false on every
+        // box and EVERY semantic/hybrid query 503'd even with a healthy
+        // ai-gateway. Initialize on demand instead — idempotent: the first
+        // call loads the proto and creates the (lazily-connecting) channel;
+        // subsequent calls return the cached availability.
+        const available = await initGrpcClient();
+        if (!available) {
+          res.status(503).json({
+            error: "AI gateway not available for semantic search",
+            code: "semantic_unavailable",
+          });
           return;
         }
         const vectors = await grpcEmbedText([q]);
         if (!vectors || vectors.length === 0 || !Array.isArray(vectors[0])) {
-          res.status(502).json({ error: "Embedding service returned no vectors" });
+          res.status(502).json({
+            error: "Embedding service returned no vectors",
+            code: "semantic_unavailable",
+          });
           return;
         }
         embedVec = vectors[0];
         // Validate every element is a finite number — a buggy/compromised gRPC
         // response with NaN/Infinity/strings would cause a Postgres cast error.
         if (!embedVec.every((v) => typeof v === "number" && Number.isFinite(v))) {
-          res.status(502).json({ error: "Embedding service returned invalid vector" });
+          res.status(502).json({
+            error: "Embedding service returned invalid vector",
+            code: "semantic_unavailable",
+          });
           return;
         }
       } catch (err) {
         logger.warn({ err }, "Semantic search: embedding failed");
-        res.status(503).json({ error: "Embedding service unavailable" });
+        res.status(503).json({
+          error: "Embedding service unavailable",
+          code: "semantic_unavailable",
+        });
         return;
       }
 
@@ -3772,6 +3797,7 @@ export function createFilesRouter(
         logger.warn({ err }, "Semantic search: database error (pgvector?)");
         res.status(503).json({
           error: "Semantic search is not available. The pgvector extension may not be installed.",
+          code: "semantic_unavailable",
         });
         return;
       }
@@ -3807,15 +3833,17 @@ export function createFilesRouter(
       // `checkSpaceAccess`).
       const { corpora: searchUserIds } = await deptSearchCorpora(req, prisma, user);
 
-      // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
-      // which reflects the latest init attempt; a hot reload from "down"
-      // to "up" lands on the next probe without restart.
+      // Probe gRPC. WARP-1914: initialize on demand — nothing at startup
+      // ever called `initGrpcClient()`, so the never-set availability flag
+      // reported "gateway down" forever and the semantic readiness pill was
+      // red on every box. `initGrpcClient()` is idempotent: first call does
+      // the real init, later calls return the cached availability.
       let gatewayHealthy = false;
       try {
-        const { isGrpcAvailable } = await import(
+        const { initGrpcClient } = await import(
           "../services/ai-gateway.grpc-client.js"
         );
-        gatewayHealthy = isGrpcAvailable();
+        gatewayHealthy = await initGrpcClient();
       } catch {
         gatewayHealthy = false;
       }

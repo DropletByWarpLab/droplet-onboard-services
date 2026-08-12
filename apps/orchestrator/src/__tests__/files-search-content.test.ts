@@ -47,14 +47,16 @@ vi.mock("../config.js", () => ({
 // ai-gateway gRPC client. `grpcEmbedText` + `isGrpcAvailable` are the two
 // exports the route touches.
 // ─────────────────────────────────────────────────────────────────────────
-const { grpcEmbedSpy, isGrpcAvailableSpy } = vi.hoisted(() => ({
+const { grpcEmbedSpy, isGrpcAvailableSpy, initGrpcClientSpy } = vi.hoisted(() => ({
   grpcEmbedSpy: vi.fn(),
   isGrpcAvailableSpy: vi.fn(),
+  initGrpcClientSpy: vi.fn(),
 }));
 
 vi.mock("../services/ai-gateway.grpc-client.js", () => ({
   grpcEmbedText: (...args: unknown[]) => grpcEmbedSpy(...args),
   isGrpcAvailable: (...args: unknown[]) => isGrpcAvailableSpy(...args),
+  initGrpcClient: (...args: unknown[]) => initGrpcClientSpy(...args),
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -216,6 +218,11 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     cacheGetSpy.mockResolvedValue(null);
     cacheSetSpy.mockResolvedValue(undefined);
     isGrpcAvailableSpy.mockReturnValue(true);
+    // WARP-1914: the route lazily initializes the client. Mirror the real
+    // contract — initGrpcClient() resolves to the availability state — so
+    // "gateway down" specs keep driving both seams with one spy.
+    initGrpcClientSpy.mockReset();
+    initGrpcClientSpy.mockImplementation(async () => isGrpcAvailableSpy());
     // Default: no name matches — keep existing content-only specs unchanged.
     ncSearchFilesSpy.mockResolvedValue([]);
     // Default: caller (dev/owner) is visible into NO active departments →
@@ -684,6 +691,105 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     const params = searchByLexicalSpy.mock.calls[0][1];
     expect(params.additionalUserIds).toEqual([]);
   });
+
+  // ── WARP-1914: semantic must initialize the gRPC client on demand ────────
+  //
+  // The root cause of "every semantic query 503s": `initGrpcClient()` was
+  // never called anywhere at runtime, so `isGrpcAvailable()` reported false
+  // forever and the route answered 503 even with a healthy ai-gateway. The
+  // route must lazily initialize (idempotent) instead of only reading the
+  // never-set availability flag.
+
+  it("semantic mode initializes the gRPC client on demand — a cold orchestrator still serves semantic search (WARP-1914)", async () => {
+    // Cold client: never initialized → isGrpcAvailable() is false…
+    isGrpcAvailableSpy.mockReturnValue(false);
+    // …but an on-demand init succeeds (gateway IS reachable).
+    initGrpcClientSpy.mockResolvedValue(true);
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockResolvedValueOnce([
+      { path: "/Docs/Dental Hygenists/plan.txt", score: 0.93, text: "dental hygiene plan" },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=dental&mode=semantic",
+    );
+
+    expect(initGrpcClientSpy).toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].path).toBe("/Docs/Dental Hygenists/plan.txt");
+  });
+
+  it("hybrid mode initializes the gRPC client on demand too (WARP-1914)", async () => {
+    isGrpcAvailableSpy.mockReturnValue(false);
+    initGrpcClientSpy.mockResolvedValue(true);
+    grpcEmbedSpy.mockResolvedValueOnce([[0.4, 0.5, 0.6]]);
+    searchHybridSpy.mockResolvedValueOnce([
+      { path: "/Docs/h.txt", score: 0.7, snippet: "h", source: "nextcloud", chunkIdx: 0 },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=hybrid&mode=hybrid",
+    );
+
+    expect(initGrpcClientSpy).toHaveBeenCalled();
+    expect(res.status).toBe(200);
+  });
+
+  // ── WARP-1914: semantic failures carry a stable wire code ────────────────
+  //
+  // The dashboard's translator (`translateError`) NEVER surfaces
+  // `err.message`, so without a machine-readable `code` every semantic
+  // failure flattened into the generic "We couldn't load those files right
+  // now" banner. Each semantic-unavailable answer must carry
+  // `code: "semantic_unavailable"` for the client to dispatch on.
+
+  it("answers 503 + code semantic_unavailable when the gateway init fails (WARP-1914)", async () => {
+    isGrpcAvailableSpy.mockReturnValue(false);
+    initGrpcClientSpy.mockResolvedValue(false);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=dental&mode=semantic",
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("semantic_unavailable");
+  });
+
+  it("answers 503 + code semantic_unavailable when the embed call rejects (WARP-1914)", async () => {
+    grpcEmbedSpy.mockRejectedValueOnce(new Error("UNAVAILABLE: connect failed"));
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=dental&mode=semantic",
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("semantic_unavailable");
+  });
+
+  it("answers 502 + code semantic_unavailable when the embedder returns no vectors (WARP-1914)", async () => {
+    grpcEmbedSpy.mockResolvedValueOnce([]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=dental&mode=semantic",
+    );
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("semantic_unavailable");
+  });
+
+  it("answers 503 + code semantic_unavailable when pgvector is missing (WARP-1914)", async () => {
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockRejectedValueOnce(
+      new Error('type "vector" does not exist'),
+    );
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=dental&mode=semantic",
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("semantic_unavailable");
+  });
 });
 
 // ── WARP-1139/WARP-1140: GET /api/files/search/status honesty fields ──────
@@ -706,6 +812,9 @@ describe("GET /api/files/search/status — explicit indexer state (WARP-1139)", 
     cacheGetSpy.mockResolvedValue(null);
     cacheSetSpy.mockResolvedValue(undefined);
     isGrpcAvailableSpy.mockReturnValue(true);
+    // WARP-1914: the status probe lazily initializes the client too.
+    initGrpcClientSpy.mockReset();
+    initGrpcClientSpy.mockImplementation(async () => isGrpcAvailableSpy());
     departmentFindManyMock.mockResolvedValue([]);
     departmentMembershipFindManyMock.mockResolvedValue([]);
     resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
@@ -802,5 +911,24 @@ describe("GET /api/files/search/status — explicit indexer state (WARP-1139)", 
       "dev",
       "__dept_fin-uuid__",
     ]);
+  });
+
+  // ── WARP-1914: the status probe initializes the client on demand too ─────
+  // Without this, `gatewayHealthy` was false on every box that never ran
+  // `initGrpcClient()` (i.e. all of them), so the semantic readiness pill
+  // showed "AI gateway not reachable" even with a healthy gateway.
+  it("reports gatewayHealthy=true from an on-demand init when the client was never initialized (WARP-1914)", async () => {
+    isGrpcAvailableSpy.mockReturnValue(false); // cold client
+    initGrpcClientSpy.mockResolvedValue(true); // init succeeds
+    queryRawUnsafeMock
+      .mockResolvedValueOnce([{ count: BigInt(3), last: null }])
+      .mockResolvedValueOnce([]);
+
+    const res = await request(app).get("/api/files/search/status");
+
+    expect(res.status).toBe(200);
+    expect(initGrpcClientSpy).toHaveBeenCalled();
+    expect(res.body.gatewayHealthy).toBe(true);
+    expect(res.body.state).toBe("ready");
   });
 });

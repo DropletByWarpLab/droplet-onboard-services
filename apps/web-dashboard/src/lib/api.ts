@@ -5179,6 +5179,39 @@ export async function fetchRecents(limit = 50): Promise<FileEntryInfo[]> {
   return data.items ?? [];
 }
 
+/**
+ * WARP-1914 — error thrown by the Files-page search helpers on a non-2xx
+ * response. Carries the HTTP status plus the orchestrator's stable wire
+ * `code` (e.g. `semantic_unavailable`) so `translateError(err,
+ * "search-semantic")` can dispatch on structure. A plain `Error` here meant
+ * the translator — which never surfaces `err.message` — flattened every
+ * search failure into the files-domain fallback ("We couldn't load those
+ * files right now…"), the QA-reported generic banner. Mirrors
+ * `ShareRequestError` below.
+ */
+export class FileSearchError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "FileSearchError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function throwFileSearchError(res: Response, fallback: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: unknown;
+    code?: unknown;
+  };
+  throw new FileSearchError(
+    typeof body.error === "string" ? body.error : `${fallback}: ${res.status}`,
+    res.status,
+    typeof body.code === "string" ? body.code : undefined
+  );
+}
+
 export async function searchFiles(
   query: string,
   opts: { mime?: string; limit?: number } = {}
@@ -5188,8 +5221,7 @@ export async function searchFiles(
   if (opts.limit) params.set("limit", String(opts.limit));
   const res = await authFetch(`${BASE}/api/files/search?${params.toString()}`);
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Search failed: ${res.status}`);
+    await throwFileSearchError(res, "Search failed");
   }
   const data = await res.json();
   return data.items ?? [];
@@ -5358,13 +5390,10 @@ export async function searchFileContent(
     // WARP-1139: a 503 (AI gateway / pgvector down) used to return [] here,
     // which rendered as "No content matches" — a dishonest empty state that
     // masked a broken search stack. Surface it as an error instead.
-    if (res.status === 503) {
-      throw new Error(
-        "Content search is unavailable right now — the AI search stack may still be starting."
-      );
-    }
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Semantic search failed: ${res.status}`);
+    // WARP-1914: the error is STRUCTURED (status + wire code), because the
+    // friendly-copy translator discards `err.message` — a plain Error meant
+    // even this honest failure rendered as the generic files banner.
+    await throwFileSearchError(res, "Content search failed");
   }
   const data = await res.json();
   return data.results ?? [];

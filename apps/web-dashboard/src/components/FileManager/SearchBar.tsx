@@ -114,7 +114,17 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
         if (!cancelled) setContentItems(results);
       } catch (err) {
         if (!cancelled) {
-          setContentError(translateError(err, "files"));
+          // WARP-1914: per-mode domain, NOT "files" — the files fallback
+          // ("We couldn't load those files right now…") misdescribed a
+          // failed search as a browse hiccup and never named the broken
+          // mode. The api layer's FileSearchError carries status + the
+          // orchestrator's wire code (semantic_unavailable) to dispatch on.
+          setContentError(
+            translateError(
+              err,
+              mode === "semantic" ? "search-semantic" : "search-keyword"
+            )
+          );
           setContentItems([]);
         }
       } finally {
