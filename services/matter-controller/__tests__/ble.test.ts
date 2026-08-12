@@ -170,4 +170,69 @@ describe("registerBleAtProcessStart", () => {
     expect(env.deleteCalls).toHaveLength(1);
     expect(env.deleteCalls[0].instance).toBeInstanceOf(FakeNodeJsBle);
   });
+
+  // WARP-1939: presence is not power. On the live box, hci0 existed in
+  // /sys while the adapter sat unpowered (bluetoothd disabled, boot
+  // power unit not yet installed) — the sidecar claimed
+  // "BLE commissioning enabled" and then scanned a dead adapter
+  // forever, surfacing only as "No commissionable device was
+  // discovered" per commission. These pin the honest answer.
+  describe("adapter power probe (WARP-1939)", () => {
+    it("rolls back and degrades when the adapter is present but not powered", async () => {
+      const env = fakeEnv();
+      const result = await registerBleAtProcessStart({
+        hciId: 0,
+        environment: env,
+        adapterPresent: () => true,
+        adapterPowered: () => false,
+        loadModule: () => moduleWith(),
+      });
+      expect(result.bleCommissioning).toBe(false);
+      expect(result.reason).toMatch(/not powered/i);
+      // Actionable: the reason must point at the fix, not just the fact.
+      expect(result.reason).toMatch(/btmgmt power on|droplet-bt-power/i);
+      expect(env.registrations.size).toBe(0);
+      expect(env.deleteCalls).toHaveLength(1);
+      expect(env.deleteCalls[0].instance).toBeInstanceOf(FakeNodeJsBle);
+    });
+
+    it("stays enabled when the probe answers powered", async () => {
+      const env = fakeEnv();
+      const result = await registerBleAtProcessStart({
+        hciId: 0,
+        environment: env,
+        adapterPresent: () => true,
+        adapterPowered: () => true,
+        loadModule: () => moduleWith(),
+      });
+      expect(result.bleCommissioning).toBe(true);
+      expect(env.registrations.size).toBe(1);
+    });
+
+    it("treats an unavailable probe (undefined) as unknown and proceeds — never demotes on Windows/CI", async () => {
+      const env = fakeEnv();
+      const result = await registerBleAtProcessStart({
+        hciId: 0,
+        environment: env,
+        adapterPresent: () => true,
+        adapterPowered: () => undefined,
+        loadModule: () => moduleWith(),
+      });
+      expect(result.bleCommissioning).toBe(true);
+      expect(env.registrations.size).toBe(1);
+    });
+
+    it("probes with the configured HCI id", async () => {
+      const env = fakeEnv();
+      const adapterPowered = vi.fn().mockReturnValue(true);
+      await registerBleAtProcessStart({
+        hciId: 1,
+        environment: env,
+        adapterPresent: () => true,
+        adapterPowered,
+        loadModule: () => moduleWith(),
+      });
+      expect(adapterPowered).toHaveBeenCalledWith(1);
+    });
+  });
 });

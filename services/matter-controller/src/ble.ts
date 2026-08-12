@@ -72,6 +72,13 @@ export interface RegisterBleOptions {
   /** Test seam — defaults to the /sys/class/bluetooth/hci<N> probe. */
   adapterPresent?: (hciId: number) => boolean;
   /**
+   * Test seam — defaults to the raw-HCI `isDevUp()` probe
+   * (defaultAdapterPowered). Returns `undefined` when the probe itself
+   * is unavailable (non-Linux dev host, bindings missing) — that is
+   * treated as "unknown, proceed", never as unpowered.
+   */
+  adapterPowered?: (hciId: number) => boolean | undefined;
+  /**
    * Test seam — defaults to `require("@matter/nodejs-ble")`. require,
    * NOT dynamic import(): our dist is CJS, and import() would load the
    * package's ESM build, binding the ESM copy of @matter/general — the
@@ -90,6 +97,42 @@ export function defaultAdapterPresent(hciId: number): boolean {
   return fs.existsSync(`/sys/class/bluetooth/hci${hciId}`);
 }
 
+/**
+ * WARP-1939: is the adapter actually POWERED (hci device UP), not just
+ * present? Presence alone lied on the live box: with bluetoothd
+ * disabled, hci0 exists in /sys but comes up unpowered after boot, and
+ * noble then scans a dead adapter forever — every commission honestly
+ * reports "No commissionable device was discovered" while the log
+ * claims "BLE commissioning enabled". This probe closes that gap.
+ *
+ * Implementation rides the same @stoprocent/bluetooth-hci-socket
+ * binding noble itself uses (a guaranteed transitive dependency), so
+ * the answer can never disagree with what noble will see. Any probe
+ * failure returns `undefined` — unknown must never demote a working
+ * setup to IP-only (Windows dev installs, CI).
+ */
+export function defaultAdapterPowered(hciId: number): boolean | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const hciSocketModule = require("@stoprocent/bluetooth-hci-socket") as {
+      new (): {
+        bindRaw(devId: number): void;
+        isDevUp(): boolean;
+        stop?(): void;
+      };
+    };
+    const socket = new hciSocketModule();
+    try {
+      socket.bindRaw(hciId);
+      return socket.isDevUp();
+    } finally {
+      socket.stop?.();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 export async function registerBleAtProcessStart(
   options: RegisterBleOptions,
 ): Promise<BleRegistrationResult> {
@@ -97,6 +140,7 @@ export async function registerBleAtProcessStart(
     hciId,
     environment,
     adapterPresent = defaultAdapterPresent,
+    adapterPowered = defaultAdapterPowered,
     loadModule = () =>
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       require("@matter/nodejs-ble") as NodeJsBleModuleLike,
@@ -150,6 +194,24 @@ export async function registerBleAtProcessStart(
   } catch (err) {
     environment.delete(Ble, instance);
     const reason = `BLE native HCI stack failed to load (${(err as Error).message}) — registration rolled back, IP-only`;
+    logger.warn(reason);
+    return { bleCommissioning: false, reason };
+  }
+
+  // WARP-1939: presence is not power. hci0 exists in /sys the moment
+  // the driver binds, but with bluetoothd disabled (its LE connection
+  // management corrupts noble's raw-HCI connects — Unknown Connection
+  // Identifier on every attempt, proven live 2026-08-12) nothing powers
+  // the adapter unless droplet-bt-power.service ran. An unpowered
+  // adapter makes noble scan silently blind, so claiming
+  // bleCommissioning=true here would be a lie the operator can only
+  // detect by a bulb that is never found. Roll back and say why.
+  // `undefined` = probe unavailable (non-Linux dev, CI) — proceed.
+  if (adapterPowered(hciId) === false) {
+    environment.delete(Ble, instance);
+    const reason =
+      `Bluetooth adapter hci${hciId} is present but not powered — BLE commissioning disabled, IP-only. ` +
+      `Run 'btmgmt power on' or install droplet-bt-power.service (scripts/setup.sh Bluetooth prep, WARP-1939)`;
     logger.warn(reason);
     return { bleCommissioning: false, reason };
   }

@@ -165,8 +165,49 @@ export interface MatterControllerCoreOptions {
    * freshly-reset BLE-first device can never be discovered.
    */
   bleCommissioning?: boolean;
+  /**
+   * WARP-1939: extra attempts when a commission fails in the class of
+   * BLE-link errors proven transient on real hardware — the very first
+   * connect to a freshly-reset device can die at the link layer
+   * (`reason 0x08 (Connection Timeout)` ×3 inside matter.js, surfacing
+   * as "No device could be commissioned … 1 discovered") and the
+   * IMMEDIATE identical retry then succeeds end-to-end (live on the
+   * box, 2026-08-12). Only errors matching that transient class are
+   * retried — "No commissionable device was discovered" is NOT one
+   * (the device isn't advertising; retrying burns the operator's
+   * pairing window for nothing). Default 1 retry.
+   */
+  transientCommissionRetries?: number;
+  /** Delay between transient retries, ms. Test seam — default 2000. */
+  transientCommissionRetryDelayMs?: number;
   /** Test seam — defaults to constructing the real matter.js controller. */
   createController?: () => ControllerLike;
+}
+
+/**
+ * WARP-1939: the error class worth one automatic retry. Message-based
+ * by necessity — matter.js surfaces BLE link failures through several
+ * error types (DiscoveryAggregateError wrapping per-transport
+ * failures, plain Errors from the BLE channel), and the messages are
+ * the only stable discriminator across them:
+ *  - "No device could be commissioned (… started attempt(s) failed, N
+ *    discovered)" — the device WAS discovered; the attempt died on the
+ *    link. Retryable.
+ *  - "Unknown Connection Identifier" — HCI-level connect abort.
+ *  - "Timeout while connecting to peripheral" — BLE connect timeout.
+ * Deliberately NOT matched: "No commissionable device was discovered"
+ * (nothing is advertising — a retry cannot help and only delays the
+ * honest error past the device's pairing window).
+ */
+const TRANSIENT_COMMISSION_ERROR_PATTERNS = [
+  /No device could be commissioned/i,
+  /Unknown Connection Identifier/i,
+  /Timeout while connecting to peripheral/i,
+];
+
+export function isTransientCommissionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return TRANSIENT_COMMISSION_ERROR_PATTERNS.some((re) => re.test(message));
 }
 
 /**
@@ -759,7 +800,31 @@ export function createMatterControllerCore(
       }
 
       logger.info("Commissioning device with pairing code...");
-      const nodeId = await ctl.commissionNode(commissioningOptions);
+      // WARP-1939: one automatic retry for the transient BLE-link error
+      // class (see isTransientCommissionError). Everything else — wrong
+      // passcode, device not advertising, Wi-Fi provisioning failures —
+      // still throws on the first attempt, untranslated.
+      const maxAttempts = 1 + (options.transientCommissionRetries ?? 1);
+      const retryDelayMs = options.transientCommissionRetryDelayMs ?? 2000;
+      let nodeId: NodeId | bigint;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          nodeId = await ctl.commissionNode(commissioningOptions);
+          break;
+        } catch (err) {
+          if (attempt >= maxAttempts || !isTransientCommissionError(err)) {
+            throw err;
+          }
+          logger.warn(
+            "Transient BLE commissioning failure (attempt %d/%d): %s — retrying in %dms",
+            attempt,
+            maxAttempts,
+            err instanceof Error ? err.message : String(err),
+            retryDelayMs,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+      }
       logger.info("Device commissioned successfully: nodeId=%s", nodeId);
 
       await setupNodeListeners(nodeId as NodeId);

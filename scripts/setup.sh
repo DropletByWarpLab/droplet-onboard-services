@@ -261,9 +261,10 @@ if [ "$DRY_RUN" = "true" ]; then
   log_info "  Would load kernel modules: uvcvideo, videodev, videobuf2_v4l2"
   log_info "  Would persist modules for boot, install udev rules"
   log_info "  Would detect connected USB cameras"
-  log_info "  Would prep host Bluetooth for Matter BLE commissioning (WARP-850):"
-  log_info "                  install bluez + rfkill, enable bluetooth.service,"
-  log_info "                  rfkill unblock bluetooth, power on the adapter"
+  log_info "  Would prep host Bluetooth for Matter BLE commissioning (WARP-850/WARP-1939):"
+  log_info "                  install bluez + rfkill, DISABLE bluetooth.service,"
+  log_info "                  install droplet-bt-power.service, rfkill unblock,"
+  log_info "                  power on the adapter"
 
   log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
@@ -410,12 +411,13 @@ main() {
     install_camera_drivers
   fi
 
-  # WARP-850: host Bluetooth prep for the matter-controller sidecar's
-  # BLE commissioning (bluez + bluetoothd enabled/active + rfkill
-  # unblock + adapter powered). Idempotent and non-fatal — a box
-  # without Bluetooth still ships IP-only Matter. Rides the same
-  # --skip-drivers escape hatch as the camera modules (both are
-  # host-hardware prep).
+  # WARP-850/WARP-1939: host Bluetooth prep for the matter-controller
+  # sidecar's BLE commissioning (bluez tools installed, bluetoothd
+  # DISABLED — its LE connection management corrupts the sidecar's
+  # raw-HCI connects — droplet-bt-power.service owning adapter power,
+  # rfkill unblock). Idempotent and non-fatal — a box without Bluetooth
+  # still ships IP-only Matter. Rides the same --skip-drivers escape
+  # hatch as the camera modules (both are host-hardware prep).
   if [ "$SKIP_DRIVERS" = "true" ]; then
     log_info "Skipping Bluetooth host prep (--skip-drivers)"
     log_divider

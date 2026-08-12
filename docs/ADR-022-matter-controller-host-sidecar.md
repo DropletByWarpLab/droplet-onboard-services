@@ -1,8 +1,8 @@
 # ADR-022 — Matter controller as a host-network sidecar (WARP-850)
 
-**Status:** accepted  
+**Status:** accepted — amended 2026-08-12 (bluetoothd decision reversed, see Amendment)  
 **Date:** 2026-06-10  
-**Ticket:** [WARP-850](https://warp-lab.atlassian.net/browse/WARP-850)
+**Ticket:** [WARP-850](https://warp-lab.atlassian.net/browse/WARP-850), amendment [WARP-1939](https://warp-lab.atlassian.net/browse/WARP-1939)
 
 ## Context
 
@@ -91,13 +91,12 @@ Key properties:
   over SSE; the orchestrator bridges them into its existing EventEmitter so
   the dashboard-facing `/api/matter/devices/events` stream is unchanged.
 - **Host prep is setup.sh-owned.** `scripts/lib/bluetooth.sh` converges the
-  host to: bluez + rfkill installed, `bluetooth.service` enabled AND running,
-  radio rfkill-unblocked, adapter powered. bluetoothd **stays running**:
-  noble's central role uses raw-channel HCI sockets that coexist with
-  bluetoothd (the exclusivity constraint applies to HCI user-channel
-  consumers and to peripheral/advertising roles, which the Droplet never
-  uses — it is a commissioner only), while bluetoothd is what keeps the
-  adapter powered across reboots and rfkill events.
+  host to: bluez + rfkill installed, `bluetooth.service` **DISABLED**
+  (reversed by the 2026-08-12 amendment below — the original "stays
+  running" coexistence decision was falsified on hardware),
+  `droplet-bt-power.service` installed and enabled (owns adapter power at
+  boot, the one job bluetoothd was kept for), radio rfkill-unblocked,
+  adapter powered.
 
 ## Consequences
 
@@ -121,11 +120,44 @@ Key properties:
   if support sees flaky BLE pairing on busy networks, this is the first
   suspect. Mitigation if it materializes: a USB BT dongle on a separate
   radio (`DROPLET_MATTER_BLE_HCI_ID` selects the adapter).
-- **bluetoothd interference.** Kept-running bluetoothd is the documented-good
-  configuration for noble's central role, but a future BlueZ behavior change
-  (e.g. aggressive autonomous LE scanning) could contend with raw-channel
-  scans. The coexistence decision and its rationale live in
+- **bluetoothd interference.** ~~Kept-running bluetoothd is the
+  documented-good configuration for noble's central role, but a future BlueZ
+  behavior change (e.g. aggressive autonomous LE scanning) could contend with
+  raw-channel scans.~~ **This risk materialized — see the Amendment below.**
+  The coexistence decision and its rationale live in
   `scripts/lib/bluetooth.sh` so there is exactly one place to revisit.
+
+## Amendment 2026-08-12 — bluetoothd disabled (WARP-1939)
+
+The "bluetoothd stays running" half of this ADR is reversed. Evidence, live
+on the shipping single-box (Ubuntu 24.04, kernel 6.x, post-2026-08-04
+image):
+
+- With `bluetooth.service` active, **every** noble LE connect failed —
+  `Unknown Connection Identifier (0x2)` within ~2 s or a 2-minute connect
+  timeout — with kernel-side `hcon … sent 0 < count 1` and `ACL packet for
+  unknown connection handle` logged at the exact attempt timestamps.
+  Scanning kept working throughout: the conflict is confined to LE
+  *connection* state (which the kernel mgmt layer and bluetoothd also
+  manage — LL privacy / resolving-list state that raw-channel connects do
+  not participate in).
+- Host BlueZ (`bluetoothctl connect`) reached the same device fine — radio
+  and firmware healthy, isolating the fault to the two stacks sharing
+  connection state.
+- With bluetoothd stopped and the adapter re-powered, the same commission
+  succeeded end-to-end (nodeId 1, Wi-Fi provisioning + operational mDNS
+  over the production fabric).
+
+What replaces it: `droplet-bt-power.service` (installed by
+`scripts/lib/bluetooth.sh`) owns the one job bluetoothd was kept for —
+powering the adapter at boot. Two honesty guards ship with the reversal:
+the sidecar probes adapter *power* (not just presence) at start and
+reports `bleCommissioning: false` with an actionable reason when hci0 is
+present-but-unpowered (`defaultAdapterPowered`, `src/ble.ts`), and the
+commission path retries once on the transient BLE-link error class
+(`isTransientCommissionError`, `src/controller.ts`) — the first connect to
+a freshly-reset device can die at the link layer (`reason 0x08`) and the
+immediate retry then succeeds, also proven live.
 
 ## Non-goals
 
