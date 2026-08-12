@@ -4,8 +4,8 @@ import { useCallback, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import {
   readDroppedUploads,
-  uploadsFromFileList,
-  type DroppedUpload,
+  selectionFromFileList,
+  type DroppedSelection,
 } from "./FileManager/dropped-entries";
 
 interface UploadZoneProps {
@@ -14,8 +14,12 @@ interface UploadZoneProps {
    * FOLDER expands to its real tree ("Invoices/jan.pdf"); a flat drop or a
    * multi-select is just bare file names. The caller decides how to turn
    * that into mkdir + upload calls.
+   *
+   * Fires for EVERY drop, including one that yielded no files — the caller
+   * owns the copy, and a folder that turned out to be empty (or unreadable)
+   * still needs a word (WARP-1876 review).
    */
-  onUpload: (uploads: DroppedUpload[]) => void;
+  onUpload: (selection: DroppedSelection) => void | Promise<void>;
   children: React.ReactNode;
   /**
    * WARP-1267 — true inside a `reader`-right department/team library.
@@ -50,11 +54,21 @@ export function UploadZone({
     [disabled]
   );
 
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    dragCounter.current--;
-    if (dragCounter.current === 0) setIsDragging(false);
-  }, []);
+  const handleDragLeave = useCallback(
+    (e: React.DragEvent) => {
+      // Symmetry with `handleDragEnter`, which bails BEFORE it increments:
+      // an unguarded leave drove the counter permanently negative in a
+      // reader space, and once it was negative the overlay never cleared
+      // again — a page-sized dashed rectangle stuck over the whole surface
+      // (WARP-1876 review). The clamp covers the other way in: a drag that
+      // began outside the zone can leave it without ever entering it.
+      if (disabled) return;
+      e.preventDefault();
+      dragCounter.current = Math.max(0, dragCounter.current - 1);
+      if (dragCounter.current === 0) setIsDragging(false);
+    },
+    [disabled]
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -66,9 +80,11 @@ export function UploadZone({
       // is over the moment the pointer releases, and the tree walk below can
       // take a beat on a deep folder. Only the reporting is async.
       const { dataTransfer } = e;
-      void readDroppedUploads(dataTransfer).then((uploads) => {
-        if (uploads.length > 0) onUpload(uploads);
-      });
+      void readDroppedUploads(dataTransfer)
+        // The caller's handler is async and owns the toast, so a rejected
+        // run must not escape the drop path as an unhandled rejection.
+        .then((selection) => onUpload(selection))
+        .catch((err) => console.error("upload: drop failed", err));
     },
     [onUpload, disabled]
   );
@@ -128,7 +144,7 @@ export function UploadButton({
   disabled = false,
   title,
 }: {
-  onUpload: (uploads: DroppedUpload[]) => void;
+  onUpload: (selection: DroppedSelection) => void | Promise<void>;
   /** WARP-1267 — true inside a `reader`-right space; the tooltip carries
    *  the shipped reader-posture copy (design brief §2). */
   disabled?: boolean;
@@ -139,7 +155,9 @@ export function UploadButton({
 
   const pick = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0 && !disabled) {
-      onUpload(uploadsFromFileList(e.target.files));
+      void Promise.resolve(onUpload(selectionFromFileList(e.target.files))).catch((err) =>
+        console.error("upload: picker failed", err)
+      );
     }
     e.target.value = "";
   };

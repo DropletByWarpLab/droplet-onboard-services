@@ -8,6 +8,12 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { UploadZone, UploadButton } from "./UploadZone";
+import type { DroppedSelection } from "./FileManager/dropped-entries";
+
+/** Relative paths of the selection the component reported. */
+function reportedPaths(call: unknown[]): string[] {
+  return (call[0] as DroppedSelection).uploads.map((u) => u.relativePath);
+}
 
 function makeFileListEvent(files: File[]) {
   return {
@@ -97,9 +103,7 @@ describe("UploadButton — folder picker (WARP-1876)", () => {
       target: { files: [new File(["x"], "a.txt"), new File(["x"], "b.txt")] },
     });
     expect(onUpload).toHaveBeenCalledTimes(1);
-    expect(onUpload.mock.calls[0][0].map((u: { relativePath: string }) => u.relativePath)).toEqual(
-      ["a.txt", "b.txt"]
-    );
+    expect(reportedPaths(onUpload.mock.calls[0])).toEqual(["a.txt", "b.txt"]);
   });
 
   it("preserves the folder tree from the directory picker", () => {
@@ -109,7 +113,7 @@ describe("UploadButton — folder picker (WARP-1876)", () => {
     const f = new File(["x"], "jan.pdf");
     Object.defineProperty(f, "webkitRelativePath", { value: "Invoices/jan.pdf" });
     fireEvent.change(folderInput, { target: { files: [f] } });
-    expect(onUpload.mock.calls[0][0][0].relativePath).toBe("Invoices/jan.pdf");
+    expect(reportedPaths(onUpload.mock.calls[0])).toEqual(["Invoices/jan.pdf"]);
   });
 });
 
@@ -159,9 +163,7 @@ describe("UploadZone — bulk drop (WARP-1876)", () => {
     );
 
     await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(1));
-    expect(onUpload.mock.calls[0][0].map((u: { relativePath: string }) => u.relativePath)).toEqual(
-      ["a.txt", "b.txt"]
-    );
+    expect(reportedPaths(onUpload.mock.calls[0])).toEqual(["a.txt", "b.txt"]);
   });
 
   it("expands a dropped FOLDER into its files, keeping the tree", async () => {
@@ -177,9 +179,10 @@ describe("UploadZone — bulk drop (WARP-1876)", () => {
     );
 
     await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(1));
-    expect(onUpload.mock.calls[0][0].map((u: { relativePath: string }) => u.relativePath)).toEqual(
-      ["Invoices/jan.pdf", "Invoices/feb.pdf"]
-    );
+    expect(reportedPaths(onUpload.mock.calls[0])).toEqual([
+      "Invoices/jan.pdf",
+      "Invoices/feb.pdf",
+    ]);
   });
 
   it("says folders are welcome on the drag-over affordance", () => {
@@ -192,7 +195,10 @@ describe("UploadZone — bulk drop (WARP-1876)", () => {
     expect(screen.getByText("Drop files or folders to upload")).toBeInTheDocument();
   });
 
-  it("does not fire onUpload for an empty drop", async () => {
+  it("reports an empty drop too, so the caller can say something", async () => {
+    // The zone used to swallow a drop that yielded no files, which is how a
+    // folder with nothing in it produced total silence. The caller owns the
+    // copy; the zone's job is to report what it read (WARP-1876 review).
     const onUpload = vi.fn();
     const { container } = render(
       <UploadZone onUpload={onUpload}>
@@ -200,6 +206,81 @@ describe("UploadZone — bulk drop (WARP-1876)", () => {
       </UploadZone>
     );
     fireEvent.drop(container.firstChild as HTMLElement, makeFileListEvent([]));
-    await waitFor(() => expect(onUpload).not.toHaveBeenCalled());
+    await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(1));
+    expect(onUpload.mock.calls[0][0]).toEqual({
+      uploads: [],
+      directories: [],
+      skipped: 0,
+    });
+  });
+
+  it("does not leak a rejected upload run out of the drop path", async () => {
+    // The caller's handler is async; an unhandled rejection here surfaces as
+    // a console error in the browser and fails the suite under CI.
+    const onUpload = vi.fn().mockRejectedValue(new Error("upload exploded"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = render(
+      <UploadZone onUpload={onUpload}>
+        <div>drop target</div>
+      </UploadZone>
+    );
+
+    fireEvent.drop(
+      container.firstChild as HTMLElement,
+      makeFileListEvent([new File(["x"], "a.txt")])
+    );
+
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    expect(consoleError.mock.calls[0][0]).toBe("upload: drop failed");
+    consoleError.mockRestore();
+  });
+});
+
+describe("UploadZone — the overlay always clears (WARP-1876 review)", () => {
+  it("survives a drag over a reader space and back", async () => {
+    // `handleDragEnter` bails before incrementing when disabled. An
+    // unguarded leave took the counter NEGATIVE, and every later enter/leave
+    // pair left it below zero — so the page-sized dashed overlay latched on
+    // and never cleared.
+    const { container, rerender } = render(
+      <UploadZone onUpload={vi.fn()} disabled>
+        <div>drop target</div>
+      </UploadZone>
+    );
+    const zone = container.firstChild as HTMLElement;
+
+    // A drag across a library this viewer can only read.
+    fireEvent.dragEnter(zone);
+    fireEvent.dragLeave(zone);
+    fireEvent.dragEnter(zone);
+    fireEvent.dragLeave(zone);
+
+    // …then the same session moves to a writable space.
+    rerender(
+      <UploadZone onUpload={vi.fn()} disabled={false}>
+        <div>drop target</div>
+      </UploadZone>
+    );
+
+    fireEvent.dragEnter(zone);
+    expect(screen.getByText("Drop files or folders to upload")).toBeInTheDocument();
+    fireEvent.dragLeave(zone);
+    expect(screen.queryByText("Drop files or folders to upload")).not.toBeInTheDocument();
+  });
+
+  it("clears on a leave that had no matching enter", () => {
+    const { container } = render(
+      <UploadZone onUpload={vi.fn()}>
+        <div>drop target</div>
+      </UploadZone>
+    );
+    const zone = container.firstChild as HTMLElement;
+
+    // A drag that began outside the zone can leave it without entering it.
+    fireEvent.dragLeave(zone);
+    fireEvent.dragEnter(zone);
+    expect(screen.getByText("Drop files or folders to upload")).toBeInTheDocument();
+    fireEvent.dragLeave(zone);
+    expect(screen.queryByText("Drop files or folders to upload")).not.toBeInTheDocument();
   });
 });

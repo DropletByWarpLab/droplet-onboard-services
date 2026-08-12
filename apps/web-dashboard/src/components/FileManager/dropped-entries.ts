@@ -36,6 +36,31 @@ export interface UploadGroup {
   files: File[];
 }
 
+/**
+ * Everything one drop (or one picker selection) yielded.
+ *
+ * The counts matter as much as the files: a walk that quietly discards what
+ * it cannot read reports a partial migration as a complete one — 188 of 200
+ * documents land and the user is told the move succeeded (WARP-1876 review).
+ */
+export interface DroppedSelection {
+  uploads: DroppedUpload[];
+  /**
+   * Every directory the drop contained, INCLUDING the ones with no files in
+   * them. File paths alone can't express an empty folder, and an office
+   * dragging a `Clients/` tree expects its empty folders to arrive too.
+   */
+  directories: string[];
+  /**
+   * Entries the walk could not turn into an upload: a file the browser
+   * refused to materialize (an online-only OneDrive/iCloud placeholder is
+   * the common one), a directory whose reader died, a name that is not a
+   * usable path segment, or a subtree past `MAX_DEPTH`. Counted so the
+   * caller can say so — never silently dropped.
+   */
+  skipped: number;
+}
+
 /** The directory part of a relative path; "" for a root-level file. */
 export function parentDir(relativePath: string): string {
   const idx = relativePath.lastIndexOf("/");
@@ -47,17 +72,25 @@ export function parentDir(relativePath: string): string {
  * and de-duplicated. Shallow-first is not cosmetic: WebDAV MKCOL fails
  * with 409 when an intermediate collection is missing, so "Reports" has
  * to be created before "Reports/2026".
+ *
+ * `directories` is the walk's own record of the folders it visited. File
+ * parents alone lose every EMPTY folder in the dropped tree, which is how a
+ * `Clients/` drop arrives thirteen folders short (WARP-1876 review).
  */
-export function requiredDirectories(uploads: DroppedUpload[]): string[] {
+export function requiredDirectories(
+  uploads: DroppedUpload[],
+  directories: string[] = [],
+): string[] {
   const seen = new Set<string>();
-  for (const u of uploads) {
-    const dir = parentDir(u.relativePath);
-    if (!dir) continue;
+  const addChain = (dir: string) => {
+    if (!dir) return;
     const segments = dir.split("/");
     for (let i = 1; i <= segments.length; i++) {
       seen.add(segments.slice(0, i).join("/"));
     }
-  }
+  };
+  for (const u of uploads) addChain(parentDir(u.relativePath));
+  for (const dir of directories) addChain(dir);
   // Depth, then name — a stable order that is always shallow-first.
   return [...seen].sort((a, b) => {
     const d = a.split("/").length - b.split("/").length;
@@ -82,15 +115,15 @@ export function groupByDirectory(uploads: DroppedUpload[]): UploadGroup[] {
  * rejects `..` itself (`isSafeUserPath`, WARP-938) — this is the matching
  * client-side guard so a hostile or merely odd directory name is dropped
  * at the boundary rather than bounced back as a 400 mid-batch.
+ *
+ * A BACKSLASH is not unsafe and never was: it is an ordinary character in a
+ * macOS/Linux file name, and the server's guard only looks for `..` segments
+ * (routes/files.ts `isSafeUserPath`). Rejecting it here discarded real
+ * documents — and did it inconsistently, since `uploadsFromFileList` uploads
+ * the very same file by falling back to its bare name (WARP-1876 review).
  */
 function isSafeSegment(name: string): boolean {
-  return (
-    name.length > 0 &&
-    name !== "." &&
-    name !== ".." &&
-    !name.includes("/") &&
-    !name.includes("\\")
-  );
+  return name.length > 0 && name !== "." && name !== ".." && !name.includes("/");
 }
 
 /** Normalize a picker selection. `webkitRelativePath` is set by a
@@ -102,6 +135,15 @@ export function uploadsFromFileList(files: FileList | File[]): DroppedUpload[] {
       rel && rel.split("/").every(isSafeSegment) ? rel : file.name;
     return { file, relativePath };
   });
+}
+
+/**
+ * A picker selection as a selection. A `<input type="file">` hands over
+ * files it has already opened, so nothing is unreadable and empty folders
+ * never reach us — the two counts are structurally zero here, unlike a drop.
+ */
+export function selectionFromFileList(files: FileList | File[]): DroppedSelection {
+  return { uploads: uploadsFromFileList(files), directories: [], skipped: 0 };
 }
 
 // ── FileSystemEntry traversal ────────────────────────────────────────────
@@ -137,19 +179,26 @@ function entryFile(entry: EntryLike): Promise<File | null> {
  * Drain a directory reader. `readEntries` returns AT MOST 100 entries per
  * call and signals completion with an empty array — calling it once is the
  * classic way to silently lose every file past the first page.
+ *
+ * `complete` separates "that was the last page" from "the reader failed":
+ * an error mid-drain loses the REST OF THE SUBTREE, and the caller has to
+ * be able to say so.
  */
-async function readAllEntries(entry: EntryLike): Promise<EntryLike[]> {
+async function readAllEntries(
+  entry: EntryLike,
+): Promise<{ entries: EntryLike[]; complete: boolean }> {
   const reader = entry.createReader?.();
-  if (!reader) return [];
+  if (!reader) return { entries: [], complete: false };
   const all: EntryLike[] = [];
   for (;;) {
-    const page = await new Promise<EntryLike[]>((resolve) => {
+    const page = await new Promise<EntryLike[] | null>((resolve) => {
       reader.readEntries(
         (entries) => resolve(entries),
-        () => resolve([]),
+        () => resolve(null),
       );
     });
-    if (page.length === 0) return all;
+    if (page === null) return { entries: all, complete: false };
+    if (page.length === 0) return { entries: all, complete: true };
     all.push(...page);
   }
 }
@@ -158,25 +207,48 @@ async function readAllEntries(entry: EntryLike): Promise<EntryLike[]> {
  *  document folder and the paths stop being usable anyway. */
 const MAX_DEPTH = 32;
 
+/** The walk's running result — `skipped` is a counter, so it is carried on
+ *  a mutable accumulator rather than returned up the recursion. */
+type WalkAccumulator = DroppedSelection;
+
 async function walk(
   entry: EntryLike,
   prefix: string,
   depth: number,
-  out: DroppedUpload[],
+  acc: WalkAccumulator,
 ): Promise<void> {
-  if (!isSafeSegment(entry.name)) return;
+  // A name we cannot express as a path segment can't be created or uploaded
+  // — but it is still something the user dropped, so it is counted.
+  if (!isSafeSegment(entry.name)) {
+    acc.skipped++;
+    return;
+  }
   const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
 
   if (entry.isFile) {
     const file = await entryFile(entry);
-    if (file) out.push({ file, relativePath });
+    // No file means the browser refused to hand it over — an online-only
+    // OneDrive/iCloud placeholder, a permissions error, a file that moved
+    // mid-drop. It is missing from the box exactly like a failed upload is.
+    if (file) acc.uploads.push({ file, relativePath });
+    else acc.skipped++;
     return;
   }
 
-  if (entry.isDirectory && depth < MAX_DEPTH) {
-    for (const child of await readAllEntries(entry)) {
-      await walk(child, relativePath, depth + 1, out);
-    }
+  if (!entry.isDirectory) return;
+
+  if (depth >= MAX_DEPTH) {
+    acc.skipped++;
+    return;
+  }
+
+  // Recorded BEFORE the children so a folder with nothing in it still gets
+  // created — file parents alone can't express an empty folder.
+  acc.directories.push(relativePath);
+  const { entries, complete } = await readAllEntries(entry);
+  if (!complete) acc.skipped++;
+  for (const child of entries) {
+    await walk(child, relativePath, depth + 1, acc);
   }
 }
 
@@ -189,7 +261,7 @@ async function walk(
  * this ticket removes. Falls back to `dataTransfer.files` (flat) only when
  * the entries API is unavailable.
  */
-export async function readDroppedUploads(dt: DataTransfer): Promise<DroppedUpload[]> {
+export async function readDroppedUploads(dt: DataTransfer): Promise<DroppedSelection> {
   const items = dt.items ? Array.from(dt.items) : [];
   const entries = items
     .map((item) =>
@@ -200,12 +272,12 @@ export async function readDroppedUploads(dt: DataTransfer): Promise<DroppedUploa
     .filter((e): e is EntryLike => e !== null);
 
   if (entries.length === 0) {
-    return uploadsFromFileList(dt.files ?? []);
+    return selectionFromFileList(dt.files ?? []);
   }
 
-  const out: DroppedUpload[] = [];
+  const acc: WalkAccumulator = { uploads: [], directories: [], skipped: 0 };
   for (const entry of entries) {
-    await walk(entry, "", 0, out);
+    await walk(entry, "", 0, acc);
   }
-  return out;
+  return acc;
 }

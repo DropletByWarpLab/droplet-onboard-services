@@ -27,7 +27,7 @@ import type { AdminFilesUsageResponse, Department } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { UploadButton } from "@/components/UploadZone";
 import { CreateLibraryDialog } from "@/components/Departments/CreateLibraryDialog";
-import type { DroppedUpload } from "@/components/FileManager/dropped-entries";
+import type { DroppedSelection } from "@/components/FileManager/dropped-entries";
 import { requiredDirectories } from "@/components/FileManager/dropped-entries";
 import { runUpload } from "@/lib/run-upload";
 import { uploadOutcomeMessage, uploadProgressLabel } from "@/lib/upload-feedback";
@@ -135,14 +135,21 @@ export default function AdminFilesPage() {
   const newLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const handleUpload = useCallback(
-    async (uploads: DroppedUpload[]) => {
+    async (selection: DroppedSelection) => {
+      const { uploads, directories } = selection;
+      // This surface only has the header pickers — a `<input type="file">`
+      // never yields an empty folder or an unreadable file, so there is no
+      // zero-file drop to give a voice to here (unlike /files).
       if (uploads.length === 0 || !companySpace) return;
       setUploadPercent(0);
       setUploadStatus(
-        uploadProgressLabel(uploads.length, requiredDirectories(uploads).length),
+        uploadProgressLabel(
+          uploads.length,
+          requiredDirectories(uploads, directories).length,
+        ),
       );
       try {
-        const { uploaded, total, cause } = await runUpload(uploads, {
+        const { uploaded, total, skipped, cause } = await runUpload(selection, {
           // The company space's own root — `rootForSpace` applies the mount
           // prefix server-side, so "/" here is the top of the shared library.
           basePath: "/",
@@ -150,7 +157,7 @@ export default function AdminFilesPage() {
           onProgress: setUploadPercent,
         });
         if (uploaded > 0) await reload().catch(() => undefined);
-        const failure = uploadOutcomeMessage(uploaded, total, cause);
+        const failure = uploadOutcomeMessage(uploaded, total, cause, skipped);
         toast(
           failure ??
             `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"} to ${companySpace.name}.`,

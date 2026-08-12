@@ -7,10 +7,12 @@
  * neither ticket added one — so a folder tree is composed from the two
  * calls that already ship:
  *
- *   1. `POST /api/files/mkdir` per directory, shallow → deep. WebDAV MKCOL
- *      409s when an intermediate collection is missing, and the server
- *      tolerates 405 "already exists", so the order matters and a re-drop
- *      of the same folder is idempotent.
+ *   1. `POST /api/files/mkdir` per directory, shallow → deep — including the
+ *      folders that hold no files, which the walk records itself because a
+ *      file's parent path cannot express them. WebDAV MKCOL 409s when an
+ *      intermediate collection is missing, and the server tolerates 405
+ *      "already exists", so the order matters and a re-drop of the same
+ *      folder is idempotent.
  *   2. `POST /api/files/upload` once per directory. Each call keeps its own
  *      batching and its own `UploadBatchError` accounting (WARP-1666 /
  *      WARP-1843); this sums them so a run spanning several directories
@@ -23,7 +25,7 @@ import { createDirectory, uploadFiles, UploadBatchError } from "./api";
 import {
   groupByDirectory,
   requiredDirectories,
-  type DroppedUpload,
+  type DroppedSelection,
 } from "@/components/FileManager/dropped-entries";
 import type { FileSpaceId } from "./types";
 
@@ -37,7 +39,15 @@ export interface UploadRunOptions {
 
 export interface UploadRunResult {
   uploaded: number;
+  /**
+   * Everything the drop was supposed to put on the box — the files that
+   * reached an upload call PLUS the ones the walk could not read. A run that
+   * reports 188 of 188 for a 200-document folder is the silent partial
+   * migration this count exists to prevent (WARP-1876 review).
+   */
   total: number;
+  /** Of `total`, how many never reached an upload call at all. */
+  skipped: number;
   /** First underlying failure, already unwrapped from `UploadBatchError`. */
   cause: unknown;
   /** Directories the run had to create — drives the progress copy. */
@@ -51,11 +61,14 @@ export function joinRelativePath(base: string, rel: string): string {
 }
 
 export async function runUpload(
-  uploads: DroppedUpload[],
+  selection: DroppedSelection,
   { basePath, space, onProgress }: UploadRunOptions,
 ): Promise<UploadRunResult> {
-  const total = uploads.length;
-  const dirs = requiredDirectories(uploads);
+  const { uploads, directories, skipped } = selection;
+  // Files the walk never got hold of are part of the total, not rounded out
+  // of it — see UploadRunResult.total.
+  const total = uploads.length + skipped;
+  const dirs = requiredDirectories(uploads, directories);
   const groups = groupByDirectory(uploads);
 
   const totalBytes = uploads.reduce((sum, u) => sum + u.file.size, 0);
@@ -106,5 +119,5 @@ export async function runUpload(
     sentBytes += groupBytes;
   }
 
-  return { uploaded, total, cause, directoryCount: dirs.length };
+  return { uploaded, total, skipped, cause, directoryCount: dirs.length };
 }

@@ -92,13 +92,22 @@ function flatDrop(names: string[]) {
   return { dataTransfer: { files: names.map((n) => new File(["x"], n)) } };
 }
 
-/** `tree` maps a relative directory ("" = root) to its file names. */
-function folderDrop(rootName: string, tree: Record<string, string[]>) {
+/**
+ * `tree` maps a relative directory ("" = root) to its file names; a
+ * directory with an empty list is an EMPTY folder in the dropped tree.
+ * `unreadable` maps the same directories to names the browser refuses to
+ * hand over — an online-only OneDrive/iCloud placeholder.
+ */
+function folderDrop(
+  rootName: string,
+  tree: Record<string, string[]>,
+  unreadable: Record<string, string[]> = {}
+) {
   interface E {
     isFile: boolean;
     isDirectory: boolean;
     name: string;
-    file?: (cb: (f: File) => void) => void;
+    file?: (cb: (f: File) => void, onError?: (e: unknown) => void) => void;
     createReader?: () => { readEntries: (cb: (e: E[]) => void) => void };
   }
   const fileEntry = (name: string): E => ({
@@ -106,6 +115,12 @@ function folderDrop(rootName: string, tree: Record<string, string[]>) {
     isDirectory: false,
     name,
     file: (cb) => cb(new File(["x"], name)),
+  });
+  const unreadableEntry = (name: string): E => ({
+    isFile: true,
+    isDirectory: false,
+    name,
+    file: (_cb, onError) => onError?.(new Error("not available offline")),
   });
   const dirEntry = (name: string, children: E[]): E => {
     let cursor = 0;
@@ -123,7 +138,10 @@ function folderDrop(rootName: string, tree: Record<string, string[]>) {
     };
   };
   const build = (prefix: string): E[] => {
-    const files = (tree[prefix] ?? []).map(fileEntry);
+    const files = [
+      ...(tree[prefix] ?? []).map(fileEntry),
+      ...(unreadable[prefix] ?? []).map(unreadableEntry),
+    ];
     const subdirs = Object.keys(tree)
       .filter((k) => k !== prefix && (prefix === "" ? !k.includes("/") : k.startsWith(`${prefix}/`)))
       .filter((k) => k.slice(prefix === "" ? 0 : prefix.length + 1).split("/").length === 1)
@@ -221,6 +239,102 @@ describe("Files page — dropping a folder (WARP-1876)", () => {
     for (const [message] of toastSpy.mock.calls) {
       expect(String(message)).not.toContain("multer");
     }
+  });
+
+  it("keeps the outcome message when the listing refresh rejects", async () => {
+    // `refresh()` is an SWR revalidation — it can reject on its own (the box
+    // rebooting mid-upload, a 503 from the listing route). The files that
+    // landed still landed, so a stale listing must not swallow the toast
+    // that says so, nor escape as an unhandled rejection.
+    refreshSpy.mockRejectedValueOnce(new Error("revalidate failed"));
+    vi.mocked(uploadFiles).mockRejectedValueOnce(
+      new UploadBatchError(1, 2, new Error("boom"), ["b.txt"])
+    );
+
+    render(<FilesPage />);
+    fireEvent.drop(screen.getByLabelText("Breadcrumbs"), flatDrop(["a.txt", "b.txt"]));
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith(
+        "Uploaded 1 of 2 files. 1 didn't upload — try again to finish."
+      )
+    );
+  });
+});
+
+/**
+ * WARP-1876 review — a folder walk that discards what it cannot read
+ * reports a partial migration as a complete one, and an empty folder never
+ * arrives at all.
+ */
+describe("Files page — a dropped folder arrives whole, or says why not", () => {
+  it("tells the user about the documents it could not read", async () => {
+    render(<FilesPage />);
+
+    // The office case: three documents, one an online-only placeholder.
+    fireEvent.drop(
+      screen.getByLabelText("Breadcrumbs"),
+      folderDrop("Docs", { "": ["a.pdf", "b.pdf"] }, { "": ["offline.docx"] })
+    );
+
+    await waitFor(() => expect(uploadFiles).toHaveBeenCalledTimes(1));
+    // Both readable files still upload — the run is not abandoned.
+    expect(Array.from(vi.mocked(uploadFiles).mock.calls[0][1]).map((f) => f.name)).toEqual([
+      "a.pdf",
+      "b.pdf",
+    ]);
+    // …and the third one is named, not rounded away into a clean success.
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith(
+        "Uploaded 2 of 3 files. 1 item couldn't be read and wasn't uploaded."
+      )
+    );
+  });
+
+  it("creates the folders that hold no files", async () => {
+    render(<FilesPage />);
+
+    fireEvent.drop(
+      screen.getByLabelText("Breadcrumbs"),
+      folderDrop("Clients", { "": [], Acme: ["contract.pdf"], Bravo: [] })
+    );
+
+    await waitFor(() => expect(uploadFiles).toHaveBeenCalledTimes(1));
+    // "Bravo" has no files, so nothing in the upload list mentions it —
+    // it has to come from the walk's own record of the tree.
+    expect(vi.mocked(createDirectory).mock.calls.map((c) => c[0])).toEqual([
+      "/Clients",
+      "/Clients/Acme",
+      "/Clients/Bravo",
+    ]);
+  });
+
+  it("gives a folder-only drop a voice instead of doing nothing visible", async () => {
+    render(<FilesPage />);
+
+    fireEvent.drop(
+      screen.getByLabelText("Breadcrumbs"),
+      folderDrop("Clients", { "": [], Acme: [], Bravo: [] })
+    );
+
+    await waitFor(() => expect(createDirectory).toHaveBeenCalledTimes(3));
+    expect(uploadFiles).not.toHaveBeenCalled();
+    // The folders ARE on the box now, so the listing has to be re-read.
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalled());
+    expect(toastSpy).toHaveBeenCalledWith(
+      "Created 3 folders. There were no files in them to upload."
+    );
+  });
+
+  it("stays quiet when the drop carried nothing at all", async () => {
+    render(<FilesPage />);
+
+    fireEvent.drop(screen.getByLabelText("Breadcrumbs"), flatDrop([]));
+
+    await waitFor(() => expect(uploadFiles).not.toHaveBeenCalled());
+    // Dragging selected text across the page is not a failed upload.
+    expect(toastSpy).not.toHaveBeenCalled();
+    expect(createDirectory).not.toHaveBeenCalled();
   });
 });
 

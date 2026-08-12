@@ -40,7 +40,7 @@ import {
 } from "@/components/FileManager/search-target";
 import {
   requiredDirectories,
-  type DroppedUpload,
+  type DroppedSelection,
 } from "@/components/FileManager/dropped-entries";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
@@ -67,7 +67,11 @@ import {
 } from "@/lib/api";
 import { authFetch, useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
-import { uploadOutcomeMessage, uploadProgressLabel } from "@/lib/upload-feedback";
+import {
+  folderOnlyOutcomeMessage,
+  uploadOutcomeMessage,
+  uploadProgressLabel,
+} from "@/lib/upload-feedback";
 import { runUpload } from "@/lib/run-upload";
 import { Dialog } from "@/components/Dialog";
 import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
@@ -454,25 +458,39 @@ export default function FilesPage() {
   // per-directory `UploadBatchError` counts, so the WARP-1666 / WARP-1843
   // copy stays true for a run spanning several directories.
   const handleUpload = useCallback(
-    async (uploads: DroppedUpload[]) => {
-      if (uploads.length === 0) return;
+    async (selection: DroppedSelection) => {
+      const { uploads, directories, skipped } = selection;
+      // A drop that yielded nothing at all (dragged text, an empty
+      // selection) is not an upload — stay quiet. A drop that yielded only
+      // folders, or only files we couldn't read, is NOT that: it runs, and
+      // it gets a message below.
+      if (uploads.length === 0 && directories.length === 0 && skipped === 0) return;
       setIsUploading(true);
       setError(null);
       setUploadPercent(0);
       setUploadProgress(
-        uploadProgressLabel(uploads.length, requiredDirectories(uploads).length)
+        uploadProgressLabel(
+          uploads.length,
+          requiredDirectories(uploads, directories).length
+        )
       );
 
       try {
-        const { uploaded, total, cause } = await runUpload(uploads, {
-          basePath: currentPath,
-          space,
-          onProgress: setUploadPercent,
-        });
+        const { uploaded, total, skipped: unread, cause, directoryCount } =
+          await runUpload(selection, {
+            basePath: currentPath,
+            space,
+            onProgress: setUploadPercent,
+          });
         // Anything that landed IS on the box — make it visible before the
-        // message that talks about it.
-        if (uploaded > 0) await refresh();
-        const message = uploadOutcomeMessage(uploaded, total, cause);
+        // message that talks about it. A rejected revalidation must not
+        // swallow that message (nor escape as an unhandled rejection): the
+        // listing being stale is the lesser failure.
+        if (uploaded > 0 || directoryCount > 0) await refresh().catch(() => undefined);
+        const message =
+          uploadOutcomeMessage(uploaded, total, cause, unread) ??
+          // No files either way — say what DID happen to the folders.
+          (total === 0 ? folderOnlyOutcomeMessage(directoryCount, cause) : null);
         if (message) toast(message);
       } finally {
         setUploadProgress(null);

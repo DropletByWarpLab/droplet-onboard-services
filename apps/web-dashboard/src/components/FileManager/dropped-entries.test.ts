@@ -34,8 +34,10 @@ interface FakeEntry {
   isFile: boolean;
   isDirectory: boolean;
   name: string;
-  file?: (cb: (f: File) => void) => void;
-  createReader?: () => { readEntries: (cb: (e: FakeEntry[]) => void) => void };
+  file?: (cb: (f: File) => void, onError?: (e: unknown) => void) => void;
+  createReader?: () => {
+    readEntries: (cb: (e: FakeEntry[]) => void, onError?: (e: unknown) => void) => void;
+  };
 }
 
 function fileEntry(name: string): FakeEntry {
@@ -44,6 +46,34 @@ function fileEntry(name: string): FakeEntry {
     isDirectory: false,
     name,
     file: (cb) => cb(new File(["x"], name)),
+  };
+}
+
+/**
+ * A file the browser will not hand over: `entry.file()` invokes its ERROR
+ * callback. An online-only OneDrive/iCloud placeholder does exactly this,
+ * and it is the shape that turned a 200-document migration into a silent
+ * 188-document one.
+ */
+function unreadableFileEntry(name: string): FakeEntry {
+  return {
+    isFile: true,
+    isDirectory: false,
+    name,
+    file: (_cb, onError) => onError?.(new Error("not available offline")),
+  };
+}
+
+/** A directory whose reader fails on its FIRST call — the whole subtree is
+ *  lost, not one file. */
+function unreadableDirEntry(name: string): FakeEntry {
+  return {
+    isFile: false,
+    isDirectory: true,
+    name,
+    createReader: () => ({
+      readEntries: (_cb, onError) => onError?.(new Error("reader died")),
+    }),
   };
 }
 
@@ -105,6 +135,21 @@ describe("requiredDirectories", () => {
   it("is empty for a flat selection", () => {
     expect(requiredDirectories([up("a.txt"), up("b.txt")])).toEqual([]);
   });
+
+  it("keeps the folders that hold no files", () => {
+    // An office drags `Clients/` with a document in one folder and thirteen
+    // empty ones beside it. File parents alone lose all thirteen.
+    const dirs = requiredDirectories(
+      [up("Clients/Acme/contract.pdf")],
+      ["Clients", "Clients/Acme", "Clients/Bravo", "Clients/Bravo/2026"],
+    );
+    expect(dirs).toEqual([
+      "Clients",
+      "Clients/Acme",
+      "Clients/Bravo",
+      "Clients/Bravo/2026",
+    ]);
+  });
 });
 
 describe("groupByDirectory", () => {
@@ -147,13 +192,14 @@ describe("readDroppedUploads", () => {
       ]),
     ]);
 
-    const uploads = await readDroppedUploads(dt);
+    const { uploads, skipped } = await readDroppedUploads(dt);
 
     expect(uploads.map((u) => u.relativePath).sort()).toEqual([
       "Reports/Q1/jan.csv",
       "Reports/top.txt",
       "loose.txt",
     ]);
+    expect(skipped).toBe(0);
   });
 
   it("keeps reading until the directory reader is exhausted", async () => {
@@ -162,7 +208,7 @@ describe("readDroppedUploads", () => {
     const children = Array.from({ length: 250 }, (_, i) => fileEntry(`f${i}.txt`));
     const dt = dataTransferOf([dirEntry("Bulk", children)]);
 
-    const uploads = await readDroppedUploads(dt);
+    const { uploads } = await readDroppedUploads(dt);
 
     expect(uploads).toHaveLength(250);
   });
@@ -173,9 +219,11 @@ describe("readDroppedUploads", () => {
       fileEntry("ok.txt"),
     ]);
 
-    const uploads = await readDroppedUploads(dt);
+    const { uploads, skipped } = await readDroppedUploads(dt);
 
     expect(uploads.map((u) => u.relativePath)).toEqual(["ok.txt"]);
+    // Refused, but not vanished: the caller has to be able to say so.
+    expect(skipped).toBe(1);
   });
 
   it("falls back to dataTransfer.files when the entries API is absent", async () => {
@@ -184,8 +232,90 @@ describe("readDroppedUploads", () => {
       files: [new File(["x"], "plain.txt")],
     } as unknown as DataTransfer;
 
-    const uploads = await readDroppedUploads(dt);
+    const { uploads, directories, skipped } = await readDroppedUploads(dt);
 
     expect(uploads.map((u) => u.relativePath)).toEqual(["plain.txt"]);
+    expect(directories).toEqual([]);
+    expect(skipped).toBe(0);
+  });
+});
+
+/**
+ * The four places the walk used to lose entries without a trace. Each one
+ * turns a partial migration into a reported success: the files never enter
+ * the upload list, so they never enter `total`, so the outcome message has
+ * nothing to say (WARP-1876 review).
+ */
+describe("readDroppedUploads — nothing is lost in silence", () => {
+  it("counts a file the browser refuses to hand over", async () => {
+    // 3 documents, 1 an online-only placeholder — the shape that reported a
+    // 200-file migration as complete after moving 188.
+    const dt = dataTransferOf([
+      dirEntry("Docs", [
+        fileEntry("a.pdf"),
+        unreadableFileEntry("offline.docx"),
+        fileEntry("b.pdf"),
+      ]),
+    ]);
+
+    const { uploads, skipped } = await readDroppedUploads(dt);
+
+    expect(uploads.map((u) => u.relativePath)).toEqual(["Docs/a.pdf", "Docs/b.pdf"]);
+    expect(skipped).toBe(1);
+  });
+
+  it("counts a subtree whose reader failed", async () => {
+    const dt = dataTransferOf([
+      dirEntry("Docs", [fileEntry("a.pdf"), unreadableDirEntry("Archive")]),
+    ]);
+
+    const { uploads, skipped } = await readDroppedUploads(dt);
+
+    expect(uploads.map((u) => u.relativePath)).toEqual(["Docs/a.pdf"]);
+    expect(skipped).toBe(1);
+  });
+
+  it("counts the entries past the depth cutoff", async () => {
+    // 40 nested directories against MAX_DEPTH = 32.
+    let deepest: FakeEntry = dirEntry("d39", [fileEntry("buried.txt")]);
+    for (let i = 38; i >= 0; i--) deepest = dirEntry(`d${i}`, [deepest]);
+    const dt = dataTransferOf([deepest]);
+
+    const { uploads, skipped } = await readDroppedUploads(dt);
+
+    expect(uploads).toHaveLength(0);
+    expect(skipped).toBe(1);
+  });
+
+  it("uploads a name containing a backslash instead of discarding it", async () => {
+    // A backslash is an ordinary character in a macOS/Linux file name, and
+    // the server's guard only rejects `..` segments. Discarding it here also
+    // contradicted `uploadsFromFileList`, which uploads the same file.
+    const dt = dataTransferOf([
+      dirEntry("Q1\\Q2", [fileEntry("plan\\draft.pdf")]),
+    ]);
+
+    const { uploads, directories, skipped } = await readDroppedUploads(dt);
+
+    expect(uploads.map((u) => u.relativePath)).toEqual(["Q1\\Q2/plan\\draft.pdf"]);
+    expect(directories).toEqual(["Q1\\Q2"]);
+    expect(skipped).toBe(0);
+  });
+
+  it("records an empty folder so it still gets created", async () => {
+    const dt = dataTransferOf([
+      dirEntry("Clients", [
+        dirEntry("Acme", [fileEntry("contract.pdf")]),
+        dirEntry("Bravo", []),
+      ]),
+    ]);
+
+    const { uploads, directories, skipped } = await readDroppedUploads(dt);
+
+    expect(uploads.map((u) => u.relativePath)).toEqual([
+      "Clients/Acme/contract.pdf",
+    ]);
+    expect(directories).toEqual(["Clients", "Clients/Acme", "Clients/Bravo"]);
+    expect(skipped).toBe(0);
   });
 });
