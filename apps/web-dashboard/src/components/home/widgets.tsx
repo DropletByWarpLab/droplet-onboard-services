@@ -91,6 +91,7 @@ import {
   deleteVpnPeer,
   fetchVpnPeers,
   fetchVpnStatus,
+  getCameraSnapshotUrl,
 } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import { dashboardUrlFromConf } from "@/lib/wireguard";
@@ -99,6 +100,7 @@ import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ChatMessage } from "@/components/ChatMessage";
 import type {
+  CameraInfo,
   FileEntryInfo,
   ModelInfo,
   VpnPeerCreatedInfo,
@@ -855,37 +857,117 @@ const CAM_TINTS = [
   "linear-gradient(135deg,#15171f,#1f2937)",
   "linear-gradient(135deg,#1a1d27,#242a38)",
 ];
-function CamerasWidget({ w, h }: WidgetProps) {
+// The home peek polls slower than the cameras grid. `/api/cameras/:name/
+// snapshot` answers with `Cache-Control: max-age=5`, so busting the URL any
+// faster than that only spends requests the browser would have served from
+// its own cache.
+const HOME_SNAPSHOT_INTERVAL_MS = 5000;
+
+const snapshotSrcFor = (name: string) =>
+  `${getCameraSnapshotUrl(name)}?t=${Math.floor(Date.now() / HOME_SNAPSHOT_INTERVAL_MS)}`;
+
+/**
+ * One live tile. The gradient tint is the *fallback*, not the content — it
+ * shows while the first frame decodes, and again if the feed drops. Frames
+ * are preloaded offscreen and only swapped in once decoded, so the tile
+ * never blinks through a blank state (same rationale as CameraCard).
+ */
+function CamTile({
+  camera,
+  tint,
+  motion,
+  more,
+}: {
+  camera: CameraInfo;
+  tint: string;
+  motion: boolean;
+  more: number;
+}) {
   const router = useRouter();
-  const { cameras } = useCameras();
-  const names = cameras.map((c) => c.displayName || c.name);
-  const motionSet = new Set(
-    cameras.filter((c) => c.status === "detecting" || c.lastDetection).map((c) => c.displayName || c.name),
+  const offline = camera.status === "offline";
+  // Both null until a frame actually lands — the timestamp marks the frame
+  // on screen, so it must not render off the wall clock alone.
+  const [src, setSrc] = useState<string | null>(null);
+  const [stamp, setStamp] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (offline) {
+      setSrc(null);
+      setStamp(null);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      const next = snapshotSrcFor(camera.name);
+      const probe = new window.Image();
+      probe.onload = () => {
+        if (cancelled) return;
+        setSrc(next);
+        setStamp(
+          new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }),
+        );
+      };
+      // Drop back to the tint rather than freezing on a stale frame — a
+      // camera that died should stop looking live.
+      probe.onerror = () => {
+        if (cancelled) return;
+        setSrc(null);
+        setStamp(null);
+      };
+      probe.src = next;
+    };
+    load(); // first frame immediately; don't sit dark for a full interval
+    const id = window.setInterval(load, HOME_SNAPSHOT_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [camera.name, offline]);
+
+  const label = camera.displayName || camera.name;
+
+  return (
+    <button
+      className="w-cam"
+      type="button"
+      style={{ background: tint }}
+      onClick={() => router.push("/cameras")}
+      aria-label={`Open ${label} in Cameras`}
+    >
+      {/* Decorative: the button's aria-label already names the tile, and a
+          live frame has no meaningful static description. */}
+      {src && <img src={src} alt="" />}
+      {!offline && <span className="rec" />}
+      {stamp && <span className="ts">{stamp}</span>}
+      <span className="lb">{label}</span>
+      {motion && <span className="mo">motion</span>}
+      {more > 0 && <span className="cam-more">+{more}</span>}
+    </button>
   );
-  if (names.length === 0) {
+}
+
+export function CamerasWidget({ w, h }: WidgetProps) {
+  const { cameras } = useCameras();
+  if (cameras.length === 0) {
     return <WEmpty>No cameras yet</WEmpty>;
   }
   const tiny = w <= 2 && h <= 2;
   const n = tiny ? 1 : w >= 4 && h >= 3 ? 4 : 2;
   const cols = tiny ? 1 : w >= 4 ? 2 : h >= 3 ? 1 : 2;
-  const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   return (
     <div className="w-cams" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
-      {names.slice(0, n).map((nm, i) => (
-        <button
-          className="w-cam"
-          key={nm + i}
-          type="button"
-          style={{ background: CAM_TINTS[i % CAM_TINTS.length] }}
-          onClick={() => router.push("/cameras")}
-          aria-label={`Open ${nm} in Cameras`}
-        >
-          <span className="rec" />
-          <span className="ts">{ts}</span>
-          <span className="lb">{nm}</span>
-          {motionSet.has(nm) && <span className="mo">motion</span>}
-          {tiny && names.length > 1 && i === 0 && <span className="cam-more">+{names.length - 1}</span>}
-        </button>
+      {cameras.slice(0, n).map((cam, i) => (
+        <CamTile
+          key={cam.name}
+          camera={cam}
+          tint={CAM_TINTS[i % CAM_TINTS.length]}
+          motion={cam.status === "detecting" || Boolean(cam.lastDetection)}
+          more={tiny && cameras.length > 1 && i === 0 ? cameras.length - 1 : 0}
+        />
       ))}
     </div>
   );
