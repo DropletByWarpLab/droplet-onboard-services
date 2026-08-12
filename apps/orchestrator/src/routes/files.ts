@@ -914,7 +914,17 @@ function applyCitationContentHeaders(res: Response, filename: string): void {
   if (inlineType) {
     res.setHeader("Content-Type", inlineType);
     res.setHeader("Content-Disposition", "inline");
-    res.setHeader("Content-Security-Policy", "sandbox");
+    // `application/pdf` is exempt from the sandbox CSP — and ONLY it.
+    // PdfCitation.tsx consumes this route in an <iframe>, whose document is
+    // governed by this response's CSP, and Chromium's plugin-class PDF viewer
+    // refuses to run in a sandboxed document (blank frame or a forced
+    // download), so `sandbox` here would break every PDF citation card. The
+    // exemption is safe: a PDF is not same-origin-scriptable in the browser,
+    // and every type that is (html, svg, ...) is already off the inline
+    // safelist entirely. nosniff (above) still applies to PDFs.
+    if (inlineType !== "application/pdf") {
+      res.setHeader("Content-Security-Policy", "sandbox");
+    }
     return;
   }
 

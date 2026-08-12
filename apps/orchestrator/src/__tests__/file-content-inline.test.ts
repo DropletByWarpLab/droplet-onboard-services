@@ -142,7 +142,11 @@ beforeEach(() => {
 
 // ── Brain-memory branch ───────────────────────────────────────────
 describe("WARP-1920 — brain branch refuses to render script-capable files", () => {
-  it("serves a .pdf inline, with nosniff + a sandbox CSP", async () => {
+  // NO sandbox CSP on the pdf: PdfCitation.tsx renders this response in an
+  // <iframe>, and Chromium refuses to run its PDF viewer in a sandboxed
+  // document (blank frame / forced download). This test must FAIL if the
+  // application/pdf exemption in applyCitationContentHeaders is reverted.
+  it("serves a .pdf inline, with nosniff but WITHOUT a sandbox CSP", async () => {
     const item = await brainItem("report.pdf", "application/pdf");
     const res = await request(buildApp(() => item)).get(`/api/files/${item.id}/content`);
 
@@ -150,7 +154,7 @@ describe("WARP-1920 — brain branch refuses to render script-capable files", ()
     expect(res.headers["content-type"]).toBe("application/pdf");
     expect(res.headers["content-disposition"]).toBe("inline");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
-    expect(res.headers["content-security-policy"]).toBe("sandbox");
+    expect(res.headers["content-security-policy"]).toBeUndefined();
   });
 
   it("DOWNLOADS a .html instead of rendering it", async () => {
@@ -186,6 +190,9 @@ describe("WARP-1920 — brain branch refuses to render script-capable files", ()
     expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
     expect(res.headers["content-type"]).not.toMatch(/html/);
     expect(res.headers["content-disposition"]).toBe("inline");
+    // The pdf exemption is pdf-ONLY: every other inline type keeps the
+    // sandbox CSP.
+    expect(res.headers["content-security-policy"]).toBe("sandbox");
   });
 
   it("IGNORES an attacker-supplied stored mimeType (svg via a .png name)", async () => {
@@ -194,6 +201,7 @@ describe("WARP-1920 — brain branch refuses to render script-capable files", ()
 
     expect(res.headers["content-type"]).toBe("image/png");
     expect(res.headers["content-type"]).not.toMatch(/svg/);
+    expect(res.headers["content-security-policy"]).toBe("sandbox");
   });
 
   // A hostile filename must not be able to add disposition parameters.
@@ -237,7 +245,9 @@ describe("WARP-1920 — brain branch refuses to render script-capable files", ()
 
 // ── Nextcloud branch ──────────────────────────────────────────────
 describe("WARP-1920 — Nextcloud branch refuses to render script-capable files", () => {
-  it("serves a .pdf inline, with nosniff + a sandbox CSP", async () => {
+  // Same pdf exemption as the brain branch: the iframe consumer needs an
+  // un-sandboxed document for Chromium's PDF viewer to run.
+  it("serves a .pdf inline, with nosniff but WITHOUT a sandbox CSP", async () => {
     ncPath = "/Documents/report.pdf";
     ncFetchFileResponseMock.mockResolvedValue(ncResponse());
     const res = await request(buildApp(() => null)).get("/api/files/999/content");
@@ -246,7 +256,7 @@ describe("WARP-1920 — Nextcloud branch refuses to render script-capable files"
     expect(res.headers["content-type"]).toBe("application/pdf");
     expect(res.headers["content-disposition"]).toBe("inline");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
-    expect(res.headers["content-security-policy"]).toBe("sandbox");
+    expect(res.headers["content-security-policy"]).toBeUndefined();
   });
 
   it("DOWNLOADS a .html instead of rendering it", async () => {
