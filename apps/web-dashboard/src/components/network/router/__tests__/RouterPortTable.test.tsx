@@ -103,6 +103,28 @@ describe("RouterPortTable — phone gutter (WARP-1787)", () => {
     expect(track.querySelectorAll(".grid")).toHaveLength(ports.length + 1);
   });
 
+  it("makes that scroll box reachable by keyboard, which the switch table gets for free", () => {
+    // The ONE place the two tables cannot be identical. The switch table's
+    // rows are `<button>`s, so tabbing into a row scrolls the box; these rows
+    // are static `<div>`s (read-only panel), leaving the scroller with zero
+    // focusable descendants. `components/setup/ScrollRegion.tsx` already
+    // states this repo's rule for that shape: "a scrollable region with no
+    // focusable content is a WCAG 2.1.1 keyboard trap otherwise, so the
+    // region itself is focusable and announced."
+    //
+    // Without this, replacing `overflow-hidden` with a scroll box would hand
+    // the clipped columns to mouse and touch and to nobody else — and axe's
+    // `scrollable-region-focusable` would flag this table while passing its
+    // sibling.
+    const { container } = render(<RouterPortTable ports={ports} />);
+    const scroller = container.querySelector<HTMLElement>("[data-port-table-scroll]")!;
+    expect(scroller.tabIndex).toBe(0);
+    expect(scroller.getAttribute("role")).toBe("region");
+    expect(scroller.getAttribute("aria-label")).toBeTruthy();
+    // A tab stop with no visible focus state is its own defect.
+    expect(scroller.className).toContain("focus-visible:ring-2");
+  });
+
   it("does not hide the scrollbar — it is the only hint the row scrolls", () => {
     const { container } = render(<RouterPortTable ports={ports} />);
     const scroller = container.querySelector<HTMLElement>("[data-port-table-scroll]")!;

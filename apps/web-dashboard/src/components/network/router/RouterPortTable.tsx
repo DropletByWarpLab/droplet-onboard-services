@@ -136,11 +136,31 @@ function Row({ p }: { p: RouterPort }) {
  * The scrollbar is deliberately left visible: it is the only affordance that
  * says the row scrolls (the same call QA made on the tab strip, guarded in
  * `src/__tests__/shell/mobile-layout-contract.test.ts`).
+ *
+ * One thing is NOT copied from the switch table, because copying it would
+ * make the two tables identical in markup and unequal in outcome: the scroll
+ * box is `role="region"` + `tabIndex={0}` + labelled. The switch table's rows
+ * are `<button>`s, so tabbing into a row scrolls its box for free; these rows
+ * are static (read-only panel), which leaves the scroller with no focusable
+ * descendant at all. `components/setup/ScrollRegion.tsx` sets the house rule
+ * for that shape — "a scrollable region with no focusable content is a WCAG
+ * 2.1.1 keyboard trap otherwise, so the region itself is focusable and
+ * announced". Without it this change would hand the recovered columns to
+ * mouse and touch and to nobody else.
  */
 export function RouterPortTable({ ports }: Props) {
   return (
     <div className="border border-[var(--card-bd)] rounded-[12px] overflow-hidden">
-      <div data-port-table-scroll className="overflow-x-auto overscroll-x-contain">
+      <div
+        data-port-table-scroll
+        role="region"
+        aria-label="Router port table"
+        tabIndex={0}
+        className={[
+          "overflow-x-auto overscroll-x-contain",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] focus-visible:ring-inset",
+        ].join(" ")}
+      >
         <div className={TRACK_MIN}>
           <div
             style={ROW_GAP}
