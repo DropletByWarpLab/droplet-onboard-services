@@ -5,6 +5,7 @@ import { X, Download, FileText, Pencil } from "lucide-react";
 import { getDownloadUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import { isEditableOfficeFile } from "@/lib/office-files";
+import { labelForMime } from "@/lib/mime-labels";
 import type { FileEntryInfo } from "@/lib/types";
 import { ReindexButton } from "./ReindexButton";
 
@@ -127,11 +128,16 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             >
               {file.name}
             </h3>
+            {/* WARP-1877: the type reads as words here for the same reason it
+                does in the Files detail panel — this modal is one click from
+                it, so a raw MIME leaking here undoes the fix. The full string
+                stays reachable as the tooltip, and only when there is one. */}
             <p
               className="type-caption-1"
-              style={{ color: "var(--text-faint)", fontFamily: "var(--font-mono)" }}
+              title={file.mimeType || undefined}
+              style={{ color: "var(--text-faint)" }}
             >
-              {file.mimeType || "Unknown type"}
+              {labelForMime(file.mimeType, file.name)}
             </p>
           </div>
           <div className="flex items-center gap-1.5">
