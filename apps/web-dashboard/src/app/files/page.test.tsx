@@ -708,8 +708,10 @@ describe("<FilesPage /> — (space, path) round-trip + URL write-back (WARP-1547
 
     fireEvent.click(screen.getByRole("tab", { name: /finance/i }));
     expect(pushMock).toHaveBeenLastCalledWith("/files?space=dept%3Afinance");
-    // Preserved behavior: the switch lands on the new space's root.
-    expect(within(crumbs()).queryByText("Docs")).not.toBeInTheDocument();
+    // Preserved behavior: the switch lands on the new space's root — where
+    // the crumb bar is suppressed outright (WARP-1910), so the old "/Docs"
+    // crumb cannot carry over anywhere on the page.
+    expect(screen.queryByText("Docs")).not.toBeInTheDocument();
   });
 
   // ── Back / Forward ──────────────────────────────────────────────────────
@@ -752,7 +754,9 @@ describe("<FilesPage /> — (space, path) round-trip + URL write-back (WARP-1547
       "aria-selected",
       "true",
     );
-    expect(within(crumbs()).queryByText("Contracts")).not.toBeInTheDocument();
+    // Back at the personal root the crumb bar is suppressed (WARP-1910);
+    // the library path must not survive anywhere on the page.
+    expect(screen.queryByText("Contracts")).not.toBeInTheDocument();
   });
 
   // ── one funnel ──────────────────────────────────────────────────────────
@@ -1560,5 +1564,63 @@ describe("<FilesPage /> — Spaces menu layering (WARP-1667)", () => {
     // The search wrapper comes FIRST in DOM order, so a tie would hand the
     // win to the switcher and put the results popover back underneath it.
     expect(zIndexOf(switcher)).toBeLessThan(zIndexOf(search));
+  });
+});
+
+// WARP-1910 — "My Files" rendered twice at the root: once as the space
+// switcher's tab and again as the breadcrumb bar's lone root crumb directly
+// below it. The switcher's tabs already name the location at a space's root,
+// so the crumb bar is suppressed there — and ONLY there: inside a folder the
+// trail (root crumb included) is navigation; without a switcher the root
+// crumb is the page's only location label; and a TEAM root keeps its bar for
+// the non-navigating department prefix crumb (WARP-1267, ADR-029 §D-3 —
+// pinned by that ticket's own suite above).
+describe('<FilesPage /> — "My Files" appears once (WARP-1910)', () => {
+  it("suppresses the breadcrumb bar at the personal root while the switcher is present", () => {
+    render(<FilesPage />);
+    // The toggle is there…
+    expect(screen.getByRole("tab", { name: /my files/i })).toBeInTheDocument();
+    // …so the redundant lone root crumb (and its bordered bar) is not.
+    expect(
+      screen.queryByRole("navigation", { name: /breadcrumbs/i })
+    ).not.toBeInTheDocument();
+    // The page says "My Files" exactly once.
+    expect(screen.getAllByText(/my files/i)).toHaveLength(1);
+  });
+
+  it("suppresses it at the Workspace root too — the active tab names the location", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    expect(
+      screen.queryByRole("navigation", { name: /breadcrumbs/i })
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText(/my files/i)).toHaveLength(1);
+  });
+
+  it("keeps the full trail — root crumb included — inside a folder", () => {
+    mockSearchParamsString = "path=%2FDocs%2F2026";
+    render(<FilesPage />);
+    const nav = screen.getByRole("navigation", { name: /breadcrumbs/i });
+    expect(within(nav).getByText("Docs")).toBeInTheDocument();
+    expect(within(nav).getByText("2026")).toBeInTheDocument();
+    // The root crumb is still there and still navigates home.
+    fireEvent.click(within(nav).getByRole("button", { name: /my files/i }));
+    expect(pushMock).toHaveBeenLastCalledWith("/files");
+  });
+
+  it("keeps the root crumb when there is no switcher — the label stays, exactly once", () => {
+    mockSpaces = [PERSONAL];
+    mockSharedAvailable = false;
+    render(<FilesPage />);
+    // No toggle (nothing to switch between)…
+    expect(
+      screen.queryByRole("tablist", { name: /file space/i })
+    ).not.toBeInTheDocument();
+    // …so the crumb bar is the page's only "My files" label.
+    const nav = screen.getByRole("navigation", { name: /breadcrumbs/i });
+    expect(
+      within(nav).getByRole("button", { name: /my files/i })
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/my files/i)).toHaveLength(1);
   });
 });
