@@ -113,7 +113,25 @@ prepare_and_build() {
   # repo root. Without this symlink, invocations that don't pass
   # `--env-file .env` (e.g. ad-hoc `docker compose -f docker/docker-compose.yml
   # logs`) silently default secrets to empty strings and break auth services.
-  ln -sfn ../.env "$REPO_ROOT/docker/.env"
+  #
+  # WARP-1908: a REGULAR file here means the link was destroyed and the two
+  # files have been drifting — `ln -sfn` would silently delete whatever that
+  # file holds. Say so and keep a copy first. Root .env stays the source of
+  # truth (it is what `env_file:` loads), so any key living only in the stale
+  # copy is named rather than quietly dropped.
+  _compose_env_link="$REPO_ROOT/docker/.env"
+  if [ -f "$_compose_env_link" ] && [ ! -L "$_compose_env_link" ]; then
+    _stale_only="$(comm -13 \
+      <(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$REPO_ROOT/.env" 2>/dev/null | sort -u) \
+      <(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$_compose_env_link" | sort -u) \
+      | tr '\n' ' ')"
+    cp -p "$_compose_env_link" "${_compose_env_link}.forked-$(date -u +%Y%m%dT%H%M%SZ)"
+    log_warn "docker/.env was a regular file, not the ../.env symlink — Compose has been interpolating from a drifted copy (WARP-1908). Backed it up and restored the link."
+    [ -z "$_stale_only" ] \
+      || log_warn "  keys that existed ONLY in that copy and are now gone: ${_stale_only}"
+  fi
+  ln -sfn ../.env "$_compose_env_link"
+  unset _compose_env_link _stale_only
 
   # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
