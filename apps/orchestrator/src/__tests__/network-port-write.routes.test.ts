@@ -286,6 +286,26 @@ describe("Tier-2 confirm dispatch reaches the port service", () => {
     expect(networkService.setRouterPortEnabled).toHaveBeenCalledWith("p1", false, true);
   });
 
+  it("a truthy NON-boolean force is not an acknowledgement", async () => {
+    /* 🔴 The mint stores `force` into the token params and the dispatcher
+       honours `=== true`, so a coercion HERE (`Boolean(body.force)`) would put
+       `true` in the token and clear the routing service's WAN guard end to end
+       — every downstream check would see a legitimately-forced write. The
+       acknowledgement is a checkbox a human ticked; a string is not that. */
+    const app = buildApp();
+    const minted = await request(app)
+      .post("/api/network/ports/p1/enable")
+      .send({ enabled: false, force: "yes" });
+    expect(minted.status).toBe(202);
+
+    await request(app).post("/api/network/command/confirm").send({
+      confirmationToken: minted.body.confirmationToken,
+      operation: "router_port_disable",
+    });
+
+    expect(networkService.setRouterPortEnabled).toHaveBeenCalledWith("p1", false, false);
+  });
+
   it("a token minted WITHOUT force never becomes a forced write", async () => {
     /* `force` is the user's extra acknowledgement. Defaulting it to true on
        replay would silently clear the WAN guard for every confirmed write. */

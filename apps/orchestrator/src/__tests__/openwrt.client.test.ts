@@ -36,6 +36,7 @@ import {
   scanWireless,
   fetchWirelessClients,
   _resetRouterContactForTests,
+  setRouterPortEnabled,
 } from "../services/openwrt.client.js";
 import { RouterError } from "../types/router-error.js";
 
@@ -730,5 +731,180 @@ describe("openwrt.client cold-start log hygiene", () => {
     const result = await healthCheck();
     expect(result).toBe(true);
     expect(hasReachedRouter()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-1907 — the router-jack write, and the four refusals it must not lose
+// ---------------------------------------------------------------------------
+describe("setRouterPortEnabled", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  function stub(res: Response) {
+    const fetchMock = vi.fn().mockResolvedValue(res);
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  it("POSTs enabled + force to the per-port path and returns the operation id", async () => {
+    const fetchMock = stub(
+      mockResponse({ ok: true, status: 200, headers: { "X-Operation-Id": "op-77" } }),
+    );
+    const result = await setRouterPortEnabled("p5", false, true);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://routing.test/network/ports/p5/enable");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ enabled: false, force: true });
+    expect(result).toEqual({ operationId: "op-77" });
+  });
+
+  it("defaults force to false on the wire", async () => {
+    const fetchMock = stub(mockResponse({ ok: true, status: 200 }));
+    await setRouterPortEnabled("p5", false);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      enabled: false,
+      force: false,
+    });
+  });
+
+  it("percent-encodes a port name so it cannot escape the path", async () => {
+    const fetchMock = stub(mockResponse({ ok: true, status: 200 }));
+    await setRouterPortEnabled("br-lan.30", true);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://routing.test/network/ports/br-lan.30/enable",
+    );
+  });
+
+  it("null operation id when the routing service emitted no header", async () => {
+    stub(mockResponse({ ok: true, status: 200 }));
+    expect(await setRouterPortEnabled("p5", true)).toEqual({ operationId: null });
+  });
+
+  it("maps 502 PORT_WRITE_NOT_APPLIED to its own code — NOT auth", async () => {
+    /* 🔴 routerErrorFromResponse maps EVERY 502 to AUTH on the WARP-1673
+       invariant ("nothing sits between the orchestrator and routing to mint a
+       502"). This route broke that invariant, so it reads its own body rather
+       than weakening a rule a real credential rejection depends on. Reported as
+       AUTH, a port that silently didn't move would render as "check your router
+       password". */
+    stub(
+      mockResponse({
+        ok: false,
+        status: 502,
+        json: { code: "PORT_WRITE_NOT_APPLIED", error: "the port didn't move" },
+      }),
+    );
+    const err = await setRouterPortEnabled("p5", false).catch((e) => e);
+    expect(err).toBeInstanceOf(RouterError);
+    expect(err.code).toBe("PORT_WRITE_NOT_APPLIED");
+    expect(err.code).not.toBe("AUTH");
+    expect(err.status).toBe(502);
+    expect(err.message).toBe("the port didn't move");
+  });
+
+  it("a 502 that is NOT ours still classifies as AUTH", async () => {
+    /* The WARP-1673 contract, unbroken: a credential rejection carries
+       ROUTER_AUTH, and must keep reaching the dashboard as AUTH. */
+    stub(mockResponse({ ok: false, status: 502, json: { code: "ROUTER_AUTH" } }));
+    const err = await setRouterPortEnabled("p5", false).catch((e) => e);
+    expect(err.code).toBe("AUTH");
+  });
+
+  it("maps 409 WAN_PORT to a refusal carrying the guard verbatim", async () => {
+    /* The race the cached `disable_guard` cannot cover: a jack that was empty at
+       poll time gained a cable before the click. Without the guard on the error
+       the dashboard has no escalation to offer and the user sees "409". */
+    stub(
+      mockResponse({
+        ok: false,
+        status: 409,
+        json: { code: "WAN_PORT", error: "This is the jack your internet comes in on." },
+      }),
+    );
+    const err = await setRouterPortEnabled("p1", false).catch((e) => e);
+    expect(err.code).toBe("PORT_WRITE_REFUSED");
+    expect(err.status).toBe(409);
+    expect(err.detail).toEqual({
+      code: "WAN_PORT",
+      reason: "This is the jack your internet comes in on.",
+    });
+    expect(err.message).toBe("This is the jack your internet comes in on.");
+  });
+
+  it("maps 409 MANAGEMENT_PORT the same way, keeping the codes apart", async () => {
+    stub(
+      mockResponse({
+        ok: false,
+        status: 409,
+        json: { code: "MANAGEMENT_PORT", error: "reaches your appliance through" },
+      }),
+    );
+    const err = await setRouterPortEnabled("p2", false).catch((e) => e);
+    expect(err.detail.code).toBe("MANAGEMENT_PORT");
+  });
+
+  it("does not invent a guard from a 409 whose body it cannot read", async () => {
+    /* A body we can't parse is not a reason to fabricate one — fall through to
+       the shared classifier rather than escalate on a guess. */
+    stub(mockResponse({ ok: false, status: 409, json: { code: "SOMETHING_ELSE" } }));
+    const err = await setRouterPortEnabled("p2", false).catch((e) => e);
+    expect(err.code).toBe("UNKNOWN");
+    expect(err.detail).toBeUndefined();
+  });
+
+  it("maps 404 PORT_NOT_FOUND with the server's sentence, not '404 Error'", async () => {
+    stub(
+      mockResponse({
+        ok: false,
+        status: 404,
+        json: { code: "PORT_NOT_FOUND", error: "This router has no physical port called 'p9'." },
+      }),
+    );
+    const err = await setRouterPortEnabled("p9", false).catch((e) => e);
+    expect(err.code).toBe("PORT_NOT_FOUND");
+    expect(err.status).toBe(404);
+    expect(err.message).toBe("This router has no physical port called 'p9'.");
+  });
+
+  it("maps 422 PORT_MAP_UNSUPPORTED with the server's sentence", async () => {
+    stub(
+      mockResponse({
+        ok: false,
+        status: 422,
+        json: { code: "PORT_MAP_UNSUPPORTED", error: "no port map on this shape" },
+      }),
+    );
+    const err = await setRouterPortEnabled("p5", false).catch((e) => e);
+    expect(err.code).toBe("PORT_MAP_UNSUPPORTED");
+    expect(err.status).toBe(422);
+    expect(err.message).toBe("no port map on this shape");
+  });
+
+  it("leaves 503 rollback_pending to the shared classifier", async () => {
+    /* Already correct, and correctness here is load-bearing: a safe-apply
+       rollback must keep reading ROLLED_BACK. */
+    stub(
+      mockResponse({
+        ok: false,
+        status: 503,
+        headers: { "X-Operation-Id": "op-9" },
+        json: { rollback_pending: true },
+      }),
+    );
+    const err = await setRouterPortEnabled("p2", false, true).catch((e) => e);
+    expect(err.code).toBe("ROLLED_BACK");
+  });
+
+  it("does NOT retry a refusal — it is a terminal answer, not a transient fault", async () => {
+    const fetchMock = stub(
+      mockResponse({ ok: false, status: 502, json: { code: "PORT_WRITE_NOT_APPLIED", error: "x" } }),
+    );
+    await setRouterPortEnabled("p5", false).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

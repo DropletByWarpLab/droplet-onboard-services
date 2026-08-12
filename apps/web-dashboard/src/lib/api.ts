@@ -121,6 +121,7 @@ import type {
   AccessExceptionInput,
   EffectiveAccess,
 } from "./types";
+import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
   EmailAccount,
   EmailAccountsResponse,
@@ -2143,6 +2144,36 @@ export async function switchSetPortPoe(
 }
 
 /**
+ * WARP-1907 — the server refused a jack write that needs the extra
+ * acknowledgement, and told us which guard and why.
+ *
+ * Thrown for the race the cached read cannot cover: a jack published with
+ * `disable_guard: null` that gains a cable between the poll and the click. The
+ * panel catches this and raises its second, destructive confirm from
+ * `guard.reason` — the same escalation it would have shown had the read been
+ * current. Without it the user meets a bare "409" and retrying fails until the
+ * next poll.
+ */
+export class RouterPortRefusedError extends Error {
+  readonly code = "PORT_WRITE_REFUSED" as const;
+  readonly guard: RouterPortDisableGuard;
+  constructor(guard: RouterPortDisableGuard) {
+    super(guard.reason);
+    this.name = "RouterPortRefusedError";
+    this.guard = guard;
+  }
+}
+
+/** Narrow the orchestrator's `detail` without trusting it into the union. */
+function asPortGuard(value: unknown): RouterPortDisableGuard | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { code?: unknown; reason?: unknown };
+  if (v.code !== "WAN_PORT" && v.code !== "MANAGEMENT_PORT") return null;
+  if (typeof v.reason !== "string" || !v.reason) return null;
+  return { code: v.code, reason: v.reason };
+}
+
+/**
  * WARP-1907 — turn a physical ROUTER jack on or off.
  *
  * `force` is the user's second acknowledgement, and only ever set by the
@@ -2164,8 +2195,17 @@ export async function routerSetPortEnabled(
     },
   );
   const data = await res.json();
-  if (!res.ok && !data.requiresConfirmation)
-    throw new Error(data.error || `Failed to set port state: ${res.status}`);
+  if (!res.ok && !data.requiresConfirmation) {
+    // A guard refusal is not a dead end — it is a question the panel can ask.
+    const guard = data?.code === "PORT_WRITE_REFUSED" ? asPortGuard(data.detail) : null;
+    if (guard) throw new RouterPortRefusedError(guard);
+    // Everything else keeps `message`/`code`/`status` so `translateError` can
+    // do its job instead of meeting a bare Error.
+    throw Object.assign(
+      new Error(data.message || data.error || `Failed to set port state: ${res.status}`),
+      { code: data.code, status: res.status },
+    );
+  }
   return data;
 }
 

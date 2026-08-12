@@ -90,7 +90,13 @@ export interface RouterPort {
    * leaves the router perfectly reachable on the LAN, so nothing reverts and
    * the household stays offline.
    */
-  disable_guard: { code: "WAN_PORT" | "MANAGEMENT_PORT"; reason: string } | null;
+  disable_guard: {
+    code: "WAN_PORT" | "MANAGEMENT_PORT";
+    /** WHY — safe to render before the user has confirmed anything. */
+    reason: string;
+    /** What to DO about it. Belongs in the refusal, not in a warning banner. */
+    instruction?: string;
+  } | null;
 }
 
 /**

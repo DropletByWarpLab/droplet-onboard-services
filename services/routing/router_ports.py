@@ -256,6 +256,20 @@ _SECTION_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 _SECTION_PREFIX = "port_"
 
 
+class DeviceSectionNameExhausted(Exception):
+    """No free uci section name is left for a jack (WARP-1907).
+
+    Only reachable on a config that already carries ~100 sections named after
+    one port — a hand-edited state nobody arrives at by accident. Typed anyway,
+    because the write route catches only the SDK's own exceptions: a bare
+    ``ValueError`` here would leave the operator with a 500, no code, and no
+    sentence describing what is actually wrong with their config.
+    """
+
+    #: Stable, wire-facing classification.
+    code = "PORT_SECTION_NAME_EXHAUSTED"
+
+
 def uci_bool(value: Any, default: bool) -> bool:
     """A uci option that means a boolean → ``bool``.
 
@@ -323,8 +337,13 @@ def new_device_section_name(netdev: str, uci_network: Any) -> str:
         if candidate not in taken:
             return candidate
     # 98 sections all named after one jack is a config nobody has; fail loudly
-    # rather than silently reusing one of them.
-    raise ValueError(f"cannot find a free uci section name for device {netdev!r}")
+    # rather than silently reusing one of them. Typed, not a bare ValueError:
+    # the route catches ConnectionLost / DeviceWriteNotApplied / UbusError, so
+    # anything else here surfaces as an untyped 500 with no code and no sentence
+    # the operator can act on.
+    raise DeviceSectionNameExhausted(
+        f"cannot find a free uci section name for device {netdev!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +367,7 @@ _WAN_NETWORKS = frozenset(
 _WAN_REASON = (
     "This is the jack your internet comes in on. Turning it off takes everyone "
     "in the home offline, and it will stay off until you turn it back on — "
-    "nothing puts it back for you. Confirm again to continue."
+    "nothing puts it back for you."
 )
 
 #: Here the promise IS true: this jack carries the path the appliance is reached
@@ -359,6 +378,17 @@ _MANAGEMENT_REASON = (
     "something is plugged into it. Turning it off will cut your own connection "
     "— the appliance puts it back automatically after a minute."
 )
+
+#: What the caller must DO about the refusal, kept apart from WHY it happened.
+#:
+#: These two sentences travel together in the 409 body but not in the dashboard's
+#: warning banner, which renders `reason` at a point where the user has confirmed
+#: nothing yet — "Confirm again to continue" there is an instruction to do
+#: something they have not been asked to do. Splitting the field, rather than
+#: letting the client compose its own sentence, keeps ONE server-side source of
+#: this policy: the property that made the WAN/management split hold up is that
+#: no second copy of these words exists anywhere.
+_GUARD_INSTRUCTION = "Confirm again to continue."
 
 
 def is_wan_port(port: dict) -> bool:
@@ -382,6 +412,11 @@ def disable_guard(
     is refused with 409 + ``code`` unless the caller passes ``force`` — the
     explicit acknowledgement, the same shape the interface writes use.
 
+    ``reason`` is WHY, and is the only field safe to render before the user has
+    been asked anything; ``instruction`` is what to do about it, and belongs in
+    the refusal, not in a warning banner. Both live here so there is exactly one
+    server-side source of this policy.
+
     Enabling a jack is never guarded: it has no blast radius, and requiring the
     same ceremony to restore the WAN as to cut it would be backwards.
     """
@@ -389,7 +424,11 @@ def disable_guard(
         # Checked first. A jack that is BOTH the WAN and a live management path
         # gets the WAN refusal, because that is the one with no automatic undo
         # and therefore the one the copy has to describe.
-        return {"code": GUARD_WAN_PORT, "reason": _WAN_REASON}
+        return {
+            "code": GUARD_WAN_PORT,
+            "reason": _WAN_REASON,
+            "instruction": _GUARD_INSTRUCTION,
+        }
 
     # Link state is half the test: on the RB5009 every LAN jack is a `br-lan`
     # member, so "carries a management network" alone describes five empty
@@ -397,7 +436,11 @@ def disable_guard(
     if port.get("link_up") and any(
         is_management_interface(n) for n in port.get("networks") or []
     ):
-        return {"code": GUARD_MANAGEMENT_PORT, "reason": _MANAGEMENT_REASON}
+        return {
+            "code": GUARD_MANAGEMENT_PORT,
+            "reason": _MANAGEMENT_REASON,
+            "instruction": _GUARD_INSTRUCTION,
+        }
 
     return None
 

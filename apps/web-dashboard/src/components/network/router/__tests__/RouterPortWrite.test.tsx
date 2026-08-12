@@ -46,6 +46,7 @@ vi.mock("@/components/Toast", () => ({
 
 import { RouterPortsPanel } from "../RouterPortsPanel";
 import { RouterPortDrawer } from "../RouterPortDrawer";
+import { RouterPortRefusedError } from "@/lib/api";
 
 function port(over: Partial<RouterPort> & { id: string }): RouterPort {
   return {
@@ -203,6 +204,63 @@ describe("RouterPortDrawer", () => {
     );
   });
 
+  it("names WHAT goes dark, not just 'whatever is plugged in'", () => {
+    /* The switch drawer names the device. A RouterPort has no device join, but
+       it does know what the jack is FOR and which interfaces ride it — both
+       already on screen as Facts. This is the only sentence an unguarded live
+       jack (guest / other) shows before it is cut. */
+    const onAction = vi.fn();
+    const guest = port({
+      id: "p6", role: "guest", networks: ["guest"], link_up: true,
+      speed: "1 Gb", status: "online",
+    });
+    render(<RouterPortDrawer port={guest} canWrite onClose={noop} onAction={onAction} />);
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    const { blast } = onAction.mock.calls[0][0];
+    expect(blast).toContain("Guest");
+    expect(blast).toContain("guest");
+    expect(blast).not.toMatch(/whatever is plugged into/i);
+  });
+
+  it("promises a manual restore ONLY where that is the truth", () => {
+    /* An unguarded jack really does stay off until someone turns it back on. A
+       live management jack does not — safe_apply puts it back after a minute,
+       which the escalation dialog says. Claiming both would contradict step 2. */
+    const onAction = vi.fn();
+    const unguarded = port({
+      id: "p6", role: "other", networks: ["iot"], link_up: true, status: "online",
+    });
+    render(<RouterPortDrawer port={unguarded} canWrite onClose={noop} onAction={onAction} />);
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    expect(onAction.mock.calls[0][0].blast).toMatch(/until you turn the port back on/i);
+
+    onAction.mockClear();
+    render(<RouterPortDrawer port={LIVE_LAN} canWrite onClose={noop} onAction={onAction} />);
+    fireEvent.click(screen.getAllByRole("button", { name: /turn off this port/i })[1]);
+    expect(onAction.mock.calls[0][0].blast).not.toMatch(/until you turn/i);
+  });
+
+  it("the guard banner shows the reason and NOT the 'confirm again' instruction", () => {
+    /* The banner renders where nothing has been confirmed yet, so an
+       instruction to confirm again is telling the user to do something nobody
+       has asked them to do. The instruction is a separate server-side field. */
+    render(<RouterPortDrawer port={WAN} canWrite onClose={noop} onAction={noop} />);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(/internet comes in on/i);
+    expect(dialog.textContent).not.toMatch(/confirm again/i);
+  });
+
+  it("explains a jack with no reading to EVERYONE, not just owners", () => {
+    /* It is a fact about the hardware, not an action. A member used to get the
+       bare "no module" chip with no account of what it meant. */
+    const cage = port({
+      id: "sfp", role: "unused", networks: [], present: false,
+      admin_up: null, is_sfp: true, status: "absent",
+    });
+    render(<RouterPortDrawer port={cage} canWrite={false} onClose={noop} onAction={noop} />);
+    expect(screen.getByRole("dialog")).toHaveTextContent(/no module in it/i);
+  });
+
   it("has no action at all for a jack with no reading", () => {
     /* An empty SFP cage reports no netifd device. There is nothing to shut, and
        writing `enabled 0` for a device netifd never realised would stage a
@@ -258,7 +316,7 @@ describe("confirming a write", () => {
   it("a guarded jack does NOT dispatch on the first confirm", async () => {
     await openDrawer("p1");
     fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
     // The second acknowledgement is now on screen and nothing has been sent.
     expect(await screen.findByText(/internet comes in on/i)).toBeInTheDocument();
     expect(setPortEnabled).not.toHaveBeenCalled();
@@ -267,7 +325,7 @@ describe("confirming a write", () => {
   it("the SECOND acknowledgement is what sends force:true", async () => {
     await openDrawer("p1");
     fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
     fireEvent.click(await screen.findByRole("button", { name: /i understand/i }));
     await waitFor(() => expect(setPortEnabled).toHaveBeenCalledWith("p1", false, true));
   });
@@ -277,7 +335,7 @@ describe("confirming a write", () => {
        back by itself, the WAN jack does not. */
     await openDrawer("p1");
     fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
     const escalation = await screen.findByText(/internet comes in on/i);
     expect(escalation).toBeInTheDocument();
     expect(screen.queryByText(/reaches your appliance through/i)).toBeNull();
@@ -286,14 +344,14 @@ describe("confirming a write", () => {
   it("shows the MANAGEMENT reason for a live management jack", async () => {
     await openDrawer("p2");
     fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
     expect(await screen.findByText(/reaches your appliance through/i)).toBeInTheDocument();
   });
 
   it("cancelling the escalation sends nothing", async () => {
     await openDrawer("p1");
     fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
     fireEvent.click(await screen.findByRole("button", { name: /cancel/i }));
     await waitFor(() => expect(screen.queryByText(/internet comes in on/i)).toBeNull());
     expect(setPortEnabled).not.toHaveBeenCalled();
@@ -307,6 +365,64 @@ describe("confirming a write", () => {
     fireEvent.click(screen.getByRole("button", { name: /turn on this port/i }));
     fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
     await waitFor(() => expect(setPortEnabled).toHaveBeenCalledWith("p1", true, false));
+  });
+
+  it("labels step 1 'Continue' on a guarded jack — it escalates, it does not apply", async () => {
+    await openDrawer("p1");
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    expect(await screen.findByRole("button", { name: /^continue$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /confirm & apply/i })).toBeNull();
+  });
+
+  it("labels step 1 'Confirm & apply' on an ordinary jack — it really does apply", async () => {
+    await openDrawer("p5");
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    expect(await screen.findByRole("button", { name: /confirm & apply/i })).toBeInTheDocument();
+  });
+
+  it("escalates on a SERVER-side refusal the cached read didn't predict", async () => {
+    /* 🔴 The race: `disable_guard` is read on a 10s poll, so a jack that was
+       empty when the map loaded can have a cable in it by the time someone
+       clicks. The server refuses; without this the user meets a bare 409 and
+       retrying fails until the next poll. */
+    setPortEnabled.mockRejectedValueOnce(
+      new RouterPortRefusedError({
+        code: "MANAGEMENT_PORT",
+        reason: "Something got plugged into this jack a moment ago.",
+      }),
+    );
+    await openDrawer("p5");
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+
+    // The escalation appears, built from the SERVER's sentence, and nothing was
+    // reported as a failure.
+    expect(await screen.findByText(/plugged into this jack a moment ago/i)).toBeInTheDocument();
+    expect(toastMock).not.toHaveBeenCalled();
+  });
+
+  it("the escalation raised by a server refusal is what finally sends force", async () => {
+    setPortEnabled.mockRejectedValueOnce(
+      new RouterPortRefusedError({ code: "WAN_PORT", reason: "A cable arrived." }),
+    );
+    await openDrawer("p5");
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /i understand/i }));
+    await waitFor(() => expect(setPortEnabled).toHaveBeenLastCalledWith("p5", false, true));
+  });
+
+  it("a refusal on the FORCED attempt is a real failure, not another escalation", async () => {
+    /* Otherwise a server that keeps refusing would loop the user through the
+       same dialog forever with nothing to show for it. */
+    setPortEnabled.mockRejectedValue(
+      new RouterPortRefusedError({ code: "WAN_PORT", reason: "still refused" }),
+    );
+    await openDrawer("p1");
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /i understand/i }));
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.any(String), "error"));
   });
 
   it("surfaces a failed write as a toast instead of swallowing it", async () => {

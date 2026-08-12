@@ -36,6 +36,41 @@ function WriteChip() {
   );
 }
 
+/**
+ * The blast-radius sentence for turning a jack OFF.
+ *
+ * Two rules the first draft got wrong, both from the UX review:
+ *
+ * **Name what goes dark.** "Whatever is plugged into p3" tells the user nothing
+ * they didn't already know. The switch drawer names the device; a `RouterPort`
+ * has no device join, but it does carry what the jack is FOR (`portName` —
+ * "Internet" / "LAN" / "Guest") and which interfaces ride it (`networksLabel`),
+ * both already on screen as Facts. This matters most on an unguarded live jack
+ * — `guest`, `other` — which gets no second dialog, so this sentence is the
+ * only thing the user reads before cutting it.
+ *
+ * **Only promise a manual restore where that is the truth.** "until you turn
+ * the port back on" is right for an unguarded jack and wrong for a live
+ * management one, which safe_apply puts back by itself after a minute — and it
+ * contradicts the escalation dialog that follows. Step 1 states the loss; step
+ * 2 owns the restoration promise, so the clause is dropped whenever step 2 is
+ * going to appear.
+ */
+export function disableBlast(
+  port: RouterPort,
+  guard: RouterPort["disable_guard"],
+): string {
+  const what = portName(port);
+  const carries = port.networks.length > 0 ? ` (${networksLabel(port)})` : "";
+  if (!port.link_up) {
+    return `Nothing is plugged into ${port.id} right now, so nothing drops — but anything connected here later stays offline until you turn it back on.`;
+  }
+  const loses = `${what}${carries} on ${port.id} loses its connection`;
+  // The escalation that follows owns the restore story, and for a management
+  // jack "until you turn it back on" is simply false.
+  return guard ? `${loses}.` : `${loses} until you turn the port back on.`;
+}
+
 function Fact({ k, children }: { k: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center gap-3 py-2.5 border-t border-[var(--card-bd)] first:border-t-0 type-footnote">
@@ -166,7 +201,9 @@ export function RouterPortDrawer({ port, canWrite, onClose, onAction }: Props) {
           </Fact>
         </div>
 
-        {/* The server's own warning, at the point of decision. */}
+        {/* The server's own warning, at the point of decision. `reason` only —
+            the "confirm again" half is a separate field on the guard, because
+            here the user has not been asked to confirm anything yet. */}
         {canWrite && actionable && guard && (
           <div
             role="note"
@@ -181,13 +218,27 @@ export function RouterPortDrawer({ port, canWrite, onClose, onAction }: Props) {
           </div>
         )}
 
+        {/* Why this jack has no reading. A FACT about the hardware, so it sits
+            outside the RBAC gate — a member who opens an empty SFP cage
+            deserves the explanation, not just a "no module" chip with no
+            account of what that means. */}
+        {!actionable && (
+          <div className="flex gap-2 items-start p-3 mb-3 bg-[var(--inset)] rounded-[10px] type-caption-1 leading-relaxed text-[color:var(--text-muted)]">
+            <AlertTriangle size={13} className="flex-none mt-px" aria-hidden="true" />
+            {port.is_sfp
+              ? "This cage has no module in it, so the router reports no reading for it."
+              : "The router reports no reading for this port."}
+            {canWrite ? " There's nothing here to switch on or off." : ""}
+          </div>
+        )}
+
         {/* Admin action — gated by RBAC, and by having a reading at all */}
-        {canWrite && (
+        {canWrite && actionable && (
           <>
             <p className="type-caption-1 font-semibold uppercase tracking-wider text-[color:var(--text-muted)] mb-2.5">
               Admin actions
             </p>
-            {actionable ? (
+            {(
               <button
                 type="button"
                 onClick={() =>
@@ -198,9 +249,7 @@ export function RouterPortDrawer({ port, canWrite, onClose, onAction }: Props) {
                     what: isDisabled ? `Turn ${port.id} back on?` : `Turn off ${port.id}?`,
                     blast: isDisabled
                       ? `Anything plugged into ${port.id} reconnects as soon as the change applies.`
-                      : port.link_up
-                        ? `Whatever is plugged into ${port.id} loses its connection until you turn the port back on.`
-                        : `Nothing is plugged into ${port.id} right now, so nothing drops — but anything connected here later stays offline until you turn it back on.`,
+                      : disableBlast(port, guard),
                     guard,
                   })
                 }
@@ -221,13 +270,6 @@ export function RouterPortDrawer({ port, canWrite, onClose, onAction }: Props) {
                 </span>
                 <WriteChip />
               </button>
-            ) : (
-              <div className="flex gap-2 items-start p-3 bg-[var(--inset)] rounded-[10px] type-caption-1 leading-relaxed text-[color:var(--text-muted)]">
-                <AlertTriangle size={13} className="flex-none mt-px" aria-hidden="true" />
-                {port.is_sfp
-                  ? "This cage has no module in it, so the router reports no reading for it. There's nothing here to switch on or off yet."
-                  : "The router reports no reading for this port, so there's nothing here to switch on or off."}
-              </div>
             )}
           </>
         )}

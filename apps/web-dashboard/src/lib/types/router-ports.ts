@@ -44,13 +44,17 @@ export interface RouterPortTraffic {
  * the change is confirmed, and the house stays offline until somebody puts it
  * back by hand.
  *
- * `reason` is the server's sentence and is rendered verbatim. The dashboard
- * cannot derive it: which interfaces count as management is deployment
- * configuration (`DROPLET_MGMT_INTERFACES`).
+ * `reason` is WHY, rendered verbatim — the dashboard cannot derive it, because
+ * which interfaces count as management is deployment configuration
+ * (`DROPLET_MGMT_INTERFACES`). `instruction` is what to DO about it, kept as a
+ * separate field because the drawer shows the reason as a warning before the
+ * user has been asked to confirm anything, and "confirm again" there is an
+ * instruction to do something nobody has requested.
  */
 export interface RouterPortDisableGuard {
   code: "WAN_PORT" | "MANAGEMENT_PORT";
   reason: string;
+  instruction?: string;
 }
 
 export interface RouterPort {

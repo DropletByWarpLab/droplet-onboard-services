@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
+import { RouterPortRefusedError } from "@/lib/api";
 import type { RouterPort } from "@/lib/types/router-ports";
 import { RouterFaceplate } from "./RouterFaceplate";
 import { RouterPortTable } from "./RouterPortTable";
@@ -104,11 +105,22 @@ export function RouterPortsPanel() {
    * Run the confirmed write. `force` is passed, never inferred: it is the
    * user's second acknowledgement, and a default would silently clear the
    * routing service's WAN guard for every write that reached here.
+   *
+   * A `RouterPortRefusedError` is not a failure to report — it is the server
+   * telling us this jack needed the escalation after all. That happens for real:
+   * `disable_guard` is read on a 10s poll, so a jack that was empty when the map
+   * last loaded can have a cable in it by the time someone clicks. Raise the
+   * same second confirm the drawer would have raised, from the server's own
+   * words, instead of toasting "409" at someone who can then never succeed.
    */
   async function applyAction(a: RouterAction, force: boolean) {
     try {
       await setPortEnabled(a.port.id, a.enabled, force);
     } catch (err) {
+      if (err instanceof RouterPortRefusedError && !force) {
+        setEscalated({ ...a, guard: err.guard });
+        return;
+      }
       // Toast AND re-throw: ConfirmDialog's contract is to stay open on a
       // rejected confirm so the operator can retry, and a write that fails
       // silently is how someone walks away believing a jack is off.
@@ -187,7 +199,9 @@ export function RouterPortsPanel() {
           open
           title={action.what}
           description={action.blast}
-          confirmLabel="Confirm & apply"
+          // On a guarded jack this button opens the second acknowledgement
+          // rather than applying anything, so it must not promise to apply.
+          confirmLabel={action.guard ? "Continue" : "Confirm & apply"}
           variant="neutral"
           accessory={
             <div className="flex items-center gap-2.5">

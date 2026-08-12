@@ -43,7 +43,12 @@ from droplet_openwrt_sdk import (
     detect_deployment_topology,
     parse_ai_acl_scopes,
 )
-from router_ports import annotate_write_guards, disable_guard, get_router_ports
+from router_ports import (
+    DeviceSectionNameExhausted,
+    annotate_write_guards,
+    disable_guard,
+    get_router_ports,
+)
 import json
 from schemas import (
     HealthResponse,
@@ -827,9 +832,20 @@ def set_network_port_enabled(port: str, req: SetPortEnabledRequest, request: Req
     if not req.enabled and not req.force:
         guard = disable_guard(target, _is_management_interface)
         if guard is not None:
+            # `reason` is WHY and `instruction` is what to do about it. They are
+            # separate fields because the dashboard renders the reason as a
+            # warning banner BEFORE the user has confirmed anything, where
+            # "confirm again" is an instruction to do something nobody has
+            # asked them to do. `error` keeps both, for a caller that has only
+            # one place to put a sentence.
             return JSONResponse(
                 status_code=409,
-                content={"error": guard["reason"], "code": guard["code"]},
+                content={
+                    "error": f"{guard['reason']} {guard['instruction']}",
+                    "reason": guard["reason"],
+                    "instruction": guard["instruction"],
+                    "code": guard["code"],
+                },
             )
 
     try:
@@ -848,6 +864,23 @@ def set_network_port_enabled(port: str, req: SetPortEnabledRequest, request: Req
                 "error": "Connectivity lost changing the port — rolling back",
                 "detail": str(exc),
                 "rollback_pending": True,
+            },
+        )
+    except DeviceSectionNameExhausted as exc:
+        # A config we cannot safely add a section to. 409, not 500: the router
+        # is healthy and the request is well-formed — the deployment's own
+        # /etc/config/network is in a state only a human can resolve.
+        logger.error("no free uci section name for port %s: %s", port, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    f"This router's network config already has too many sections "
+                    f"named after {port}. Tidy up /etc/config/network before "
+                    f"changing this port."
+                ),
+                "detail": str(exc),
+                "code": DeviceSectionNameExhausted.code,
             },
         )
     except DeviceWriteNotApplied as exc:

@@ -68,6 +68,7 @@ from droplet_openwrt_sdk import (
     UbusError,
 )
 from router_ports import (
+    DeviceSectionNameExhausted,
     annotate_write_guards,
     derive_ports,
     device_section_enabled,
@@ -220,6 +221,18 @@ class TestDisableGuard:
     def test_wan6_counts_as_wan(self) -> None:
         p = {**port("p5"), "networks": ["wan6"], "role": "wan"}
         assert disable_guard(p, IS_MGMT)["code"] == "WAN_PORT"
+
+    @pytest.mark.parametrize("jack", ["p1", "p2"])
+    def test_reason_says_WHY_and_never_what_to_do_next(self, jack: str) -> None:
+        """The drawer renders `reason` as a warning banner at a point where the
+        user has confirmed nothing, so an instruction to "confirm again" there is
+        telling them to do something nobody has asked. `instruction` is the
+        separate field — kept server-side so there is still exactly one source
+        of this copy, which is the property that made the WAN/management split
+        hold up in the first place."""
+        guard = disable_guard(port(jack), IS_MGMT)
+        assert "confirm" not in guard["reason"].lower()
+        assert guard["instruction"] == "Confirm again to continue."
 
     def test_the_management_list_is_the_injected_one(self) -> None:
         """DROPLET_MGMT_INTERFACES is env-configurable, so the guard must read
@@ -417,6 +430,36 @@ class TestSetPortEnabledEndpoint:
         assert resp.status_code == 409, resp.text
         assert resp.json()["code"] == "WAN_PORT"
         mock_router.network.set_device_enabled.assert_not_called()
+
+    def test_the_refusal_body_splits_the_reason_from_the_instruction(
+        self, connected_client: TestClient, mock_router: MagicMock
+    ) -> None:
+        """The orchestrator carries `reason` into the dashboard's escalation
+        dialog; `error` keeps both for a caller with one place to put a
+        sentence."""
+        wire_port_map(mock_router)
+        body = connected_client.post(
+            "/network/ports/p1/enable", json={"enabled": False}, headers=AUTH,
+        ).json()
+        assert "confirm" not in body["reason"].lower()
+        assert body["instruction"] == "Confirm again to continue."
+        assert body["error"] == f"{body['reason']} {body['instruction']}"
+
+    def test_an_exhausted_section_namespace_is_a_typed_409_not_a_500(
+        self, connected_client: TestClient, mock_router: MagicMock
+    ) -> None:
+        """The route catches only the SDK's own exceptions, so a bare
+        ValueError from `new_device_section_name` would surface as an untyped
+        500 with nothing the operator could act on."""
+        wire_port_map(mock_router)
+        mock_router.network.set_device_enabled.side_effect = DeviceSectionNameExhausted(
+            "no free name for p5"
+        )
+        resp = connected_client.post(
+            "/network/ports/p5/enable", json={"enabled": False}, headers=AUTH,
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["code"] == "PORT_SECTION_NAME_EXHAUSTED"
 
     def test_the_wan_jack_proceeds_with_force(
         self, connected_client: TestClient, mock_router: MagicMock
