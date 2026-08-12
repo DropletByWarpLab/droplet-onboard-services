@@ -261,11 +261,14 @@ export function serializeIcs(
     if (ev.description) lines.push(`DESCRIPTION:${escapeText(ev.description)}`);
     if (ev.location) lines.push(`LOCATION:${escapeText(ev.location)}`);
     // URL is what Apple Calendar and Outlook render as a join target, and a
-    // subscriber's own client is where they actually are at 2:59. It is a
-    // URI value (§3.8.4.6), so it takes escapeUri, not escapeText — a `,` or
-    // `;` in the link must survive verbatim or the subscriber joins a room
-    // that doesn't exist, while the dashboard's Join button stays healthy
-    // and hides the break.
+    // subscriber's own client is where they actually are at 2:59. RFC 5545
+    // types it as a URI value, not TEXT, so it takes escapeUri rather than
+    // escapeText — a `,` or `;` in the link must survive verbatim or the
+    // subscriber joins a room that doesn't exist, while the dashboard's Join
+    // button stays healthy and hides the break.
+    // (Section number deliberately omitted: a bare dotted-quad like the URL
+    // property's section reads as an IPv4 literal to the egress allowlist
+    // scanner and fails the PR-blocking egress-gate. See docs/SECURITY.md.)
     if (ev.meetingUrl) lines.push(`URL:${escapeUri(ev.meetingUrl)}`);
     if (ev.updatedAt) lines.push(`LAST-MODIFIED:${fmtIcsDateTime(ev.updatedAt, false)}`);
     lines.push("END:VEVENT");
