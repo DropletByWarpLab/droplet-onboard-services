@@ -74,6 +74,23 @@ export interface RouterPort {
   /** online = carrier · offline = admin up, no cable · disabled = admin down ·
    *  absent = no reading at all. */
   status: "online" | "offline" | "disabled" | "absent";
+  /**
+   * WARP-1907 — the extra acknowledgement turning this jack OFF requires, or
+   * `null` when the ordinary Tier-2 confirm is enough.
+   *
+   * Computed by the routing service (`router_ports.disable_guard`) and carried
+   * on the read so the dashboard can choose its confirmation copy before it
+   * opens the dialog. It is NOT re-derivable here: the management-interface set
+   * is deployment configuration (`DROPLET_MGMT_INTERFACES`). The write route
+   * calls the same function, so the sentence the user sees and the rule the
+   * server enforces cannot drift.
+   *
+   * `WAN_PORT` and `MANAGEMENT_PORT` differ in more than wording — a live
+   * management jack self-cuts and OpenWrt reverts after 60s, while the WAN jack
+   * leaves the router perfectly reachable on the LAN, so nothing reverts and
+   * the household stays offline.
+   */
+  disable_guard: { code: "WAN_PORT" | "MANAGEMENT_PORT"; reason: string } | null;
 }
 
 /**

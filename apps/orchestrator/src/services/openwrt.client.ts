@@ -353,11 +353,35 @@ export async function fetchAllInterfaces(): Promise<NetworkInterfaceRow[]> {
 
 /**
  * The router's PHYSICAL port map (WARP-1866) — the jacks, not the interfaces.
- * Read-only; there is no write counterpart by design (disabling a router jack
- * from the dashboard would sever the WAN or the switch trunk).
+ *
+ * Every port carries `disable_guard` (WARP-1907): the extra acknowledgement
+ * turning that jack off requires, or null. See `types/network.ts`.
  */
 export async function fetchRouterPorts(): Promise<RouterPortMap> {
   return routingFetchJson<RouterPortMap>("/network/ports", { label: "Router ports" });
+}
+
+/**
+ * WARP-1907 — administratively bring a physical jack up or down.
+ *
+ * `force` is the caller's acknowledgement of the routing service's own guard,
+ * which refuses a DISABLE of the WAN jack or of a live management jack with 409
+ * without it. We do not pre-empt that refusal here: the routing service owns the
+ * management-interface set, and a second copy of the rule in TypeScript is a
+ * copy that drifts. The dashboard decides whether to ASK for the extra confirm
+ * from `disable_guard` on the read — the same function, on the same data.
+ */
+export async function setRouterPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<WriteResult> {
+  const res = await postJson(
+    `/network/ports/${encodeURIComponent(port)}/enable`,
+    { enabled, force },
+    `Router port ${enabled ? "enable" : "disable"} ${port}`,
+  );
+  return opFrom(res);
 }
 
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {
