@@ -224,6 +224,12 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   ] },
   { tool: "set_detection_zones", client: "orchestrator", hops: [admit("patch", "/api/cameras/:name/settings")] },
   { tool: "delete_clip", client: "orchestrator", hops: [admit("delete", "/api/cameras/events/:eventId")] },
+  // WARP-1893: two hops — the GET resolves the user's phrasing ("the driveway
+  // camera") to a config key before the PATCH writes the new label.
+  { tool: "rename_camera", client: "orchestrator", hops: [
+    admit("get", "/api/cameras"),
+    admit("patch", "/api/cameras/:name"),
+  ] },
 
   // ── switch ──────────────────────────────────────────────────────────────
   { tool: "get_switch_ports", client: "orchestrator", hops: [admit("get", "/api/switch/ports")] },

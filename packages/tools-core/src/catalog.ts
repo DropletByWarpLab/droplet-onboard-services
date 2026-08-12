@@ -143,6 +143,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "set_camera_detection",
     "set_detection_zones",
     "delete_clip",
+    "rename_camera",
   ],
   switch: [
     "get_switch_ports",
@@ -307,6 +308,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   get_camera_storage: "See which camera is using the most recording space, and how full the drive is",
   set_camera_detection: "Turn a camera's detection and recording on or off",
   set_detection_zones: "Choose the areas of a camera view that trigger motion alerts",
+  rename_camera: "Give a camera a name you'll recognise, like \"Driveway\"",
   delete_clip: "Permanently delete a saved camera clip",
   // Switch
   get_switch_ports: "See what's plugged into each network port",

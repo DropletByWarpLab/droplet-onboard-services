@@ -85,6 +85,9 @@ import getCameraStorage from "./handlers/cameras/get-camera-storage.js";
 import setCameraDetection from "./handlers/cameras/set-camera-detection.js";
 import setDetectionZones from "./handlers/cameras/set-detection-zones.js";
 import deleteClip from "./handlers/cameras/delete-clip.js";
+// WARP-1893: rename a camera's household-facing label (displayName only —
+// never the Frigate config key, which owns the recordings).
+import renameCamera from "./handlers/cameras/rename-camera.js";
 
 // switch
 import getSwitchPorts from "./handlers/switch/get-switch-ports.js";
@@ -281,6 +284,7 @@ const allTools: Tool[] = [
   setCameraDetection,
   setDetectionZones,
   deleteClip,
+  renameCamera,
   // switch
   getSwitchPorts,
   getSwitchVlans,

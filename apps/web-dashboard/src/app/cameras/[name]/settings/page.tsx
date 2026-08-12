@@ -10,6 +10,7 @@ import {
   Check,
   HardDrive,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -22,6 +23,7 @@ import {
   patchCameraSettings,
   fetchCameraBudget,
   setCameraBudget,
+  renameCamera,
 } from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
@@ -73,7 +75,7 @@ export default function CameraSettingsPage() {
     [params],
   );
 
-  const { cameras } = useCameras();
+  const { cameras, refresh: refreshCameras } = useCameras();
   const camera: CameraInfo | undefined = cameras.find((c) => c.name === name);
 
   const { data: fetched, error, isLoading, mutate } = useSWR<CameraSettings>(
@@ -100,6 +102,38 @@ export default function CameraSettingsPage() {
 
   const update = <K extends keyof CameraSettings>(key: K, value: CameraSettings[K]) => {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
+  };
+
+  // WARP-1893 — display name. Kept out of `draft` for the same reason as the
+  // budget below: it is not part of the Frigate settings patch and saves
+  // through its own endpoint. Critically it also does NOT restart the camera,
+  // so it must not ride the sticky save bar, whose copy warns that it will.
+  const [nameDraft, setNameDraft] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [renameMsg, setRenameMsg] = useState<string | null>(null);
+
+  // Hydrate from server truth once the camera list resolves. Keyed on the
+  // camera's own displayName so a rename made elsewhere (chat, another tab)
+  // reflects here instead of leaving a stale draft in the field.
+  useEffect(() => {
+    if (camera?.displayName !== undefined) setNameDraft(camera.displayName ?? "");
+  }, [camera?.displayName]);
+
+  const trimmedName = nameDraft.trim();
+  const nameDirty = camera ? trimmedName !== (camera.displayName ?? "") : false;
+
+  const saveName = async () => {
+    setRenaming(true);
+    setRenameMsg(null);
+    try {
+      await renameCamera(name, trimmedName);
+      refreshCameras();
+      setRenameMsg("Saved.");
+    } catch (e) {
+      setRenameMsg(e instanceof Error ? e.message : "Couldn't rename this camera.");
+    } finally {
+      setRenaming(false);
+    }
   };
 
   // WARP-1851 — storage budget. Kept out of `draft` because it is not part
@@ -310,6 +344,48 @@ export default function CameraSettingsPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Name — WARP-1893. Saves through its own endpoint and does NOT
+              restart the camera, so it stays off the sticky save bar. */}
+          <div className="card space-y-3 lg:col-span-2">
+            <div className="flex items-center gap-2">
+              <Pencil size={16} className="text-accent" />
+              <h2 className="type-headline text-label-primary">Name</h2>
+            </div>
+            <p className="type-caption-1 text-label-tertiary">
+              What this camera is called around the house. Renaming is instant
+              and doesn&apos;t affect any recordings you already have.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                maxLength={64}
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                placeholder="e.g. Driveway"
+                className="input"
+                style={{ maxWidth: 280 }}
+                aria-label="Camera name"
+              />
+              <button
+                type="button"
+                className="btn"
+                disabled={renaming || !nameDirty || trimmedName.length === 0}
+                onClick={saveName}
+              >
+                {renaming ? "Saving…" : "Rename"}
+              </button>
+            </div>
+            {renameMsg && (
+              <p
+                className={`type-caption-1 ${
+                  renameMsg === "Saved." ? "text-system-green" : "text-system-red"
+                }`}
+              >
+                {renameMsg}
+              </p>
+            )}
+          </div>
+
           {/* Detection */}
           <div className="card space-y-3">
             <div className="flex items-center gap-2">

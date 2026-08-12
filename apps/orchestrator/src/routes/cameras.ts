@@ -151,6 +151,11 @@ const CAMERA_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 /** Frigate event IDs: alphanumeric with hyphens/dots (UUID-like or numeric) */
 const EVENT_ID_RE = /^[a-zA-Z0-9._-]{1,128}$/;
 
+/** WARP-1893 — cap on the household-facing camera label. Unlike
+ *  CAMERA_NAME_RE this is free text (spaces, accents, emoji all fine); the
+ *  only limits are length and control characters. */
+const MAX_DISPLAY_NAME_LEN = 64;
+
 function isValidCameraName(name: string): boolean {
   return CAMERA_NAME_RE.test(name);
 }
@@ -2045,6 +2050,83 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // --- Rename a camera (display name only) — WARP-1893 ---
+  //
+  // `Camera.name` is the Frigate config key: it names the recording
+  // directory, keys the event rows, and roots the MQTT topic tree, so
+  // renaming it would orphan every recording the household already has.
+  // `displayName` is the human-facing label and the ONLY field this route
+  // touches — `name` is never written here.
+  //
+  // Until now `displayName` was written exactly once, at adoption, as a
+  // title-cased transform of the config key (see the manual-add handler
+  // above). A camera discovered as `xnv_c8083r_e43022502afd` was therefore
+  // stuck displaying "Xnv C8083r E43022502afd" forever, with no way to fix
+  // it from any surface. This is the missing write path.
+  //
+  // requireRoleOrMcpService so the `rename_camera` LLM tool — dispatching
+  // as `_service:mcp`, which is neither owner nor admin — can reach it.
+  // Human roles are unchanged. Without the MCP variant the tool would ship
+  // registered and 403 on every call.
+  router.patch(
+    "/cameras/:name",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        if (!isValidCameraName(req.params.name)) {
+          return res.status(400).json({ error: "Invalid camera name" });
+        }
+
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        if (typeof body.displayName !== "string") {
+          return res.status(400).json({ error: "displayName must be a string" });
+        }
+        const displayName = body.displayName.trim();
+        if (displayName.length === 0) {
+          return res.status(400).json({ error: "displayName cannot be empty" });
+        }
+        if (displayName.length > MAX_DISPLAY_NAME_LEN) {
+          return res
+            .status(400)
+            .json({ error: `displayName must be ${MAX_DISPLAY_NAME_LEN} characters or fewer` });
+        }
+        // Control and format characters would corrupt every surface that
+        // renders the name (dashboard, OLED, notification bodies) and can
+        // smuggle line breaks into log lines.
+        if (/[\p{Cc}\p{Cf}]/u.test(displayName)) {
+          return res
+            .status(400)
+            .json({ error: "displayName cannot contain control characters" });
+        }
+
+        // Deliberately NOT unique-checked: a household may legitimately have
+        // two "Side Gate" cameras, and `Camera.name` remains the unique key.
+        //
+        // updateMany rather than update: `name` is unique but is not the
+        // primary key, and a camera present in Frigate but not yet mirrored
+        // into the DB has no row — that is a 404, not a Prisma throw.
+        const { count } = await prisma.camera.updateMany({
+          where: { name: req.params.name },
+          data: { displayName },
+        });
+        if (count === 0) {
+          return res.status(404).json({ error: "Camera not found" });
+        }
+
+        // `displayName` is part of the `cameras:list` payload, which
+        // getCameras() serves from a 5s cache — without this the rename
+        // appears to do nothing for up to CACHE_TTL and the user renames it
+        // again. No reconcileFrigateCameras() here: the SET of cameras is
+        // unchanged, so Frigate has nothing to sync.
+        await invalidateCamerasCache();
+
+        res.json({ status: "renamed", camera: req.params.name, displayName });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // --- Camera live MJPEG stream (proxied from Frigate — auth-gated) ---
   //
