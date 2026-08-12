@@ -61,6 +61,15 @@ export type ErrorDomain =
   // the copy has to name notes, or an outage is indistinguishable from an
   // empty account.
   | "notes"
+  // WARP-1914 — the Files-page search bar's three modes. Every search failure
+  // used to translate through "files", whose fallback ("We couldn't load
+  // those files right now…") misdescribes a failed SEARCH as a browse hiccup
+  // and hides WHICH mode is broken — QA saw exactly that banner when the
+  // semantic stack was down. One narrow domain per mode so the copy can name
+  // the failing mode and point at the modes that still work.
+  | "search-name"
+  | "search-keyword"
+  | "search-semantic"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -117,6 +126,16 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "The Droplet couldn't create a pairing code right now. Try again in a moment.",
   notes:
     "We couldn't reach your notes. They're safe on your Droplet — try again in a moment.",
+  // WARP-1914 — each search-mode fallback names the mode (or the search
+  // action for Name), never file LOADING, and points at a mode that still
+  // works. Name search only needs the files service, so its fallback stays
+  // retry-only.
+  "search-name":
+    "We couldn't search your files right now. Try again in a moment.",
+  "search-keyword":
+    "Keyword search isn't working right now. Try again in a moment, or switch to Name search.",
+  "search-semantic":
+    "Semantic search isn't available right now. Name and Keyword search still work — try again in a moment.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -548,6 +567,32 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     NETWORK:
       "We can't reach this Droplet right now. Your notes are on it — check the connection and try again.",
     TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  // WARP-1914 — the Files-page search modes. `semantic_unavailable` is the
+  // orchestrator's stable wire code for EVERY semantic-unavailable answer
+  // (gateway down, embed failure, pgvector missing); the bare 503/502
+  // entries catch an older orchestrator that predates the code. Semantic
+  // copy always names the two modes that keep working without the AI stack.
+  "search-name": {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That search took too long. Try again in a moment.",
+  },
+  "search-keyword": {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That search took too long. Try again in a moment.",
+  },
+  "search-semantic": {
+    semantic_unavailable:
+      "Semantic search isn't available right now — the AI on this Droplet may still be starting. Name and Keyword search still work.",
+    "503":
+      "Semantic search isn't available right now — the AI on this Droplet may still be starting. Name and Keyword search still work.",
+    "502":
+      "Semantic search isn't available right now — the AI on this Droplet may still be starting. Name and Keyword search still work.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That search took too long. Try again in a moment.",
   },
   generic: {
     NETWORK:
