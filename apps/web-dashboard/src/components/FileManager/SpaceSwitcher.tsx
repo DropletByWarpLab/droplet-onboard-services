@@ -97,6 +97,24 @@ function isVisibleNonActive(space: FileSpace, isOwnerOrAdmin: boolean): boolean 
 }
 
 /**
+ * WARP-1910 — whether the switcher renders at all for this viewer: at least
+ * two visible spaces (active ones, plus the provisioning/failed rows this
+ * viewer may see). Exported because the Files page keys off it too — the
+ * breadcrumb bar's lone root crumb is suppressed only while the switcher is
+ * actually on screen. Single source of truth: the component's own
+ * nothing-to-switch-between early return uses this same predicate.
+ */
+export function spaceSwitcherVisible(
+  spaces: FileSpace[],
+  isOwnerOrAdmin = false
+): boolean {
+  const visible = spaces.filter(
+    (s) => isActiveState(s) || isVisibleNonActive(s, isOwnerOrAdmin)
+  );
+  return visible.length >= 2;
+}
+
+/**
  * WARP-883 (ADR-027 WS-5) — segmented control to switch between the user's
  * private "My Files" space and other spaces (shared Household, and — as of
  * WARP-1267 — N departments/teams with one level of nesting).
@@ -120,7 +138,6 @@ export function SpaceSwitcher({
   const nonActiveVisible = spaces.filter(
     (s) => !isActiveState(s) && isVisibleNonActive(s, isOwnerOrAdmin)
   );
-  const allVisible = [...activeVisible, ...nonActiveVisible];
 
   // Light dismiss + Esc on the Spaces menu.
   useEffect(() => {
@@ -141,8 +158,9 @@ export function SpaceSwitcher({
     };
   }, [menuOpen]);
 
-  // Nothing to switch between → don't show a lone control.
-  if (allVisible.length < 2) return null;
+  // Nothing to switch between → don't show a lone control. Same predicate
+  // the Files page uses to decide the root breadcrumb's fate (WARP-1910).
+  if (!spaceSwitcherVisible(spaces, isOwnerOrAdmin)) return null;
 
   // ── ≤3 spaces, all active: the shipped segmented tablist, untouched. ──
   const useMenu = activeVisible.length > 3 || nonActiveVisible.length > 0;

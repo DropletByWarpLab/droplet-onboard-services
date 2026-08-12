@@ -33,7 +33,10 @@ import { SearchBar } from "@/components/FileManager/SearchBar";
 import { PreviewPane } from "@/components/FileManager/PreviewPane";
 import { DocEditorPanel } from "@/components/FileManager/DocEditorPanel";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
-import { SpaceSwitcher } from "@/components/FileManager/SpaceSwitcher";
+import {
+  SpaceSwitcher,
+  spaceSwitcherVisible,
+} from "@/components/FileManager/SpaceSwitcher";
 import {
   resolveSearchResultTarget,
   toSpaceRelativePath,
@@ -253,6 +256,19 @@ export default function FilesPage() {
   );
   const isReaderSpace = activeSpace?.right === "reader";
   const isTeamSpace = activeSpace?.kind === "team";
+
+  // WARP-1910 — "My Files" appeared twice at the root: the switcher's tab and,
+  // directly below it, the breadcrumb bar's lone "My files" root crumb. The
+  // switcher's tabs already name the location at a space's root, so the crumb
+  // bar is suppressed there — and ONLY there: inside a folder the trail (root
+  // crumb included) is navigation; without a switcher the root crumb is the
+  // page's only location label; and a team space keeps its bar at the root for
+  // the non-navigating department prefix crumb (WARP-1267, ADR-029 §D-3).
+  const breadcrumbPrefix = isTeamSpace ? activeSpace?.parentName : undefined;
+  const showBreadcrumbs =
+    currentPath !== "/" ||
+    !spaceSwitcherVisible(spaces, isOwnerOrAdmin) ||
+    !!breadcrumbPrefix;
 
   // WARP-1267 — admin-in-foreign-library banner (design brief §2): shown
   // only to an owner/admin who is NOT a member of the active department/
@@ -1326,17 +1342,21 @@ export default function FilesPage() {
       </div>
 
       {/* Breadcrumbs — team spaces get a non-navigating parent-department
-          prefix crumb (WARP-1267, design brief §2). */}
-      <div className="mb-4">
-        <BreadcrumbNav
-          path={currentPath}
-          // WARP-1547 — through the funnel: crumb jumps are navigation, so
-          // they get a URL and a history entry like any other move.
-          onNavigate={(next) => navigateTo(space, next)}
-          prefixCrumb={isTeamSpace ? activeSpace?.parentName : undefined}
-          labelForSegment={crumbLabelForSegment}
-        />
-      </div>
+          prefix crumb (WARP-1267, design brief §2). Suppressed while it would
+          hold nothing but the lone root crumb the switcher's active tab
+          already duplicates (WARP-1910 — see showBreadcrumbs above). */}
+      {showBreadcrumbs && (
+        <div className="mb-4">
+          <BreadcrumbNav
+            path={currentPath}
+            // WARP-1547 — through the funnel: crumb jumps are navigation, so
+            // they get a URL and a history entry like any other move.
+            onNavigate={(next) => navigateTo(space, next)}
+            prefixCrumb={breadcrumbPrefix}
+            labelForSegment={crumbLabelForSegment}
+          />
+        </div>
+      )}
 
       {/* Admin-in-foreign-library banner (WARP-1267, design brief §2) —
           owner/admin visiting a department/team library they're not a
