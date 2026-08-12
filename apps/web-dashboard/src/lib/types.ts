@@ -662,15 +662,20 @@ export interface VpnPeerInfo {
   linkTokenLabel?: string | null;
   linkTokenEnrolledBy?: string | null;
   enrolledAt?: string | null;
-  /** WARP-1763 — read from the RUNNING interface, not from the database.
+  /** WARP-1763 — read from the ROUTER, not from the database. The two are not
+   *  read the same way and the difference is load-bearing:
    *
-   *  `provisioned` false means the row is active but the peer never landed on
-   *  wg0 (the WARP-1757 `tunnel_ready: false` case). `lastHandshakeAt` is
-   *  `null` when the interface reports a peer that has never handshaken, and
-   *  ABSENT when the observation could not be made at all. Never collapse the
-   *  two: absent means unknown, and rendering it as "never connected" is the
-   *  bug this field replaced. Both are absent whenever
-   *  `liveStateAvailable` is false. */
+   *  `provisioned` is read from the interface's CONFIGURATION (UCI). False
+   *  means the row is active but nothing was ever written for this peer on the
+   *  router — the WARP-1757 `tunnel_ready: false` case. True means configured,
+   *  which is NOT the same as loaded in the running interface; a config change
+   *  that never got applied still reads true.
+   *
+   *  `lastHandshakeAt` is a runtime reading of the running interface: `null`
+   *  when it reports a peer that has never handshaken, and ABSENT when the
+   *  observation could not be made at all. Never collapse the two: absent
+   *  means unknown, and rendering it as "never connected" is the bug this
+   *  field replaced. Both are absent whenever `liveStateAvailable` is false. */
   provisioned?: boolean;
   lastHandshakeAt?: string | null;
 }

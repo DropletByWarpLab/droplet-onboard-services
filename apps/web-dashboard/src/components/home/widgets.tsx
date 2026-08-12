@@ -1066,7 +1066,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
   const { user } = useAuth();
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
   const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
-  // WARP-1763: did the orchestrator actually read the running interface? When
+  // WARP-1763: did the orchestrator actually read the router's peer list? When
   // false the peers carry no handshake facts, and the widget withholds the
   // live count rather than publishing a zero it cannot support.
   const [liveState, setLiveState] = useState(false);

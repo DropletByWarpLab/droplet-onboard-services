@@ -8,9 +8,15 @@
  * exists from the moment a config is minted or a QR link is approved — it says
  * a device was set up, never that it is here.
  *
- * The orchestrator now reports what it actually observed on the running
- * interface. This module is the single place that decides what those
- * observations MEAN, so the two surfaces cannot drift apart again.
+ * The orchestrator now reports what it actually observed on the router. This
+ * module is the single place that decides what those observations MEAN, so the
+ * two surfaces cannot drift apart again.
+ *
+ * Only the handshake is a runtime reading. `provisioned` comes from the
+ * interface's UCI CONFIGURATION, so it answers "configured on the interface",
+ * not "loaded in the running interface" — which is why nothing below promotes
+ * `provisioned: true` on its own to a presence claim. Presence is always
+ * decided by a fresh `lastHandshakeAt`.
  *
  * The rule that shapes everything below: an absent observation is not a
  * negative one. `lastHandshakeAt === null` means the interface reported a peer
@@ -91,9 +97,10 @@ export function countConnectedNow(
  * support:
  *
  *   unavailable  the interface could not be read — say that, don't guess
- *   pending      approved, but the peer never landed on wg0 (WARP-1757's
- *                `tunnel_ready: false`); re-approving is the recovery
- *   waiting      installed, has never handshaken — the normal state right
+ *   pending      approved, but the peer was never written to the interface's
+ *                config (WARP-1757's `tunnel_ready: false`); re-approving is
+ *                the recovery
+ *   waiting      configured, has never handshaken — the normal state right
  *                after linking, until the device actually connects
  *   connected    a handshake inside {@link HANDSHAKE_FRESH_MS}
  *   last seen    a handshake, but not a recent one — recency is the only
@@ -115,9 +122,9 @@ export function peerConnectionCopy(
   }
   const age = handshakeAgeMs(peer, liveStateAvailable, now);
   if (age === null) {
-    // On the interface, but the handshake wasn't reported (an older routing
-    // build). Claiming either "connected" or "never" would be inventing the
-    // observation we just failed to make.
+    // Configured on the interface, but the handshake wasn't reported (an
+    // older routing build). Claiming either "connected" or "never" would be
+    // inventing the observation we just failed to make.
     return { text: "Linked", tone: "muted" };
   }
   // A handshake in the future is clock skew, not the future. Treat it as fresh
