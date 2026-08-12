@@ -1,0 +1,17 @@
+-- WARP-1898: record which Files space a forwarded file's path is relative to.
+--
+-- `sharedFilePath` is HOME-RELATIVE — it includes the space's mount segment
+-- ("/Finance/Q1/x.pdf"), because the picker stores a listing row's `path`
+-- verbatim and listing entries always carry the home-relative form
+-- (WARP-1140). But the space was never persisted, so the recipient's link
+-- carried no `space` param and /files fell back to its silent personal-space
+-- default — resolving the sender's mounted path inside the recipient's own
+-- namespace.
+--
+-- Nullable with no backfill ON PURPOSE: the space of an existing row is not
+-- recoverable (the registry only knows department-owned files, and a null
+-- there is ambiguous between personal and unregistered). A null reads as
+-- "unknown" and renders the honest unavailable state, which is strictly
+-- better than guessing "personal" and sending the recipient to their own
+-- files — the exact defect this ticket fixes.
+ALTER TABLE "TeamChatMessage" ADD COLUMN "sharedFileSpace" TEXT;

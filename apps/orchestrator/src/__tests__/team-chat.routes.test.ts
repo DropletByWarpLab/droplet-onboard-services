@@ -111,9 +111,20 @@ interface MessageRow {
   sharedNcFileId: number | null;
   sharedFileName: string | null;
   sharedFilePath: string | null;
+  sharedFileSpace: string | null;
   sharedChatSessionId: string | null;
   sharedChatSnapshot: unknown;
   createdAt: Date;
+}
+/**
+ * WARP-1898 — only `kind` matters here: `departmentSpaceId()` reads it to
+ * decide whether a resolved department is the seeded HOUSEHOLD one (the
+ * dashboard addresses that as the legacy `"shared"` space id) or an
+ * ordinary library (`dept:<uuid>`).
+ */
+interface DepartmentRow {
+  id: string;
+  kind: string;
 }
 interface SessionRow {
   id: string;
@@ -138,6 +149,7 @@ function createTeamChatPrisma(seed: {
   messages?: MessageRow[];
   sessions?: SessionRow[];
   chatMessages?: ChatMessageRow[];
+  departments?: DepartmentRow[];
 }) {
   const users = [...(seed.users ?? [])];
   const threads = [...(seed.threads ?? [])];
@@ -145,6 +157,7 @@ function createTeamChatPrisma(seed: {
   const messages = [...(seed.messages ?? [])];
   const sessions = [...(seed.sessions ?? [])];
   const chatMessages = [...(seed.chatMessages ?? [])];
+  const departments = [...(seed.departments ?? [])];
 
   const matchesMessageWhere = (
     m: MessageRow,
@@ -392,6 +405,14 @@ function createTeamChatPrisma(seed: {
       findUnique: vi.fn(
         async (args: { where: { id: string } }) =>
           sessions.find((s) => s.id === args.where.id) ?? null,
+      ),
+    },
+    // WARP-1898 — read by departmentSpaceId() when a file_share resolves to
+    // a department, to pick the wire space id the recipient's link carries.
+    department: {
+      findUnique: vi.fn(
+        async (args: { where: { id: string } }) =>
+          departments.find((d) => d.id === args.where.id) ?? null,
       ),
     },
     chatMessage: {
@@ -668,6 +689,7 @@ describe("participant-only access", () => {
           sharedNcFileId: null,
           sharedFileName: null,
           sharedFilePath: null,
+          sharedFileSpace: null,
           sharedChatSessionId: "sess-1",
           sharedChatSnapshot: { title: "T", messages: [] },
           createdAt: new Date("2026-08-01T11:00:00Z"),
@@ -714,6 +736,7 @@ describe("participant-only access", () => {
         sharedNcFileId: null,
         sharedFileName: null,
         sharedFilePath: null,
+        sharedFileSpace: null,
         sharedChatSessionId: null,
         sharedChatSnapshot: null,
         createdAt: new Date(at),
@@ -753,6 +776,7 @@ describe("participant-only access", () => {
         sharedNcFileId: null,
         sharedFileName: null,
         sharedFilePath: null,
+        sharedFileSpace: null,
         sharedChatSessionId: null,
         sharedChatSnapshot: null,
         createdAt: at,
@@ -802,12 +826,13 @@ describe("participant-only access", () => {
 // ── Sending: text + forwards ────────────────────────────────────────
 
 describe("POST /api/team-chat/threads/:id/messages", () => {
-  function abWorld() {
+  function abWorld(departments: DepartmentRow[] = []) {
     const t = seedThread();
     return createTeamChatPrisma({
       users: [alice, bob],
       threads: [t],
       participants: [seedParticipant(t.id, alice.id), seedParticipant(t.id, bob.id)],
+      departments,
       sessions: [
         { id: "sess-alice", userId: alice.username, title: "Quarterly plan" },
         { id: "sess-bob", userId: bob.username, title: "Bob's chat" },
@@ -916,6 +941,109 @@ describe("POST /api/team-chat/threads/:id/messages", () => {
         filePath: "/Finance/secret.xlsx",
       });
     expect(res.status).toBe(403);
+    expect(prisma.teamChatMessage.create).not.toHaveBeenCalled();
+  });
+
+  // ── WARP-1898: which SPACE a shared file belongs to ──
+  //
+  // `sharedFilePath` is HOME-relative — the picker stores a listing row's
+  // `path` verbatim, and listing entries carry the mount segment
+  // (WARP-1140) — but the SPACE was never stored, so the recipient's link
+  // carried none, and /files applied the sender's path inside the
+  // RECIPIENT's personal space. These pin the resolution order: registry
+  // first, sender's claim only as a fallback.
+
+  it("takes the space from the file REGISTRY, overriding the sender's claim", async () => {
+    const prisma = abWorld();
+    resolveFileDepartmentMock.mockResolvedValue("dep-1");
+    checkSpaceAccessMock.mockResolvedValue({ allowed: true, departmentId: "dep-1" });
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app)
+      .post("/api/team-chat/threads/thread-ab/messages")
+      .send({
+        kind: "file_share",
+        ncFileId: 4711,
+        fileName: "q3.docx",
+        filePath: "/Sales/q3.docx",
+        // A pick from the picker's SEARCH tab can carry the wrong space —
+        // the registry is what the access check itself keyed on, so it wins.
+        space: "personal",
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.message.sharedFileSpace).toBe("dept:dep-1");
+  });
+
+  it("addresses the household department as the wire 'shared' space id", async () => {
+    const prisma = abWorld([{ id: "dep-house", kind: "HOUSEHOLD" }]);
+    resolveFileDepartmentMock.mockResolvedValue("dep-house");
+    checkSpaceAccessMock.mockResolvedValue({
+      allowed: true,
+      departmentId: "dep-house",
+    });
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app)
+      .post("/api/team-chat/threads/thread-ab/messages")
+      .send({
+        kind: "file_share",
+        ncFileId: 88,
+        fileName: "menu.pdf",
+        filePath: "/Household/menu.pdf",
+      });
+    expect(res.status).toBe(201);
+    // NOT "dept:dep-house": /api/files/spaces reports the household space
+    // under the legacy "shared" id, and that is what /files?space= matches.
+    expect(res.body.message.sharedFileSpace).toBe("shared");
+  });
+
+  it("falls back to the sender's claim for a file with no registry row", async () => {
+    const prisma = abWorld();
+    resolveFileDepartmentMock.mockResolvedValue(null);
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app)
+      .post("/api/team-chat/threads/thread-ab/messages")
+      .send({
+        kind: "file_share",
+        ncFileId: 12,
+        fileName: "notes.txt",
+        filePath: "/notes.txt",
+        space: "personal",
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.message.sharedFileSpace).toBe("personal");
+  });
+
+  it("stores null when nothing can determine the space (never guesses personal)", async () => {
+    const prisma = abWorld();
+    resolveFileDepartmentMock.mockResolvedValue(null);
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app)
+      .post("/api/team-chat/threads/thread-ab/messages")
+      .send({
+        kind: "file_share",
+        ncFileId: 12,
+        fileName: "notes.txt",
+        filePath: "/notes.txt",
+        // No `space` — an older client, or a searched pick that genuinely
+        // doesn't know. Guessing "personal" here is the original defect.
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.message.sharedFileSpace).toBeNull();
+  });
+
+  it("400s a malformed space instead of writing it into a link", async () => {
+    const prisma = abWorld();
+    resolveFileDepartmentMock.mockResolvedValue(null);
+    const app = buildApp(prisma, asAlice);
+    const res = await request(app)
+      .post("/api/team-chat/threads/thread-ab/messages")
+      .send({
+        kind: "file_share",
+        ncFileId: 12,
+        fileName: "notes.txt",
+        filePath: "/notes.txt",
+        space: "dept:not-a-uuid",
+      });
+    expect(res.status).toBe(400);
     expect(prisma.teamChatMessage.create).not.toHaveBeenCalled();
   });
 
@@ -1035,6 +1163,7 @@ describe("transcript + unread count", () => {
           sharedNcFileId: null,
           sharedFileName: null,
           sharedFilePath: null,
+          sharedFileSpace: null,
           sharedChatSessionId: null,
           sharedChatSnapshot: null,
           createdAt: new Date(),

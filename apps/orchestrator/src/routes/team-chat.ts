@@ -44,6 +44,15 @@
  *     back to personal-space semantics (allowed — the message stores only
  *     the sender-supplied display name/path; recipients still pass
  *     /files' own access control when they follow the link).
+ *     WARP-1898 — that same resolveFileDepartment result also decides
+ *     `sharedFileSpace`, the space the stored `sharedFilePath` is RELATIVE
+ *     TO. It has to be persisted: without it the recipient's link carried
+ *     no `space`, and /files' deliberately-silent personal-space default
+ *     then resolved the SENDER's path inside the RECIPIENT's namespace —
+ *     landing them in their own files with no error. Forwarding still
+ *     grants NOTHING; it remains a pointer, so a personal-space file stays
+ *     unreachable to everyone but its owner. What changed is that the
+ *     dashboard can now SAY so instead of failing silently.
  *   - ai_chat_share snapshots {title, messages:[{role, content,
  *     createdAt}]} at send time — an IMMUTABLE forward that survives the
  *     source conversation's later deletion (FK SetNull) and never leaks
@@ -128,6 +137,25 @@ const sendMessageSchema = z.discriminatedUnion("kind", [
     // DECISION below never trusts them — it keys off ncFileId alone.
     fileName: z.string().trim().min(1).max(255),
     filePath: z.string().trim().min(1).max(1024),
+    // WARP-1898 — the space `filePath` is relative to, in the WIRE
+    // vocabulary GET /api/files/spaces reports ("shared" is the household
+    // alias; the space GATE's own vocabulary calls that "household" —
+    // routes/files.ts translates at its boundary). A navigation hint for
+    // the recipient's deep link, never an access decision, and only a
+    // FALLBACK: the registry below wins whenever it has a row. Validated
+    // anyway so a malformed value can reach neither the DB nor a rendered
+    // URL. Optional — an older client simply doesn't send it.
+    space: z
+      .union([
+        z.literal("personal"),
+        z.literal("shared"),
+        z
+          .string()
+          .regex(
+            /^dept:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+          ),
+      ])
+      .optional(),
     caption: z.string().trim().max(1000).optional(),
   }),
   z.object({
@@ -222,6 +250,25 @@ function toMeetingDto(m: MeetingRowLike, names?: Map<string, ContactDto>) {
   };
 }
 
+/**
+ * WARP-1898 — a resolved `departmentId` in the WIRE space vocabulary the
+ * dashboard's `/files?space=` understands. The seeded HOUSEHOLD department
+ * is addressed as the legacy `"shared"` literal there (GET /api/files/spaces
+ * reports it under that id); every other department/team is `dept:<uuid>`.
+ * routes/files.ts translates `"shared"` back to the gate's `"household"` at
+ * its own boundary, so this stays on the UI side of that seam.
+ */
+async function departmentSpaceId(
+  prisma: PrismaClient,
+  departmentId: string,
+): Promise<string> {
+  const dept = await prisma.department.findUnique({
+    where: { id: departmentId },
+    select: { kind: true },
+  });
+  return dept?.kind === "HOUSEHOLD" ? "shared" : `dept:${departmentId}`;
+}
+
 function toMessageDto(
   m: {
     id: string;
@@ -232,6 +279,7 @@ function toMessageDto(
     sharedNcFileId: number | null;
     sharedFileName: string | null;
     sharedFilePath: string | null;
+    sharedFileSpace: string | null;
     sharedChatSessionId: string | null;
     meetingId?: string | null;
     meeting?: MeetingRowLike | null;
@@ -249,6 +297,10 @@ function toMessageDto(
     sharedNcFileId: m.sharedNcFileId,
     sharedFileName: m.sharedFileName,
     sharedFilePath: m.sharedFilePath,
+    // WARP-1898 — null on rows written before that ticket. The client reads
+    // null as UNKNOWN, never as personal: guessing personal is precisely
+    // what sent recipients into their own files.
+    sharedFileSpace: m.sharedFileSpace,
     sharedChatSessionId: m.sharedChatSessionId,
     // WARP-1685 — present (possibly null) on every message; populated when
     // the meeting relation was loaded (meeting_invite / meeting_reminder).
@@ -650,6 +702,20 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
             return;
           }
         }
+        // WARP-1898 — record WHICH SPACE that path is relative to, so the
+        // recipient's link can address it. The REGISTRY is authoritative
+        // wherever it has a row: it is the same source the access check
+        // above keys on, and it holds even when the client cannot know the
+        // answer — a pick from the forward dialog's SEARCH tab spans every
+        // space the sender can reach, so the picker's own selector says
+        // nothing about where the chosen file actually lives. The sender's
+        // claim is the fallback for unregistered files only, and widens
+        // nothing: /files re-runs its own space gate on every read.
+        const sharedFileSpace =
+          departmentId !== null
+            ? await departmentSpaceId(prisma, departmentId)
+            : (body.space ?? null);
+
         data = {
           threadId: req.params.id,
           senderId: me.id,
@@ -658,6 +724,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           sharedNcFileId: body.ncFileId,
           sharedFileName: body.fileName,
           sharedFilePath: body.filePath,
+          sharedFileSpace,
         };
       } else {
         // ai_chat_share — ownership first, 404 on any miss (no existence

@@ -11,8 +11,9 @@
  * message id so the 5s poll doesn't spam identical writes.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import useSWR from "swr";
 import {
   ArrowLeft,
   ArrowUp,
@@ -24,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   cancelTeamChatMeeting,
+  fetchSpaces,
   markTeamChatThreadRead,
   rsvpTeamChatMeeting,
   sendTeamChatMessage,
@@ -32,6 +34,8 @@ import {
   type TeamChatSendBody,
   type TeamChatThreadSummary,
 } from "@/lib/api";
+import type { FileSpace, FileSpacesResponse } from "@/lib/types";
+import { buildFilesUrl, spaceRelativePath } from "@/lib/space-attribution";
 import { useTeamChatMessages } from "@/lib/hooks/useTeamChat";
 import { threadDisplayName } from "./ThreadList";
 import { ForwardFileDialog, ForwardChatDialog } from "./ForwardDialogs";
@@ -185,6 +189,25 @@ export function ConversationPane({
     return c.length > 0 ? c : undefined;
   }
 
+  // WARP-1898 — the spaces THIS viewer can open. A forwarded-file card needs
+  // them twice: to tell "follow this link" apart from "you can't reach this"
+  // (instead of linking into /files' silent personal-space fallback), and for
+  // the matched space's `root`, which converts the stored home-relative path
+  // into the space-relative `?path=` /files expects. Fetched only once a
+  // thread actually contains a file share (SWR dedupes it with the forward
+  // picker's identical key), and deliberately NOT gated on `thread`: hooks
+  // run before the no-thread early return below.
+  const hasFileShare = messages?.some((m) => m.kind === "file_share") ?? false;
+  const { data: spacesResp } = useSWR<FileSpacesResponse>(
+    hasFileShare ? "/api/files/spaces" : null,
+    fetchSpaces,
+    { shouldRetryOnError: false },
+  );
+  // `null` = not known yet (loading, or the probe failed). Distinct from an
+  // empty list, which would mean "reaches nothing" — cards stay neutral while
+  // it is null rather than accusing a reachable space of being unreachable.
+  const spaces = useMemo(() => spacesResp?.spaces ?? null, [spacesResp]);
+
   if (!thread) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
@@ -254,6 +277,7 @@ export function ConversationPane({
             onRsvp={(meetingId, response) => void rsvp(meetingId, response)}
             onCancelMeeting={(meetingId) => void cancelMeeting(meetingId)}
             busyMeetingId={busyMeetingId}
+            spaces={spaces}
           />
         ))}
       </div>
@@ -339,6 +363,9 @@ export function ConversationPane({
             ncFileId: file.ncFileId,
             fileName: file.name,
             filePath: file.path,
+            // WARP-1898 — `filePath` is space-relative, so the space has to
+            // travel with it or the recipient's link resolves in THEIRS.
+            space: file.space,
             caption: captionOrUndefined(),
           });
         }}
@@ -374,6 +401,151 @@ export function ConversationPane({
 }
 
 /**
+ * WARP-1898 — the /files deep link for a forwarded file.
+ *
+ * Two path vocabularies meet here, and mixing them is the WARP-1140
+ * double-prefix bug (a silently EMPTY folder, no error):
+ *
+ *   - `sharedFilePath` is HOME-relative, because the picker stores a
+ *     listing row's own `path` and library rows carry their mount
+ *     ("/Finance/Q1/x.pdf" — see `toActiveSpaceRelative` in files/page.tsx).
+ *   - `?path=` is SPACE-relative: the orchestrator re-prefixes the mount
+ *     server-side (`rootForSpace`), so passing the mounted form again
+ *     resolves "/Finance/Finance/Q1".
+ *
+ * So `path` is converted with the space's own root, exactly as
+ * `resolveFileSpace` does for the space-aware sub-views, while `preview`
+ * stays HOME-relative — it is matched against the loaded listing's entries,
+ * which carry that form (files/page.tsx). `buildFilesUrl` drops `space` for
+ * personal and `path` for the root, keeping those URLs byte-identical to
+ * every other Files link.
+ */
+function filesHrefFor(
+  spaceId: string,
+  spaceRoot: string,
+  homeRelativePath: string,
+): string {
+  const parent = homeRelativePath.replace(/\/[^/]*$/, "") || "/";
+  const base = buildFilesUrl(spaceId, spaceRelativePath(parent, spaceRoot));
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}preview=${encodeURIComponent(homeRelativePath)}`;
+}
+
+type FileShareState =
+  | { kind: "open"; href: string }
+  /** Known to be unopenable by THIS viewer, with a reason worth showing. */
+  | { kind: "blocked"; reason: string }
+  /** Reachability not known yet — render neutral, never guess. */
+  | { kind: "pending" };
+
+/**
+ * Decide what a forwarded-file card can honestly offer this viewer.
+ *
+ * Forwarding grants NOTHING — `routes/team-chat.ts` checks only that the
+ * SENDER could read the file and then stores a pointer; /files re-runs its
+ * own access control when the link is followed. So a card that cannot work
+ * must say so, rather than render a link that silently goes elsewhere:
+ * /files resolves an absent-or-inaccessible `space` to the viewer's
+ * personal space on purpose (a no-existence-leak fallback, files/page.tsx),
+ * which is exactly how the sender's path came to be resolved inside the
+ * recipient's own namespace.
+ */
+function fileShareState(
+  message: TeamChatMessage,
+  mine: boolean,
+  spaces: FileSpace[] | null,
+): FileShareState {
+  const path = message.sharedFilePath;
+  const space = message.sharedFileSpace;
+
+  // Sent before the space was recorded. A path with no space is not
+  // addressable, and resolving it against a guess IS the defect.
+  if (!path || !space) {
+    return {
+      kind: "blocked",
+      reason: "Droplet can't tell where this file is kept — ask for it again.",
+    };
+  }
+
+  // Personal space is nobody's but its owner's: there is no grant and no
+  // cross-user personal space to browse, so this can never resolve for
+  // anyone else however well-formed the link is. Its root is always "/",
+  // so my own file links without waiting on the space list.
+  if (space === "personal") {
+    if (mine) return { kind: "open", href: filesHrefFor(space, "/", path) };
+    const who = message.senderDisplayName ?? "the sender";
+    return {
+      kind: "blocked",
+      reason: `Only ${who} can open this — it's in their personal files.`,
+    };
+  }
+
+  // Household / department library: openable only if the viewer has that
+  // space — and its `root` is also what converts the stored home-relative
+  // path into the space-relative `?path=`, so the lookup is load-bearing
+  // twice over, not just an access check.
+  if (spaces === null) return { kind: "pending" };
+  const target = spaces.find((s) => s.id === space);
+  if (!target) {
+    return {
+      kind: "blocked",
+      reason: "You don't have access to where this file is kept.",
+    };
+  }
+  return { kind: "open", href: filesHrefFor(target.id, target.root, path) };
+}
+
+function FileShareCard({
+  message,
+  mine,
+  spaces,
+}: {
+  message: TeamChatMessage;
+  mine: boolean;
+  spaces: FileSpace[] | null;
+}) {
+  const name = message.sharedFileName ?? "Shared file";
+  const state = fileShareState(message, mine, spaces);
+
+  if (state.kind === "open") {
+    return (
+      <Link href={state.href} className="mx-card" data-testid="file-share-link">
+        <FileText size={18} strokeWidth={1.5} aria-hidden="true" />
+        <span className="min-w-0">
+          <span className="mx-card-title truncate">{name}</span>
+          {message.sharedFilePath && (
+            <span className="mx-card-meta mx-sub truncate">
+              {message.sharedFilePath}
+            </span>
+          )}
+        </span>
+      </Link>
+    );
+  }
+
+  // Not a link: there is nowhere correct to send them. The filename still
+  // shows (the sender already disclosed it), and the path rides along as a
+  // title so they can ask for it by name.
+  return (
+    <div
+      className="mx-card is-unavailable"
+      data-testid={
+        state.kind === "blocked" ? "file-share-unavailable" : "file-share-pending"
+      }
+      title={message.sharedFilePath ?? undefined}
+    >
+      <FileText size={18} strokeWidth={1.5} aria-hidden="true" />
+      <span className="min-w-0">
+        <span className="mx-card-title truncate">{name}</span>
+        {state.kind === "blocked" && (
+          <span className="mx-card-meta mx-sub">{state.reason}</span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+/**
  * One message. Text renders as a plain bubble; the two forward kinds render
  * a card INSIDE the bubble — file cards deep-link into /files, AI-chat
  * cards open the read-only transcript modal. No entrance motion by design:
@@ -398,6 +570,7 @@ function MessageBubble({
   onRsvp,
   onCancelMeeting,
   busyMeetingId,
+  spaces,
 }: {
   message: TeamChatMessage;
   mine: boolean;
@@ -409,6 +582,8 @@ function MessageBubble({
   onCancelMeeting: (meetingId: string) => void;
   /** The one meeting with a mutation in flight — only ITS card disables. */
   busyMeetingId: string | null;
+  /** WARP-1898 — spaces this viewer can open; null until known. */
+  spaces: FileSpace[] | null;
 }) {
   const align = mine ? "items-end" : "items-start";
 
@@ -421,28 +596,11 @@ function MessageBubble({
       )}
       <div className={`mx-bubble ${mine ? "is-mine" : "is-theirs"}`}>
         {message.kind === "file_share" && (
-          <Link
-            href={
-              message.sharedFilePath
-                ? `/files?path=${encodeURIComponent(
-                    message.sharedFilePath.replace(/\/[^/]*$/, "") || "/",
-                  )}`
-                : "/files"
-            }
-            className="mx-card"
-          >
-            <FileText size={18} strokeWidth={1.5} aria-hidden="true" />
-            <span className="min-w-0">
-              <span className="mx-card-title truncate">
-                {message.sharedFileName ?? "Shared file"}
-              </span>
-              {message.sharedFilePath && (
-                <span className="mx-card-meta mx-sub truncate">
-                  {message.sharedFilePath}
-                </span>
-              )}
-            </span>
-          </Link>
+          <FileShareCard
+            message={message}
+            mine={mine}
+            spaces={spaces}
+          />
         )}
 
         {message.kind === "meeting_invite" &&

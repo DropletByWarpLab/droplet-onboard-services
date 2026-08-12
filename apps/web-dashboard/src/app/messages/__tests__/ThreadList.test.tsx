@@ -36,6 +36,7 @@ function thread(over: Partial<TeamChatThreadSummary> = {}): TeamChatThreadSummar
       sharedNcFileId: null,
       sharedFileName: null,
       sharedFilePath: null,
+      sharedFileSpace: null,
       sharedChatSessionId: null,
       meetingId: null,
       meeting: null,
