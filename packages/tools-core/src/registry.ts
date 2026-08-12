@@ -115,6 +115,7 @@ import sendNotification from "./handlers/notifications/send-notification.js";
 import listNotifications from "./handlers/notifications/list-notifications.js";
 
 // system
+import getGpuStatus from "./handlers/system/get-gpu-status.js";
 import getSystemHealth from "./handlers/system/get-system-health.js";
 import listDrives from "./handlers/system/list-drives.js";
 // BUG-3: read-only storage-pool (mdadm) inventory. Destructive pool ops are
@@ -305,6 +306,7 @@ const allTools: Tool[] = [
   sendNotification,
   listNotifications,
   // system
+  getGpuStatus,
   getSystemHealth,
   listDrives,
   listStoragePools,

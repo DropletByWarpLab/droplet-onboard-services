@@ -258,6 +258,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── system ──────────────────────────────────────────────────────────────
   { tool: "get_system_health", client: "orchestrator", hops: [admit("get", "/api/orchestrator/health")] },
+  { tool: "get_gpu_status", client: "orchestrator", hops: [admit("get", "/api/hardware/gpu")] },
   { tool: "list_drives", client: "orchestrator", hops: [admit("get", "/api/storage/drives")] },
   { tool: "list_storage_pools", client: "orchestrator", hops: [admit("get", "/api/storage/pools")] },
   { tool: "get_drive_health", client: "orchestrator", hops: [admit("get", "/api/storage/drives")] },
