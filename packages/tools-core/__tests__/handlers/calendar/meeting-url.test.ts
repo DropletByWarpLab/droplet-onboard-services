@@ -10,9 +10,17 @@
  * The value the model supplies is no more trusted than the one a person
  * pastes — arguably less, since it can be echoed out of a summarized
  * email. Same gate: parseMeetingLink, https only.
+ *
+ * The read tier matters as much as the write tier: a field the model can
+ * only ever set is a field it can never answer questions about. Asked
+ * "what's the link to my 3pm standup?", a model whose only view of the
+ * event omits meeting_url has two bad options — say there is no link, or
+ * invent one. So list_events and search_calendar_events project it too.
  */
 import { describe, it, expect, vi } from "vitest";
 import createEvent from "../../../src/handlers/calendar/create-event.js";
+import listEvents from "../../../src/handlers/calendar/list-events.js";
+import searchEvents from "../../../src/handlers/calendar/search-events.js";
 import updateEvent from "../../../src/handlers/calendar/update-event.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -173,5 +181,60 @@ describe("update_event — meeting_url", () => {
     );
     expect(r.ok).toBe(false);
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+// ── the read tier ────────────────────────────────────────────────────
+
+function readCtx(findMany: ReturnType<typeof vi.fn>): ToolContext {
+  return {
+    prisma: { calendarEvent: { findMany } } as unknown as ToolContext["prisma"],
+    http: {} as ToolContext["http"],
+    matter: {} as ToolContext["matter"],
+    userId: "alice",
+    signal: new AbortController().signal,
+  };
+}
+
+function row(meetingUrl: string | null) {
+  return {
+    id: "e1",
+    title: "Daily standup",
+    startsAt: new Date(STARTS),
+    endsAt: new Date(ENDS),
+    allDay: false,
+    location: "Living Room",
+    meetingUrl,
+    source: "local",
+  };
+}
+
+describe.each([
+  ["list_events", listEvents, {} as Record<string, unknown>],
+  ["search_calendar_events", searchEvents, { query: "standup" }],
+])("%s — meeting_url read-back", (_name, tool, args) => {
+  it("returns the link so the model can answer 'what's the link?'", async () => {
+    const findMany = vi.fn().mockResolvedValue([row(ZOOM)]);
+    const r = await tool.handler(args, readCtx(findMany));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as { events: Array<Record<string, unknown>> };
+      expect(data.events[0].meeting_url).toBe(ZOOM);
+      // Separate from the room, exactly as it is on the write side.
+      expect(data.events[0].location).toBe("Living Room");
+    }
+  });
+
+  it("returns null rather than omitting the key when there is no link", async () => {
+    // An absent key reads as "unknown" to a model; an explicit null is the
+    // answer "this meeting has no video call".
+    const findMany = vi.fn().mockResolvedValue([row(null)]);
+    const r = await tool.handler(args, readCtx(findMany));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as { events: Array<Record<string, unknown>> };
+      expect("meeting_url" in data.events[0]).toBe(true);
+      expect(data.events[0].meeting_url).toBeNull();
+    }
   });
 });

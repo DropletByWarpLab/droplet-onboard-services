@@ -30,6 +30,7 @@ describe("search_calendar_events", () => {
         endsAt: new Date("2026-08-01T11:00:00Z"),
         allDay: false,
         location: "Downtown clinic",
+        meetingUrl: null,
         source: "local",
       },
     ]);
@@ -77,6 +78,7 @@ describe("search_calendar_events", () => {
         ends_at: "2026-08-01T11:00:00.000Z",
         all_day: false,
         location: "Downtown clinic",
+        meeting_url: null,
         source: "local",
       });
     }

@@ -41,6 +41,7 @@ interface CalendarEventRow {
   endsAt: Date;
   allDay: boolean;
   location: string | null;
+  meetingUrl: string | null;
   source: string | null;
 }
 
@@ -98,6 +99,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         ends_at: e.endsAt.toISOString(),
         all_day: e.allDay,
         location: e.location,
+        // WARP-1874 — kept in step with list_events, per the shape contract
+        // this file's header states.
+        meeting_url: e.meetingUrl,
         source: e.source,
       })),
     },
