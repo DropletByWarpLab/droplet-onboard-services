@@ -1433,4 +1433,20 @@
   /* The base rule already supplies inline-flex + centring; only the height
      is missing, so don't restate display here. */
   .droplet-home .w-remote-link { min-height: 44px; }
+  /* Each camera tile became a <button> opening that camera in this ticket, so
+     it is now a touch target and owes the 44px floor like any other. The base
+     rule sets `min-height: 0` and `.w-cams` uses `grid-auto-rows: 1fr`, so a
+     short widget (or a four-camera grid on a phone) divides the height down
+     past 44 with nothing stopping it. Raising the floor only — the tiles keep
+     filling the row when there is room. */
+  .droplet-home .w-cam { min-height: 44px; }
+  /* The status cell became tappable here (it deep-links to the surface it
+     reports on), so it owes the floor too — its base rule is `min-height: 0`
+     and the copy inside it can be a single short line. */
+  .droplet-home .w-stat-cell { min-height: 44px; }
+  /* The whole note row is the target, not just the two controls inside it.
+     `.w-note-open` and `.w-note-act` already carry 44px, so in practice the
+     row clears it — state that explicitly rather than leave it depending on a
+     child, which is what the contract is checking for. */
+  .droplet-home .w-note { min-height: 44px; }
 }
