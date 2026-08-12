@@ -857,6 +857,31 @@ describe("setRouterPortEnabled", () => {
     expect(err.detail).toBeUndefined();
   });
 
+  it("rejects an UNKNOWN guard code even when the reason reads fine", async () => {
+    /* The code drives which escalation title the dashboard shows, so it is
+       narrowed independently of the reason. Pinned separately because the case
+       above happens to have an empty reason too — which would let a mutant that
+       deleted the code check pass on the reason check alone. */
+    stub(
+      mockResponse({
+        ok: false,
+        status: 409,
+        json: { code: "TOTALLY_NEW_GUARD", error: "a perfectly readable sentence" },
+      }),
+    );
+    const err = await setRouterPortEnabled("p2", false).catch((e) => e);
+    expect(err.code).toBe("UNKNOWN");
+    expect(err.detail).toBeUndefined();
+  });
+
+  it("rejects a guard whose reason is missing even when the code is valid", async () => {
+    /* The mirror of the case above: an escalation dialog with a blank body is
+       worse than the generic classifier's message. */
+    stub(mockResponse({ ok: false, status: 409, json: { code: "WAN_PORT" } }));
+    const err = await setRouterPortEnabled("p1", false).catch((e) => e);
+    expect(err.code).toBe("UNKNOWN");
+  });
+
   it("maps 404 PORT_NOT_FOUND with the server's sentence, not '404 Error'", async () => {
     stub(
       mockResponse({
