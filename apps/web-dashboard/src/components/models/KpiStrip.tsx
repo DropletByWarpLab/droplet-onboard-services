@@ -11,10 +11,12 @@
  */
 
 import { Clock, Cloud, Cpu, HardDrive, type LucideIcon } from "lucide-react";
-import type { ModelsGpuInfo } from "@/lib/types";
+import type { ModelsGpuInfo, ModelsGpuReason } from "@/lib/types";
 
 interface KpiStripProps {
   gpu: ModelsGpuInfo | null;
+  /** Why `gpu` is null — see `gpuFallbackMeta`. Ignored when `gpu` is set. */
+  gpuReason?: ModelsGpuReason;
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /** Count of local models — used only for the model-store tile's sub-line. */
@@ -50,14 +52,36 @@ function gpuMeta(gpu: ModelsGpuInfo): string {
   return [
     vram,
     gpu.tempC !== null ? `${gpu.tempC}°C` : null,
-    gpu.utilPct !== null ? `${gpu.utilPct}% busy` : "idle — not reporting",
+    // NOT "idle". `busy_percent` is null for ANY read failure — device-bridge's
+    // `_read_sysfs_int` swallows every exception, and a driver that never
+    // publishes `gpu_busy_percent` yields null permanently. Runtime suspend
+    // was the excuse for the old wording, but suspend requires zero clients:
+    // a card holding 13.2 GiB at 62°C is provably not idle, and the tile used
+    // to say so anyway. An unread counter is reported as unread.
+    gpu.utilPct !== null ? `${gpu.utilPct}% busy` : "utilisation not reported",
   ]
     .filter(Boolean)
     .join(" · ");
 }
 
+/**
+ * The GPU tile's sub-line when there is no `gpu` block — one string per
+ * DISTINCT fact, because "no card" and "couldn't ask" are not the same claim.
+ *
+ * Only `no_card` is a measurement the bridge actually took, so only it gets to
+ * say something about the customer's hardware. `unreachable` names the probe,
+ * which is the thing that failed and the thing the owner can act on. An absent
+ * reason (older orchestrator) commits to neither.
+ */
+function gpuFallbackMeta(reason: ModelsGpuReason | undefined): string {
+  if (reason === "no_card") return "No accelerator detected";
+  if (reason === "unreachable") return "Couldn’t reach the GPU sensor";
+  return "GPU reading unavailable";
+}
+
 export function KpiStrip({
   gpu,
+  gpuReason,
   avgLatencyMs,
   cloudSpendUsd,
   localCount,
@@ -86,13 +110,19 @@ export function KpiStrip({
           BRIDGE_GPU_CARD can name a live card whose VRAM total is
           unreadable. Rendering 0% there would claim a measurement nobody
           made, so each field degrades on its OWN — the tile drops the entry
-          it can't fill and still names the card. */}
+          it can't fill and still names the card.
+
+          And when there is no block at all, the sub-line says WHICH absence
+          it is: a bridge that answered "no card" is a measurement, a bridge
+          we couldn't reach is not. Saying "No accelerator detected" over an
+          unreachable probe is an affirmative claim about hardware nobody
+          looked at — the failure mode this whole chain exists to stop. */}
       <KpiTile
         icon={Cpu}
         label="GPU"
         value={gpu ? gpu.name : "Unavailable"}
         valueMuted={!gpu}
-        meta={gpu ? gpuMeta(gpu) : "No accelerator detected"}
+        meta={gpu ? gpuMeta(gpu) : gpuFallbackMeta(gpuReason)}
       />
 
       {/* Avg latency — 0 is the placeholder sentinel (no metrics surface yet),

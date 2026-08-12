@@ -1,7 +1,7 @@
 /**
  * WARP-1861 — the GPU tile says what it measured, in the unit it measured it.
  *
- * Three separate ways this tile could mislead, all pinned here:
+ * Five separate ways this tile could mislead, all pinned here:
  *
  *   1. Utilisation is a COMPUTE figure. Labelling 97% as "used" reads as
  *      "97% of VRAM is consumed" — on the lab box that would mean ~15.4 of
@@ -13,10 +13,15 @@
  *   3. Per-FIELD degradation, not per-tile. A pinned BRIDGE_GPU_CARD can
  *      report a live card with an unreadable VRAM total; the tile drops the
  *      VRAM entry and keeps the card, rather than claiming no accelerator.
+ *   4. A FAILED PROBE is not a negative answer. "No accelerator detected" is
+ *      a claim about the customer's hardware, and we may only make it when
+ *      the bridge answered. An unreachable bridge gets its own copy.
+ *   5. A null counter is not a reading. Unreadable utilisation is reported as
+ *      unreported, never as "idle" — a card holding 13.2 GiB cannot be idle.
  */
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
-import type { ModelsGpuInfo } from "@/lib/types";
+import type { ModelsGpuInfo, ModelsGpuReason } from "@/lib/types";
 
 import { KpiStrip } from "./KpiStrip";
 
@@ -32,9 +37,18 @@ function gpu(over: Partial<ModelsGpuInfo> = {}): ModelsGpuInfo {
   };
 }
 
-function renderStrip(g: ModelsGpuInfo | null) {
+function renderStrip(
+  g: ModelsGpuInfo | null,
+  gpuReason: ModelsGpuReason = g ? null : "no_card",
+) {
   return render(
-    <KpiStrip gpu={g} avgLatencyMs={0} cloudSpendUsd={0} localCount={1} />,
+    <KpiStrip
+      gpu={g}
+      gpuReason={gpuReason}
+      avgLatencyMs={0}
+      cloudSpendUsd={0}
+      localCount={1}
+    />,
   );
 }
 
@@ -75,17 +89,59 @@ describe("KpiStrip — GPU tile (WARP-1861)", () => {
     expect(screen.getByText("15.9 GiB · 62°C · 97% busy")).toBeInTheDocument();
   });
 
-  it("says idle rather than 0% when a suspended card reports nothing", () => {
+  it("declines to report utilisation rather than 0% when nothing is readable", () => {
     // amdgpu runtime-suspends an unheld card and the sysfs reads return
-    // EBUSY. 0% would be a measurement nobody took.
+    // EBUSY. 0% would be a measurement nobody took — and neither is "idle".
     renderStrip(gpu({ utilPct: null, tempC: null }));
     expect(
-      screen.getByText("13.2 / 15.9 GiB · idle — not reporting"),
+      screen.getByText("13.2 / 15.9 GiB · utilisation not reported"),
     ).toBeInTheDocument();
   });
 
-  it("falls back to Unavailable only when there is genuinely no card", () => {
-    renderStrip(null);
+  it("never claims a card holding 13.2 GiB is idle", () => {
+    // The provable contradiction. `busy_percent` is null for ANY read
+    // failure — device-bridge's `_read_sysfs_int` swallows every exception,
+    // and a driver that never publishes `gpu_busy_percent` yields null
+    // permanently. The old copy justified "idle" with runtime suspend, but
+    // runtime suspend requires ZERO clients: a card holding 13.2 GiB at 62°C
+    // cannot be suspended, so the claim was provably false in this state.
+    renderStrip(gpu({ utilPct: null }));
+    expect(screen.queryByText(/idle/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("13.2 / 15.9 GiB · 62°C · utilisation not reported"),
+    ).toBeInTheDocument();
+  });
+
+  it("says no accelerator only when the bridge ANSWERED that no card resolves", () => {
+    renderStrip(null, "no_card");
     expect(screen.getByText("No accelerator detected")).toBeInTheDocument();
+  });
+
+  it("does not claim the hardware is absent when the probe never completed", () => {
+    // `fetchGpuTelemetry()` returns null for no token, ECONNREFUSED, timeout,
+    // non-2xx and a malformed body. On a box whose droplet-device-bridge
+    // didn't restart after a refresh (WARP-1829), or whose
+    // SERVICE_TOKEN_DISPLAY a setup.sh re-run dropped (WARP-1865), the owner
+    // would read "No accelerator detected" over a working 16 GiB dGPU and
+    // file a hardware ticket. The route already keeps the two apart; the tile
+    // has to as well.
+    renderStrip(null, "unreachable");
+    expect(
+      screen.getByText("Couldn’t reach the GPU sensor"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No accelerator detected/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stays non-committal when an older orchestrator sends no reason at all", () => {
+    // Additive field: a box running a pre-WARP-1861 orchestrator sends `gpu`
+    // with no `gpuReason`. Defaulting that to "no accelerator" would
+    // reintroduce the same unearned claim through the back door.
+    renderStrip(null, null);
+    expect(
+      screen.queryByText(/No accelerator detected/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("GPU reading unavailable")).toBeInTheDocument();
   });
 });
