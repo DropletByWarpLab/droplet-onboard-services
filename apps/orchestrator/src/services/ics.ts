@@ -101,6 +101,20 @@ function escapeText(value: string): string {
     .replace(/\r?\n/g, "\\n");
 }
 
+/** Escaper for URI-typed property values (URL, and any future ATTACH /
+ *  ORGANIZER / SOURCE line).
+ *
+ *  RFC 5545 §3.3.13 types these as URI, not TEXT — §3.3.11's backslash
+ *  escaping of `;` `,` and `\` does NOT apply, and applying it corrupts any
+ *  link that legitimately contains those characters (a self-hosted Jitsi room
+ *  at /Warp,Standup, say). We keep the CR/LF strip alone: stored values come
+ *  from the WHATWG URL parser, which already removes raw CR/LF, but this
+ *  module's interface is plain and a caller that skipped the parser must not
+ *  be able to inject a content line. Defense in depth — do not remove it. */
+function escapeUri(value: string): string {
+  return value.replace(/\r?\n/g, "\\n");
+}
+
 /** Parse an ICS document into a list of events. Drops malformed events
  *  silently — caller may log the dropped count if desired. */
 export function parseIcs(text: string): IcsEvent[] {
@@ -208,6 +222,9 @@ export interface SerializeInput {
   summary: string;
   description?: string | null;
   location?: string | null;
+  /** WARP-1874 — video-call link, emitted as the RFC 5545 URL property.
+   *  Separate from `location`: an event can have both a room and a call. */
+  meetingUrl?: string | null;
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
@@ -243,6 +260,16 @@ export function serializeIcs(
     lines.push(`SUMMARY:${escapeText(ev.summary)}`);
     if (ev.description) lines.push(`DESCRIPTION:${escapeText(ev.description)}`);
     if (ev.location) lines.push(`LOCATION:${escapeText(ev.location)}`);
+    // URL is what Apple Calendar and Outlook render as a join target, and a
+    // subscriber's own client is where they actually are at 2:59. RFC 5545
+    // types it as a URI value, not TEXT, so it takes escapeUri rather than
+    // escapeText — a `,` or `;` in the link must survive verbatim or the
+    // subscriber joins a room that doesn't exist, while the dashboard's Join
+    // button stays healthy and hides the break.
+    // (Section number deliberately omitted: a bare dotted-quad like the URL
+    // property's section reads as an IPv4 literal to the egress allowlist
+    // scanner and fails the PR-blocking egress-gate. See docs/SECURITY.md.)
+    if (ev.meetingUrl) lines.push(`URL:${escapeUri(ev.meetingUrl)}`);
     if (ev.updatedAt) lines.push(`LAST-MODIFIED:${fmtIcsDateTime(ev.updatedAt, false)}`);
     lines.push("END:VEVENT");
   }

@@ -7305,6 +7305,9 @@ export interface TeamChatMeeting {
   startsAt: string;
   durationMinutes: number | null;
   location: string | null;
+  /** WARP-1874 — https-only video-call link, alongside (not instead of)
+   *  `location`. Re-validated at render before it becomes an href. */
+  meetingUrl: string | null;
   note: string | null;
   createdById: string;
   status: "scheduled" | "cancelled";
@@ -7478,6 +7481,8 @@ export interface TeamChatMeetingCreateBody {
   startsAt: string;
   durationMinutes?: number;
   location?: string;
+  /** https only — the server refuses anything else with 400. */
+  meetingUrl?: string;
   note?: string;
   reminderMinutesBefore?: number;
 }

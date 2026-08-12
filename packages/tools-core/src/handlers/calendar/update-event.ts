@@ -1,3 +1,4 @@
+import { parseMeetingLink } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
 
@@ -8,6 +9,11 @@ const inputSchema = {
     title: { type: "string" },
     description: { type: "string" },
     location: { type: "string" },
+    meeting_url: {
+      type: "string",
+      description:
+        "Video-call link (https:// only). Pass an empty string to remove an existing link.",
+    },
     starts_at: { type: "string" },
     ends_at: { type: "string" },
     all_day: { type: "boolean" },
@@ -58,6 +64,18 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   }
 
   const data: Record<string, unknown> = {};
+  // WARP-1874 — https-only, same gate as every other write path. An empty
+  // string is the removal verb: most tool-call encodings cannot express
+  // JSON null, and "" is never a valid link, so it is unambiguous.
+  if (typeof args.meeting_url === "string") {
+    if (args.meeting_url === "") {
+      data.meetingUrl = null;
+    } else {
+      const link = parseMeetingLink(args.meeting_url);
+      if (!link) return err("INVALID_ARGS", "meeting_url must be an https:// link");
+      data.meetingUrl = link.url;
+    }
+  }
   if (typeof args.title === "string") data.title = args.title;
   if (typeof args.description === "string") data.description = args.description;
   if (typeof args.location === "string") data.location = args.location;

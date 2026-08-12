@@ -47,6 +47,7 @@ function meeting(over: Partial<TeamChatMeeting> = {}): TeamChatMeeting {
     startsAt: new Date(Date.now() + DEFAULT_STARTS_IN_MS).toISOString(),
     durationMinutes: 45,
     location: "Kitchen",
+    meetingUrl: null,
     note: null,
     createdById: "u-alice",
     status: "scheduled",

@@ -1,3 +1,4 @@
+import { parseMeetingLink } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { parseModelDate } from "./_dates.js";
 
@@ -6,7 +7,12 @@ const inputSchema = {
   properties: {
     title: { type: "string", description: "Event title (1-500 chars)." },
     description: { type: "string", description: "Optional longer notes." },
-    location: { type: "string", description: "Optional location string." },
+    location: { type: "string", description: "Optional physical location string." },
+    meeting_url: {
+      type: "string",
+      description:
+        "Optional video-call link (Zoom, Microsoft Teams, Google Meet, Webex, or any other https URL). Must start with https://. This is separate from `location` — an event can have both a room and a call.",
+    },
     starts_at: { type: "string", description: "ISO-8601 start time." },
     ends_at: { type: "string", description: "ISO-8601 end time (must be after starts_at)." },
     all_day: { type: "boolean", description: "True for all-day events. Default false." },
@@ -30,6 +36,20 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const title = typeof args.title === "string" ? args.title.trim() : "";
   if (!title || title.length > 500) return err("INVALID_ARGS", "title must be 1-500 chars");
 
+  // WARP-1874 — a model-supplied URL is no more trusted than a pasted one
+  // (arguably less: it can be echoed out of a summarized email), and it
+  // ends up as an href on a household member's screen. Same https-only
+  // gate as every other write path.
+  let meetingUrl: string | null = null;
+  if (args.meeting_url !== undefined && args.meeting_url !== null && args.meeting_url !== "") {
+    const link = parseMeetingLink(args.meeting_url);
+    if (!link)
+      return err("INVALID_ARGS", "meeting_url must be an https:// link");
+    // Store the parser's normalized href, so the value that was validated
+    // is the value that renders.
+    meetingUrl = link.url;
+  }
+
   try {
     const ev = (await ctx.prisma.calendarEvent.create({
       data: {
@@ -37,6 +57,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         title,
         description: typeof args.description === "string" ? args.description : null,
         location: typeof args.location === "string" ? args.location : null,
+        meetingUrl,
         startsAt,
         endsAt,
         allDay: args.all_day === true,

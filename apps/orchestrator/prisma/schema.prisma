@@ -1355,6 +1355,21 @@ model CalendarEvent {
   title        String
   description  String?
   location     String?
+  /// WARP-1874 — an https-only video-call link (Zoom / Teams / Meet / Webex
+  /// or any other https URL), EXPLICIT rather than sniffed out of
+  /// `location`. Deriving "is this location string actually a link" from
+  /// the text would be exactly the guessing CLAUDE.md rule 10 forbids, and
+  /// it is what made the field unusable for remote attendees.
+  ///
+  /// Nullable and additive: rows written before this column keep working,
+  /// including the ones whose `location` already holds a pasted URL —
+  /// those still render as the plain text they always were.
+  ///
+  /// Admission is `https:` ONLY, enforced on every write path by
+  /// `parseMeetingLink` in @droplet/shared-types. The stored value is that
+  /// parser's normalized href, so what was validated is what becomes an
+  /// anchor on another household member's screen.
+  meetingUrl   String?
   startsAt     DateTime
   endsAt       DateTime
   allDay       Boolean  @default(false)
@@ -4735,6 +4750,9 @@ model TeamChatMeeting {
   startsAt              DateTime
   durationMinutes       Int?
   location              String?
+  /// WARP-1874 — https-only video-call link for the meeting. Mirrors onto
+  /// the organizer's CalendarEvent.meetingUrl; same parseMeetingLink gate.
+  meetingUrl            String?
   note                  String?
   createdById           String
   status                TeamChatMeetingStatus         @default(scheduled)
