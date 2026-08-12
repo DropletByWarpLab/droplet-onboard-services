@@ -31,6 +31,7 @@ import operations
 from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
+    DeviceWriteNotApplied,
     LoginDenied,
     UbusError,
     ScanUnsupportedError,
@@ -42,7 +43,7 @@ from droplet_openwrt_sdk import (
     detect_deployment_topology,
     parse_ai_acl_scopes,
 )
-from router_ports import get_router_ports
+from router_ports import annotate_write_guards, disable_guard, get_router_ports
 import json
 from schemas import (
     HealthResponse,
@@ -70,6 +71,7 @@ from schemas import (
     CameraSubnetSetupRequest,
     CreateInterfaceRequest,
     EditInterfaceRequest,
+    SetPortEnabledRequest,
     FirewallZoneCollection,
     FirewallRuleCollection,
     FirewallRedirectCollection,
@@ -730,20 +732,141 @@ def network_interfaces():
 # same question: those enumerate the logical interfaces, this the jacks.
 @app.get("/network/ports")
 def network_ports():
-    """The router's PHYSICAL port map (WARP-1866).
+    """The router's PHYSICAL port map (WARP-1866), with its write verdicts (WARP-1907).
 
-    Read-only, and deliberately so: the interface routes above can bring a
-    link down, but there is no equivalent here. Disabling a router jack from
-    the dashboard would sever the WAN or the switch trunk with no safe-apply
-    arm to undo it, and it answers no question the port map is being asked.
+    Each port carries `disable_guard`: `null` when turning that jack off needs
+    nothing beyond the ordinary Tier-2 confirm, or `{code, reason}` when it
+    needs the explicit `force` acknowledgement that `POST
+    /network/ports/{port}/enable` demands. Published on the read because the
+    dashboard has to choose its confirmation copy BEFORE it opens the dialog,
+    and because the management-interface list is deployment configuration
+    (`DROPLET_MGMT_INTERFACES`) no client can know. One source of policy —
+    `router_ports.disable_guard` — feeds both this read and the write, so the
+    sentence the user is shown and the rule the server enforces cannot drift.
+
+    (Until WARP-1907 this docstring asserted the write path should not exist,
+    on the grounds that disabling a jack "would sever the WAN or the switch
+    trunk with no safe-apply arm to undo it". Half right, and the half that was
+    right is now the guard rather than a reason to ship nothing: a live
+    management jack DOES have a safe-apply arm — cutting it fails the
+    connectivity probe and OpenWrt reverts after 60s — while the WAN jack has
+    none, which is exactly why the two refusals are worded differently.)
 
     Degrades on shape (`supported: false` + a reason), never on reachability —
     an unreachable router still surfaces as an error, so the panel can say the
     router is offline instead of drawing every jack dark.
     """
     try:
-        return get_router_ports(get_router())
+        return annotate_write_guards(
+            get_router_ports(get_router()), _is_management_interface,
+        )
     except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# Refusals for a jack write. Kept beside the route (like _MANAGEMENT_REFUSAL)
+# rather than inside router_ports, because the *reason* copy is policy and the
+# *code* is the wire contract the dashboard branches on.
+_PORT_MAP_UNSUPPORTED = {
+    "error": (
+        "This deployment's router doesn't report a physical port map, so there "
+        "is nothing here to turn on or off."
+    ),
+    "code": "PORT_MAP_UNSUPPORTED",
+}
+
+
+@app.post("/network/ports/{port}/enable")
+def set_network_port_enabled(port: str, req: SetPortEnabledRequest, request: Request):
+    """Administratively bring a physical jack up or down (WARP-1907).
+
+    Write parity with the managed switch's `POST /switch/ports/{port}/enable`,
+    and the same blast-radius posture as the interface writes above: the SDK
+    stages the uci change inside `safe_apply(timeout=60)`, a `ConnectionLost`
+    surfaces as 503 `rollback_pending`, and a refusal is a 409 the caller clears
+    by passing `force`.
+
+    The order of the checks is the contract:
+
+    1. **The port map first.** A shape with no port map (`ROUTING_MODE=mock`,
+       whose MockRouter has no `device_status`) degrades to 422
+       `PORT_MAP_UNSUPPORTED` — the same honest shape-limitation the read
+       reports, never a 500 and never a fake 200.
+    2. **The jack must be ON the map.** `p99` on a router with eight jacks, or
+       `br-lan`, which is a real netdev with a real `config device` section but
+       is a BRIDGE — disabling it takes the whole LAN down in one call. 404.
+    3. **The guard, on disable only.** `router_ports.disable_guard` — 409
+       `WAN_PORT` / `MANAGEMENT_PORT` unless `force`. Enabling is never guarded:
+       it has no blast radius, and making the WAN harder to restore than to cut
+       would be backwards.
+
+    RBAC (owner/admin) and the Tier-2 confirm live one layer up in the
+    orchestrator; this service trusts a valid bearer.
+    """
+    try:
+        port_map = get_router_ports(get_router())
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+    if not port_map.get("supported"):
+        return JSONResponse(
+            status_code=422,
+            content={**_PORT_MAP_UNSUPPORTED, "detail": port_map.get("detail")},
+        )
+
+    target = next((p for p in port_map["ports"] if p.get("id") == port), None)
+    if target is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": f"This router has no physical port called {port!r}.",
+                "code": "PORT_NOT_FOUND",
+            },
+        )
+
+    if not req.enabled and not req.force:
+        guard = disable_guard(target, _is_management_interface)
+        if guard is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"error": guard["reason"], "code": guard["code"]},
+            )
+
+    try:
+        result = get_router().network.set_device_enabled(port, req.enabled)
+        return {
+            "status": "ok",
+            "port": port,
+            "enabled": req.enabled,
+            "created_section": result.get("created_section"),
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost changing the port — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except DeviceWriteNotApplied as exc:
+        # The uci readback says nothing moved. Reporting this as a success is
+        # the one outcome that would leave an operator believing a live jack is
+        # off, so it is a 5xx with its own code.
+        logger.error("port %s write did not apply: %s", port, exc)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": (
+                    "The router accepted the change but the port didn't move. "
+                    "Nothing was left half-applied — try again."
+                ),
+                "detail": str(exc),
+                "code": DeviceWriteNotApplied.code,
+            },
+        )
+    except UbusError as exc:
         handle_router_error(exc)
 
 

@@ -414,6 +414,27 @@ class EditInterfaceRequest(BaseModel):
         return self
 
 
+class SetPortEnabledRequest(BaseModel):
+    """Administratively enable/disable a physical router jack (WARP-1907).
+
+    `enabled` is required and has no default: "which way?" is the entire
+    request, and a defaulted direction is how a mis-serialised body silently
+    turns a jack off.
+
+    `force` is the explicit extra-confirm, carrying the same semantics as the
+    interface writes'. The route refuses a DISABLE of the WAN jack, or of a
+    live management jack, with 409 unless it is set — see
+    `router_ports.disable_guard` for why those two refusals are worded
+    differently.
+    """
+
+    enabled: bool = Field(..., description="True brings the jack up, False shuts it")
+    force: bool = Field(
+        default=False,
+        description="Explicit extra-confirm for a WAN or live-management jack",
+    )
+
+
 # ---------------------------------------------------------------------------
 # VPN (WireGuard)
 # ---------------------------------------------------------------------------
