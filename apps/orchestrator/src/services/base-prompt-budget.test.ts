@@ -36,6 +36,8 @@ import {
 } from "./context-budget.service.js";
 import { IDENTITY_MAX_CHARS } from "./identity-prompt.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
+import { CORE_TOOL_NAMES } from "./tool-selection.service.js";
 
 /** buildMemoryFactsBlock's MEMORY_FACTS_CHAR_BUDGET (routes/llm.ts). Kept as
  *  a literal here (the const is route-local, not exported) so the invariant
@@ -63,6 +65,40 @@ function chatToolEntries() {
 
 function serializeChatToolSchemas(): string {
   return JSON.stringify(chatToolEntries());
+}
+
+/**
+ * WARP-1921 — the WORST-CASE SHIPPED TURN under `TOOL_SELECTION_MODE=domains`.
+ *
+ * Since WARP-1921 the shipping default advertises the core set plus the
+ * domains matched by the user's message, not the whole chat scope. So the
+ * number that bounds a real turn is `core ∪ (the single largest domain)` —
+ * a turn matching two domains is possible but not the budgeted worst case
+ * for a canary whose job is to catch pathological GROWTH of one tool group.
+ *
+ * Multi-domain turns are covered by the runtime gate
+ * (estimateRequestTokens/degradeToFit), which sees the actual assembled
+ * request; this canary is the static tripwire.
+ */
+function worstCaseSelectedTurnChars(): { chars: number; domain: string } {
+  const entries = chatToolEntries();
+  const byName = new Map(entries.map((e) => [e.function.name, e]));
+  const core = [...CORE_TOOL_NAMES].filter((n) => byName.has(n));
+  const domains = new Set(
+    TOOL_CATALOG.filter((e) => byName.has(e.name)).map((e) => e.domain),
+  );
+  let worst = { chars: 0, domain: "(none)" };
+  for (const d of domains) {
+    const names = new Set([
+      ...core,
+      ...TOOL_CATALOG.filter((e) => e.domain === d).map((e) => e.name),
+    ]);
+    const chars = JSON.stringify(
+      entries.filter((e) => names.has(e.function.name)),
+    ).length;
+    if (chars > worst.chars) worst = { chars, domain: d };
+  }
+  return worst;
 }
 
 /** Per-tool serialized sizes, largest first — the naming half of the canary. */
@@ -109,42 +145,66 @@ describe("worst-case fixed system-block budget", () => {
     expect(fixedBlockChars).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS);
   });
 
-  it("fits the fixed blocks + default chat tools[] under the shipping window minus reserve", () => {
+  it("fits the fixed blocks + the worst-case SELECTED turn under the shipping window minus reserve", () => {
     // GROUND TRUTH (WARP-1118 §10, corrected 2026-07-08): the bundled box runs
-    // OLLAMA_CONTEXT_LENGTH=16384 (docker-compose.yml, the WARP-854 fix). The
+    // a 16384-token window (docker-compose.yml, the WARP-854 fix). The
     // orchestrator estimator budgets against that window minus OUTPUT_RESERVE.
-    const toolSchemasJson = serializeChatToolSchemas();
-    const worstCaseChars =
+    //
+    // WARP-1921 — this assertion now measures the SHIPPED turn, not the whole
+    // chat scope. `TOOL_SELECTION_MODE` defaults to "domains", so a real turn
+    // carries core ∪ the matched domain(s), not all ~71 in-scope tools.
+    // Measuring the full pool here made the canary reject every new tool while
+    // actual turns ran ~10K tokens under the ceiling — it blocked WARP-1893 on
+    // 28 tokens of phantom headroom.
+    const fixedChars =
       IDENTITY_MAX_CHARS +
       PERSONA_PROMPT_MAX_CHARS +
       BUSINESS_CONTEXT_MAX_CHARS +
       TOOL_GUIDANCE_MAX_CHARS +
       MEMORY_FACTS_CHAR_BUDGET +
-      INTERVIEW_PROMPT_MAX_CHARS +
-      toolSchemasJson.length;
-    const worstCaseTokens = estimateTokensFromChars(worstCaseChars);
+      INTERVIEW_PROMPT_MAX_CHARS;
     const effectiveWindow = DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE;
 
-    // The fixed blocks + the scoped chat advertisement fit under the
-    // effective window with room for history. Growing the advertised set
-    // (registering a tool without adding it to chat-tool-scope.ts) spends
-    // this headroom — when this assertion trips, either scope the new tool
-    // out of chat or make a deliberate, measured budget decision here.
-    //
+    const worst = worstCaseSelectedTurnChars();
+    const selectedTokens = estimateTokensFromChars(fixedChars + worst.chars);
+
     // NEVER raise effectiveWindow to make this pass: it derives from the
     // shipping window and the output reserve, so raising it relocates the
     // cliff instead of removing it and the next tool lands past the real
     // limit silently. Trim the schema, or scope the tool out of chat.
     expect(
-      worstCaseTokens,
-      `worst-case chat turn is ${worstCaseTokens} tokens against a ${effectiveWindow} ` +
-        `ceiling (${toolSchemasJson.length} chars of tools[] over ` +
-        `${chatToolSizes().length} tools). Largest advertised tools: ` +
+      selectedTokens,
+      `worst-case SELECTED turn is ${selectedTokens} tokens against a ` +
+        `${effectiveWindow} ceiling — domain "${worst.domain}" + core = ` +
+        `${worst.chars} chars. Largest advertised tools overall: ` +
         chatToolSizes()
           .slice(0, 5)
           .map((r) => `${r.name} (${r.chars})`)
           .join(", "),
     ).toBeLessThan(effectiveWindow);
+  });
+
+  it("tracks the full chat pool as a growth tripwire (the TOOL_SELECTION_MODE=off rollback path)", () => {
+    // The full in-scope pool is what goes on the wire when an operator sets
+    // TOOL_SELECTION_MODE=off to roll back selection.
+    //
+    // HONEST LIMIT, stated so nobody reads a green here as a guarantee: the
+    // pool passed 15360 tokens during WARP-1893 and is NOT expected to come
+    // back under it. `off` is therefore a diagnostic/rollback mode that no
+    // longer fits the window alongside the full fixed blocks — on a large
+    // turn it will lean on the runtime degradeToFit gate. The shipped default
+    // is what the assertion above budgets.
+    //
+    // This number still earns its keep as a GROWTH tripwire: it catches a
+    // pathological jump (a tool group doubling) that the per-domain assertion
+    // above could miss, and it makes the cost of `off` visible rather than
+    // implicit.
+    const poolChars = serializeChatToolSchemas().length;
+    expect(
+      poolChars,
+      `full chat pool is ${poolChars} chars over ${chatToolSizes().length} tools`,
+    ).toBeLessThan(60000);
+
     // Regression ceiling on the FULL registry serialization (growth
     // tripwire for the MCP-facing surface, which advertises everything).
     // Re-baselined 2026-07 for the WARP-1423 rollout (94 → ~127 tools,

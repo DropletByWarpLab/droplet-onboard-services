@@ -332,6 +332,25 @@ export interface AgentRequest {
    */
   tool_selection_mode?: "off" | "domains";
   /**
+   * WARP-1921 — tool names already used EARLIER in this conversation, read
+   * server-side from the persisted trace by the route.
+   *
+   * The §3 continuity rule ("domains of tools already called stay
+   * advertised") originally read `tool_calls` off replayed assistant
+   * messages, but `chatRequestSchema` never declared that field, so zod
+   * stripped it and continuity only ever worked within a single turn's
+   * iterations. That gap is why the spec's §6 outcome held
+   * `TOOL_SELECTION_MODE` at "off".
+   *
+   * Unioned with the within-turn names below, so a follow-up like "rename it
+   * to Side Gate" — which matches no domain keyword — still sees the camera
+   * tools the previous turn used, instead of burning a self-heal iteration.
+   *
+   * Advisory only: it can never widen reach, because selection is applied to
+   * `filtered` (already RBAC- and scope-narrowed) and only ever subsets it.
+   */
+  prior_tool_names?: string[];
+  /**
    * WARP-1529 / ADR-032 §3 (RBAC v2 T5) — the caller's resolved per-role tool
    * reach. Applied TWICE, on purpose:
    *
@@ -1182,11 +1201,22 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   let activeTools = filtered;
   if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
     const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
-    const conversationToolNames = req.messages.flatMap((m) =>
-      m.role === "assistant" && m.tool_calls
-        ? m.tool_calls.map((tc) => tc.function.name)
-        : [],
-    );
+    // WARP-1921 — continuity spans BOTH sources, and needs both:
+    //   • `prior_tool_names` — earlier TURNS, read from the persisted trace
+    //     by the route. `req.messages` cannot supply these: chatRequestSchema
+    //     declares no `tool_calls` field, so zod strips it from every
+    //     replayed assistant message.
+    //   • `req.messages` — earlier ITERATIONS of THIS turn, where the loop
+    //     pushes the model's raw message object with tool_calls intact. Still
+    //     required: those calls are not persisted until the turn finalizes.
+    const conversationToolNames = [
+      ...(req.prior_tool_names ?? []),
+      ...req.messages.flatMap((m) =>
+        m.role === "assistant" && m.tool_calls
+          ? m.tool_calls.map((tc) => tc.function.name)
+          : [],
+      ),
+    ];
     // `content` is an array (multimodal — e.g. an image attachment) on some
     // user turns; rule matching only understands plain text, so those turns
     // yield "" here and fall back to core-only advertisement. That's an
