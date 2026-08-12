@@ -145,7 +145,7 @@ export default function ModelsPage() {
     );
   }
 
-  const { local, cloud, gpu, avgLatencyMs, cloudSpendUsd } = data;
+  const { local, cloud, gpu, gpuReason, avgLatencyMs, cloudSpendUsd } = data;
   const localEmpty = local.length === 0;
   // WARP-1289 — the orchestrator's honesty flag: the local list can't be
   // trusted as complete (ai-gateway unreachable, or its Ollama provider
@@ -192,6 +192,7 @@ export default function ModelsPage() {
         {/* KPI strip */}
         <KpiStrip
           gpu={gpu}
+          gpuReason={gpuReason}
           avgLatencyMs={avgLatencyMs}
           cloudSpendUsd={cloudSpendUsd}
           localCount={local.length}

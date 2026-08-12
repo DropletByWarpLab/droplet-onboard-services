@@ -119,10 +119,34 @@ export interface GpuInfo {
   tempC: number | null;
 }
 
+/**
+ * WARP-1861 — why `gpu` is null, when it is.
+ *
+ * `null` is not a measurement, and neither is a failed probe. Two facts hide
+ * behind an absent GPU block and only one of them is a statement about the
+ * customer's hardware:
+ *
+ *   - `no_card`    the bridge ANSWERED and resolved no card (`available:false`
+ *                  plus a reason). A negative measurement — safe to state.
+ *   - `unreachable` we could not ask at all. `fetchGpuTelemetry()` returns null
+ *                  for no token, ECONNREFUSED, timeout, non-2xx and a
+ *                  malformed body alike. That is a fact about the PROBE.
+ *
+ * Collapsing the second into the first is how a box with a working 16 GiB dGPU
+ * ends up telling its owner "No accelerator detected" because
+ * droplet-device-bridge.service didn't restart after a refresh (WARP-1829) or
+ * a setup.sh re-run dropped SERVICE_TOKEN_DISPLAY (WARP-1865).
+ * GET /api/hardware/gpu already keeps them apart for the LLM tool; the
+ * dashboard payload has to as well.
+ */
+export type GpuReason = "unreachable" | "no_card";
+
 export interface ModelsPagePayload {
   local: LocalModelInfo[];
   cloud: CloudProviderInfo[];
   gpu: GpuInfo | null;
+  /** Why `gpu` is null. Null when `gpu` is populated. */
+  gpuReason: GpuReason | null;
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /**
@@ -315,6 +339,12 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
           tempC: telemetry.tempC,
         }
       : null;
+  // Carry WHY, not just the absence. `telemetry === null` means the probe
+  // never completed — no token, bridge down, timeout, non-2xx, bad body —
+  // which is evidence about us, not about the customer's hardware. Only a
+  // bridge that answered gets to have its "no card" repeated as a fact.
+  const gpuReason: GpuReason | null =
+    gpu !== null ? null : telemetry === null ? "unreachable" : "no_card";
 
   return {
     local,
@@ -333,6 +363,9 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // existing "GPU info unavailable" tile stays the honest fallback rather
     // than a fabricated zero.
     gpu,
+    // ...and WHY it is null, so the tile can tell "we asked and there is no
+    // card" apart from "we never got to ask". See `GpuReason`.
+    gpuReason,
     // Avg latency: requires a metrics aggregation surface that doesn't
     // exist yet. 0 until ai-gateway exports a /metrics summary.
     avgLatencyMs: 0,

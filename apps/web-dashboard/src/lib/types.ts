@@ -372,10 +372,27 @@ export interface ModelsGpuInfo {
   tempC: number | null;
 }
 
+/**
+ * WARP-1861 — why `gpu` is null, when it is. Mirrors the orchestrator's
+ * `GpuReason` (services/models-summary.service.ts).
+ *
+ * `no_card` is a MEASUREMENT: the device-bridge answered and resolved no card.
+ * `unreachable` is not — the orchestrator couldn't ask (no token, bridge down,
+ * timeout, non-2xx, malformed body), which says nothing about the customer's
+ * hardware. Rendering both as "No accelerator detected" is how a box with a
+ * working dGPU tells its owner the card is missing because a host unit didn't
+ * restart. The two get different copy.
+ */
+export type ModelsGpuReason = "unreachable" | "no_card" | null;
+
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
   gpu: ModelsGpuInfo | null;
+  /** WARP-1861 (additive; optional so an older orchestrator that predates the
+   *  field still parses). Absent ⇒ we know nothing about why, and the tile
+   *  must not guess — see `ModelsGpuReason`. */
+  gpuReason?: ModelsGpuReason;
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by

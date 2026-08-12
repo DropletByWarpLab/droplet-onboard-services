@@ -269,6 +269,8 @@ describe("WARP-1861 — GPU telemetry on the models payload", () => {
       utilPct: 97,
       tempC: 62,
     });
+    // A card resolved, so there is nothing to explain away.
+    expect(payload.gpuReason).toBeNull();
   });
 
   it("still renders the card when VRAM total is unreadable (pinned card)", async () => {
@@ -316,12 +318,48 @@ describe("WARP-1861 — GPU telemetry on the models payload", () => {
     });
     const payload = await getModelsPagePayload();
     expect(payload.gpu).toBeNull();
+    // The bridge ANSWERED and the answer was "no card" — a negative
+    // measurement, which the tile is allowed to state as a fact.
+    expect(payload.gpuReason).toBe("no_card");
   });
 
   it("reports no GPU when the bridge itself is absent (probe returns null)", async () => {
     fetchGpuTelemetryMock.mockResolvedValue(null);
     const payload = await getModelsPagePayload();
     expect(payload.gpu).toBeNull();
+    // We could not ASK. `fetchGpuTelemetry` returns null for no token,
+    // ECONNREFUSED, timeout, non-2xx and a malformed body alike — none of
+    // which is evidence about the customer's hardware. Collapsing this into
+    // the same `gpu: null` as "no card" is what let the tile claim "No
+    // accelerator detected" over a working 16 GiB dGPU whose
+    // droplet-device-bridge.service simply hadn't restarted (WARP-1829) or
+    // whose SERVICE_TOKEN_DISPLAY a setup.sh re-run had dropped (WARP-1865).
+    expect(payload.gpuReason).toBe("unreachable");
+  });
+
+  it("does not collapse a failed probe into the bridge's negative answer", async () => {
+    // The regression in one test. BOTH branches produce `gpu: null`, so
+    // nothing downstream can tell them apart unless the reason differs —
+    // re-collapsing them re-ships "No accelerator detected" over a live card.
+    fetchGpuTelemetryMock.mockResolvedValue(null);
+    const probeFailed = await getModelsPagePayload();
+    fetchGpuTelemetryMock.mockResolvedValue({
+      available: false,
+      card: null,
+      reason: "no DRM card exposing mem_info_vram_total",
+      busyPercent: null,
+      vramTotalBytes: null,
+      vramUsedBytes: null,
+      vramUsedFraction: null,
+      powerWatts: null,
+      tempC: null,
+      processes: [],
+    });
+    const bridgeSaidNoCard = await getModelsPagePayload();
+
+    expect(probeFailed.gpu).toBeNull();
+    expect(bridgeSaidNoCard.gpu).toBeNull();
+    expect(probeFailed.gpuReason).not.toBe(bridgeSaidNoCard.gpuReason);
   });
 });
 
@@ -378,6 +416,9 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.body.local).toHaveLength(1);
     expect(res.body.cloud).toHaveLength(3);
     expect(res.body.gpu).toBeNull();
+    // No bridge in the test env, so the payload must say WHY it has no GPU
+    // over the wire — the dashboard cannot re-derive that from `gpu: null`.
+    expect(res.body.gpuReason).toBe("unreachable");
   });
 
   it("serves a degraded payload UNCACHED so it self-heals (WARP-1289)", async () => {
