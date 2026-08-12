@@ -1165,7 +1165,14 @@
 
    Breakpoint matches `.dh-m-board` in home-bento.css — below 1024px the bento
    is already in its single-column mobile board, so these controls are being
-   driven by touch from exactly that width down. */
+   driven by touch from exactly that width down.
+
+   WARP-1875 — the original census walked Home in the Ask AI widget's EMPTY
+   state, where the conversation head does not render, so `.w-chat-conv-btn`
+   ("Open full chat" / "New chat") was never counted and stayed at 28px. The
+   derived census in __tests__/shell/mobile-layout-contract.test.ts now keys
+   off hover/disabled states instead of a hand-maintained list, so the next
+   widget control cannot go missing the same way. */
 @media (max-width: 1023px) {
   /* Cells are ~44px wide in the 7-column grid; a square makes them 44 tall
      without changing the grid's column maths. */
@@ -1176,6 +1183,10 @@
   .droplet-home .w-chat-iconbtn { width: 44px; height: 44px; }
   .droplet-home .w-chat-send { height: 44px; }
   .droplet-home .w-sug { height: 44px; }
+  /* The conversation head wraps to two rows on a phone (see the `@container
+     bento` layer above), so these pills sit on a row of their own — all the
+     more reason they cannot stay 28px. */
+  .droplet-home .w-chat-conv-btn { height: 44px; }
   .droplet-home .w-notes-new { min-height: 44px; }
   /* The base rule already supplies inline-flex + centring; only the height
      is missing, so don't restate display here. */

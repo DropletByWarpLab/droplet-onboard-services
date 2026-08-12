@@ -9,26 +9,30 @@
  * endpoint, so this is the smallest useful surface — enough for the
  * user to confirm *which* email is being cited.
  *
- * WARP-1875 — that modal PORTALS to document.body. A citation renders wherever
- * an answer renders, and on Home that is inside a `.bento` widget shell, which
- * is now a query container (`container-type: inline-size`, home-bento.css).
- * Inline-size containment implies `contain: layout`, which makes the tile a
- * containing block for `position: fixed` descendants — so rendered in place
- * the backdrop would have resolved `inset: 0` against a ~240px tile and then
- * been clipped by its `overflow: hidden`, instead of covering the viewport.
- * Same escape hatch, same reason, as the <Dialog> primitive.
+ * WARP-1875 — that modal goes through the <Dialog> primitive, which PORTALS to
+ * document.body. A citation renders wherever an answer renders, and on Home
+ * that is inside a `.bento` widget shell, which is now a query container
+ * (`container-type: inline-size`, home-bento.css). Inline-size containment
+ * implies `contain: layout`, which makes the tile a containing block for
+ * `position: fixed` descendants — so rendered in place the backdrop would have
+ * resolved `inset: 0` against a ~240px tile and then been clipped by its
+ * `overflow: hidden`, instead of covering the viewport.
+ *
+ * Portalling is only half of it, which is why this uses the primitive rather
+ * than its own `createPortal`. At the end of the document the dialog is no
+ * longer the trigger's next DOM sibling, so Tab no longer steps into it — and
+ * a hand-rolled portal that still declares `aria-modal="true"` would tab the
+ * user onto the next citation chip BEHIND the scrim, inside a subtree it has
+ * just told assistive tech does not exist. <Dialog> owns the focus trap,
+ * initial focus, Escape, focus restore and scroll-lock that make the
+ * `aria-modal` claim true. Guarded by citations/__tests__/EmailCitation.test.tsx.
  */
 
-import { useState } from "react";
-import { createPortal } from "react-dom";
+import { useId, useRef, useState } from "react";
 import { Mail } from "lucide-react";
 import type { EmailPartAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";
-// Portal-mounted to document.body, OUTSIDE any page scope, so the backdrop
-// carries the `droplet-shell` class itself and imports the tokens it reads
-// (`--scrim`, `--card-bg`, `--card-bd`, `--lift`) — the WARP-1079 pattern the
-// <Dialog> primitive documents.
-import "@/components/shell/indigo-tokens.css";
+import { Dialog } from "@/components/Dialog";
 
 export interface EmailCitationProps {
   hit: CitationHit;
@@ -37,9 +41,14 @@ export interface EmailCitationProps {
 
 export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  // Several citations can render in one answer, so the heading id has to be
+  // per-instance or `aria-labelledby` resolves to the first one on the page.
+  const titleId = useId();
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen(true)}
         data-testid="email-card"
@@ -55,57 +64,42 @@ export function EmailCitation({ hit, anchor }: EmailCitationProps): JSX.Element 
           </span>
         </span>
       </button>
-      {open && typeof document !== "undefined" && createPortal(
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Email citation"
-          className="droplet-shell fixed inset-0 z-50 flex items-center justify-center"
-          style={{ position: "fixed", background: "var(--scrim)" }}
-          onClick={() => setOpen(false)}
-        >
-          <div
-            className="max-w-xl w-full m-4 p-4"
-            style={{
-              background: "var(--card-bg)",
-              border: "1px solid var(--card-bd)",
-              borderRadius: "var(--radius-card)",
-              boxShadow: "var(--lift)",
-            }}
-            onClick={(e) => e.stopPropagation()}
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        triggerRef={triggerRef}
+        labelledBy={titleId}
+        maxWidth="xl"
+      >
+        <header className="flex items-center justify-between gap-3 mb-2">
+          <h2 id={titleId} className="type-subheadline truncate" style={{ color: "var(--text)" }}>
+            {hit.filename}
+          </h2>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="type-caption-1 flex-shrink-0 text-[var(--text-muted)] transition-colors duration-150 hover:text-[var(--text)]"
+            aria-label="Close"
           >
-            <header className="flex items-center justify-between mb-2">
-              <h2 className="type-subheadline truncate" style={{ color: "var(--text)" }}>
-                {hit.filename}
-              </h2>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="type-caption-1 text-[var(--text-muted)] hover:text-[var(--text)]"
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </header>
-            <dl className="type-caption-1 space-y-1 mb-3" style={{ color: "var(--text-muted)" }}>
-              <div className="flex gap-2">
-                <dt style={{ color: "var(--text-muted)" }}>Message-Id:</dt>
-                {/* WARP-1153: min-w-0 so a long Message-Id truncates instead
-                    of widening the card past max-w-xl. */}
-                <dd className="font-mono truncate min-w-0">{anchor.messageId}</dd>
-              </div>
-              <div className="flex gap-2">
-                <dt style={{ color: "var(--text-muted)" }}>Part:</dt>
-                <dd>#{anchor.partIndex}</dd>
-              </div>
-            </dl>
-            <p className="type-body whitespace-pre-wrap" style={{ color: "var(--text)" }}>
-              {hit.chunkText}
-            </p>
+            ✕
+          </button>
+        </header>
+        <dl className="type-caption-1 space-y-1 mb-3" style={{ color: "var(--text-muted)" }}>
+          <div className="flex gap-2">
+            <dt style={{ color: "var(--text-muted)" }}>Message-Id:</dt>
+            {/* WARP-1153: min-w-0 so a long Message-Id truncates instead
+                of widening the card past max-w-xl. */}
+            <dd className="font-mono truncate min-w-0">{anchor.messageId}</dd>
           </div>
-        </div>,
-        document.body,
-      )}
+          <div className="flex gap-2">
+            <dt style={{ color: "var(--text-muted)" }}>Part:</dt>
+            <dd>#{anchor.partIndex}</dd>
+          </div>
+        </dl>
+        <p className="type-body whitespace-pre-wrap" style={{ color: "var(--text)" }}>
+          {hit.chunkText}
+        </p>
+      </Dialog>
     </>
   );
 }

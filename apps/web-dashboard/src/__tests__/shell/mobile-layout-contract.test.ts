@@ -165,3 +165,107 @@ describe("phone input font floor", () => {
     expect(block).toMatch(/font-size:\s*16px\s*!important/);
   });
 });
+
+/* ══ Home widget touch targets ═════════════════════════════════════════════
+   WARP-1875. The WARP-1848 census that produced the `@media (max-width:
+   1023px)` block in home-widgets.css was measured by walking Home at 375px
+   and listing every control under 44px. That is only as complete as the
+   STATE the page happened to be in: it was measured with the Ask AI widget
+   in its EMPTY state, where the conversation head does not render, so the
+   two 28px pills in it ("Open full chat" / "New chat") were never in the
+   41-control count and never got raised.
+
+   So this guard does not restate the list — it DERIVES it. A `.w-*` control
+   that declares a `:hover` / `:active` / `:focus` / `:disabled` state is an
+   interactive control by construction, and every one of them has to be in
+   the 44px block. Adding a widget button with a hover state and forgetting
+   the phone layer now goes red here instead of shipping. */
+describe("home widget touch targets", () => {
+  const HOME = readFileSync(
+    path.resolve(__dirname, "../../components/home/home-widgets.css"),
+    "utf8",
+  );
+
+  /** Drop every at-rule block, leaving the base (desktop) layer. */
+  function baseLayer(src: string): string {
+    let out = "";
+    let i = 0;
+    while (i < src.length) {
+      const at = src.indexOf("@", i);
+      if (at === -1) {
+        out += src.slice(i);
+        break;
+      }
+      const open = src.indexOf("{", at);
+      if (open === -1) {
+        out += src.slice(i);
+        break;
+      }
+      out += src.slice(i, at);
+      let depth = 0;
+      let j = open;
+      for (; j < src.length; j++) {
+        if (src[j] === "{") depth++;
+        else if (src[j] === "}" && --depth === 0) break;
+      }
+      i = j + 1;
+    }
+    return out;
+  }
+
+  /** Body of the `max-width: 1023px` layer, braces walked so it is whole. */
+  function touchLayer(): string {
+    const open = HOME.indexOf("@media (max-width: 1023px)");
+    expect(open, "the 44px touch layer is missing from home-widgets.css").toBeGreaterThan(-1);
+    const from = HOME.indexOf("{", open);
+    let depth = 0;
+    let i = from;
+    for (; i < HOME.length; i++) {
+      if (HOME[i] === "{") depth++;
+      else if (HOME[i] === "}" && --depth === 0) break;
+    }
+    return HOME.slice(from, i + 1);
+  }
+
+  /** Every `.w-*` class the base layer gives an interactive state to. */
+  function interactiveControls(): string[] {
+    const found = new Set<string>();
+    for (const [, selectors] of baseLayer(HOME).matchAll(/([^{}]+)\{[^{}]*\}/g)) {
+      for (const selector of selectors.split(",")) {
+        const m = selector
+          .trim()
+          .match(/\.(w-[\w-]+)(?::hover|:active|:focus|:focus-visible|:disabled)/);
+        if (m) found.add(m[1]);
+      }
+    }
+    return [...found].sort();
+  }
+
+  it("derives a non-trivial census, or the guard below asserts nothing", () => {
+    // A refactor that renames the hover rules would empty the census and turn
+    // every assertion under it into a vacuous pass.
+    const controls = interactiveControls();
+    expect(controls.length).toBeGreaterThanOrEqual(8);
+    expect(controls).toContain("w-chat-conv-btn");
+  });
+
+  it("raises every interactive Home control to 44px below 1023px", () => {
+    const layer = touchLayer();
+    for (const control of interactiveControls()) {
+      expect(
+        layer,
+        `\`.${control}\` has a hover/disabled state — it is a touch target, ` +
+          "and it is not raised to 44px in the phone layer " +
+          "(04-coding-standards/mobile-web-layout.md)",
+      ).toMatch(new RegExp(`\\.${control}\\s*\\{[^}]*(height|min-height):\\s*44px`));
+    }
+  });
+
+  it("keeps the phone layer scoped so desktop keeps its compact controls", () => {
+    // The pills are 28px by design on a wide tile; the 44px floor is a TOUCH
+    // affordance, not a new base size.
+    const base = baseLayer(HOME);
+    expect(base).toMatch(/\.w-chat-conv-btn\s*\{[^}]*height:\s*28px/);
+    expect(base).not.toMatch(/\.w-chat-conv-btn\s*\{[^}]*44px/);
+  });
+});

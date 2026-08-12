@@ -298,7 +298,18 @@ describe("WARP-1875 · Ask AI widget reflows to its container", () => {
     // If this ever changes the cap below stops being load-bearing — but it
     // stays harmless, so this is documentation, not a constraint.
     expect(col!.className).toMatch(/items-(start|end)/);
-    expect(getComputedStyle(col!).flexDirection || "column").toBe("column");
+    // The column direction comes from the AUTHORED cascade, so read it the
+    // way every other assertion in this file does. `getComputedStyle` cannot
+    // answer it: jsdom never applies these stylesheets to the DOM, so it
+    // returns "" for the property and any `|| "column"` fallback would make
+    // the check pass unconditionally.
+    expect(col!.className).not.toMatch(/(^|\s)flex-(row|col)(-reverse)?(\s|$)/);
+    expect(col!.getAttribute("style")).toBeNull();
+    const direction = resolve(col!, homeCascade, "flex-direction");
+    expect(
+      direction.contested.map((d) => `${d.sheet} \`${d.selector}\` (${d.value})`),
+    ).toEqual([]);
+    expect(direction.winner?.value).toBe("column");
   });
 
   it("caps the answer bubble at its column so a resized tile cannot be overflowed", () => {
@@ -350,6 +361,11 @@ describe("WARP-1875 · Ask AI widget reflows to its container", () => {
     // the tile and then be cut off by it — scrim over one tile, dialog
     // squeezed into a 240px box. Citations render inside the Ask AI answer,
     // so this is a live path: an email citation opens exactly such a modal.
+    //
+    // The viewer gets out by going through the <Dialog> primitive, so this
+    // matches on `role="dialog"` rather than on any one implementation's
+    // label: it stays red whether the escape hatch is removed from
+    // EmailCitation or from the primitive underneath it.
     const container = renderInTile(
       <CitationCard
         hit={{
@@ -364,10 +380,13 @@ describe("WARP-1875 · Ask AI widget reflows to its container", () => {
     );
     fireEvent.click(container.querySelector('[data-testid="email-card"]')!);
 
-    const modal = document.querySelector('[aria-label="Email citation"]');
+    const modal = document.querySelector('[role="dialog"]');
     expect(modal, "clicking an email citation did not open its viewer").not.toBeNull();
+    // The box that actually resolves `inset: 0` is the scrim, one level up
+    // from the labelled dialog — assert on that where it exists.
+    const scrim = modal!.closest(".fixed") ?? modal!;
     expect(
-      container.querySelector(".bento")!.contains(modal),
+      container.querySelector(".bento")!.contains(scrim),
       "a `position: fixed` surface renders inside `.bento`, which is now its " +
         "containing block — it must portal out (the <Dialog> primitive's " +
         "documented reason for portalling to document.body)",
