@@ -2082,7 +2082,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         if (typeof body.displayName !== "string") {
           return res.status(400).json({ error: "displayName must be a string" });
         }
-        const displayName = body.displayName.trim();
+        // NFC once, on write: iOS dictation and some IMEs emit decomposed
+        // (NFD) strings, and two byte forms of the same visible name break
+        // rename_camera's display-name resolution and read as duplicates.
+        const displayName = body.displayName.normalize("NFC").trim();
         if (displayName.length === 0) {
           return res.status(400).json({ error: "displayName cannot be empty" });
         }

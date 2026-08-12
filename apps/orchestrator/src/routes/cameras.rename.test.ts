@@ -187,6 +187,24 @@ describe("WARP-1893 — PATCH /api/cameras/:name", () => {
     }
   });
 
+  it("persists NFC — an NFD 'Café' (e + combining acute) is stored composed", async () => {
+    // WARP-1893 review — iOS dictation and some IMEs emit decomposed
+    // (NFD) strings. Without normalization the same visible name can be
+    // stored in two byte forms, so the rename_camera tool's display-name
+    // resolution and duplicate-looking labels get inconsistent. Normalize
+    // once, on write.
+    const nfd = "Cafe\u0301"; // "Cafe" + combining acute (decomposed)
+    const nfc = "Caf\u00e9"; // precomposed
+    expect(nfd).not.toBe(nfc); // the fixture really is two byte forms
+    const res = await request(makeApp())
+      .patch("/api/cameras/cam_1")
+      .send({ displayName: nfd });
+    expect(res.status).toBe(200);
+    const call = h.updateMany.mock.calls[0][0] as { data: { displayName: string } };
+    expect(call.data.displayName).toBe(nfc);
+    expect(res.body.displayName).toBe(nfc);
+  });
+
   it("accepts exactly 64 characters and rejects 65", async () => {
     const ok = await request(makeApp())
       .patch("/api/cameras/cam_1")

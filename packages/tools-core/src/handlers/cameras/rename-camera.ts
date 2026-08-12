@@ -75,7 +75,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const camera = typeof args.camera === "string" ? args.camera.trim() : "";
   if (camera.length === 0) return invalidArgs("camera is required");
 
-  const displayName = typeof args.display_name === "string" ? args.display_name.trim() : "";
+  // NFC to match the route's on-write normalization, so the displayName
+  // echoed back to the model is byte-identical to what was persisted.
+  const displayName =
+    typeof args.display_name === "string" ? args.display_name.normalize("NFC").trim() : "";
   if (displayName.length === 0) {
     return invalidArgs("display_name is required and cannot be blank");
   }

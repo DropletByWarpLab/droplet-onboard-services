@@ -219,6 +219,28 @@ describe("rename_camera", () => {
     expect(patch).toHaveBeenCalledWith("/api/cameras/front_door", { displayName: exactly64 });
   });
 
+  it("sends NFC to the orchestrator and echoes NFC back to the model", async () => {
+    // WARP-1893 review — iOS dictation and some IMEs emit decomposed (NFD)
+    // strings. The route normalizes on write; the handler normalizes too so
+    // the displayName it echoes in its result matches what was persisted.
+    const nfd = "Cafe\u0301"; // "Cafe" + combining acute (decomposed)
+    const nfc = "Caf\u00e9"; // precomposed
+    expect(nfd).not.toBe(nfc); // the fixture really is two byte forms
+    const get = listing(TWO_CAMERAS);
+    const patch = okPatch();
+
+    const r = await renameCamera.handler(
+      { camera: "front_door", display_name: nfd },
+      ctxWith(get, patch),
+    );
+
+    expect(r.ok).toBe(true);
+    expect(patch).toHaveBeenCalledWith("/api/cameras/front_door", { displayName: nfc });
+    if (r.ok) {
+      expect(r.data).toMatchObject({ displayName: nfc });
+    }
+  });
+
   it("percent-encodes the camera id into the path", async () => {
     // CAMERA_NAME_RE keeps ids tame, but the handler must not build the URL
     // by naive concatenation regardless.
