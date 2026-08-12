@@ -38,6 +38,10 @@ import {
   resolveSearchResultTarget,
   toSpaceRelativePath,
 } from "@/components/FileManager/search-target";
+import {
+  requiredDirectories,
+  type DroppedSelection,
+} from "@/components/FileManager/dropped-entries";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
@@ -51,8 +55,6 @@ import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import { useSpaces } from "@/lib/hooks/useSpaces";
 import {
-  uploadFiles,
-  UploadBatchError,
   deleteFile,
   createDirectory,
   getDownloadUrl,
@@ -65,6 +67,12 @@ import {
 } from "@/lib/api";
 import { authFetch, useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
+import {
+  folderOnlyOutcomeMessage,
+  uploadOutcomeMessage,
+  uploadProgressLabel,
+} from "@/lib/upload-feedback";
+import { runUpload } from "@/lib/run-upload";
 import { labelForMime } from "@/lib/mime-labels";
 import { Dialog } from "@/components/Dialog";
 import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
@@ -330,7 +338,6 @@ export default function FilesPage() {
     mode: "move" | "copy";
     paths: string[];
   } | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // NOTE (WARP-1547): `?path=` used to be re-applied by its own effect here,
   // separately from `?space=` further down — the two raced and the space one
@@ -490,51 +497,57 @@ export default function FilesPage() {
   );
 
   // ── Upload ──
+  //
+  // WARP-1876: the input is a relative-path list, not a raw FileList, so a
+  // dropped FOLDER survives as a tree. `runUpload` composes it out of the
+  // mkdir + upload calls that already ship (the upload route has no
+  // nested-path field and this ticket did not add one) and sums the
+  // per-directory `UploadBatchError` counts, so the WARP-1666 / WARP-1843
+  // copy stays true for a run spanning several directories.
   const handleUpload = useCallback(
-    async (fileList: FileList) => {
+    async (selection: DroppedSelection) => {
+      const { uploads, directories, skipped } = selection;
+      // A drop that yielded nothing at all (dragged text, an empty
+      // selection) is not an upload — stay quiet. A drop that yielded only
+      // folders, or only files we couldn't read, is NOT that: it runs, and
+      // it gets a message below.
+      if (uploads.length === 0 && directories.length === 0 && skipped === 0) return;
       setIsUploading(true);
       setError(null);
       setUploadPercent(0);
-      const count = fileList.length;
-      setUploadProgress(`Uploading ${count} file${count > 1 ? "s" : ""}...`);
+      setUploadProgress(
+        uploadProgressLabel(
+          uploads.length,
+          requiredDirectories(uploads, directories).length
+        )
+      );
+
       try {
-        await uploadFiles(
-          currentPath,
-          fileList,
-          (percent) => {
-            setUploadPercent(percent);
-          },
-          space
-        );
-        await refresh();
-        setUploadProgress(null);
-      } catch (err) {
-        // WARP-1666: a large selection is uploaded in batches, so a failure
-        // partway through still leaves earlier batches on the box. Refresh so
-        // those files actually appear, and say how many landed rather than
-        // implying the whole upload was lost. `translateError` deliberately
-        // never echoes a raw message, so the counts are composed here from the
-        // typed error instead of read out of `err.message`.
-        //
-        // WARP-1843: batches continue past a failure now, so the files that
-        // didn't land can be a non-contiguous slice of the selection — "the
-        // rest" stopped being accurate. Say exactly how many didn't upload.
-        if (err instanceof UploadBatchError && err.uploaded > 0) {
-          console.error("partial upload", err.cause);
-          await refresh();
-          toast(
-            `Uploaded ${err.uploaded} of ${err.total} files. ${err.total - err.uploaded} didn't upload — try again to finish.`
-          );
-        } else {
-          toast(
-            translateError(
-              err instanceof UploadBatchError ? err.cause : err,
-              "files"
-            )
-          );
-        }
-        setUploadProgress(null);
+        const {
+          uploaded,
+          total,
+          skipped: unread,
+          cause,
+          directoryCount,
+          directoriesFailed,
+        } = await runUpload(selection, {
+          basePath: currentPath,
+          space,
+          onProgress: setUploadPercent,
+        });
+        // Anything that landed IS on the box — make it visible before the
+        // message that talks about it. A rejected revalidation must not
+        // swallow that message (nor escape as an unhandled rejection): the
+        // listing being stale is the lesser failure.
+        if (uploaded > 0 || directoryCount > 0) await refresh().catch(() => undefined);
+        const message =
+          uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed) ??
+          // Everything the drop carried landed and none of it was a file —
+          // say what DID happen to the folders.
+          (total === 0 ? folderOnlyOutcomeMessage(directoryCount) : null);
+        if (message) toast(message);
       } finally {
+        setUploadProgress(null);
         setIsUploading(false);
         setUploadPercent(0);
       }
@@ -1203,15 +1216,21 @@ export default function FilesPage() {
     return moveDialog.paths.map((p) => p.split("/").pop() || p);
   }, [moveDialog]);
 
-  // ShellPage header action slot: New Folder + Upload. The file-system
-  // BreadcrumbNav stays BELOW the header — it's intra-page navigation
-  // (path within Files), distinct from the page-level "Files" header.
+  // ShellPage header action slot: New folder + the two bulk pickers. The
+  // file-system BreadcrumbNav stays BELOW the header — it's intra-page
+  // navigation (path within Files), distinct from the page-level "Files"
+  // header.
+  //
+  // WARP-1876: `UploadButton` now owns both hidden inputs (multi-select and
+  // `webkitdirectory`) so the folder path is reachable by keyboard, not only
+  // by dragging.
   const filesActions = (
     <>
       <button
         onClick={() => !isReaderSpace && setShowNewFolder(true)}
         disabled={isReaderSpace}
         aria-disabled={isReaderSpace || undefined}
+        aria-label="New folder"
         title={isReaderSpace ? READER_TOOLBAR_TOOLTIP : undefined}
         className="btn ghost"
         type="button"
@@ -1220,19 +1239,9 @@ export default function FilesPage() {
         <span className="hidden sm:inline">New folder</span>
       </button>
       <UploadButton
-        onClick={() => fileInputRef.current?.click()}
+        onUpload={handleUpload}
         disabled={isReaderSpace}
         title={isReaderSpace ? READER_TOOLBAR_TOOLTIP : undefined}
-      />
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files && !isReaderSpace) handleUpload(e.target.files);
-          e.target.value = "";
-        }}
       />
     </>
   );
@@ -1245,6 +1254,20 @@ export default function FilesPage() {
       sub="Everything on your Droplet, indexed locally for instant, private search."
       actions={filesActions}
     >
+      {/* WARP-1876 — the WHOLE page is the drop target, not just the file
+          list column. Samantha's report was that there was "no drag-and-drop
+          dropzone": there was one, but it wrapped only the list, so a drop on
+          the breadcrumbs, the storage tiles or the detail panel did nothing
+          and read as "unsupported".
+
+          `page-dropzone` re-emits the shell's staggered entrance to its own
+          children — `.page-inner > *` would otherwise animate this single
+          wrapper and collapse the whole page into one fade. */}
+      <UploadZone
+        onUpload={handleUpload}
+        disabled={isReaderSpace}
+        className="page-dropzone"
+      >
       {/* Search bar.
           WARP-1139: `relative z-40` — the shell's ds-rise entrance animation
           (fill-mode: both, animates transform) leaves every `.page-inner`
@@ -1463,7 +1486,6 @@ export default function FilesPage() {
       <div className="flex flex-col lg:flex-row gap-6">
         {/* File list */}
         <div className="flex-1 min-w-0">
-          <UploadZone onUpload={handleUpload} disabled={isReaderSpace}>
             <div
               className="card overflow-hidden min-h-[300px]"
               style={{ padding: 0 }}
@@ -1553,7 +1575,6 @@ export default function FilesPage() {
                 </div>
               )}
             </div>
-          </UploadZone>
         </div>
 
         {/* Detail panel */}
@@ -1960,6 +1981,7 @@ export default function FilesPage() {
         confirmLabel="Move to Trash"
         variant="destructive"
       />
+      </UploadZone>
     </ShellPage>
   );
 }
