@@ -68,14 +68,17 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "get_gpu_status",
+  // WARP-1891 — kept tight on purpose. Every char here rides in `tools[]` on
+  // EVERY chat turn and is charged against the shipping 16384 window (see
+  // apps/orchestrator/src/services/base-prompt-budget.test.ts). The verbose
+  // first cut of this string put the worst-case turn 19 tokens over the
+  // ceiling. Say what it returns, who may call it, when to reach for it, and
+  // how to read a null — nothing else.
   description:
-    "Live GPU status: utilisation, VRAM used/total, power, temperature — plus " +
-    "the processes currently holding the card and which container each belongs " +
-    "to. Owner/admin only — other roles get FORBIDDEN. Use when the user asks " +
-    "why the GPU is busy or hot, whether anything is " +
-    "using it, or whether a model is actually running on the GPU. Values can be " +
-    "null: an idle card is often runtime-suspended and cannot be read, which is " +
-    "not the same as 0%. `available: false` means no GPU could be read at all.",
+    "Live GPU utilisation, VRAM used/total, power, temperature, plus the processes " +
+    "holding the card and their containers. Owner/admin only. Use when asked why the " +
+    "GPU is busy or hot, or whether a model is running on it. Nulls mean an idle, " +
+    "suspended card, not 0%; `available: false` means no GPU was readable.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

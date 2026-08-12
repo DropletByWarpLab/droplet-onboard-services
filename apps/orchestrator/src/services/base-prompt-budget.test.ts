@@ -48,8 +48,8 @@ const MEMORY_FACTS_CHAR_BUDGET = 2000;
  *  the full registry no longer fits the shipping window, so the scoped set
  *  IS what goes on the wire for an owner chat turn — and therefore the
  *  worst case this canary must budget. */
-function serializeChatToolSchemas(): string {
-  const tools = Array.from(TOOLS.values())
+function chatToolEntries() {
+  return Array.from(TOOLS.values())
     .filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
     .map((t) => ({
       type: "function" as const,
@@ -59,8 +59,39 @@ function serializeChatToolSchemas(): string {
         parameters: t.inputSchema,
       },
     }));
-  return JSON.stringify(tools);
 }
+
+function serializeChatToolSchemas(): string {
+  return JSON.stringify(chatToolEntries());
+}
+
+/** Per-tool serialized sizes, largest first — the naming half of the canary. */
+function chatToolSizes(): { name: string; chars: number }[] {
+  return chatToolEntries()
+    .map((e) => ({ name: e.function.name, chars: JSON.stringify(e).length }))
+    .sort((a, b) => b.chars - a.chars);
+}
+
+/**
+ * WARP-1891 — per-tool ceiling on a single serialized `tools[]` entry.
+ *
+ * Derivation: the effective window is DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE
+ * = 15360 tokens = 61440 chars, of which the fixed blocks take 11800, leaving
+ * ~49.6K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
+ * that budget in ONE tool — past that a tool is pathological, not merely rich.
+ *
+ * This exists because the aggregate assertion below is FILE-scoped: when the
+ * sum tips over, it blames whichever tool happened to be registered last
+ * rather than the one that is actually oversized. WARP-1861's get_gpu_status
+ * tipped it by 19 tokens with a 491-char description while four other tools
+ * carried larger payloads. This assertion names names.
+ *
+ * NOTE (WARP-1839): trimming a schema to fit here must NEVER be done by adding
+ * `maxLength` / `pattern` / `enum` constraints. Those are what blew llama.cpp's
+ * GBNF grammar and took out tool calling on the appliance entirely. Cut prose,
+ * cut properties — never add constraints.
+ */
+const PER_TOOL_MAX_CHARS = 2000;
 
 describe("worst-case fixed system-block budget", () => {
   it("keeps identity + persona + business + guidance + memory + interview under BASE_PROMPT_MAX_CHARS", () => {
@@ -99,7 +130,21 @@ describe("worst-case fixed system-block budget", () => {
     // (registering a tool without adding it to chat-tool-scope.ts) spends
     // this headroom — when this assertion trips, either scope the new tool
     // out of chat or make a deliberate, measured budget decision here.
-    expect(worstCaseTokens).toBeLessThan(effectiveWindow);
+    //
+    // NEVER raise effectiveWindow to make this pass: it derives from the
+    // shipping window and the output reserve, so raising it relocates the
+    // cliff instead of removing it and the next tool lands past the real
+    // limit silently. Trim the schema, or scope the tool out of chat.
+    expect(
+      worstCaseTokens,
+      `worst-case chat turn is ${worstCaseTokens} tokens against a ${effectiveWindow} ` +
+        `ceiling (${toolSchemasJson.length} chars of tools[] over ` +
+        `${chatToolSizes().length} tools). Largest advertised tools: ` +
+        chatToolSizes()
+          .slice(0, 5)
+          .map((r) => `${r.name} (${r.chars})`)
+          .join(", "),
+    ).toBeLessThan(effectiveWindow);
     // Regression ceiling on the FULL registry serialization (growth
     // tripwire for the MCP-facing surface, which advertises everything).
     // Re-baselined 2026-07 for the WARP-1423 rollout (94 → ~127 tools,
@@ -115,5 +160,19 @@ describe("worst-case fixed system-block budget", () => {
       })),
     );
     expect(fullRegistryJson.length).toBeLessThan(100000);
+  });
+
+  it("keeps every default-chat tool under the per-tool serialized ceiling", () => {
+    const sizes = chatToolSizes();
+    const oversized = sizes.filter((r) => r.chars > PER_TOOL_MAX_CHARS);
+    expect(
+      oversized.map((r) => `${r.name} (${r.chars} chars)`),
+      `these default-chat tools serialize over the ${PER_TOOL_MAX_CHARS}-char ` +
+        `per-tool ceiling. Trim the description or drop properties — do NOT add ` +
+        `maxLength/pattern/enum (WARP-1839), and do NOT raise the ceiling.`,
+    ).toEqual([]);
+    // Sanity: the set is non-empty, so an accidentally-empty advertisement
+    // cannot make this assertion vacuously true.
+    expect(sizes.length).toBeGreaterThan(50);
   });
 });
