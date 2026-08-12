@@ -70,6 +70,25 @@ describe("mimeFromPath", () => {
     ["data.csv", "text/csv"],
     ["archive.tar", "application/x-tar"],
     ["bundle.tar.gz", "application/gzip"],
+    // WARP-1877 additions — the rest of the Office/ODF set, the remaining
+    // image formats, and 7z/rar.
+    [
+      "budget.xlsx",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ],
+    [
+      "deck.pptx",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+    ["sheet.xls", "application/vnd.ms-excel"],
+    ["talk.ppt", "application/vnd.ms-powerpoint"],
+    ["notes.odt", "application/vnd.oasis.opendocument.text"],
+    ["book.epub", "application/epub+zip"],
+    ["memo.rtf", "application/rtf"],
+    ["logo.svg", "image/svg+xml"],
+    ["scan.tiff", "image/tiff"],
+    ["dump.7z", "application/x-7z-compressed"],
+    ["old.rar", "application/vnd.rar"],
   ])("maps %s -> %s", (path, expected) => {
     expect(mimeFromPath(path)).toBe(expected);
   });
