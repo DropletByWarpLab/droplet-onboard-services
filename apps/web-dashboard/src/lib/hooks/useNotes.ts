@@ -23,6 +23,14 @@ export interface Note {
 
 const NOTES_URL = "/api/notes";
 
+/**
+ * Mirrors `NOTE_MAX_BODY` in
+ * `apps/orchestrator/src/services/notes.service.ts`. The server 400s a longer
+ * body, and a 400 on an autosave is a lost keystroke — so the editor caps the
+ * textarea at the same number and the rejection never happens.
+ */
+export const NOTE_MAX_BODY = 20000;
+
 export function useNotes() {
   const { data, error, isLoading, mutate } = useSWR<{ notes: Note[] }>(
     NOTES_URL,

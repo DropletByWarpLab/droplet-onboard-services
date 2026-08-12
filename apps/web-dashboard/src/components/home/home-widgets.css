@@ -1096,6 +1096,17 @@
 .dark .droplet-home .w-notes-status[data-state="saved"] {
   color: #4ade80;
 }
+.droplet-home .w-notes-status[data-state="error"] {
+  /* Same red-TEXT ramp as .w-remote-err, and NOT var(--danger): the home
+     scope's --danger is a background-fill token (#b91c1c light, #7f1d1d
+     dark — see home-bento.css and .dh-tile-x:hover), and #7f1d1d as 12px
+     text on the dark card is unreadable. Same reasoning that put the
+     green-TEXT ramp on [data-state="saved"] above. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-status[data-state="error"] {
+  color: #fca5a5;
+}
 .droplet-home .w-notes-new {
   display: inline-flex;
   align-items: center;
@@ -1181,6 +1192,24 @@
 }
 .droplet-home .w-note.pinned .w-note-act[aria-pressed="true"] {
   color: var(--brand);
+}
+/* Notes we couldn't load. Same red-TEXT ramp as .w-remote-err (#b91c1c light
+   / #fca5a5 dark) so a failed read never gets mistaken for the muted
+   "No notes yet" empty state sitting in the same slot. Not var(--danger) —
+   that's a fill token and its dark value (#7f1d1d) is unreadable as text. */
+.droplet-home .w-notes-err {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  text-align: left;
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-err {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-err svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 /* ---------- Remote access (Connect toggle, WARP-1351) ---------- */

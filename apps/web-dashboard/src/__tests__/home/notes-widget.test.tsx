@@ -11,6 +11,12 @@
  * The save-feedback and unmount-flush cases carry over from the original
  * localStorage widget (Samantha QA, #bugs) — the storage moved, the contract
  * with the customer did not.
+ *
+ * Since the move, every failure path is a data-loss story rather than a
+ * cosmetic one: there is no browser-local copy left to fall back on. The
+ * failure cases below (load error ≠ empty account, refused save keeps the
+ * typing, one-time import can't double-upload, delete is confirm-gated) pin
+ * exactly that.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, cleanup } from "@testing-library/react";
@@ -28,15 +34,19 @@ type MockNote = {
 };
 
 const notesRef: { current: MockNote[] } = { current: [] };
+const errorRef: { current: unknown } = { current: undefined };
 const refreshMock = vi.fn();
 const createNoteMock = vi.fn();
 const updateNoteMock = vi.fn();
 const deleteNoteMock = vi.fn();
 
-vi.mock("@/lib/hooks/useNotes", () => ({
+// Spread the real module so NOTE_MAX_BODY stays the production number — the
+// textarea cap is only worth anything if it's the same one the box enforces.
+vi.mock("@/lib/hooks/useNotes", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hooks/useNotes")>()),
   useNotes: () => ({
     notes: notesRef.current,
-    error: undefined,
+    error: errorRef.current,
     isLoading: false,
     refresh: refreshMock,
   }),
@@ -46,6 +56,7 @@ vi.mock("@/lib/hooks/useNotes", () => ({
 }));
 
 import { NotesWidget } from "@/components/home/widgets";
+import { NOTE_MAX_BODY } from "@/lib/hooks/useNotes";
 
 const LEGACY_KEY = "droplet-home-notes";
 const IMPORTED_KEY = "droplet-home-notes-imported";
@@ -73,6 +84,7 @@ beforeEach(() => {
   // Default: nothing to import, so the legacy path stays out of the way.
   window.localStorage.setItem(IMPORTED_KEY, "1");
   notesRef.current = [];
+  errorRef.current = undefined;
   refreshMock.mockReset().mockResolvedValue(undefined);
   createNoteMock.mockReset().mockResolvedValue({ note: note({ id: "new", body: "" }) });
   updateNoteMock.mockReset().mockResolvedValue({ note: note() });
@@ -103,6 +115,23 @@ describe("the notes list", () => {
     expect(screen.getByText(/no notes yet/i)).toBeInTheDocument();
   });
 
+  it("a failed load reads as unreachable, never as an empty account", () => {
+    // The customer's notes were just migrated off their browser. If a dead
+    // fetch renders the empty state they conclude the migration ate them.
+    errorRef.current = Object.assign(new Error("boom"), { status: 500 });
+    render(<NotesWidget />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /couldn't reach your notes/i,
+    );
+    expect(screen.queryByText(/no notes yet/i)).not.toBeInTheDocument();
+  });
+
+  it("a failed load does not say the notes are gone", () => {
+    errorRef.current = new Error("boom");
+    render(<NotesWidget />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/safe on your droplet/i);
+  });
+
   it("pins an unpinned note", async () => {
     notesRef.current = [note({ body: "groceries" })];
     render(<NotesWidget />);
@@ -131,13 +160,35 @@ describe("the notes list", () => {
     expect(screen.getByText("2 pinned")).toBeInTheDocument();
   });
 
-  it("deletes a note", async () => {
+  it("deletes a note once the confirmation is accepted", async () => {
     notesRef.current = [note({ body: "scratch" })];
     render(<NotesWidget />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Delete scratch" }));
     });
+    // The trash icon opens the gate; it does not destroy anything.
+    expect(deleteNoteMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toHaveTextContent(/delete this note\?/i);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    });
     expect(deleteNoteMock).toHaveBeenCalledWith("n1");
+  });
+
+  it("backing out of the confirmation keeps the note", async () => {
+    // The trash target sits beside Pin at the right edge of a scrollable list;
+    // on a phone a flick-scroll that lands as a tap must be recoverable, and
+    // there is no localStorage copy left to recover from.
+    notesRef.current = [note({ body: "scratch" })];
+    render(<NotesWidget />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete scratch" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /keep it/i }));
+    });
+    expect(deleteNoteMock).not.toHaveBeenCalled();
   });
 
   it("'New note' creates one on the box and opens it", async () => {
@@ -203,6 +254,100 @@ describe("editing a note", () => {
     expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "half-typed" });
   });
 
+  it("caps the textarea at the length the box accepts", () => {
+    // Without this the server's 400 is reachable by typing, and a 400 on an
+    // autosave used to discard the text silently.
+    const ta = openNote();
+    expect(ta.maxLength).toBe(NOTE_MAX_BODY);
+  });
+
+  it("says so when the box refuses the save — never a blank status line", async () => {
+    const ta = openNote();
+    updateNoteMock.mockRejectedValueOnce(new Error("offline"));
+
+    act(() => {
+      fireEvent.change(ta, { target: { value: "buy oat milk" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+
+    expect(updateNoteMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Not saved — retrying")).toBeInTheDocument();
+    expect(screen.queryByText(/^saved$/i)).not.toBeInTheDocument();
+  });
+
+  it("retries a refused save on its own, and recovers", async () => {
+    const ta = openNote();
+    updateNoteMock.mockRejectedValueOnce(new Error("offline"));
+
+    act(() => {
+      fireEvent.change(ta, { target: { value: "buy oat milk" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(updateNoteMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(3100);
+    });
+    expect(updateNoteMock).toHaveBeenCalledTimes(2);
+    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", { body: "buy oat milk" });
+    expect(screen.getByText(/^saved$/i)).toBeInTheDocument();
+  });
+
+  it("a refused save stays pending, so the unmount flush still carries it", async () => {
+    notesRef.current = [note({ body: "buy milk" })];
+    const { unmount } = render(<NotesWidget />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "buy milk" }));
+    });
+    const ta = screen.getByLabelText("Note") as HTMLTextAreaElement;
+    updateNoteMock.mockRejectedValueOnce(new Error("offline"));
+
+    act(() => {
+      fireEvent.change(ta, { target: { value: "half-typed" } });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(updateNoteMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      unmount();
+    });
+
+    // The failed attempt did NOT clear the pending flag, so the text the
+    // customer typed still reaches the box on the way out.
+    expect(updateNoteMock).toHaveBeenCalledTimes(2);
+    expect(updateNoteMock).toHaveBeenLastCalledWith("n1", { body: "half-typed" });
+  });
+
+  // Guard is the RUN, not the assertion: without a .catch on the flush this
+  // rejects after the component is gone and vitest fails the file with an
+  // "Unhandled Rejection" — which on a real box is a console error every time
+  // someone closes a note while the Droplet is unreachable.
+  it("a flush that also fails doesn't surface as an unhandled rejection", async () => {
+    notesRef.current = [note({ body: "buy milk" })];
+    const { unmount } = render(<NotesWidget />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "buy milk" }));
+    });
+    const ta = screen.getByLabelText("Note") as HTMLTextAreaElement;
+    updateNoteMock.mockRejectedValue(new Error("still offline"));
+
+    act(() => {
+      fireEvent.change(ta, { target: { value: "half-typed" } });
+    });
+    await act(async () => {
+      unmount();
+      await Promise.resolve();
+    });
+
+    expect(updateNoteMock).toHaveBeenCalledWith("n1", { body: "half-typed" });
+  });
+
   it("'All notes' returns to the list", () => {
     openNote();
     act(() => {
@@ -237,7 +382,41 @@ describe("the old browser-local note", () => {
     });
 
     expect(window.localStorage.getItem(LEGACY_KEY)).toBe("precious");
+    // The claim is released too, so the next mount picks the import back up.
     expect(window.localStorage.getItem(IMPORTED_KEY)).toBeNull();
+  });
+
+  it("is claimed before the upload, so a second tab can't double it", async () => {
+    // localStorage is shared across tabs with no lock. Writing the guard flag
+    // only after the POST resolved let two tabs mounting together both read
+    // null and both upload — one old note, two rows on the box.
+    window.localStorage.removeItem(IMPORTED_KEY);
+    window.localStorage.setItem(LEGACY_KEY, "the note I already had");
+    createNoteMock.mockReturnValueOnce(new Promise(() => {})); // never settles
+
+    await act(async () => {
+      render(<NotesWidget />);
+    });
+    expect(createNoteMock).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(IMPORTED_KEY)).toMatch(/^pending:/);
+
+    // Second tab, same browser, upload still in flight.
+    await act(async () => {
+      render(<NotesWidget />);
+    });
+    expect(createNoteMock).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(LEGACY_KEY)).toBe("the note I already had");
+  });
+
+  it("takes over a claim whose tab went away mid-upload", async () => {
+    window.localStorage.setItem(IMPORTED_KEY, `pending:${Date.now() - 60_000}`);
+    window.localStorage.setItem(LEGACY_KEY, "precious");
+
+    await act(async () => {
+      render(<NotesWidget />);
+    });
+
+    expect(createNoteMock).toHaveBeenCalledWith({ body: "precious" });
   });
 
   it("is not re-uploaded on a later mount", async () => {
@@ -268,4 +447,24 @@ it("colors the 'Saved' status with the AA-passing green-text token, not var(--su
   expect(savedRule).not.toMatch(/var\(--success\)/);
   expect(savedRule).toMatch(/#15803d/i);
   expect(savedDark).toMatch(/#4ade80/i);
+});
+
+it("colors the failure states with the red-TEXT ramp, not the var(--danger) fill", () => {
+  // Same trap, other end of the ramp: `.droplet-home`'s --danger is a FILL
+  // token (#b91c1c light / #7f1d1d dark, see home-bento.css). Its dark value
+  // is unreadable as 12px text on the dark card, so both failure surfaces use
+  // the red-TEXT ramp .w-remote-err already established.
+  // Comments stripped first — these rules EXPLAIN in prose why they don't use
+  // the fill token, and a bare grep would read that prose as the violation.
+  const css = readFileSync(cssPath, "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const selector of [
+    '\\.w-notes-status\\[data-state="error"\\]',
+    "\\.w-notes-err",
+  ]) {
+    const light = css.match(new RegExp(`\\n\\.droplet-home ${selector}\\s*\\{[^}]*\\}`))?.[0] ?? "";
+    const dark = css.match(new RegExp(`\\.dark \\.droplet-home ${selector}\\s*\\{[^}]*\\}`))?.[0] ?? "";
+    expect(light, selector).not.toMatch(/var\(--danger\)/);
+    expect(light, selector).toMatch(/#b91c1c/i);
+    expect(dark, selector).toMatch(/#fca5a5/i);
+  }
 });

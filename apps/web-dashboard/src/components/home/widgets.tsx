@@ -12,7 +12,7 @@
  *   · Recent files → useRecents
  *   · Cameras     → useCameras
  *   · Models      → useModels
- *   · Notes       → local scratchpad (localStorage; real per-device store)
+ *   · Notes       → useNotes (real /api/notes, stored on the box)
  *
  * Widgets whose backend doesn't exist yet (Tasks, Activity, Scenes, scheduled
  * Automations) are gated behind default-off feature flags and tracked in
@@ -78,6 +78,7 @@ import {
   createNote,
   updateNote,
   deleteNote,
+  NOTE_MAX_BODY,
   type Note,
 } from "@/lib/hooks/useNotes";
 import { dayKey } from "@/lib/calendar";
@@ -983,7 +984,13 @@ function TasksWidget() {
  * tile has two views: a list (pinned first, pin/delete per row) and an
  * editor for the note you tapped. Editing autosaves on a ~500ms debounce
  * with a legible status line — "Saving…" while a write is pending, "Saved"
- * once it lands — instead of writing on every keystroke with no feedback.
+ * once it lands, "Not saved — retrying" if the box refused it — instead of
+ * writing on every keystroke with no feedback.
+ *
+ * Every failure path here is a data-loss path, because the box is now the
+ * only copy: a failed LIST says so rather than rendering the empty state, a
+ * failed SAVE keeps the text pending and keeps trying, and DELETE is
+ * confirm-gated.
  *
  * Before this, the tile was a single string in this browser's localStorage:
  * unsynced, unpinnable, and wiped by "New note". That key is uploaded once
@@ -991,13 +998,45 @@ function TasksWidget() {
  */
 const NOTES_KEY = "droplet-home-notes";
 const NOTES_IMPORTED_KEY = "droplet-home-notes-imported";
+/** Prefix of the in-flight-import marker written to `NOTES_IMPORTED_KEY`,
+ *  followed by the epoch-ms the claim was taken. */
+const NOTES_IMPORT_CLAIM = "pending:";
+/** How long a claim is honoured before another tab may take it over. Must
+ *  outlast apiFetch's 20s request timeout (so a slow-but-live upload is never
+ *  raced), and be short enough that a tab closed mid-upload doesn't strand the
+ *  note for the rest of the session. */
+const NOTES_IMPORT_CLAIM_TTL_MS = 30_000;
 const NOTES_SAVE_DEBOUNCE_MS = 500;
-type NotesSaveStatus = "idle" | "saving" | "saved";
+/** Gap before an autosave the box refused (asleep, Wi-Fi dropped) tries
+ *  again. Long enough not to hammer a box that's down; short enough that a
+ *  blip clears itself while the customer is still looking at the tile. */
+const NOTES_SAVE_RETRY_MS = 3000;
+/** Longest note name we render anywhere. */
+const NOTE_TITLE_MAX = 80;
+type NotesSaveStatus = "idle" | "saving" | "saved" | "error";
+
+/** The first non-empty line names a note in the list; a brand-new one has none. */
+function noteTitle(n: Note): string {
+  const first = n.body.split("\n").find((l) => l.trim().length > 0)?.trim();
+  if (!first) return "Empty note";
+  // The list ellipsises in CSS, but the delete confirmation echoes this name
+  // as a monospace identifier and screen readers read it out of an aria-label
+  // — neither wants a 2000-character first line.
+  return first.length > NOTE_TITLE_MAX
+    ? `${first.slice(0, NOTE_TITLE_MAX).trimEnd()}…`
+    : first;
+}
 
 /** One-time lift of the old browser-local note onto the box. Runs once per
  *  browser (guarded by its own localStorage flag) and only when there is
  *  something to move — then clears the legacy key so it can't be re-imported
- *  as a duplicate if the flag is lost. */
+ *  as a duplicate if the flag is lost.
+ *
+ *  The flag is CLAIMED before the upload, not after: localStorage is shared
+ *  across tabs with no lock, so two tabs opening Home together would both read
+ *  an empty flag and both POST, landing the customer's one old note on the box
+ *  twice. A tab that finds a fresh claim stands down; a stale one (the holder
+ *  was closed mid-upload) is taken over so the note is never stranded. */
 function useLegacyNoteImport(onImported: () => void) {
   const ran = useRef(false);
   useEffect(() => {
@@ -1005,7 +1044,13 @@ function useLegacyNoteImport(onImported: () => void) {
     ran.current = true;
     let legacy: string | null = null;
     try {
-      if (window.localStorage.getItem(NOTES_IMPORTED_KEY)) return;
+      const flag = window.localStorage.getItem(NOTES_IMPORTED_KEY);
+      // Anything that isn't a claim means the import already happened.
+      if (flag && !flag.startsWith(NOTES_IMPORT_CLAIM)) return;
+      if (flag) {
+        const claimedAt = Number(flag.slice(NOTES_IMPORT_CLAIM.length));
+        if (Date.now() - claimedAt < NOTES_IMPORT_CLAIM_TTL_MS) return;
+      }
       legacy = window.localStorage.getItem(NOTES_KEY);
     } catch {
       return; // private mode — nothing to import from
@@ -1019,6 +1064,14 @@ function useLegacyNoteImport(onImported: () => void) {
       }
       return;
     }
+    try {
+      window.localStorage.setItem(
+        NOTES_IMPORTED_KEY,
+        `${NOTES_IMPORT_CLAIM}${Date.now()}`,
+      );
+    } catch {
+      /* ignore */
+    }
     void createNote({ body })
       .then(() => {
         try {
@@ -1029,9 +1082,18 @@ function useLegacyNoteImport(onImported: () => void) {
         }
         onImported();
       })
-      // Offline / server down: leave the legacy key and the flag alone so the
-      // next mount tries again. Never drop the customer's text.
-      .catch(() => {});
+      // Offline / server down: drop our claim and leave the legacy key alone
+      // so the next mount tries again. Never drop the customer's text.
+      .catch(() => {
+        try {
+          const held = window.localStorage.getItem(NOTES_IMPORTED_KEY);
+          if (held?.startsWith(NOTES_IMPORT_CLAIM)) {
+            window.localStorage.removeItem(NOTES_IMPORTED_KEY);
+          }
+        } catch {
+          /* ignore */
+        }
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
@@ -1053,8 +1115,13 @@ function NoteEditor({
   // read the latest state through a stale `[]`-effect closure.
   const valRef = useRef(note.body);
   const pendingRef = useRef(false);
+  // False once the editor is gone, so a request that fails after unmount can't
+  // schedule a retry against a component nobody is looking at.
+  const aliveRef = useRef(true);
 
-  const save = useCallback(
+  // Annotated because the retry below references `save` from inside its own
+  // initializer, which tsc otherwise can't type.
+  const save: (next: string) => void = useCallback(
     (next: string) => {
       pendingRef.current = false;
       void updateNote(note.id, { body: next })
@@ -1062,7 +1129,20 @@ function NoteEditor({
           setStatus("saved");
           onSaved();
         })
-        .catch(() => setStatus("idle"));
+        .catch(() => {
+          // A refused save must never eat the typing. Put the edit back in the
+          // pending slot so the unmount flush still carries it, say so on the
+          // status line instead of silently reading "idle", and keep trying
+          // while the editor is open — notes live only on the box now, so
+          // there is no localStorage copy left to recover from.
+          if (!aliveRef.current) return;
+          pendingRef.current = true;
+          setStatus("error");
+          timerRef.current = setTimeout(
+            () => save(valRef.current),
+            NOTES_SAVE_RETRY_MS,
+          );
+        });
     },
     [note.id, onSaved],
   );
@@ -1082,10 +1162,20 @@ function NoteEditor({
   }, [val]);
 
   // Unmount-only: commit a still-pending edit so navigating off Home (or
-  // closing the editor) never drops up to ~500ms of typing.
+  // closing the editor) never drops up to ~500ms of typing. The rejection is
+  // swallowed — there is no surface left to report it on, and an unhandled
+  // rejection here would surface as a console error on every offline close.
   useEffect(() => {
+    // Re-armed on mount, not just initialised: React StrictMode (on by default
+    // in dev) mounts → unmounts → remounts, and a ref survives that round trip.
+    // Without this the editor would come back permanently "dead" and stop
+    // reporting or retrying failed saves for the rest of the dev session.
+    aliveRef.current = true;
     return () => {
-      if (pendingRef.current) void updateNote(note.id, { body: valRef.current });
+      aliveRef.current = false;
+      if (pendingRef.current) {
+        void updateNote(note.id, { body: valRef.current }).catch(() => {});
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1098,6 +1188,9 @@ function NoteEditor({
         onChange={(e) => setVal(e.target.value)}
         aria-label="Note"
         placeholder="Jot something down…"
+        // Same ceiling the orchestrator enforces: stop the keystroke rather
+        // than let the autosave take a 400 the customer can't act on.
+        maxLength={NOTE_MAX_BODY}
         autoFocus
       />
       <div className="w-notes-bar">
@@ -1107,7 +1200,13 @@ function NoteEditor({
           aria-live="polite"
           data-state={status}
         >
-          {status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}
+          {status === "saving"
+            ? "Saving…"
+            : status === "saved"
+              ? "Saved"
+              : status === "error"
+                ? "Not saved — retrying"
+                : ""}
         </span>
         <button className="w-notes-new" type="button" onClick={onClose}>
           <ChevronLeft size={13} />
@@ -1119,8 +1218,12 @@ function NoteEditor({
 }
 
 export function NotesWidget() {
-  const { notes, isLoading, refresh } = useNotes();
+  const { notes, error, isLoading, refresh } = useNotes();
   const [openId, setOpenId] = useState<string | null>(null);
+  // Delete-confirm state + the row button that opened it, so focus restores
+  // there on close — same pattern as CoverageExtendersPanel's remove confirm.
+  const [confirmDelete, setConfirmDelete] = useState<Note | null>(null);
+  const deleteTriggerRef = useRef<HTMLElement | null>(null);
   useLegacyNoteImport(() => void refresh());
 
   const open = notes.find((n) => n.id === openId) ?? null;
@@ -1160,15 +1263,22 @@ export function NotesWidget() {
   return (
     <div className="w-notes-wrap">
       <div className="w-note-list">
-        {notes.length === 0 ? (
+        {/* A failed load is NOT an empty account. Notes no longer have a
+            localStorage copy behind them, so rendering "No notes yet" over a
+            dead fetch reads as "the migration ate my notes". Branch on the
+            error first and say what actually happened. */}
+        {error ? (
+          <WEmpty>
+            <span className="w-notes-err" role="alert">
+              <AlertTriangle size={12} aria-hidden />
+              <span>{translateError(error, "notes")}</span>
+            </span>
+          </WEmpty>
+        ) : notes.length === 0 ? (
           <WEmpty>{isLoading ? "Loading notes…" : "No notes yet"}</WEmpty>
         ) : (
           notes.map((n) => {
-            // The first non-empty line is the note's name in the list; a
-            // brand-new note has none yet.
-            const title =
-              n.body.split("\n").find((l) => l.trim().length > 0)?.trim() ??
-              "Empty note";
+            const title = noteTitle(n);
             return (
               <div className={"w-note" + (n.pinned ? " pinned" : "")} key={n.id}>
                 <button
@@ -1191,7 +1301,10 @@ export function NotesWidget() {
                 <button
                   className="w-note-act"
                   type="button"
-                  onClick={() => void remove(n)}
+                  onClick={(e) => {
+                    deleteTriggerRef.current = e.currentTarget;
+                    setConfirmDelete(n);
+                  }}
                   aria-label={`Delete ${title}`}
                 >
                   <Trash2 size={13} />
@@ -1212,6 +1325,26 @@ export function NotesWidget() {
           New note
         </button>
       </div>
+
+      {/* Delete is irreversible and its 44px target sits next to Pin at the
+          right edge of a scrollable list — on a phone a flick-scroll that
+          lands as a tap would destroy the note, and there is no localStorage
+          copy left to recover it from. Same ConfirmDialog gate every other
+          destructive action in the dashboard uses. */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        triggerRef={deleteTriggerRef}
+        title="Delete this note?"
+        description="The note will be removed from your Droplet and from every device you're signed in on. This can't be undone."
+        confirmLabel="Delete"
+        cancelLabel="Keep it"
+        variant="destructive"
+        confirmedIdentifier={confirmDelete ? noteTitle(confirmDelete) : undefined}
+        onConfirm={async () => {
+          if (confirmDelete) await remove(confirmDelete);
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

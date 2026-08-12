@@ -40,6 +40,7 @@ const DOMAINS: ErrorDomain[] = [
   "camera",
   "projects",
   "device",
+  "notes",
   "generic",
 ];
 
