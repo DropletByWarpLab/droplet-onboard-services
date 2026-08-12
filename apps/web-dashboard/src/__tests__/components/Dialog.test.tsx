@@ -204,23 +204,27 @@ describe("<Dialog> primitive", () => {
   it("marks a right-placement panel so the phone layer can make it full-width", () => {
     render(<Harness initiallyOpen placement="right" />);
     const dialog = screen.getByRole("dialog");
-    expect(dialog.className).toContain("dlg-side");
+    // `classList`, not `className.toContain` — the stylesheet keys on the
+    // whole class, and a substring match on a shorter prefix would keep
+    // passing after the class the CSS actually needs was deleted.
+    expect(dialog.classList.contains("dlg-side-panel")).toBe(true);
     // The desktop cap stays a utility — the phone layer overrides it.
-    expect(dialog.className).toContain("max-w-md");
+    expect(dialog.classList.contains("max-w-md")).toBe(true);
   });
 
   it("leaves the 520px `sheet` width alone — its packet already locks min(520px, 100vw)", () => {
     render(<Harness initiallyOpen placement="right" sideWidth="sheet" />);
     const dialog = screen.getByRole("dialog");
-    expect(dialog.className).toContain("dlg-side");
     // Only the default (max-w-md) panel opts into the full-width phone sheet.
-    expect(dialog.className).not.toContain("dlg-side-panel");
-    expect(dialog.className).toContain("max-w-[520px]");
+    expect(dialog.classList.contains("dlg-side-panel")).toBe(false);
+    expect(dialog.classList.contains("max-w-[520px]")).toBe(true);
   });
 
   it("does not mark a CENTERED dialog — it keeps its 24px backdrop inset", () => {
     render(<Harness initiallyOpen />);
-    expect(screen.getByRole("dialog").className).not.toContain("dlg-side");
+    expect(
+      screen.getByRole("dialog").classList.contains("dlg-side-panel"),
+    ).toBe(false);
   });
 
   it("traps Tab forward: from last focusable wraps to first", async () => {
