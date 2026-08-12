@@ -176,7 +176,19 @@ const envSchema = z.object({
   // advertises the full effective pool exactly as before; "domains" narrows
   // per-turn via tool-selection.service.ts. The shipped default flips only
   // after the spec §6 phase-3 eval says so.
-  TOOL_SELECTION_MODE: z.enum(["off", "domains"]).default("off"),
+  // WARP-1921 — agent-budgets §3 relevance-based tool advertisement.
+  // "domains" narrows each turn to the core set + keyword-matched domains
+  // (+ domains already used in the conversation); "off" advertises the whole
+  // chat scope and is the rollback.
+  //
+  // Shipped default flipped off → domains. The §6 phase-3 cell already scored
+  // 24/36 — best of the 2026-07-21 sweep, zero self-heals, zero degradation
+  // drops — and was held only by the cross-turn continuity gap, which
+  // WARP-1921 closes (ChatPersistenceService.getConversationToolNames).
+  // Measured effect: ~12.7K tokens of tools[] on EVERY turn drops to ~2.6K on
+  // a camera turn, returning ~10K tokens to history and cutting prompt
+  // prefill 3-5x on the box's local GPU.
+  TOOL_SELECTION_MODE: z.enum(["off", "domains"]).default("domains"),
   // WARP-1122 (§8.2/§5-11) — the business-profile refresh nudge. Enabled-ness
   // is an EXPLICIT boolean, never derived from the days var's emptiness.
   BUSINESS_PROFILE_REVIEW_ENABLED: z

@@ -167,6 +167,64 @@ export class ChatPersistenceService {
   }
 
   /**
+   * WARP-1921 — the distinct tool names already used in a conversation, for
+   * the agent-budgets §3 CONTINUITY rule ("the domains of any tools already
+   * called earlier in the conversation stay advertised").
+   *
+   * Why this exists rather than reading `tool_calls` off the replayed
+   * messages: `chatRequestSchema` declares only `{role, content,
+   * tool_call_id}`, so zod strips `tool_calls` from every replayed assistant
+   * turn. Continuity therefore only ever worked WITHIN a single turn's
+   * iterations — never across HTTP requests — which is the exact prerequisite
+   * the spec's §6 outcome named before `TOOL_SELECTION_MODE` could flip.
+   *
+   * Reading the persisted trace rather than trusting the request body is
+   * deliberate: the client cannot claim to have used a tool it never used.
+   * That matters less than it sounds (selection only ever SUBSETS the
+   * RBAC-narrowed pool, so a lie could never widen reach past the user's own
+   * permissions) but a server-authoritative answer costs nothing extra here
+   * and removes the question entirely.
+   *
+   * Deliberately NOT `getConversationForUser`: that loads every message and
+   * its full content to answer a question about a handful of names. This
+   * selects one nullable JSON column off the `(sessionId, createdAt)` index.
+   *
+   * Scoped by `userId` via the session relation, so a guessed conversation id
+   * from another household member reveals nothing — same rule as
+   * `getConversationForUser`. Returns `[]` for unknown/foreign ids rather
+   * than throwing: continuity is an optimisation, and a turn must never fail
+   * because we could not enrich it.
+   */
+  async getConversationToolNames(
+    conversationId: string,
+    userId: string,
+  ): Promise<string[]> {
+    const rows = await this.prisma.chatMessage.findMany({
+      where: {
+        sessionId: conversationId,
+        session: { userId },
+        role: "assistant",
+        // Prisma's canonical "JSON column is not SQL NULL" filter.
+        toolCalls: { not: Prisma.DbNull },
+      },
+      select: { toolCalls: true },
+      orderBy: { createdAt: "desc" },
+      // A conversation only has so many distinct domains; the most recent
+      // turns are the ones continuity is for. Bounds the read on a long thread.
+      take: 50,
+    });
+    const names = new Set<string>();
+    for (const row of rows) {
+      const calls = row.toolCalls as unknown as PersistedToolCall[] | null;
+      if (!Array.isArray(calls)) continue;
+      for (const c of calls) {
+        if (c && typeof c.name === "string" && c.name.length > 0) names.add(c.name);
+      }
+    }
+    return [...names];
+  }
+
+  /**
    * List a user's conversations newest-first. Used by the dashboard sidebar
    * (when reintroduced) and any future "resume" flow.
    */
