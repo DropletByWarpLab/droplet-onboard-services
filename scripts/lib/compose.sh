@@ -122,8 +122,8 @@ prepare_and_build() {
   _compose_env_link="$REPO_ROOT/docker/.env"
   if [ -f "$_compose_env_link" ] && [ ! -L "$_compose_env_link" ]; then
     _stale_only="$(comm -13 \
-      <(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$REPO_ROOT/.env" 2>/dev/null | sort -u) \
-      <(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$_compose_env_link" | sort -u) \
+      <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$REPO_ROOT/.env" 2>/dev/null | sort -u) \
+      <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$_compose_env_link" | sort -u) \
       | tr '\n' ' ')"
     cp -p "$_compose_env_link" "${_compose_env_link}.forked-$(date -u +%Y%m%dT%H%M%SZ)"
     log_warn "docker/.env was a regular file, not the ../.env symlink — Compose has been interpolating from a drifted copy (WARP-1908). Backed it up and restored the link."
