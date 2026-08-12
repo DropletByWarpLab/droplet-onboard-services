@@ -133,8 +133,18 @@ export async function fetchGpuTelemetry(): Promise<GpuTelemetry | null> {
   };
 }
 
-/** Bytes → GiB, 1dp. Null in, null out. */
-export function bytesToGib(bytes: number | null): number | null {
+/**
+ * Bytes → GiB (binary, 1024³), 1dp. Null in, null out.
+ *
+ * GiB, not GB, all the way to the pixel: the function name, the payload field
+ * (`vramGiB`) and the tile's unit label all say the same thing. The divisor
+ * is the binary one because that is how VRAM is actually sized — mem_info_
+ * vram_total on the lab's 16 GiB card reads 17_095_983_104, which is 15.9 GiB
+ * and 17.1 GB. Printing "17.1 GB" for a card the customer bought as "16GB"
+ * would be a worse lie than the 15.9 it replaces, so the unit label moved to
+ * match the arithmetic rather than the other way round.
+ */
+export function bytesToGiB(bytes: number | null): number | null {
   if (bytes === null) return null;
   return Math.round((bytes / 1024 ** 3) * 10) / 10;
 }

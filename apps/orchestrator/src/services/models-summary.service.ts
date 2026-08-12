@@ -12,11 +12,12 @@
  *     enabled flag from `WorkspaceSetting`'s off-LAN allowlist
  *     channel (Phase E1 will own the real keys; v1 returns
  *     enabled=false for all three).
- *   - GPU stats: null for v1 (ai-gateway `/gpu` probe is a follow-up).
+ *   - GPU stats: the host device-bridge's read-only `/gpu` (WARP-1861).
+ *     Every counter degrades on its own — see `GpuInfo`.
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
-import { bytesToGib, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
+import { bytesToGiB, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import { cacheGet } from "./cache.service.js";
 import {
   fetchLocalModelMetrics,
@@ -97,12 +98,23 @@ export interface CloudProviderInfo {
 
 export interface GpuInfo {
   name: string;
-  vramGb: number;
-  // WARP-1861: nullable because the bridge legitimately cannot always read
-  // them. When nothing holds the card, amdgpu runtime-SUSPENDS it and the
-  // sysfs reads return EBUSY rather than a number — so on an idle appliance
-  // this is the common case, not an edge case. `0` would be a lie a threshold
-  // check would happily pass.
+  // WARP-1861: EVERY counter is nullable, because the bridge legitimately
+  // cannot always read each one and they fail independently. When nothing
+  // holds the card, amdgpu runtime-SUSPENDS it and the sysfs reads return
+  // EBUSY rather than a number — so on an idle appliance that is the common
+  // case, not an edge case. `0` would be a lie a threshold check would
+  // happily pass.
+  //
+  // GiB, not GB, and named for it: the bridge reports raw bytes and the
+  // conversion is binary (see lib/gpu-telemetry.ts::bytesToGiB), which is how
+  // VRAM is actually sized. The tile labels it "GiB" to match.
+  /** Total VRAM. Null on a BRIDGE_GPU_CARD-pinned node whose
+   *  mem_info_vram_total is unreadable — the card is still present. */
+  vramGiB: number | null;
+  /** VRAM currently in use, so the tile can show pressure as well as size —
+   *  utilisation is a COMPUTE figure and says nothing about how full the
+   *  card is. */
+  vramUsedGiB: number | null;
   utilPct: number | null;
   tempC: number | null;
 }
@@ -281,15 +293,22 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   // an absent bridge or an unresolvable card yields null, which the tile
   // already renders as "Unavailable".
   const telemetry = await fetchGpuTelemetry();
-  const vramGb = bytesToGib(telemetry?.vramTotalBytes ?? null);
+  // A CARD, not a complete reading, is what decides whether there is a tile.
+  // Requiring a VRAM total here would drop the whole tile over one unreadable
+  // field: with BRIDGE_GPU_CARD pinned, device-bridge returns the pinned node
+  // WITHOUT reading mem_info_vram_total, so a card sitting at 97% and 62°C can
+  // legitimately report a null total — and the page would have said "No
+  // accelerator detected" over a GPU that is present and actively reporting.
+  // Each counter degrades on its own instead; the tile omits what it lacks.
   const gpu: GpuInfo | null =
-    telemetry?.available && telemetry.card && vramGb !== null
+    telemetry?.available && telemetry.card
       ? {
           // The DRM node name is what the operator can act on — it is the
           // same identifier BRIDGE_GPU_CARD pins and the same one that
           // appears in the flip script's resolver.
           name: telemetry.card,
-          vramGb,
+          vramGiB: bytesToGiB(telemetry.vramTotalBytes),
+          vramUsedGiB: bytesToGiB(telemetry.vramUsedBytes),
           // Nullable by design: a runtime-suspended card reports neither,
           // and 0% on a card nothing can currently read would be a lie.
           utilPct: telemetry.busyPercent,

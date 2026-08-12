@@ -77,6 +77,33 @@ vi.mock("../services/model-catalog.service.js", () => ({
     openPullStreamMock(model, signal),
 }));
 
+// WARP-1861 — stub the device-bridge probe (network), keep the real
+// `bytesToGiB` so the payload's arithmetic is exercised rather than mocked.
+// Without this every test here runs against a bridge token vitest never sets,
+// so `fetchGpuTelemetry` short-circuits to null and the populated GPU path is
+// unreachable — a `gpu === null` assertion would pass for the wrong reason.
+const { fetchGpuTelemetryMock } = vi.hoisted(() => ({
+  fetchGpuTelemetryMock: vi.fn(),
+}));
+vi.mock("../lib/gpu-telemetry.js", async (importActual) => {
+  const actual = await importActual<typeof import("../lib/gpu-telemetry.js")>();
+  return { ...actual, fetchGpuTelemetry: () => fetchGpuTelemetryMock() };
+});
+
+/** A fully-populated bridge snapshot, as measured on the lab box. */
+const GPU_SNAPSHOT = {
+  available: true,
+  card: "card1",
+  reason: null,
+  busyPercent: 97,
+  vramTotalBytes: 17_095_983_104,
+  vramUsedBytes: 14_190_886_912,
+  vramUsedFraction: 0.83,
+  powerWatts: 164,
+  tempC: 62,
+  processes: [],
+};
+
 import { createModelsRouter } from "../routes/models.js";
 import { getModelsPagePayload } from "../services/models-summary.service.js";
 import { benchCacheKey } from "../services/model-benchmark.service.js";
@@ -120,6 +147,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Default: metrics probe returns nothing → rows keep honest null placeholders.
   fetchLocalModelMetricsMock.mockResolvedValue(new Map());
+  // Default: no bridge → no GPU. Cases that want a card say so explicitly.
+  fetchGpuTelemetryMock.mockResolvedValue(null);
 });
 
 describe("WARP-471 — models page payload", () => {
@@ -206,12 +235,93 @@ describe("WARP-471 — models page payload", () => {
     expect(payload.degraded).toBe(false);
   });
 
-  it("placeholder fields return safe defaults (gpu null, avg latency 0)", async () => {
+  it("the remaining placeholder fields return safe defaults (avg latency 0)", async () => {
+    // `gpu` used to be a placeholder here; WARP-1861 made it a real reading,
+    // so it moved to its own describe below. Latency and spend are still
+    // unbuilt surfaces.
     listModelsMock.mockResolvedValue({ models: [] });
     const payload = await getModelsPagePayload();
-    expect(payload.gpu).toBeNull();
     expect(payload.avgLatencyMs).toBe(0);
     expect(payload.cloudSpendUsd).toBe(0);
+  });
+});
+
+// ── WARP-1861 — the GPU tile's real reading ─────────────────────────────
+//
+// Every counter degrades on its OWN. The failure this pins is the whole-tile
+// drop: on a box with BRIDGE_GPU_CARD pinned, device-bridge returns the
+// pinned node without reading mem_info_vram_total, so a live card that is
+// visibly at 97% can legitimately report a null VRAM total. Dropping the tile
+// there renders "No accelerator detected" over a working GPU — the exact
+// false outage this chain exists to end.
+describe("WARP-1861 — GPU telemetry on the models payload", () => {
+  beforeEach(() => {
+    listModelsMock.mockResolvedValue({ models: [] });
+  });
+
+  it("carries the full counter set when the bridge reports a card", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue(GPU_SNAPSHOT);
+    const payload = await getModelsPagePayload();
+    expect(payload.gpu).toEqual({
+      name: "card1",
+      vramGiB: 15.9,
+      vramUsedGiB: 13.2,
+      utilPct: 97,
+      tempC: 62,
+    });
+  });
+
+  it("still renders the card when VRAM total is unreadable (pinned card)", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue({
+      ...GPU_SNAPSHOT,
+      vramTotalBytes: null,
+      vramUsedBytes: null,
+      vramUsedFraction: null,
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.gpu).not.toBeNull();
+    expect(payload.gpu?.name).toBe("card1");
+    expect(payload.gpu?.vramGiB).toBeNull();
+    expect(payload.gpu?.vramUsedGiB).toBeNull();
+    // The counters that ARE readable survive — that is the whole point.
+    expect(payload.gpu?.utilPct).toBe(97);
+    expect(payload.gpu?.tempC).toBe(62);
+  });
+
+  it("keeps a suspended card's util/temp null rather than reporting 0", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue({
+      ...GPU_SNAPSHOT,
+      busyPercent: null,
+      tempC: null,
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.gpu?.utilPct).toBeNull();
+    expect(payload.gpu?.utilPct).not.toBe(0);
+    expect(payload.gpu?.tempC).toBeNull();
+    expect(payload.gpu?.vramGiB).toBe(15.9);
+  });
+
+  it("reports no GPU when the bridge resolved no card (available:false)", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue({
+      available: false,
+      card: null,
+      reason: "no DRM card exposing mem_info_vram_total",
+      busyPercent: null,
+      vramTotalBytes: null,
+      vramUsedBytes: null,
+      vramUsedFraction: null,
+      powerWatts: null,
+      tempC: null,
+      processes: [],
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.gpu).toBeNull();
+  });
+
+  it("reports no GPU when the bridge itself is absent (probe returns null)", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue(null);
+    const payload = await getModelsPagePayload();
+    expect(payload.gpu).toBeNull();
   });
 });
 

@@ -346,15 +346,28 @@ export interface CloudProviderRow {
   spendUsd: number;
 }
 
-/** GPU stats block — null until ai-gateway exposes a `/gpu` probe. */
+/**
+ * GPU stats block — the host device-bridge's reading (WARP-1861), null only
+ * when no card resolved at all. Mirrors the orchestrator's `GpuInfo`
+ * (services/models-summary.service.ts).
+ */
 export interface ModelsGpuInfo {
   name: string;
-  vramGb: number;
-  // WARP-1861: nullable because the bridge legitimately cannot always read
-  // them. When nothing holds the card, amdgpu runtime-SUSPENDS it and the
-  // sysfs reads return EBUSY rather than a number — so on an idle appliance
-  // this is the common case, not an edge case. `0` would be a lie a threshold
-  // check would happily pass.
+  // WARP-1861: EVERY counter is nullable, because the bridge legitimately
+  // cannot always read each one and they fail independently. When nothing
+  // holds the card, amdgpu runtime-SUSPENDS it and the sysfs reads return
+  // EBUSY rather than a number — so on an idle appliance that is the common
+  // case, not an edge case. `0` would be a lie a threshold check would
+  // happily pass.
+  //
+  // GiB, not GB: the conversion behind these is binary (1024³), which is how
+  // VRAM is sized, and the tile labels them to match.
+  /** Total VRAM. Null on a BRIDGE_GPU_CARD-pinned node whose
+   *  mem_info_vram_total is unreadable — the card is still present. */
+  vramGiB: number | null;
+  /** VRAM in use. Distinct from `utilPct`, which is COMPUTE utilisation and
+   *  says nothing about how full the card is. */
+  vramUsedGiB: number | null;
   utilPct: number | null;
   tempC: number | null;
 }

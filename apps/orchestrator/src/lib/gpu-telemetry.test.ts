@@ -38,7 +38,7 @@ vi.mock("./bridge-errors.js", () => ({
   isTimeoutOrAbort: (e: unknown) => String((e as Error)?.name) === "TimeoutError",
 }));
 
-import { bytesToGib, fetchGpuTelemetry } from "./gpu-telemetry.js";
+import { bytesToGiB, fetchGpuTelemetry } from "./gpu-telemetry.js";
 
 const realFetch = global.fetch;
 
@@ -181,11 +181,17 @@ describe("fetchGpuTelemetry", () => {
   });
 });
 
-describe("bytesToGib", () => {
+describe("bytesToGiB", () => {
   it("converts to 1dp", () => {
-    expect(bytesToGib(17095983104)).toBe(15.9);
+    expect(bytesToGiB(17095983104)).toBe(15.9);
   });
-  it("is null-preserving — an unknown size must not become 0 GB", () => {
-    expect(bytesToGib(null)).toBeNull();
+  it("is null-preserving — an unknown size must not become 0 GiB", () => {
+    expect(bytesToGiB(null)).toBeNull();
+  });
+  it("is BINARY — the name, the field and the tile's unit all say GiB", () => {
+    // 1 GiB exactly. A decimal (1000³) divisor would read 1.1 here, and the
+    // whole point of the rename is that no surface prints a unit its
+    // arithmetic doesn't match.
+    expect(bytesToGiB(1024 ** 3)).toBe(1);
   });
 });

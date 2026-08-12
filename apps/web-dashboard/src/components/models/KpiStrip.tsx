@@ -4,10 +4,10 @@
  * WARP-836 — the Models page KPI strip.
  *
  * Four read-only tiles: model-store usage, GPU, average latency, cloud spend.
- * All but cloud spend are placeholders today (the backend returns null/0 for
- * GPU + latency + per-model disk until ai-gateway exposes those probes), so
- * those tiles render an honest "Unavailable" rather than a fabricated number.
- * Cloud spend is a real value — $0.00 while no cloud escapes are enabled.
+ * Model-store disk and average latency are still placeholders (no probe
+ * exists yet), so those render an honest "Unavailable" rather than a
+ * fabricated number. GPU is a real reading as of WARP-1861, and cloud spend
+ * is real — $0.00 while no cloud escapes are enabled.
  */
 
 import { Clock, Cloud, Cpu, HardDrive, type LucideIcon } from "lucide-react";
@@ -24,6 +24,36 @@ interface KpiStripProps {
 /** Format USD with two decimals, e.g. 0 → "$0.00". */
 function usd(n: number): string {
   return `$${n.toFixed(2)}`;
+}
+
+/**
+ * The GPU tile's sub-line, one entry per counter that could actually be read.
+ *
+ * VRAM and utilisation are DIFFERENT FACTS and the operator needs both: on
+ * the lab box under load the card is 97% busy while VRAM sits at 83%, and
+ * "97% used" beside a 15.9 GiB total reads as "15.4 GiB consumed, no room for
+ * a second model" — a conclusion the numbers don't support. So compute
+ * utilisation is labelled "busy", and the VRAM pair stands on its own.
+ *
+ * GiB because the arithmetic behind the number is binary (1024³) — see
+ * `bytesToGiB` in the orchestrator's lib/gpu-telemetry.ts.
+ */
+function gpuMeta(gpu: ModelsGpuInfo): string {
+  const vram =
+    gpu.vramUsedGiB !== null && gpu.vramGiB !== null
+      ? `${gpu.vramUsedGiB} / ${gpu.vramGiB} GiB`
+      : gpu.vramGiB !== null
+        ? `${gpu.vramGiB} GiB`
+        : gpu.vramUsedGiB !== null
+          ? `${gpu.vramUsedGiB} GiB in use`
+          : null;
+  return [
+    vram,
+    gpu.tempC !== null ? `${gpu.tempC}°C` : null,
+    gpu.utilPct !== null ? `${gpu.utilPct}% busy` : "idle — not reporting",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function KpiStrip({
@@ -50,30 +80,19 @@ export function KpiStrip({
 
       {/* GPU — live counters via device-bridge (WARP-1861).
 
-          util and temp are nullable, and that is the NORMAL case rather
-          than a fault: with nothing holding the card the driver
-          runtime-suspends it and those readings cannot be taken at all.
-          Rendering 0% there would claim a measurement nobody made, so each
-          field degrades on its own and the tile still names the card and
-          its VRAM. */}
+          EVERY counter is nullable, and that is the NORMAL case rather than
+          a fault: with nothing holding the card the driver runtime-suspends
+          it and those readings cannot be taken at all, and a pinned
+          BRIDGE_GPU_CARD can name a live card whose VRAM total is
+          unreadable. Rendering 0% there would claim a measurement nobody
+          made, so each field degrades on its OWN — the tile drops the entry
+          it can't fill and still names the card. */}
       <KpiTile
         icon={Cpu}
         label="GPU"
         value={gpu ? gpu.name : "Unavailable"}
         valueMuted={!gpu}
-        meta={
-          gpu
-            ? [
-                `${gpu.vramGb} GB`,
-                gpu.tempC !== null ? `${gpu.tempC}°C` : null,
-                gpu.utilPct !== null
-                  ? `${gpu.utilPct}% used`
-                  : "idle — not reporting",
-              ]
-                .filter(Boolean)
-                .join(" · ")
-            : "No accelerator detected"
-        }
+        meta={gpu ? gpuMeta(gpu) : "No accelerator detected"}
       />
 
       {/* Avg latency — 0 is the placeholder sentinel (no metrics surface yet),
