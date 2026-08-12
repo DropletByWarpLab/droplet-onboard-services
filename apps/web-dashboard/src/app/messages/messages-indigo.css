@@ -549,7 +549,16 @@
 /* ── Phone touch targets ──────────────────────────────────────────────────
    `.mx-iconbtn` is 30x30, under the 44px Apple HIG / WCAG 2.5.5 minimum;
    measured on /messages at 375px. See
-   04-coding-standards/mobile-web-layout.md in the engineering handbook. */
+   04-coding-standards/mobile-web-layout.md in the engineering handbook.
+
+   `.mx-pill` measured ~23px (3px padding-block, 12px text, 1px border), so
+   the whole pill vocabulary was under the same minimum — RSVP, Cancel,
+   Join, and the dialog's link controls alike. Raised as a class rather
+   than per-variant: a Join-only fix would leave "Can't go" at 23px, and
+   the next pill added would arrive under the bar again. The pill is
+   inline-flex/align-items:center, so the label stays centered; desktop is
+   untouched. */
 @media (max-width: 720px) {
   .droplet-shell .mx-iconbtn { width: 44px; height: 44px; }
+  .droplet-shell .mx-pill { min-height: 44px; padding-block: 0; }
 }
