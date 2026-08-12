@@ -96,14 +96,21 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf 
 
           Measured in Chrome at 375px against the production CSS bundle: the
           seven day columns came out **35px each with 16px of dead space
-          between them** (7×35 + 6×16 = 341). All of the slack sat BETWEEN the
-          columns, which pinned the outer two hard against the card walls —
-          Sam's "the 22/29/5 column sits flush against the screen edge" — and
-          left every cell's `border-r` floating 16px from the cell it is meant
-          to divide, so the lattice read as clipped rather than intentional.
-          With gap 0 the cells measure 48.7px, the borders form one grid, and
-          the card keeps the page's 16px gutter like every other card on the
-          screen. WARP-1786. */}
+          between them** (7×35 + 6×16 = 341). What that cost is the CELLS, not
+          the card's edges. This card is `padding: 0` (see above), so the outer
+          two columns sit flush against the card walls either way — `gap` only
+          redistributes the same 341px track BETWEEN the columns, and
+          7×48.7 + 6×0 is that same 341. Dropping it buys two things:
+
+            · each cell is ~39% wider (35px → 48.7px), which is the difference
+              between a 2-digit date plus an event chip fitting and not; and
+            · every cell's `border-r`/`border-b` meets its neighbour's instead
+              of floating 16px away from the cell it is meant to divide, so
+              the lattice reads as one grid rather than as clipped decoration.
+
+          That lattice is what the markup below has drawn since the view was
+          written (`isLastCol`/`isLastRow`, #341) — the shell's gap had been
+          quietly pulling it apart at every width. WARP-1786. */}
       <div
         className="grid grid-cols-7"
         style={{ gap: "0px", borderBottom: "1px solid var(--card-bd)" }}
