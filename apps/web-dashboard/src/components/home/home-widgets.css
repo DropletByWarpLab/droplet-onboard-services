@@ -674,6 +674,17 @@
 .droplet-home .w-cam:hover {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 55%, transparent);
 }
+/* The live frame. Sits under the chrome spans and under `::after` (the
+   generated scanline sits last in paint order), so the feed reads through
+   the same tile treatment as the placeholder tint it replaces. */
+.droplet-home .w-cam img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 .droplet-home .w-cam::after {
   content: "";
   position: absolute;
