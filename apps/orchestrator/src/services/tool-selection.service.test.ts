@@ -74,6 +74,27 @@ describe("selectAdvertisedTools (spec §3)", () => {
       expect(r.advertised).toContain("list_camera_events");
     });
 
+    it("rename by DISPLAY NAME only — 'rename Blue Eye to Kitchen' advertises rename_camera", () => {
+      // WARP-1893 review — a rename that names the camera by its label
+      // contains no camera vocabulary at all, so before the rename verbs
+      // were added the turn advertised zero camera tools and rename_camera
+      // could never be called. False-positive domains are cheap (see the
+      // rule comment), so the verb also claims files for rename_file.
+      const r = selectAdvertisedTools({
+        mode: "domains",
+        userMessage: "rename Blue Eye to Kitchen",
+        pool: [...CAMERA_POOL, "rename_camera"],
+        conversationToolNames: [],
+      });
+      expect(
+        r.matchedDomains,
+        `advertised only [${r.advertised.join(", ")}]`,
+      ).toContain("cameras");
+      expect(r.advertised).toContain("rename_camera");
+      // rename_file lives in the files domain; the same verb must reach it.
+      expect(r.matchedDomains).toContain("files");
+    });
+
     it("a plain greeting still matches no domain (generosity has a floor)", () => {
       // Guards the opposite failure: if the widened vocabulary matched
       // everything, selection would save nothing and this suite would still
