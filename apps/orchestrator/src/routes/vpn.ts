@@ -58,6 +58,7 @@ import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
 import { readLivePeerState } from "../lib/vpn-live-peers.js";
+import { overlayRequiresApproval } from "../services/overlay-enroll-policy.service.js";
 import { createLogger } from "../lib/logger.js";
 import {
   enrollOverlayDevice,
@@ -607,6 +608,54 @@ export function createVpnRouter(
             message:
               "That device is already set up under a different account on this Droplet.",
           });
+        }
+
+        // WARP-1882 — the stricter posture, off by default.
+        //
+        // When an owner has asked for it, a signed-in device is STAGED rather
+        // than set up, and lands in the same review queue QR-linked devices
+        // use. Deliberately not a second queue and not a second approve route:
+        // the owner already has one place where devices wait, and two would be
+        // two things to remember to check.
+        //
+        // Staged BEFORE the HQ vouch, matching the QR flow — the vouch is not
+        // idempotent, so it must not fire until an owner has actually said
+        // yes. Approving the row runs the identical vouch-then-provision path.
+        if (await overlayRequiresApproval(prisma)) {
+          const fp = signKeyFingerprint(parsed.data.sign_public_key_pem);
+          const existingPending = await prisma.pendingOverlayEnrollment.findFirst({
+            where: { wgPublicKey: parsed.data.wg_public_key, state: "pending" },
+          });
+          // Re-launching the app must not queue the same device twice — the
+          // owner would see two identical rows and have to guess.
+          const pending =
+            existingPending ??
+            (await prisma.pendingOverlayEnrollment.create({
+              data: {
+                // No link token was involved; the column is non-nullable and
+                // the QR path already writes "" when the token row is gone.
+                linkTokenId: "",
+                signKeyFingerprint: fp,
+                signPublicKeyPem: parsed.data.sign_public_key_pem,
+                wgPublicKey: parsed.data.wg_public_key,
+                label: parsed.data.label,
+                presentedAt: now(),
+                state: "pending",
+              },
+            }));
+          audit({
+            event: "overlay_signin_enroll_pending",
+            method: req.method,
+            route: "/vpn/overlay/devices",
+            status: 202,
+            clientId: owner,
+            refs: { pending_id: pending.id, fingerprint: fp },
+          });
+          // Same shape the QR redeem returns, so a client polls the existing
+          // status route and needs no second code path for this mode.
+          return res
+            .status(202)
+            .json({ state: "pending", pending_id: pending.id });
         }
 
         // The HQ vouch, byte-identical to the approve path's.

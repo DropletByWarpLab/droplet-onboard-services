@@ -1430,3 +1430,89 @@ describe("POST /api/vpn/overlay/devices — sign-in enrollment (WARP-1882)", () 
     expect(res.body.profile).toBeUndefined();
   });
 });
+
+// ── WARP-1882 — the optional approval gate ────────────────────────────────
+//
+// Off by default: signing in sets the device up. On, a signed-in device is
+// staged into the SAME queue QR-linked devices use, so an owner has one place
+// to look rather than two.
+describe("POST /api/vpn/overlay/devices — approval gate (WARP-1882)", () => {
+  const FAMILY = { id: "bob", username: "bob", role: "family" };
+  const SIGN_PEM = generateKeyPairSync("ec", { namedCurve: "P-256" })
+    .publicKey.export({ type: "spki", format: "pem" })
+    .toString();
+
+  /** A prisma mock whose settings row says the gate is on. */
+  function gated(value: unknown) {
+    const prisma = createPrismaMock();
+    prisma.workspaceSetting = {
+      findUnique: vi.fn(async () => ({ valueJson: value })),
+    };
+    return prisma;
+  }
+
+  function enroll(app: any, label = "Bob's laptop") {
+    return request(app).post("/api/vpn/overlay/devices").send({
+      wg_public_key: VALID_WG_KEY,
+      sign_public_key_pem: SIGN_PEM,
+      label,
+    });
+  }
+
+  it("stages instead of provisioning, and does NOT vouch to HQ yet", async () => {
+    // The vouch is not idempotent, so it must not fire until an owner has
+    // actually said yes — the same ordering the QR flow uses.
+    const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-1" }));
+    const { app } = buildApp({ prisma: gated(true), user: FAMILY, overlayEnroll });
+
+    const res = await enroll(app);
+
+    expect(res.status).toBe(202);
+    expect(res.body.state).toBe("pending");
+    expect(res.body.pending_id).toBeTruthy();
+    expect(res.body.profile).toBeUndefined();
+    expect(overlayEnroll).not.toHaveBeenCalled();
+    expect(installOverlayPeerMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the staged device in the SAME owner queue as a QR-linked one", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    await enroll(app);
+
+    const { app: ownerApp } = buildApp({ prisma });
+    const queue = await request(ownerApp).get("/api/vpn/overlay/pending-enrollments");
+    expect(queue.status).toBe(200);
+    expect(queue.body.pending ?? queue.body).toHaveLength(1);
+  });
+
+  it("does not queue the same device twice when the app relaunches", async () => {
+    const prisma = gated(true);
+    const { app } = buildApp({ prisma, user: FAMILY });
+    const first = await enroll(app);
+    const second = await enroll(app);
+
+    expect(second.status).toBe(202);
+    expect(second.body.pending_id).toBe(first.body.pending_id);
+  });
+
+  it("reads the flag strictly — only a literal true turns the gate on", async () => {
+    // A malformed or half-written row must fall to the DOCUMENTED default
+    // (immediate setup), not to a surprising one where new devices silently
+    // stop working and nothing says why.
+    for (const value of ["true", 1, {}, null]) {
+      installOverlayPeerMock.mockClear();
+      const { app } = buildApp({ prisma: gated(value), user: FAMILY });
+      const res = await enroll(app);
+      expect(res.status, `valueJson=${JSON.stringify(value)}`).toBe(200);
+      expect(res.body.profile).toBeTruthy();
+    }
+  });
+
+  it("is off when the setting has never been written", async () => {
+    const { app } = buildApp({ user: FAMILY });
+    const res = await enroll(app);
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBeTruthy();
+  });
+});
