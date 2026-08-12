@@ -7356,6 +7356,14 @@ export interface TeamChatMessage {
   sharedNcFileId: number | null;
   sharedFileName: string | null;
   sharedFilePath: string | null;
+  /**
+   * WARP-1898 — the Files space `sharedFilePath` is relative to
+   * ("personal" | "shared" | "dept:<uuid>"), resolved server-side.
+   * `null` on messages sent before that ticket and means UNKNOWN — treat
+   * it as such, never as "personal": assuming personal is exactly what
+   * used to drop recipients into their own files.
+   */
+  sharedFileSpace: FileSpaceId | null;
   sharedChatSessionId: string | null;
   /** WARP-1685 — set on meeting_invite / meeting_reminder; the live
    *  meeting (incl. RSVPs) rides along so cards render in one fetch. */
@@ -7392,6 +7400,13 @@ export type TeamChatSendBody =
       ncFileId: number;
       fileName: string;
       filePath: string;
+      /**
+       * WARP-1898 — the space `filePath` is relative to, as the picker knew
+       * it. Only a fallback: the server re-derives from the file registry
+       * and that wins whenever a row exists (a pick from the picker's
+       * SEARCH tab spans spaces, so the selector can be wrong).
+       */
+      space?: FileSpaceId;
       caption?: string;
     }
   | { kind: "ai_chat_share"; chatSessionId: string; caption?: string };

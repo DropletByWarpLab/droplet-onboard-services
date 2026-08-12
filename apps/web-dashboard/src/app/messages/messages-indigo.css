@@ -270,6 +270,16 @@
 .droplet-shell .mx-card.is-block {
   display: block;
 }
+/* WARP-1898 — a forwarded file this viewer can't open. It renders as a
+   `div`, so the cursor/hover rules above already don't match it; all that
+   is missing is a cue that it isn't going anywhere. Deliberately a BORDER
+   style, not `opacity` or a muted colour: dimming the card would pull the
+   filename and the reason line below the contrast floor, and this way the
+   inactive state survives a high-contrast / forced-colours mode. The
+   reason line under the name carries the actual explanation. */
+.droplet-shell .mx-card.is-unavailable {
+  border-style: dashed;
+}
 .droplet-shell .mx-card-title {
   display: block;
   font-size: 12.5px;

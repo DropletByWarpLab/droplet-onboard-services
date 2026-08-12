@@ -4712,6 +4712,14 @@ model TeamChatMessage {
   sharedNcFileId      Int?
   sharedFileName      String?
   sharedFilePath      String?
+  /// WARP-1898 — the Files space `sharedFilePath` is relative to
+  /// ("personal" | "shared" | "dept:<uuid>"). Without it the recipient's
+  /// link fell through to /files' silent personal-space default and
+  /// resolved the SENDER's path inside the RECIPIENT's own namespace.
+  /// Derived server-side from the file registry where a row exists; the
+  /// sender's claim is only a fallback. Null on rows written before this
+  /// ticket — treated as unknown, never as personal.
+  sharedFileSpace     String?
   sharedChatSessionId String?
   sharedChatSession   ChatSession?        @relation(fields: [sharedChatSessionId], references: [id], onDelete: SetNull)
   sharedChatSnapshot  Json?
