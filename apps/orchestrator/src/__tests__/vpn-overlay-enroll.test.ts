@@ -44,32 +44,22 @@ beforeEach(() => {
 });
 
 describe("POST /api/vpn/overlay/devices (WARP-1385 Part D)", () => {
-  it("owner enrolls: delegates to the box→HQ bridge and returns its result", async () => {
-    const overlayEnroll = vi.fn(async () => ({ status: "enrolled", device_ref: "dev-1" }));
-    const app = buildApp(overlayEnroll);
-    const res = await request(app)
-      .post("/api/vpn/overlay/devices")
-      .send({ wg_public_key: VALID_WG_KEY, sign_public_key_pem: VALID_PEM, label: "Alice iPhone" });
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "enrolled", device_ref: "dev-1" });
-    // Route maps the snake_case body onto the service input shape verbatim.
-    expect(overlayEnroll).toHaveBeenCalledTimes(1);
-    expect(overlayEnroll).toHaveBeenCalledWith({
-      wgPublicKey: VALID_WG_KEY,
-      signPublicKeyPem: VALID_PEM,
-      label: "Alice iPhone",
-    });
-  });
+  // WARP-1882 removed two cases that used to live here. Both are behaviour
+  // changes, not tidying:
+  //
+  //   * "owner enrolls: delegates to the bridge and returns its result" — the
+  //     route no longer returns HQ's raw result. It now provisions the wg0
+  //     peer and returns a usable profile, because returning the vouch alone
+  //     registered a device that could never build a tunnel.
+  //   * "rejects a non-owner caller (owner-JWT gate)" — that gate is gone on
+  //     purpose. A family member enrolling their own device is the ordinary
+  //     case, and the peer is scoped to them.
+  //
+  // Both behaviours are covered in vpn-overlay-qr-enroll.test.ts under
+  // "sign-in enrollment (WARP-1882)", which has the routing + prisma harness
+  // this suite deliberately lacks — it passes `{} as any` for prisma, which is
+  // why the old cases could not be updated in place.
 
-  it("rejects a non-owner caller (owner-JWT gate)", async () => {
-    const overlayEnroll = vi.fn(async () => ({ status: "enrolled" }));
-    const app = buildApp(overlayEnroll, { username: "bob", role: "family" });
-    const res = await request(app)
-      .post("/api/vpn/overlay/devices")
-      .send({ wg_public_key: VALID_WG_KEY, sign_public_key_pem: VALID_PEM, label: "Bob phone" });
-    expect(res.status).toBe(403);
-    expect(overlayEnroll).not.toHaveBeenCalled();
-  });
 
   it("400s on a malformed WireGuard public key", async () => {
     const overlayEnroll = vi.fn(async () => ({}));
