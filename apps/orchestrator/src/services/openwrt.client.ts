@@ -295,6 +295,13 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
       // grace off so subsequent UNREACHABLE errors escalate to `warn`.
       // Skipped for callers that need to verify the payload before confirming
       // reachability (e.g. /health, which returns 200 while OpenWrt provisions).
+      //
+      // WARP-1907, deliberate and worth knowing: a `passthroughStatuses`
+      // 4xx/5xx now reaches this line, where before this ticket every 4xx
+      // aborted above it. That is the correct reading rather than an accident —
+      // the routing service answered, with a considered refusal, which is at
+      // least as good evidence of reachability as a 200. Only the one opt-in
+      // caller can get here.
       if (!skipContactMark) {
         routerContacted = true;
       }
@@ -334,7 +341,22 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   });
 }
 
-async function routingFetchJson<T>(path: string, init?: RoutingFetchInit): Promise<T> {
+/**
+ * `routingFetch` + `res.json() as T`.
+ *
+ * WARP-1907: `passthroughStatuses` is excluded at the TYPE level, not left to
+ * convention. This helper ASSERTS the body is a `T`, and a passthrough status
+ * hands back an unthrown 4xx/5xx whose body is a refusal — so combining the two
+ * would type an error payload as the success shape and pass it to a caller with
+ * no reason to suspect it. Nothing does that today; this makes it a compile
+ * error if anyone tries, because the failure is silent at runtime. A caller that
+ * needs to read its own refusals uses `routingFetch` directly and narrows the
+ * body itself, as `setRouterPortEnabled` does.
+ */
+async function routingFetchJson<T>(
+  path: string,
+  init?: Omit<RoutingFetchInit, "passthroughStatuses">,
+): Promise<T> {
   const res = await routingFetch(path, init);
   return res.json() as Promise<T>;
 }

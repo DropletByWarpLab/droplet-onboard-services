@@ -55,13 +55,43 @@ function WriteChip() {
  * contradicts the escalation dialog that follows. Step 1 states the loss; step
  * 2 owns the restoration promise, so the clause is dropped whenever step 2 is
  * going to appear.
+ *
+ * **And say the networks only when they add something.** Naming them
+ * unconditionally reads "Internet (wan) on p1" / "LAN (lan) on p2" — the
+ * parenthetical restating the label back in installer vocabulary, promoted out
+ * of the labelled Networks Fact row into the primary consequence sentence. That
+ * is the COMMON shape, not an edge case: every RB5009 LAN jack is a `br-lan`
+ * member, so most jacks carry exactly one network named after their role, and
+ * the degenerate cases include the two most dangerous jacks. It earns its place
+ * twice and is suppressed otherwise (see `networksAddInformation`).
  */
+
+/**
+ * Whether the `(networks)` parenthetical carries information the label doesn't.
+ *
+ *   - **more than one network** — `LAN (lan · guest) on p4` is the only place a
+ *     user learns the guest VLAN rides that jack;
+ *   - **`role === "other"`** — "Other" is contentless by construction (it is what
+ *     `derive_ports` reports for an interface we have no vocabulary for), so
+ *     here the parenthetical IS the information: `Other (iot) on p5`.
+ */
+function networksAddInformation(port: RouterPort): boolean {
+  return port.networks.length > 1 || port.role === "other";
+}
+
 export function disableBlast(
   port: RouterPort,
   guard: RouterPort["disable_guard"],
 ): string {
   const what = portName(port);
-  const carries = port.networks.length > 0 ? ` (${networksLabel(port)})` : "";
+  // The emptiness check is NOT redundant with `networksAddInformation`. The
+  // server only reports `role: "other"` for a jack that HAS networks, but this
+  // is a JSON consumer: a malformed or older payload pairing them would render
+  // "Other () on p5", and an empty parenthetical is worse than none.
+  const carries =
+    port.networks.length > 0 && networksAddInformation(port)
+      ? ` (${networksLabel(port)})`
+      : "";
   if (!port.link_up) {
     return `Nothing is plugged into ${port.id} right now, so nothing drops — but anything connected here later stays offline until you turn it back on.`;
   }

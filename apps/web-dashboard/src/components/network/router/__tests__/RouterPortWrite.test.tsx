@@ -204,22 +204,90 @@ describe("RouterPortDrawer", () => {
     );
   });
 
+  /** The blast sentence a jack would show if an admin hit Turn off. */
+  function blastFor(p: RouterPort): string {
+    const onAction = vi.fn();
+    const { unmount } = render(
+      <RouterPortDrawer port={p} canWrite onClose={noop} onAction={onAction} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
+    unmount();
+    return onAction.mock.calls[0][0].blast as string;
+  }
+
   it("names WHAT goes dark, not just 'whatever is plugged in'", () => {
     /* The switch drawer names the device. A RouterPort has no device join, but
-       it does know what the jack is FOR and which interfaces ride it — both
-       already on screen as Facts. This is the only sentence an unguarded live
-       jack (guest / other) shows before it is cut. */
-    const onAction = vi.fn();
-    const guest = port({
-      id: "p6", role: "guest", networks: ["guest"], link_up: true,
-      speed: "1 Gb", status: "online",
-    });
-    render(<RouterPortDrawer port={guest} canWrite onClose={noop} onAction={onAction} />);
-    fireEvent.click(screen.getByRole("button", { name: /turn off this port/i }));
-    const { blast } = onAction.mock.calls[0][0];
+       it does know what the jack is FOR — already on screen as a Fact. This is
+       the only sentence an unguarded live jack shows before it is cut. */
+    const blast = blastFor(
+      port({ id: "p6", role: "guest", networks: ["guest"], link_up: true, status: "online" }),
+    );
     expect(blast).toContain("Guest");
-    expect(blast).toContain("guest");
+    expect(blast).toContain("p6");
     expect(blast).not.toMatch(/whatever is plugged into/i);
+  });
+
+  describe("the (networks) parenthetical", () => {
+    /* 🔴 Evaluated against the eight shapes a real RB5009 produces. Naming the
+       networks unconditionally is degenerate on four of them — including the
+       WAN jack and the live management jack — because it restates the label in
+       uci vocabulary: "Internet (wan)", "LAN (lan)". Every LAN jack on this
+       board is a br-lan member carrying one network named after its role, so
+       that is the COMMON shape, not an edge case. Suppressed there; kept where
+       it carries something the label does not. */
+
+    it.each([
+      ["p1 · the WAN jack", { id: "p1", role: "wan" as const, networks: ["wan"] }, "Internet on p1"],
+      ["p2 · a live LAN jack", { id: "p2", role: "lan" as const, networks: ["lan"] }, "LAN on p2"],
+      ["p3 · another LAN jack", { id: "p3", role: "lan" as const, networks: ["lan"] }, "LAN on p3"],
+      ["p6 · a guest jack", { id: "p6", role: "guest" as const, networks: ["guest"] }, "Guest on p6"],
+    ])("is suppressed on %s — it would only restate the label", (_label, over, expected) => {
+      const blast = blastFor(port({ ...over, link_up: true, status: "online" }));
+      expect(blast).toContain(expected);
+      expect(blast).not.toContain("(");
+    });
+
+    it("is KEPT when the jack carries more than one network", () => {
+      /* The only place a user learns the guest VLAN rides this jack. */
+      const blast = blastFor(
+        port({
+          id: "p4", role: "lan", networks: ["lan", "guest"], link_up: true, status: "online",
+        }),
+      );
+      expect(blast).toContain("LAN (lan · guest) on p4");
+    });
+
+    it("is KEPT for role 'other', where the label itself says nothing", () => {
+      const blast = blastFor(
+        port({ id: "p5", role: "other", networks: ["iot"], link_up: true, status: "online" }),
+      );
+      expect(blast).toContain("Other (iot) on p5");
+    });
+
+    it("is kept for role 'other' even with one network — the label carries nothing", () => {
+      const blast = blastFor(
+        port({ id: "p7", role: "other", networks: ["dmz"], link_up: true, status: "online" }),
+      );
+      expect(blast).toContain("(dmz)");
+    });
+
+    it("never renders an empty parenthetical, even on a payload that shouldn't exist", () => {
+      /* `derive_ports` only reports role "other" for a jack that HAS networks,
+         so this pairing cannot come off our own server — but the drawer is a
+         JSON consumer, and "Other ()" is worse than "Other". This is the input
+         that makes the emptiness check load-bearing rather than decorative. */
+      const blast = blastFor(
+        port({ id: "p8", role: "other", networks: [], link_up: true, status: "online" }),
+      );
+      expect(blast).not.toContain("(");
+    });
+
+    it("renders no parenthetical for a jack nothing claims", () => {
+      const blast = blastFor(
+        port({ id: "p8", role: "unused", networks: [], link_up: true, status: "online" }),
+      );
+      expect(blast).not.toContain("(");
+    });
   });
 
   it("promises a manual restore ONLY where that is the truth", () => {
