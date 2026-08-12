@@ -944,12 +944,14 @@ describe("POST /api/team-chat/threads/:id/messages", () => {
     expect(prisma.teamChatMessage.create).not.toHaveBeenCalled();
   });
 
-  // ── WARP-1898: which SPACE the cached path is relative to ──
+  // ── WARP-1898: which SPACE a shared file belongs to ──
   //
-  // `sharedFilePath` has always been space-relative, but the space was
-  // never stored — so the recipient's link carried none, and /files applied
-  // the sender's path inside the RECIPIENT's personal space. These pin the
-  // resolution order: registry first, sender's claim only as a fallback.
+  // `sharedFilePath` is HOME-relative — the picker stores a listing row's
+  // `path` verbatim, and listing entries carry the mount segment
+  // (WARP-1140) — but the SPACE was never stored, so the recipient's link
+  // carried none, and /files applied the sender's path inside the
+  // RECIPIENT's personal space. These pin the resolution order: registry
+  // first, sender's claim only as a fallback.
 
   it("takes the space from the file REGISTRY, overriding the sender's claim", async () => {
     const prisma = abWorld();
