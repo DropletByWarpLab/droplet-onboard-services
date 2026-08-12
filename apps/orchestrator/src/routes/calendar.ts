@@ -137,6 +137,7 @@ export function createCalendarPublicRouter(prisma: PrismaClient): Router {
           summary: e.title,
           description: e.description,
           location: e.location,
+          meetingUrl: e.meetingUrl,
           startsAt: e.startsAt,
           endsAt: e.endsAt,
           allDay: e.allDay,

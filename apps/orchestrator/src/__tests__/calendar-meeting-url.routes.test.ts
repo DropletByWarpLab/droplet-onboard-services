@@ -6,8 +6,13 @@
  * actually CALLS it — that a `javascript:` payload is refused with a 400
  * before any prisma write, on both POST and PATCH, and that the row stores
  * the parser's normalized href rather than the raw request string.
+ *
+ * It also pins the ICS publish feed, because a household member who
+ * subscribes from Apple Calendar or Outlook never sees the dashboard card
+ * — the link has to reach the client they actually use.
  */
 
+import crypto from "node:crypto";
 import { describe, it, expect, vi } from "vitest";
 import request from "supertest";
 import express from "express";
@@ -21,7 +26,7 @@ vi.mock("../services/encryption.service.js", () => ({
   decryptSecret: (s: string) => s,
 }));
 
-import { createCalendarRouter } from "../routes/calendar.js";
+import { createCalendarRouter, createCalendarPublicRouter } from "../routes/calendar.js";
 
 interface EventRow {
   id: string;
@@ -216,5 +221,50 @@ describe("PATCH /calendar/events/:id — meetingUrl", () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("invalid_request");
     expect(stub.calendarEvent.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /calendar/publish/:user.ics — meetingUrl", () => {
+  // Same derivation as the route: no DEVICE_SECRET in tests, so the
+  // deterministic dev placeholder applies.
+  function tokenFor(username: string): string {
+    return crypto
+      .createHmac("sha256", "dev-only-not-secure")
+      .update(`calendar:${username}`)
+      .digest("hex")
+      .slice(0, 32);
+  }
+
+  function buildPublicApp(stub: ReturnType<typeof makeStub>) {
+    const app = express();
+    app.use("/api", createCalendarPublicRouter(stub as never));
+    return app;
+  }
+
+  it("emits the link as a URL property a subscribed client can join from", async () => {
+    const stub = makeStub([
+      seedRow({
+        location: "Living Room",
+        meetingUrl: "https://warplab.zoom.us/j/98765?pwd=abc",
+      }),
+    ]);
+    const res = await request(buildPublicApp(stub))
+      .get("/api/calendar/publish/alice.ics")
+      .query({ token: tokenFor("alice") });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("URL:https://warplab.zoom.us/j/98765?pwd=abc");
+    // The room survives alongside it — the feed carries both facts.
+    expect(res.text).toContain("LOCATION:Living Room");
+  });
+
+  it("emits no URL property for an event without a link", async () => {
+    const stub = makeStub([seedRow()]);
+    const res = await request(buildPublicApp(stub))
+      .get("/api/calendar/publish/alice.ics")
+      .query({ token: tokenFor("alice") });
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain("URL:");
   });
 });

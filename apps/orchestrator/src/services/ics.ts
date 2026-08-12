@@ -208,6 +208,9 @@ export interface SerializeInput {
   summary: string;
   description?: string | null;
   location?: string | null;
+  /** WARP-1874 — video-call link, emitted as the RFC 5545 URL property.
+   *  Separate from `location`: an event can have both a room and a call. */
+  meetingUrl?: string | null;
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
@@ -243,6 +246,12 @@ export function serializeIcs(
     lines.push(`SUMMARY:${escapeText(ev.summary)}`);
     if (ev.description) lines.push(`DESCRIPTION:${escapeText(ev.description)}`);
     if (ev.location) lines.push(`LOCATION:${escapeText(ev.location)}`);
+    // URL is what Apple Calendar and Outlook render as a join target, and a
+    // subscriber's own client is where they actually are at 2:59. Stored
+    // values are already parser-normalized hrefs, but escapeText stays on:
+    // this interface is plain, and a caller that skipped the parser must
+    // not be able to inject a content line through it.
+    if (ev.meetingUrl) lines.push(`URL:${escapeText(ev.meetingUrl)}`);
     if (ev.updatedAt) lines.push(`LAST-MODIFIED:${fmtIcsDateTime(ev.updatedAt, false)}`);
     lines.push("END:VEVENT");
   }

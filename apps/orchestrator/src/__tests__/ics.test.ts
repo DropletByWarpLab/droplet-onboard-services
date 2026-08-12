@@ -170,6 +170,60 @@ describe("serializeIcs", () => {
     expect(out).toContain("DTEND;VALUE=DATE:20260508");
   });
 
+  it("emits the video-call link as a URL property so external clients can join", () => {
+    // WARP-1874 — a household member who subscribes from Apple Calendar or
+    // Outlook sees the meeting there, not in the dashboard. Without URL the
+    // one thing they need at 2:59 is the one thing missing. URL is the RFC
+    // 5545 property both clients render as a join target.
+    const out = serializeIcs([
+      {
+        uid: "ev-1",
+        summary: "Sprint sync",
+        location: "Living Room",
+        meetingUrl: "https://warplab.zoom.us/j/98765?pwd=abc",
+        startsAt: new Date("2026-04-23T14:00:00Z"),
+        endsAt: new Date("2026-04-23T15:00:00Z"),
+        allDay: false,
+      },
+    ]);
+    expect(out).toContain("URL:https://warplab.zoom.us/j/98765?pwd=abc");
+    // The room and the call are separate facts, as they are in the
+    // database — LOCATION must not be displaced by the link.
+    expect(out).toContain("LOCATION:Living Room");
+  });
+
+  it("omits URL entirely when the event has no link", () => {
+    const out = serializeIcs([
+      {
+        uid: "ev-1",
+        summary: "Sprint sync",
+        meetingUrl: null,
+        startsAt: new Date("2026-04-23T14:00:00Z"),
+        endsAt: new Date("2026-04-23T15:00:00Z"),
+        allDay: false,
+      },
+    ]);
+    expect(out).not.toContain("URL:");
+  });
+
+  it("escapes the link like every other text value", () => {
+    // Stored values are parser-normalized hrefs, so CR/LF are already
+    // percent-encoded — but serializeIcs takes a plain interface, and a
+    // caller that skipped the parser must not be able to inject a content
+    // line through it.
+    const out = serializeIcs([
+      {
+        uid: "ev-1",
+        summary: "x",
+        meetingUrl: "https://vc.warp-lab.ai/room;a,b",
+        startsAt: new Date("2026-04-23T14:00:00Z"),
+        endsAt: new Date("2026-04-23T15:00:00Z"),
+        allDay: false,
+      },
+    ]);
+    expect(out).toContain("URL:https://vc.warp-lab.ai/room\\;a\\,b");
+  });
+
   it("round-trips: serialize then parse returns the same events", () => {
     const original = [
       {
