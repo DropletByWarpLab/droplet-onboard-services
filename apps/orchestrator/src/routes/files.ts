@@ -68,7 +68,6 @@ import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
-  contentTypeForFilename,
   inlinePreviewContentType,
   parseRangeHeader,
 } from "../lib/file-content.js";
@@ -869,6 +868,83 @@ function handleFileError(
     return;
   }
   next(err);
+}
+
+/**
+ * WARP-1920 — decide, and apply, how `GET /files/:id/content` hands a file to
+ * the browser.
+ *
+ * That route serves stored files with `Content-Disposition: inline` from the
+ * dashboard's own cookie-authenticated origin, and is reachable by top-level
+ * navigation (it sits behind `authMiddleware`, so a direct navigation carries
+ * the session cookie and renders as a document — not only inside the citation
+ * viewers' `<object>`/`<video>` tags).
+ *
+ * Inline is therefore granted ONLY for `inlinePreviewContentType()`'s safelist
+ * of inert types. `text/html` and `image/svg+xml` both execute script, so
+ * rendering a user-supplied one here would be stored XSS against the session.
+ * Anything off the safelist still gets served — as an `attachment`, which the
+ * browser saves instead of interpreting. The affordance degrades; the
+ * invariant does not.
+ *
+ * The `filename` argument is the ONLY input to the decision. The brain branch
+ * used to prefer `item.mimeType`, which `POST /files/brain` writes from
+ * `file.mimetype` (files-brain.ts) — i.e. the multipart `Content-Type` the
+ * UPLOADING CLIENT chose. Echoing that back as the served type let a caller
+ * name its own Content-Type, which no extension safelist could have contained.
+ * The stored MIME is deliberately not consulted.
+ *
+ * `nosniff` stops a browser re-interpreting safelisted bytes as markup, and
+ * `Content-Security-Policy: sandbox` drops the response into an opaque origin
+ * with scripting disabled. helmet's global default already sets both a CSP and
+ * nosniff on every `/api` response today, which is why this endpoint is not
+ * presently exploitable — but that is an incidental global default that
+ * nothing asserts, and one `'unsafe-inline'` added elsewhere for an unrelated
+ * dashboard feature would silently re-arm this route. These headers make the
+ * guarantee local to the response that needs it.
+ */
+function applyCitationContentHeaders(res: Response, filename: string): void {
+  const inlineType = inlinePreviewContentType(filename);
+
+  // Both branches get nosniff: it is what stops content-sniffing from
+  // promoting either an inline safelisted file or a downloaded one back into
+  // markup.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  if (inlineType) {
+    res.setHeader("Content-Type", inlineType);
+    res.setHeader("Content-Disposition", "inline");
+    // `application/pdf` is exempt from the sandbox CSP — and ONLY it.
+    // PdfCitation.tsx consumes this route in an <iframe>, whose document is
+    // governed by this response's CSP, and Chromium's plugin-class PDF viewer
+    // refuses to run in a sandboxed document (blank frame or a forced
+    // download), so `sandbox` here would break every PDF citation card. The
+    // exemption is safe: a PDF is not same-origin-scriptable in the browser,
+    // and every type that is (html, svg, ...) is already off the inline
+    // safelist entirely. nosniff (above) still applies to PDFs.
+    if (inlineType !== "application/pdf") {
+      res.setHeader("Content-Security-Policy", "sandbox");
+    }
+    return;
+  }
+
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Disposition", contentDispositionAttachment(filename));
+}
+
+/**
+ * An `attachment` Content-Disposition that survives a hostile filename.
+ *
+ * A bare `attachment; filename="${name}"` breaks on any name containing a
+ * quote or backslash — the value stops being one quoted-string and the rest is
+ * reparsed as disposition parameters. Node rejects CR/LF in a header value, so
+ * response splitting is already off the table, but parameter smuggling is not.
+ * The ASCII fallback is stripped to a conservative set, and the real name is
+ * carried in RFC 5987 `filename*`, which every current browser prefers.
+ */
+function contentDispositionAttachment(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 export function createFilesRouter(
@@ -3825,8 +3901,10 @@ export function createFilesRouter(
   // : hit.path`; `ChatMessage.tsx`: `c.brainItemId ? String(c.brainItemId) :
   // c.path`) — so `classifyFileContentId` dispatches on shape.
   //
-  // Served INLINE (never as an attachment) with a best-effort Content-Type and
-  // HTTP Range support, so `<iframe>`/`<video>` can render and seek.
+  // Served inline with HTTP Range support, so `<iframe>`/`<video>` can render
+  // and seek — but ONLY for the inert types on `inlinePreviewContentType()`'s
+  // safelist. See `applyCitationContentHeaders` for why the served type is
+  // derived from the filename alone and never from the stored MIME.
   //
   // Registered LAST so the static sibling routes above (`/files/search/content`
   // in particular, which `:id` would otherwise shadow) keep winning.
@@ -3867,11 +3945,11 @@ export function createFilesRouter(
           return;
         }
 
-        res.setHeader(
-          "Content-Type",
-          item.mimeType ?? contentTypeForFilename(item.filename),
-        );
-        res.setHeader("Content-Disposition", "inline");
+        // WARP-1920: safelist-gated. `item.mimeType` is NOT consulted — it is
+        // the uploader's own multipart Content-Type (files-brain.ts writes
+        // `file.mimetype` verbatim), so trusting it would let a caller pick
+        // the type its bytes are rendered as.
+        applyCitationContentHeaders(res, item.filename);
         res.setHeader("Accept-Ranges", "bytes");
 
         const range = parseRangeHeader(req.header("range"), size);
@@ -3930,11 +4008,10 @@ export function createFilesRouter(
 
       // 200, or 206/416 when WebDAV ruled on the forwarded Range.
       res.status(upstream.status);
-      res.setHeader(
-        "Content-Type",
-        contentTypeForFilename(path.basename(ncPath)),
-      );
-      res.setHeader("Content-Disposition", "inline");
+      // WARP-1920: same safelist gate as the brain branch above. An
+      // off-safelist file (.html, .svg, unknown) downloads instead of
+      // rendering; Range/206/416 below is unaffected either way.
+      applyCitationContentHeaders(res, path.basename(ncPath));
       res.setHeader(
         "Accept-Ranges",
         upstream.headers.get("accept-ranges") ?? "bytes",
