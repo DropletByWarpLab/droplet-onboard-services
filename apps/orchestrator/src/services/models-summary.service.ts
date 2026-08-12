@@ -12,10 +12,12 @@
  *     enabled flag from `WorkspaceSetting`'s off-LAN allowlist
  *     channel (Phase E1 will own the real keys; v1 returns
  *     enabled=false for all three).
- *   - GPU stats: null for v1 (ai-gateway `/gpu` probe is a follow-up).
+ *   - GPU stats: the host device-bridge's read-only `/gpu` (WARP-1861).
+ *     Every counter degrades on its own — see `GpuInfo`.
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import { bytesToGiB, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import { cacheGet } from "./cache.service.js";
 import {
   fetchLocalModelMetrics,
@@ -96,15 +98,55 @@ export interface CloudProviderInfo {
 
 export interface GpuInfo {
   name: string;
-  vramGb: number;
-  utilPct: number;
-  tempC: number;
+  // WARP-1861: EVERY counter is nullable, because the bridge legitimately
+  // cannot always read each one and they fail independently. When nothing
+  // holds the card, amdgpu runtime-SUSPENDS it and the sysfs reads return
+  // EBUSY rather than a number — so on an idle appliance that is the common
+  // case, not an edge case. `0` would be a lie a threshold check would
+  // happily pass.
+  //
+  // GiB, not GB, and named for it: the bridge reports raw bytes and the
+  // conversion is binary (see lib/gpu-telemetry.ts::bytesToGiB), which is how
+  // VRAM is actually sized. The tile labels it "GiB" to match.
+  /** Total VRAM. Null on a BRIDGE_GPU_CARD-pinned node whose
+   *  mem_info_vram_total is unreadable — the card is still present. */
+  vramGiB: number | null;
+  /** VRAM currently in use, so the tile can show pressure as well as size —
+   *  utilisation is a COMPUTE figure and says nothing about how full the
+   *  card is. */
+  vramUsedGiB: number | null;
+  utilPct: number | null;
+  tempC: number | null;
 }
+
+/**
+ * WARP-1861 — why `gpu` is null, when it is.
+ *
+ * `null` is not a measurement, and neither is a failed probe. Two facts hide
+ * behind an absent GPU block and only one of them is a statement about the
+ * customer's hardware:
+ *
+ *   - `no_card`    the bridge ANSWERED and resolved no card (`available:false`
+ *                  plus a reason). A negative measurement — safe to state.
+ *   - `unreachable` we could not ask at all. `fetchGpuTelemetry()` returns null
+ *                  for no token, ECONNREFUSED, timeout, non-2xx and a
+ *                  malformed body alike. That is a fact about the PROBE.
+ *
+ * Collapsing the second into the first is how a box with a working 16 GiB dGPU
+ * ends up telling its owner "No accelerator detected" because
+ * droplet-device-bridge.service didn't restart after a refresh (WARP-1829) or
+ * a setup.sh re-run dropped SERVICE_TOKEN_DISPLAY (WARP-1865).
+ * GET /api/hardware/gpu already keeps them apart for the LLM tool; the
+ * dashboard payload has to as well.
+ */
+export type GpuReason = "unreachable" | "no_card";
 
 export interface ModelsPagePayload {
   local: LocalModelInfo[];
   cloud: CloudProviderInfo[];
   gpu: GpuInfo | null;
+  /** Why `gpu` is null. Null when `gpu` is populated. */
+  gpuReason: GpuReason | null;
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /**
@@ -271,13 +313,59 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
   ];
 
+  // WARP-1861 — GPU counters via the host device-bridge. Never throws;
+  // an absent bridge or an unresolvable card yields null, which the tile
+  // already renders as "Unavailable".
+  const telemetry = await fetchGpuTelemetry();
+  // A CARD, not a complete reading, is what decides whether there is a tile.
+  // Requiring a VRAM total here would drop the whole tile over one unreadable
+  // field: with BRIDGE_GPU_CARD pinned, device-bridge returns the pinned node
+  // WITHOUT reading mem_info_vram_total, so a card sitting at 97% and 62°C can
+  // legitimately report a null total — and the page would have said "No
+  // accelerator detected" over a GPU that is present and actively reporting.
+  // Each counter degrades on its own instead; the tile omits what it lacks.
+  const gpu: GpuInfo | null =
+    telemetry?.available && telemetry.card
+      ? {
+          // The DRM node name is what the operator can act on — it is the
+          // same identifier BRIDGE_GPU_CARD pins and the same one that
+          // appears in the flip script's resolver.
+          name: telemetry.card,
+          vramGiB: bytesToGiB(telemetry.vramTotalBytes),
+          vramUsedGiB: bytesToGiB(telemetry.vramUsedBytes),
+          // Nullable by design: a runtime-suspended card reports neither,
+          // and 0% on a card nothing can currently read would be a lie.
+          utilPct: telemetry.busyPercent,
+          tempC: telemetry.tempC,
+        }
+      : null;
+  // Carry WHY, not just the absence. `telemetry === null` means the probe
+  // never completed — no token, bridge down, timeout, non-2xx, bad body —
+  // which is evidence about us, not about the customer's hardware. Only a
+  // bridge that answered gets to have its "no card" repeated as a fact.
+  const gpuReason: GpuReason | null =
+    gpu !== null ? null : telemetry === null ? "unreachable" : "no_card";
+
   return {
     local,
     cloud,
-    // GPU probe: ai-gateway doesn't expose one yet. Returning null is
-    // documented in FEATURES.md §2.11 — the dashboard renders a
-    // "GPU info unavailable" tile.
-    gpu: null,
+    // WARP-1861 — real GPU counters, from the host device-bridge.
+    //
+    // The note that used to sit here planned an ai-gateway `/gpu` probe. That
+    // would have been drift: ai-gateway is a thin provider router, and the
+    // handbook bans the orchestrator from reading /dev/dri itself (see the
+    // header of hardware-summary.service.ts). device-bridge is the
+    // host-privileged surface that already exists for exactly this, behind
+    // the same token.
+    //
+    // Still null when the bridge is absent or no card resolves — it is
+    // profile-gated, so "not running" is ordinary — and the dashboard's
+    // existing "GPU info unavailable" tile stays the honest fallback rather
+    // than a fabricated zero.
+    gpu,
+    // ...and WHY it is null, so the tile can tell "we asked and there is no
+    // card" apart from "we never got to ask". See `GpuReason`.
+    gpuReason,
     // Avg latency: requires a metrics aggregation surface that doesn't
     // exist yet. 0 until ai-gateway exports a /metrics summary.
     avgLatencyMs: 0,

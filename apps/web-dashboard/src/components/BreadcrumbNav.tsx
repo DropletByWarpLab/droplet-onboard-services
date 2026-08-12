@@ -31,7 +31,11 @@ export function BreadcrumbNav({
   return (
     <nav
       aria-label="Breadcrumbs"
-      className="flex items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-[var(--radius-input)] px-3 py-2 overflow-x-auto"
+      // WARP-1876: `w-fit` — the bar used to stretch the full content width
+      // around a single "My files" crumb, which reads as an unfinished
+      // toolbar. It hugs its crumbs now, and still scrolls (`max-w-full` +
+      // `overflow-x-auto`) once a path is deep enough to overflow.
+      className="flex w-fit max-w-full items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-[var(--radius-input)] px-3 py-2 overflow-x-auto"
     >
       {prefixCrumb && (
         <span className="flex items-center gap-1 type-subheadline text-[color:var(--text-muted)] flex-shrink-0 min-h-[28px]">

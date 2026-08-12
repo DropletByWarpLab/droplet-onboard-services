@@ -17,6 +17,33 @@ vi.mock("../services/cache.service.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
 }));
 
+// WARP-1861 — stub the device-bridge probe (network). vitest sets neither
+// BRIDGE_AUTH_TOKEN nor SERVICE_TOKEN_DISPLAY, so the real probe short-circuits
+// to null in every test here and the populated path would never be exercised.
+const { fetchGpuTelemetryMock } = vi.hoisted(() => ({
+  fetchGpuTelemetryMock: vi.fn(),
+}));
+vi.mock("../lib/gpu-telemetry.js", async (importActual) => {
+  const actual = await importActual<typeof import("../lib/gpu-telemetry.js")>();
+  return { ...actual, fetchGpuTelemetry: () => fetchGpuTelemetryMock() };
+});
+
+/** A fully-populated bridge snapshot, as measured on the lab box. */
+const GPU_SNAPSHOT = {
+  available: true,
+  card: "card1",
+  reason: null,
+  busyPercent: 97,
+  vramTotalBytes: 17_095_983_104,
+  vramUsedBytes: 14_190_886_912,
+  vramUsedFraction: 0.83,
+  powerWatts: 164,
+  tempC: 62,
+  processes: [
+    { pid: 2325005, comm: "ollama", cmdline: "ollama runner", containerId: "a1b2c3d4e5f6" },
+  ],
+};
+
 import { createHardwareRouter } from "../routes/hardware.js";
 import { getHardwarePayload } from "../services/hardware-summary.service.js";
 
@@ -46,7 +73,9 @@ function createPrismaMock(over: { settings?: MockSetting[]; drives?: MockDrive[]
 
 function buildApp(
   prismaMock: ReturnType<typeof createPrismaMock>,
-  asUser: { username?: string; role?: string },
+  // `id` so a test can present the `_service:mcp` principal WARP-1861's
+  // /hardware/gpu guard admits.
+  asUser: { id?: string; username?: string; role?: string },
 ) {
   const app = express();
   app.use(express.json());
@@ -60,6 +89,8 @@ function buildApp(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: no bridge → no GPU. Cases that want a card say so explicitly.
+  fetchGpuTelemetryMock.mockResolvedValue(null);
 });
 
 describe("WARP-472 — hardware payload composition", () => {
@@ -151,5 +182,67 @@ describe("WARP-472 — /api/hardware route", () => {
     const app = buildApp(prisma, { username: "stefan", role: "owner" });
     const res = await request(app).patch("/api/hardware").send({});
     expect(res.status).toBe(404);
+  });
+});
+
+// ── WARP-1861 — GET /api/hardware/gpu ───────────────────────────────────
+describe("WARP-1861 — /api/hardware/gpu", () => {
+  it("200s with available:false and every counter null when the bridge is absent", async () => {
+    // The bridge is profile-gated: not running is an ordinary state
+    // (WARP-645), so this is a successful answer, never a 5xx.
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const res = await request(app).get("/api/hardware/gpu");
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(false);
+    expect(res.body.reason).toBeTruthy();
+    expect(res.body.card).toBeNull();
+    expect(res.body.busyPercent).toBeNull();
+    expect(res.body.vramTotalBytes).toBeNull();
+    expect(res.body.vramUsedBytes).toBeNull();
+    expect(res.body.vramUsedFraction).toBeNull();
+    expect(res.body.powerWatts).toBeNull();
+    expect(res.body.tempC).toBeNull();
+    expect(res.body.processes).toEqual([]);
+  });
+
+  it("passes a populated snapshot through unchanged, attribution included", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue(GPU_SNAPSHOT);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { username: "stefan", role: "admin" });
+    const res = await request(app).get("/api/hardware/gpu");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(GPU_SNAPSHOT);
+  });
+
+  it("family GET is forbidden (owner/admin or the mcp service principal only)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { username: "sam", role: "family" });
+    const res = await request(app).get("/api/hardware/gpu");
+    expect(res.status).toBe(403);
+  });
+
+  it("admits the mcp service principal — which is why the HANDLER gates the role", async () => {
+    // `requireRoleOrMcpService` short-circuits here, so the owner/admin arm
+    // above never runs on a tool call. That is deliberate (otherwise
+    // get_gpu_status 403s on every call — the WARP-1455 dead-tool class), and
+    // it is exactly why the human-role check lives in the tools-core handler:
+    // packages/tools-core/src/handlers/system/get-gpu-status.ts.
+    fetchGpuTelemetryMock.mockResolvedValue(GPU_SNAPSHOT);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { id: "_service:mcp", role: "service" });
+    const res = await request(app).get("/api/hardware/gpu");
+    expect(res.status).toBe(200);
+  });
+
+  it("compute.ai/util/temp_c on /api/hardware come from the same probe", async () => {
+    fetchGpuTelemetryMock.mockResolvedValue(GPU_SNAPSHOT);
+    const prisma = createPrismaMock();
+    const payload = await getHardwarePayload(
+      prisma as unknown as import("@prisma/client").PrismaClient,
+    );
+    expect(payload.compute.ai).toBe("card1");
+    expect(payload.compute.util).toBe(97);
+    expect(payload.compute.temp_c).toBe(62);
   });
 });

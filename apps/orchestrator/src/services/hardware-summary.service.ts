@@ -13,6 +13,7 @@
 import type { PrismaClient } from "@prisma/client";
 import * as os from "node:os";
 import { boxDisplayName } from "../lib/box-identity.js";
+import { fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 
 export interface HardwareCompute {
   control_plane: string;
@@ -121,7 +122,7 @@ async function getStorage(prisma: PrismaClient): Promise<HardwareStorage> {
   };
 }
 
-function getCompute(): HardwareCompute {
+async function getCompute(): Promise<HardwareCompute> {
   // Across host types: the canonical answer comes from the same
   // signals scripts/lib/single-box.sh::detect_single_box_mode uses
   // (render-node count + lspci dGPU). Wiring that into a runtime
@@ -133,11 +134,24 @@ function getCompute(): HardwareCompute {
     arch === "arm64" || arch === "arm"
       ? "ARM64"
       : (cpus[0]?.model ?? "x86_64");
+  // WARP-1861 — util and temp_c now come from the host device-bridge's
+  // read-only /gpu, which is the sanctioned path: this file's own header
+  // records that the handbook bans direct /dev/dri probing from the
+  // orchestrator, and the bridge already runs host-side behind a token.
+  //
+  // Both stay NULLABLE. The bridge returns null for a counter it cannot
+  // read, and on an idle appliance that is the norm rather than an edge
+  // case: with nothing holding the card amdgpu runtime-SUSPENDS it and the
+  // sysfs reads return EBUSY. Reporting 0% there would claim a measurement
+  // nobody took.
+  const telemetry = await fetchGpuTelemetry();
   return {
     control_plane,
-    ai: null,
-    util: null,
-    temp_c: null,
+    // The resolved DRM node is the most useful thing we can name for the
+    // AI accelerator, and it is what BRIDGE_GPU_CARD pins.
+    ai: telemetry?.available ? telemetry.card : null,
+    util: telemetry?.busyPercent ?? null,
+    temp_c: telemetry?.tempC ?? null,
   };
 }
 
@@ -177,7 +191,7 @@ export async function getHardwarePayload(
     // docker container id, and this field renders on the dashboard hardware
     // surface. HQ registry id when provisioned, else the canonical box name.
     appliance_id: (process.env.DROPLET_DEVICE_ID || "").trim() || boxDisplayName(),
-    compute: getCompute(),
+    compute: await getCompute(),
     storage,
     network: getNetwork(),
     display: getDisplay(),

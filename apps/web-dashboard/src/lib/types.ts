@@ -346,18 +346,53 @@ export interface CloudProviderRow {
   spendUsd: number;
 }
 
-/** GPU stats block — null until ai-gateway exposes a `/gpu` probe. */
+/**
+ * GPU stats block — the host device-bridge's reading (WARP-1861), null only
+ * when no card resolved at all. Mirrors the orchestrator's `GpuInfo`
+ * (services/models-summary.service.ts).
+ */
 export interface ModelsGpuInfo {
   name: string;
-  vramGb: number;
-  utilPct: number;
-  tempC: number;
+  // WARP-1861: EVERY counter is nullable, because the bridge legitimately
+  // cannot always read each one and they fail independently. When nothing
+  // holds the card, amdgpu runtime-SUSPENDS it and the sysfs reads return
+  // EBUSY rather than a number — so on an idle appliance that is the common
+  // case, not an edge case. `0` would be a lie a threshold check would
+  // happily pass.
+  //
+  // GiB, not GB: the conversion behind these is binary (1024³), which is how
+  // VRAM is sized, and the tile labels them to match.
+  /** Total VRAM. Null on a BRIDGE_GPU_CARD-pinned node whose
+   *  mem_info_vram_total is unreadable — the card is still present. */
+  vramGiB: number | null;
+  /** VRAM in use. Distinct from `utilPct`, which is COMPUTE utilisation and
+   *  says nothing about how full the card is. */
+  vramUsedGiB: number | null;
+  utilPct: number | null;
+  tempC: number | null;
 }
+
+/**
+ * WARP-1861 — why `gpu` is null, when it is. Mirrors the orchestrator's
+ * `GpuReason` (services/models-summary.service.ts).
+ *
+ * `no_card` is a MEASUREMENT: the device-bridge answered and resolved no card.
+ * `unreachable` is not — the orchestrator couldn't ask (no token, bridge down,
+ * timeout, non-2xx, malformed body), which says nothing about the customer's
+ * hardware. Rendering both as "No accelerator detected" is how a box with a
+ * working dGPU tells its owner the card is missing because a host unit didn't
+ * restart. The two get different copy.
+ */
+export type ModelsGpuReason = "unreachable" | "no_card" | null;
 
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
   gpu: ModelsGpuInfo | null;
+  /** WARP-1861 (additive; optional so an older orchestrator that predates the
+   *  field still parses). Absent ⇒ we know nothing about why, and the tile
+   *  must not guess — see `ModelsGpuReason`. */
+  gpuReason?: ModelsGpuReason;
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by
@@ -654,6 +689,30 @@ export interface VpnPeerInfo {
   status: "active" | "revoked";
   createdAt: string;
   revokedAt?: string | null;
+  /** WARP-1763 — how this peer came to exist. `"overlay"` is a device the
+   *  owner linked by scanning the dashboard QR; those rows carry the synthetic
+   *  `userId: "overlay"`, so this is the only field that identifies them. */
+  kind?: "static" | "overlay";
+  /** Link-token provenance, present only on QR-linked devices. */
+  linkTokenLabel?: string | null;
+  linkTokenEnrolledBy?: string | null;
+  enrolledAt?: string | null;
+  /** WARP-1763 — read from the ROUTER, not from the database. The two are not
+   *  read the same way and the difference is load-bearing:
+   *
+   *  `provisioned` is read from the interface's CONFIGURATION (UCI). False
+   *  means the row is active but nothing was ever written for this peer on the
+   *  router — the WARP-1757 `tunnel_ready: false` case. True means configured,
+   *  which is NOT the same as loaded in the running interface; a config change
+   *  that never got applied still reads true.
+   *
+   *  `lastHandshakeAt` is a runtime reading of the running interface: `null`
+   *  when it reports a peer that has never handshaken, and ABSENT when the
+   *  observation could not be made at all. Never collapse the two: absent
+   *  means unknown, and rendering it as "never connected" is the bug this
+   *  field replaced. Both are absent whenever `liveStateAvailable` is false. */
+  provisioned?: boolean;
+  lastHandshakeAt?: string | null;
 }
 
 /** Snapshot the dashboard polls before deciding whether to enable the

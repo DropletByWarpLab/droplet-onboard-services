@@ -1498,11 +1498,20 @@ describe("<FilesPage /> — Spaces menu layering (WARP-1667)", () => {
     return match ? Number(match[1]) : 0;
   }
 
-  /** The `.page-inner` child that contains `el` — the stacking context it's trapped in. */
+  /**
+   * The stacking-context box that contains `el`.
+   *
+   * WARP-1876 pushed the page's content one level down: it is all wrapped
+   * in the page-wide `.page-dropzone` now, which re-emits the ds-rise
+   * stagger to its own children. The blocks whose layering these specs pin
+   * are therefore siblings inside THAT container rather than inside
+   * `.page-inner`. The invariant is untouched — search above spaces above
+   * everything later — so this resolves whichever container is in play.
+   */
   function pageInnerAncestorOf(el: Element): Element {
-    const inner = el.closest(".page-inner");
-    expect(inner).not.toBeNull();
-    const child = Array.from(inner!.children).find((c) => c.contains(el));
+    const container = el.closest(".page-dropzone") ?? el.closest(".page-inner");
+    expect(container).not.toBeNull();
+    const child = Array.from(container!.children).find((c) => c.contains(el));
     expect(child).toBeDefined();
     return child!;
   }

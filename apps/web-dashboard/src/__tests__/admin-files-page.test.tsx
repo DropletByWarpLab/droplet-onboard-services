@@ -21,6 +21,9 @@ vi.mock("@/lib/api", () => ({
   fetchAdminFilesUsage: (...a: any[]) => fetchAdminFilesUsageMock(...a),
   listDepartments: (...a: any[]) => listDepartmentsMock(...a),
   // ShellPage status chip pulls device + health hooks — keep them callable.
+  // WARP-1506: the page also reads the space list to find the company
+  // (shared) space its Upload action writes into.
+  fetchSpaces: vi.fn().mockResolvedValue({ spaces: [], sharedAvailable: false }),
   fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
   fetchDevices: vi.fn().mockResolvedValue([]),
   fetchHealth: vi.fn().mockResolvedValue({}),

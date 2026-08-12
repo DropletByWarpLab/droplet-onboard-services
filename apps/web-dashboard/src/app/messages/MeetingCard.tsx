@@ -12,12 +12,21 @@
  *
  * `MeetingReminderCard` renders a meeting_reminder as a subtle
  * system-style line ("Reminder: <title> starts in N min") — ambient
- * information, deliberately quieter than the invite.
+ * information, deliberately quieter than the invite, carrying only the
+ * one action that is due at that moment (Join, when there is a link).
  *
  * No entrance motion by design (the 5s poll re-renders the list —
  * replayed animations would turn ambient refresh into noise; the v1
  * MessageBubble restraint). Interactive affordances keep the surface's
  * color transitions.
+ *
+ * WARP-1874 — a meeting can carry a video-call link, rendered as a real
+ * Join anchor. The URL is re-parsed HERE, at render, even though the
+ * server already refused anything but https on the way in: a row can
+ * predate the `meetingUrl` column or arrive from an ICS sync, and this
+ * component is the last thing standing between a stored string and an
+ * href on somebody else's screen. An unparseable value renders nothing —
+ * never a dead or dangerous anchor.
  *
  * WARP-1783 — both cards used to take a `mine` prop purely to pick a tone,
  * because the caller's own bubble was a saturated accent fill that nothing
@@ -28,7 +37,8 @@
  */
 
 import { useEffect, useState } from "react";
-import { Ban, CalendarClock, Check, X } from "lucide-react";
+import { Ban, CalendarClock, Check, Video, X } from "lucide-react";
+import { parseMeetingLink } from "@droplet/shared-types";
 import type { TeamChatMeeting, TeamChatRsvpResponse } from "@/lib/api";
 
 interface ParticipantRef {
@@ -75,6 +85,9 @@ export function MeetingCard({
   useEffect(() => setConfirmingCancel(false), [meeting.status, meeting.id]);
 
   const cancelled = meeting.status === "cancelled";
+  // Cancelled meetings offer no Join — the call was called off, and an
+  // action that leads nowhere is worse than no action.
+  const link = cancelled ? null : parseMeetingLink(meeting.meetingUrl);
   const isOrganizer = meeting.createdById === meId;
   const myResponse =
     meeting.rsvps.find((r) => r.userId === meId)?.response ?? null;
@@ -118,6 +131,27 @@ export function MeetingCard({
             <p className="mx-card-meta mx-sub mt-1 whitespace-pre-wrap break-words">
               {meeting.note}
             </p>
+          )}
+
+          {/* Join is the ACTION of a remote meeting, so it leads the row
+              and carries the only filled treatment on the card. The host
+              sits outside the anchor, quietly: a member should be able to
+              see where a link somebody else pasted actually goes before
+              they follow it. */}
+          {link && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2">
+              <a
+                href={link.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={link.url}
+                className="mx-pill is-join"
+              >
+                <Video size={13} strokeWidth={1.5} aria-hidden="true" />
+                {link.label}
+              </a>
+              <span className="mx-card-meta mx-sub truncate">{link.host}</span>
+            </div>
           )}
 
           {meeting.rsvps.length > 0 && (
@@ -248,12 +282,23 @@ function SmallButton({
  * meeting_reminder — a quiet system-style line, not a second invite card.
  * Countdown text is computed at render; the surface's 5s poll keeps it
  * honest without any timer of its own.
+ *
+ * WARP-1874 — the one action it does carry is Join. The reminder fires 15
+ * minutes before the start, which is exactly when the link is wanted;
+ * without it here, a member has to scroll back up the thread to the invite
+ * to find it. Same guard as the invite card, so a cancelled meeting offers
+ * nothing to join.
  */
 export function MeetingReminderCard({
   meeting,
 }: {
   meeting: TeamChatMeeting | null;
 }) {
+  // Re-parsed at render for the same reason the invite card does it: this
+  // is the last thing between a stored string and an href.
+  const link =
+    meeting?.status === "cancelled" ? null : parseMeetingLink(meeting?.meetingUrl);
+
   let line: string;
   if (!meeting) {
     line = "Meeting reminder";
@@ -274,11 +319,32 @@ export function MeetingReminderCard({
   return (
     <div className="mx-card mx-sub">
       {meeting?.status === "cancelled" ? (
-        <Ban size={14} strokeWidth={1.5} aria-hidden="true" />
+        <Ban size={14} strokeWidth={1.5} className="flex-shrink-0" aria-hidden="true" />
       ) : (
-        <CalendarClock size={14} strokeWidth={1.5} aria-hidden="true" />
+        <CalendarClock
+          size={14}
+          strokeWidth={1.5}
+          className="flex-shrink-0"
+          aria-hidden="true"
+        />
       )}
-      <span className="mx-card-meta">{line}</span>
+      <span className="mx-card-meta min-w-0 flex-1">{line}</span>
+      {/* No host line here, unlike the invite card. The reminder stays one
+          row, and the "see where this link goes" disclosure already
+          happened on the invite — plus the label itself is host-derived
+          for a recognized provider, and `title` carries the full URL. */}
+      {link && (
+        <a
+          href={link.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={link.url}
+          className="mx-pill is-join flex-shrink-0"
+        >
+          <Video size={13} strokeWidth={1.5} aria-hidden="true" />
+          {link.label}
+        </a>
+      )}
     </div>
   );
 }

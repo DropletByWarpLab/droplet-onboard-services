@@ -30,6 +30,8 @@ import {
 import { serializeIcs } from "../services/ics.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
+// WARP-1874 — the single https-only gate for a value that becomes an href.
+import { meetingUrlSchema } from "../lib/meeting-url.js";
 
 // WARP-1502: the place-suggestion shape + Nominatim fetch/formatting moved to
 // services/places.service.ts so the structured-formatting logic is unit-tested
@@ -76,6 +78,7 @@ const eventCreateSchema = z.object({
   title: z.string().min(1).max(500),
   description: z.string().max(10000).optional(),
   location: z.string().max(500).optional(),
+  meetingUrl: meetingUrlSchema.optional(),
   startsAt: z.string().datetime(),
   endsAt: z.string().datetime(),
   allDay: z.boolean().optional(),
@@ -84,6 +87,9 @@ const eventCreateSchema = z.object({
 const eventPatchSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   description: z.string().max(10000).optional(),
+  // Nullable on PATCH so "remove video call link" is expressible. An
+  // empty string would store a falsy href instead of clearing the column.
+  meetingUrl: meetingUrlSchema.nullable().optional(),
   location: z.string().max(500).optional(),
   startsAt: z.string().datetime().optional(),
   endsAt: z.string().datetime().optional(),
@@ -131,6 +137,7 @@ export function createCalendarPublicRouter(prisma: PrismaClient): Router {
           summary: e.title,
           description: e.description,
           location: e.location,
+          meetingUrl: e.meetingUrl,
           startsAt: e.startsAt,
           endsAt: e.endsAt,
           allDay: e.allDay,
@@ -181,6 +188,7 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         title: parsed.data.title,
         description: parsed.data.description,
         location: parsed.data.location,
+        meetingUrl: parsed.data.meetingUrl,
         startsAt: new Date(parsed.data.startsAt),
         endsAt: new Date(parsed.data.endsAt),
         allDay: parsed.data.allDay,
@@ -207,6 +215,7 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         title: parsed.data.title,
         description: parsed.data.description,
         location: parsed.data.location,
+        meetingUrl: parsed.data.meetingUrl,
         startsAt: parsed.data.startsAt ? new Date(parsed.data.startsAt) : undefined,
         endsAt: parsed.data.endsAt ? new Date(parsed.data.endsAt) : undefined,
         allDay: parsed.data.allDay,

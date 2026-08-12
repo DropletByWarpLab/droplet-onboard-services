@@ -24,6 +24,10 @@ export interface EventInput {
   title: string;
   description?: string | null;
   location?: string | null;
+  /** WARP-1874 — https-only video-call link. Callers MUST have run it
+   *  through `meetingUrlSchema` (or `parseMeetingLink`) first; this layer
+   *  persists what it is given. `null` clears an existing link. */
+  meetingUrl?: string | null;
   startsAt: Date;
   endsAt: Date;
   allDay?: boolean;
@@ -43,6 +47,7 @@ export async function createEvent(
       title: input.title,
       description: input.description ?? null,
       location: input.location ?? null,
+      meetingUrl: input.meetingUrl ?? null,
       startsAt: input.startsAt,
       endsAt: input.endsAt,
       allDay: input.allDay === true,
@@ -96,6 +101,7 @@ export async function updateEvent(
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
       ...(patch.location !== undefined ? { location: patch.location } : {}),
+      ...(patch.meetingUrl !== undefined ? { meetingUrl: patch.meetingUrl } : {}),
       ...(patch.startsAt !== undefined ? { startsAt: patch.startsAt } : {}),
       ...(patch.endsAt !== undefined ? { endsAt: patch.endsAt } : {}),
       ...(patch.allDay !== undefined ? { allDay: patch.allDay } : {}),

@@ -216,6 +216,12 @@ jobs:
       - name: Build workspace packages the orchestrator imports
         run: |
           npm run -w @droplet/fips-selftest build
+          # WARP-1874: tools-core now imports @droplet/shared-types, so it has
+          # to be built BEFORE tools-core. Exactly the failure this block's
+          # comment describes: rbac-v2-guard-rails.pg.test.ts died on
+          # "Cannot find module …/@droplet/shared-types/dist/index.js" — a
+          # resolve error in a suite that has nothing to do with meetings.
+          npm run -w @droplet/shared-types build
           npm run -w @droplet/tools-core build
           npm run -w @droplet/mcp-server build
           npm run -w @droplet/erp-connector build

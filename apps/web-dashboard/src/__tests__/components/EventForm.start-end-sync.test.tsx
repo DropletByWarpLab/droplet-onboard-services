@@ -38,6 +38,7 @@ function makeInitial(startIso: string, endIso: string): CalendarEvent {
     title: "Standup",
     description: null,
     location: null,
+    meetingUrl: null,
     startsAt: startIso,
     endsAt: endIso,
     allDay: false,

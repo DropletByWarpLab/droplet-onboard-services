@@ -1159,10 +1159,44 @@ export async function installOverlayVpnPeer(opts: {
   }>;
 }
 
+/** Outcome of `DELETE /vpn/peers` on the routing service.
+ *
+ *  A 200 here is NOT proof the peer is off the interface. Routing removes the
+ *  peer from UCI and then calls `uci.apply`; when that apply fails (a busy
+ *  router timing out the 5s budget is the realistic case) it still answers
+ *  200, but with `status: "staged"` / `applied: false` — meaning the config no
+ *  longer lists the peer while the peer is STILL LIVE on wg0 until something
+ *  reloads the interface.
+ *
+ *  That distinction has to survive the type boundary. Hard-coding
+ *  `status: "ok"` here made the staged branch invisible to TypeScript, and the
+ *  revoke route duly reported "revoked" over a working tunnel.
+ *
+ *  `applied` is optional because older routing builds omit it. Absent is not
+ *  false — see `isRevokeApplied`. */
+export interface DeleteVpnPeerResult {
+  status: "ok" | "staged";
+  /** `false` ⇒ removed from config but still live on the interface. Absent on
+   *  routing builds predating the staged-vs-live split. */
+  applied?: boolean;
+  interface: string;
+  removed: number;
+}
+
+/** True unless routing EXPLICITLY said the delete was not applied.
+ *
+ *  Absent-means-applied is deliberate: an older sidecar that cannot report
+ *  `applied` at all would otherwise fail every revoke, which trades a rare
+ *  half-revoke for a total loss of revocation. Only an explicit `false` — the
+ *  one case routing actually observed and reported — is treated as staged. */
+export function isRevokeApplied(result: DeleteVpnPeerResult): boolean {
+  return result.applied !== false;
+}
+
 export async function deleteVpnPeer(opts: {
   interface?: string;
   publicKey: string;
-}): Promise<{ status: "ok"; interface: string; removed: number }> {
+}): Promise<DeleteVpnPeerResult> {
   const body: Record<string, unknown> = { public_key: opts.publicKey };
   if (opts.interface) body.interface = opts.interface;
   const res = await routingFetch("/vpn/peers", {
@@ -1171,7 +1205,7 @@ export async function deleteVpnPeer(opts: {
     body: JSON.stringify(body),
     label: "VPN delete peer",
   });
-  return res.json() as Promise<{ status: "ok"; interface: string; removed: number }>;
+  return res.json() as Promise<DeleteVpnPeerResult>;
 }
 
 /** Fetch the state of a previously-started operation (WARP-40).

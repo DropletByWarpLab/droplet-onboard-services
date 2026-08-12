@@ -324,6 +324,27 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(themeControls.length).toBeGreaterThan(0);
   });
 
+  // ── WARP-1787 ────────────────────────────────────────────────────────
+  // Below 720px the drawer is a full-width sheet, so the backdrop strip it
+  // used to be dismissed by is gone — and a phone has no Escape key. The
+  // header Close button is the only way out of a drawer that opens from the
+  // bottom tab bar on EVERY route.
+  it("dismisses the drawer via the header Close button (WARP-1787)", async () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    const close = within(dialog).getByRole("button", { name: /^close$/i });
+    // Same 44px floor the drawer's own rows are held to above.
+    expect(close.className).toMatch(/h-11|h-\[44px\]|min-h-\[44px\]/);
+
+    fireEvent.click(close);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
   it("dismisses the drawer via Escape (WARP-289 primitive behaviour)", async () => {
     render(<Sidebar />);
     const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });

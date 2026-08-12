@@ -6,9 +6,25 @@
  * future — the server refuses past starts anyway), an optional length,
  * location, and note. Participants are implicit: everyone in the thread
  * gets the invite card and can RSVP from it.
+ *
+ * WARP-1874 — a video call link sits ALONGSIDE the physical location,
+ * behind an explicit "Add video call link" control (the Google Calendar /
+ * Outlook idiom). Two reasons it isn't just typed into Location:
+ *   - a meeting can be both in the living room and on a call, and the old
+ *     single field forced a choice;
+ *   - the link becomes a clickable href on other members' screens, and
+ *     deciding "is this location text really a link" by sniffing it is the
+ *     kind of guessing that produces the wrong answer on the day it
+ *     matters. The field is explicit, and so is the column behind it.
+ *
+ * The scheme check here is a courtesy — it puts the error next to the
+ * field at paste time. The server enforces the same rule and is what
+ * actually protects the render.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { Video } from "lucide-react";
+import { parseMeetingLink } from "@droplet/shared-types";
 import { Dialog } from "@/components/Dialog";
 import { createTeamChatMeeting } from "@/lib/api";
 
@@ -44,16 +60,39 @@ export function MeetingDialog({
   const [start, setStart] = useState("");
   const [duration, setDuration] = useState("");
   const [location, setLocation] = useState("");
+  const [meetingUrl, setMeetingUrl] = useState("");
+  // Explicit disclosure state, not `meetingUrl !== ""` — the organizer can
+  // legitimately have the field open and empty while they go find the link.
+  const [showMeetingUrl, setShowMeetingUrl] = useState(false);
   const [note, setNote] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const meetingUrlRef = useRef<HTMLInputElement | null>(null);
+
+  const trimmedUrl = meetingUrl.trim();
+  const link = parseMeetingLink(trimmedUrl);
 
   function reset() {
     setTitle("");
     setStart("");
     setDuration("");
     setLocation("");
+    setMeetingUrl("");
+    setShowMeetingUrl(false);
     setNote("");
+    setError(null);
+  }
+
+  function addMeetingUrl() {
+    setShowMeetingUrl(true);
+    // Focus follows the disclosure — a revealed field the user then has to
+    // go and click is a half-finished control.
+    requestAnimationFrame(() => meetingUrlRef.current?.focus());
+  }
+
+  function removeMeetingUrl() {
+    setMeetingUrl("");
+    setShowMeetingUrl(false);
     setError(null);
   }
 
@@ -71,6 +110,12 @@ export function MeetingDialog({
       setError("Pick a start time in the future.");
       return;
     }
+    if (trimmedUrl.length > 0 && !link) {
+      setError(
+        "Video call links need to start with https:// — paste the full link from Zoom, Teams, Meet or Webex.",
+      );
+      return;
+    }
     setCreating(true);
     setError(null);
     try {
@@ -79,6 +124,9 @@ export function MeetingDialog({
         startsAt: startsAt.toISOString(),
         ...(duration !== "" ? { durationMinutes: Number(duration) } : {}),
         ...(location.trim().length > 0 ? { location: location.trim() } : {}),
+        // Send the parser's normalized href, so the string the organizer
+        // was shown as valid is the string that gets stored.
+        ...(link ? { meetingUrl: link.url } : {}),
         ...(note.trim().length > 0 ? { note: note.trim() } : {}),
       });
       reset();
@@ -162,6 +210,54 @@ export function MeetingDialog({
             className="mx-field"
           />
         </label>
+
+        {/* Video call link — disclosed on request so the common case (a
+            room in the house) stays a single field. No height/fade
+            transition on the reveal: this surface's restraint is
+            deliberate, and animating a form field the user just asked for
+            delays the thing they asked for. */}
+        {showMeetingUrl ? (
+          <div className="mt-3">
+            <label className="block">
+              {/* No "(optional)" here — the whole section is already
+                  behind an opt-in control; repeating it is noise. */}
+              <span className="mx-label">Video call link</span>
+              <input
+                ref={meetingUrlRef}
+                type="url"
+                inputMode="url"
+                value={meetingUrl}
+                onChange={(e) => setMeetingUrl(e.target.value)}
+                maxLength={2048}
+                placeholder="https://…"
+                aria-describedby="meeting-url-hint"
+                className="mx-field"
+              />
+            </label>
+            <p id="meeting-url-hint" className="mx-hint">
+              {link
+                ? // Name what was recognized back to the organizer — an
+                  // unrecognized host shows as the host itself rather than
+                  // a made-up service name.
+                  link.providerName
+                  ? `${link.providerName} link`
+                  : link.host
+                : "Paste the invite link from Zoom, Teams, Meet or Webex."}
+            </p>
+            <button
+              type="button"
+              onClick={removeMeetingUrl}
+              className="mx-pill mt-2"
+            >
+              Remove video call link
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={addMeetingUrl} className="mx-pill mt-3">
+            <Video size={13} strokeWidth={1.5} aria-hidden="true" />
+            Add video call link
+          </button>
+        )}
 
         <label className="block mt-3">
           <span className="mx-label">

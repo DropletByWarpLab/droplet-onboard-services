@@ -721,6 +721,23 @@
   .animate-passkey-state-in {
     animation: passkey-state-in 200ms cubic-bezier(0.25, 0.1, 0.25, 1) both;
   }
+
+  /* WARP-1876 — the bulk-upload drop overlay. This is direct-manipulation
+     feedback: the pointer is already mid-gesture, so it gets the shortest
+     fade on the scale (120ms, no scale, no travel) — long enough not to
+     flash, short enough that the page still feels like it lit up under the
+     cursor. Frozen by the global prefers-reduced-motion rule below. */
+  @keyframes ds-dropzone-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .ds-dropzone-in {
+    animation: ds-dropzone-in 120ms cubic-bezier(0.25, 0.1, 0.25, 1) both;
+  }
 }
 
 /* ============================================================

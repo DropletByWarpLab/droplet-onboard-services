@@ -424,6 +424,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // "check the connection" — which is not the problem.
     remote_access_not_configured:
       "This Droplet doesn't have its internet address yet, so a linking code can't be created. Finish setting up remote access, then try again.",
+    // WARP-1763 review: the router took the device out of its configuration
+    // but the change never took effect, so the device still has a working
+    // connection to the network. Same bug class as the entry above — without a
+    // mapping this becomes the generic "we couldn't update remote access"
+    // retry line, which a person reads as "nothing happened". Here something
+    // DID happen and it left the device connected, which is the opposite of
+    // what they just asked for. Say it plainly, and say retrying is the fix.
+    REVOKE_STAGED:
+      "This device is still connected — the Droplet started removing it, but the change didn't take effect. Try revoking it again in a moment.",
   },
   camera: {
     NETWORK:

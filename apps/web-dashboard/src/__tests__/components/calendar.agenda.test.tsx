@@ -16,6 +16,7 @@ const fixtureEvent: CalendarEvent = {
   title: "Team standup",
   description: null,
   location: null,
+  meetingUrl: null,
   startsAt: evDate.toISOString(),
   endsAt: new Date(evDate.getTime() + 3600_000).toISOString(),
   allDay: false,
