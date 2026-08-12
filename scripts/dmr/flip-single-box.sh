@@ -53,8 +53,20 @@ die()  { printf '\033[1;31m[flip] FATAL\033[0m %s\n' "$*" >&2; printf '[flip] Ro
 dc() { (cd "$COMPOSE_DIR" && docker compose -p droplet "$@"); }
 
 # --- helpers -----------------------------------------------------------------
+# WARP-1908: resolve through a symlink BEFORE staging. docker/.env is a
+# symlink to ../.env (scripts/lib/compose.sh) so that Compose's ${...}
+# interpolation source and the services' `env_file:` are one and the same
+# file. `mv` onto the LINK path replaces the link with a regular file and
+# forks the two permanently — after which every key written to root .env
+# alone is invisible to interpolation and silently substitutes "". That is
+# how RAGAS_EVAL_USER went blank and took every RAG eval run down with it.
+# Writing through the link makes the ROOT_ENV/COMPOSE_ENV pair idempotent
+# on a correctly linked box instead of destructive.
+_resolve_env_target() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+
 upsert() { # upsert FILE KEY VALUE — last-wins replace-or-append, atomic-ish
-  local file="$1" key="$2" val="$3" stage
+  local file key="$2" val="$3" stage
+  file="$(_resolve_env_target "$1")"
   stage="${file}.flip.$$"
   ( umask 077; { grep -vE "^${key}=" "$file" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )

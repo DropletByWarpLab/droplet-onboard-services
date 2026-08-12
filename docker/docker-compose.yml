@@ -1164,12 +1164,24 @@ services:
       # orchestrator stores it as SERVICE_TOKEN_RAG_EVAL (TS convention
       # SERVICE_TOKEN_<consumer>).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_RAG_EVAL:-}
-      # Whose indexed corpus the eval measures — the runner passes it as
-      # ?user= on every search, because the service principal owns no
-      # files of its own. NO default: the operator sets it deliberately
-      # in .env; unset, runs fail fast with eval_user_required instead of
-      # scoring an empty corpus into the baselines.
-      - RAGAS_EVAL_USER=${RAGAS_EVAL_USER:-}
+      # RAGAS_EVAL_USER — whose indexed corpus the eval measures. The runner
+      # passes it as ?user= on every search, because the service principal
+      # owns no files of its own. NO default: the operator sets it
+      # deliberately in .env; unset, runs fail fast with eval_user_required
+      # instead of scoring an empty corpus into the baselines.
+      #
+      # WARP-1908: deliberately NOT re-declared here — it arrives via the
+      # `env_file: ../.env` above. Re-declaring it as
+      # `RAGAS_EVAL_USER=${RAGAS_EVAL_USER:-}` resolved the substitution
+      # against docker/.env — a DIFFERENT file from that env_file — which
+      # does not carry the key. That yielded "", and because `environment:`
+      # outranks `env_file:`, the empty string shadowed the operator's real
+      # value. Every search then went out with no ?user= and 400'd on
+      # eval_user_required, so every run aborted at the third query. Exactly
+      # the WARP-1860 failure recorded in the orchestrator block above,
+      # arriving through the other variable. ORCHESTRATOR_SERVICE_TOKEN
+      # below keeps its ${...} because it genuinely renames the key — that
+      # is the only reason to use substitution in this block.
       # RAGAS_OLLAMA_URL points at the judge LLM's OpenAI-compat /v1
       # endpoint. The default suits mac/dev where Ollama runs ON the host
       # (host.docker.internal). It does NOT work on the single-box shape:

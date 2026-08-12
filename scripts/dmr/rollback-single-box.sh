@@ -29,8 +29,17 @@ ok()  { printf '\033[1;32m[rollback] ok\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[rollback] FATAL\033[0m %s\n' "$*" >&2; exit 1; }
 dc()  { (cd "$COMPOSE_DIR" && docker compose -p droplet "$@"); }
 
+# WARP-1908: resolve through a symlink BEFORE staging — see the matching
+# note in flip-single-box.sh. docker/.env is a symlink to ../.env so that
+# Compose's ${...} interpolation source and the services' `env_file:` are
+# one file; `mv` onto the LINK path would replace it with a regular file
+# and fork the two permanently, silently blanking every key that only root
+# .env carries.
+_resolve_env_target() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+
 upsert() {
-  local file="$1" key="$2" val="$3" stage
+  local file key="$2" val="$3" stage
+  file="$(_resolve_env_target "$1")"
   stage="${file}.rollback.$$"
   ( umask 077; { grep -vE "^${key}=" "$file" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
@@ -38,7 +47,8 @@ upsert() {
   mv "$stage" "$file"
 }
 drop_key() {
-  local file="$1" key="$2" stage
+  local file key="$2" stage
+  file="$(_resolve_env_target "$1")"   # WARP-1908 — write through the symlink
   stage="${file}.rollback.$$"
   ( umask 077; grep -vE "^${key}=" "$file" 2>/dev/null > "$stage" || true )
   chmod --reference="$file" "$stage" 2>/dev/null || chmod 600 "$stage"
