@@ -17,8 +17,17 @@
  * Mock stack mirrors files-page.upload-partial-toast.test.tsx.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor, act } from "@testing-library/react";
 import type { FileEntryInfo } from "@/lib/types";
+
+/**
+ * Flush the microtask queue and one macrotask, inside `act`. The drop path
+ * is `readDroppedUploads(dataTransfer).then(onUpload)`, so whatever a drop
+ * was going to start has started by the time this resolves — which is what
+ * makes a NEGATIVE assertion after it mean something. `waitFor` cannot:
+ * it stops on the first poll that passes, and a negative always passes.
+ */
+const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
 const EXISTING: FileEntryInfo = {
   name: "already-here.txt",
@@ -390,10 +399,21 @@ describe("Files page — a dropped folder arrives whole, or says why not", () =>
 
     fireEvent.drop(screen.getByLabelText("Breadcrumbs"), flatDrop([]));
 
-    await waitFor(() => expect(uploadFiles).not.toHaveBeenCalled());
+    // This assertion used to sit inside `waitFor`, which a NEGATIVE
+    // expectation satisfies on its very first poll — it waited for nothing
+    // and could not fail (WARP-1876 review round 2). Settle the drop path,
+    // then assert.
+    await settle();
+    expect(uploadFiles).not.toHaveBeenCalled();
     // Dragging selected text across the page is not a failed upload.
     expect(toastSpy).not.toHaveBeenCalled();
     expect(createDirectory).not.toHaveBeenCalled();
+
+    // …and the settle window is not vacuous: the same gesture carrying one
+    // real file reaches the wire inside it.
+    fireEvent.drop(screen.getByLabelText("Breadcrumbs"), flatDrop(["real.txt"]));
+    await settle();
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
   });
 });
 
