@@ -46,7 +46,7 @@ import {
   localModelIdentifiers,
 } from "../services/active-model.service.js";
 import { requireRole } from "../middleware/auth.js";
-import { decideCloudTurn } from "../services/cloud-access.service.js";
+import { decideCloudTurn, isLocalProvider } from "../services/cloud-access.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
@@ -805,10 +805,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // additive since this ticket). The models list can't be trusted as
       // complete, so stamp `degraded: true` on the forwarded response and —
       // like the unreachable fallback above — never cache it: the next
-      // request re-queries so the signal clears the moment Ollama recovers.
-      // A cloud-only provider failure keeps today's behavior (cached,
-      // unflagged): only ollama drives the wizard's local-AI state.
-      if (models.degraded_providers?.includes("ollama")) {
+      // request re-queries so the signal clears the moment the runtime
+      // recovers. A cloud-only provider failure keeps today's behavior
+      // (cached, unflagged): only the on-box provider drives the wizard's
+      // local-AI state. WARP-1926 — match the accept-set, not a literal.
+      if (models.degraded_providers?.some(isLocalProvider)) {
         console.warn(
           "[llm/models] ai-gateway reports degraded providers; serving uncached:",
           models.degraded_providers,

@@ -54,7 +54,19 @@ AI_GATEWAY_SAMPLER_TOKEN = (
 
 # Allowlist of providers that are considered "local" — never gated.
 # Anything else is "off-LAN" and must clear cloud_model_escape=true.
-LOCAL_PROVIDERS = frozenset({"ollama", "ollama_local"})
+#
+# `local` is the canonical name (WARP-1926). The two `ollama*` spellings are
+# LEGACY ALIASES and must stay: `provider` is a PERSISTED column
+# (`ChatSession.provider`, `ChatMessage.provider`), so every turn recorded
+# before the rename carries `ollama` on disk and still has to clear this gate
+# when it is replayed. Dropping them 451s conversation history on a box that
+# has been serving since before the rename.
+#
+# Widening this set is the safe direction (it exempts MORE traffic from the
+# cloud gate); narrowing it is what causes an outage. Mirrored by
+# `LOCAL_PROVIDERS` in apps/orchestrator/src/services/cloud-access.service.ts,
+# pinned by a parity test that parses THIS line.
+LOCAL_PROVIDERS = frozenset({"local", "ollama", "ollama_local"})
 
 
 @dataclass

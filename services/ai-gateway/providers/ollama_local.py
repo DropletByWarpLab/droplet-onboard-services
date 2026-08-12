@@ -579,12 +579,29 @@ class _LimitsCache:
             logger.warning("appliance_limits_refresh_failed: %s", e)
 
 
-def prettify_ollama_name(raw: str) -> str:
-    """Turn an Ollama tag like 'llama3.1:8b' into a display name 'Llama 3.1 8B'.
+def prettify_model_name(raw: str) -> str:
+    """Turn a local model id into a display name.
+
+    'llama3.1:8b'                   -> 'Llama 3.1 8B'
+    'docker.io/ai/gpt-oss:20B-F16'  -> 'Gpt-oss 20B F16'
 
     Other providers already return curated display names (e.g. 'Claude Sonnet 4');
-    Ollama returns the raw tag, so match the convention at the provider edge.
+    the local runtimes return raw ids, so match the convention at the provider
+    edge.
+
+    WARP-1926 — the registry path must be stripped FIRST. Ollama ids are bare
+    tags (`llama3.1:8b`), but Docker Model Runner reports FULLY QUALIFIED OCI
+    references, and this function used to title-case the whole thing: the box's
+    own model rendered as **'Docker.io/ai/gpt-oss 20B F16'** in the chat picker,
+    the models page and the setup wizard. Only the last path segment is a model
+    name; everything before the final `/` is registry host + namespace, which
+    carries no display information (the unique id is kept separately in
+    `ModelInfo.id`, so nothing is lost).
     """
+    # Registry host / namespace -> drop. `rsplit` is safe for a bare Ollama tag
+    # (no slash -> unchanged) and for a port-bearing host (`localhost:5000/ai/x`
+    # -> `x`), because the split is on `/` and the tag is parsed AFTER it.
+    raw = raw.rsplit("/", 1)[-1]
     base, _, tag = raw.partition(":")
     base_spaced = re.sub(r"([A-Za-z])(\d)", r"\1 \2", base)
     base_pretty = " ".join(
@@ -772,8 +789,13 @@ class OllamaLocalProvider(BaseProvider):
             out.append(
                 ModelInfo(
                     id=name,
-                    provider="ollama",
-                    name=prettify_ollama_name(name),
+                    # WARP-1926: `local` names WHERE inference runs, not which
+                    # daemon serves it. Was `ollama`, which became a lie the
+                    # day DMR shipped as the default runtime (WARP-1870) —
+                    # this endpoint reported `ollama` while Docker Model
+                    # Runner served every token.
+                    provider="local",
+                    name=prettify_model_name(name),
                     context_window=None,
                     capabilities=await self._capabilities(name),
                 )

@@ -2417,15 +2417,22 @@ services:
     cpus: ${OLLAMA_CPUS:-4.0}
     pids_limit: ${OLLAMA_PIDS_LIMIT:-2048}
 
-  # --- Docker Model Runner (DARK — WARP-1772, epic WARP-1740) ---------------
-  # The second implementation of the ADR-036 runtime contract, wired for the
-  # single-box shape but NEVER started by default: `dmr` is a non-default
-  # profile, so a bare `docker compose up` starts nothing here and
-  # `docker compose config --services` does not even list it until an operator
-  # adds `dmr` to COMPOSE_PROFILES (or passes --profile dmr). Flipping the
-  # serving default is NOT this service's job — that is WARP-1749 (multi-box)
-  # / WARP-1772 phase 2 (this shape), both hard-gated on a lab soak, the
-  # size_vram product decision, and explicit human sign-off (ADR-036 §8).
+  # --- Docker Model Runner (THE DEFAULT RUNTIME — WARP-1870) ----------------
+  # The second implementation of the ADR-036 runtime contract, and since
+  # WARP-1870 the one a FRESH BOX PROVISIONS TO: `scripts/lib/secrets.sh`
+  # writes `INFERENCE_RUNTIME=dmr` and `.env.example` ships
+  # `COMPOSE_PROFILES=linux,single-box,dmr`, so this service starts on a
+  # default install and `ollama` below does not.
+  #
+  # It is still profile-gated rather than unconditional, because the profile
+  # token IS the runtime switch: `scripts/lib/single-box.sh` appends exactly
+  # one of `dmr` / `ollama` from INFERENCE_RUNTIME and strips the other, so a
+  # box can never run both (the WARP-1826 SINGLE GPU OWNER rule) or neither.
+  #
+  # HISTORY (this header said "DARK — NEVER started by default" until
+  # WARP-1926 corrected it): the flip was gated on a lab soak and human
+  # sign-off per ADR-036 §8. Both happened — WARP-1772 phase 2 shipped the
+  # single-box flip, WARP-1870 made it the provisioning default.
   #
   # Phase-0 gate (WARP-1741) PASSED on this box 2026-08-08: gfx1200 visible
   # via rocminfo inside the container; decode 103.5% of Ollama on the 3B pair
