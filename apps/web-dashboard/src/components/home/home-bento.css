@@ -845,6 +845,11 @@ body:has(.droplet-home) {
 .dh-opt-txt {
   flex: 1;
   min-width: 0;
+  /* WARP-1899: stack the title over the description. As a plain inline
+     wrapper the two spans rendered flush on one line
+     ("BalancedComfortable spacing…") and the .d margin-top below was inert. */
+  display: flex;
+  flex-direction: column;
 }
 .dh-opt-txt .t {
   font-size: 14px;
