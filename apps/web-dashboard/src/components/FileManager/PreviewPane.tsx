@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { X, Download, FileText, Pencil } from "lucide-react";
-import { getDownloadUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
+import { getDownloadUrl, getPreviewUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import { isEditableOfficeFile } from "@/lib/office-files";
 import { labelForMime } from "@/lib/mime-labels";
@@ -46,8 +46,15 @@ function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "te
 
 /**
  * Full-bleed preview modal supporting images, PDFs, video, audio, and text.
- * Videos and audio stream directly from the download endpoint. PDFs use a
- * native <object> tag with the browser's PDF viewer — no external JS lib.
+ * Videos and audio stream directly from the file endpoint. PDFs use a native
+ * <object> tag with the browser's PDF viewer — no external JS lib.
+ *
+ * Every embedded tag loads `getPreviewUrl`, NOT `getDownloadUrl`. The download
+ * URL answers with `Content-Disposition: attachment`, and a browser honours that
+ * inside <object> by downloading the file — which made Preview raise a Save-As
+ * dialog over an empty modal instead of rendering. The preview URL is the same
+ * bytes served inline. The Download button still uses the attachment URL, which
+ * is the one place that behaviour is wanted.
  */
 export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPaneProps) {
   const [textContent, setTextContent] = useState<string | null>(null);
@@ -104,7 +111,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
     };
   }, [file.path, kind]);
 
-  const downloadUrl = getDownloadUrl(file.path);
+  const previewUrl = getPreviewUrl(file.path);
 
   return (
     <div
@@ -188,8 +195,8 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
                 alt={file.name}
                 className="max-w-full max-h-[calc(90vh-64px)] object-contain"
                 onError={(e) => {
-                  // Fall back to the raw download endpoint if the preview API 404s
-                  (e.target as HTMLImageElement).src = downloadUrl;
+                  // Fall back to the raw file bytes if the thumbnail API 404s
+                  (e.target as HTMLImageElement).src = previewUrl;
                 }}
               />
             </div>
@@ -197,7 +204,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
 
           {kind === "pdf" && (
             <object
-              data={`${downloadUrl}#toolbar=0`}
+              data={`${previewUrl}#toolbar=0`}
               type="application/pdf"
               className="w-full h-[calc(90vh-64px)]"
             >
@@ -217,7 +224,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
           {kind === "video" && (
             <div className="flex items-center justify-center min-h-full p-4">
               <video
-                src={downloadUrl}
+                src={previewUrl}
                 controls
                 className="max-w-full max-h-[calc(90vh-64px)]"
               />
@@ -240,7 +247,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
                 >
                   {file.name}
                 </p>
-                <audio src={downloadUrl} controls className="w-full" />
+                <audio src={previewUrl} controls className="w-full" />
               </div>
             </div>
           )}

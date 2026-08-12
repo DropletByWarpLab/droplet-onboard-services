@@ -59,6 +59,7 @@ import type { ChatProject } from "@/lib/api";
 // shared shell set; chat-indigo.css carries the chat-specific surface.
 import "@/components/shell/indigo-tokens.css";
 import "@/components/chat/chat-indigo.css";
+import { isLocalProvider } from "@/lib/provider";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -277,7 +278,7 @@ export default function ChatPage() {
     if (!selectedModel && models.length > 0) {
       const preferred =
         (defaultModel && models.find((m) => m.id === defaultModel)) ||
-        models.find((m) => m.provider === "ollama") ||
+        models.find((m) => isLocalProvider(m.provider)) ||
         models[0];
       setSelectedModel(preferred.id);
     }
@@ -593,7 +594,7 @@ export default function ChatPage() {
 
   // WARP-855 — design-handoff header: conversation title (first user
   // message, clamped) or "New chat", plus the "local · on-device" privacy
-  // tag whenever the selected model runs on the box (ollama provider).
+  // tag whenever the selected model runs on the box (local provider).
   const headerTitle = useMemo(() => {
     const first = messages.find((m) => m.role === "user")?.content.trim();
     if (!first) return "New chat";
@@ -601,7 +602,7 @@ export default function ChatPage() {
     return flat.length > 64 ? `${flat.slice(0, 63)}…` : flat;
   }, [messages]);
   const isLocalModel = useMemo(
-    () => models.find((m) => m.id === selectedModel)?.provider === "ollama",
+    () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
     [models, selectedModel],
   );
 

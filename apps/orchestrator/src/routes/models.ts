@@ -33,6 +33,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
+import { isLocalProvider } from "../services/cloud-access.service.js";
 import {
   getModelsPagePayload,
   type ModelsPagePayload,
@@ -94,13 +95,14 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         // degraded), pass `null` so the resolver treats the installed set as
         // unknown and returns the stored value unresolved rather than
         // nulling it out — or fabricating a fallback — against an
-        // incomplete list. Ollama-only, same "local never points off-box"
+        // incomplete list. On-box providers only, same "local never
+        // points off-box"
         // invariant as localModelIdentifiers.
         const installed = payload.degraded
           ? null
           : new Set(
               payload.local
-                .filter((m) => m.provider === "ollama")
+                .filter((m) => isLocalProvider(m.provider))
                 .map((m) => m.name),
             );
         const activeModel = resolveActiveChatModel(

@@ -46,7 +46,7 @@ import {
   localModelIdentifiers,
 } from "../services/active-model.service.js";
 import { requireRole } from "../middleware/auth.js";
-import { decideCloudTurn } from "../services/cloud-access.service.js";
+import { decideCloudTurn, isLocalProvider } from "../services/cloud-access.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
@@ -805,10 +805,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // additive since this ticket). The models list can't be trusted as
       // complete, so stamp `degraded: true` on the forwarded response and —
       // like the unreachable fallback above — never cache it: the next
-      // request re-queries so the signal clears the moment Ollama recovers.
-      // A cloud-only provider failure keeps today's behavior (cached,
-      // unflagged): only ollama drives the wizard's local-AI state.
-      if (models.degraded_providers?.includes("ollama")) {
+      // request re-queries so the signal clears the moment the runtime
+      // recovers. A cloud-only provider failure keeps today's behavior
+      // (cached, unflagged): only the on-box provider drives the wizard's
+      // local-AI state. WARP-1926 — match the accept-set, not a literal.
+      if (models.degraded_providers?.some(isLocalProvider)) {
         console.warn(
           "[llm/models] ai-gateway reports degraded providers; serving uncached:",
           models.degraded_providers,
@@ -1201,6 +1202,42 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               messageId: assistantMessageId,
             }
           : undefined;
+
+      // WARP-1921 — the §3 continuity input, read from the persisted trace.
+      //
+      // The replayed `chatReq.messages` cannot carry it: chatRequestSchema
+      // declares only `{role, content, tool_call_id}`, so zod strips
+      // `tool_calls` off every replayed assistant turn. Without this, a
+      // follow-up naming no domain keyword ("rename it to Blue Spruce")
+      // falls back to core-only advertisement and burns a self-heal
+      // iteration — the gap the spec's §6 outcome named as the prerequisite
+      // to shipping TOOL_SELECTION_MODE.
+      //
+      // Skipped entirely when selection is off (nothing consumes it) or the
+      // turn is ephemeral/unauthenticated (no conversation to read).
+      //
+      // try/catch, NOT `.catch()`: a `.catch()` only handles a REJECTED
+      // promise. If `getConversationToolNames` is missing from the object
+      // entirely (an injected double, a partially-migrated deployment) the
+      // call throws TypeError synchronously, before any promise exists — and
+      // a 500 on every chat turn is a spectacular way for an optimisation to
+      // fail. Continuity must never cost the user their answer; try/catch is
+      // what enforces that rather than merely asserting it.
+      let priorToolNames: string[] = [];
+      if (config.TOOL_SELECTION_MODE !== "off" && conversationId && userId) {
+        try {
+          priorToolNames = await persistence.getConversationToolNames(
+            conversationId,
+            userId,
+          );
+        } catch (err: unknown) {
+          // eslint-disable-next-line no-console
+          console.error(
+            "[llm/chat] continuity lookup failed; advertising without prior domains:",
+            err,
+          );
+        }
+      }
 
       // Track tool calls observed during streaming so we can include
       // them in the persisted assistant message at the end of the turn.
@@ -1808,6 +1845,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             max_iter: chatReq.max_iter,
             context_window: config.OLLAMA_CONTEXT_LENGTH,
             tool_selection_mode: config.TOOL_SELECTION_MODE,
+            // WARP-1921 — cross-turn continuity for §3 selection.
+            prior_tool_names: priorToolNames,
             allowed_tools: allowedForUser,
             // WARP-1529 — the same §3 scope, re-checked fail-closed before
             // every tool dispatch inside the loop.
@@ -1893,6 +1932,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           max_iter: chatReq.max_iter,
           context_window: config.OLLAMA_CONTEXT_LENGTH,
           tool_selection_mode: config.TOOL_SELECTION_MODE,
+          // WARP-1921 — cross-turn continuity for §3 selection.
+          prior_tool_names: priorToolNames,
           allowed_tools: allowedForUser,
           // WARP-1529 — the same §3 scope, re-checked fail-closed before
           // every tool dispatch inside the loop.

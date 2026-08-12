@@ -17,6 +17,7 @@
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import { isLocalProvider } from "./cloud-access.service.js";
 import { bytesToGiB, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import { cacheGet } from "./cache.service.js";
 import {
@@ -195,13 +196,16 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   // whose local Ollama provider raised during the listing fan-out, per
   // WARP-1284's `degraded_providers`) sets `degraded: true` so the page
   // can say "can't reach your AI service" instead of "no local models".
-  // A cloud-only provider failure does NOT degrade: only ollama serves
-  // local models (same rule as GET /api/llm/models).
+  // A cloud-only provider failure does NOT degrade: only the on-box
+  // provider serves local models (same rule as GET /api/llm/models).
+  // WARP-1926: match on the LOCAL_PROVIDERS accept-set, not the literal
+  // `ollama` — the gateway emits `local` now, and a stale literal here
+  // silently reports "not degraded" while the AI service is down.
   let local: LocalModelInfo[] = [];
   let degraded = false;
   try {
     const resp = await aiGateway.listModels();
-    degraded = resp.degraded_providers?.includes("ollama") ?? false;
+    degraded = resp.degraded_providers?.some(isLocalProvider) ?? false;
     local = resp.models.map((m) => ({
       name: m.name,
       family: inferFamily(m.name),
@@ -237,7 +241,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       const metrics = await fetchLocalModelMetrics();
       if (metrics.size > 0) {
         for (const row of local) {
-          if (row.provider !== "ollama") continue;
+          if (!isLocalProvider(row.provider)) continue;
           const m = metricsFor(metrics, row.name);
           if (!m) continue;
           row.gbOnDisk = m.gbOnDisk;
@@ -270,7 +274,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
         // confidently wrong bar we draw none, and the card says the usage
         // breakdown isn't available. Ollama reports every size, so this
         // condition is always true there and the bars are unchanged.
-        const localRows = local.filter((r) => r.provider === "ollama");
+        const localRows = local.filter((r) => isLocalProvider(r.provider));
         const everySizeKnown =
           localRows.length > 0 && localRows.every((r) => r.gbOnDisk != null);
         const totalGb = localRows.reduce((s, r) => s + (r.gbOnDisk ?? 0), 0);
@@ -289,7 +293,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // auto-run a benchmark on a page load (it would load/evict models).
     try {
       for (const row of local) {
-        if (row.provider !== "ollama") continue;
+        if (!isLocalProvider(row.provider)) continue;
         const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.name));
         if (bench) {
           row.tokensPerSec = bench.tokensPerSec;

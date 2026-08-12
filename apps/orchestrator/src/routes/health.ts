@@ -7,6 +7,7 @@ import { isRouterHealthy } from "../services/network.service.js";
 import { isFrigateHealthy } from "../services/camera.service.js";
 import { switchHealthDetail } from "../services/switch.client.js";
 import { getAggregateHealth } from "../services/health-monitor.service.js";
+import { inferenceRuntime } from "../services/inference-runtime.js";
 import type { HealthResponse } from "../types/index.js";
 
 const startTime = Date.now();
@@ -51,6 +52,14 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       status: allOk ? "ok" : "degraded",
       uptime: Math.floor((Date.now() - startTime) / 1000),
       version: "0.1.0",
+      // WARP-1926 — which inference runtime this box actually serves from.
+      // The dashboard had NO way to know: Settings hardcoded the string
+      // "Ollama (on-device)", so every DMR box (the shipped default since
+      // WARP-1870) told its owner it was running a daemon that is not
+      // installed. This is the same class of deployment fact as `version`
+      // and the `services` map already on this unauthenticated route — it
+      // names a runtime, never an endpoint, model or credential.
+      inferenceRuntime: inferenceRuntime(),
       services: {
         db: dbOk,
         redis: redisOk,

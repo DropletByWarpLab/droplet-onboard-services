@@ -107,6 +107,8 @@ interface MessageRow {
   sharedNcFileId: number | null;
   sharedFileName: string | null;
   sharedFilePath: string | null;
+  /** WARP-1898 — the space `sharedFilePath` is relative to. */
+  sharedFileSpace: string | null;
   sharedChatSessionId: string | null;
   sharedChatSnapshot: unknown;
   meetingId: string | null;
@@ -276,6 +278,7 @@ function createStub(seed: {
             sharedNcFileId: null,
             sharedFileName: null,
             sharedFilePath: null,
+            sharedFileSpace: null,
             sharedChatSessionId: null,
             sharedChatSnapshot: null,
             meetingId: null,
@@ -928,6 +931,7 @@ describe("GET /team-chat/threads/:id/messages — meeting payload", () => {
           sharedNcFileId: null,
           sharedFileName: null,
           sharedFilePath: null,
+          sharedFileSpace: null,
           sharedChatSessionId: null,
           sharedChatSnapshot: null,
           meetingId: meeting.id,

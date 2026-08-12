@@ -53,34 +53,56 @@ describe("contentTypeForFilename", () => {
 // deliberately permissive (it is a "what is this file" answer); this is the
 // narrower "may a browser RENDER it on our origin" answer, and the two must
 // not be collapsed into one map.
+//
+// The bug the safelist exists to serve (WARP-1919): the preview modal embeds
+// the file in an <object>/<video>/<audio>, and those obey
+// `Content-Disposition: attachment` by DOWNLOADING. A PDF has to come back
+// renderable or Preview pops a Save-As dialog over an empty modal.
 describe("inlinePreviewContentType", () => {
   it("returns the inert type for safelisted extensions (case-insensitive)", () => {
+    expect(inlinePreviewContentType("report.pdf")).toBe("application/pdf");
     expect(inlinePreviewContentType("report.PDF")).toBe("application/pdf");
     expect(inlinePreviewContentType("clip.mp4")).toBe("video/mp4");
     expect(inlinePreviewContentType("song.mp3")).toBe("audio/mpeg");
+    expect(inlinePreviewContentType("voice.mp3")).toBe("audio/mpeg");
     expect(inlinePreviewContentType("photo.jpeg")).toBe("image/jpeg");
     expect(inlinePreviewContentType("notes.txt")).toBe("text/plain; charset=utf-8");
   });
 
-  // THE guard. Both of these are in `CONTENT_TYPE_BY_EXT` and both execute
-  // JavaScript when rendered, so a safelist built by filtering that map — or
-  // widened "just to preview a page" — reintroduces stored XSS against the
-  // session cookie. They must never resolve to a renderable type.
-  it("REFUSES script-capable types (html, svg) — the whole point", () => {
+  it("is case- and path-insensitive, matching on the extension alone", () => {
+    expect(inlinePreviewContentType("SCAN.PDF")).toBe("application/pdf");
+    expect(inlinePreviewContentType("My Report (final).PdF")).toBe("application/pdf");
+  });
+
+  // THE guard. `contentTypeForFilename` happily maps .html and .svg to
+  // renderable types, and both execute JavaScript when rendered, so a safelist
+  // built by filtering that map — or widened "just to preview a page" —
+  // reintroduces stored XSS against the session cookie. They must never
+  // resolve to a renderable type; they fall through to an attachment, forever.
+  it("REFUSES script-capable types (html, svg, xhtml) — the whole point", () => {
+    expect(contentTypeForFilename("evil.html")).toBe("text/html; charset=utf-8");
     expect(inlinePreviewContentType("evil.html")).toBeNull();
     expect(inlinePreviewContentType("evil.HTML")).toBeNull();
     expect(inlinePreviewContentType("evil.htm")).toBeNull();
+    expect(inlinePreviewContentType("evil.xhtml")).toBeNull();
+    expect(contentTypeForFilename("evil.svg")).toBe("image/svg+xml");
     expect(inlinePreviewContentType("evil.svg")).toBeNull();
     expect(inlinePreviewContentType("evil.SVG")).toBeNull();
   });
 
   it("refuses unknown and extension-less names rather than guessing", () => {
     // Contrast with contentTypeForFilename, which answers octet-stream here.
-    // Null is not the same answer: it means "do not render", and an unknown
-    // type is exactly the case that must not be rendered.
+    // Null is not the same answer: it means "do not render", and an unknown or
+    // off-safelist type must never be *silently* downgraded to octet-stream
+    // and rendered — the route reads null as "attachment".
     expect(inlinePreviewContentType("archive.xyz")).toBeNull();
+    expect(inlinePreviewContentType("archive.zip")).toBeNull();
+    expect(inlinePreviewContentType("installer.exe")).toBeNull();
     expect(inlinePreviewContentType("noextension")).toBeNull();
+    expect(inlinePreviewContentType("Makefile")).toBeNull();
+    expect(inlinePreviewContentType("")).toBeNull();
     expect(contentTypeForFilename("archive.xyz")).toBe("application/octet-stream");
+    expect(contentTypeForFilename("archive.zip")).toBe("application/octet-stream");
   });
 
   // A double extension resolves on the LAST one, which is also what the

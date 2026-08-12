@@ -20,6 +20,8 @@ const DOCX_MIME =
 vi.mock("@/lib/api", () => ({
   getDocsStatus: vi.fn().mockResolvedValue({ state: "unavailable", engine: "onlyoffice" }),
   getDownloadUrl: (p: string) => `/api/files/download?path=${encodeURIComponent(p)}`,
+  getPreviewUrl: (p: string) =>
+    `/api/files/download?path=${encodeURIComponent(p)}&disposition=inline`,
   getThumbnailUrl: (p: string) => `/api/files/thumbnail?path=${encodeURIComponent(p)}`,
 }));
 

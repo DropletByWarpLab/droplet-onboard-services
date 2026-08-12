@@ -1164,12 +1164,24 @@ services:
       # orchestrator stores it as SERVICE_TOKEN_RAG_EVAL (TS convention
       # SERVICE_TOKEN_<consumer>).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_RAG_EVAL:-}
-      # Whose indexed corpus the eval measures — the runner passes it as
-      # ?user= on every search, because the service principal owns no
-      # files of its own. NO default: the operator sets it deliberately
-      # in .env; unset, runs fail fast with eval_user_required instead of
-      # scoring an empty corpus into the baselines.
-      - RAGAS_EVAL_USER=${RAGAS_EVAL_USER:-}
+      # RAGAS_EVAL_USER — whose indexed corpus the eval measures. The runner
+      # passes it as ?user= on every search, because the service principal
+      # owns no files of its own. NO default: the operator sets it
+      # deliberately in .env; unset, runs fail fast with eval_user_required
+      # instead of scoring an empty corpus into the baselines.
+      #
+      # WARP-1908: deliberately NOT re-declared here — it arrives via the
+      # `env_file: ../.env` above. Re-declaring it as
+      # `RAGAS_EVAL_USER=${RAGAS_EVAL_USER:-}` resolved the substitution
+      # against docker/.env — a DIFFERENT file from that env_file — which
+      # does not carry the key. That yielded "", and because `environment:`
+      # outranks `env_file:`, the empty string shadowed the operator's real
+      # value. Every search then went out with no ?user= and 400'd on
+      # eval_user_required, so every run aborted at the third query. Exactly
+      # the WARP-1860 failure recorded in the orchestrator block above,
+      # arriving through the other variable. ORCHESTRATOR_SERVICE_TOKEN
+      # below keeps its ${...} because it genuinely renames the key — that
+      # is the only reason to use substitution in this block.
       # RAGAS_OLLAMA_URL points at the judge LLM's OpenAI-compat /v1
       # endpoint. The default suits mac/dev where Ollama runs ON the host
       # (host.docker.internal). It does NOT work on the single-box shape:
@@ -2417,15 +2429,22 @@ services:
     cpus: ${OLLAMA_CPUS:-4.0}
     pids_limit: ${OLLAMA_PIDS_LIMIT:-2048}
 
-  # --- Docker Model Runner (DARK — WARP-1772, epic WARP-1740) ---------------
-  # The second implementation of the ADR-036 runtime contract, wired for the
-  # single-box shape but NEVER started by default: `dmr` is a non-default
-  # profile, so a bare `docker compose up` starts nothing here and
-  # `docker compose config --services` does not even list it until an operator
-  # adds `dmr` to COMPOSE_PROFILES (or passes --profile dmr). Flipping the
-  # serving default is NOT this service's job — that is WARP-1749 (multi-box)
-  # / WARP-1772 phase 2 (this shape), both hard-gated on a lab soak, the
-  # size_vram product decision, and explicit human sign-off (ADR-036 §8).
+  # --- Docker Model Runner (THE DEFAULT RUNTIME — WARP-1870) ----------------
+  # The second implementation of the ADR-036 runtime contract, and since
+  # WARP-1870 the one a FRESH BOX PROVISIONS TO: `scripts/lib/secrets.sh`
+  # writes `INFERENCE_RUNTIME=dmr` and `.env.example` ships
+  # `COMPOSE_PROFILES=linux,single-box,dmr`, so this service starts on a
+  # default install and `ollama` below does not.
+  #
+  # It is still profile-gated rather than unconditional, because the profile
+  # token IS the runtime switch: `scripts/lib/single-box.sh` appends exactly
+  # one of `dmr` / `ollama` from INFERENCE_RUNTIME and strips the other, so a
+  # box can never run both (the WARP-1826 SINGLE GPU OWNER rule) or neither.
+  #
+  # HISTORY (this header said "DARK — NEVER started by default" until
+  # WARP-1926 corrected it): the flip was gated on a lab soak and human
+  # sign-off per ADR-036 §8. Both happened — WARP-1772 phase 2 shipped the
+  # single-box flip, WARP-1870 made it the provisioning default.
   #
   # Phase-0 gate (WARP-1741) PASSED on this box 2026-08-08: gfx1200 visible
   # via rocminfo inside the container; decode 103.5% of Ollama on the 3B pair

@@ -25,7 +25,11 @@ import {
   searchFiles,
   type ConversationSummary,
 } from "@/lib/api";
-import type { FileEntryInfo, FileSpacesResponse } from "@/lib/types";
+import type {
+  FileEntryInfo,
+  FileSpaceId,
+  FileSpacesResponse,
+} from "@/lib/types";
 // WARP-1808 — display-only "Workspace" mapping for the household space; the
 // option VALUE stays the raw space id the files API expects.
 import { spaceRenderName } from "@/lib/space-attribution";
@@ -34,6 +38,14 @@ export interface PickedFile {
   ncFileId: number;
   name: string;
   path: string;
+  /**
+   * WARP-1898 — the space `path` is relative to. `undefined` when the pick
+   * came from the SEARCH tab: that search spans every space the caller can
+   * reach and the results carry no space of their own, so the selector's
+   * current value would be a guess. Omitting it lets the server decide from
+   * the file registry rather than recording something we don't know.
+   */
+  space?: FileSpaceId;
 }
 
 /**
@@ -207,6 +219,9 @@ export function ForwardFileDialog({
                     ncFileId: entry.ncFileId as number,
                     name: entry.name,
                     path: entry.path,
+                    // Browsed pick → the selector IS the space. Searched
+                    // pick → unknown, so say nothing (see PickedFile).
+                    space: searching ? undefined : space,
                   })
                 }
                 className={`mx-row items-center ${pickable ? "" : "is-disabled"}`}

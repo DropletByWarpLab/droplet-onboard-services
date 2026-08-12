@@ -299,3 +299,53 @@ The staged protocol ran the same evening the branch merged (7 × 36-row cells,
 3. **§3 selection — stays `off` shipped** (continuity prerequisite stands),
    but the phase-3 cell scored 24/36 — best of the sweep — with zero
    self-heals and zero degradation drops; re-decide after continuity lands.
+
+## §3 re-decision (2026-08-12, WARP-1921) — shipped default flipped to `domains`
+
+The continuity prerequisite named above has landed, so the re-decide is due.
+
+**Prerequisite closed.** Correction #2 (§3 continuity inert through
+`/api/llm/chat`) is fixed by reading the prior turns' tool names from the
+persisted trace — `ChatPersistenceService.getConversationToolNames`, passed to
+the loop as `prior_tool_names` — rather than from `tool_calls` on replayed
+messages, which `chatRequestSchema` never declared and zod therefore stripped.
+Reading the trace is also authoritative: a client cannot claim to have used a
+tool it did not. Within-turn `tool_calls` continuity is unchanged and still
+required (a turn's own calls are not persisted until it finalizes).
+
+**Why flip now, beyond the 24/36 cell.** The advertisement had run out of
+room. Measured on `bf30e753`, the default chat turn carried 71 tools = 50,665
+chars = **12,666 tokens**, against a 15,360-token ceiling — leaving 28 tokens.
+WARP-1893's `rename_camera` could not fit at *any* description length (244
+chars minimum vs 112 free), and the WARP-1892 epic needs ~8 more tools. The
+canary was blocking every new tool while real turns had ~10K tokens spare.
+
+**Measured effect of `domains` (2026-08-12):**
+
+| Turn | Tools | tools[] chars | Worst-case turn |
+| --- | --- | --- | --- |
+| `off` (previous default) | 71 | 50,665 | 15,617 tok — over ceiling |
+| "rename the driveway camera…" | 15 | 10,421 | 5,556 tok |
+| "what's in my documents folder?" | 13 | 8,635 | 5,109 tok |
+| "hey, how are you?" | 4 | 3,165 | 3,742 tok |
+
+That matches the §3 prediction ("~11k → ~3–5k"). Prompt prefill drops
+proportionally on every turn, which is the latency win on a local GPU.
+
+**Two defects fixed alongside the flip.**
+
+1. The keyword rules were written from tool names, not from how people talk:
+   *"show me people at the front door yesterday"* matched **nothing** and
+   advertised zero camera tools. Vocabulary widened across domains, and the
+   suite now drives whole sentences a household would type — asserting with
+   the pattern's own words is the tautology that let this ship green.
+2. The WARP-1118 canary measured the full static pool, so with selection
+   shipped it would have stayed red against ~10K tokens of real headroom. It
+   now asserts the worst-case **selected** turn (largest domain + core), with
+   the full pool kept as a growth tripwire.
+
+**Honest limit on the rollback.** `TOOL_SELECTION_MODE=off` no longer fits the
+16K window alongside the full fixed blocks — the pool passed the ceiling
+during WARP-1893 and is not expected to come back under it. `off` is a
+diagnostic/rollback mode that leans on the runtime `degradeToFit` gate, not a
+supported steady state.

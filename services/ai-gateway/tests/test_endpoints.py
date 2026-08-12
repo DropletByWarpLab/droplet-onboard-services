@@ -150,9 +150,9 @@ class TestModelsDegradedSignal:
 
         router = ProviderRouter()
         if ollama_side_effect is not None:
-            router.ollama.list_models = AsyncMock(side_effect=ollama_side_effect)
+            router.local.list_models = AsyncMock(side_effect=ollama_side_effect)
         else:
-            router.ollama.list_models = AsyncMock(return_value=ollama_models or [])
+            router.local.list_models = AsyncMock(return_value=ollama_models or [])
         monkeypatch.setattr(main, "provider_router", router)
         monkeypatch.setattr(main, "model_registry", ModelRegistry())
 
@@ -168,7 +168,7 @@ class TestModelsDegradedSignal:
         assert resp.status_code == 200
         data = resp.json()
         assert data["models"] == []
-        assert data["degraded_providers"] == ["ollama"]
+        assert data["degraded_providers"] == ["local"]
 
     async def test_degraded_providers_empty_when_all_providers_succeed(
         self, client, monkeypatch
@@ -178,7 +178,7 @@ class TestModelsDegradedSignal:
                 monkeypatch,
                 ollama_models=[
                     ModelInfo(
-                        id="gpt-oss:20b", provider="ollama", name="gpt-oss:20b"
+                        id="gpt-oss:20b", provider="local", name="gpt-oss:20b"
                     )
                 ],
             )
@@ -217,7 +217,7 @@ class TestModelsDegradedSignal:
         assert resp.status_code == 200
         data = resp.json()
         assert data["models"] == []
-        assert data["degraded_providers"] == ["ollama"]
+        assert data["degraded_providers"] == ["local"]
 
 
 class TestKeysEndpoints:
@@ -279,7 +279,7 @@ class TestReadinessEndpoint:
             main.provider_router = ProviderRouter()
 
         # Sanity: the resolved manager health URL is None on this deploy shape.
-        assert main.provider_router.ollama._limits.health_url is None
+        assert main.provider_router.local._limits.health_url is None
 
         resp = await client.get("/ai/readiness")
         assert resp.status_code == 200

@@ -22,6 +22,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import type { ModelInfo } from "../types/index.js";
+import { isLocalProvider } from "./cloud-access.service.js";
 
 /** WorkspaceSetting key holding the box's active local chat model. */
 export const ACTIVE_CHAT_MODEL_KEY = "ai.model.chat";
@@ -42,14 +43,14 @@ export async function readActiveChatModel(
 }
 
 /**
- * Identifiers (id + name) of installed LOCAL (ollama) models — the only
+ * Identifiers (id + name) of installed LOCAL (on-box) models — the only
  * models eligible to be the active local chat model. Cloud providers are
  * excluded: the active-local-model choice never points off-box.
  */
 export function localModelIdentifiers(models: ModelInfo[]): Set<string> {
   const ids = new Set<string>();
   for (const m of models) {
-    if (m.provider !== "ollama") continue;
+    if (!isLocalProvider(m.provider)) continue;
     if (m.id) ids.add(m.id);
     if (m.name) ids.add(m.name);
   }

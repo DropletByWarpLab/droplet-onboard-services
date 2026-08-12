@@ -39,6 +39,7 @@ import {
 import type { AuthUser } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect, Badge } from "@/components/shell/primitives";
+import { inferenceRuntimeLabel } from "@/lib/provider";
 
 export default function SettingsPage() {
   const { device, health } = useDevice();
@@ -494,12 +495,17 @@ export default function SettingsPage() {
         {/* AI Providers */}
         <Sect title="AI providers" />
 
-        {/* Ollama / Local */}
+        {/* On-device inference. WARP-1926 — this row used to hardcode
+            "Ollama (on-device)", so a Docker-Model-Runner box (the shipped
+            default since WARP-1870) told its owner it was running a daemon
+            that isn't installed. The runtime now comes from /api/health. */}
         <div className="card" style={{ padding: 0, marginBottom: 12 }}>
           <div className="rows">
             <div className="lrow" style={{ padding: "12px 16px" }}>
               <span className="rt">
-                <span className="nm">Ollama (on-device)</span>
+                <span className="nm">
+                  {inferenceRuntimeLabel(health?.inferenceRuntime)} (on-device)
+                </span>
                 <span className="sub">Local LLM inference, never leaves your network</span>
               </span>
               <Badge kind={health?.services.aiGateway ? "ok" : "muted"}>

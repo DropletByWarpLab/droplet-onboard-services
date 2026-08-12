@@ -44,7 +44,7 @@
  *   2. the catalogue, which is authoritative WHEN it resolves (it carries the
  *      box's actually-pulled local models);
  *   3. the PROVIDER_PREFIXES mirror below;
- *   4. otherwise not-cloud — the gateway's own `return self.ollama` default.
+ *   4. otherwise not-cloud — the gateway's own `return self.local` default.
  *
  * The mirror is duplicated knowledge, deliberately, on the same terms as
  * `LOCAL_PROVIDERS` above: it is pinned to its source by a parity test that
@@ -60,9 +60,27 @@ const logger = createLogger("cloud-access");
 /**
  * Providers exempt from the cloud gate. Mirrors `LOCAL_PROVIDERS` in
  * services/ai-gateway/middleware/off_lan_gating.py — the two layers must agree
- * on what "local" means or one of them gates the wrong traffic.
+ * on what "local" means or one of them gates the wrong traffic. A parity test
+ * parses that file and fails CI on drift.
+ *
+ * WARP-1926: `local` is the canonical name the gateway now emits. The two
+ * `ollama*` spellings are LEGACY ALIASES and must stay — `provider` is a
+ * PERSISTED column (`ChatSession.provider`, `ChatMessage.provider`), so every
+ * turn recorded before the rename carries `ollama` on disk. Widening this set
+ * is the safe direction; narrowing it refuses on-box traffic.
  */
-export const LOCAL_PROVIDERS: ReadonlySet<string> = new Set(["ollama", "ollama_local"]);
+export const LOCAL_PROVIDERS: ReadonlySet<string> = new Set([
+  "local",
+  "ollama",
+  "ollama_local",
+]);
+
+/**
+ * The CANONICAL local-provider name — what the gateway emits today and what
+ * every new row persists. Distinct from `LOCAL_PROVIDERS`, which is the wider
+ * *accept* set (canonical + legacy aliases). Emit this; accept those.
+ */
+export const LOCAL_PROVIDER = "local";
 
 /** True for a provider that never leaves the LAN. */
 export function isLocalProvider(provider: string): boolean {
@@ -71,11 +89,11 @@ export function isLocalProvider(provider: string): boolean {
 
 /**
  * The LOCAL half of `router.py`'s PROVIDER_PREFIXES. Checked FIRST, exactly as
- * the gateway checks it: the dict iterates in insertion order with `ollama`
+ * the gateway checks it: the dict iterates in insertion order with `local`
  * listed first, so a local family whose name collides with a cloud prefix wins.
- * `gpt-oss` is the canonical case — OpenAI's OPEN-WEIGHTS model, served by the
- * local Ollama, whose name starts with the cloud prefix `gpt`. Dropping this
- * ordering would 451 the box's own model.
+ * `gpt-oss` is the canonical case — OpenAI's OPEN-WEIGHTS model, served on-box,
+ * whose name starts with the cloud prefix `gpt`. Dropping this ordering would
+ * 451 the box's own model.
  */
 export const LOCAL_MODEL_PREFIXES: readonly string[] = [
   "llama",
@@ -99,7 +117,7 @@ export const CLOUD_MODEL_PREFIXES: ReadonlyArray<readonly [string, readonly stri
  * fallback for everything the catalogue does not know. Mirrors
  * `resolve_provider`'s order: the configured local model wins outright, then
  * local prefixes, then cloud prefixes. `undefined` = no prefix matched, which
- * is the gateway's `return self.ollama` default (i.e. local).
+ * is the gateway's `return self.local` default (i.e. local).
  */
 export function providerForModelName(model: string): string | undefined {
   const name = model.trim().toLowerCase();
@@ -110,9 +128,9 @@ export function providerForModelName(model: string): string | undefined {
   // a cloud prefix — read at call time so a deployment override applies
   // without a restart, matching how the route reads it elsewhere.
   const configuredLocal = (process.env.LLM_MODEL ?? "").trim().toLowerCase();
-  if (configuredLocal && name === configuredLocal) return "ollama";
+  if (configuredLocal && name === configuredLocal) return LOCAL_PROVIDER;
 
-  if (LOCAL_MODEL_PREFIXES.some((p) => name.startsWith(p))) return "ollama";
+  if (LOCAL_MODEL_PREFIXES.some((p) => name.startsWith(p))) return LOCAL_PROVIDER;
   for (const [provider, prefixes] of CLOUD_MODEL_PREFIXES) {
     if (prefixes.some((p) => name.startsWith(p))) return provider;
   }

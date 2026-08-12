@@ -4505,6 +4505,24 @@ export function getDownloadUrl(path: string): string {
   return `${BASE}/api/files/download?path=${encodeURIComponent(path)}`;
 }
 
+/**
+ * Same bytes as `getDownloadUrl`, served for RENDERING rather than saving.
+ *
+ * The preview modal hands this URL to `<object>` / `<video>` / `<audio>`, and
+ * those tags obey `Content-Disposition: attachment` by downloading — so a
+ * preview built on the plain download URL pops a Save-As dialog over an empty
+ * modal instead of showing the file. `?disposition=inline` asks the orchestrator
+ * for `Content-Disposition: inline` plus a real Content-Type.
+ *
+ * The server grants inline only for a safelist of inert media types (no
+ * `text/html`, no `image/svg+xml` — both execute script on our own origin), and
+ * falls back to an attachment for anything else. So this is safe to use for any
+ * file: a non-previewable one simply behaves as it does today.
+ */
+export function getPreviewUrl(path: string): string {
+  return `${BASE}/api/files/download?path=${encodeURIComponent(path)}&disposition=inline`;
+}
+
 // --- WARP-882: in-browser editing + co-authoring ---
 
 /**
@@ -7356,6 +7374,14 @@ export interface TeamChatMessage {
   sharedNcFileId: number | null;
   sharedFileName: string | null;
   sharedFilePath: string | null;
+  /**
+   * WARP-1898 — the Files space `sharedFilePath` is relative to
+   * ("personal" | "shared" | "dept:<uuid>"), resolved server-side.
+   * `null` on messages sent before that ticket and means UNKNOWN — treat
+   * it as such, never as "personal": assuming personal is exactly what
+   * used to drop recipients into their own files.
+   */
+  sharedFileSpace: FileSpaceId | null;
   sharedChatSessionId: string | null;
   /** WARP-1685 — set on meeting_invite / meeting_reminder; the live
    *  meeting (incl. RSVPs) rides along so cards render in one fetch. */
@@ -7392,6 +7418,13 @@ export type TeamChatSendBody =
       ncFileId: number;
       fileName: string;
       filePath: string;
+      /**
+       * WARP-1898 — the space `filePath` is relative to, as the picker knew
+       * it. Only a fallback: the server re-derives from the file registry
+       * and that wins whenever a row exists (a pick from the picker's
+       * SEARCH tab spans spaces, so the selector can be wrong).
+       */
+      space?: FileSpaceId;
       caption?: string;
     }
   | { kind: "ai_chat_share"; chatSessionId: string; caption?: string };
