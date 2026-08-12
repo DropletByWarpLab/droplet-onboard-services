@@ -12,7 +12,8 @@
  *
  * `MeetingReminderCard` renders a meeting_reminder as a subtle
  * system-style line ("Reminder: <title> starts in N min") — ambient
- * information, deliberately quieter than the invite.
+ * information, deliberately quieter than the invite, carrying only the
+ * one action that is due at that moment (Join, when there is a link).
  *
  * No entrance motion by design (the 5s poll re-renders the list —
  * replayed animations would turn ambient refresh into noise; the v1
@@ -281,12 +282,23 @@ function SmallButton({
  * meeting_reminder — a quiet system-style line, not a second invite card.
  * Countdown text is computed at render; the surface's 5s poll keeps it
  * honest without any timer of its own.
+ *
+ * WARP-1874 — the one action it does carry is Join. The reminder fires 15
+ * minutes before the start, which is exactly when the link is wanted;
+ * without it here, a member has to scroll back up the thread to the invite
+ * to find it. Same guard as the invite card, so a cancelled meeting offers
+ * nothing to join.
  */
 export function MeetingReminderCard({
   meeting,
 }: {
   meeting: TeamChatMeeting | null;
 }) {
+  // Re-parsed at render for the same reason the invite card does it: this
+  // is the last thing between a stored string and an href.
+  const link =
+    meeting?.status === "cancelled" ? null : parseMeetingLink(meeting?.meetingUrl);
+
   let line: string;
   if (!meeting) {
     line = "Meeting reminder";
@@ -307,11 +319,32 @@ export function MeetingReminderCard({
   return (
     <div className="mx-card mx-sub">
       {meeting?.status === "cancelled" ? (
-        <Ban size={14} strokeWidth={1.5} aria-hidden="true" />
+        <Ban size={14} strokeWidth={1.5} className="flex-shrink-0" aria-hidden="true" />
       ) : (
-        <CalendarClock size={14} strokeWidth={1.5} aria-hidden="true" />
+        <CalendarClock
+          size={14}
+          strokeWidth={1.5}
+          className="flex-shrink-0"
+          aria-hidden="true"
+        />
       )}
-      <span className="mx-card-meta">{line}</span>
+      <span className="mx-card-meta min-w-0 flex-1">{line}</span>
+      {/* No host line here, unlike the invite card. The reminder stays one
+          row, and the "see where this link goes" disclosure already
+          happened on the invite — plus the label itself is host-derived
+          for a recognized provider, and `title` carries the full URL. */}
+      {link && (
+        <a
+          href={link.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={link.url}
+          className="mx-pill is-join flex-shrink-0"
+        >
+          <Video size={13} strokeWidth={1.5} aria-hidden="true" />
+          {link.label}
+        </a>
+      )}
     </div>
   );
 }

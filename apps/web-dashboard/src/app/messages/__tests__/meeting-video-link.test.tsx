@@ -12,11 +12,15 @@
  *      meeting row can predate the meetingUrl column or arrive from an
  *      ICS sync, and this component is the last thing between a stored
  *      string and an href on another household member's screen.
+ *   3. MeetingReminderCard — the same anchor on the 15-minutes-before
+ *      reminder. That is peak intent for the whole feature: without it the
+ *      member has to scroll back up the thread to the invite to find the
+ *      link they need right now.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MeetingDialog } from "../MeetingDialog";
-import { MeetingCard } from "../MeetingCard";
+import { MeetingCard, MeetingReminderCard } from "../MeetingCard";
 import type { TeamChatMeeting } from "@/lib/api";
 
 const { createTeamChatMeetingMock } = vi.hoisted(() => ({
@@ -256,5 +260,69 @@ describe("MeetingCard — Join link", () => {
     renderCard({ location: "Kitchen" });
     expect(screen.queryByRole("link")).toBeNull();
     expect(screen.queryByText(/Join/)).toBeNull();
+  });
+});
+
+// ── the reminder ────────────────────────────────────────────────────
+
+describe("MeetingReminderCard — Join link", () => {
+  function renderReminder(over: Partial<TeamChatMeeting> = {}) {
+    return render(
+      <MeetingReminderCard
+        meeting={meeting({
+          startsAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+          ...over,
+        })}
+      />,
+    );
+  }
+
+  it("carries the Join link next to the countdown", () => {
+    // The reminder fires 15 minutes out — the moment the link is actually
+    // wanted. Sending the member back up the thread to the invite is the
+    // gap this closes.
+    renderReminder({ meetingUrl: ZOOM });
+    expect(screen.getByText(/starts in 15 min/)).toBeTruthy();
+    const join = screen.getByRole("link", { name: /Join Zoom/ });
+    expect(join.getAttribute("href")).toBe(ZOOM);
+  });
+
+  it("opens in a new tab with rel=noopener noreferrer", () => {
+    renderReminder({ meetingUrl: ZOOM });
+    const join = screen.getByRole("link", { name: /Join Zoom/ });
+    expect(join.getAttribute("target")).toBe("_blank");
+    expect(join.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("drops the Join link on a cancelled meeting", () => {
+    // Same suppression as the invite card, from the same guard: the
+    // reminder for a cancelled meeting says so, and offers nothing to do.
+    renderReminder({ meetingUrl: ZOOM, status: "cancelled" });
+    expect(screen.getByText(/cancelled/i)).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "http://zoom.us/j/1",
+    "Living Room",
+  ])("refuses to render %s as an href", (hostile) => {
+    const { container } = renderReminder({ meetingUrl: hostile });
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.innerHTML).not.toContain("javascript:");
+  });
+
+  it("renders the bare line when the meeting has no link", () => {
+    renderReminder();
+    expect(screen.getByText(/starts in 15 min/)).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("renders the bare line when the meeting row is gone", () => {
+    render(<MeetingReminderCard meeting={null} />);
+    expect(screen.getByText("Meeting reminder")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });
