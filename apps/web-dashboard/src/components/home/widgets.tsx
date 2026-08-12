@@ -81,6 +81,7 @@ import {
 } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import { dashboardUrlFromConf } from "@/lib/wireguard";
+import { countConnectedNow } from "@/lib/vpn-peer-liveness";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ChatMessage } from "@/components/ChatMessage";
@@ -1065,6 +1066,10 @@ export function RemoteAccessWidget(_: WidgetProps) {
   const { user } = useAuth();
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
   const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
+  // WARP-1763: did the orchestrator actually read the router's peer list? When
+  // false the peers carry no handshake facts, and the widget withholds the
+  // live count rather than publishing a zero it cannot support.
+  const [liveState, setLiveState] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
@@ -1079,16 +1084,22 @@ export function RemoteAccessWidget(_: WidgetProps) {
       if ((s.peerCount ?? 0) > 0) {
         // Peer list unavailable → fall back to the off-toggle rather than a
         // half-rendered on-state (same posture as VpnStep).
-        const { peers: all } = await fetchVpnPeers().catch(() => ({
-          peers: [] as VpnPeerInfo[],
-        }));
+        const { peers: all, liveStateAvailable } = await fetchVpnPeers().catch(
+          () => ({
+            peers: [] as VpnPeerInfo[],
+            liveStateAvailable: false,
+          }),
+        );
         setPeers(all.filter((p) => p.status === "active"));
+        setLiveState(liveStateAvailable === true);
       } else {
         setPeers([]);
+        setLiveState(false);
       }
     } catch {
       setStatus(null);
       setPeers([]);
+      setLiveState(false);
     } finally {
       setLoaded(true);
     }
@@ -1163,6 +1174,8 @@ export function RemoteAccessWidget(_: WidgetProps) {
     else void connect();
   };
 
+  const connectedNow = countConnectedNow(peers, liveState);
+
   const sub = !loaded
     ? "Checking…"
     : endpointBlocked
@@ -1172,7 +1185,19 @@ export function RemoteAccessWidget(_: WidgetProps) {
         : submitting
           ? "Connecting this device…"
           : on
-            ? `On · ${peers.length} connected device${peers.length === 1 ? "" : "s"}`
+            ? `On · ${peers.length} device${peers.length === 1 ? "" : "s"} set up${
+                // WARP-1763: this count is of ACTIVE PEER ROWS — devices that
+                // have been set up. It was labelled "connected", which it never
+                // measured: a peer row exists from the moment a config is
+                // minted or a QR link is approved, whether or not that device
+                // has ever completed a handshake. Real handshake recency now
+                // rides on each peer (`lastHandshakeAt`, read from the running
+                // interface), so the live count is appended only when the
+                // orchestrator actually observed it.
+                liveState
+                  ? ` · ${connectedNow} connected now`
+                  : ""
+              }`
             : "Off · tap to connect this device";
 
   const copyConf = () => {
