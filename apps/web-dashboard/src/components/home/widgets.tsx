@@ -941,7 +941,10 @@ function CamTile({
       {/* Decorative: the button's aria-label already names the tile, and a
           live frame has no meaningful static description. */}
       {src && <img src={src} alt="" />}
-      {!offline && <span className="rec" />}
+      {/* The rec dot claims "live" — gate it on a frame actually being on
+          screen, not merely the camera not reporting offline. An idle camera
+          or a failing snapshot probe must not pulse red over the tint. */}
+      {src && <span className="rec" />}
       {stamp && <span className="ts">{stamp}</span>}
       <span className="lb">{label}</span>
       {motion && <span className="mo">motion</span>}

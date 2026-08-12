@@ -160,6 +160,43 @@ describe("Home CamerasWidget live frame", () => {
     expect(probes.length).toBe(0);
   });
 
+  // The rec dot is the strongest "live" claim in the chrome, so it tracks a
+  // frame actually being on screen — not merely "the camera isn't offline".
+  // A reverted `!offline` gate fails all three of these.
+  it("shows no rec dot for an idle camera before any frame decodes", () => {
+    cameras = [cam({ status: "idle" })];
+    const { container } = render(<CamerasWidget w={4} h={3} />);
+
+    expect(container.querySelector(".w-cam .rec")).toBeNull();
+  });
+
+  it("shows the rec dot only once a frame is actually on screen", async () => {
+    const { container } = render(<CamerasWidget w={4} h={3} />);
+
+    // Probe still in flight — nothing live is behind the tile yet.
+    expect(container.querySelector(".w-cam .rec")).toBeNull();
+
+    await settleFirstFrame();
+    await waitFor(() =>
+      expect(container.querySelector(".w-cam .rec")).not.toBeNull(),
+    );
+  });
+
+  it("drops the rec dot when the snapshot probe starts erroring", async () => {
+    const { container } = render(<CamerasWidget w={4} h={3} />);
+    await settleFirstFrame();
+    await waitFor(() =>
+      expect(container.querySelector(".w-cam .rec")).not.toBeNull(),
+    );
+
+    // Feed dies on the next poll — the tile is back on the tint placeholder,
+    // so the "recording" claim must come down with the frame.
+    probes[probes.length - 1].onerror?.();
+    await waitFor(() =>
+      expect(container.querySelector(".w-cam .rec")).toBeNull(),
+    );
+  });
+
   it("keeps tiles distinct when two cameras share a display name", async () => {
     cameras = [
       cam({ name: "cam_a", displayName: "Garage" }),
