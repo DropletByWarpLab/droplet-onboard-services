@@ -654,6 +654,25 @@ export interface VpnPeerInfo {
   status: "active" | "revoked";
   createdAt: string;
   revokedAt?: string | null;
+  /** WARP-1763 — how this peer came to exist. `"overlay"` is a device the
+   *  owner linked by scanning the dashboard QR; those rows carry the synthetic
+   *  `userId: "overlay"`, so this is the only field that identifies them. */
+  kind?: "static" | "overlay";
+  /** Link-token provenance, present only on QR-linked devices. */
+  linkTokenLabel?: string | null;
+  linkTokenEnrolledBy?: string | null;
+  enrolledAt?: string | null;
+  /** WARP-1763 — read from the RUNNING interface, not from the database.
+   *
+   *  `provisioned` false means the row is active but the peer never landed on
+   *  wg0 (the WARP-1757 `tunnel_ready: false` case). `lastHandshakeAt` is
+   *  `null` when the interface reports a peer that has never handshaken, and
+   *  ABSENT when the observation could not be made at all. Never collapse the
+   *  two: absent means unknown, and rendering it as "never connected" is the
+   *  bug this field replaced. Both are absent whenever
+   *  `liveStateAvailable` is false. */
+  provisioned?: boolean;
+  lastHandshakeAt?: string | null;
 }
 
 /** Snapshot the dashboard polls before deciding whether to enable the

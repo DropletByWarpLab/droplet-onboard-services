@@ -26,6 +26,7 @@ import {
   createVpnPeer,
   deleteVpnPeer,
   installOverlayVpnPeer,
+  listVpnPeers,
   fetchNetworkSummary,
   RouterError,
 } from "../services/openwrt.client.js";
@@ -55,6 +56,7 @@ import { observePlacement } from "../services/overlay-placement.service.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
+import { readLivePeerState } from "../lib/vpn-live-peers.js";
 import { createLogger } from "../lib/logger.js";
 import {
   enrollOverlayDevice,
@@ -1376,6 +1378,24 @@ export function createVpnRouter(
   // Lists peers visible to the caller. Family users see their own; admins
   // see all. Includes status (active/revoked) so the dashboard can render
   // a tombstoned row briefly after revoke for context.
+  //
+  // WARP-1763 — this DTO also carries what an owner needs to MANAGE a device
+  // they linked by QR, which until now it did not:
+  //
+  //   * `kind` + the link-token provenance, so a QR-linked phone is
+  //     distinguishable from a legacy static peer. Overlay peers are written
+  //     with the synthetic `userId: "overlay"`, which matches no real
+  //     username — so without `kind` the dashboard had nothing to key on.
+  //   * `provisioned` and `lastHandshakeAt`, read from the ROUTER, so the UI
+  //     can separate *enrolled* from *provisioned* from *actually connected*.
+  //
+  // On that last point, deliberately NOT `lastSessionAt`: the ticket suggested
+  // it, but `provisionOverlayPeer` stamps it at APPROVAL time (it is the
+  // idle-expiry clock — a NULL there would make the sweep skip the row
+  // forever). Handing it to the UI as liveness would render every
+  // just-approved device "connected" before it has ever handshaken, which is
+  // the exact lie this ticket exists to remove. The only honest source of
+  // handshake recency is the running interface, so that is what we read.
   router.get("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
@@ -1401,11 +1421,30 @@ export function createVpnRouter(
           assignedIp: true,
           status: true,
           mode: true,
+          kind: true,
           createdAt: true,
           revokedAt: true,
+          linkTokenLabel: true,
+          linkTokenEnrolledBy: true,
+          enrolledAt: true,
         },
       });
-      res.json({ peers });
+
+      const live = await readLivePeerState(
+        () => listVpnPeers(),
+        (err) =>
+          logger.warn(
+            { err },
+            "vpn: routing unavailable while listing peers — reporting live state as unknown",
+          ),
+      );
+      res.json({
+        peers: peers.map((p) => ({ ...p, ...live.forPeer(p.publicKey) })),
+        // Explicit, because "no handshake" and "we couldn't ask" must not
+        // render the same. False → the UI says the network service isn't
+        // answering instead of showing every device as never-connected.
+        liveStateAvailable: live.available,
+      });
     } catch (err) {
       next(err);
     }

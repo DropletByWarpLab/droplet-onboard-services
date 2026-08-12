@@ -5791,7 +5791,20 @@ export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   return res.json();
 }
 
-export async function fetchVpnPeers(): Promise<{ peers: VpnPeerInfo[] }> {
+/**
+ * List the caller's devices.
+ *
+ * WARP-1763: `liveStateAvailable` is false when the orchestrator could not read
+ * the running WireGuard interface. In that case every peer's `provisioned` and
+ * `lastHandshakeAt` are absent, and the UI must say so rather than render the
+ * devices as never-connected — a routing sidecar restarting is not a fleet of
+ * dead phones. Older orchestrators omit the flag entirely; treat that as
+ * unavailable too, since they also send no live fields to interpret.
+ */
+export async function fetchVpnPeers(): Promise<{
+  peers: VpnPeerInfo[];
+  liveStateAvailable?: boolean;
+}> {
   const res = await authFetch(`${BASE}/api/vpn/peers`);
   if (!res.ok) throw new Error(`Failed to fetch peers: ${res.status}`);
   return res.json();

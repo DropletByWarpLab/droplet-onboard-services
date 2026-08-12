@@ -418,6 +418,98 @@ describe("GET /api/vpn/peers", () => {
     const res = await request(app).get("/api/vpn/peers");
     expect(res.body.peers.map((p: any) => p.id).sort()).toEqual(["p1", "p2"]);
   });
+
+  // WARP-1763 — the DTO an owner needs to MANAGE a QR-linked device.
+  //
+  // Route-level on purpose. `vpn-live-peers.test.ts` pins the never-vs-unknown
+  // logic in isolation, but the failure this feature actually had was one of
+  // WIRING: the columns existed on the row and were simply not selected into
+  // the response, so the dashboard had nothing to render. A unit test of the
+  // helper would have passed the whole time.
+  describe("overlay provenance + live state (WARP-1763)", () => {
+    const OVERLAY_ROW = {
+      id: "p-overlay",
+      userId: "overlay",
+      deviceLabel: "Alice's iPhone",
+      publicKey: "OVERLAY_KEY=",
+      assignedIp: "10.13.13.9",
+      status: "active",
+      mode: "overlay",
+      kind: "overlay",
+      createdAt: new Date(3),
+      revokedAt: null,
+      linkTokenLabel: "Alice's iPhone",
+      linkTokenEnrolledBy: "admin",
+      enrolledAt: new Date(3),
+      lastSessionAt: new Date(3),
+    };
+
+    it("carries kind + link-token provenance so a QR device is identifiable", async () => {
+      const prisma = createPrismaMock();
+      prisma.rows.push({ ...OVERLAY_ROW });
+      vi.mocked(openwrt.listVpnPeers).mockResolvedValue([
+        { public_key: "OVERLAY_KEY=", latest_handshake: 1_754_000_000 } as any,
+      ]);
+
+      const app = buildApp(prisma, { username: "admin", role: "owner" });
+      const res = await request(app).get("/api/vpn/peers");
+
+      expect(res.status).toBe(200);
+      const peer = res.body.peers[0];
+      expect(peer.kind).toBe("overlay");
+      expect(peer.linkTokenEnrolledBy).toBe("admin");
+      expect(peer.linkTokenLabel).toBe("Alice's iPhone");
+      expect(peer.enrolledAt).toBeTruthy();
+      expect(res.body.liveStateAvailable).toBe(true);
+      expect(peer.provisioned).toBe(true);
+      expect(peer.lastHandshakeAt).toBe(new Date(1_754_000_000_000).toISOString());
+    });
+
+    it("never leaks lastSessionAt as if it were a handshake", async () => {
+      // It is stamped at APPROVAL time (the idle-expiry clock). Shipping it
+      // would let a client render a just-approved device as connected, which
+      // is the exact defect this ticket removes.
+      const prisma = createPrismaMock();
+      prisma.rows.push({ ...OVERLAY_ROW });
+      vi.mocked(openwrt.listVpnPeers).mockResolvedValue([]);
+
+      const app = buildApp(prisma, { username: "admin", role: "owner" });
+      const res = await request(app).get("/api/vpn/peers");
+
+      expect(res.body.peers[0]).not.toHaveProperty("lastSessionAt");
+    });
+
+    it("reports a DB-active peer the interface does not carry as unprovisioned", async () => {
+      const prisma = createPrismaMock();
+      prisma.rows.push({ ...OVERLAY_ROW });
+      vi.mocked(openwrt.listVpnPeers).mockResolvedValue([]);
+
+      const app = buildApp(prisma, { username: "admin", role: "owner" });
+      const res = await request(app).get("/api/vpn/peers");
+
+      expect(res.body.liveStateAvailable).toBe(true);
+      expect(res.body.peers[0].provisioned).toBe(false);
+      expect(res.body.peers[0]).not.toHaveProperty("lastHandshakeAt");
+    });
+
+    it("still lists devices — with live state withheld — when routing is down", async () => {
+      // The list IS the revoke surface. A sidecar restart must not take away
+      // the owner's ability to cut a device off, and must not report every
+      // device as never-connected on the way.
+      const prisma = createPrismaMock();
+      prisma.rows.push({ ...OVERLAY_ROW });
+      vi.mocked(openwrt.listVpnPeers).mockRejectedValue(new Error("routing down"));
+
+      const app = buildApp(prisma, { username: "admin", role: "owner" });
+      const res = await request(app).get("/api/vpn/peers");
+
+      expect(res.status).toBe(200);
+      expect(res.body.peers).toHaveLength(1);
+      expect(res.body.liveStateAvailable).toBe(false);
+      expect(res.body.peers[0]).not.toHaveProperty("provisioned");
+      expect(res.body.peers[0]).not.toHaveProperty("lastHandshakeAt");
+    });
+  });
 });
 
 describe("POST /api/vpn/peers", () => {
