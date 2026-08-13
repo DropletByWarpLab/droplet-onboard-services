@@ -572,6 +572,51 @@ derive_single_box_home_endpoint() {
   printf '%s' "$ip"
 }
 
+# ----------------------------------------------------------------------------
+# WARP-1982 — the box's own LAN IPv4 addresses, for Nextcloud's trusted_domains.
+#
+# Browsing the appliance BY IP is a first-class path, not an edge case: the
+# setup wizard hands out an address before any name resolves, droplet.local /
+# .lan answer only on the appliance's own LAN, and the per-device FQDN is
+# split-horizon. A browser on a neighbouring segment has no name at all. If the
+# address it uses is not in Nextcloud's trusted_domains, the dashboard loads
+# (Next.js does not check Host) while every Nextcloud leg — the embedded
+# document editor above all — answers HTTP 400.
+#
+# WHY NOT WILDCARDS, which is what WARP-1973 tried and WARP-1982 removed:
+# Nextcloud expands a `*` in a trusted-domain entry to `[-\.a-zA-Z0-9]*`, a
+# class that includes LETTERS AND DOTS. So `192.168.*` compiles to
+# /^192\.168\.[-\.a-zA-Z0-9]*$/i and matches `192.168.evil.com` — measured, not
+# theorised. Any attacker controlling a DNS name of that shape pointed at the
+# box passes the allowlist, which is the Host-header poisoning the list exists
+# to prevent. No wildcard can express "IPv4 in this range only"; narrowing the
+# prefix does not help, since `192.168.5.*` still matches `192.168.5.evil`.
+#
+# So: enumerate the box's ACTUAL addresses as EXACT tokens. Re-derived on every
+# provision, which is what keeps it correct across a DHCP change and a factory
+# reset — the same reasoning as the home endpoint above.
+#
+# Loopback, link-local and the Docker bridge ranges are excluded: the first two
+# are never a browser's address for this box, and the in-compose services reach
+# Nextcloud by service NAME (already trusted), so a bridge address would widen
+# the list for nothing.
+derive_single_box_lan_ips() {
+  local ips
+  ips="$(ip -4 -o addr show scope global 2>/dev/null \
+    | awk '{ split($4, a, "/"); print a[1] }' \
+    | awk '
+        /^127\./      { next }   # loopback
+        /^169\.254\./ { next }   # link-local
+        /^172\.1[7-9]\./ { next }  # docker default bridge pool
+        /^172\.2[0-9]\./ { next }
+        /^172\.3[01]\./  { next }
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print }
+      ' \
+    | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+  [ -n "$ips" ] || return 1
+  printf '%s' "$ips"
+}
+
 # ============================================================================
 # .env knobs
 # ============================================================================
@@ -1021,6 +1066,18 @@ EOF
     log_info "WIREGUARD_HOME_ENDPOINT_HOST derived from default route: $_home_endpoint"
   else
     log_warn "could not derive the box egress IP (no default route?) — leaving WIREGUARD_HOME_ENDPOINT_HOST unchanged; the overlay home candidate may be unavailable until the next setup run"
+  fi
+  # WARP-1982: the box's own addresses, so a browser that reaches the appliance
+  # BY IP gets a working document editor instead of HTTP 400 from every
+  # Nextcloud leg. Re-derived every provision so a new DHCP lease converges.
+  # Leave any prior value alone if enumeration fails — blanking it would strip
+  # working entries from the trust list on a box that is merely mid-reconfigure.
+  local _lan_ips
+  if _lan_ips="$(derive_single_box_lan_ips)"; then
+    upsert_env DROPLET_TRUSTED_LAN_IPS "$_lan_ips"
+    log_info "DROPLET_TRUSTED_LAN_IPS derived from the box's interfaces: $_lan_ips"
+  else
+    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on Nextcloud legs (the embedded editor included) until the next setup run"
   fi
   # WARP-1772: the inference runtime is a durable, operator-set property, and
   # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a
