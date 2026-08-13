@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { NodeStates } from "@project-chip/matter.js/device";
 import {
   createMatterControllerCore,
+  isTransientCommissionError,
   resolveWifiNetwork,
   resolveWifiSsid,
   MATTER_ENV_ID,
@@ -156,6 +157,105 @@ describe("createMatterControllerCore", () => {
       );
       (controller.commissionNode as ReturnType<typeof vi.fn>).mockRejectedValue(raw);
       await expect(core.commission(MANUAL_PAIRING_CODE)).rejects.toBe(raw);
+    });
+
+    // WARP-1939: the first connect to a freshly-reset BLE device can die
+    // at the link layer (reason 0x08 ×3 inside matter.js, surfacing as
+    // "No device could be commissioned … 1 discovered") and the
+    // IMMEDIATE identical retry then succeeds — proven live. One
+    // automatic retry, and ONLY for that transient class.
+    describe("transient BLE retry (WARP-1939)", () => {
+      const TRANSIENT = new Error(
+        "discovery of node with discriminator 7 failed: No device could be commissioned (1 of 1 started attempt(s) failed, 1 discovered)",
+      );
+      const NOT_ADVERTISING = new Error(
+        "discovery of node with discriminator 7 failed: No commissionable device was discovered",
+      );
+
+      function retryCore(
+        controller: ControllerLike,
+        extra: Record<string, unknown> = {},
+      ): MatterControllerCore {
+        return createMatterControllerCore({
+          storagePath: ".data/matter-controller-test",
+          adminFabricLabel: "Droplet Test",
+          transientCommissionRetryDelayMs: 0,
+          createController: () => controller,
+          ...extra,
+        });
+      }
+
+      it("retries once when the device was discovered but the attempt failed, then succeeds", async () => {
+        const ctl = fakeController({
+          commissionNode: vi
+            .fn()
+            .mockRejectedValueOnce(TRANSIENT)
+            .mockResolvedValueOnce(2n),
+        });
+        const c = retryCore(ctl);
+        await c.init();
+        await expect(c.commission(MANUAL_PAIRING_CODE)).resolves.toEqual({
+          nodeId: "2",
+        });
+        expect(ctl.commissionNode).toHaveBeenCalledTimes(2);
+      });
+
+      it("gives up after the configured retries, rethrowing the raw error", async () => {
+        const ctl = fakeController({
+          commissionNode: vi.fn().mockRejectedValue(TRANSIENT),
+        });
+        const c = retryCore(ctl);
+        await c.init();
+        await expect(c.commission(MANUAL_PAIRING_CODE)).rejects.toBe(TRANSIENT);
+        expect(ctl.commissionNode).toHaveBeenCalledTimes(2);
+      });
+
+      it("does NOT retry when nothing was advertising — that only burns the pairing window", async () => {
+        const ctl = fakeController({
+          commissionNode: vi.fn().mockRejectedValue(NOT_ADVERTISING),
+        });
+        const c = retryCore(ctl);
+        await c.init();
+        await expect(c.commission(MANUAL_PAIRING_CODE)).rejects.toBe(
+          NOT_ADVERTISING,
+        );
+        expect(ctl.commissionNode).toHaveBeenCalledTimes(1);
+      });
+
+      it("honors transientCommissionRetries: 0", async () => {
+        const ctl = fakeController({
+          commissionNode: vi.fn().mockRejectedValue(TRANSIENT),
+        });
+        const c = retryCore(ctl, { transientCommissionRetries: 0 });
+        await c.init();
+        await expect(c.commission(MANUAL_PAIRING_CODE)).rejects.toBe(TRANSIENT);
+        expect(ctl.commissionNode).toHaveBeenCalledTimes(1);
+      });
+
+      it("classifies exactly the transient BLE-link message set", () => {
+        expect(isTransientCommissionError(TRANSIENT)).toBe(true);
+        expect(
+          isTransientCommissionError(
+            new Error(
+              "Error while connecting to peripheral d8:61:4e:9f:34:ac: Unknown Connection Identifier (0x2)",
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          isTransientCommissionError(
+            new Error("[ble] Timeout while connecting to peripheral ef:f1:47:03:cb:3c"),
+          ),
+        ).toBe(true);
+        // Not advertising ⇒ not transient; retrying can't help.
+        expect(isTransientCommissionError(NOT_ADVERTISING)).toBe(false);
+        // Wi-Fi provisioning failures have their own honest errors
+        // (NetworkNotFound / auth) — never masked by a silent retry.
+        expect(
+          isTransientCommissionError(
+            new Error("WifiNetworkSetupFailedError: networkingStatus 5"),
+          ),
+        ).toBe(false);
+      });
     });
 
     it("wires node listeners so attribute changes fan out as state_changed", async () => {
