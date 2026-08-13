@@ -59,6 +59,7 @@ else
 fi
 
 WORK="$(mktemp -d)"
+mkdir -p "$WORK/ip-stub" "$WORK/ip-stub-junk"
 trap 'rm -rf "$WORK"' EXIT
 
 # extract_fn <start-mark> <end-mark> <outfile>
@@ -106,6 +107,40 @@ for pair in "richdocuments:onlyoffice-engine" "onlyoffice:collabora-engine"; do
     fail "the ${pair#*:} branch never calls 'disable_other_connector ${other}' — both connectors stay enabled"
   fi
 done
+
+echo "--- Phase 1b: every top-level call is DEFINED before it is made (WARP-1982) ---"
+
+# A shell function must be defined before it is called. WARP-1979 invoked
+# disable_hub_apps at line 452 and defined it at line 515: on every boot the
+# hook hit `disable_hub_apps: command not found`, exited 127, and under
+# `set -euo pipefail` took the whole before-starting hook down with it —
+# connector wiring and shared-folder provisioning included.
+#
+# Nothing caught it. `bash -n` parses the file and is BLIND to call order.
+# Every behavioural test here extracts one function and calls it directly, so
+# the hook is never executed top-to-bottom. shellcheck does not flag it either.
+# This is the guard for the class, not just the instance.
+hook_body_no_comments="$(sed 's/#.*$//' "$HOOK")"
+call_order_bad=""
+while IFS= read -r fname; do
+  [ -n "$fname" ] || continue
+  def_line=$(printf '%s
+' "$hook_body_no_comments" | grep -nE "^[[:space:]]*${fname}\(\)" | head -1 | cut -d: -f1)
+  call_line=$(printf '%s
+' "$hook_body_no_comments" | grep -nE "^${fname}[[:space:]]*$" | head -1 | cut -d: -f1)
+  if [ -n "$def_line" ] && [ -n "$call_line" ] && [ "$call_line" -lt "$def_line" ]; then
+    call_order_bad="$call_order_bad ${fname}(called@${call_line},defined@${def_line})"
+  fi
+done <<EOF
+$(printf '%s
+' "$hook_body_no_comments" | grep -oE '^[a-z_][a-z0-9_]*\(\)' | tr -d '()' | sort -u)
+EOF
+
+if [ -z "$call_order_bad" ]; then
+  pass "no top-level invocation precedes its function definition"
+else
+  fail "function(s) CALLED BEFORE DEFINED:$call_order_bad — the hook exits 127 there and \`set -e\` aborts the whole boot hook. bash -n cannot see this."
+fi
 
 echo "--- Phase 2: overwriteprotocol behaviour against a stub occ ---"
 
@@ -440,35 +475,105 @@ else
   fail "the hook uninstalls Hub apps — re-enabling one would need appstore access"
 fi
 
-echo "--- Phase 4: compose covers all of RFC1918, and stays an allowlist ---"
+echo "--- Phase 4: the trust list carries NO wildcard, and covers IPs exactly (WARP-1982) ---"
 
 TD_LINE="$(grep -E '^[[:space:]]*-[[:space:]]*NEXTCLOUD_TRUSTED_DOMAINS=' "$COMPOSE_FILE" | head -1)"
 
-# 192.168/16, 10/8, and every /16 of 172.16/12. A box gets its LAN address from
-# whatever router it is plugged into; any of these is a legitimate lease.
-missing=""
-for r in '192\.168\.\*' '10\.\*'; do
-  printf '%s' "$TD_LINE" | grep -qE "(^|[[:space:]])$r([[:space:]]|\$)" || missing="$missing ${r//\\/}"
-done
-for i in $(seq 16 31); do
-  printf '%s' "$TD_LINE" | grep -qE "(^|[[:space:]])172\.$i\.\*([[:space:]]|\$)" || missing="$missing 172.$i.*"
-done
-if [ -z "$missing" ]; then
-  pass "all of RFC1918 is trusted (192.168/16, 10/8, and each /16 of 172.16/12)"
+# THE SECURITY INVARIANT. Nextcloud expands a `*` in a trusted-domain entry to
+# [-\.a-zA-Z0-9]* — letters and dots included — so ANY wildcard admits
+# attacker-controlled hostnames. Measured on a real box with the WARP-1973
+# entries applied: `192.168.evil.com` and `10.evil.com` were both ACCEPTED.
+# It is structural: no wildcard can express "IPv4 in this range only", and
+# narrowing the prefix does not help (`192.168.5.*` matches `192.168.5.evil`).
+#
+# The predecessor of this check asserted the literal TOKENS (require 192.168.*,
+# forbid 172.*) and so was satisfied by the very entries that opened the hole.
+# It tested spelling, not matching semantics. This asserts the property.
+if printf '%s' "$TD_LINE" | grep -q '\*'; then
+  offenders="$(printf '%s' "$TD_LINE" | tr ' ' '
+' | grep '\*' | grep -v '^\${' | tr '
+' ' ')"
+  fail "NEXTCLOUD_TRUSTED_DOMAINS contains wildcard entr(ies): ${offenders}— Nextcloud expands \`*\` to [-.a-zA-Z0-9]*, so '192.168.*' matches '192.168.evil.com' and the allowlist stops being one. Cover IPs with \$DROPLET_TRUSTED_LAN_IPS (exact tokens) instead."
 else
-  fail "private ranges missing from trusted domains:$missing — a box leased one of those answers 400 on every Nextcloud leg"
+  pass "no wildcard in NEXTCLOUD_TRUSTED_DOMAINS (a wildcard admits attacker hostnames)"
 fi
 
-# The allowlist must stay an allowlist. `172.*` is called out by name because it
-# is the tempting short spelling for the sixteen entries above and it reaches
-# into PUBLIC space (172.32+ is routable).
-for forbidden in '\*' '172\.\*' '0\.0\.0\.0'; do
-  literal="$(printf '%s' "$forbidden" | tr -d '\\')"
-  if printf '%s' "$TD_LINE" | grep -qE "(^|[[:space:]])$forbidden([[:space:]]|\$)"; then
-    fail "trusted domains contain '$literal' — that reaches public address space and stops this being an allowlist"
-  else
-    pass "trusted domains do not contain '$literal'"
-  fi
+# The replacement mechanism must actually be wired, or removing the wildcards
+# silently drops IP coverage instead of fixing it.
+if printf '%s' "$TD_LINE" | grep -q 'DROPLET_TRUSTED_LAN_IPS'; then
+  pass "the trust list interpolates \$DROPLET_TRUSTED_LAN_IPS (exact box addresses)"
+else
+  fail "\$DROPLET_TRUSTED_LAN_IPS is not in the trust list — browsing the box BY IP answers 400 on every Nextcloud leg, editor included"
+fi
+
+# …and the deriver must exist and be invoked, or the variable is always empty.
+SB="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+if grep -qE '^derive_single_box_lan_ips\(\)' "$SB"; then
+  pass "derive_single_box_lan_ips() is defined"
+else
+  fail "derive_single_box_lan_ips() is missing — DROPLET_TRUSTED_LAN_IPS would interpolate to empty forever"
+fi
+if grep -qE 'upsert_env DROPLET_TRUSTED_LAN_IPS' "$SB"; then
+  pass "DROPLET_TRUSTED_LAN_IPS is written to .env on every provision (survives a DHCP change)"
+else
+  fail "nothing ever writes DROPLET_TRUSTED_LAN_IPS — the deriver is dead code"
+fi
+
+# Behavioural: run the real deriver against a stubbed `ip` and check what it emits.
+cat > "$WORK/ip-stub/ip" <<'STUB'
+#!/usr/bin/env bash
+cat <<'OUT'
+1: lo    inet 127.0.0.1/8 scope host lo
+2: eth0    inet 192.168.9.250/24 scope global eth0
+3: eth0    inet 192.168.9.195/24 scope global secondary eth0
+4: wlan0    inet 192.168.1.221/24 scope global wlan0
+5: br0    inet 172.18.0.1/16 scope global br0
+6: veth1    inet 169.254.5.5/16 scope global veth1
+OUT
+STUB
+chmod +x "$WORK/ip-stub/ip"
+got="$(PATH="$WORK/ip-stub:$PATH" bash -c "
+  $(sed -n '/^derive_single_box_lan_ips()/,/^}/p' "$SB")
+  derive_single_box_lan_ips
+" 2>/dev/null)"
+case " $got " in
+  *" 192.168.9.250 "*) pass "deriver emits the box's real LAN address" ;;
+  *) fail "deriver dropped the real LAN address — got '[$got]'" ;;
+esac
+# Shape guard, tested by BEHAVIOUR rather than by grepping for the regex text:
+# feed the deriver output that is not a dotted quad and require it to drop it.
+# Anything it emits lands verbatim in a security list.
+cat > "$WORK/ip-stub-junk/ip" <<'STUB'
+#!/usr/bin/env bash
+cat <<'OUT'
+1: eth0    inet 192.168.9.250/24 scope global eth0
+2: eth0    inet not-an-ip/24 scope global eth0
+3: eth0    inet 999.999.999.999abc/24 scope global eth0
+4: eth0    inet ; rm -rf //24 scope global eth0
+OUT
+STUB
+chmod +x "$WORK/ip-stub-junk/ip"
+junk="$(PATH="$WORK/ip-stub-junk:$PATH" bash -c "
+  $(sed -n '/^derive_single_box_lan_ips()/,/^}/p' "$SB")
+  derive_single_box_lan_ips
+" 2>/dev/null)"
+bad_tokens=""
+for tok in $junk; do
+  case "$tok" in
+    *[!0-9.]*) bad_tokens="$bad_tokens $tok" ;;
+  esac
+done
+if [ -z "$bad_tokens" ]; then
+  pass "deriver emits dotted-quad only, dropping junk interface output"
+else
+  fail "deriver emitted non-address token(s):$bad_tokens — that lands verbatim in trusted_domains"
+fi
+
+for bad in 127.0.0.1 169.254.5.5 172.18.0.1; do
+  case " $got " in
+    *" $bad "*) fail "deriver emitted $bad — loopback/link-local/docker-bridge must never enter the trust list" ;;
+    *) pass "deriver excludes $bad" ;;
+  esac
 done
 
 echo ""

@@ -447,39 +447,6 @@ reconcile_overwrite_protocol() {
 }
 # <<< reconcile_overwrite_protocol (WARP-1973)
 
-reconcile_trusted_domains
-reconcile_overwrite_protocol
-disable_hub_apps
-
-# >>> disable_other_connector (WARP-1973)
-# The engine choice must be EXCLUSIVE. This hook configures the connector for
-# the selected DOCS_ENGINE but never disabled the other one, so a box that was
-# ever switched — or that picked the app up any other way — ends up running
-# both. Measured on the live box: richdocuments 8.4.16 AND onlyoffice 9.8.0
-# both enabled, with onlyoffice pointed at http://docserver/ (port 80, where
-# nothing listens; Collabora serves 9980).
-#
-# That is not cosmetic. Both apps register preview providers and file actions
-# for the SAME Office MIME types, so which one answers a preview or an open is
-# not deterministic, and the loser's provider fails: nextcloud.log carries
-# `onlyoffice … getConvertedUri: from docx to jpeg … cURL error 7: Failed to
-# connect to docserver port 80` on every attempt.
-#
-# Disable, never uninstall: a switch back to the other engine then costs an
-# app:enable rather than an appstore round-trip on a box that may have no
-# egress. Non-fatal throughout — a failure here must not take down the hook.
-disable_other_connector() {
-  doc_other="$1"
-  if occ_www app:list 2>/dev/null | grep -qE "^[[:space:]]*- ${doc_other}:"; then
-    if occ_www app:disable "$doc_other" >/dev/null 2>&1; then
-      echo "[droplet] WARP-1973: disabled the '${doc_other}' connector — DOCS_ENGINE selects exactly one"
-    else
-      echo "[droplet] WARP-1973: could not disable '${doc_other}'; two connectors remain enabled and may race for the same Office MIME types" >&2
-    fi
-  fi
-}
-# <<< disable_other_connector (WARP-1973)
-
 # >>> disable_hub_apps (WARP-1979)
 # Nextcloud is a HEADLESS STORAGE BACKEND here. The user's interface is the
 # Droplet dashboard; the only Nextcloud-rendered page a user is ever shown is
@@ -536,6 +503,39 @@ disable_hub_apps() {
   fi
 }
 # <<< disable_hub_apps (WARP-1979)
+
+reconcile_trusted_domains
+reconcile_overwrite_protocol
+disable_hub_apps
+
+# >>> disable_other_connector (WARP-1973)
+# The engine choice must be EXCLUSIVE. This hook configures the connector for
+# the selected DOCS_ENGINE but never disabled the other one, so a box that was
+# ever switched — or that picked the app up any other way — ends up running
+# both. Measured on the live box: richdocuments 8.4.16 AND onlyoffice 9.8.0
+# both enabled, with onlyoffice pointed at http://docserver/ (port 80, where
+# nothing listens; Collabora serves 9980).
+#
+# That is not cosmetic. Both apps register preview providers and file actions
+# for the SAME Office MIME types, so which one answers a preview or an open is
+# not deterministic, and the loser's provider fails: nextcloud.log carries
+# `onlyoffice … getConvertedUri: from docx to jpeg … cURL error 7: Failed to
+# connect to docserver port 80` on every attempt.
+#
+# Disable, never uninstall: a switch back to the other engine then costs an
+# app:enable rather than an appstore round-trip on a box that may have no
+# egress. Non-fatal throughout — a failure here must not take down the hook.
+disable_other_connector() {
+  doc_other="$1"
+  if occ_www app:list 2>/dev/null | grep -qE "^[[:space:]]*- ${doc_other}:"; then
+    if occ_www app:disable "$doc_other" >/dev/null 2>&1; then
+      echo "[droplet] WARP-1973: disabled the '${doc_other}' connector — DOCS_ENGINE selects exactly one"
+    else
+      echo "[droplet] WARP-1973: could not disable '${doc_other}'; two connectors remain enabled and may race for the same Office MIME types" >&2
+    fi
+  fi
+}
+# <<< disable_other_connector (WARP-1973)
 
 if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
   # Connector wiring must not abort shared-space provisioning above; every

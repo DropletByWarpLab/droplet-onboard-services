@@ -766,14 +766,28 @@ services:
       # and the Host-poisoning control the allowlist exists for (password-reset
       # and other absolute links) still holds for anything off-LAN.
       #
-      # WARP-1973 — 172.16/12 is enumerated as its SIXTEEN /16 wildcards rather
-      # than written `172.*`. A router handing the box a 172.16–31.x lease is
-      # uncommon but real, and that box's editor would 400 on every Nextcloud
-      # leg with nothing pointing at why. `172.*` would have been the short
-      # spelling and is wrong: it reaches deep into PUBLIC address space
-      # (172.32+ is routable), which stops this being an allowlist at all.
-      # Verbose and exact beats short and over-permissive on a security list.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan 192.168.* 10.* 172.16.* 172.17.* 172.18.* 172.19.* 172.20.* 172.21.* 172.22.* 172.23.* 172.24.* 172.25.* 172.26.* 172.27.* 172.28.* 172.29.* 172.30.* 172.31.* ${DROPLET_PUBLIC_FQDN:-}
+      # WARP-1982 — NO WILDCARDS IN THIS LIST. EVER.
+      #
+      # WARP-1973 put RFC1918 wildcards here to cover browsing the box by IP.
+      # That was a Host-header allowlist BYPASS, measured on a real box:
+      #
+      #   Host: 192.168.evil.com   -> ACCEPTED
+      #   Host: 10.evil.com        -> ACCEPTED
+      #
+      # Nextcloud expands `*` to `[-\.a-zA-Z0-9]*` — a class containing LETTERS
+      # AND DOTS — so `192.168.*` compiles to /^192\.168\.[-\.a-zA-Z0-9]*$/i and
+      # matches any attacker-controlled name of that shape pointed at the box.
+      # That is precisely the poisoning of absolute URLs (password-reset links
+      # among them) this allowlist exists to prevent. It is structural: no
+      # wildcard can express "IPv4 in this range only", and narrowing the prefix
+      # does not help — `192.168.5.*` still matches `192.168.5.evil`.
+      #
+      # ${DROPLET_TRUSTED_LAN_IPS} carries the coverage instead: the box's OWN
+      # addresses as EXACT tokens, enumerated by derive_single_box_lan_ips() in
+      # scripts/lib/single-box.sh and re-derived on every provision, so a new
+      # DHCP lease converges without ever widening the match. Empty on a box
+      # that has not provisioned yet — a blank token is harmless here.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_TRUSTED_LAN_IPS:-} ${DROPLET_PUBLIC_FQDN:-}
       - OVERWRITEPROTOCOL=https
       # WARP-883 (ADR-027 WS-5) — shared "Household" group folder. The
       # post-installation hook (nextcloud-init.sh) reads these to create the
