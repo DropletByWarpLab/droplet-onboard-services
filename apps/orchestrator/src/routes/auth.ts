@@ -110,6 +110,7 @@ import {
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
+import { warmDefaultModel } from "../services/model-readiness.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
@@ -1377,6 +1378,21 @@ export function createPublicAuthRouter(
                 Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
             }
           : {}),
+      });
+
+      // WARP-1954 — the user just signed in; their next stop is usually
+      // chat, and after an idle unload (or a reboot) that first completion
+      // eats the full cold model load. Start loading the chat model NOW,
+      // silently, so it's resident by the time they ask anything. Reuses
+      // the WARP-1041/1772 warm (runtime-agnostic Ollama/DMR, 10-min
+      // debounced, error-swallowing) — same call shape as the setup
+      // wizard's trigger: strictly after the response (setImmediate),
+      // never awaited, so a cold/hung runtime can never stall or fail the
+      // login. Placed on the COMPLETED-login path only (password AND
+      // second factor satisfied) so the warm can't become a pre-auth
+      // probe surface.
+      setImmediate(() => {
+        void warmDefaultModel().catch(() => undefined);
       });
     } catch (err) {
       next(err);
