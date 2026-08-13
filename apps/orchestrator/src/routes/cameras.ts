@@ -102,6 +102,10 @@ import {
 } from "../services/camera-candidates.service.js";
 import { getCameraStorage } from "../services/camera-storage.service.js";
 import {
+  backfillCameraRetention,
+  planRetentionBackfill,
+} from "../services/camera-retention-backfill.service.js";
+import {
   filterVisibleCameras,
   listGrantsForUser,
   principalFromRequest,
@@ -3103,6 +3107,40 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       snapshot_url: `/api/cameras/${encodeURIComponent(req.params.name)}/snapshot`,
     });
   });
+
+  // ── WARP-1974: repair cameras adopted before retention defaults ────
+  //
+  // Deliberately a manual, reported operation rather than a startup
+  // migration: it restarts every camera it touches, and a repair that runs
+  // silently at boot is indistinguishable from one that never ran.
+  //
+  // GET is the dry run. An operator should be able to see which cameras a
+  // repair will restart BEFORE it restarts them.
+  router.get(
+    "/cameras/retention/backfill",
+    requireRole(...CAMERA_CUSTODY_ROLES),
+    async (_req, res, next) => {
+      try {
+        res.json({ plan: await planRetentionBackfill(prisma) });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/cameras/retention/backfill",
+    requireRole(...CAMERA_CUSTODY_ROLES),
+    async (_req, res, next) => {
+      try {
+        // `noop` travels in the payload: "nothing needed doing" and "it
+        // failed quietly" must not look the same to the caller.
+        res.json(await backfillCameraRetention(prisma));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ── WARP-1962: who can see which camera ────────────────────────────
   //

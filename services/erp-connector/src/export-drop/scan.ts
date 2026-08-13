@@ -4,10 +4,13 @@
  *
  * Three properties this module exists to guarantee:
  *
- *  * **Nothing is read outside the drop root.** The root is resolved once and
- *    every candidate path is resolved and checked against it, so a symlink
- *    planted in a share the practice controls cannot turn this into an
- *    arbitrary-file read inside the orchestrator.
+ *  * **Nothing is read outside the drop root.** The root (and any subdirectory)
+ *    is resolved through symlinks once and containment-checked. Inside the
+ *    drop, symlinks are REFUSED outright rather than resolved and checked:
+ *    resolving one proves only where it pointed at check time, and the read
+ *    happens a whole pass later. Reads then go through a descriptor opened
+ *    `O_NOFOLLOW` with the regular-file and size ceilings re-asserted on that
+ *    handle, so the inode that was checked is the inode that is read.
  *  * **A file being written is never parsed.** Change notifications are not
  *    reliable over CIFS — the kernel does not see writes made by the Windows
  *    host — so this is a poll, and a poll can easily catch a half-flushed
@@ -52,6 +55,7 @@ export interface FileDiagnostic {
     | "too-large"
     | "too-many-rows"
     | "unreadable"
+    | "malformed-rows"
     | "symlink";
   detail?: string;
   /** Present for `unrecognized`, which is the case an operator has to act on. */
@@ -76,6 +80,14 @@ export interface SnapshotDataset {
    * could have.
    */
   unplacedRows: number;
+  /**
+   * Rows carrying MORE fields than the header row declares — the signature of a
+   * value containing an unquoted delimiter. Every column after the offending
+   * one is shifted, so the row's balances and ids belong to the wrong fields.
+   * Skipped rather than read, and counted, because reading a shifted row is
+   * silently wrong money and skipping it silently is silently missing money.
+   */
+  malformedRows: number;
 }
 
 /** The full result of one scan. */
@@ -385,7 +397,14 @@ export async function scanDropDirectory(
   const merged = new Map<DatasetName, Map<string, Record<string, unknown>>>();
   const meta = new Map<
     DatasetName,
-    { label: string; files: string[]; headers: string[]; generatedAt: number; unplaced: number }
+    {
+      label: string;
+      files: string[];
+      headers: string[];
+      generatedAt: number;
+      unplaced: number;
+      malformed: number;
+    }
   >();
 
   for (const file of files) {
@@ -449,18 +468,35 @@ export async function scanDropDirectory(
     }
     let info = meta.get(dataset.dataset);
     if (!info) {
-      info = { label: profile.label, files: [], headers: [], generatedAt: 0, unplaced: 0 };
+      info = {
+        label: profile.label,
+        files: [],
+        headers: [],
+        generatedAt: 0,
+        unplaced: 0,
+        malformed: 0,
+      };
       meta.set(dataset.dataset, info);
     }
     info.files.push(file.name);
     info.headers.push(...table.headers);
     info.generatedAt = Math.max(info.generatedAt, file.mtimeMs);
 
+    const malformedBefore = info.malformed;
     let truncated = false;
     for (const [index, record] of table.rows.entries()) {
       if (bucket.size >= limits.maxRowsPerDataset) {
         truncated = true;
         break;
+      }
+      // A row with MORE fields than there are headers means a value contained
+      // an unquoted delimiter, so every column past it is shifted. Reading it
+      // would attribute one account's balance to another — the kind of wrong
+      // that looks like data. A SHORT row is fine and stays supported: trailing
+      // empty columns are legitimately omitted by plenty of report writers.
+      if (record.length > table.headers.length) {
+        info.malformed += 1;
+        continue;
       }
       const { row, placed } = projectRow(dataset.dataset, dataset.columns, headerIndex, record);
       if (!placed) info.unplaced += 1;
@@ -476,6 +512,15 @@ export async function scanDropDirectory(
       const key =
         typeof keyValue === "string" ? `k:${keyValue}` : `f:${file.name}#${index}`;
       bucket.set(key, row);
+    }
+    if (malformedBefore !== info.malformed) {
+      diagnostics.push({
+        file: file.name,
+        reason: "malformed-rows",
+        detail:
+          `${info.malformed - malformedBefore} row(s) carried more fields than the header ` +
+          `declares (an unquoted delimiter in a value) and were skipped rather than read shifted`,
+      });
     }
     if (truncated) {
       diagnostics.push({
@@ -498,6 +543,7 @@ export async function scanDropDirectory(
       generatedAt: info.generatedAt,
       rows: [...bucket.values()],
       unplacedRows: info.unplaced,
+      malformedRows: info.malformed,
     });
   }
 

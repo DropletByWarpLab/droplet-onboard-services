@@ -449,6 +449,7 @@ reconcile_overwrite_protocol() {
 
 reconcile_trusted_domains
 reconcile_overwrite_protocol
+disable_hub_apps
 
 # >>> disable_other_connector (WARP-1973)
 # The engine choice must be EXCLUSIVE. This hook configures the connector for
@@ -478,6 +479,63 @@ disable_other_connector() {
   fi
 }
 # <<< disable_other_connector (WARP-1973)
+
+# >>> disable_hub_apps (WARP-1979)
+# Nextcloud is a HEADLESS STORAGE BACKEND here. The user's interface is the
+# Droplet dashboard; the only Nextcloud-rendered page a user is ever shown is
+# the document editor, embedded in an iframe. But the stock image ships the
+# consumer "Hub" apps enabled, and they inject into EVERY page Nextcloud
+# renders — including that iframe.
+#
+# Reported symptom: clicking Edit "brings up Nextcloud Hub". `firstrunwizard`
+# is precisely that — its entire job is the "Welcome to Nextcloud Hub" splash
+# on a user's first page load, and every new user gets it exactly once, which
+# is why it reads as intermittent. Measured on the live box: the rendered
+# editor page pulled in firstrunwizard-style.css and updatenotification-init.js
+# before this landed, and neither afterwards.
+#
+# The rest are disabled for two reasons beyond chrome:
+#   * `survey_client` and `nextcloud_announcements` PHONE HOME to Nextcloud's
+#     servers. On an appliance sold on not doing that, they are a defect
+#     regardless of what they render.
+#   * `updatenotification` nags about Nextcloud releases this appliance does
+#     not apply on its own schedule — the box updates as a unit.
+#   * `support` advertises Nextcloud Enterprise; `weather_status` calls an
+#     external weather API from the user menu; `recommendations` is noise.
+#
+# NOT `dashboard` and NOT `activity`, deliberately. `dashboard` is Nextcloud's
+# default landing app — disabling it changes what the bare /nextcloud/ route
+# serves, which is a different decision from cleaning up the editor iframe, and
+# nothing in the editor flow loads it. `activity` backs file-activity data other
+# apps read. Neither appears in the editor page's asset list.
+#
+# Disabled, never removed: an operator who wants one back gets an app:enable,
+# with no appstore round-trip on a box that may have no egress. Idempotent and
+# non-fatal — this must never take down the boot hook.
+disable_hub_apps() {
+  hub_disabled=""
+  for hub_app in firstrunwizard updatenotification nextcloud_announcements \
+                 survey_client support weather_status recommendations; do
+    # Match the app NAME in the Enabled block, not anywhere in occ's output:
+    # every one of these also appears under "Disabled:" once it is off, and a
+    # loose grep would retry the disable on every single boot forever.
+    if occ_www app:list 2>/dev/null \
+       | sed -n '/Enabled:/,/Disabled:/p' \
+       | grep -qE "^[[:space:]]*- ${hub_app}:"; then
+      if occ_www app:disable "$hub_app" >/dev/null 2>&1; then
+        hub_disabled="$hub_disabled $hub_app"
+      else
+        echo "[droplet] WARP-1979: could not disable '${hub_app}' — it will keep injecting into the embedded editor page" >&2
+      fi
+    fi
+  done
+  if [ -n "$hub_disabled" ]; then
+    echo "[droplet] WARP-1979: disabled Nextcloud Hub apps:${hub_disabled}"
+  else
+    echo "[droplet] WARP-1979: no Hub apps enabled — nothing to do"
+  fi
+}
+# <<< disable_hub_apps (WARP-1979)
 
 if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
   # Connector wiring must not abort shared-space provisioning above; every
