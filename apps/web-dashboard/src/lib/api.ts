@@ -4755,6 +4755,39 @@ export class UploadBatchError extends Error {
   }
 }
 
+/**
+ * WARP-1912 — shape a non-2xx upload answer into a STRUCTURED error.
+ *
+ * `translateError` never surfaces `err.message` (the no-echo rule), so a
+ * plain `Error("Upload failed: <body>")` flattened every rejection into the
+ * generic files fallback — which is exactly how a too-large .dmg (nginx's
+ * 100M `client_max_body_size` answers 413 with an HTML page; the
+ * orchestrator's per-user multer cap answers 413 with JSON) read as "try
+ * again in a moment" for a file that can never fit. Same fix as WARP-1914's
+ * `FileSearchError`: the HTTP status plus the orchestrator's stable wire
+ * `code` / `limitMb` ride on the error so `uploadOutcomeMessage` can name
+ * the real reason. The raw body stays in `message` for DevTools only.
+ */
+function uploadRejectionError(status: number, body: string): Error {
+  let code: string | undefined;
+  let limitMb: number | undefined;
+  try {
+    const parsed = JSON.parse(body) as {
+      code?: unknown;
+      limitMb?: unknown;
+    };
+    if (typeof parsed.code === "string") code = parsed.code;
+    if (typeof parsed.limitMb === "number") limitMb = parsed.limitMb;
+  } catch {
+    /* non-JSON (nginx HTML error page) — the status carries the truth */
+  }
+  return Object.assign(new Error(`Upload failed: ${body}`), {
+    status,
+    code,
+    limitMb,
+  });
+}
+
 /** POST a single batch — never more files than the server accepts at once. */
 async function uploadBatch(
   url: string,
@@ -4783,7 +4816,7 @@ async function uploadBatch(
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
         } else {
-          reject(new Error(`Upload failed: ${xhr.responseText}`));
+          reject(uploadRejectionError(xhr.status, xhr.responseText));
         }
       };
 
@@ -4795,7 +4828,7 @@ async function uploadBatch(
   const res = await authFetch(url, { method: "POST", body: formData });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Upload failed: ${body}`);
+    throw uploadRejectionError(res.status, body);
   }
 }
 

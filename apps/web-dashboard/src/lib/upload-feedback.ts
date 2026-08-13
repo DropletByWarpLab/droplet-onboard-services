@@ -15,6 +15,24 @@
 import { translateError } from "./friendly-errors";
 
 /**
+ * WARP-1912 — was this failure "the file can never fit"?
+ *
+ * Both size gates in front of an upload answer 413: nginx's
+ * `client_max_body_size 100M` (HTML body, no code) and the orchestrator's
+ * per-user multer cap (JSON body with the stable `UPLOAD_TOO_LARGE` wire
+ * code plus the ACTUAL applied `limitMb`). `uploadBatch` puts those fields
+ * on the error (see `uploadRejectionError` in lib/api.ts); classifying here
+ * lets the copy below say "too large (max X MB)" instead of advising a
+ * retry that cannot help — the QA-reported .dmg toast.
+ */
+function tooLargeRejection(cause: unknown): { limitMb?: number } | null {
+  if (!cause || typeof cause !== "object") return null;
+  const c = cause as { status?: unknown; code?: unknown; limitMb?: unknown };
+  if (c.status !== 413 && c.code !== "UPLOAD_TOO_LARGE") return null;
+  return { limitMb: typeof c.limitMb === "number" ? c.limitMb : undefined };
+}
+
+/**
  * Copy for a finished upload run.
  *
  * @param uploaded how many files actually landed
@@ -64,16 +82,37 @@ export function uploadOutcomeMessage(
         ? " 1 folder couldn't be created — try again to add it."
         : ` ${directoriesFailed} folders couldn't be created — try again to add them.`;
 
+  // WARP-1912 — a too-large rejection gets its own sentence in both
+  // branches below: "try again" (and the generic retry fallback) is the one
+  // remedy guaranteed never to work for a file over the cap. The number is
+  // the server's own `limitMb` (the applied per-user cap), never parsed out
+  // of its prose; a bare nginx 413 carries no number and the copy stays
+  // honest without one.
+  const tooLarge = failed > 0 ? tooLargeRejection(cause) : null;
+  const cap =
+    tooLarge?.limitMb !== undefined ? ` (max ${tooLarge.limitMb} MB)` : "";
+
   // Nothing landed — there is no partial success to report, so fall back
   // to the domain translator's fixed copy. Folders get their own count
   // rather than the translator's generic line: "3 folders couldn't be
   // created" is both truer and more actionable than "we couldn't reach
   // your files", and it still never echoes the server.
   if (uploaded === 0) {
-    const lead = failed > 0 ? translateError(cause, "files") : "";
+    const lead = tooLarge
+      ? failed === 1
+        ? `That file is too large to upload${cap}.`
+        : `Those files are too large to upload${cap}.`
+      : failed > 0
+        ? translateError(cause, "files")
+        : "";
     return `${lead}${unread}${lostFolders}`.trim();
   }
   if (failed === 0) return `Uploaded ${uploaded} of ${total} files.${unread}${lostFolders}`;
+  if (tooLarge) {
+    return `Uploaded ${uploaded} of ${total} files. ${failed} ${
+      failed === 1 ? "was" : "were"
+    } too large to upload${cap}.${unread}${lostFolders}`;
+  }
   return `Uploaded ${uploaded} of ${total} files. ${failed} didn't upload — try again to finish.${unread}${lostFolders}`;
 }
 

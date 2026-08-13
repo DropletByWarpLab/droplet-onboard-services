@@ -520,6 +520,39 @@ export default function FilesPage() {
   // nested-path field and this ticket did not add one) and sums the
   // per-directory `UploadBatchError` counts, so the WARP-1666 / WARP-1843
   // copy stays true for a run spanning several directories.
+  // WARP-1912 — Undo for the batch the confirmation toast just announced.
+  // The paths are `runUpload`'s manifest, composed from `currentPath` — the
+  // WRITE-route (space-relative) vocabulary — so `deleteFile` takes them
+  // verbatim; listing rows and `toActiveSpaceRelative` are never involved.
+  // The space is the one the upload targeted, captured at upload time: the
+  // user may have switched spaces before clicking Undo. Sequential like the
+  // upload itself, and a delete that fails partway reports what remains —
+  // the re-list is the honest account either way (WARP-1682 posture).
+  const undoUpload = useCallback(
+    async (paths: string[], targetSpace: FileSpaceId) => {
+      let removed = 0;
+      for (const p of paths) {
+        try {
+          await deleteFile(p, targetSpace);
+          removed++;
+        } catch (err) {
+          console.error("undo upload: delete failed", p, err);
+        }
+      }
+      await refresh().catch(() => undefined);
+      if (removed === paths.length) {
+        toast(`Removed ${removed} uploaded file${removed === 1 ? "" : "s"}.`, "info");
+      } else {
+        toast(
+          `Removed ${removed} of ${paths.length} uploaded files — ${
+            paths.length - removed
+          } couldn't be removed.`,
+        );
+      }
+    },
+    [refresh, toast]
+  );
+
   const handleUpload = useCallback(
     async (selection: DroppedSelection) => {
       const { uploads, directories, skipped } = selection;
@@ -546,6 +579,7 @@ export default function FilesPage() {
           cause,
           directoryCount,
           directoriesFailed,
+          uploadedPaths,
         } = await runUpload(selection, {
           basePath: currentPath,
           space,
@@ -561,14 +595,33 @@ export default function FilesPage() {
           // Everything the drop carried landed and none of it was a file —
           // say what DID happen to the folders.
           (total === 0 ? folderOnlyOutcomeMessage(directoryCount) : null);
-        if (message) toast(message);
+        if (message) {
+          toast(message);
+        } else if (uploadedPaths.length > 0) {
+          // WARP-1912 — every file landed: confirm it, and offer Undo for
+          // "too much" or "wrong area" (e.g. personal files dropped into the
+          // shared Workspace). Full-success only: a partial run's toast
+          // already reports counts, and offering Undo there would remove the
+          // very files the copy just said DID land. Undo lives as long as
+          // the toast does (success auto-dismisses; hover/focus pauses it) —
+          // the v1 contract.
+          const undoSpace = space;
+          toast(
+            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.`,
+            "success",
+            {
+              label: "Undo",
+              onClick: () => void undoUpload(uploadedPaths, undoSpace),
+            }
+          );
+        }
       } finally {
         setUploadProgress(null);
         setIsUploading(false);
         setUploadPercent(0);
       }
     },
-    [currentPath, space, refresh, toast]
+    [currentPath, space, refresh, toast, undoUpload]
   );
 
   // ── Download ──

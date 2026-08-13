@@ -61,6 +61,17 @@ export interface UploadRunResult {
    * into the missing collection 409s and the group accounting catches it.
    */
   directoriesFailed: number;
+  /**
+   * WARP-1912 — Undo's manifest: the space-relative FULL path of every file
+   * that landed, in run order. Already the write-route vocabulary
+   * (`deleteFile` takes these verbatim with the run's `space`) because it is
+   * composed from `basePath`, never from listing rows. A successful group
+   * contributes all its files; a group that failed partway contributes its
+   * files minus the typed `UploadBatchError.failedFiles`; a group lost to an
+   * untyped failure contributes nothing — over-claiming here would make Undo
+   * delete a file the user already had.
+   */
+  uploadedPaths: string[];
 }
 
 /** Join a dropped folder's relative directory onto the target path. */
@@ -105,12 +116,14 @@ export async function runUpload(
     }
   }
 
+  const uploadedPaths: string[] = [];
   for (const group of groups) {
     const groupBytes = group.files.reduce((sum, f) => sum + f.size, 0);
     const before = sentBytes;
+    const dirPath = joinRelativePath(basePath, group.dir);
     try {
       await uploadFiles(
-        joinRelativePath(basePath, group.dir),
+        dirPath,
         group.files,
         onProgress &&
           ((percent) => {
@@ -122,10 +135,24 @@ export async function runUpload(
         space,
       );
       uploaded += group.files.length;
+      uploadedPaths.push(
+        ...group.files.map((f) => joinRelativePath(dirPath, f.name)),
+      );
     } catch (err) {
       // A failed group still uploaded whatever its own batches got through
-      // — count those, don't write them off.
-      if (err instanceof UploadBatchError) uploaded += err.uploaded;
+      // — count those, don't write them off. The manifest keeps exactly the
+      // same accounting: `failedFiles` names what did NOT land (per-group
+      // call, and two files in one directory can't share a name), so the
+      // rest of the group is on the box and undoable (WARP-1912).
+      if (err instanceof UploadBatchError) {
+        uploaded += err.uploaded;
+        const lost = new Set(err.failedFiles);
+        uploadedPaths.push(
+          ...group.files
+            .filter((f) => !lost.has(f.name))
+            .map((f) => joinRelativePath(dirPath, f.name)),
+        );
+      }
       console.error("partial upload", group.dir, err);
       noteFailure(err);
     }
@@ -139,5 +166,6 @@ export async function runUpload(
     cause,
     directoryCount: dirs.length,
     directoriesFailed,
+    uploadedPaths,
   };
 }

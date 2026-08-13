@@ -12,14 +12,26 @@ import { X, AlertCircle, CheckCircle2, Info } from "lucide-react";
 
 type ToastType = "error" | "success" | "info";
 
+/**
+ * WARP-1912 — one optional action per toast (the post-upload Undo). Firing
+ * the action dismisses its toast, so it can only run once; "available while
+ * the toast lives" is the whole contract — there is no background registry
+ * to re-offer it from.
+ */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface Toast {
   id: number;
   message: string;
   type: ToastType;
+  action?: ToastAction;
 }
 
 interface ToastContextValue {
-  toast: (message: string, type?: ToastType) => void;
+  toast: (message: string, type?: ToastType, action?: ToastAction) => void;
 }
 
 const ToastContext = createContext<ToastContextValue>({
@@ -48,19 +60,36 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts([]);
   }, []);
 
-  const toast = useCallback((message: string, type: ToastType = "error") => {
-    const id = ++nextId;
-    // WARP-1306 — don't stack an identical twin. Error toasts persist until
-    // dismissed (WCAG 2.2.1), so a repeated failure (e.g. re-submitting the
-    // Projects New-project dialog against a disabled module) used to pile up
-    // duplicates of the same message. An identical (message, type) already on
-    // screen means the user is already told; adding a copy is pure noise.
-    setToasts((prev) =>
-      prev.some((t) => t.message === message && t.type === type)
-        ? prev
-        : [...prev, { id, message, type }],
-    );
-  }, []);
+  const toast = useCallback(
+    (message: string, type: ToastType = "error", action?: ToastAction) => {
+      const id = ++nextId;
+      // WARP-1306 — don't stack an identical twin. Error toasts persist until
+      // dismissed (WCAG 2.2.1), so a repeated failure (e.g. re-submitting the
+      // Projects New-project dialog against a disabled module) used to pile up
+      // duplicates of the same message. An identical (message, type) already on
+      // screen means the user is already told; adding a copy is pure noise.
+      //
+      // WARP-1912 — but when an action is in play (either side), REPLACE the
+      // twin instead of dropping the new call. Dropping kept the OLD toast's
+      // Undo bound to the OLD batch's paths, so two same-count uploads inside
+      // one toast lifetime made Undo delete the wrong files. The fresh id
+      // remounts ToastItem (keyed by id), restarting the 5s timer and
+      // rebinding Undo to the newest batch; the older batch merely loses its
+      // courtesy affordance, which is safe.
+      setToasts((prev) => {
+        const twin = prev.find(
+          (t) => t.message === message && t.type === type,
+        );
+        if (!twin) return [...prev, { id, message, type, action }];
+        // WARP-1306 posture unchanged for plain toasts.
+        if (!action && !twin.action) return prev;
+        return prev.map((t) =>
+          t === twin ? { id, message, type, action } : t,
+        );
+      });
+    },
+    [],
+  );
 
   const icons = {
     error: <AlertCircle size={16} />,
@@ -190,6 +219,25 @@ function ToastItem({ toast, icon, colorClass, onDismiss }: ToastItemProps) {
     >
       <span className="flex-shrink-0 mt-0.5">{icon}</span>
       <span className="flex-1">{toast.message}</span>
+      {toast.action && (
+        <button
+          type="button"
+          onClick={() => {
+            // Dismissing alongside the click is what makes the action
+            // single-fire — there is no second Undo to double-delete with.
+            toast.action?.onClick();
+            onDismiss();
+          }}
+          // Text button in the toast's own color: quieter than a filled
+          // button (this is a courtesy affordance, not the primary path),
+          // louder than the dismiss X. Padding grows the hit area without
+          // moving the visual baseline.
+          className="flex-shrink-0 font-semibold underline underline-offset-2
+            px-1.5 py-1 -my-1 opacity-90 hover:opacity-100 transition-opacity"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         type="button"
         onClick={onDismiss}
