@@ -110,7 +110,29 @@ describe("AgendaView — passcode chip", () => {
     // Copying must not double as "open the detail sheet".
     expect(onSelect).not.toHaveBeenCalled();
     // The chip confirms, then the row stays calm — no toast, no relayout.
-    expect(await screen.findByText(/copied/i)).toBeTruthy();
+    // (findAll: the visible word AND the sr-only live region both say it.)
+    expect((await screen.findAllByText(/copied/i)).length).toBeGreaterThan(0);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("announces the copied confirmation via a permanently-mounted polite live region (WCAG 4.1.3)", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+
+    render(<AgendaView events={[event({ meetingUrl: ZOOM })]} />);
+
+    // The region must exist BEFORE the state change — screen readers only
+    // reliably announce mutations of a region they were already observing
+    // (WARP-1528, same rule as access/bits.tsx SyncChip)…
+    const status = screen.getByRole("status");
+    expect(status.textContent).toBe("");
+    // …and it must sit OUTSIDE the chip button: button descendants are
+    // presentational per ARIA, so an in-button region can be flattened away.
+    expect(status.closest("button")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /copy passcode/i }));
+    expect(await within(status).findByText("Copied")).toBeTruthy();
 
     vi.unstubAllGlobals();
   });
@@ -119,5 +141,23 @@ describe("AgendaView — passcode chip", () => {
     render(<AgendaView events={[event({ meetingUrl: MEET })]} />);
     expect(screen.getByRole("link", { name: /Join Google Meet/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /copy passcode/i })).toBeNull();
+  });
+});
+
+describe("AgendaView — touch targets (04-coding-standards/mobile-web-layout.md §3b)", () => {
+  it("gives the Join pill a ≥44px tap target at phone widths", () => {
+    render(<AgendaView events={[event({ meetingUrl: ZOOM })]} />);
+    const join = screen.getByRole("link", { name: /Join Zoom/ });
+    // Same convention as MiniMonth / Sidebar: the handbook's hard rule is
+    // "nothing tappable under 44px at phone widths" — pinned by class token
+    // because jsdom does no layout.
+    expect(join.className).toMatch(/max-lg:min-h-\[44px\]/);
+  });
+
+  it("gives the passcode chip ≥24px at all widths (WCAG 2.5.8) and ≥44px at phone widths", () => {
+    render(<AgendaView events={[event({ meetingUrl: ZOOM })]} />);
+    const chip = screen.getByRole("button", { name: /copy passcode/i });
+    expect(chip.className).toMatch(/min-h-\[24px\]/);
+    expect(chip.className).toMatch(/max-lg:min-h-\[44px\]/);
   });
 });

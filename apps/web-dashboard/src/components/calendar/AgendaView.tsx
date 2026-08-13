@@ -79,22 +79,37 @@ function PasscodeChip({ link }: { link: NonNullable<ReturnType<typeof parseMeeti
   };
 
   return (
-    <button
-      type="button"
-      onClick={copy}
-      aria-label={`Copy passcode ${passcode}`}
-      title="Copy passcode"
-      className="inline-flex items-center gap-1 type-caption-1 transition-colors hover:text-[var(--text)] max-w-full"
-      style={{ color: "var(--text-muted)" }}
-    >
-      {copied ? (
-        <Check size={10} aria-hidden="true" />
-      ) : (
-        <Copy size={10} aria-hidden="true" />
-      )}
-      {copied ? "Copied" : "Passcode"}
-      <span className="font-mono truncate">{passcode}</span>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={`Copy passcode ${passcode}`}
+        title="Copy passcode"
+        // min-h-[24px] — WCAG 2.5.8 target floor at every width;
+        // max-lg:min-h-[44px] — the handbook's phone-width touch minimum
+        // (04-coding-standards/mobile-web-layout.md §3b), same token as
+        // MiniMonth's day cells.
+        className="inline-flex items-center gap-1 type-caption-1 transition-colors hover:text-[var(--text)] max-w-full min-h-[24px] max-lg:min-h-[44px]"
+        style={{ color: "var(--text-muted)" }}
+      >
+        {copied ? (
+          <Check size={10} aria-hidden="true" />
+        ) : (
+          <Copy size={10} aria-hidden="true" />
+        )}
+        {copied ? "Copied" : "Passcode"}
+        <span className="font-mono truncate">{passcode}</span>
+      </button>
+      {/* WCAG 4.1.3 — the visible word-flip above never reaches the
+          accessible name (aria-label is static), so the confirmation is
+          announced here. Permanently mounted (WARP-1528: SRs only announce
+          mutations of a region they were already observing) and a SIBLING of
+          the button, since button descendants are presentational per ARIA.
+          sr-only is position:absolute, so the empty span adds no flex gap. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copied ? "Copied" : ""}
+      </span>
+    </>
   );
 }
 
@@ -228,7 +243,10 @@ export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
                           target="_blank"
                           rel="noopener noreferrer"
                           title={link.url}
-                          className="inline-flex items-center gap-1.5 type-caption-1 rounded-full border px-2.5 py-1 transition-colors hover:bg-[var(--hover)]"
+                          // max-lg:min-h-[44px] — ~26px tall on a phone
+                          // otherwise, under the 44px touch minimum
+                          // (04-coding-standards/mobile-web-layout.md §3b).
+                          className="inline-flex items-center gap-1.5 type-caption-1 rounded-full border px-2.5 py-1 transition-colors hover:bg-[var(--hover)] max-lg:min-h-[44px]"
                           style={{ borderColor: "var(--border)", color: "var(--text)" }}
                         >
                           <Video size={12} strokeWidth={1.5} aria-hidden="true" />
