@@ -109,6 +109,88 @@ class TestProviderResolution:
         assert provider is router.local
 
 
+class TestLegacyLocalProviderAliases:
+    """WARP-1933 — `provider` is a PERSISTED column (`ChatSession.provider`,
+    `ChatMessage.provider`), so turns recorded before the WARP-1926 rename
+    carry `ollama` on disk. `_providers` only has the `local` key, so those
+    turns missed the explicit-provider lookup entirely and fell through to
+    prefix matching — which resolves a cloud provider whenever the persisted
+    model name happens to match a cloud prefix.
+
+    The off-LAN gate already treats these spellings as local
+    (`LOCAL_PROVIDERS` in middleware/off_lan_gating.py). The router did not,
+    so the two disagreed about the same request: a 451 under the default
+    posture, or an actual off-box call when cloud_model_escape=true.
+    """
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_legacy_alias_resolves_local(self, mock_key):
+        router = ProviderRouter()
+        for alias in ["ollama", "ollama_local", "local"]:
+            provider = router.resolve_provider("some-model", explicit_provider=alias)
+            assert provider is router.local, f"{alias} must resolve to the on-box provider"
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_legacy_alias_beats_a_cloud_looking_model_name(self, mock_key):
+        """The case the router's own comments document: a local model whose
+        name starts with a cloud prefix and is NOT the current LLM_MODEL.
+        Without the alias guard this resolved to anthropic."""
+        router = ProviderRouter()
+        # LLM_MODEL is unset here, so the one-model rule cannot rescue it —
+        # exactly the state of a box whose configured model has since changed.
+        assert router._local_model is None
+        for alias in ["ollama", "ollama_local"]:
+            for model in ["claude-distill-local:7b", "gpt-4o", "o1-preview"]:
+                provider = router.resolve_provider(model, explicit_provider=alias)
+                assert provider is router.local, (
+                    f"{alias}/{model} escaped to a cloud provider"
+                )
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_alias_matching_is_case_insensitive(self, mock_key):
+        router = ProviderRouter()
+        for alias in ["Ollama", "OLLAMA_LOCAL"]:
+            provider = router.resolve_provider("claude-3-5-sonnet", explicit_provider=alias)
+            assert provider is router.local
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_explicit_cloud_provider_is_untouched(self, mock_key):
+        """The guard must only catch local aliases — an explicit cloud
+        provider still wins over prefix matching."""
+        router = ProviderRouter()
+        assert (
+            router.resolve_provider("llama3:8b", explicit_provider="anthropic")
+            is router.anthropic
+        )
+        assert (
+            router.resolve_provider("llama3:8b", explicit_provider="openai")
+            is router.openai
+        )
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_aliases_are_not_added_to_the_provider_registry(self, mock_key):
+        """Aliasing `ollama` back into `_providers` would double-query the
+        on-box provider in `list_all_models`'s fan-out and skew the reverse
+        lookup that names the provider for the off-LAN gate. The guard has to
+        live in `resolve_provider`, not in the registry."""
+        router = ProviderRouter()
+        assert set(router._providers) == {"local", "anthropic", "openai"}
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_alias_set_matches_the_off_lan_gate(self, mock_key):
+        """Parity: every spelling the gate exempts must also resolve local in
+        the router. If the two sets drift, a request is local to one and cloud
+        to the other — which is the defect this ticket describes."""
+        from middleware.off_lan_gating import LOCAL_PROVIDERS
+
+        router = ProviderRouter()
+        for alias in LOCAL_PROVIDERS:
+            assert (
+                router.resolve_provider("claude-sonnet-4-20250514", explicit_provider=alias)
+                is router.local
+            ), f"{alias} is exempt from the off-LAN gate but resolves cloud"
+
+
 class TestListAllModelsDegradedSignal:
     """WARP-1284 — list_all_models must NAME the providers whose
     list_models() raised instead of silently swallowing the failure into a
