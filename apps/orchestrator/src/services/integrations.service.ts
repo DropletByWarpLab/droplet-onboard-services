@@ -345,13 +345,14 @@ export function createIntegrationsService(
           return {
             ok: false,
             reason: "ERP_NOT_CONNECTED",
-            // Provider-accurate reason: the SQL and API tracks are blocked on
-            // different prerequisites, so don't tell an API operator they need
-            // a SQL Anywhere driver.
-            message:
-              provider === EAGLESOFT_API_PROVIDER
-                ? "not connected: Patterson vendor credentials + the discovered /help route map are required"
-                : "not connected: the SAP SQL Anywhere driver + a copy of PattersonPM.db are required",
+            // Provider-accurate reason, taken from the error the connector
+            // actually raised rather than re-derived from the provider key.
+            // Each track carries its own remediation constant (SQL_TRACK_*,
+            // API_TRACK_*, EXPORT_DROP_TRACK_*), so this stays correct when a
+            // track is added — the two-way ternary that used to live here told
+            // export-drop installers to go license a SAP driver, on the one
+            // track that needs no driver at all (WARP-1964).
+            message: `not connected: ${err.remediation}`,
           };
         }
         return {

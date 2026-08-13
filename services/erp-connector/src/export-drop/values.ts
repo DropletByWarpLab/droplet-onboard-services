@@ -155,13 +155,30 @@ export function parseMoney(raw: string | undefined): number | undefined {
   let negative = false;
   let body = text;
 
-  if (body.startsWith("(") && body.endsWith(")")) {
+  // Trailing accounting sign marker, read BEFORE the strip below would eat it.
+  // On an AR ageing report `CR` means credit — a negative balance — and `DR`
+  // means debit. Treating `CR` as decoration inverts the sign of every credit
+  // balance and inflates `get_ar_summary.total_balance` by twice each one.
+  // The marker must be preceded by a digit, a closing paren or whitespace so a
+  // cell that merely ends in those letters is not misread.
+  const marker = /^(.*[\d)\s])\s*(CR|DR)\.?$/i.exec(body);
+  if (marker) {
+    if (marker[2].toUpperCase() === "CR") negative = true;
+    body = marker[1];
+  }
+
+  // Accounting parentheses mean negative — matched ANYWHERE, not only as the
+  // outermost characters. Excel's and Crystal's Accounting formats put the
+  // currency symbol OUTSIDE the parens (`$(1,234.56)`), and the strip below
+  // removes parens unconditionally, so a pair not recognised here is silently
+  // discarded and the amount comes back positive.
+  if (/\(.*\)/.test(body)) {
     negative = true;
-    body = body.slice(1, -1);
+    body = body.replace(/[()]/g, "");
   }
 
   // Strip everything that is not a digit, separator or sign (currency symbols,
-  // non-breaking spaces, stray letters like a trailing "CR").
+  // non-breaking spaces, thousands spacing).
   body = body.replace(/[^\d.,+-]/g, "");
 
   if (body.startsWith("-")) {
