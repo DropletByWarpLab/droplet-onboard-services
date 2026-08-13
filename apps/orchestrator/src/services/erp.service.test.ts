@@ -491,3 +491,117 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
     });
   });
 });
+
+/**
+ * WARP-1964 — the export-drop track must be reachable from the read service.
+ *
+ * `eaglesoftRow()` is the single row resolver behind all five named reads. It
+ * originally looked up only the two direct-connection provider keys, so a fully
+ * connected `<vendor>-export` row was invisible: every read answered
+ * NOT_CONFIGURED with zero rows while a working export drop sat on disk. The
+ * connector was correct and simply never called.
+ */
+describe("erp.service — export-drop row selection (WARP-1964)", () => {
+  const OWNER_USER = { id: "u-owner", role: "owner" as const, connectorGrantLevel: null };
+
+  /** Prisma stub that understands both `provider: "x"` and `provider: { in: [...] }`. */
+  function prismaWithRows(rows: Array<{ provider: string; status: string }>) {
+    const full = rows.map((r, i) => ({
+      id: `conn-${i}`,
+      provider: r.provider,
+      status: r.status,
+      writeEnabled: false,
+      schemaHash: null,
+    }));
+    return {
+      integrationConnection: {
+        findFirst: vi.fn(async ({ where }: any) => {
+          const matches = full.filter((row) => {
+            const p = where.provider;
+            const byProvider =
+              typeof p === "string" ? row.provider === p : p?.in?.includes(row.provider);
+            const byStatus = where.status === undefined || row.status === where.status;
+            return byProvider && byStatus;
+          });
+          return matches[0] ? { ...matches[0] } : null;
+        }),
+      },
+      erpAuditLog: { create: vi.fn(async () => ({})) },
+    } as never;
+  }
+
+  function serviceOver(
+    rows: Array<{ provider: string; status: string }>,
+    runRead: () => Promise<unknown[]>,
+  ) {
+    const seen: string[] = [];
+    const svc = createErpService(prismaWithRows(rows), {
+      connectorFor: ((conn: { provider: string }) => {
+        seen.push(conn.provider);
+        return {
+          provider: conn.provider,
+          connect: async () => {},
+          close: async () => {},
+          health: async () => ({ ok: true }),
+          introspect: async () => ({ tables: [], fingerprint: "f" }),
+          runRead,
+          applyWrite: async () => ({}),
+        };
+      }) as never,
+    });
+    return { svc, seen };
+  }
+
+  it("reaches an export-drop connection — the reads are not NOT_CONFIGURED", async () => {
+    const { svc, seen } = serviceOver(
+      [{ provider: "eaglesoft-export", status: "CONNECTED" }],
+      async () => [{ patient_id: "P1", first_name: "Ada", last_name: "Lovelace" }],
+    );
+    const result = await svc.searchPatients({ query: "Love" }, OWNER_USER);
+    expect(result.connected).toBe(true);
+    expect(result.items).toHaveLength(1);
+    expect(seen).toEqual(["eaglesoft-export"]);
+  });
+
+  it("serves any vendor's export key, not just Eaglesoft's", async () => {
+    for (const provider of ["dentrix-export", "opendental-export", "generic-export"]) {
+      const { svc, seen } = serviceOver([{ provider, status: "CONNECTED" }], async () => []);
+      const result = await svc.getArSummary(OWNER_USER);
+      expect(result.connected, provider).toBe(true);
+      expect(seen).toEqual([provider]);
+    }
+  });
+
+  it("does not let an export row shadow a CONNECTED direct-track row", async () => {
+    const { svc, seen } = serviceOver(
+      [
+        { provider: "eaglesoft", status: "CONNECTED" },
+        { provider: "eaglesoft-export", status: "CONNECTED" },
+      ],
+      async () => [],
+    );
+    await svc.getArSummary(OWNER_USER);
+    expect(seen).toEqual(["eaglesoft"]);
+  });
+
+  it("prefers a CONNECTED export row over a direct row that is not connected", async () => {
+    // A permanently-blocked SQL row must not shadow a track that actually works
+    // — the same reasoning the SQL-vs-API precedence was written for.
+    const { svc, seen } = serviceOver(
+      [
+        { provider: "eaglesoft", status: "PROVISIONING" },
+        { provider: "eaglesoft-export", status: "CONNECTED" },
+      ],
+      async () => [],
+    );
+    await svc.getArSummary(OWNER_USER);
+    expect(seen).toEqual(["eaglesoft-export"]);
+  });
+
+  it("still answers NOT_CONFIGURED when there is no row at all", async () => {
+    const { svc } = serviceOver([], async () => []);
+    const result = await svc.getArSummary(OWNER_USER);
+    expect(result.connected).toBe(false);
+    expect(result.reason).toBe("NOT_CONFIGURED");
+  });
+});

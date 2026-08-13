@@ -255,3 +255,69 @@ describe("integrations.service (WARP-1137, DB-independent)", () => {
     });
   });
 });
+
+/**
+ * WARP-1964 — a failed reachability test must name the remediation for the
+ * track that actually failed.
+ *
+ * `test()` used to pick its message with a two-way ternary on the REST provider
+ * key, so everything that was not `eaglesoft-api` fell through to the SQL text.
+ * Once export-drop providers became valid, an installer standing in a practice
+ * with a CIFS share was told to go license a SAP SQL Anywhere driver — on the
+ * one track that needs no driver at all. The message now comes from the
+ * error's own `remediation`, so it stays correct as tracks are added.
+ */
+describe("integrations.service — blocked test() names the right track (WARP-1964)", () => {
+  function serviceWithBlockedConnector(remediation: string) {
+    const prisma = {
+      integrationConnection: { findFirst: vi.fn(async () => null) },
+      erpAuditLog: { create: vi.fn(async () => ({})) },
+    } as never;
+    return createIntegrationsService(prisma, {
+      connectorFor: (() => ({
+        provider: "stub",
+        connect: async () => {
+          throw new ConnectorBlockedError("connect", remediation);
+        },
+        close: async () => {},
+        health: async () => ({ ok: true }),
+        introspect: async () => ({ tables: [], fingerprint: "" }),
+        runRead: async () => [],
+        applyWrite: async () => ({}),
+      })) as never,
+    });
+  }
+
+  it("reports the export-drop remediation, not the SAP driver text", async () => {
+    const svc = serviceWithBlockedConnector(
+      "needs ERP_EXPORT_DROP_ROOT pointing at a readable export folder",
+    );
+    const result = await svc.test({
+      provider: "eaglesoft-export",
+      host: "",
+      databaseName: "",
+      secretRef: "",
+    } as never);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("ERP_NOT_CONNECTED");
+    expect(result.message).toContain("ERP_EXPORT_DROP_ROOT");
+    expect(result.message).not.toMatch(/SQL Anywhere|PattersonPM/);
+  });
+
+  it("still reports each direct track's own remediation", async () => {
+    for (const [provider, needle] of [
+      [EAGLESOFT_PROVIDER, "SAP SQL Anywhere"],
+      [EAGLESOFT_API_PROVIDER, "Patterson vendor enrolment"],
+    ] as const) {
+      const svc = serviceWithBlockedConnector(`needs ${needle} things`);
+      const result = await svc.test({
+        provider,
+        host: "h",
+        databaseName: "d",
+        secretRef: "s",
+      } as never);
+      expect(result.message, provider).toContain(needle);
+    }
+  });
+});

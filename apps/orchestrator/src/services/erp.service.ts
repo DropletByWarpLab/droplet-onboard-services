@@ -35,6 +35,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   ConnectorBlockedError,
   WRITE_COMMANDS,
+  exportProviders,
   scheduleDayBounds,
   type Connector,
 } from "@droplet/erp-connector";
@@ -43,6 +44,7 @@ import { ErpError } from "./erp-error.js";
 import {
   apiMaterialFromRow,
   connectorForProvider,
+  loadOperatorExportProfiles,
   EAGLESOFT_API_PROVIDER,
   EAGLESOFT_PROVIDER,
 } from "./erp-provider.js";
@@ -213,8 +215,29 @@ export function createErpService(
     const sql = await rowForProvider(EAGLESOFT_PROVIDER);
     if (sql?.status === "CONNECTED") return sql;
     const api = await rowForProvider(EAGLESOFT_API_PROVIDER);
-    if (api) return api;
-    return sql;
+    if (api?.status === "CONNECTED") return api;
+    // WARP-1964 — the export-drop track. Its provider keys are `<vendor>-export`
+    // and the vendor set is open (an operator profile can add one), so this is
+    // the one lookup that cannot be a single-provider equality: it is scoped to
+    // the enumerated key list, which keeps `@@index([provider, status])` usable.
+    const drop = await rowForExportProviders();
+    if (drop?.status === "CONNECTED") return drop;
+    // No connected row anywhere: fall back to whichever exists, preserving the
+    // historical API-before-SQL ordering and appending export-drop after it.
+    return api ?? drop ?? sql;
+  }
+
+  /** The export-drop connection row, preferring a CONNECTED one. */
+  async function rowForExportProviders(): Promise<ConnRow | null> {
+    const providers = exportProviders(loadOperatorExportProfiles().profiles);
+    if (providers.length === 0) return null;
+    const connected = (await prisma.integrationConnection.findFirst({
+      where: { provider: { in: providers }, status: "CONNECTED" },
+    })) as ConnRow | null;
+    if (connected) return connected;
+    return (await prisma.integrationConnection.findFirst({
+      where: { provider: { in: providers } },
+    })) as ConnRow | null;
   }
 
   function assertCanReadPhi(user: ErpUser): void {

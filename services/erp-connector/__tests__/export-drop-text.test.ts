@@ -73,6 +73,36 @@ describe("parseDelimited", () => {
     expect(table.rows[0][0]).toBe('He said "hi"');
   });
 
+  it("treats a quote INSIDE an unquoted field as a literal, not an opening quote", () => {
+    // RFC 4180 gives `"` its meaning only at the start of a field. An inch mark
+    // in a free-text cell is real dental data (`#8 crown 5" prep`), and reading
+    // it as an opening quote swallows every delimiter and newline after it —
+    // deleting the rest of that row and every row below, with no diagnostic.
+    const table = parseDelimited(
+      [
+        "Appt,Status,Pat",
+        "A1,Scheduled,p1",
+        'A2,#8 crown 5" prep,p2',
+        "A3,Scheduled,p3",
+        "",
+      ].join("\n"),
+    );
+    expect(table.rows).toHaveLength(3);
+    expect(table.rows[1]).toEqual(["A2", '#8 crown 5" prep', "p2"]);
+    expect(table.rows[2]).toEqual(["A3", "Scheduled", "p3"]);
+  });
+
+  it("still honours a quote that does open a field", () => {
+    const table = parseDelimited('Name,Id\n"Smith, John",7\nplain,8');
+    expect(table.rows[0]).toEqual(["Smith, John", "7"]);
+    expect(table.rows[1]).toEqual(["plain", "8"]);
+  });
+
+  it("treats a quote after a closing quote as a literal", () => {
+    const table = parseDelimited('Name,Id\n"a"b",7');
+    expect(table.rows[0][0]).toBe('ab"');
+  });
+
   it("normalizes CRLF inside a quoted field", () => {
     const table = parseDelimited('Note,Id\r\n"one\r\ntwo",7\r\n');
     expect(table.rows[0][0]).toBe("one\ntwo");
@@ -228,6 +258,31 @@ describe("parseMoney", () => {
   it("reads parentheses as negative, which is what an AR ageing report prints", () => {
     expect(parseMoney("(1,234.56)")).toBe(-1234.56);
     expect(parseMoney("($45.00)")).toBe(-45);
+  });
+
+  it("reads parentheses as negative when the currency symbol sits OUTSIDE them", () => {
+    // Excel's and Crystal's Accounting formats emit `$(1,234.56)`. The parens
+    // are stripped as non-numeric either way, so failing to recognise them here
+    // does not error — it silently returns a positive number, and an AR total
+    // ends up wrong by twice each credit balance.
+    expect(parseMoney("$(1,234.56)")).toBe(-1234.56);
+    expect(parseMoney("$ (45.00)")).toBe(-45);
+    expect(parseMoney("(1,234.56) CR")).toBe(-1234.56);
+  });
+
+  it("reads a trailing CR as a credit (negative) and DR as a debit", () => {
+    // `CR` on an AR ageing report is a sign marker, not decoration.
+    expect(parseMoney("1,250.00 CR")).toBe(-1250);
+    expect(parseMoney("1250.00CR")).toBe(-1250);
+    expect(parseMoney("150.00 DR")).toBe(150);
+    expect(parseMoney("150.00 cr")).toBe(-150);
+  });
+
+  it("does not mistake trailing letters for a sign marker", () => {
+    // A marker has to follow a digit, a closing paren or whitespace, so a cell
+    // that merely ends in those letters is not silently re-signed.
+    expect(parseMoney("SCR")).toBeUndefined();
+    expect(parseMoney("DECR")).toBeUndefined();
   });
 
   it("handles leading and trailing signs", () => {

@@ -21,7 +21,8 @@
  * connector, matching the read-through posture of the SQL and REST tracks — no
  * patient data is written to Droplet's database by this track.
  */
-import { readdir, readFile, realpath, stat, lstat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, readdir, realpath, stat, lstat } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
@@ -51,7 +52,7 @@ export interface FileDiagnostic {
     | "too-large"
     | "too-many-rows"
     | "unreadable"
-    | "outside-root";
+    | "symlink";
   detail?: string;
   /** Present for `unrecognized`, which is the case an operator has to act on. */
   headers?: string[];
@@ -211,31 +212,26 @@ async function collectEligibleFiles(
 
     const candidate = join(directory, entry.name);
 
-    // Resolve through symlinks and re-check containment. A regular file still
-    // goes through realpath so a hard-to-spot case (a symlinked parent, a
-    // junction on a Windows share) cannot slip past.
-    let resolved: string;
+    // `lstat`, never `stat`: a symlink is REFUSED outright rather than resolved
+    // and containment-checked. Resolving one would only prove where it pointed
+    // at check time — the read happens a whole pass later (every earlier file
+    // is read and parsed first), and the directory entry belongs to whoever
+    // writes to the practice's share. Refusing outright removes the race
+    // instead of narrowing it, and an export drop has no legitimate use for a
+    // symlink. `readExportBytes` re-asserts this at open time with O_NOFOLLOW.
+    let info;
     try {
-      const link = await lstat(candidate);
-      resolved = link.isSymbolicLink() ? await realpath(candidate) : candidate;
+      info = await lstat(candidate);
     } catch {
       diagnostics.push({ file: entry.name, reason: "unreadable", detail: "cannot stat" });
       continue;
     }
-    if (!isInsideRoot(directory, resolved)) {
+    if (info.isSymbolicLink()) {
       diagnostics.push({
         file: entry.name,
-        reason: "outside-root",
-        detail: "symlink resolves outside the drop directory",
+        reason: "symlink",
+        detail: "symlinks are not read from the drop directory",
       });
-      continue;
-    }
-
-    let info;
-    try {
-      info = await stat(resolved);
-    } catch {
-      diagnostics.push({ file: entry.name, reason: "unreadable", detail: "cannot stat target" });
       continue;
     }
     if (!info.isFile()) continue;
@@ -258,13 +254,47 @@ async function collectEligibleFiles(
       continue;
     }
 
-    eligible.push({ name: entry.name, path: resolved, mtimeMs: info.mtimeMs });
+    eligible.push({ name: entry.name, path: candidate, mtimeMs: info.mtimeMs });
   }
 
   // Oldest first, so a re-export of the same day overwrites the earlier copy
   // when rows are merged by natural key.
   eligible.sort((a, b) => a.mtimeMs - b.mtimeMs);
   return eligible;
+}
+
+/**
+ * `O_NOFOLLOW` where the platform has it. Linux and macOS do; Windows does not
+ * expose it, so it degrades to 0 there. The appliance is Linux — a developer
+ * checkout on Windows loses this one defence and keeps every other.
+ */
+const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+
+/**
+ * Read a candidate export through a file DESCRIPTOR.
+ *
+ * The gates in `collectEligibleFiles` prove things about a path; this proves
+ * them about the inode that is actually read, which is the only version that
+ * survives a concurrent writer. `O_NOFOLLOW` makes a symlink swapped in after
+ * the `lstat` fail the open (ELOOP) instead of being followed, and the size and
+ * regular-file checks are re-asserted on the open handle rather than trusted
+ * from the earlier pass.
+ *
+ * Without this, the window is not instruction-level: every earlier file in the
+ * directory is read and parsed between a given file's check and its read.
+ */
+export async function readExportBytes(path: string, maxBytes: number): Promise<Buffer> {
+  const handle = await open(path, fsConstants.O_RDONLY | O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error("not a regular file at open time");
+    if (info.size > maxBytes) {
+      throw new Error(`${info.size} bytes exceeds the ${maxBytes}-byte ceiling at open time`);
+    }
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
 }
 
 /** The column whose value identifies a row for dedup across re-exports. */
@@ -361,7 +391,7 @@ export async function scanDropDirectory(
   for (const file of files) {
     let text: string;
     try {
-      text = decodeExportBytes(await readFile(file.path));
+      text = decodeExportBytes(await readExportBytes(file.path, limits.maxFileBytes));
     } catch (err) {
       diagnostics.push({
         file: file.name,
@@ -437,10 +467,14 @@ export async function scanDropDirectory(
 
       const keyColumn = NATURAL_KEY[dataset.dataset];
       const keyValue = row[keyColumn];
+      // Fall back to a per-row key when the natural key is absent. A PMS that
+      // only assigns an appointment id at check-in exports walk-ins with the id
+      // cell blank; keying those on one shared value would collapse them into a
+      // single row and silently drop the rest. `normalizeText` yields undefined
+      // for a blank cell (never ""), so this one condition covers both "the
+      // profile maps no id column" and "the id cell is empty".
       const key =
-        typeof keyValue === "string" && keyValue !== ""
-          ? `k:${keyValue}`
-          : `f:${file.name}#${index}`;
+        typeof keyValue === "string" ? `k:${keyValue}` : `f:${file.name}#${index}`;
       bucket.set(key, row);
     }
     if (truncated) {
