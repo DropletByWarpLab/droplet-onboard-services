@@ -59,6 +59,8 @@ import {
   ptzGoToPreset,
   ptzMove,
   restartFrigate,
+  isValidIanaTimezone,
+  NoRecordingsInRangeError,
   type PtzAction,
 } from "../services/frigate.client.js";
 import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
@@ -2384,7 +2386,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
       }
-      const days = await getRecordingsSummary(req.params.name);
+      // The caller's IANA zone. Frigate buckets in UTC without it, while
+      // the dashboard builds playback ranges in browser-local time — one
+      // clock or the other, never both (WARP-1958). An unrecognised zone
+      // is a 400 rather than a silent UTC fallback: falling back would
+      // reintroduce exactly the mismatch this parameter exists to close.
+      const tz = (req.query as Record<string, string | undefined>).timezone;
+      if (tz !== undefined && !isValidIanaTimezone(tz)) {
+        return res.status(400).json({ error: "timezone must be an IANA zone name" });
+      }
+      const days = await getRecordingsSummary(req.params.name, tz);
       res.json({ days });
     } catch (err) {
       next(err);
@@ -2545,6 +2556,15 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       res.setHeader("Cache-Control", "no-store");
       res.send(rewritten);
     } catch (err) {
+      // "Nothing was kept for that window" is an ANSWER, not a failure.
+      // Frigate 404s an empty VOD range; reporting that as 502 told the
+      // player the recorder was broken and put a red banner over a
+      // perfectly healthy camera (WARP-1958).
+      if (err instanceof NoRecordingsInRangeError) {
+        return res
+          .status(404)
+          .json({ error: "no_recordings_in_range", message: err.message });
+      }
       // hls.js retries on transient errors, but a clean 502 is the
       // signal that the upstream is broken (vs 4xx for "you sent us a
       // bad range").
@@ -3040,14 +3060,22 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 }
 
 /**
+ * How far past `now` a requested range may start before we call it a
+ * future range. Covers ordinary client-clock skew so a browser running a
+ * minute fast can still ask for the segment being written right now.
+ */
+const FUTURE_RANGE_SKEW_SEC = 120;
+
+/**
  * Parse + sanity-check a recording range from query params (`after`,
  * `before` in Unix seconds). Returns `{ after, before }` on success or
  * `{ error }` for the caller to surface as 400.
  *
  * Both bounds must be positive finite numbers, after must be earlier
- * than before, and the total span is capped at 31 days so a careless
+ * than before, the total span is capped at 31 days so a careless
  * `?before=0&after=2000000000` doesn't make Frigate scan its whole
- * archive (and our timeline endpoint return 1000s of rows).
+ * archive (and our timeline endpoint return 1000s of rows), and the
+ * window may not start in the future.
  */
 function parseRecordingRange(req: import("express").Request):
   | { after: number; before: number }
@@ -3067,7 +3095,17 @@ function parseRecordingRange(req: import("express").Request):
   if (b - a > 31 * 24 * 60 * 60) {
     return { error: "range exceeds 31 days" };
   }
-  return { after: a, before: b };
+  // Clamp the future away. Footage cannot exist ahead of now, and asking
+  // Frigate for it returns an empty list plus a 404 on the matching VOD
+  // manifest — which the player surfaces as "we couldn't load that
+  // recording", i.e. an empty hour dressed up as a broken camera
+  // (WARP-1958). A small skew allowance keeps a client clock that is a
+  // little fast from losing the current segment.
+  const nowSec = Math.floor(Date.now() / 1000) + FUTURE_RANGE_SKEW_SEC;
+  if (a >= nowSec) {
+    return { error: "range starts in the future" };
+  }
+  return { after: a, before: Math.min(b, nowSec) };
 }
 
 /** Defense-in-depth path validation mirroring PR #1's validateNcPath

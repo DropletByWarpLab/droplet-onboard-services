@@ -779,44 +779,108 @@ export async function searchEventsSemanticTyped(
 // --- Recordings + timeline ---
 
 /**
+ * Coerce Frigate's loose per-hour `motion` into a flat non-negative
+ * number. Some versions emit a number, some `{ value, ... }`, some omit
+ * it entirely.
+ *
+ * 🔴 This deliberately does NOT clamp to 0–100. Frigate 0.17's `motion`
+ * is an unbounded activity count, not a percentage — one real day on the
+ * box reported 11, 3, 954, 160, 0 and 774 across consecutive hours. The
+ * previous 0–100 clamp collapsed 954, 774 and 160 to the same value, so
+ * every busy hour rendered in the same heat-map tier and the graphic had
+ * no dynamic range where it mattered most. Consumers scale against the
+ * range they actually receive.
+ */
+function normaliseMotion(raw: unknown): number {
+  let motion = 0;
+  if (typeof raw === "number") motion = raw;
+  else if (raw && typeof raw === "object" && "value" in raw) {
+    const v = (raw as { value: unknown }).value;
+    motion = typeof v === "number" ? v : 0;
+  }
+  if (!Number.isFinite(motion) || motion < 0) return 0;
+  return motion;
+}
+
+/**
+ * Pull the hour-of-day out of one summary entry.
+ *
+ * 🔴 Frigate 0.17 returns `hours` as an ARRAY, newest-first, each element
+ * carrying its own `hour` field as a STRING ("15", "04"). The previous
+ * implementation ran `Object.entries()` over it and used the resulting
+ * key as the hour — i.e. the ARRAY INDEX. With <= 24 entries every index
+ * passes a 0..23 range check, so nothing was dropped and nothing warned:
+ * the whole timeline was silently reversed and mislabelled, and the
+ * page then turned those bogus hours into playback ranges that Frigate
+ * 404s. Measured on the box 2026-08-13 (WARP-1958).
+ *
+ * `fallbackKey` is the object-shaped path — older Frigate keyed `hours`
+ * as a dict of hour -> stats, and that key IS the hour. It is only
+ * consulted when the entry has no usable `hour` of its own.
+ */
+function parseSummaryHour(
+  entry: Record<string, unknown>,
+  fallbackKey: string | null,
+): number | null {
+  const own = entry.hour;
+  const candidates: unknown[] = fallbackKey === null ? [own] : [own, fallbackKey];
+  for (const c of candidates) {
+    if (c === undefined || c === null || c === "") continue;
+    const n = Number(c);
+    if (Number.isInteger(n) && n >= 0 && n <= 23) return n;
+  }
+  return null;
+}
+
+/**
  * Per-day + per-hour recording summary. The dashboard's date picker
  * uses this to grey out days with no recordings, and the timeline
- * scrubber paints hour bands using the motion + event counts.
+ * scrubber paints hour bands from the retained duration, with motion +
+ * event counts layered on top.
  *
- * Frigate's wire shape is loose — `motion` may be a number, an
- * object, or absent depending on version. We normalise to a flat
- * RecordingHour shape so the frontend doesn't need to know.
+ * `timezone` is an IANA zone name (e.g. "America/Los_Angeles"). Frigate
+ * buckets days and hours in UTC unless told otherwise, while the browser
+ * builds playback ranges in its own local time — passing the caller's
+ * zone through is what keeps those two on ONE clock. Omitting it is how
+ * a PDT operator ended up requesting 22:00 UTC for 15:00 local.
  */
 export async function getRecordingsSummary(
   cameraName: string,
+  timezone?: string,
 ): Promise<RecordingDay[]> {
-  const raw = (await fetchRecordingsSummary(cameraName)) as Array<Record<string, unknown>>;
+  const raw = (await fetchRecordingsSummary(cameraName, timezone)) as Array<
+    Record<string, unknown>
+  >;
   return raw.map((d) => {
     const day = String(d.day ?? "");
     const events = Number(d.events ?? 0);
     const duration = Number(d.duration ?? 0);
-    const hoursSrc = (d.hours as Record<string, Record<string, unknown>> | undefined) ?? {};
-    const hours: RecordingHour[] = [];
-    for (const [hourKey, h] of Object.entries(hoursSrc)) {
-      const hour = Number(hourKey);
-      if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
-      // Some Frigate versions emit `motion: { value, ... }`; some emit
-      // a flat number; some omit it. Coerce to a flat 0-100.
-      let motion = 0;
-      const m = h.motion;
-      if (typeof m === "number") motion = m;
-      else if (m && typeof m === "object" && "value" in m) {
-        const v = (m as { value: unknown }).value;
-        motion = typeof v === "number" ? v : 0;
-      }
-      hours.push({
+
+    // 0.17 ships an array; older builds shipped a dict keyed by hour.
+    // Object.entries() handles both, but ONLY the dict's key is a real
+    // hour — for an array it is the index, which is why the entry's own
+    // `hour` field wins whenever it is present.
+    const rawHours = d.hours;
+    const entries: Array<[string | null, Record<string, unknown>]> = Array.isArray(rawHours)
+      ? rawHours.map((h) => [null, (h ?? {}) as Record<string, unknown>])
+      : Object.entries((rawHours as Record<string, Record<string, unknown>>) ?? {}).map(
+          ([k, v]) => [k, (v ?? {}) as Record<string, unknown>],
+        );
+
+    const byHour = new Map<number, RecordingHour>();
+    for (const [key, h] of entries) {
+      const hour = parseSummaryHour(h, key);
+      if (hour === null) continue;
+      byHour.set(hour, {
         hour,
         events: Number(h.events ?? 0),
         duration: Number(h.duration ?? 0),
-        motion: Math.max(0, Math.min(100, motion)),
+        motion: normaliseMotion(h.motion),
+        objects: Number(h.objects ?? 0),
       });
     }
-    hours.sort((a, b) => a.hour - b.hour);
+
+    const hours = [...byHour.values()].sort((a, b) => a.hour - b.hour);
     return { day, events, duration, hours };
   });
 }

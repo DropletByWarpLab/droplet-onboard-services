@@ -1940,8 +1940,11 @@ export interface FilteredReviewsResult {
 export interface RecordingHour {
   hour: number;
   events: number;
+  /** Seconds of footage retained for this hour, 0–3600. This — not
+   *  `motion` — is what says there is something to play. */
   duration: number;
   motion: number;
+  objects: number;
 }
 
 export interface RecordingDay {

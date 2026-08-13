@@ -2435,11 +2435,30 @@ export async function markReviewViewed(reviewId: string): Promise<void> {
 
 // --- Recordings + timeline (Phase 3.1) ---
 
+/**
+ * The browser's IANA zone, e.g. "America/Los_Angeles".
+ *
+ * Frigate buckets the summary's days and hours in UTC unless it is told
+ * otherwise, while this page turns an hour into an epoch with
+ * `new Date(y, m, d, hour)` — browser-local. Sending the zone is what
+ * puts both on one clock; without it a UTC-7 operator asks for 22:00 UTC
+ * when they clicked 15:00 and gets an empty range back (WARP-1958).
+ */
+export function browserTimezone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchRecordingsSummary(
   cameraName: string,
+  timezone: string | null = browserTimezone(),
 ): Promise<RecordingDay[]> {
+  const qs = timezone ? `?${new URLSearchParams({ timezone })}` : "";
   const res = await authFetch(
-    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/recordings/summary`,
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/recordings/summary${qs}`,
   );
   if (!res.ok) throw new Error(`Failed to fetch recording summary: ${res.status}`);
   const body = (await res.json()) as { days: RecordingDay[] };
