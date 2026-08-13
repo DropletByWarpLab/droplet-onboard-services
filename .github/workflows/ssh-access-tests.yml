@@ -1,0 +1,85 @@
+name: ssh-access-tests
+
+# WARP-1984 — the SSH toggle's privileged half. The orchestrator's vitest guard
+# reads these artefacts as TEXT (it can prove `iptables` never appears); this
+# job RUNS them, which is the only way to prove the parser actually refuses
+# `DROPLET_SSH_ACCESS=$(id)` rather than merely looking like it would.
+#
+# ubuntu-latest matters: /bin/sh is dash here, exactly as on the appliance.
+# Developer shells provide bash-as-sh and accept constructs dash rejects, so a
+# script that only ever ran locally can still die on the box.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/host/usr-local-sbin/droplet-ssh-access"
+      - "scripts/host/etc-systemd-system/droplet-ssh-access.service"
+      - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
+      - "scripts/lib/single-box.sh"
+      - "tests/droplet-ssh-access.test.sh"
+      - ".github/workflows/ssh-access-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/usr-local-sbin/droplet-ssh-access"
+      - "scripts/host/etc-systemd-system/droplet-ssh-access.service"
+      - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
+      - "scripts/lib/single-box.sh"
+      - "tests/droplet-ssh-access.test.sh"
+      - ".github/workflows/ssh-access-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ssh-access-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ssh-access:
+    runs-on: ubuntu-latest
+    # Local stubs and tmpdirs only; a hung test must fail fast.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck the SSH-access applier
+        # warning severity to match ship-check's bar; no global excludes —
+        # waivers live inline per scripts/test/ship-check.sh convention.
+        run: shellcheck --severity=warning scripts/host/usr-local-sbin/droplet-ssh-access
+
+      - name: Validate the unit files
+        # systemd-analyze parses a unit exactly the way systemd will, so a bad
+        # directive fails here instead of on a box. Exactly two outputs are
+        # expected and only those two: ExecStart is installed by setup.sh and
+        # never exists on a runner, and the permission advisories fire on
+        # filesystems that do not carry POSIX modes. ANY other line fails the
+        # job — a filter wide enough to hide a real error would make this step
+        # decorative.
+        run: |
+          out="$(systemd-analyze verify \
+            scripts/host/etc-systemd-system/droplet-ssh-access.service \
+            scripts/host/etc-systemd-system/droplet-ssh-access.path 2>&1 || true)"
+          printf '%s\n' "$out"
+          unexpected="$(printf '%s\n' "$out" \
+            | grep -v 'is not executable: No such file or directory' \
+            | grep -v 'Proceeding anyway' \
+            | grep -v '^$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::systemd-analyze verify reported a unit-file problem:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Confirm /bin/sh really is dash
+        # The whole point of running these on ubuntu-latest. If a future runner
+        # image ships bash-as-sh, this job silently stops testing what it
+        # claims to test, so say so loudly rather than pass on a weaker shell.
+        run: |
+          target="$(readlink -f /bin/sh)"
+          echo "/bin/sh -> $target"
+          case "$target" in
+            *dash) ;;
+            *) echo "::error::/bin/sh is $target, not dash — this job no longer reproduces the appliance" >&2; exit 1 ;;
+          esac
+
+      - name: Run the SSH-access shell tests
+        run: bash tests/droplet-ssh-access.test.sh
