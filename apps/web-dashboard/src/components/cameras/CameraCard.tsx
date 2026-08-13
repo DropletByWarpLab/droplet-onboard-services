@@ -36,6 +36,11 @@ const HOVER_LATENCY_DELAY_MS = 250;
 const STATUS_CONFIG = {
   recording: { label: "Recording", color: "var(--success)", pulse: false },
   detecting: { label: "Detecting", color: "#d9a35c", pulse: true },
+  // WARP-1974: a healthy stream that keeps NOTHING. Amber rather than
+  // green, and named for what it is — the camera works, but nothing is
+  // being saved, so there will be nothing to look back at. The old build
+  // showed this exact state as a green "Recording".
+  live: { label: "Live · not saving", color: "#d9a35c", pulse: false },
   idle: { label: "Idle", color: "var(--text-faint)", pulse: false },
   offline: { label: "Offline", color: "var(--danger)", pulse: false },
 } as const;

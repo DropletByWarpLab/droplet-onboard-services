@@ -1839,7 +1839,13 @@ export interface CameraInfo {
   macAddress: string | null;
   enabled: boolean;
   autoDiscovered: boolean;
-  status: "recording" | "detecting" | "idle" | "offline";
+  /**
+   * ⚠ `recording` means footage is being KEPT, not merely that frames are
+   * arriving. `live` is the state that used to be mislabelled "recording":
+   * a healthy stream whose retention windows are all zero, so there will be
+   * nothing to scrub back to (WARP-1974).
+   */
+  status: "recording" | "detecting" | "live" | "idle" | "offline";
   lastSeen: string;
   lastDetection: DetectionEvent | null;
 }

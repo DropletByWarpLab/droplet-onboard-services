@@ -9,7 +9,23 @@ export interface CameraInfo {
   macAddress: string | null;
   enabled: boolean;
   autoDiscovered: boolean;
-  status: "recording" | "detecting" | "idle" | "offline";
+  /**
+   * What this camera is actually doing.
+   *
+   * ⚠ `recording` means **footage is being kept**, not merely that frames
+   * are arriving. Those are different facts and conflating them is what
+   * made the product report "Recording" over cameras that retained
+   * nothing (WARP-1974).
+   *
+   *   detecting — frames arriving, objects being tracked, footage kept
+   *   recording — frames arriving, footage kept
+   *   live      — frames arriving and NOTHING is being kept. The camera is
+   *               healthy; its retention windows are all zero, so there
+   *               will be nothing to scrub back to.
+   *   idle      — connected, no frames
+   *   offline   — Frigate doesn't see it
+   */
+  status: "recording" | "detecting" | "live" | "idle" | "offline";
   lastSeen: string;
   lastDetection: DetectionEvent | null;
 }
