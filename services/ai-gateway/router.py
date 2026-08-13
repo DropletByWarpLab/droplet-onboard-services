@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 from typing import NamedTuple
 
 from auth.byok import get_api_key
-from middleware.off_lan_gating import check_off_lan_gate
+from middleware.off_lan_gating import check_off_lan_gate, is_local_provider
 from providers.anthropic_cloud import AnthropicCloudProvider
 from providers.ollama_local import OllamaLocalProvider
 from providers.openai_cloud import OpenAICloudProvider
@@ -121,6 +121,19 @@ class ProviderRouter:
 
     def resolve_provider(self, model: str, explicit_provider: str | None = None) -> BaseProvider:
         """Resolve which provider handles the given model."""
+        # WARP-1933: `provider` is a PERSISTED column, so a replayed turn can
+        # arrive spelled `ollama`/`ollama_local` — the legacy names for the
+        # on-box provider before WARP-1926 renamed the key to `local`. Those
+        # spellings are not in `_providers` (deliberately: aliasing them in
+        # would double-query the local provider in `list_all_models`'s fan-out
+        # and skew the reverse lookup), so without this they missed the lookup
+        # below and fell through to prefix matching — resolving a CLOUD
+        # provider whenever the persisted model name matched a cloud prefix.
+        # Same allowlist the off-LAN gate uses, so the two cannot disagree
+        # about whether a given request is local.
+        if explicit_provider and is_local_provider(explicit_provider):
+            return self.local
+
         if explicit_provider and explicit_provider in self._providers:
             return self._providers[explicit_provider]
 
