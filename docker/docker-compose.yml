@@ -1314,8 +1314,10 @@ services:
   #     the in-container OpenWrt AP's br-lan (a host bridge).
   # The orchestrator is its only consumer (HTTP on :8083 — host-service
   # ladder after routing 8080 / switch 8081 / display 8082), authed via
-  # the X-Droplet-Auth shared token. Host Bluetooth prep (bluez, rfkill
-  # unblock, powered adapter) is owned by scripts/setup.sh.
+  # the X-Droplet-Auth shared token. Host Bluetooth prep (bluez tools,
+  # bluetoothd DISABLED per WARP-1939 — its LE connection management
+  # corrupts noble's raw-HCI connects — droplet-bt-power.service owning
+  # adapter power, rfkill unblock) is owned by scripts/setup.sh.
   matter-controller:
     build:
       # Repo-root context so the workspace deps resolve via npm

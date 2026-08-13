@@ -49,182 +49,28 @@
  * loses on specificity to a `.droplet-shell` rule in a different stylesheet,
  * goes red here.
  *
- * Two limits, stated so nothing here reads as broader than it is:
- *   - The corpus is the AUTHORED stylesheets. Tailwind's generated utilities
- *     are not in it, so each element under test is separately asserted to
- *     carry no utility (and no inline style) for the property in question —
- *     that is what makes the resolution complete rather than partial.
- *   - Only the base layer is resolved. `@container` / `@media` declarations
- *     are excluded from `resolve()` because whether they apply is a layout
- *     question jsdom cannot answer; they are checked structurally instead,
- *     by the two `@container bento` tests at the bottom.
+ * That machinery is shared — it lives in `helpers/css-cascade`, whose header
+ * documents the two limits on what a resolution proves (Tailwind's generated
+ * utilities are outside the corpus, so each element under test is separately
+ * asserted to carry no utility and no inline style for the property in
+ * question; and only the base layer is resolved, so the `@container bento`
+ * layer is checked structurally by the two tests at the bottom instead).
  */
 import { describe, it, expect } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import type { ReactNode } from "react";
-import postcss, { type Rule, type AtRule } from "postcss";
+import {
+  HOME_SHEETS,
+  SHEETS,
+  collectSheets,
+  rank,
+  readSheet,
+  resolve,
+  specificity,
+} from "../helpers/css-cascade";
 import { ChatMessage } from "@/components/ChatMessage";
 import { CitationCard } from "@/components/citations/CitationCard";
 import type { ChatMessage as ChatMessageType } from "@/lib/types";
-
-const SRC = path.resolve(__dirname, "../..");
-
-const SHEETS = {
-  chat: "components/chat/chat-indigo.css",
-  homeWidgets: "components/home/home-widgets.css",
-  homeBento: "components/home/home-bento.css",
-} as const;
-
-/**
- * Every stylesheet the Home route loads, and where it enters the import
- * graph. The cascade is only as honest as this list: `.msg-bubble` is styled
- * from chat-indigo.css, but droplet-shell.css and home-widgets.css target the
- * same elements from a DIFFERENT chunk, and a rule that quietly loses to one
- * of them is precisely the regression a reflow fix has to be guarded against.
- *
- *   app/globals.css                      app/layout.tsx (root)
- *   components/shell/indigo-tokens.css   help/HelpLauncher.tsx, home/widgets.tsx
- *   components/shell/droplet-shell.css   help/HelpLauncher.tsx (AuthGate chrome)
- *   components/home/home-bento.css       app/page.tsx
- *   components/home/home-widgets.css     app/page.tsx
- *   components/chat/chat-indigo.css      home/widgets.tsx
- *   components/chat/thinking.css         components/ChatMessage.tsx
- */
-const HOME_SHEETS: readonly string[] = [
-  "app/globals.css",
-  "components/shell/indigo-tokens.css",
-  "components/shell/droplet-shell.css",
-  SHEETS.homeBento,
-  SHEETS.homeWidgets,
-  SHEETS.chat,
-  "components/chat/thinking.css",
-];
-
-function readSheet(rel: string): string {
-  return readFileSync(path.join(SRC, rel), "utf8");
-}
-
-interface Decl {
-  /** Stylesheet this came from — cross-sheet ties are unresolvable, see below. */
-  sheet: string;
-  selector: string;
-  prop: string;
-  value: string;
-  /** `!important` outranks every normal declaration regardless of specificity. */
-  important: boolean;
-  specificity: number;
-  order: number;
-  /** `@container`/`@media` condition chain, empty for the base layer. */
-  conditions: string[];
-}
-
-/** (b, c) only — no ids anywhere in these sheets. */
-function flatSpecificity(selector: string): number {
-  const b = (selector.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g) ?? []).length;
-  const c = (selector.match(/(^|[\s>+~])[a-z][\w-]*/gi) ?? []).length;
-  return b * 100 + c;
-}
-
-/**
- * Specificity as a single comparable number. `:where()` contributes nothing
- * and `:is()` / `:not()` / `:has()` contribute their most specific argument
- * rather than a pseudo-class of their own — without that, `.a:not(.b)` scores
- * 300 instead of 200 and the resolver ranks rules a browser would not. None
- * of these nest in the Home sheets, so one non-nesting pass is enough.
- */
-function specificity(selector: string): number {
-  let rest = selector.replace(/::[\w-]+/g, "").replace(/:where\([^()]*\)/g, "");
-  let fromArgs = 0;
-  rest = rest.replace(/:(?:is|not|has)\(([^()]*)\)/g, (_match, args: string) => {
-    fromArgs += Math.max(...args.split(",").map(flatSpecificity));
-    return "";
-  });
-  return fromArgs + flatSpecificity(rest);
-}
-
-/** Flatten a stylesheet into declarations tagged with their at-rule chain. */
-function collect(css: string, sheet: string, firstOrder = 0): Decl[] {
-  const out: Decl[] = [];
-  let order = firstOrder;
-  postcss.parse(css).walkRules((rule: Rule) => {
-    const conditions: string[] = [];
-    let parent = rule.parent;
-    while (parent && parent.type === "atrule") {
-      const at = parent as AtRule;
-      conditions.unshift(`@${at.name} ${at.params}`);
-      parent = at.parent;
-    }
-    for (const selector of rule.selectors) {
-      for (const node of rule.nodes) {
-        if (node.type !== "decl") continue;
-        out.push({
-          sheet,
-          selector,
-          prop: node.prop,
-          value: node.value,
-          important: node.important === true,
-          specificity: specificity(selector),
-          order: order++,
-          conditions,
-        });
-      }
-    }
-  });
-  return out;
-}
-
-/** One corpus across several stylesheets, with `order` continuous through it. */
-function collectSheets(sheets: { css: string; name: string }[]): Decl[] {
-  const out: Decl[] = [];
-  for (const { css, name } of sheets) out.push(...collect(css, name, out.length));
-  return out;
-}
-
-interface Resolution {
-  /** What the browser lands on — trustworthy only while `contested` is empty. */
-  winner?: Decl;
-  /**
-   * Declarations from OTHER stylesheets that tie the winner on importance and
-   * specificity with a different value. Within one sheet source order is
-   * stable; across sheets it is the order the bundler concatenates CSS chunks
-   * in, which this repo does not control — so a cross-sheet tie is an
-   * unresolved cascade, and the caller should fail on it rather than pick.
-   */
-  contested: Decl[];
-}
-
-/** Importance first, then specificity — the browser's ordering. */
-const rank = (d: Decl) => (d.important ? 1e6 : 0) + d.specificity;
-
-/**
- * Resolve one property for a real DOM element across the whole Home cascade:
- * every base-layer rule whose selector actually matches, ranked by importance
- * then specificity, ties inside a stylesheet broken by source order.
- */
-function resolve(el: Element, decls: Decl[], prop: string): Resolution {
-  const hits = decls.filter((d) => {
-    if (d.prop !== prop || d.conditions.length > 0) return false;
-    try {
-      return el.matches(d.selector);
-    } catch {
-      // Selectors jsdom cannot parse (::-webkit-scrollbar, :has(), …).
-      return false;
-    }
-  });
-  if (hits.length === 0) return { contested: [] };
-
-  const top = Math.max(...hits.map(rank));
-  // Last-wins within each sheet, then one candidate per sheet left standing.
-  const perSheet = new Map<string, Decl>();
-  for (const d of hits) {
-    if (rank(d) === top) perSheet.set(d.sheet, d);
-  }
-  const candidates = [...perSheet.values()].sort((a, b) => a.order - b.order);
-  const winner = candidates[candidates.length - 1];
-  return { winner, contested: candidates.filter((d) => d.value !== winner.value) };
-}
 
 /**
  * The exact content class that produced the 477px floor: a fenced code block

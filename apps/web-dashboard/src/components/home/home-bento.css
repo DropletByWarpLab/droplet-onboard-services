@@ -1164,8 +1164,12 @@ body:has(.droplet-home) {
 .dh-m-board .w-stat-cell {
   min-height: 76px;
 }
+/* The mobile card has no fixed height, so the cams grid used to need one or
+   it collapsed. It no longer does: the tiles carry their own aspect and size
+   themselves from the column width. Pinning 188px here would only re-impose a
+   shape the frame has to fit into — the thing this widget is done doing. */
 .dh-m-board .w-cams {
-  height: 188px !important;
+  height: auto !important;
 }
 .dh-m-board .w-cal {
   height: 296px !important;

@@ -166,28 +166,34 @@ describe("Calendar Agenda view (WARP-944)", () => {
     scrollSpy.mockRestore();
   });
 
-  // pr-reviewer #2: picking a mini-month day while in MONTH view must not set
-  // `selectedKey` (the agenda isn't even rendered). Otherwise switching to
-  // Agenda later auto-scrolls to that stale date the user never meant as an
-  // agenda selection.
-  it("does not auto-scroll the agenda to a day that was picked while in Month view", () => {
+  // WARP-1904 (supersedes pr-reviewer #2's "month-view pick" case): in MONTH
+  // view a mini-month day click did nothing visible — it only moved the cursor
+  // inside the already-displayed month. Product decision (Option B): the
+  // mini-month day grid is DISPLAY-ONLY in Month view — the cells are not
+  // buttons at all, so no month-view click exists to seed a stale agenda
+  // selection. The cells become real buttons only in Agenda view, where
+  // picking a day scrolls to it (WARP-944).
+  it("renders the mini-month day cells display-only in Month view, interactive in Agenda view", () => {
     HTMLElement.prototype.scrollIntoView = vi.fn();
     const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
 
     render(<CalendarPage />); // starts in Month view
 
-    // Pick a day in the mini-month while still in Month view.
     const label = evDate.toLocaleDateString(undefined, {
       weekday: "long",
       month: "long",
       day: "numeric",
     });
-    fireEvent.click(screen.getAllByRole("button", { name: label })[0]);
+    // Month view: no day button with the mini-month's bare date label exists —
+    // the grid is inert. (The big month grid's cells are labelled
+    // "<date>, N events", which the exact-match query does not match.)
+    expect(screen.queryAllByRole("button", { name: label })).toHaveLength(0);
 
-    // Now switch to Agenda — there must be no auto-scroll from the month-view pick.
+    // Switching to Agenda re-arms the day cells (real buttons again) and no
+    // stale selection from Month view auto-scrolls the list.
     fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
-
     expect(scrollSpy).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("button", { name: label }).length).toBeGreaterThan(0);
     scrollSpy.mockRestore();
   });
 
