@@ -258,8 +258,14 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
 
 describe("POST /api/llm/chat — a cloud turn carries no stored content", () => {
   it("withholds the Drive and brain tools from a cloud turn", async () => {
+    // Owner, so this pairs like-for-like with the local test below: same
+    // principal, same registry, only the provider differs. An unprivileged
+    // role resolves its allowed-tools through the live access-scope resolver,
+    // which this harness does not reproduce and which returns an EMPTY list —
+    // every "not.toContain" would then pass vacuously while proving nothing.
+    // The paired `toContain` below is what catches that.
     mockGetModelProvider.mockResolvedValue("anthropic");
-    const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
 
     const res = await request(app)
       .post("/api/llm/chat")
@@ -393,6 +399,11 @@ describe("POST /api/llm/chat — attachments on a cloud turn", () => {
   });
 
   it("inlines that same document on a local turn", async () => {
+    // No image claimed by the vision route, so the OCR-text path is the one
+    // under test. (When vision DOES claim an item the route deliberately
+    // stops inlining its text — correct behaviour, but it would mask the
+    // assertion this case exists to make.)
+    mockBuildImageBlocks.mockResolvedValue({ blocks: [], usedItemIds: [] });
     mockGetModelProvider.mockResolvedValue("local");
     const app = buildApp({ id: USER_ID, username: "reception", role: "family" });
 
@@ -408,6 +419,8 @@ describe("POST /api/llm/chat — attachments on a cloud turn", () => {
     expect(res.status).toBe(200);
     const sent = outboundText();
     expect(sent).toContain(PHI_TEXT);
+    // The vision path WAS offered the attachment on a local turn — the
+    // mirror of the cloud case above, where it is offered nothing at all.
     expect(mockBuildImageBlocks.mock.calls[0]?.[2]).toEqual(["item-1"]);
   });
 });
