@@ -55,6 +55,32 @@ logger = logging.getLogger(__name__)
 _unverified_tls_warned = False
 
 
+def _ca_cert_path() -> str:
+    """The configured CAMERA_INIT_CA_CERT, or "" when unset."""
+    return os.environ.get("CAMERA_INIT_CA_CERT", "").strip()
+
+
+def _probe_schemes(default: tuple[str, ...]) -> tuple[str, ...]:
+    """WARP-1029 — the URL schemes a first-run probe may use.
+
+    `verify=` alone does not make a pin meaningful: both probes below walked
+    `https` AND `http`, `continue`-ing to plaintext on ANY `httpx.HTTPError`
+    — including a pinned-TLS handshake failure. An active on-path attacker
+    could therefore break the handshake, watch the caller retry over plain
+    HTTP, serve its own `PublicKey` on that channel, and recover the admin
+    password the caller is about to POST. A configured CA cert protected
+    only against a PASSIVE eavesdropper, never the active MITM a pin implies.
+
+    So when the operator has pinned, the fallback is dropped and the probe
+    fails closed. Unpinned deployments keep the historical order byte-for-byte
+    — fresh-from-box cameras are the reason that fallback exists (see
+    `_tls_verify`), and this must not break them.
+    """
+    if _ca_cert_path():
+        return ("https",)
+    return default
+
+
 def _tls_verify() -> bool | str:
     """Resolve the httpx ``verify=`` value for vendor-init clients.
 
@@ -64,7 +90,7 @@ def _tls_verify() -> bool | str:
     configured path does not exist.
     """
     global _unverified_tls_warned
-    ca_cert = os.environ.get("CAMERA_INIT_CA_CERT", "").strip()
+    ca_cert = _ca_cert_path()
     if ca_cert:
         if not os.path.isfile(ca_cert):
             raise ValueError(
@@ -203,8 +229,12 @@ class HanwhaInitializer:
         ``key=value`` body even pre-init, which nothing else does. We
         probe the status URL on both HTTP and HTTPS because Wisenet
         cameras redirect HTTP to HTTPS on some firmwares.
+
+        WARP-1029: HTTPS-only once CAMERA_INIT_CA_CERT is set. Unpinned this
+        still tries plaintext FIRST, which is the historical behaviour and
+        stays untouched.
         """
-        for scheme in ("http", "https"):
+        for scheme in _probe_schemes(("http", "https")):
             try:
                 resp = await client.get(
                     f"{scheme}://{ip}{_HANWHA_STATUS_PATH}", timeout=5.0
@@ -218,8 +248,13 @@ class HanwhaInitializer:
     async def _fetch_status(
         self, client: httpx.AsyncClient, ip: str
     ) -> tuple[str, dict] | None:
-        """Return ``(base_url, parsed)`` for the first scheme that responds."""
-        for scheme in ("https", "http"):
+        """Return ``(base_url, parsed)`` for the first scheme that responds.
+
+        WARP-1029: the returned ``base_url`` is what `initialize` POSTs the
+        RSA-encrypted admin password to, so this loop is the one that decides
+        whether the secret travels over TLS. HTTPS-only once pinned.
+        """
+        for scheme in _probe_schemes(("https", "http")):
             base = f"{scheme}://{ip}"
             try:
                 resp = await client.get(f"{base}{_HANWHA_STATUS_PATH}", timeout=5.0)

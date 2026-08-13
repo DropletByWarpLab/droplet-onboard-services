@@ -100,3 +100,98 @@ def test_missing_cert_fails_closed(monkeypatch, tmp_path):
         asyncio.run(vendor_init.check_status("192.0.2.10"))
     with pytest.raises(ValueError, match="CAMERA_INIT_CA_CERT"):
         asyncio.run(vendor_init.initialize_camera("192.0.2.10", "admin", "pw"))
+
+
+# ── WARP-1029 ────────────────────────────────────────────────────────────
+#
+# `verify=` alone did not make the pin meaningful. Both Hanwha probes walked
+# `https` AND `http`, `continue`-ing to plaintext on ANY httpx.HTTPError —
+# including a pinned-TLS handshake failure. An active on-path attacker could
+# break the handshake, watch the caller retry over plain HTTP, serve its own
+# `PublicKey` on that channel, and recover the admin password about to be
+# POSTed. So a configured CA cert defended only against a PASSIVE
+# eavesdropper, never the active MITM a pin implies.
+
+
+class _SchemeRecordingClient:
+    """Records every URL requested and fails them all, so a probe is forced
+    to walk its whole scheme list — which is exactly what we assert on."""
+
+    def __init__(self, **kwargs):
+        self.requested: list[str] = []
+
+    async def get(self, url, **kwargs):
+        self.requested.append(url)
+        raise vendor_init.httpx.ConnectError("handshake failed")
+
+    async def post(self, url, **kwargs):
+        self.requested.append(url)
+        raise vendor_init.httpx.ConnectError("handshake failed")
+
+
+def _schemes_tried(client: _SchemeRecordingClient) -> set[str]:
+    return {url.split("://", 1)[0] for url in client.requested}
+
+
+def test_status_probe_drops_the_plaintext_fallback_when_pinned(monkeypatch, tmp_path):
+    cert = tmp_path / "camera-ca.pem"
+    cert.write_text("cert")
+    monkeypatch.setenv("CAMERA_INIT_CA_CERT", str(cert))
+
+    client = _SchemeRecordingClient()
+    hanwha = vendor_init.HanwhaInitializer()
+    assert asyncio.run(hanwha._fetch_status(client, "192.0.2.10")) is None
+
+    # The password POST is built from this probe's base URL, so a plaintext
+    # retry here is what hands the secret to the attacker.
+    assert _schemes_tried(client) == {"https"}
+    assert not any(url.startswith("http://") for url in client.requested)
+
+
+def test_vendor_match_probe_is_https_only_when_pinned(monkeypatch, tmp_path):
+    cert = tmp_path / "camera-ca.pem"
+    cert.write_text("cert")
+    monkeypatch.setenv("CAMERA_INIT_CA_CERT", str(cert))
+
+    client = _SchemeRecordingClient()
+    hanwha = vendor_init.HanwhaInitializer()
+    assert asyncio.run(hanwha.matches(client, "192.0.2.10")) is False
+
+    # This one tried plaintext FIRST, so under a pin the very first packet
+    # was a downgrade.
+    assert _schemes_tried(client) == {"https"}
+
+
+def test_unpinned_probes_keep_the_historical_scheme_order(monkeypatch):
+    # The fallback exists for fresh-from-box cameras with no capturable cert
+    # (see _tls_verify). Unpinned behaviour must stay byte-for-byte identical
+    # or this fix breaks the default first-run path it is meant to protect.
+    monkeypatch.delenv("CAMERA_INIT_CA_CERT", raising=False)
+    hanwha = vendor_init.HanwhaInitializer()
+
+    status_client = _SchemeRecordingClient()
+    asyncio.run(hanwha._fetch_status(status_client, "192.0.2.10"))
+    assert [url.split("://", 1)[0] for url in status_client.requested] == [
+        "https",
+        "http",
+    ]
+
+    match_client = _SchemeRecordingClient()
+    asyncio.run(hanwha.matches(match_client, "192.0.2.10"))
+    assert [url.split("://", 1)[0] for url in match_client.requested] == [
+        "http",
+        "https",
+    ]
+
+
+def test_probe_schemes_helper_reads_the_pin_directly(monkeypatch, tmp_path):
+    # Pins the predicate itself, so a future caller that forgets to route
+    # through _probe_schemes is the only way to regress this.
+    monkeypatch.delenv("CAMERA_INIT_CA_CERT", raising=False)
+    assert vendor_init._probe_schemes(("https", "http")) == ("https", "http")
+
+    cert = tmp_path / "camera-ca.pem"
+    cert.write_text("cert")
+    monkeypatch.setenv("CAMERA_INIT_CA_CERT", str(cert))
+    assert vendor_init._probe_schemes(("https", "http")) == ("https",)
+    assert vendor_init._probe_schemes(("http", "https")) == ("https",)
