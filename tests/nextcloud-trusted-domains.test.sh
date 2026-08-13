@@ -82,24 +82,30 @@ else
   fail "compose no longer mounts nextcloud-init.sh in before-starting — a renamed box never reconciles"
 fi
 
-# ── WARP-1982: the list must admit an IP-addressed browser, WITHOUT wildcards ──
+# ── WARP-1982: the IP-addressed browser is covered WITHOUT wildcards ──
 #
-# Reaching the box by IP is not an edge case: the setup wizard hands out an
-# address before any name resolves, droplet.local/.lan answer only on the
-# appliance's own LAN, and the per-device FQDN is split-horizon. A client on a
-# neighbouring segment has no name at all, and an address absent from this list
-# means HTTP 400 on every Nextcloud leg while the dashboard itself loads fine.
+# The reconcile above only propagates what compose declares, and compose
+# declared NAMES only. Reaching the box by IP is not an edge case: the setup
+# wizard hands out an address before any name resolves, droplet.local/.lan
+# answer only on the appliance's own LAN, and the per-device FQDN is
+# split-horizon — so a client on a neighbouring segment has no name at all.
+# Measured on the box before WARP-1966 landed: the dashboard loaded fine at
+# https://<ip>/files (Next.js does not check Host) while the embedded editor's
+# Nextcloud leg answered 400 "Access through untrusted domain".
 #
-# WARP-1973 covered that with RFC1918 WILDCARDS. That was a Host-header
-# allowlist bypass: isTrustedDomain() expands `*` to [-.a-zA-Z0-9]*, letters and
-# dots included, so an entry of the form `192.168.*` also matches a public name
-# beginning `192.168.` — measured as ACCEPTED on a real box. It is structural;
-# a narrower prefix does not help.
+# WARP-1966 covered that with `192.168.*` and `10.*`, and THIS FILE USED TO
+# ASSERT THOSE WILDCARDS WERE PRESENT — it pinned the vulnerability as the
+# invariant, so the fix could not land without a red. Nextcloud expands `*`
+# to `[-\.a-zA-Z0-9]*` (lib/private/Security/TrustedDomainHelper.php) — a
+# class containing LETTERS AND DOTS — so `192.168.*` compiles to
+# /^192\.168\.[-\.a-zA-Z0-9]*$/i and ACCEPTS an attacker-controlled
+# `Host: 192.168.evil.invalid`. No wildcard can express "IPv4 in this range
+# only", and narrowing the prefix does not help: `192.168.5.*` still matches
+# `192.168.5.evil`.
 #
-# The predecessor of this guard REQUIRED those wildcards and forbade only the
-# literal token `172.*`, so it green-lit the entries that opened the hole while
-# its own failure text warned about Host-header poisoning. It asserted spelling;
-# this asserts the property.
+# ${DROPLET_TRUSTED_LAN_IPS} carries the coverage instead — the box's own LAN
+# addresses, explicitly. Both halves are load-bearing, so both are pinned: the
+# IP coverage must survive, and no wildcard may come back.
 TD_LINE="$(grep -E '^[[:space:]]*-[[:space:]]*NEXTCLOUD_TRUSTED_DOMAINS=' "$COMPOSE_FILE" | head -1)"
 if [ -n "$TD_LINE" ]; then
   pass "compose declares NEXTCLOUD_TRUSTED_DOMAINS"
@@ -107,19 +113,30 @@ else
   fail "compose no longer declares NEXTCLOUD_TRUSTED_DOMAINS"
 fi
 
-if printf '%s' "$TD_LINE" | grep -q '\*'; then
-  offenders="$(printf '%s' "$TD_LINE" | tr ' ' '
-' | grep '\*' | grep -v '^\${' | tr '
-' ' ')"
-  fail "wildcard entr(ies) in the trust list:${offenders}— Nextcloud expands \`*\` to [-.a-zA-Z0-9]*, so a private-range wildcard also matches a PUBLIC hostname with that prefix and the allowlist stops being one"
+TD_VALUE="${TD_LINE#*NEXTCLOUD_TRUSTED_DOMAINS=}"
+
+# Dropping this returns the box to the HTTP 400 WARP-1966 was filed for.
+if printf '%s' "$TD_VALUE" | grep -q 'DROPLET_TRUSTED_LAN_IPS'; then
+  pass "trusted domains carry \$DROPLET_TRUSTED_LAN_IPS — an IP-addressed browser still reaches the editor"
 else
-  pass "no wildcard in the trust list (a wildcard also matches public hostnames)"
+  fail "trusted domains no longer reference \$DROPLET_TRUSTED_LAN_IPS — a browser addressing the box by IP gets HTTP 400 on every Nextcloud leg, editor included"
 fi
 
-if printf '%s' "$TD_LINE" | grep -q 'DROPLET_TRUSTED_LAN_IPS'; then
-  pass "IP coverage comes from \$DROPLET_TRUSTED_LAN_IPS (the box's own addresses, exact)"
+# NO WILDCARDS. EVER. Not a bare '*', not a "narrowed" RFC1918 prefix. Every
+# one of them is a Host-header bypass, because the expansion admits letters and
+# dots. Substring check on purpose: '192.168.*' is not a standalone token, so a
+# token-boundary check like the one this replaced sails straight past it.
+if printf '%s' "$TD_VALUE" | grep -q '\*'; then
+  fail "trusted domains contain a wildcard ($(printf '%s' "$TD_VALUE" | tr ' ' '\n' | grep -F '*' | tr '\n' ' ')) — Nextcloud expands '*' to [-.a-zA-Z0-9]*, which accepts any attacker-controlled name of that shape"
 else
-  fail "\$DROPLET_TRUSTED_LAN_IPS missing — removing the wildcards without it drops IP coverage entirely"
+  pass "trusted domains contain no wildcard of any shape"
+fi
+
+# 0.0.0.0 carries no '*', so the wildcard check above cannot see it.
+if printf '%s' "$TD_VALUE" | grep -qE "(^|[[:space:]])0\.0\.0\.0([[:space:]]|\$)"; then
+  fail "trusted domains contain '0.0.0.0' — that stops being an allowlist and re-opens Host-header poisoning"
+else
+  pass "trusted domains do not contain '0.0.0.0'"
 fi
 
 START_LINE=$(grep -nF "$START_MARK" "$HOOK" | head -1 | cut -d: -f1)

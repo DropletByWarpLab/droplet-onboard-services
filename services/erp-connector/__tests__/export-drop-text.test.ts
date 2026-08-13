@@ -279,10 +279,35 @@ describe("parseMoney", () => {
   });
 
   it("does not mistake trailing letters for a sign marker", () => {
-    // A marker has to follow a digit, a closing paren or whitespace, so a cell
-    // that merely ends in those letters is not silently re-signed.
+    // These must carry DIGITS. A letters-only cell reaches undefined through
+    // the empty-body path no matter what the marker branch decided, so it
+    // cannot pin the "must follow a digit, paren or space" anchor at all — a
+    // version of this test that asserted only `SCR`/`DECR` stayed green with
+    // the anchor deleted. SCR is a real currency code an exporter can emit.
+    expect(parseMoney("100 SCR")).toBe(100);
+    expect(parseMoney("1,234.56 ACCR")).toBe(1234.56);
+    // ...and letters alone are still not an amount.
     expect(parseMoney("SCR")).toBeUndefined();
-    expect(parseMoney("DECR")).toBeUndefined();
+    expect(parseMoney("ACCRUED")).toBeUndefined();
+  });
+
+  it("reads parentheses as negative ONLY when they wrap the whole amount", () => {
+    // An ageing annotation is a positive balance with a comment after it.
+    // Treating any parenthesised text as accounting-negative inverted the sign
+    // AND spliced the annotation's digits into the number: `500.00 (30 days)`
+    // came back as -500.003.
+    expect(parseMoney("500.00 (30 days)")).toBeUndefined();
+    expect(parseMoney("1,234.56 (90+)")).toBeUndefined();
+    // An unbalanced pair is not a clean amount either.
+    expect(parseMoney("(1,234.56")).toBeUndefined();
+    expect(parseMoney("()")).toBeUndefined();
+    // ...while the genuine accounting forms still read as negative.
+    expect(parseMoney("(1,234.56)")).toBe(-1234.56);
+    expect(parseMoney("$(1,234.56)")).toBe(-1234.56);
+  });
+
+  it("does not return negative zero for a zero credit", () => {
+    expect(Object.is(parseMoney("(0.00)"), 0)).toBe(true);
   });
 
   it("handles leading and trailing signs", () => {

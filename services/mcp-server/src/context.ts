@@ -10,6 +10,38 @@ import type {
 // the existing `import { type Claims } from "./context.js"` callers
 // (server.ts, transports/*) keep working without duplicating the type.
 import type { Claims } from "./auth/jwt.js";
+
+/**
+ * WARP-1975 — stamp the acting user on every orchestrator request.
+ *
+ * The orchestrator scopes camera reads to the acting human's per-camera
+ * grants. A tool call arrives as the bare `_service:mcp` principal, which
+ * holds no grants of its own, so it has to name the person behind it.
+ *
+ * Wrapping the client rather than editing 17 handlers is not just less
+ * churn — a handler that forgets does not fail loudly. It silently gets an
+ * empty result, which reads to the model as "there are no cameras" rather
+ * than "you didn't say who you are". One binding cannot be forgotten.
+ *
+ * A per-call `headers` option still wins, so export_clip's existing
+ * X-Nextcloud-Token/User pairing is untouched.
+ */
+function withActingUser(client: HttpClient, userId: string | undefined): HttpClient {
+  if (!userId) return client;
+  const acting = { "X-Nextcloud-User": userId };
+  // The caller's own headers win, so an explicit per-call assertion (or a
+  // paired X-Nextcloud-Token) is never clobbered by the default.
+  function merge(opts?: { headers?: Record<string, string> }) {
+    return { ...(opts ?? {}), headers: { ...acting, ...(opts?.headers ?? {}) } };
+  }
+
+  return {
+    get: (path, opts) => client.get(path, merge(opts)),
+    post: (path, body, opts) => client.post(path, body, merge(opts)),
+    patch: (path, body, opts) => client.patch(path, body, merge(opts)),
+    delete: (path, opts) => client.delete(path, merge(opts)),
+  };
+}
 export type { Claims } from "./auth/jwt.js";
 
 export interface ContextDeps {
@@ -135,7 +167,24 @@ export function buildContext(
       switchSvc: deps.httpFactory("switchSvc"),
       fileIndexer: deps.httpFactory("fileIndexer"),
       nextcloud: deps.httpFactory("nextcloud"),
-      orchestrator: deps.httpFactory("orchestrator"),
+      // WARP-1975 — assert WHO the assistant is acting for.
+      //
+      // Camera reads in the orchestrator are scoped to the acting human's
+      // per-camera grants. A tool call arrives as the bare `_service:mcp`
+      // principal, which holds no grants of its own, so every orchestrator
+      // request must name the person behind it. Same `X-Nextcloud-User`
+      // header `middleware/space.ts` already uses for department access,
+      // and which export_clip/share_clip were already sending by hand.
+      //
+      // Bound HERE rather than in each handler on purpose: 17 camera
+      // handlers cannot all be relied on to remember, and a handler that
+      // forgets does not fail loudly — it silently gets an empty result,
+      // which reads as "no cameras" rather than "you didn't say who you
+      // are". One binding cannot be forgotten.
+      //
+      // A per-call `headers` option still wins, so export_clip's
+      // X-Nextcloud-Token pairing is untouched.
+      orchestrator: withActingUser(deps.httpFactory("orchestrator"), userId),
     },
     embedText: deps.embedText,
     searchHybrid,

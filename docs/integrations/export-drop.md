@@ -171,6 +171,7 @@ Everything below is enforced in `src/export-drop/scan.ts` and covered by tests t
 * **The checked inode is the read inode.** Files are opened with `O_NOFOLLOW` and re-stat'd on the open descriptor — regular-file and size ceilings are asserted there, not trusted from the earlier pass. A symlink swapped in after the check fails the open rather than being followed. (`O_NOFOLLOW` exists on Linux and macOS; a Windows developer checkout loses this one defence and keeps every other. The appliance is Linux.)
 * **A file being written is never parsed.** Change notifications are not reliable over CIFS — the kernel does not see writes made by the Windows host — so this is a **poll**, not a watcher, and a poll will catch a half-flushed export. A file becomes eligible only after a quiet period (default 30 s) and is reported as `pending` until then, not as broken.
 * **Memory is bounded** by per-file byte, per-file row, per-dataset row and per-directory file ceilings. Exceeding one skips the file with a diagnostic; a runaway export cannot take the orchestrator down.
+* **A row with more fields than headers is skipped and counted, never read.** That shape means a value contained an unquoted delimiter — `AC5,2,000.00` where the thousands separator was not quoted — which shifts every column after it, so the balance read for one account is really part of another's. Reading it is silently wrong money; dropping it quietly is silently missing money. It is reported per dataset as `malformedRows` and as a `malformed-rows` diagnostic naming the file. A **short** row stays supported: trailing empty columns are legitimately omitted by plenty of report writers, and a missing value is just a NULL.
 * **Diagnostics carry file names and column headers, never cell values.** That is the line between "an operator can fix this" and "PHI in a log".
 
 ### Re-exports and history
@@ -190,6 +191,15 @@ Exported date/times are read as ISO-8601 or the US layout a Windows report write
 **A value with no zone is treated as UTC.** That is deliberate and matches the other tracks: `scheduleDayBounds` builds its window as `${date}T00:00:00.000Z`, so the SQL track already compares a practice's local wall-clock column against UTC bounds. Converting here would make this track disagree with the other two about which appointments are "today", and would make the box's own timezone setting change the answer. Real local-timezone day boundaries are the WARP-1095 refinement noted in `read-queries.ts`, and belong in one place for all three tracks.
 
 ---
+
+## 8a. Amounts
+
+Balances are read from whatever the report writer printed, which is rarely a bare number.
+
+* A currency symbol and thousands separators are stripped. When both `.` and `,` appear the **last** one is the decimal point, which resolves `1,234.56` and `1.234,56` correctly; a lone comma followed by exactly two digits is a decimal separator, anything else is thousands.
+* **Parentheses mean negative only when they wrap the whole amount** — `(1,234.56)` and `$(1,234.56)`, the Accounting format where the symbol sits outside. A cell like `500.00 (30 days)` is a positive balance with an ageing annotation after it, and is **refused** rather than read: treating any parenthesised text as negative both inverted the sign and spliced the annotation's digits into the number.
+* **A trailing `CR` is a credit, i.e. negative**, and `DR` is a debit. The marker must follow a digit, a closing paren or whitespace, so `100 SCR` (a currency code) stays `100`.
+* Anything that does not reduce cleanly to a number is `undefined` rather than a guess. An unparseable balance contributes nothing to an AR total; a confidently wrong one moves it.
 
 ## 9. What this track does not do
 
