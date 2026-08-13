@@ -105,7 +105,19 @@ function buildApp(user: AuthUser): express.Express {
     (req as Request & { user: AuthUser }).user = user;
     next();
   });
-  app.use("/api", createCamerasRouter({} as unknown as PrismaClient));
+  app.use("/api", createCamerasRouter({
+  // WARP-1975: camera routes scope to the ACTING human behind the MCP
+  // principal, resolved from X-Nextcloud-User. Without a user table the
+  // resolution throws and the guard fails CLOSED — correct behaviour,
+  // wrong fixture. Model what production has.
+  user: {
+    findUnique: async ({ where }: { where: { nextcloudUsername?: string } }) =>
+      where.nextcloudUsername
+        ? { id: `u-${where.nextcloudUsername}`, role: "owner" }
+        : null,
+  },
+  cameraAccessGrant: { findMany: async () => [] },
+} as unknown as PrismaClient));
   return app;
 }
 
@@ -157,7 +169,15 @@ describe("POST /api/cameras/:name/clips/export (WARP-1439 MCP path)", () => {
       .send(BODY);
 
     expect(res.status).toBe(401);
-    expect(res.body).toEqual({ error: "unauthenticated" });
+    expect(res.body).toEqual({
+      // WARP-1975 refined this. The per-camera SCOPE layer now runs before
+      // the handler and answers first, because it is the layer that
+      // actually needs the header. Same 401, same cause — a more specific
+      // reason, and one that names the header to send.
+      error: "no_asserted_user",
+      message:
+        "Camera access is scoped to the acting user; assert one with X-Nextcloud-User.",
+    });
     expect(mockExportClip).not.toHaveBeenCalled();
   });
 

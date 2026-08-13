@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   canAccessCamera,
+  principalFromRequest,
   filterVisibleCameras,
   requireCameraAccess,
   setGrantsForUser,
@@ -30,6 +31,15 @@ function prismaWith(grantsByUser: Record<string, string[]>) {
           .filter((n) => ["front_door", "driveway", "bedroom"].includes(n))
           .map((n) => ({ id: `id-${n}`, name: n })),
       ),
+    },
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { nextcloudUsername: string } }) => {
+        const dir: Record<string, { id: string; role: string }> = {
+          sam: { id: "u-sam", role: "family" },
+          stefan: { id: "u-owner", role: "owner" },
+        };
+        return dir[where.nextcloudUsername] ?? null;
+      }),
     },
     $transaction: vi.fn(async (ops: unknown[]) => ops),
   } as never;
@@ -167,13 +177,67 @@ describe("granting", () => {
   });
 });
 
-describe("the MCP principal", () => {
-  it("is not silently reduced to seeing nothing", async () => {
-    // Tools dispatch on behalf of a human whose role was already checked
-    // at the tool layer, and the principal holds no grants of its own.
-    // ⚠ Consequence, stated rather than hidden: per-camera scoping does
-    // NOT currently narrow the assistant. Threading the acting user
-    // through tool dispatch is the follow-up.
-    expect(await visibleCameraNames(PRISMA(), MCP)).toBe("all");
+describe("WARP-1975: the assistant is scoped to whoever is asking", () => {
+  const mcp = (assertedNextcloudUser: string | null) => ({
+    id: "_service:mcp",
+    role: "service",
+    assertedNextcloudUser,
+  });
+
+  it("scopes to the acting human's grants, not to everything", async () => {
+    // WARP-1962 shipped this returning "all", so a family member blocked
+    // from the bedroom in the dashboard could still ask the assistant.
+    const visible = await visibleCameraNames(PRISMA(), mcp("sam"));
+    expect(visible).not.toBe("all");
+    expect([...(visible as Set<string>)].sort()).toEqual(["driveway", "front_door"]);
+  });
+
+  it("denies an ungranted camera asked for through a tool", async () => {
+    expect(await canAccessCamera(PRISMA(), mcp("sam"), "front_door")).toBe(true);
+    expect(await canAccessCamera(PRISMA(), mcp("sam"), "bedroom")).toBe(false);
+  });
+
+  it("still gives an owner asking through the assistant everything", async () => {
+    // The ACTING human's own role decides, not the service principal's.
+    expect(await visibleCameraNames(PRISMA(), mcp("stefan"))).toBe("all");
+  });
+
+  it("fails CLOSED when no user is asserted", async () => {
+    // A tool that cannot say who is asking has not earned an answer.
+    // Returning "all" here is precisely the WARP-1962 gap.
+    expect([...((await visibleCameraNames(PRISMA(), mcp(null))) as Set<string>)]).toEqual([]);
+  });
+
+  it("fails CLOSED when the asserted user is not provisioned", async () => {
+    expect(
+      [...((await visibleCameraNames(PRISMA(), mcp("nobody"))) as Set<string>)],
+    ).toEqual([]);
+  });
+
+  it("ignores the asserted header for a HUMAN principal", async () => {
+    // Otherwise anyone could set X-Nextcloud-User and impersonate.
+    const visible = await visibleCameraNames(PRISMA(), {
+      ...SAM,
+      assertedNextcloudUser: "stefan",
+    });
+    expect(visible).not.toBe("all");
+  });
+});
+
+describe("principalFromRequest", () => {
+  it("lifts the asserted header off the request", () => {
+    const p = principalFromRequest({
+      user: { id: "_service:mcp", role: "service" },
+      header: (n: string) => (n === "x-nextcloud-user" ? "  sam  " : undefined),
+    });
+    expect(p.assertedNextcloudUser).toBe("sam");
+  });
+
+  it("treats a blank header as absent", () => {
+    const p = principalFromRequest({
+      user: { id: "_service:mcp", role: "service" },
+      header: () => "   ",
+    });
+    expect(p.assertedNextcloudUser).toBeNull();
   });
 });

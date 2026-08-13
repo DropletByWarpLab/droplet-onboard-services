@@ -167,19 +167,27 @@ export function parseMoney(raw: string | undefined): number | undefined {
     body = marker[1];
   }
 
-  // Accounting parentheses mean negative — matched ANYWHERE, not only as the
-  // outermost characters. Excel's and Crystal's Accounting formats put the
-  // currency symbol OUTSIDE the parens (`$(1,234.56)`), and the strip below
-  // removes parens unconditionally, so a pair not recognised here is silently
-  // discarded and the amount comes back positive.
-  if (/\(.*\)/.test(body)) {
-    negative = true;
-    body = body.replace(/[()]/g, "");
-  }
+  // Strip currency symbols and spacing but KEEP parentheses, so the accounting
+  // convention can be judged on the numeric body rather than on the raw cell.
+  body = body.replace(/[^\d.,+()-]/g, "");
 
-  // Strip everything that is not a digit, separator or sign (currency symbols,
-  // non-breaking spaces, thousands spacing).
-  body = body.replace(/[^\d.,+-]/g, "");
+  // Accounting parentheses mean negative ONLY when they wrap the whole amount.
+  // Testing for a pair anywhere is wrong in both directions: it has to catch
+  // `$(1,234.56)`, where Excel's and Crystal's Accounting formats put the
+  // currency symbol outside the parens — but an ageing annotation like
+  // `500.00 (30 days)` is a positive balance with a comment after it, and
+  // reading that as negative inverts a real number (and, once the parens are
+  // discarded, splices the annotation's digits into it: 500.00 became -500.003).
+  const wrapped = /^\((.+)\)$/.exec(body);
+  if (wrapped) {
+    negative = true;
+    body = wrapped[1];
+  }
+  // A parenthesis surviving that check means the cell is not a clean amount —
+  // an annotation like `500.00 (30 days)`, or an unbalanced pair. No explicit
+  // rejection is needed: the digits-and-one-separator test at the end of this
+  // function refuses anything still carrying one, and a second check that no
+  // mutation can distinguish is a branch nobody can prove is doing work.
 
   if (body.startsWith("-")) {
     negative = !negative;
@@ -218,5 +226,7 @@ export function parseMoney(raw: string | undefined): number | undefined {
 
   const value = Number(normalized);
   if (!Number.isFinite(value)) return undefined;
-  return negative ? -value : value;
+  const signed = negative ? -value : value;
+  // Normalize -0 to 0 so a zero balance does not serialize as "-0".
+  return signed === 0 ? 0 : signed;
 }

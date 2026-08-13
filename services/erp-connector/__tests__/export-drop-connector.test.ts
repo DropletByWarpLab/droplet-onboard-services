@@ -498,6 +498,41 @@ describe("merging re-exports", () => {
     expect(await c.runRead("get_schedule_today", { from, to })).toHaveLength(3);
   });
 
+  it("skips a row with more fields than headers, and says so", async () => {
+    // An unquoted delimiter inside a value shifts every later column, so the
+    // balance read for one account is really another's. Reading it is silently
+    // wrong money; dropping it without saying so is silently missing money.
+    await drop(
+      "accounts.csv",
+      [
+        "Acct Ref,Balance",
+        "AC1,1234.56",
+        "AC2,2,000.00", // unquoted thousands separator -> three fields
+        "AC3,500.00",
+        "",
+      ].join("\n"),
+    );
+    const c = connector();
+    await c.connect();
+
+    const rows = (await c.runRead("get_ar_summary", {})) as Record<string, unknown>[];
+    // AC2 is excluded entirely rather than contributing a shifted "2".
+    expect(rows[0].account_count).toBe(2);
+    expect(rows[0].total_balance).toBeCloseTo(1734.56, 6);
+
+    const status = await c.status();
+    expect(status.datasets.find((d) => d.dataset === "account")?.malformedRows).toBe(1);
+    expect(status.diagnostics.some((d) => d.reason === "malformed-rows")).toBe(true);
+  });
+
+  it("still accepts a SHORT row — trailing empty columns are legitimately omitted", async () => {
+    await drop("patients.csv", ["Pat Ref,Given,Surname", "P1,Ada,Lovelace", "P2,,Hopper", "P3", ""].join("\n"));
+    const c = connector();
+    await c.connect();
+    expect(await c.runRead("get_recall_due", {})).toHaveLength(3);
+    expect((await c.status()).datasets[0].malformedRows).toBe(0);
+  });
+
   it("unions rows across files that carry different records", async () => {
     await drop("patients-a.csv", PATIENT_CSV, SETTLED - 60_000);
     await drop("patients-b.csv", ["Pat Ref,Given,Surname", "P9,Edsger,Dijkstra", ""].join("\n"), SETTLED);
