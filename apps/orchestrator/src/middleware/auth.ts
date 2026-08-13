@@ -778,7 +778,7 @@ export function requireRole(
   // invoked thousands of times; the Set avoids a linear scan when
   // a route allows multiple roles.
   const allowedSet = new Set<string>(allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     const role = req.user?.role;
     if (typeof role !== "string" || role.length === 0) {
       recordAccessDenied(req, "no-role");
@@ -791,7 +791,37 @@ export function requireRole(
       return;
     }
     next();
-  };
+  });
+}
+
+/**
+ * Marker stamped on every role-guard middleware.
+ *
+ * A router can be walked to enumerate its routes, but the handlers in each
+ * layer are anonymous closures — there is no way to tell "this route is
+ * guarded" from "this route has two handlers" without one. WARP-1961 needs
+ * that distinction to assert a standing invariant: *no camera route ships
+ * without a guard*. Counting middleware would pass for any route that
+ * happens to have a validator in front of it, which is exactly the kind of
+ * test that stays green while the thing it claims to check rots.
+ *
+ * Non-enumerable so it never shows up in logs or serialisation.
+ */
+export const ROLE_GUARD_MARKER = Symbol.for("droplet.roleGuard");
+
+/** True when `fn` is a role guard produced by this module. */
+export function isRoleGuard(fn: unknown): boolean {
+  if (typeof fn !== "function") return false;
+  return (fn as unknown as Record<symbol, unknown>)[ROLE_GUARD_MARKER] === true;
+}
+
+function markAsRoleGuard<T extends object>(fn: T): T {
+  Object.defineProperty(fn, ROLE_GUARD_MARKER, {
+    value: true,
+    enumerable: false,
+    writable: false,
+  });
+  return fn;
 }
 
 /**
@@ -813,13 +843,13 @@ export function requireRoleOrMcpService(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   const base = requireRole(...allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === "_service:mcp" && req.user.role === "service") {
       next();
       return;
     }
     base(req, res, next);
-  };
+  });
 }
 
 /**
