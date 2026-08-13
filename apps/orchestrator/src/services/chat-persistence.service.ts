@@ -68,6 +68,10 @@ export interface PersistedConversationSummary {
   provider: string | null;
   /** WARP-845 — owning project, or null when ungrouped. */
   projectId: string | null;
+  /** WARP-1917 — sidebar pin. Explicit boolean state; `pinnedAt` orders
+   *  the Pinned section (most recent pin first) and is null when unpinned. */
+  pinned: boolean;
+  pinnedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -140,6 +144,8 @@ export class ChatPersistenceService {
       model: row.model,
       provider: row.provider,
       projectId: row.projectId ?? null,
+      pinned: row.pinned,
+      pinnedAt: row.pinnedAt?.toISOString() ?? null,
       systemPrompt: row.systemPrompt,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -264,7 +270,13 @@ export class ChatPersistenceService {
             }
           : {}),
       },
-      orderBy: { updatedAt: "desc" },
+      // WARP-1917 — pinned rows first, so they always land inside the
+      // sidebar's FIRST page regardless of how old their activity is
+      // (offset pagination would otherwise strand an old pinned chat
+      // several scroll-loads deep). Within each half, newest-first as
+      // before. The dashboard orders the Pinned section by pinnedAt desc
+      // itself.
+      orderBy: [{ pinned: "desc" }, { updatedAt: "desc" }],
       take: Math.min(Math.max(limit, 1), 100),
       skip: Math.max(offset, 0),
     });
@@ -274,6 +286,8 @@ export class ChatPersistenceService {
       model: r.model,
       provider: r.provider,
       projectId: r.projectId ?? null,
+      pinned: r.pinned,
+      pinnedAt: r.pinnedAt?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
     }));
@@ -385,6 +399,34 @@ export class ChatPersistenceService {
       data: { projectId },
     });
     return r.count > 0;
+  }
+
+  /**
+   * WARP-1917 — pin (or unpin) a conversation in the caller's sidebar.
+   * `pinned` and `pinnedAt` always move in lockstep: pinning stamps now(),
+   * unpinning clears it.
+   *
+   * Raw SQL for the same reason as renameConversationForUser below:
+   * `ChatSession.updatedAt` carries `@updatedAt`, and pin state is
+   * metadata, not activity. A `chatSession.update()` would bump the
+   * column and the chat would surface under "Today" after unpinning
+   * instead of returning to its chronological position (the AC). The
+   * single UPDATE is also atomic and ownership-scoped; returns false
+   * when no row matched (other user, or doesn't exist — callers map
+   * both to 404, no existence leak).
+   */
+  async setConversationPinned(
+    conversationId: string,
+    userId: string,
+    pinned: boolean,
+  ): Promise<boolean> {
+    const rowsAffected = await this.prisma.$executeRaw`
+      UPDATE "ChatSession"
+      SET pinned = ${pinned},
+          "pinnedAt" = CASE WHEN ${pinned} THEN NOW() ELSE NULL END
+      WHERE id = ${conversationId} AND "userId" = ${userId}
+    `;
+    return rowsAffected > 0;
   }
 
   /** Delete a conversation owned by the user. No-op when it doesn't exist. */

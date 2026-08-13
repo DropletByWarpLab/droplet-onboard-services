@@ -51,6 +51,7 @@ const mockFinalizeAssistantMessage = vi.fn().mockResolvedValue(undefined);
 const mockListConversationsForUser = vi.fn().mockResolvedValue([]);
 const mockGetConversationForUser = vi.fn().mockResolvedValue(null);
 const mockDeleteConversationForUser = vi.fn().mockResolvedValue(false);
+const mockSetConversationPinned = vi.fn().mockResolvedValue(false);
 
 vi.mock("../services/chat-persistence.service.js", () => ({
   ChatPersistenceService: vi.fn().mockImplementation(() => ({
@@ -60,6 +61,7 @@ vi.mock("../services/chat-persistence.service.js", () => ({
     listConversationsForUser: mockListConversationsForUser,
     getConversationForUser: mockGetConversationForUser,
     deleteConversationForUser: mockDeleteConversationForUser,
+    setConversationPinned: mockSetConversationPinned,
     ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
   })),
 }));
@@ -583,6 +585,78 @@ describe("LLM routes", () => {
         .patch("/api/llm/conversations/abc")
         .send({ title: "Whatever" });
       expect(res.status).toBe(401);
+    });
+
+    // ── WARP-1917: pin / unpin ──
+
+    it("pins a conversation owned by the caller", async () => {
+      mockSetConversationPinned.mockResolvedValue(true);
+
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ pinned: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: "abc", pinned: true });
+      expect(mockSetConversationPinned).toHaveBeenCalledWith(
+        "abc",
+        "test",
+        true,
+      );
+      // Pin-only PATCH must not touch the other legs.
+      expect(mockRenameConversationForUser).not.toHaveBeenCalled();
+    });
+
+    it("unpins a conversation owned by the caller", async () => {
+      mockSetConversationPinned.mockResolvedValue(true);
+
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ pinned: false });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: "abc", pinned: false });
+      expect(mockSetConversationPinned).toHaveBeenCalledWith(
+        "abc",
+        "test",
+        false,
+      );
+    });
+
+    it("rejects a non-boolean pinned outright (nothing half-applied)", async () => {
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ pinned: "yes" });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "invalid_pinned" });
+      expect(mockSetConversationPinned).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-boolean pinned even when a valid title rides along", async () => {
+      // Same posture as the malformed-title-with-projectId case above:
+      // the whole PATCH 400s before mutating anything.
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: "Fine title", pinned: 1 });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "invalid_pinned" });
+      expect(mockRenameConversationForUser).not.toHaveBeenCalled();
+      expect(mockSetConversationPinned).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 when pinning a row that doesn't belong to the caller", async () => {
+      mockSetConversationPinned.mockResolvedValue(false);
+
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ pinned: true });
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({ error: "conversation_not_found" });
     });
   });
 });

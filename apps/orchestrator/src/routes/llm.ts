@@ -2272,7 +2272,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const body = req.body as { title?: unknown; projectId?: unknown };
+      const body = req.body as {
+        title?: unknown;
+        projectId?: unknown;
+        pinned?: unknown;
+      };
       const hasTitle = typeof body?.title === "string";
       // WARP-845 — move into / out of a project. `null` = ungroup. An
       // empty string is rejected outright (it would skip the ownership
@@ -2280,6 +2284,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       const hasProject =
         (typeof body?.projectId === "string" && body.projectId.length > 0) ||
         body?.projectId === null;
+      // WARP-1917 — pin/unpin. Strictly boolean; a present-but-non-boolean
+      // value 400s the whole PATCH before anything mutates (same posture
+      // as the malformed-title rule below).
+      const hasPinned = typeof body?.pinned === "boolean";
+      if (body?.pinned !== undefined && !hasPinned) {
+        res.status(400).json({ error: "invalid_pinned" });
+        return;
+      }
       if (
         body?.projectId !== undefined &&
         body?.projectId !== null &&
@@ -2295,7 +2307,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "title_or_project_required" });
         return;
       }
-      if (!hasTitle && !hasProject) {
+      if (!hasTitle && !hasProject && !hasPinned) {
         res.status(400).json({ error: "title_or_project_required" });
         return;
       }
@@ -2347,10 +2359,25 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           return;
         }
       }
+      // WARP-1917 — pin leg. Ownership enforced in the service's single
+      // UPDATE; a miss is indistinguishable between other-user and
+      // nonexistent (same no-existence-leak posture as the legs above).
+      if (hasPinned) {
+        const ok = await persistence.setConversationPinned(
+          req.params.id,
+          userId,
+          body.pinned as boolean,
+        );
+        if (!ok) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+      }
       res.json({
         id: req.params.id,
         ...(hasTitle ? { title: finalTitle } : {}),
         ...(hasProject ? { projectId: body.projectId ?? null } : {}),
+        ...(hasPinned ? { pinned: body.pinned as boolean } : {}),
       });
     } catch (err) {
       next(err);
