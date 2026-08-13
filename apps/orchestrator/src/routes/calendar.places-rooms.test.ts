@@ -138,4 +138,27 @@ describe("GET /api/calendar/places — premade room merge (WARP-1906)", () => {
     expect(res.status).toBe(200);
     expect(res.body.places).toEqual([CITY]);
   });
+
+  it("returns the matching rooms when fetchNominatim rejects — offline box", async () => {
+    // Network-level failure (DNS / ECONNREFUSED / the 5s abort) REJECTS the
+    // fetch — unlike a non-OK HTTP response, which resolves to []. On an
+    // air-gapped box this is every request; the premade rooms are exactly
+    // the part that must keep working (inverse of the db-down test above).
+    fetchNominatimMock.mockRejectedValue(
+      new Error("getaddrinfo ENOTFOUND nominatim.openstreetmap.org"),
+    );
+    const findMany = vi.fn().mockResolvedValue(ROOM_ROWS);
+    const res = await request(mkApp(findMany)).get(
+      "/api/calendar/places?q=aurora",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.places).toEqual([
+      expect.objectContaining({
+        kind: "room",
+        displayName: "HQ - Room Aurora",
+      }),
+    ]);
+    // Nothing to cache on a failed lookup.
+    expect(cacheSetMock).not.toHaveBeenCalled();
+  });
 });
