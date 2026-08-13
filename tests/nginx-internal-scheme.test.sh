@@ -69,7 +69,27 @@ fi
 # every user-plane leg stays literal http:// — so the docserver assertion now
 # points at BOTH variants (collabora keeps the /docs prefix ⇒ no trailing
 # slash on its proxy_pass; onlyoffice strips ⇒ trailing slash).
-if grep -qE 'proxy_pass[[:space:]]+http://\$upstream_nextcloud/;' "$conf" \
+#
+# WARP-1966: what this check pins is the SCHEME (literal http:// rather than
+# $internal_scheme://), not the presence of a URI on proxy_pass. The nextcloud
+# leg's trailing slash was incidental to that — and it was also wrong: against
+# a VARIABLE upstream nginx cannot compute a prefix strip, so the URI in the
+# directive replaces the request URI outright and every request under
+# /nextcloud/ reached the upstream as literally `/`. That leg now strips its
+# prefix with an explicit `rewrite … break` and carries no URI. The shape
+# itself is guarded in nginx-nextcloud-assets.
+#
+# Match it INSIDE its location block rather than file-wide. The old pattern
+# was unique only because of the slash; dropping the slash makes a bare
+# `http://$upstream_nextcloud;` match any of the half-dozen ^~ asset legs
+# too, so a regression on THIS leg would still find a match elsewhere and
+# the assertion would pass while the leg it names had moved off http://.
+nc_leg=$(awk '
+  /^[[:space:]]*location \/nextcloud\/ \{/ { inblock = 1; next }
+  inblock && /^[[:space:]]*}[[:space:]]*$/ { exit }
+  inblock && /^[[:space:]]*proxy_pass/    { print }
+' "$conf")
+if printf '%s\n' "$nc_leg" | grep -qE '^[[:space:]]*proxy_pass[[:space:]]+http://\$upstream_nextcloud;[[:space:]]*$' \
    && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_web_dashboard;' "$conf" \
    && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver;' "$NGINX_DIR/docs-engine.collabora.conf" \
    && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver/;' "$NGINX_DIR/docs-engine.onlyoffice.conf"; then
