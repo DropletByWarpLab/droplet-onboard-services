@@ -2237,6 +2237,33 @@ export async function switchProvision(): Promise<NetworkCommandResult> {
   return data;
 }
 
+/**
+ * WARP-1982 — complete a Tier-2 switch write.
+ *
+ * The switch has its OWN confirm endpoint, and it is the only one that can run
+ * a switch operation: `/api/network/command/confirm`'s dispatcher has no
+ * `switch_*` case at all, so every confirm the panel sent there resolved the
+ * token and then executed nothing. `/api/switch/command/confirm` is where the
+ * real executor lives (it resolves the operation from the token server-side,
+ * which is why no `operation` argument is needed here).
+ *
+ * Unlike the router's safe-apply writes there is no operation to poll: §7
+ * per-port writes apply synchronously on confirm, so the response IS the
+ * outcome. It is returned so callers can surface a plan-only result rather
+ * than reporting a dry run as a change that landed.
+ */
+export async function confirmSwitchCommand(
+  token: string,
+): Promise<{ status?: string; dry_run?: boolean }> {
+  const res = await authFetch(`${BASE}/api/switch/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken: token }),
+  });
+  if (!res.ok) throw await confirmFailure(res);
+  return (await res.json().catch(() => ({}))) as { status?: string; dry_run?: boolean };
+}
+
 export type NetworkOperation = {
   id: string;
   // DASH-07: "unknown" is a distinct, non-success terminal state used when the
