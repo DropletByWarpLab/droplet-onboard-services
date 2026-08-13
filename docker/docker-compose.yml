@@ -719,7 +719,30 @@ services:
       # (${DROPLET_PUBLIC_FQDN}) so Nextcloud trusts the one-URL-everywhere
       # address. Empty until the box learns it from HQ — a trailing blank token
       # is harmless to Nextcloud's space-separated trusted-domains list.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_PUBLIC_FQDN:-}
+      #
+      # WARP-1966 — the private-range wildcards are NOT belt-and-braces, they
+      # are the only entries a browser addressing the box BY IP can match, and
+      # that is a first-class way to reach this appliance:
+      #   - the setup wizard hands out an IP before any name resolves;
+      #   - droplet.local / .lan answer only for clients on the Droplet's own
+      #     LAN, and the per-device FQDN is split-horizon (it resolves via the
+      #     appliance's router, NXDOMAIN anywhere else) — so a client on a
+      #     neighbouring segment has NO name to use, only an address;
+      #   - the appliance's own AP subnets are 192.168.10.x / 192.168.20.x, so a
+      #     customer on the Droplet's Wi-Fi browses to a bare 192.168.x.x.
+      # Without these, the dashboard loads over IP (Next.js does not check Host)
+      # while every Nextcloud-served leg — the embedded document editor above
+      # all — answers HTTP 400 "Access through untrusted domain".
+      #
+      # Nextcloud expands `*` in a trusted-domain entry to [-.a-zA-Z0-9]*, so
+      # `192.168.*` matches any host in that range. The list stays an ALLOWLIST:
+      # only RFC1918 space is trusted, so a public Host header is still refused
+      # and the Host-poisoning control the allowlist exists for (password-reset
+      # and other absolute links) still holds for anything off-LAN. 172.16/12 is
+      # deliberately ABSENT: it is the Docker bridge range, not a browser-facing
+      # LAN, the in-compose hosts already have names above, and the only wildcard
+      # that would cover it (`172.*`) reaches far into public address space.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan 192.168.* 10.* ${DROPLET_PUBLIC_FQDN:-}
       - OVERWRITEPROTOCOL=https
       # WARP-883 (ADR-027 WS-5) — shared "Household" group folder. The
       # post-installation hook (nextcloud-init.sh) reads these to create the

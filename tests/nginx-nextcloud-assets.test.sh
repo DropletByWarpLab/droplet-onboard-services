@@ -93,9 +93,10 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
     fail "  $prefix does not set \$upstream_nextcloud like the other legs"
   fi
 
-  # NO trailing slash on proxy_pass: Nextcloud serves these at its OWN root, so
-  # the prefix must be forwarded UNSTRIPPED. A trailing slash here (copied from
-  # the /nextcloud/ leg, which DOES strip) would rewrite /apps/x → /x and 404.
+  # NO URI on proxy_pass: Nextcloud serves these at its OWN root, so the prefix
+  # must be forwarded UNSTRIPPED. A trailing slash here would not "strip /apps/"
+  # — against a variable upstream it sends every one of these requests upstream
+  # as literally `/` (WARP-1966, guarded file-wide in Phase 3).
   if printf '%s' "$body" | grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud;[[:space:]]*$'; then
     pass "  $prefix forwards the prefix UNSTRIPPED (no trailing slash on proxy_pass)"
   else
@@ -277,12 +278,59 @@ else
   fail "the /apps/ leg changed shape — re-check what this test claims about /apps/files"
 fi
 
-# Regression guard: the pre-existing /nextcloud/ leg DOES strip its prefix.
-# The new legs must not have been "fixed" to match it, nor it to match them.
-if grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud/;' "$CONF"; then
-  pass "the /nextcloud/ leg still strips its prefix (trailing slash preserved)"
+# ── WARP-1966: the /nextcloud/ leg strips its prefix with a REWRITE ──
+#
+# This guard used to assert the OPPOSITE — that `proxy_pass
+# http://$upstream_nextcloud/;` (trailing slash) was the correct
+# prefix-stripping shape, and it failed the build if the slash was removed. It
+# encoded the bug as an invariant, on a belief that is only true for a LITERAL
+# upstream: a trailing slash strips the location prefix when nginx can compute
+# the replacement, but with a VARIABLE upstream it cannot, and its documented
+# fallback is that the URI in the directive replaces the request URI outright.
+#
+# So that leg sent EVERY request under /nextcloud/ upstream as literally `/`.
+# Measured on the box: GET /nextcloud/index.php/apps/richdocuments/direct/<tok>
+# arrived at Nextcloud's Apache as `GET /` and 302'd to the login page, while
+# the same path through the no-URI `^~ /index.php/apps/richdocuments/` leg
+# arrived intact. Not a syntax error, so `nginx -t` (Phase 5) could never see
+# it — which is exactly why it needs a shape guard here.
+NC_BODY="$(awk '
+  /^[[:space:]]*location \/nextcloud\/ \{/ { inblock = 1; next }
+  inblock && /^[[:space:]]*}[[:space:]]*$/ { exit }
+  inblock { print }
+' "$CONF")"
+
+if [ -n "$NC_BODY" ]; then
+  pass "found the location /nextcloud/ leg"
 else
-  fail "the /nextcloud/ leg lost its trailing-slash strip — that breaks the whole Nextcloud proxy"
+  fail "location /nextcloud/ is missing — the whole Nextcloud proxy leg is gone"
+fi
+
+if printf '%s' "$NC_BODY" | grep -qE '^[[:space:]]*rewrite \^/nextcloud/\(\.\*\)\$ /\$1 break;[[:space:]]*$'; then
+  pass "the /nextcloud/ leg strips its prefix with an explicit 'rewrite … break'"
+else
+  fail "the /nextcloud/ leg must strip its prefix with 'rewrite ^/nextcloud/(.*)\$ /\$1 break;' — a trailing slash on proxy_pass cannot do it against a variable upstream"
+fi
+
+if printf '%s' "$NC_BODY" | grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud;[[:space:]]*$'; then
+  pass "the /nextcloud/ leg's proxy_pass carries NO URI (the rewrite owns the path)"
+else
+  fail "the /nextcloud/ leg's proxy_pass must be 'http://\$upstream_nextcloud;' with no URI — a URI on a variable upstream REPLACES the request path with itself"
+fi
+
+# ── File-wide: a variable upstream may NEVER carry a URI ──
+#
+# The invariant above generalised. Any `proxy_pass <scheme>://$var<path>;`
+# discards the caller's path and sends <path> instead. Every leg in this file
+# uses a variable upstream (deferred DNS), so the rule is absolute here — and
+# stating it file-wide is what stops the next leg from reintroducing it under a
+# different prefix. Matches http://, https:// and the $internal_scheme legs.
+uri_on_var=$(grep -nE '^[[:space:]]*proxy_pass[[:space:]]+[^;]*\$[A-Za-z_][A-Za-z0-9_]*/[^;]*;' "$CONF" \
+             | grep -vE '\$[A-Za-z_][A-Za-z0-9_]*;' || true)
+if [ -z "$uri_on_var" ]; then
+  pass "no proxy_pass combines a variable upstream with a URI (file-wide)"
+else
+  fail "proxy_pass with a variable upstream AND a URI at line(s): $(printf '%s' "$uri_on_var" | cut -d: -f1 | tr '\n' ' ')— nginx replaces the request URI with that literal path, so every request under the leg reaches the upstream as that path"
 fi
 
 echo "--- Phase 4: no collision with a dashboard surface ---"
