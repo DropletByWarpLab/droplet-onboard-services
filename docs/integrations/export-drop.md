@@ -15,11 +15,15 @@ Droplet has three ways to reach a practice-management system. Two of them are bl
 
 | Track | Provider key | Blocked on |
 |---|---|---|
-| Direct SQL | `eaglesoft` | SAP's licence-gated SQL Anywhere client. **x86_64-only** — no aarch64 Linux client exists, so an ARM box can never run it |
+| Direct SQL | `eaglesoft` | **Patterson's EULA §5(a) gate on direct-database connections** (WARP-1294), plus SAP's licence-governed, account-walled SQL Anywhere client, which an operator must vendor per deployment |
 | Official REST | `eaglesoft-api` | Patterson vendor enrolment, plus the route contract discovered from a live box |
 | **Export drop** | **`<vendor>-export`** | **Nothing. The practice already runs these reports.** |
 
-The export-drop track needs no driver, no vendor approval and no architecture exception. The practice exports its own reports into a folder on its own network; Droplet mounts that folder read-only and reads the files. It is the only track that can be stood up during a first site visit, and it is the right thing to run while the other two are being pursued properly — not a replacement for them.
+The export-drop track needs no driver and no vendor approval. The practice exports its own reports into a folder on its own network; Droplet mounts that folder read-only and reads the files. It is the only track that can be stood up during a first site visit, and it is the right thing to run while the other two are being pursued properly — not a replacement for them.
+
+Note what the legal shape is, because it is the part that does not show up in a diff: this track never opens a connection to the practice's database. It reads files the practice itself produced and owns, from a share the practice controls. That is a materially different posture from direct-SQL access, and it is the reason this track can run while the sanctioned route is being pursued rather than instead of it.
+
+**Secondary, and not a factor on current hardware:** the direct-SQL sidecar is x86_64-only — SAP ships no aarch64 Linux client ([`eaglesoft.md`](eaglesoft.md) §"x86_64-only"). Today's shipping `single-box` shape is x86, so this constrains no deployment we run; it matters only if the control plane ever lands on an aarch64 host, where the export-drop and REST tracks would be the only options.
 
 It is **vendor-agnostic by construction**. The transport is one connector; each product is a declarative *export profile*. Adding a practice-management system is a profile, not a code change — and an operator can add one on site without waiting for a release.
 

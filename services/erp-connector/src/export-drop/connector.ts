@@ -10,12 +10,19 @@
  *
  * ## Why a third track
  *
- * The direct-SQL track needs SAP's licence-gated SQL Anywhere client, which
- * ships x86_64-only — an ARM box can never run it. The REST track needs vendor
+ * The direct-SQL track is gated on Patterson's EULA §5(a) treatment of
+ * direct-database connections (WARP-1294 records the official API as the
+ * sanctioned replacement), and on SAP's licence-governed, account-walled client
+ * that an operator must vendor per deployment. The REST track needs vendor
  * enrolment and a route contract discovered from a live box. Both are the right
- * long-term answers and neither unblocks on our schedule. An export drop needs
- * no driver, no vendor approval and no aarch64 exception: the practice already
- * runs these reports, and we read what it produces.
+ * long-term answers and neither unblocks on our schedule.
+ *
+ * An export drop needs neither, and its posture is different in kind: it never
+ * opens a connection to the practice's database. It reads files the practice
+ * produced and owns, from a share the practice controls.
+ *
+ * (The SQL sidecar is also x86_64-only, since SAP ships no aarch64 client —
+ * true, documented, and not a factor on the x86 shape that ships today.)
  *
  * ## What this track is, precisely
  *
