@@ -1,12 +1,23 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Download, FolderInput, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import {
+  Download,
+  FolderInput,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
+  Trash2,
+} from "lucide-react";
 
 export interface ChatHistoryRowProps {
   id: string;
   title: string | null;
   active: boolean;
+  /** WARP-1917 — whether this chat is pinned; flips the menu item between
+   *  Pin and Unpin. */
+  pinned: boolean;
   onSelect: () => void;
   onRenameSubmit: (newTitle: string) => Promise<void>;
   onDeleteRequest: () => void;
@@ -14,6 +25,8 @@ export interface ChatHistoryRowProps {
   onExport: () => void;
   /** WARP-845 — open the move-to-project chooser for this chat. */
   onMoveRequest: () => void;
+  /** WARP-1917 — toggle the pin (parent owns the optimistic state). */
+  onTogglePin: () => void;
 }
 
 const DISPLAY_TITLE = (title: string | null) => title?.trim() || "Untitled chat";
@@ -22,11 +35,13 @@ export function ChatHistoryRow({
   id,
   title,
   active,
+  pinned,
   onSelect,
   onRenameSubmit,
   onDeleteRequest,
   onExport,
   onMoveRequest,
+  onTogglePin,
 }: ChatHistoryRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -158,6 +173,20 @@ export function ChatHistoryRow({
               style={{ background: "var(--surface)", borderColor: "var(--border)", boxShadow: "var(--lift)" }}
               onMouseLeave={() => setMenuOpen(false)}
             >
+              {/* WARP-1917 — pin toggle first: it's the "keep this handy"
+                  action the menu exists for; label + icon flip with state. */}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onTogglePin();
+                }}
+                className="msg-act w-full !justify-start !h-8"
+              >
+                {pinned ? <PinOff size={12} /> : <Pin size={12} />}{" "}
+                {pinned ? "Unpin" : "Pin"}
+              </button>
               <button
                 type="button"
                 role="menuitem"

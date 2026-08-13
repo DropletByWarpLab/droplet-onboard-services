@@ -3880,6 +3880,11 @@ export interface ConversationSummary {
   provider: string | null;
   /** WARP-845 — owning project, or null when ungrouped. */
   projectId?: string | null;
+  /** WARP-1917 — pinned to the top of the sidebar. Optional (missing on
+   *  older orchestrator builds → treated as unpinned); `pinnedAt` orders
+   *  the Pinned section, most recent pin first. */
+  pinned?: boolean;
+  pinnedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -4265,6 +4270,30 @@ export async function deleteChatProject(id: string): Promise<void> {
   if (!res.ok && res.status !== 404) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to delete project: ${res.status}`);
+  }
+}
+
+/** WARP-1917 — pin (true) or unpin (false) a chat in the history sidebar.
+ *  Server-side state on the conversation row; the PATCH deliberately does
+ *  not bump updatedAt, so unpinning restores the chronological position. */
+export async function setConversationPinned(
+  conversationId: string,
+  pinned: boolean,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      body.error ||
+        `Failed to ${pinned ? "pin" : "unpin"} conversation: ${res.status}`,
+    );
   }
 }
 

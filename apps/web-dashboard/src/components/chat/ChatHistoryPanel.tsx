@@ -71,6 +71,7 @@ export function ChatHistoryPanel({
     rename,
     remove,
     moveToProject,
+    togglePin,
     clearProjectLocally,
   } = useConversationList();
   // WARP-844 — raw input value, debounced into the hook's search needle
@@ -249,13 +250,27 @@ export function ChatHistoryPanel({
     }
   };
 
+  // WARP-1917 — pinned chats surface in their own section at the very top,
+  // most recent pin first (NOT activity order — re-pinning something is
+  // the user saying "this one, now"). Hidden while searching: all matches
+  // render in the date groups, same rule as the projects section below.
+  const pinnedChats = search
+    ? []
+    : flat
+        .filter((c) => c.pinned)
+        .sort((a, b) =>
+          (b.pinnedAt ?? b.updatedAt).localeCompare(a.pinnedAt ?? a.updatedAt),
+        );
+
   // WARP-845 — project-grouped vs ungrouped chats. Date groups only show
   // chats without a project; project chats nest under their folder.
   // While SEARCHING, project membership is ignored: every match renders
   // in the date groups so a chat filed in a collapsed folder is still
   // findable (the projects section hides for the same reason).
+  // WARP-1917 — pinned chats are excluded for the same no-duplicate
+  // reason: they already render in the Pinned section above.
   const ungroupedGroups = groupConversationsByDate(
-    search ? flat : flat.filter((c) => !c.projectId),
+    search ? flat : flat.filter((c) => !c.projectId && !c.pinned),
     new Date(),
   );
   // Newest-first inside a folder: fetch-on-expand merges older rows at
@@ -335,6 +350,30 @@ export function ChatHistoryPanel({
             {error}
           </div>
         )}
+        {/* WARP-1917 — pinned chats, above everything else. Empty (and so
+            absent) while searching — matches surface in the date groups. */}
+        {pinnedChats.length > 0 && (
+          <div className="conv-group">
+            <div className="conv-cap">Pinned</div>
+            <div className="space-y-0.5">
+              {pinnedChats.map((item) => (
+                <ChatHistoryRow
+                  key={item.id}
+                  id={item.id}
+                  title={item.title}
+                  active={item.id === activeConversationId}
+                  pinned
+                  onSelect={() => onSelect(item.id)}
+                  onRenameSubmit={(title) => handleRename(item.id, title)}
+                  onDeleteRequest={() => setPendingDelete(item)}
+                  onExport={() => void handleExport(item.id)}
+                  onMoveRequest={() => setPendingMove(item)}
+                  onTogglePin={() => void togglePin(item.id, false)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
         {/* WARP-845 — projects (per-user folders) above the date groups.
             Rendered even with zero chats (a fresh user's first move may
             well be "create a project"); hidden while searching, when all
@@ -408,6 +447,7 @@ export function ChatHistoryPanel({
                               id={item.id}
                               title={item.title}
                               active={item.id === activeConversationId}
+                              pinned={!!item.pinned}
                               onSelect={() => onSelect(item.id)}
                               onRenameSubmit={(title) =>
                                 handleRename(item.id, title)
@@ -415,6 +455,9 @@ export function ChatHistoryPanel({
                               onDeleteRequest={() => setPendingDelete(item)}
                               onExport={() => void handleExport(item.id)}
                               onMoveRequest={() => setPendingMove(item)}
+                              onTogglePin={() =>
+                                void togglePin(item.id, !item.pinned)
+                              }
                             />
                           ))
                         )}
@@ -464,11 +507,13 @@ export function ChatHistoryPanel({
                       id={item.id}
                       title={item.title}
                       active={item.id === activeConversationId}
+                      pinned={!!item.pinned}
                       onSelect={() => onSelect(item.id)}
                       onRenameSubmit={(title) => handleRename(item.id, title)}
                       onDeleteRequest={() => setPendingDelete(item)}
                       onExport={() => void handleExport(item.id)}
                       onMoveRequest={() => setPendingMove(item)}
+                      onTogglePin={() => void togglePin(item.id, !item.pinned)}
                     />
                   ))}
                 </div>
