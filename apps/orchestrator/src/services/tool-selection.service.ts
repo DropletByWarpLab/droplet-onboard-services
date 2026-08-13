@@ -64,12 +64,18 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  * what let the `people` gap ship green.
  */
 const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = [
-  { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|uploads?|attachments?|downloads?|scans?|presentations?|slides?)\b/i, domains: ["files"] },
+  // `rename`/`relabel` claims files AND cameras (below): "rename Blue Eye
+  // to Kitchen" names the target only by its label, so the verb is the
+  // ONLY signal. A false-positive domain is cheap (see the rule comment).
+  { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|uploads?|attachments?|downloads?|scans?|presentations?|slides?|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|sockets?|outlets?|switch(es)?|heating|cooling|air-?con(ditioning)?|fans?|temperature|dim|brightness|blinds?|curtains?|locks?|unlock|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
   { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?|online|offline|connected|guest|ethernet|vpn|slow)\b/i, domains: ["network"] },
   // The places a household points cameras, and the things it looks for —
-  // NOT just the word "camera". See the WARP-1921 note above.
-  { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell|snapshots?|surveillance|nvr|frigate|live view|people|person|someone|somebody|anybody|anyone|intruders?|visitors?|packages?|parcels?|deliver(y|ies)|driveway|porch|doorstep|front door|back door|garage|yard|gate|who (was|were|came|is|has been))\b/i, domains: ["cameras"] },
+  // NOT just the word "camera". See the WARP-1921 note above. Rename verbs
+  // included (WARP-1893): "rename Blue Eye to Kitchen" identifies the
+  // camera by display name alone, so without the verb the turn would never
+  // advertise rename_camera.
+  { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell|snapshots?|surveillance|nvr|frigate|live view|people|person|someone|somebody|anybody|anyone|intruders?|visitors?|packages?|parcels?|deliver(y|ies)|driveway|porch|doorstep|front door|back door|garage|yard|gate|who (was|were|came|is|has been)|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["cameras"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   { pattern: /\b(remind(er)?s?|tasks?|to-?dos?|don'?t forget|shopping list)\b/i, domains: ["reminders"] },
   { pattern: /\b(notifications?|notify|alerts?)\b/i, domains: ["notifications"] },

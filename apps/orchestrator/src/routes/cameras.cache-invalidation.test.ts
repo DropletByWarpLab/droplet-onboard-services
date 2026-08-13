@@ -40,8 +40,14 @@ const h = vi.hoisted(() => {
     id: string;
     name: string;
     enabled: boolean;
+    // WARP-1893: optional so the pre-existing fixtures below still typecheck;
+    // only the rename test cares about it.
+    displayName?: string;
   }
-  const state: { db: Row[]; cache: { name: string; enabled: boolean }[] | null } = {
+  const state: {
+    db: Row[];
+    cache: { name: string; enabled: boolean; displayName?: string }[] | null;
+  } = {
     db: [],
     cache: null,
   };
@@ -51,7 +57,11 @@ const h = vi.hoisted(() => {
     // the real getCameras() contract, minus the Frigate merge we don't exercise.
     getCameras: vi.fn(async () => {
       if (state.cache) return state.cache;
-      state.cache = state.db.map((c) => ({ name: c.name, enabled: c.enabled }));
+      state.cache = state.db.map((c) => ({
+        name: c.name,
+        enabled: c.enabled,
+        displayName: c.displayName,
+      }));
       return state.cache;
     }),
     invalidateCamerasCache: vi.fn(async () => {
@@ -200,16 +210,28 @@ function makePrisma() {
         return { id: row.id, name: row.name };
       }),
       // enable/disable: flip the enabled flag by name.
-      updateMany: vi.fn(async ({ where, data }: { where: { name: string }; data: { enabled: boolean } }) => {
-        let count = 0;
-        for (const c of h.state.db) {
-          if (c.name === where.name) {
-            c.enabled = data.enabled;
-            count++;
+      // WARP-1893: also the rename path, which writes `displayName` through
+      // the same updateMany. Each field is applied only when present so a
+      // rename can't clear `enabled` (or vice versa).
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { name: string };
+          data: { enabled?: boolean; displayName?: string };
+        }) => {
+          let count = 0;
+          for (const c of h.state.db) {
+            if (c.name === where.name) {
+              if (data.enabled !== undefined) c.enabled = data.enabled;
+              if (data.displayName !== undefined) c.displayName = data.displayName;
+              count++;
+            }
           }
-        }
-        return { count };
-      }),
+          return { count };
+        },
+      ),
       // accept: enable a discovered row by id.
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: { enabled: boolean } }) => {
         const row = h.state.db.find((c) => c.id === where.id);
@@ -245,6 +267,14 @@ async function getEnabled(app: express.Express, name: string): Promise<boolean |
   const res = await request(app).get("/api/cameras");
   expect(res.status).toBe(200);
   return (res.body.cameras as { name: string; enabled: boolean }[]).find((c) => c.name === name)?.enabled;
+}
+
+async function getDisplayName(app: express.Express, name: string): Promise<string | undefined> {
+  const res = await request(app).get("/api/cameras");
+  expect(res.status).toBe(200);
+  return (res.body.cameras as { name: string; displayName?: string }[]).find(
+    (c) => c.name === name,
+  )?.displayName;
 }
 
 beforeEach(() => {
@@ -365,6 +395,42 @@ describe("WARP-1286 follow-up — cameras:list invalidation on every camera muta
     expect(h.invalidateCamerasCache).toHaveBeenCalled();
 
     expect(await getEnabled(app, "front_door")).toBe(false);
+  });
+
+  it("rename (WARP-1893): the new display name is visible on a GET inside the TTL", async () => {
+    // displayName rides in the same `cameras:list` payload as `enabled`, so a
+    // rename that skips invalidation reads back as the OLD label for up to
+    // CACHE_TTL — the user sees their rename do nothing and renames again.
+    h.state.db = [
+      { id: "id-front", name: "front_door", enabled: true, displayName: "Xnv C8083r E43022502afd" },
+    ];
+    const app = makeApp(makePrisma());
+
+    // Warm the cache with the pre-rename label.
+    expect(await getDisplayName(app, "front_door")).toBe("Xnv C8083r E43022502afd");
+    expect(h.state.cache).not.toBeNull();
+
+    const res = await request(app)
+      .patch("/api/cameras/front_door")
+      .send({ displayName: "Driveway" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "renamed", displayName: "Driveway" });
+    expect(h.invalidateCamerasCache).toHaveBeenCalled();
+
+    // Refetch inside the TTL — must be the NEW label, not the warm snapshot.
+    expect(await getDisplayName(app, "front_door")).toBe("Driveway");
+  });
+
+  it("rename does NOT reconcile Frigate — the camera SET is unchanged", async () => {
+    // Renaming touches a label, not the set of cameras. Calling
+    // syncCamerasFromDb here would be pointless Frigate traffic on every
+    // rename; the invalidation above is the only side effect required.
+    h.state.db = [{ id: "id-front", name: "front_door", enabled: true, displayName: "Old" }];
+    const app = makeApp(makePrisma());
+
+    const res = await request(app).patch("/api/cameras/front_door").send({ displayName: "New" });
+    expect(res.status).toBe(200);
+    expect(h.syncCamerasFromDb).not.toHaveBeenCalled();
   });
 
   it("delete (Tier-2 confirm): the centralised reconcile invalidation removes the camera within the TTL", async () => {

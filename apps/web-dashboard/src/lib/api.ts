@@ -2420,6 +2420,31 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   return body.status;
 }
 
+/**
+ * WARP-1893 — rename a camera to a household-facing label.
+ *
+ * Writes `displayName` only. The camera's `name` is the Frigate config key
+ * that owns its recording paths and event history, so it is never changed —
+ * this is a label, and existing footage is unaffected. Takes effect
+ * immediately with no NVR restart, which is why it saves through its own
+ * endpoint rather than the settings patch.
+ */
+export async function renameCamera(
+  name: string,
+  displayName: string,
+): Promise<{ status: string; camera: string; displayName: string }> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ displayName }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error || `Failed to rename camera: ${res.status}`);
+  }
+  return (await res.json()) as { status: string; camera: string; displayName: string };
+}
+
 /** WARP-1851 — read a camera's current storage allocation. */
 export async function fetchCameraBudget(name: string): Promise<CameraBudget> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/budget`);

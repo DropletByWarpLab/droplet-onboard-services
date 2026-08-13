@@ -17,13 +17,14 @@
  * The scenario, which is the ordinary way people talk:
  *
  *     turn 1  "show me the driveway camera"     → matches `cameras`
- *     turn 2  "rename it to Side Gate"          → matches NOTHING
+ *     turn 2  "call it Blue Spruce"             → matches NOTHING
  *
  * Without continuity, turn 2 advertises core-only and the rename is
  * impossible until a self-heal iteration recovers it.
  */
 import { describe, it, expect, vi } from "vitest";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import { selectAdvertisedTools } from "../services/tool-selection.service.js";
 
 /** A pool spanning two domains + the core set, shaped like listTools(). */
 const POOL = [
@@ -65,10 +66,36 @@ function advertised(chat: ReturnType<typeof vi.fn>): string[] {
  * domain on its own and would make the continuity assertions below pass for
  * the wrong reason. The control test guards exactly this — if a future rule
  * widening swallows this phrase too, the control goes red and tells you.
+ *
+ * It did, on schedule: WARP-1893 added `rename`/`relabel` to BOTH the files
+ * and cameras vocabularies (a rename names its target only by label, so the
+ * verb is the only signal `rename_camera` gets), which swallowed the previous
+ * "rename it to Blue Spruce". Replaced with the phrasing a household uses for
+ * the same follow-up. The first case below now pins that premise directly, so
+ * the next widening fails saying WHICH domain it leaked into rather than as a
+ * puzzling `not.toContain`.
  */
-const FOLLOW_UP = "rename it to Blue Spruce";
+const FOLLOW_UP = "call it Blue Spruce";
 
 describe("WARP-1921 — §3 selection continuity across turns", () => {
+  it("the control phrase really does match no domain (the premise every case below rests on)", () => {
+    // Asserted against the rules themselves, not through the agent, so a
+    // vocabulary widening names the domain it leaked into. Without this the
+    // whole file silently degrades into testing that core-only is core-only.
+    const { matchedDomains } = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: FOLLOW_UP,
+      pool: POOL.map((t) => t.name),
+      conversationToolNames: [],
+    });
+    expect(
+      matchedDomains,
+      `"${FOLLOW_UP}" now matches [${matchedDomains.join(", ")}] on its own, so the ` +
+        `continuity assertions below would pass without any continuity at all. ` +
+        `Pick a follow-up that matches nothing — do NOT narrow the domain rule to suit this test.`,
+    ).toEqual([]);
+  });
+
   it("a follow-up with NO domain keyword still advertises the prior turn's domain", async () => {
     const { deps: d, chat } = deps();
     await runAgent(d, {

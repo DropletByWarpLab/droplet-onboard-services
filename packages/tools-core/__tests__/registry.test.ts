@@ -141,6 +141,8 @@ const EXPECTED_TOOL_NAMES = [
   "set_camera_detection",
   "set_detection_zones",
   "delete_clip",
+  // WARP-1893 — cameras: rename to a household-facing label
+  "rename_camera",
   // WARP-1443 — network depth (reads Tier-1; password/schedule Tier-2)
   "get_bandwidth_usage",
   "list_vpn_peers",
@@ -264,6 +266,11 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("set_detection_zones")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("delete_clip")?.requiresWrite).toBe(true);
     expect(TOOLS.get("delete_clip")?.requiresConfirmation).toBe(true);
+    // WARP-1893 — a write (so non-privileged roles never see it) but
+    // deliberately NOT confirmation-gated: a display name destroys nothing
+    // and is instantly reversible, unlike delete_clip above.
+    expect(TOOLS.get("rename_camera")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("rename_camera")?.requiresConfirmation).toBe(false);
     // WARP-1443 — network reads are Tier-1 (list_threat_events additionally
     // role-gates INSIDE the handler, WARP-845); password/schedule are Tier-2.
     expect(TOOLS.get("get_bandwidth_usage")?.requiresWrite).toBe(false);
