@@ -45,6 +45,7 @@ import type {
   TimelineEntry,
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
+import { retainsFootage } from "./camera-retention-defaults.js";
 
 const logger = createLogger("camera-service");
 
@@ -436,6 +437,43 @@ export function subscribeCameraEvents(callback: SSECallback): () => void {
 
 // --- Camera listing ---
 
+/**
+ * Map a camera's RESOLVED Frigate config into the shape `retainsFootage`
+ * expects.
+ *
+ * Reads the resolved tree deliberately: it is what Frigate will actually
+ * enforce, inherited defaults included. The authored config is the right
+ * source for WRITES (it round-trips; the resolved tree does not), but the
+ * wrong one for asking "what is this camera really doing right now".
+ *
+ * Note the asymmetry in Frigate 0.17's schema — `continuous` and `motion`
+ * carry `days` directly, while `alerts` and `detections` nest theirs under
+ * `retain`. Reading the wrong depth yields `undefined`, which coerces to
+ * "nothing retained" and would put every healthy camera in the warning
+ * state. Hence the explicit reads rather than a generic walk.
+ */
+export function retentionFromFrigateConfig(configEntry: unknown): {
+  enabled?: boolean;
+  continuousDays: number;
+  motionDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
+} {
+  const record = ((configEntry as Record<string, unknown> | undefined)?.record ??
+    {}) as Record<string, Record<string, Record<string, unknown>>>;
+  const num = (v: unknown): number => {
+    const n = Number(v ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return {
+    enabled: (record as unknown as { enabled?: boolean }).enabled,
+    continuousDays: num(record.continuous?.days),
+    motionDays: num(record.motion?.days),
+    alertsRetainDays: num(record.alerts?.retain?.days),
+    detectionsRetainDays: num(record.detections?.retain?.days),
+  };
+}
+
 export async function getCameras(
   prisma: PrismaClient
 ): Promise<CameraInfo[]> {
@@ -457,9 +495,24 @@ export async function getCameras(
     const frigateStatus = (frigateCameras as any)?.[dbCam.name];
     const configEntry = configCameras[dbCam.name];
 
+    // 🔴 Frame rate says the camera is ALIVE. It says nothing about whether
+    // anything is being KEPT — and this used to report "recording" on the
+    // strength of `camera_fps > 0` alone. A camera with every retention
+    // window at zero decodes, detects, and stores nothing, while the badge
+    // told the household their footage was safe (WARP-1974).
+    //
+    // `configEntry` was declared here and never read. It is exactly what
+    // answers the question, so it is now the thing that does.
+    const retaining = retainsFootage(retentionFromFrigateConfig(configEntry));
+
     let status: CameraInfo["status"] = "offline";
     if (frigateStatus) {
-      if (frigateStatus.detection_fps > 0) status = "detecting";
+      if (frigateStatus.camera_fps > 0 && !retaining) {
+        // Healthy stream, nothing retained. Deliberately NOT "recording",
+        // and deliberately not "idle" either — the camera is working; it
+        // just has nowhere to put anything.
+        status = "live";
+      } else if (frigateStatus.detection_fps > 0) status = "detecting";
       else if (frigateStatus.camera_fps > 0) status = "recording";
       else status = "idle";
     }
@@ -491,7 +544,13 @@ export async function getCameras(
         macAddress: null,
         enabled: true,
         autoDiscovered: false,
-        status: (stats as any)?.camera_fps > 0 ? "recording" : "idle",
+        // Same rule as above: a live stream with nothing retained is
+        // "live", never "recording".
+        status: !((stats as any)?.camera_fps > 0)
+          ? "idle"
+          : retainsFootage(retentionFromFrigateConfig(configCameras[name]))
+            ? "recording"
+            : "live",
         lastSeen: new Date().toISOString(),
         lastDetection: null,
       });
