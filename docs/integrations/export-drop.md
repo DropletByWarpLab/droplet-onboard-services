@@ -192,6 +192,15 @@ Exported date/times are read as ISO-8601 or the US layout a Windows report write
 
 ---
 
+## 8a. Amounts
+
+Balances are read from whatever the report writer printed, which is rarely a bare number.
+
+* A currency symbol and thousands separators are stripped. When both `.` and `,` appear the **last** one is the decimal point, which resolves `1,234.56` and `1.234,56` correctly; a lone comma followed by exactly two digits is a decimal separator, anything else is thousands.
+* **Parentheses mean negative only when they wrap the whole amount** — `(1,234.56)` and `$(1,234.56)`, the Accounting format where the symbol sits outside. A cell like `500.00 (30 days)` is a positive balance with an ageing annotation after it, and is **refused** rather than read: treating any parenthesised text as negative both inverted the sign and spliced the annotation's digits into the number.
+* **A trailing `CR` is a credit, i.e. negative**, and `DR` is a debit. The marker must follow a digit, a closing paren or whitespace, so `100 SCR` (a currency code) stays `100`.
+* Anything that does not reduce cleanly to a number is `undefined` rather than a guess. An unparseable balance contributes nothing to an AR total; a confidently wrong one moves it.
+
 ## 9. What this track does not do
 
 * **No writes** — see §2. Permanent, by construction.
