@@ -651,11 +651,17 @@
 }
 
 /* ---------- Cameras ---------- */
+/* `align-items: center` is load-bearing, not cosmetic: stretch alignment
+   would hand each tile the row's full height, which overrides the tile's
+   aspect-ratio and hands a 16:9 frame a portrait box to fill. Centring lets
+   the tile size itself from its width and sit in the middle of whatever
+   height the widget happens to have. */
 .droplet-home .w-cams {
   display: grid;
   gap: 8px;
   height: 100%;
-  grid-auto-rows: 1fr;
+  grid-auto-rows: minmax(0, 1fr);
+  align-items: center;
 }
 /* A <button> that opens the Cameras page — needs the button reset alongside
    the tile styling. */
@@ -669,6 +675,14 @@
   font: inherit;
   display: block;
   width: 100%;
+  /* The tile is a viewport onto a camera, so it keeps a camera's shape. The
+     component overrides this inline with the decoded frame's real aspect once
+     one lands; 16/9 is the placeholder shape until then. `max-height` keeps a
+     wide, short widget from pushing the tile past the card and getting it
+     clipped — the frame letterboxes inside the tint instead. */
+  aspect-ratio: 16 / 9;
+  height: auto;
+  max-height: 100%;
   cursor: pointer;
 }
 .droplet-home .w-cam:hover {
@@ -676,14 +690,20 @@
 }
 /* The live frame. Sits under the chrome spans and under `::after` (the
    generated scanline sits last in paint order), so the feed reads through
-   the same tile treatment as the placeholder tint it replaces. */
+   the same tile treatment as the placeholder tint it replaces.
+
+   `contain`, never `cover`: this is a security feed, so the half of the scene
+   `cover` would crop away is the half that matters. The tile already carries
+   the frame's own aspect, so in the normal case contain and cover agree and
+   nothing letterboxes — contain is what keeps the picture whole in the cases
+   where they don't (a height-clamped tile, or a frame that changes shape). */
 .droplet-home .w-cam img {
   position: absolute;
   inset: 0;
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 .droplet-home .w-cam::after {
   content: "";
