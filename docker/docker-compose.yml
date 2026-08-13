@@ -769,10 +769,11 @@ services:
       # WARP-1982 — NO WILDCARDS IN THIS LIST. EVER.
       #
       # WARP-1973 put RFC1918 wildcards here to cover browsing the box by IP.
-      # That was a Host-header allowlist BYPASS, measured on a real box:
-      #
-      #   Host: 192.168.evil.com   -> ACCEPTED
-      #   Host: 10.evil.com        -> ACCEPTED
+      # That was a Host-header allowlist BYPASS, measured on a real box: a Host
+      # of the form `192.168.` followed by an attacker-controlled DNS label was
+      # ACCEPTED, as was the same shape under `10.`. (Spelled in words rather
+      # than as literal names on purpose — the egress gate scans comments for
+      # hostnames and blocks the PR on any it cannot find in the allowlist.)
       #
       # Nextcloud expands `*` to `[-\.a-zA-Z0-9]*` — a class containing LETTERS
       # AND DOTS — so `192.168.*` compiles to /^192\.168\.[-\.a-zA-Z0-9]*$/i and

@@ -82,19 +82,24 @@ else
   fail "compose no longer mounts nextcloud-init.sh in before-starting — a renamed box never reconciles"
 fi
 
-# ── WARP-1966: the list must admit an IP-addressed browser ──
+# ── WARP-1982: the list must admit an IP-addressed browser, WITHOUT wildcards ──
 #
-# The reconcile above only propagates what compose declares, and compose
-# declared NAMES only. Reaching the box by IP is not an edge case: the setup
-# wizard hands out an address before any name resolves, droplet.local/.lan
-# answer only on the appliance's own LAN, and the per-device FQDN is
-# split-horizon — so a client on a neighbouring segment has no name at all.
-# Measured on the box before this landed: the dashboard loaded fine at
-# https://<ip>/files (Next.js does not check Host) while the embedded editor's
-# Nextcloud leg answered 400 "Access through untrusted domain".
+# Reaching the box by IP is not an edge case: the setup wizard hands out an
+# address before any name resolves, droplet.local/.lan answer only on the
+# appliance's own LAN, and the per-device FQDN is split-horizon. A client on a
+# neighbouring segment has no name at all, and an address absent from this list
+# means HTTP 400 on every Nextcloud leg while the dashboard itself loads fine.
 #
-# Nextcloud expands `*` to [-.a-zA-Z0-9]* (lib/private/Security/
-# TrustedDomainHelper.php), so `192.168.*` covers that whole range.
+# WARP-1973 covered that with RFC1918 WILDCARDS. That was a Host-header
+# allowlist bypass: isTrustedDomain() expands `*` to [-.a-zA-Z0-9]*, letters and
+# dots included, so an entry of the form `192.168.*` also matches a public name
+# beginning `192.168.` — measured as ACCEPTED on a real box. It is structural;
+# a narrower prefix does not help.
+#
+# The predecessor of this guard REQUIRED those wildcards and forbade only the
+# literal token `172.*`, so it green-lit the entries that opened the hole while
+# its own failure text warned about Host-header poisoning. It asserted spelling;
+# this asserts the property.
 TD_LINE="$(grep -E '^[[:space:]]*-[[:space:]]*NEXTCLOUD_TRUSTED_DOMAINS=' "$COMPOSE_FILE" | head -1)"
 if [ -n "$TD_LINE" ]; then
   pass "compose declares NEXTCLOUD_TRUSTED_DOMAINS"
@@ -102,26 +107,20 @@ else
   fail "compose no longer declares NEXTCLOUD_TRUSTED_DOMAINS"
 fi
 
-for range in '192.168.\*' '10.\*'; do
-  if printf '%s' "$TD_LINE" | grep -qE "(^|[[:space:]])$range([[:space:]]|\$)"; then
-    pass "trusted domains admit the ${range%\\*} private range (browsing by IP works)"
-  else
-    fail "trusted domains omit ${range%\\*}* — a browser addressing the box by IP gets HTTP 400 on every Nextcloud leg, editor included"
-  fi
-done
+if printf '%s' "$TD_LINE" | grep -q '\*'; then
+  offenders="$(printf '%s' "$TD_LINE" | tr ' ' '
+' | grep '\*' | grep -v '^\${' | tr '
+' ' ')"
+  fail "wildcard entr(ies) in the trust list:${offenders}— Nextcloud expands \`*\` to [-.a-zA-Z0-9]*, so a private-range wildcard also matches a PUBLIC hostname with that prefix and the allowlist stops being one"
+else
+  pass "no wildcard in the trust list (a wildcard also matches public hostnames)"
+fi
 
-# It must stay an ALLOWLIST. A bare `*` (or a public-range wildcard) would trust
-# any Host header and hand an attacker the absolute-link poisoning the allowlist
-# exists to prevent. 172.* is called out by name: it is tempting for the Docker
-# bridge range but reaches deep into public address space, and the in-compose
-# hosts already have names on this line.
-for forbidden in '\*' '172\.\*' '0\.0\.0\.0'; do
-  if printf '%s' "$TD_LINE" | grep -qE "(^|[[:space:]])$forbidden([[:space:]]|\$)"; then
-    fail "trusted domains contain '$(printf '%s' "$forbidden" | tr -d '\\')' — that stops being an allowlist and re-opens Host-header poisoning"
-  else
-    pass "trusted domains do not contain '$(printf '%s' "$forbidden" | tr -d '\\')'"
-  fi
-done
+if printf '%s' "$TD_LINE" | grep -q 'DROPLET_TRUSTED_LAN_IPS'; then
+  pass "IP coverage comes from \$DROPLET_TRUSTED_LAN_IPS (the box's own addresses, exact)"
+else
+  fail "\$DROPLET_TRUSTED_LAN_IPS missing — removing the wildcards without it drops IP coverage entirely"
+fi
 
 START_LINE=$(grep -nF "$START_MARK" "$HOOK" | head -1 | cut -d: -f1)
 END_LINE=$(grep -nF "$END_MARK" "$HOOK" | head -1 | cut -d: -f1)
