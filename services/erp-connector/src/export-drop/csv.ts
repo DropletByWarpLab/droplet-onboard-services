@@ -133,10 +133,20 @@ export function parseDelimited(text: string, options: ParseOptions = {}): Delimi
   let record: string[] = [];
   let inQuotes = false;
   let recordHasContent = false;
+  /**
+   * Whether no character of the current field has been consumed yet. RFC 4180
+   * only gives `"` its special meaning at the START of a field; a quote further
+   * in is an ordinary character. Without this distinction one stray inch mark
+   * in a free-text cell — `#8 crown 5" prep` is a real appointment status —
+   * opens a quoted section that swallows every delimiter and newline after it,
+   * silently deleting the rest of the file with no diagnostic.
+   */
+  let atFieldStart = true;
 
   const endField = (): void => {
     record.push(field);
     field = "";
+    atFieldStart = true;
   };
   const endRecord = (): void => {
     endField();
@@ -179,7 +189,14 @@ export function parseDelimited(text: string, options: ParseOptions = {}): Delimi
     }
 
     if (ch === '"') {
-      inQuotes = true;
+      if (atFieldStart) {
+        inQuotes = true;
+        atFieldStart = false;
+      } else {
+        // Mid-field quote: a literal character, not the start of a quoted
+        // section. See `atFieldStart`.
+        field += ch;
+      }
       recordHasContent = true;
       continue;
     }
@@ -198,6 +215,7 @@ export function parseDelimited(text: string, options: ParseOptions = {}): Delimi
     }
     field += ch;
     recordHasContent = true;
+    atFieldStart = false;
   }
 
   // Flush whatever the file ended on. An unterminated quoted field is flushed

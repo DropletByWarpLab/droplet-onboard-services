@@ -19,7 +19,13 @@ import { ExportDropConnector, exportProviderFor, vendorFromExportProvider, expor
 import { ConnectorBlockedError } from "../src/connector.js";
 import { UnknownReadQueryError, scheduleDayBounds } from "../src/read-queries.js";
 import { UnknownWriteCommandError, WRITE_COMMANDS } from "../src/write-commands.js";
-import { isInsideRoot, resolveDropDirectory, DropRootError } from "../src/export-drop/scan.js";
+import { constants } from "node:fs";
+import {
+  isInsideRoot,
+  readExportBytes,
+  resolveDropDirectory,
+  DropRootError,
+} from "../src/export-drop/scan.js";
 import { GENERIC_VENDOR, type ExportProfile } from "../src/export-drop/profiles.js";
 
 /** Fixed clock: 2026-08-14T12:00:00Z. */
@@ -333,6 +339,19 @@ describe("find_patient over-fetch guard", () => {
     expect(await c.runRead("find_patient", { query: "hopp" })).toHaveLength(1);
   });
 
+  it("anchors at the START of the surname — a mid-name substring matches nothing", async () => {
+    // The SQL track binds `${escapeLike(query)}%`, a strict prefix. Without a
+    // term that is a substring but NOT a prefix, `.startsWith` and `.includes`
+    // are indistinguishable, and a regression to substring would return more
+    // PHI here than the same named read returns on the other two tracks.
+    await drop("patients.csv", PATIENT_CSV);
+    const c = connector();
+    await c.connect();
+    expect(await c.runRead("find_patient", { query: "lace" })).toHaveLength(0);
+    expect(await c.runRead("find_patient", { query: "opper" })).toHaveLength(0);
+    expect(await c.runRead("find_patient", { query: "Lovelace" })).toHaveLength(2);
+  });
+
   it("returns every patient for an empty term, as a bare prefix match does", async () => {
     await drop("patients.csv", PATIENT_CSV);
     const c = connector();
@@ -458,6 +477,27 @@ describe("merging re-exports", () => {
     expect(rows[0].first_name).toBe("Augusta");
   });
 
+  it("keeps every row when the natural-key cell is blank", async () => {
+    // A PMS that only assigns an appointment id at check-in exports walk-ins
+    // with a blank id. Keying those on the empty string collapses them all into
+    // one bucket and the rest vanish — the silent appointment loss this
+    // module's docstring calls the worst failure it could have.
+    await drop(
+      "schedule.csv",
+      [
+        "Appt Ref,Start Time,Provider,Status,Pat Ref",
+        ",2026-08-14 09:00,DR1,Walk-in,P1",
+        ",2026-08-14 09:30,DR1,Walk-in,P2",
+        ",2026-08-14 10:00,DR1,Walk-in,P3",
+        "",
+      ].join("\n"),
+    );
+    const c = connector();
+    await c.connect();
+    const { from, to } = scheduleDayBounds("2026-08-14");
+    expect(await c.runRead("get_schedule_today", { from, to })).toHaveLength(3);
+  });
+
   it("unions rows across files that carry different records", async () => {
     await drop("patients-a.csv", PATIENT_CSV, SETTLED - 60_000);
     await drop("patients-b.csv", ["Pat Ref,Given,Surname", "P9,Edsger,Dijkstra", ""].join("\n"), SETTLED);
@@ -508,25 +548,87 @@ describe("file gates", () => {
     expect(status.diagnostics.some((d) => d.file === "report.pdf")).toBe(false);
   });
 
-  it("refuses a symlink that resolves outside the drop directory", async () => {
+  it("refuses a symlink in the drop directory, wherever it points", async () => {
+    // Refused outright rather than resolved-and-containment-checked. Resolving
+    // proves only where it pointed at CHECK time, and the read happens a whole
+    // pass later — every earlier file is read and parsed in between — while the
+    // directory entry belongs to whoever writes to the practice's share.
     const outsideDir = await mkdtemp(join(tmpdir(), "droplet-export-outside-"));
     try {
-      const secret = join(outsideDir, "secret.csv");
-      await writeFile(secret, PATIENT_CSV, "utf8");
+      const outside = join(outsideDir, "secret.csv");
+      await writeFile(outside, PATIENT_CSV, "utf8");
+      const inside = join(root, "real.csv");
+      await writeFile(inside, PATIENT_CSV, "utf8");
       try {
-        await symlink(secret, join(root, "linked.csv"));
+        await symlink(outside, join(root, "escaping.csv"));
+        await symlink(inside, join(root, "contained.csv"));
       } catch {
         return; // symlink creation needs privileges on some platforms; CI runs Linux.
       }
-      await utimes(join(root, "linked.csv"), new Date(SETTLED), new Date(SETTLED));
+      for (const name of ["escaping.csv", "contained.csv", "real.csv"]) {
+        await utimes(join(root, name), new Date(SETTLED), new Date(SETTLED));
+      }
 
       const c = connector();
-      await expect(c.connect()).rejects.toThrow(ConnectorBlockedError);
+      await c.connect(); // real.csv is a genuine file, so the drop is usable
       const status = await c.status();
-      expect(status.directory).toBeTruthy();
+      const reasons = status.diagnostics
+        .filter((d) => d.file === "escaping.csv" || d.file === "contained.csv")
+        .map((d) => d.reason);
+      expect(reasons).toEqual(["symlink", "symlink"]);
+      // ...and neither contributed rows: only real.csv's three patients.
+      expect(await c.runRead("get_recall_due", {})).toHaveLength(3);
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses to open a symlink even when handed one directly (O_NOFOLLOW)", async () => {
+    // The symlink refusal above happens at scan time; this is the second half,
+    // asserted on the open itself. It is what closes the window between the
+    // check and the read — every earlier file in the directory is read and
+    // parsed in between, so an entry can be swapped after it was approved.
+    if (!constants.O_NOFOLLOW) return; // Windows has no O_NOFOLLOW; CI runs Linux.
+    const real = join(root, "real.csv");
+    await writeFile(real, PATIENT_CSV, "utf8");
+    try {
+      await symlink(real, join(root, "link.csv"));
+    } catch {
+      return;
+    }
+    // The target is readable through its own path...
+    await expect(readExportBytes(real, 1024 * 1024)).resolves.toBeInstanceOf(Buffer);
+    // ...but not through the symlink.
+    await expect(readExportBytes(join(root, "link.csv"), 1024 * 1024)).rejects.toThrow();
+  });
+
+  it("re-asserts the size ceiling on the open descriptor, not the earlier stat", async () => {
+    const path = join(root, "big.csv");
+    await writeFile(path, PATIENT_CSV, "utf8");
+    await expect(readExportBytes(path, 5)).rejects.toThrow(/exceeds/);
+  });
+
+  it("reads a free-text cell containing an inch mark without losing later rows", async () => {
+    // End-to-end guard for the RFC-4180 field-start rule: `#8 crown 5" prep` is
+    // a real appointment status, and reading that quote as an opening quote
+    // silently deletes every row below it.
+    await drop(
+      "schedule.csv",
+      [
+        "Appt Ref,Start Time,Provider,Status,Pat Ref",
+        "A1,2026-08-14 09:00,DR1,Scheduled,P1",
+        'A2,2026-08-14 10:00,DR1,#8 crown 5" prep,P2',
+        "A3,2026-08-14 11:00,DR1,Scheduled,P3",
+        "",
+      ].join("\n"),
+    );
+    const c = connector();
+    await c.connect();
+    const { from, to } = scheduleDayBounds("2026-08-14");
+    const rows = (await c.runRead("get_schedule_today", { from, to })) as Record<string, unknown>[];
+    expect(rows.map((r) => r.appt_id)).toEqual(["A1", "A2", "A3"]);
+    expect(rows[1].status).toBe('#8 crown 5" prep');
+    expect(rows[1].patient_id).toBe("P2");
   });
 });
 

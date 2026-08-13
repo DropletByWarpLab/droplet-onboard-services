@@ -55,9 +55,19 @@ export const SQL_TRACK_REMEDIATION =
  */
 export class ConnectorBlockedError extends Error {
   readonly code = "CONNECTOR_BLOCKED";
+  /**
+   * The standing "what would unblock this" text, kept as a field and not only
+   * baked into `message`. Callers that render their own copy — the connect/test
+   * route's blocked branch — need the per-track text; without it they have to
+   * re-derive it by branching on the provider key, and that branch goes stale
+   * the moment a track is added (WARP-1964: an export-drop test failure was
+   * reported as "install the SAP SQL Anywhere driver").
+   */
+  readonly remediation: string;
   constructor(operation: string, remediation: string = SQL_TRACK_REMEDIATION) {
     super(`"${operation}" is blocked: ${remediation}`);
     this.name = "ConnectorBlockedError";
+    this.remediation = remediation;
   }
 }
 
