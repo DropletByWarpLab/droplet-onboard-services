@@ -333,9 +333,19 @@ describe("rerankPassages", () => {
       reranker: r,
     });
     expect(out.map((h) => h.path)).toEqual(["/b.pdf", "/c.pdf", "/a.pdf"]);
-    expect(out[0]!.score).toBe(0.9);
+    // WARP-1637: the raw logit is normalized on the way OUT. The ranking is
+    // unchanged (sigmoid is monotonic) — only the scale is, and the hit now
+    // says which scale it is in so the renderer stops inferring.
+    expect(out[0]!.score).toBeCloseTo(1 / (1 + Math.exp(-0.9)), 10);
+    expect(out.every((h) => h.scoreKind === "similarity")).toBe(true);
     expect(r.rerank).toHaveBeenCalledTimes(1);
+    // The CACHE still stores raw logits — normalization happens once, on read.
     expect(redis.setex).toHaveBeenCalledTimes(1);
+    expect(redis.setex).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Number),
+      JSON.stringify([0.1, 0.9, 0.2]),
+    );
   });
 
   it("uses cached scores on cache hit", async () => {
@@ -366,7 +376,12 @@ describe("rerankPassages", () => {
       redis,
       reranker: r,
     });
-    expect(out).toEqual(baseHits); // pass-through unchanged
+    // WARP-1637: pass-through leaves the NUMBERS untouched but tags the scale
+    // — the incoming RRF weights are already bounded, so saying so beats
+    // leaving the renderer to infer it.
+    expect(out.map((h) => h.score)).toEqual(baseHits.map((h) => h.score));
+    expect(out.map((h) => h.path)).toEqual(baseHits.map((h) => h.path));
+    expect(out.every((h) => h.scoreKind === "similarity")).toBe(true);
   });
 
   it("survives Redis read errors and still rer-anks via the backend", async () => {
@@ -463,7 +478,9 @@ describe("searchHybrid with reranker", () => {
       rerank: { redis, reranker, candidates: 50 },
     });
     expect(hits.map((h) => h.path)).toEqual(["/c.pdf", "/b.pdf", "/a.pdf"]);
-    expect(hits[0]!.score).toBe(0.9);
+    // WARP-1637: normalized + tagged, same as rerankPassages above.
+    expect(hits[0]!.score).toBeCloseTo(1 / (1 + Math.exp(-0.9)), 10);
+    expect(hits.every((h) => h.scoreKind === "similarity")).toBe(true);
     expect(reranker.rerank).toHaveBeenCalledTimes(1);
   });
 
