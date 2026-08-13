@@ -23,8 +23,8 @@ import {
  * keeps the typed values with the error line (§7.9: never lose edits).
  *
  * Renders nothing for family/guest — Settings is an admin surface (§6.3).
- * Indigo shell tokens only (dp-card / type-* / text-label-* / --brand),
- * mirroring BusinessProfileCard.
+ * Ratified DESIGN.md tokens only (.card / type-* / the indigo CSS vars),
+ * mirroring the ratchet-clean settings cards (PersonalityCard/FeaturesCard).
  */
 
 const SAVE_ERROR_LINE =
@@ -156,9 +156,14 @@ export function LocationsCard() {
   const addDisabled = !addBuilding.trim() || !addRoom.trim() || adding;
 
   return (
-    <div className="dp-card !p-5 space-y-4" data-testid="locations-card">
+    <div className="card space-y-4" data-testid="locations-card">
       <div className="flex items-start gap-2.5">
-        <MapPin size={18} className="text-label-secondary mt-0.5" aria-hidden />
+        <MapPin
+          size={18}
+          className="mt-0.5"
+          style={{ color: "var(--text-muted)" }}
+          aria-hidden
+        />
         <div>
           <p className="type-headline" style={{ color: "var(--text)" }}>
             Locations
@@ -217,7 +222,7 @@ export function LocationsCard() {
                         !editBuilding.trim() || !editRoom.trim() || savingEdit
                       }
                       aria-label="Save"
-                      className="p-2 rounded-md text-accent hover:bg-accent-subtle transition-colors duration-200 ease-smooth disabled:opacity-40"
+                      className="p-2 rounded-md text-[var(--brand)] hover:bg-[var(--brand-subtle)] transition-colors duration-200 ease-smooth disabled:opacity-40"
                     >
                       <Check size={16} aria-hidden />
                     </button>
