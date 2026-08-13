@@ -4406,6 +4406,12 @@ model Department {
   kind            DepartmentKind         @default(DEPARTMENT)
   state           ProvisionState         @default(pending)
   provisionError  String?
+  /// WARP-1651: when this row FIRST failed to converge, or null while it is
+  /// converging normally. The durable clock the reconciler bounds the
+  /// re-verify state with — `updatedAt` cannot serve, because
+  /// provisionDepartment rewrites `state` on every retry and so refreshes it
+  /// each tick. Stamped once per failure episode, cleared on convergence.
+  nonConvergedSince DateTime?
   ncGroupRw       String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
   ncGroupRo       String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
   ncGroupfolderId Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key

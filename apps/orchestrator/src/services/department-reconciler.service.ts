@@ -134,15 +134,32 @@ const DEPARTMENT_REVERIFY_STATES = new Set<string>([
 const STUCK_TICK_THRESHOLD = 6;
 
 /**
- * WARP-1557 — consecutive non-converged tick counts, keyed by department id.
- *
- * Deliberately in-memory: this is an alerting/escalation aid, not truth, and
- * it must not cost a schema column or a write per row per tick. A process
- * restart resets the counters, which at worst delays an escalation by
- * `STUCK_TICK_THRESHOLD` ticks — it can never lose a row, because the row's
- * own `state` (Prisma, durable) is what actually drives the retry.
+ * WARP-1651 — the same budget as `STUCK_TICK_THRESHOLD` ticks at the 5-minute
+ * cron interval, expressed as wall-clock so it survives a restart.
  */
-const consecutiveNonConvergedTicks = new Map<string, number>();
+const STUCK_AFTER_MS = STUCK_TICK_THRESHOLD * 5 * 60 * 1000;
+
+/**
+ * WARP-1651 — how long a row has been failing to converge, from the DURABLE
+ * `Department.nonConvergedSince` column.
+ *
+ * WARP-1557 counted consecutive ticks in a module-level in-memory Map and
+ * claimed a restart "at worst delays an escalation by STUCK_TICK_THRESHOLD
+ * ticks — it can never lose a row". The second half was true; the first was
+ * not. On a box restarting more often than the threshold — a deploy, a
+ * reboot, an OOM, or the very infra instability that produced the 5xx — the
+ * counter never reached the threshold, the demotion never fired, and the
+ * owner saw "Setting up…" with no error text forever. WARP-1557 moved the
+ * silent-forever failure from `failed` to `provisioning`, which is worse:
+ * the UI actively reassures.
+ *
+ * `updatedAt` cannot substitute for the column. `provisionDepartment` writes
+ * `state = 'provisioning'` at entry on every retry, so `updatedAt` is
+ * refreshed each tick and never ages.
+ */
+function msNonConverged(since: Date | null, now: number): number {
+  return since ? now - since.getTime() : 0;
+}
 
 // WARP-1257: `failed` and `remove_failed` are BOTH swept — `failed` retries
 // down the sync path, `remove_failed` down the removal path.
@@ -345,6 +362,8 @@ interface DepartmentSweepRow {
   kind: "HOUSEHOLD" | "DEPARTMENT" | "TEAM";
   state: string;
   ncGroupfolderId: number | null;
+  /** WARP-1651 — the durable escalation clock; null while converging. */
+  nonConvergedSince: Date | null;
 }
 
 /**
@@ -367,54 +386,71 @@ function terminalFailureStateFor(state: string): "failed" | "archive_failed" {
  * members — the people who lost access — saw nothing at all, and neither did
  * anything watching logs at the default level.
  *
- * Now each non-converged row carries a consecutive-tick count that escalates
- * warn → error at the threshold, is reported out of the tick as
- * `departmentsStuck`, and bounds the re-verify state by demoting a row that
- * has been "unconfirmed" for too long to its terminal failure state.
+ * Now each non-converged row carries a DURABLE start-of-failure timestamp
+ * (WARP-1651) that escalates warn → error once the budget is spent, is
+ * reported out of the tick as `departmentsStuck`, and bounds the re-verify
+ * state by demoting a row that has been "unconfirmed" for too long to its
+ * terminal failure state.
  *
- * Returns true if the row is stuck (at or past the threshold).
+ * Returns true if the row is stuck (at or past the budget).
  */
 async function trackNonConvergedRow(
   prisma: PrismaClient,
   row: DepartmentSweepRow,
   currentState: string,
 ): Promise<boolean> {
-  const ticks = (consecutiveNonConvergedTicks.get(row.id) ?? 0) + 1;
-  consecutiveNonConvergedTicks.set(row.id, ticks);
-  const stuck = ticks >= STUCK_TICK_THRESHOLD;
+  const now = Date.now();
+  // WARP-1651: stamp the clock on the FIRST non-converged tick only. A row
+  // already carrying a timestamp keeps it, which is the whole point — the
+  // budget has to survive the restarts that used to reset the tick counter.
+  const since = row.nonConvergedSince ?? new Date(now);
+  const firstFailure = row.nonConvergedSince === null;
+  const elapsedMs = msNonConverged(since, now);
+  const stuck = elapsedMs >= STUCK_AFTER_MS;
 
   const detail = {
     departmentId: row.id,
     name: row.name,
     fromState: row.state,
     currentState,
-    consecutiveTicks: ticks,
-    approxMinutesStuck: ticks * 5,
+    nonConvergedSince: since.toISOString(),
+    minutesStuck: Math.floor(elapsedMs / 60000),
   };
 
   if (stuck) {
     logger.error(
       detail,
-      "WARP-1557: department has failed to converge for many consecutive ticks — manual intervention likely required",
+      "WARP-1557: department has failed to converge for far too long — manual intervention likely required",
     );
   } else {
     logger.warn(detail, "department did not converge this tick; will retry");
   }
 
   // Bound the RE-VERIFY state: an ambiguous outcome is allowed to stay
-  // "unconfirmed" for a while, but not indefinitely. Past the threshold the
+  // "unconfirmed" for a while, but not indefinitely. Past the budget the
   // row is demoted to the terminal failure state matching its intent, so the
   // operator-facing surface stops implying work is in progress.
   if (stuck && !currentState.endsWith("failed")) {
     const terminal = terminalFailureStateFor(currentState);
     await prisma.department.update({
       where: { id: row.id },
-      data: { state: terminal },
+      // The clock is NOT cleared here: the row is still not converged, and
+      // clearing it would restart the budget on the next sweep.
+      data: { state: terminal, nonConvergedSince: since },
     });
     logger.error(
       { ...detail, demotedTo: terminal },
       "WARP-1557: re-verify budget exhausted; parking row in its terminal failure state",
     );
+  } else if (firstFailure) {
+    // WARP-1651: start the clock. One write per failure EPISODE, not one per
+    // row per tick — every later tick reads the stamp back off the row.
+    // (`firstFailure` implies `!stuck`: a clock started this tick has spent
+    // none of its budget.)
+    await prisma.department.update({
+      where: { id: row.id },
+      data: { nonConvergedSince: since },
+    });
   }
 
   return stuck;
@@ -432,7 +468,15 @@ async function sweepDepartments(
 }> {
   const rows = (await prisma.department.findMany({
     where: { state: { in: [...DEPARTMENT_SWEEP_STATES] } },
-    select: { id: true, name: true, kind: true, state: true, ncGroupfolderId: true },
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      state: true,
+      ncGroupfolderId: true,
+      // WARP-1651: the durable escalation clock, read once per row per tick.
+      nonConvergedSince: true,
+    },
   })) as DepartmentSweepRow[];
 
   // Every currently-active DEPARTMENT/TEAM/HOUSEHOLD row also gets a
@@ -441,7 +485,15 @@ async function sweepDepartments(
   // path, not just on error retry.
   const activeRows = (await prisma.department.findMany({
     where: { state: "active" },
-    select: { id: true, name: true, kind: true, state: true, ncGroupfolderId: true },
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      state: true,
+      ncGroupfolderId: true,
+      // WARP-1651: the durable escalation clock, read once per row per tick.
+      nonConvergedSince: true,
+    },
   })) as DepartmentSweepRow[];
 
   let converged = 0;
@@ -476,8 +528,15 @@ async function sweepDepartments(
 
     if (after?.state === "active" || after?.state === "archived") {
       converged += 1;
-      // WARP-1557: converged — drop any stuck-tracking for this row.
-      consecutiveNonConvergedTicks.delete(row.id);
+      // WARP-1651: converged — stop the clock, so the NEXT failure episode
+      // gets a full budget. Guarded on it actually running: a row that
+      // converged normally has nothing to clear and must not cost a write.
+      if (row.nonConvergedSince !== null) {
+        await prisma.department.update({
+          where: { id: row.id },
+          data: { nonConvergedSince: null },
+        });
+      }
       await recordActivity({
         kind: "system",
         severity: "ok",
@@ -520,7 +579,11 @@ async function sweepDepartments(
             departmentId: row.id,
             // WARP-1557: how long this has been going on, so the activity
             // row itself carries the escalation and not just the log.
-            consecutiveTicks: consecutiveNonConvergedTicks.get(row.id) ?? 1,
+            // WARP-1651: read off the durable column, so the number survives
+            // the restarts that used to reset it to 1.
+            minutesStuck: Math.floor(
+              msNonConverged(row.nonConvergedSince, Date.now()) / 60000,
+            ),
           },
           actor: { type: "system" },
         });
@@ -1073,13 +1136,16 @@ export function kickReconcile(): void {
 }
 
 /**
- * Exposed only for tests — clears any pending debounced kick, and (WARP-1557)
- * the in-memory stuck-row tick counters, so one spec's non-converged rows
- * cannot leak an escalation into the next.
+ * Exposed only for tests — clears any pending debounced kick.
+ *
+ * WARP-1651: this used to also clear the in-memory stuck-row tick counters so
+ * one spec's non-converged rows could not leak an escalation into the next.
+ * There are no counters any more — the escalation clock lives on the row
+ * (`Department.nonConvergedSince`), so a spec's state goes away with its
+ * prisma stub and there is nothing module-level left to reset.
  */
 export function _resetReconcileKickForTests(): void {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = null;
   boundPrisma = null;
-  consecutiveNonConvergedTicks.clear();
 }

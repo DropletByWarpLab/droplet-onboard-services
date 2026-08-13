@@ -348,6 +348,41 @@ describe("DepartmentsPanel — failure explanations (WARP-1507)", () => {
 
     expect(screen.queryByText(/retries automatically/i)).not.toBeInTheDocument();
   });
+
+  // WARP-1651 — the notice was gated on `state === "failed"`, but WARP-1557
+  // sends an AMBIGUOUS write outcome (a 5xx that may or may not have landed)
+  // to `provisioning` WITH `provisionError` set. The owner then saw
+  // "Setting up…", a spinner, and no error text at all — strictly less than
+  // before WARP-1557, and the UI actively reassuring while nothing works.
+  it("explains a provisioning department that is carrying an error", async () => {
+    const unconfirmed = dept({
+      state: "provisioning",
+      provisionError: "Groupfolder create: 503",
+    });
+    listDepartmentsMock.mockResolvedValue({ departments: [unconfirmed] });
+    getDepartmentMock.mockResolvedValue(detail(unconfirmed));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Groupfolder create: 503")).toBeInTheDocument();
+      expect(screen.getByText(/retries automatically/i)).toBeInTheDocument();
+    });
+  });
+
+  it("stays quiet for a department that is provisioning normally", async () => {
+    // The guard is `provisionError != null`, not "any non-active state" — a
+    // first-run department mid-setup has nothing to explain and must not grow
+    // a warning box.
+    const fresh = dept({ state: "provisioning", provisionError: null });
+    listDepartmentsMock.mockResolvedValue({ departments: [fresh] });
+    getDepartmentMock.mockResolvedValue(detail(fresh));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    expect(screen.queryByText(/retries automatically/i)).not.toBeInTheDocument();
+  });
 });
 
 describe("DepartmentsPanel — select focus visibility (WCAG 2.4.7)", () => {
