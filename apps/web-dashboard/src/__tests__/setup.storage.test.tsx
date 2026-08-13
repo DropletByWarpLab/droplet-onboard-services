@@ -1083,7 +1083,9 @@ describe("setup Storage step — unmounted disks + existing pool (WARP-936)", ()
     await act(async () => {
       fireEvent.click(adoptSwitch());
     });
-    const reclaimButtons = screen.getAllByRole("button", { name: /^reclaim$/i });
+    // WARP-1945: the row CTA names both halves of the destructive action —
+    // "Reclaim & erase", never a bare "Reclaim" (parity with the Drives page).
+    const reclaimButtons = screen.getAllByRole("button", { name: /^reclaim & erase$/i });
     expect(reclaimButtons.length).toBeGreaterThan(0);
     await act(async () => {
       fireEvent.click(reclaimButtons[0]);
@@ -1112,6 +1114,35 @@ describe("setup Storage step — unmounted disks + existing pool (WARP-936)", ()
     );
     // A member is reclaimed, never plain-adopted.
     expect(requestAdoptDriveMock).not.toHaveBeenCalled();
+  });
+
+  // WARP-1945 — label/copy parity with the Drives page (WARP-1915). The row
+  // CTA names BOTH halves of the destructive action — never a bare "Reclaim" —
+  // and the supporting copy says up front that reclaiming erases the drive.
+  it("labels the pool-member row 'Reclaim & erase' and says it erases everything (WARP-1945)", async () => {
+    fetchDrivesMock.mockResolvedValue({
+      drives: [],
+      count: 0,
+      disks: [
+        { name: "sda", size_bytes: 1_800_000_000_000, state: "pool_member", md: "md127", fstype: "linux_raid_member" },
+      ],
+    });
+    fetchPoolsMock.mockResolvedValue({ pools: [MD127], count: 1 });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    // Both halves of the action in the label — mirrors the Drives card family.
+    expect(
+      screen.getByRole("button", { name: /^reclaim & erase$/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^reclaim$/i })).toBeNull();
+    // And the supporting copy says the data goes away, before any click.
+    expect(
+      screen.getByText(/removes it from the pool and erases everything on it/i),
+    ).toBeInTheDocument();
   });
 
   it("shows an existing pool during setup instead of ignoring it", async () => {
