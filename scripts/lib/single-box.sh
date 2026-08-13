@@ -528,6 +528,51 @@ provision_single_box_openwrt() {
 }
 
 # ============================================================================
+# WARP-1947 — the box's home-facing WireGuard endpoint IP
+# ============================================================================
+#
+# Derive the box's default-route egress source IPv4 — the LAN address a
+# same-network client dials the overlay WireGuard endpoint at. This is the
+# value `WIREGUARD_HOME_ENDPOINT_HOST` pins so the issued overlay profile
+# carries a REACHABLE `lan` candidate.
+#
+# Why derive it here rather than leave the env empty and let the orchestrator
+# discover it at request time (the vpn-home-endpoint.ts design):
+#   - On the single-box shape the host owns the uplink, so the routing summary
+#     has NO WAN address — tier 1 of the request-time precedence yields nothing.
+#   - The env fallback (tier 2) is consulted BEFORE the device-bridge
+#     /host/uplink-ip probe (tier 3), so a STALE pin silently shadows discovery
+#     (this box shipped 192.168.1.87, a dead former IP, and every issued profile
+#     pointed its only endpoint at a corpse — no_usable_endpoint).
+#   - /host/uplink-ip returns null on this shape today, and the orchestrator
+#     often has no BRIDGE_AUTH_TOKEN, so leaving the env empty yields NO lan
+#     candidate at all.
+# The module doc explicitly allows an operator to pin the host's DHCP IP here;
+# doing it at provision time (re-derived on every setup run, overwriting any
+# stale value) keeps it correct across DHCP changes and a factory reset.
+#
+# `ip route get 1.1.1.1` reports the source address the kernel would use for
+# off-box traffic — the box's real uplink IP. Parsed with awk (portable; no
+# grep -P dependency). Prints the IP on success, exit 1 when there is no usable
+# address so the caller can leave any existing value alone rather than blank it.
+derive_single_box_home_endpoint() {
+  local line ip
+  line="$(ip route get 1.1.1.1 2>/dev/null)" || return 1
+  ip="$(printf '%s\n' "$line" \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+  case "$ip" in
+    # Mirror vpn-home-endpoint.ts isUsableHostIp(): reject placeholders/self.
+    '' | 0.0.0.0 | 127.* | 169.254.*) return 1 ;;
+  esac
+  # A crude IPv4 shape guard — never emit anything that isn't dotted-quad, so a
+  # surprising `ip` output can't land junk in a minted conf.
+  case "$ip" in
+    *[!0-9.]*) return 1 ;;
+  esac
+  printf '%s' "$ip"
+}
+
+# ============================================================================
 # .env knobs
 # ============================================================================
 #
@@ -843,6 +888,14 @@ configure_single_box_env() {
 #                        LAN defaults (192.168.50.x in
 #                        apps/orchestrator/src/config.ts) so a remote VPN client
 #                        can reach the dashboard + resolve *.lan (WARP-839).
+#   WIREGUARD_HOME_ENDPOINT_HOST DERIVED (WARP-1947) — the box's default-route
+#                        egress IPv4, the LAN address a same-network overlay
+#                        client dials the WireGuard endpoint at. Request-time
+#                        discovery can't find it on this shape (host owns WAN,
+#                        /host/uplink-ip null), and a stale pin shadows it (this
+#                        box shipped a dead 192.168.1.87), so it is derived +
+#                        pinned here, overwriting any stale value on every run.
+#                        Skipped (prior value left) when there's no default route.
 #   OLLAMA_URL           compose-internal `ollama` service
 #   RAGAS_OLLAMA_URL     rag-eval judge → the same in-network ollama (/v1);
 #                        the compose host.docker.internal default is
@@ -953,6 +1006,22 @@ EOF
   # on the single-box path.
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
+  # WARP-1947: pin the box's home-facing endpoint IP so a same-network client's
+  # overlay profile carries a REACHABLE `lan` candidate. See the
+  # derive_single_box_home_endpoint() banner above for the full why — in short,
+  # request-time discovery cannot find it on this shape, and a stale hardcode
+  # (this box shipped a dead 192.168.1.87) is worse than none. Derived + upserted
+  # here, so it re-derives on every provision and survives a factory reset. If the
+  # box has no default route yet (headless first boot), leave any prior value
+  # rather than blanking an operator pin — the client just falls back to whatever
+  # runtime discovery can find, and the next setup run fixes it.
+  local _home_endpoint
+  if _home_endpoint="$(derive_single_box_home_endpoint)"; then
+    upsert_env WIREGUARD_HOME_ENDPOINT_HOST "$_home_endpoint"
+    log_info "WIREGUARD_HOME_ENDPOINT_HOST derived from default route: $_home_endpoint"
+  else
+    log_warn "could not derive the box egress IP (no default route?) — leaving WIREGUARD_HOME_ENDPOINT_HOST unchanged; the overlay home candidate may be unavailable until the next setup run"
+  fi
   # WARP-1772: the inference runtime is a durable, operator-set property, and
   # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a
   # DMR-flipped box silently pointed chat, the RAGAS judge, and the model id
