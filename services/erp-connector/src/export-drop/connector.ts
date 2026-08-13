@@ -163,6 +163,9 @@ export interface DatasetStatus {
   ageMinutes: number;
   rowCount: number;
   unplacedRows: number;
+  /** Rows skipped because they carried more fields than the header declares —
+   *  an unquoted delimiter in a value, which shifts every later column. */
+  malformedRows: number;
 }
 
 /** The connector's own status view — richer than `health()`'s `{ok}`. */
@@ -363,6 +366,7 @@ export class ExportDropConnector implements Connector {
       ageMinutes: Math.max(0, Math.round((now - ds.generatedAt) / 60_000)),
       rowCount: ds.rows.length,
       unplacedRows: ds.unplacedRows,
+      malformedRows: ds.malformedRows,
     }));
     const newest = datasets.reduce(
       (min, d) => Math.min(min, d.ageMinutes),
