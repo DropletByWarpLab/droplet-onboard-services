@@ -1160,6 +1160,64 @@ EOF
   upsert_env ROUTING_SERVICE_URL "http://${bridge_gw}:8080"
   upsert_env SWITCH_SERVICE_URL  "http://${bridge_gw}:8081"
   upsert_env DISPLAY_SERVICE_URL "http://${bridge_gw}:8082"
+  # WARP-1981: a framebuffer rack panel must survive a factory reset.
+  #
+  # display.py keeps "fb" EXPLICIT-ONLY on purpose: the 5 s promotion loop
+  # re-probes USB every tick, so an auto-selected fb backend would silently
+  # lose the panel to a PyPortal plugged in later. That intent is right at
+  # RUNTIME — but nothing ever made the value explicit at PROVISION time. No
+  # script writes DISPLAY_BACKEND (`git grep DISPLAY_BACKEND -- scripts/` was
+  # empty), .env.example ships `auto`, and factory-reset.sh deletes .env.
+  #
+  # So a rack-panel box came back from a wipe on the `sim` backend, which
+  # renders to a PNG inside the container. The setup wizard's claim code lives
+  # on that panel and ClaimStep is NOT skippable — the install stops dead at
+  # step two with a working box nobody can claim.
+  #
+  # Detect the panel and write the explicit value setup should always have
+  # left behind. Gated on a framebuffer existing AND no PyPortal on USB, so a
+  # real PyPortal box still auto-probes exactly as before.
+  # Test/dev hooks (so the detection is unit-testable without a real panel):
+  #   DROPLET_FB_DEV   override the framebuffer device probed  (default /dev/fb0)
+  #   DROPLET_FB_SIZE  override the virtual_size sysfs file
+  #   DROPLET_USB_TTY  override the PyPortal USB glob prefix
+  local _fb_dev _fb_sizefile _usb_glob
+  _fb_dev="${DROPLET_FB_DEV:-/dev/fb0}"
+  _fb_sizefile="${DROPLET_FB_SIZE:-/sys/class/graphics/fb0/virtual_size}"
+  _usb_glob="${DROPLET_USB_TTY:-/dev/tty}"
+  local _current_display_backend
+  _current_display_backend="$( { grep -E '^DISPLAY_BACKEND=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
+  # Probe each glob separately. `ls a* b*` exits non-zero when EITHER pattern
+  # is unmatched, so a single `! ls` reports "no PyPortal" on a box that has
+  # /dev/ttyACM1 but no /dev/ttyUSB* — failing OPEN into fb and stealing the
+  # panel from a real USB display. Unmatched globs stay literal and
+  # `[ -e <literal> ]` is false, so this needs no nullglob.
+  local _usb_present=0 _tty
+  for _tty in "${_usb_glob}"ACM* "${_usb_glob}"USB*; do
+    if [ -e "$_tty" ]; then _usb_present=1; break; fi
+  done
+  if [ -n "$_current_display_backend" ] && [ "$_current_display_backend" != "auto" ]; then
+    log_info "single-box env: DISPLAY_BACKEND=$_current_display_backend already set — leaving the operator's choice alone"
+  elif [ -e "$_fb_dev" ] && [ "$_usb_present" = 0 ]; then
+    upsert_env DISPLAY_BACKEND fb
+    upsert_env FB_DEVICE       "$_fb_dev"
+    # virtual_size is "<width>,<height>" (e.g. `1424,280`). Never trust it
+    # blind: a bad parse here writes a garbage geometry that the panel then
+    # renders at, which reads as "the screen is broken" rather than as a
+    # config error.
+    local _fb_size _fb_w _fb_h
+    _fb_size="$(cat "$_fb_sizefile" 2>/dev/null || true)"
+    _fb_w="${_fb_size%%,*}"
+    _fb_h="${_fb_size##*,}"
+    case "${_fb_w}|${_fb_h}" in
+      *[!0-9]*\|*|*\|*[!0-9]*|\|*|*\|)
+        log_warn "single-box env: /dev/fb0 present but virtual_size was unreadable ('${_fb_size}') — DISPLAY_BACKEND=fb written WITHOUT dimensions. Set LCD_WIDTH/LCD_HEIGHT by hand or the claim screen may render at the wrong geometry." ;;
+      *)
+        upsert_env LCD_WIDTH  "$_fb_w"
+        upsert_env LCD_HEIGHT "$_fb_h"
+        log_info "single-box env: framebuffer rack panel detected — DISPLAY_BACKEND=fb, ${_fb_w}x${_fb_h} (from /sys/class/graphics/fb0/virtual_size)" ;;
+    esac
+  fi
   # WARP-850: matter-controller is the 4th host-net service on the ladder
   # (:8083) — same WARP-806 reasoning as the three above.
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
