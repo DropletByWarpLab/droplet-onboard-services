@@ -55,6 +55,61 @@ describe("Toast action (WARP-1912)", () => {
     expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
   });
 
+  it("rebinds the action to the newest call when an identical actioned toast fires again", () => {
+    // WARP-1912 review finding — the WARP-1306 dedupe used to DROP the second
+    // actioned twin, leaving the surviving Undo bound to the FIRST batch's
+    // paths. Two same-count uploads inside one toast lifetime then made Undo
+    // delete the wrong files. The twin must be REPLACED so Undo always
+    // targets the latest batch.
+    const firstBatch = vi.fn();
+    const secondBatch = vi.fn();
+    function TwoBatches() {
+      const { toast } = useToast();
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              toast("Uploaded 1 file.", "success", {
+                label: "Undo",
+                onClick: firstBatch,
+              })
+            }
+          >
+            fire-first
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              toast("Uploaded 1 file.", "success", {
+                label: "Undo",
+                onClick: secondBatch,
+              })
+            }
+          >
+            fire-second
+          </button>
+        </>
+      );
+    }
+    render(
+      <ToastProvider>
+        <TwoBatches />
+      </ToastProvider>,
+    );
+
+    fireEvent.click(screen.getByText("fire-first"));
+    fireEvent.click(screen.getByText("fire-second"));
+
+    // Dedupe posture holds — still exactly one toast on screen…
+    expect(screen.getAllByText("Uploaded 1 file.")).toHaveLength(1);
+
+    // …but its Undo belongs to the LATEST batch, not the first.
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(secondBatch).toHaveBeenCalledTimes(1);
+    expect(firstBatch).not.toHaveBeenCalled();
+  });
+
   it("renders no action button for plain two-argument toasts", () => {
     function Plain() {
       const { toast } = useToast();

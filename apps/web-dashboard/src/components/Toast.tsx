@@ -68,11 +68,25 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       // Projects New-project dialog against a disabled module) used to pile up
       // duplicates of the same message. An identical (message, type) already on
       // screen means the user is already told; adding a copy is pure noise.
-      setToasts((prev) =>
-        prev.some((t) => t.message === message && t.type === type)
-          ? prev
-          : [...prev, { id, message, type, action }],
-      );
+      //
+      // WARP-1912 — but when an action is in play (either side), REPLACE the
+      // twin instead of dropping the new call. Dropping kept the OLD toast's
+      // Undo bound to the OLD batch's paths, so two same-count uploads inside
+      // one toast lifetime made Undo delete the wrong files. The fresh id
+      // remounts ToastItem (keyed by id), restarting the 5s timer and
+      // rebinding Undo to the newest batch; the older batch merely loses its
+      // courtesy affordance, which is safe.
+      setToasts((prev) => {
+        const twin = prev.find(
+          (t) => t.message === message && t.type === type,
+        );
+        if (!twin) return [...prev, { id, message, type, action }];
+        // WARP-1306 posture unchanged for plain toasts.
+        if (!action && !twin.action) return prev;
+        return prev.map((t) =>
+          t === twin ? { id, message, type, action } : t,
+        );
+      });
     },
     [],
   );
