@@ -4,3 +4,7 @@
 # --only-binary=:all: into services/ai-gateway/.venv per repo test convention).
 pytest==9.1.1
 PyYAML==6.0.3
+
+# WARP-1948 — OSV floor: pytest 9 pulls pygments; the osv-nightly resolver
+# scores it at its minimum resolvable version. State the real minimum.
+pygments>=2.20.0

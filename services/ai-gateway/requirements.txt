@@ -9,7 +9,13 @@ redis>=8.1.0
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
 sentence-transformers>=5.7.0
-torch>=2.13.0 --index-url https://download.pytorch.org/whl/cpu
+# NOTE (WARP-1948): keep this torch line EXACTLY as-is. Appending a version
+# spec ("torch>=X --index-url …") makes osv-scanner treat the whole remainder
+# as the version string and match every torch advisory ever published. The
+# unpinned form resolves to the scanner's 2.9.1 floor; the four advisories
+# that floor trips are triaged in osv-scanner.toml (real installs pull the
+# latest CPU wheel, ≥2.13).
+torch --index-url https://download.pytorch.org/whl/cpu
 # WARP-1948 — OSV floors. The osv-nightly resolver scores unpinned/transitive
 # deps at their MINIMUM resolvable version, so it flags ancient releases no
 # image actually installs. These floors state the already-true minimum instead

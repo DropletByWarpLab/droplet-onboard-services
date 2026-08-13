@@ -183,10 +183,31 @@ reason = "vite: dev-only (vitest 1.6 toolchain), fixed only in 6.x; tracked in W
 id = "GHSA-67mh-4wv8-2f99"
 reason = "esbuild: dev-server CORS issue in vite 5's pinned esbuild; dev server never runs on appliances; fixed only via vite 6 (WARP-1949)"
 
+# ── torch (services/ai-gateway) ────────────────────────────────────────────
+# torch is deliberately unpinned ("torch --index-url …/whl/cpu") so images
+# always install the latest CPU wheel (≥2.13). A version spec CANNOT be added
+# to that line: osv-scanner then treats the rest of the line as the version
+# string and matches every torch advisory ever published (see the NOTE in
+# services/ai-gateway/requirements.txt). The scanner therefore scores torch
+# at its 2.9.1 resolver floor, tripping the three fixed-in-2.10/2.13 ids
+# below even though real installs already exceed them. Re-check under
+# WARP-1949.
+[[IgnoredVulns]]
+id = "PYSEC-2026-2286"
+reason = "torch: resolver-floor artifact (scored 2.9.1, fixed 2.10.0); images install the latest CPU wheel ≥2.13 (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "GHSA-qfhq-4f3w-5fph"
+reason = "torch: resolver-floor artifact (scored 2.9.1, fixed 2.10.0); images install the latest CPU wheel ≥2.13 (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "GHSA-rrmf-rvhw-rf47"
+reason = "torch: resolver-floor artifact (scored 2.9.1, fixed 2.13.0); images install the latest CPU wheel ≥2.13 (WARP-1949)"
+
 # ── no fixed release published ─────────────────────────────────────────────
 [[IgnoredVulns]]
 id = "PYSEC-2026-139"
-reason = "torch: no fixed release published; ai-gateway floors torch>=2.13.0 (latest CPU wheel); re-check under WARP-1949"
+reason = "torch: no fixed release published; images install the latest CPU wheel (≥2.13); re-check under WARP-1949"
 
 [[IgnoredVulns]]
 id = "PYSEC-2026-2447"
