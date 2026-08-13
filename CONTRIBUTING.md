@@ -68,10 +68,12 @@ npm run test
 
 ### Workspace builds come first
 
-These five packages resolve through their built `dist/` (`"types":
-"dist/index.d.ts"`), and `turbo.json`'s `test` task does **not** declare
-`dependsOn: ["^build"]`. Nothing builds them implicitly, so on a fresh checkout
-`tsc` and Vitest fail against packages that are present and healthy in the tree:
+Three of those five resolve through their built `dist/` — `@droplet/tools-core`,
+`@droplet/fips-selftest` and `@droplet/erp-connector` all point `main`, `types`
+and every `exports` condition at `dist/`. `turbo.json`'s `test` task does **not**
+declare `dependsOn: ["^build"]`, so nothing builds them implicitly, and on a
+fresh checkout `tsc` and Vitest fail against packages that are present and
+healthy in the tree:
 
 ```
 src/services/erp.service.ts(40,8): error TS2307:
@@ -85,6 +87,15 @@ is the only one of the five that lives under `services/` rather than
 (`ci.yml`, `orchestrator-tests.yml`, `publish-release.yml`), as does
 `apps/orchestrator/Dockerfile`; a local checkout is the only place you have to
 do it yourself.
+
+The other two — `@droplet/shared-types` and `@droplet/auth-policy` — point
+`main`, `types` and `exports.import` at `./src/index.ts`, so TypeScript and
+Vitest resolve them straight from source and they do **not** need building for
+either. Only their `exports.require` condition points at `dist/`, so a CommonJS
+`require()` of one of them is the single path that does. They stay in the build
+command above because building all five is one line, costs seconds, and removes
+the need to remember which two are the exception — not because a fresh checkout
+fails without them.
 
 ### Optional: pre-commit secret scanning
 
