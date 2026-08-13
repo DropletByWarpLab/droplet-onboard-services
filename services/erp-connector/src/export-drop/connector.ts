@@ -252,18 +252,23 @@ export class ExportDropConnector implements Connector {
 
   /** The current snapshot, rescanning first if it has aged past the floor. */
   private async currentSnapshot(op: string): Promise<Snapshot> {
-    if (!this.snapshot) throw this.blocked(op, "connect required first");
-    if (this.now() - this.snapshot.scannedAt >= this.minRefreshMs) {
+    // Held in a local because `refresh()` clears `this.snapshot` when a rescan
+    // fails. Reading the field again in the catch below would hand back null
+    // typed as a Snapshot — the narrowing above does not survive the call.
+    const held = this.snapshot;
+    if (!held) throw this.blocked(op, "connect required first");
+    if (this.now() - held.scannedAt >= this.minRefreshMs) {
       try {
         return await this.refresh();
       } catch {
         // A failed rescan must not throw away data we already hold — the share
         // blipping should degrade to "serving the last good snapshot", which
         // `status()` reports honestly, not to an empty schedule.
-        return this.snapshot;
+        this.snapshot = held;
+        return held;
       }
     }
-    return this.snapshot;
+    return held;
   }
 
   async connect(): Promise<void> {

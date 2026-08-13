@@ -566,6 +566,31 @@ describe("freshness", () => {
   });
 });
 
+describe("a share that blips mid-session", () => {
+  it("keeps serving the last good snapshot instead of emptying the schedule", async () => {
+    // minRefreshMs 0 forces a rescan on every read, which is the only way to
+    // reach the failed-rescan path. The share going away must degrade to
+    // "serving what we last read", not to a crash and not to zero patients.
+    await drop("patients.csv", PATIENT_CSV);
+    const c = new ExportDropConnector(
+      { vendor: "acme", root },
+      { now: () => NOW, profiles: [ACME], minRefreshMs: 0 },
+    );
+    await c.connect();
+    expect(await c.runRead("get_recall_due", {})).toHaveLength(3);
+
+    await rm(root, { recursive: true, force: true });
+
+    // Still three patients, from the snapshot held in memory.
+    expect(await c.runRead("get_recall_due", {})).toHaveLength(3);
+    // ...and repeatedly, rather than working once and then throwing.
+    expect(await c.runRead("get_recall_due", {})).toHaveLength(3);
+    expect((await c.status()).ok).toBe(true);
+
+    await mkdir(root, { recursive: true }); // afterEach cleanup expects it
+  });
+});
+
 describe("close", () => {
   it("drops the snapshot so a reconnect rescans", async () => {
     await drop("patients.csv", PATIENT_CSV);
