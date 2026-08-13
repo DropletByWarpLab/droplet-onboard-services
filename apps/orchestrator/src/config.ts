@@ -782,6 +782,29 @@ const envSchema = z.object({
   // ignores this entirely.
   ERP_SQL_BRIDGE_URL: z.string().default(""),
 
+  // --- ERP export-drop track (WARP-1964) ---
+  // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports
+  // land in, typically a read-only CIFS mount of a share on the practice LAN.
+  //
+  // This is OPERATOR configuration and never request input, deliberately: a
+  // caller-supplied filesystem path on a connect call would hand anyone who can
+  // edit a connection an arbitrary-file read inside the orchestrator. A
+  // per-practice subdirectory can come off the connection row, and is validated
+  // for containment against this root.
+  //
+  // Empty by default, mirroring ERP_SQL_BRIDGE_URL: with nothing configured the
+  // export-drop connector blocks with its own remediation ("point me at a
+  // folder") rather than reporting a failure about a track the box is not
+  // running.
+  ERP_EXPORT_DROP_ROOT: z.string().default(""),
+
+  // ERP_EXPORT_DROP_PROFILES — path to a JSON file of operator-authored export
+  // profiles (header signature -> canonical columns). This is what lets an
+  // install map a practice-management system we ship no built-in profile for,
+  // or correct a built-in whose columns do not match that site's report layout,
+  // without waiting for a release. See docs/integrations/export-drop.md.
+  ERP_EXPORT_DROP_PROFILES: z.string().default(""),
+
   // --- Ambient web data (WARP-1436) ---
   // WEB_FETCH_URL — compose-internal base URL of the services/web-fetch
   // allowlisted fetcher (weather via api.open-meteo.com, currency rates

@@ -3,7 +3,7 @@
 > **Audience:** anyone building, operating, or reviewing a Droplet integration.
 > **Scope:** the whole integration system — the generic connector framework that applies to **every** integration, with **Eaglesoft** as the first concrete provider.
 >
-> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — operator guide) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference).
+> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — operator guide) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
 
 ---
 
@@ -168,6 +168,7 @@ The framework is built and buildable **without** any live external system. What'
 | Connector foundation (`erp-connector`: interface, registries, schema-map/fingerprint, provisioning SQL, tools) | **Merged** (PR #901). Every live I/O path throws `ConnectorBlockedError` until a driver is wired. |
 | Orchestrator API + service layer (this document's §6) | **Built** (PR #916) — endpoints return honest status/empty; the write outbox works end-to-end with the connector stubbed. |
 | **Live driver** (the provider's real DB connection + introspection + read/write execution) | **Blocked** — needs the provider's client + a data source. For Eaglesoft that's the SAP SQL Anywhere client + a copy of `PattersonPM.db` on an x86_64 host (see [`eaglesoft.md`](eaglesoft.md)). Wiring it live only replaces the connector's stubbed methods. |
+| **Export-drop track** (`<vendor>-export`, WARP-1964) | **Runnable today** — reads the report files a practice exports from its own PMS off a read-only share. Needs no vendor driver and no vendor enrolment, so it is the one track that does not wait on a third party; read-only by construction and vendor-agnostic via declarative profiles. See [`export-drop.md`](export-drop.md). |
 
 **"Blocked" means the seam is stubbed, not missing.** The whole walking skeleton (dashboard ↔ orchestrator ↔ connector) is wired and tested; only the connector's driver methods (`connect`/`introspect`/`runRead`/`applyWrite`) reject with `ConnectorBlockedError` until the provider's driver lands.
 
