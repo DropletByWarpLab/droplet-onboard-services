@@ -11,6 +11,15 @@ interface BreadcrumbNavProps {
    */
   prefixCrumb?: string;
   /**
+   * WARP-1944 — the root crumb's label. It names the ACTIVE SPACE, so a
+   * Workspace/department/team browse never claims "My files": the caller
+   * passes the space's display label (e.g. "Workspace", the team name).
+   * Defaults to "My files" — the personal space and every caller that
+   * predates spaces. Label only: the root crumb always navigates to "/",
+   * the space's own root.
+   */
+  rootLabel?: string;
+  /**
    * WARP-1338 (UX review) — display-name override for a crumb. A volume
    * deep-link lands on /files?path=/<mount-tail>; for a legacy pool the tail
    * is the full fs UUID, and a GUID must never be the primary location label
@@ -24,6 +33,7 @@ export function BreadcrumbNav({
   path,
   onNavigate,
   prefixCrumb,
+  rootLabel = "My files",
   labelForSegment,
 }: BreadcrumbNavProps) {
   const segments = path.split("/").filter(Boolean);
@@ -46,11 +56,11 @@ export function BreadcrumbNav({
       )}
       <button
         onClick={() => onNavigate("/")}
-        aria-label="My files"
+        aria-label={rootLabel}
         className="flex items-center gap-1 type-subheadline text-[color:var(--brand)] hover:text-[color:var(--brand-hover)] transition-colors flex-shrink-0 min-h-[28px]"
       >
         <FolderOpen size={14} aria-hidden="true" />
-        <span>My files</span>
+        <span>{rootLabel}</span>
       </button>
 
       {segments.map((segment, idx) => {
