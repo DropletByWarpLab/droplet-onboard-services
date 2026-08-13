@@ -1,0 +1,12 @@
+# WARP-1964 — default host directory for the ERP export-drop track.
+#
+# docker/docker-compose.yml bind-mounts this read-only into the orchestrator at
+# /data/erp-exports when ERP_EXPORT_DROP_HOST_PATH is not overridden. Kept in
+# the repo so a fresh checkout composes without Docker having to invent the
+# directory as root.
+#
+# On an appliance this is usually NOT where the files live: point
+# ERP_EXPORT_DROP_HOST_PATH at the CIFS mount of the practice's export share
+# instead. Nothing is read from anywhere until ERP_EXPORT_DROP_ROOT is set.
+#
+# Never commit an exported report here — those files are PHI.

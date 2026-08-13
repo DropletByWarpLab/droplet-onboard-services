@@ -137,3 +137,67 @@ export {
   type ResolvedCredentials,
   type ApiTransport,
 } from "./api-auth.js";
+
+// WARP-1964 — vendor-agnostic export-drop track: read the report files a
+// practice exports from its own PMS, off a read-only share on the practice LAN.
+// Same Connector interface, same read registry, same blocked-error contract as
+// the other two tracks; read-only by construction, and the only track that
+// needs neither a licence-gated driver nor vendor enrolment.
+export {
+  ExportDropConnector,
+  EXPORT_DROP_TRACK_REMEDIATION,
+  EXPORT_PROVIDER_SUFFIX,
+  exportProviderFor,
+  exportProviders,
+  vendorFromExportProvider,
+  type ExportDropConfig,
+  type ExportDropDeps,
+  type ExportDropStatus,
+  type DatasetStatus,
+} from "./export-drop/connector.js";
+
+export {
+  BUILT_IN_PROFILES,
+  CANONICAL_COLUMNS,
+  DATASETS,
+  GENERIC_VENDOR,
+  REQUIRED_CANONICAL,
+  assertValidProfile,
+  knownVendors,
+  matchDataset,
+  normalizeHeader,
+  parseProfileJson,
+  profilesForVendor,
+  ProfileError,
+  type DatasetName,
+  type DatasetProfile,
+  type ExportProfile,
+  type MatchResult,
+} from "./export-drop/profiles.js";
+
+export {
+  DEFAULT_SCAN_LIMITS,
+  DropRootError,
+  isInsideRoot,
+  resolveDropDirectory,
+  scanDropDirectory,
+  snapshotTables,
+  type FileDiagnostic,
+  type ScanLimits,
+  type Snapshot,
+  type SnapshotDataset,
+} from "./export-drop/scan.js";
+
+export {
+  decodeExportBytes,
+  parseDelimited,
+  sniffDelimiter,
+  DelimitedLimitError,
+  type DelimitedTable,
+} from "./export-drop/csv.js";
+
+export {
+  normalizeText,
+  parseExportTimestamp,
+  parseMoney,
+} from "./export-drop/values.js";

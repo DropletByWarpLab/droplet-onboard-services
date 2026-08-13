@@ -416,6 +416,20 @@ services:
       # the orchestrator's gRPC client can reach it without exposing a
       # network port. Read-only — the orchestrator never writes.
       - /var/run/droplet:/var/run/droplet:ro
+      # WARP-1964: the ERP export-drop folder — where a practice's own PMS
+      # report exports land, normally a CIFS mount of a share on the practice
+      # LAN. Point ERP_EXPORT_DROP_HOST_PATH at that mount point; the default
+      # is a local directory so a box without one still composes.
+      #
+      # READ-ONLY, and that is the whole security model of this track rather
+      # than a precaution: the connector's applyWrite always refuses, and a
+      # read-only mount means it could not write back even if that changed.
+      # Combined with a share the practice exports into (their account writes,
+      # ours only reads), Droplet physically cannot alter the practice's data.
+      #
+      # Opt-in twice, like the erp-sql-bridge: this mount existing does nothing
+      # until ERP_EXPORT_DROP_ROOT names the container path below.
+      - ${ERP_EXPORT_DROP_HOST_PATH:-../data/erp-exports}:/data/erp-exports:ro
       # ADR-023 (C2): the TLS cert dir, mounted READ-WRITE so the
       # tls-issuance cron can atomically install the freshly-issued LE
       # fullchain (droplet.crt) + private key (droplet.key). The gateway

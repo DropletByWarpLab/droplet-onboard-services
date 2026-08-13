@@ -30,26 +30,66 @@
 import { Agent } from "undici";
 import { config } from "../config.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
+import { readFileSync } from "node:fs";
 import {
   EaglesoftConnector,
   EaglesoftApiConnector,
+  ExportDropConnector,
   DEFAULT_PORT,
   DEFAULT_DATABASE_NAME,
   DEFAULT_API_HTTPS_PORT,
+  exportProviders,
+  parseProfileJson,
+  vendorFromExportProvider,
   type Connector,
   type EaglesoftApiRouteMap,
+  type ExportProfile,
 } from "@droplet/erp-connector";
 
 /** The flagship direct-SQL provider (framework provider #1). */
 export const EAGLESOFT_PROVIDER = "eaglesoft";
 /** The dual-track official-REST-API provider. */
 export const EAGLESOFT_API_PROVIDER = "eaglesoft-api";
-/** Every provider key the control plane knows how to build a connector for. */
+/**
+ * The direct-connection provider keys — the two tracks that reach a practice's
+ * system of record over the network.
+ *
+ * The export-drop track (WARP-1964) is deliberately NOT in this list: its
+ * provider keys are `<vendor>-export` and the set of vendors is open, because
+ * an operator profile can introduce one at runtime. Use
+ * {@link isKnownErpProvider}, which covers both, rather than testing membership
+ * here.
+ */
 export const KNOWN_ERP_PROVIDERS: readonly string[] = [EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER];
 
-/** True for a provider key this factory can build. */
+/**
+ * Operator-authored export profiles, read fresh on every call.
+ *
+ * Deliberately not memoized: an installer correcting a column mapping at a
+ * practice should be able to fix the file and reconnect, not restart the
+ * orchestrator. The file is small and this runs once per connector build.
+ *
+ * A malformed file yields no profiles plus the parser's message, which the
+ * connector reports as its blocked reason — so a JSON typo says "your profile
+ * file has a typo, here it is" instead of the misleading "no profile is
+ * registered for this vendor".
+ */
+export function loadOperatorExportProfiles(): { profiles: ExportProfile[]; error: string | null } {
+  const path = config.ERP_EXPORT_DROP_PROFILES;
+  if (!path) return { profiles: [], error: null };
+  try {
+    return { profiles: parseProfileJson(readFileSync(path, "utf8")), error: null };
+  } catch (err) {
+    return { profiles: [], error: `ERP_EXPORT_DROP_PROFILES: ${(err as Error).message}` };
+  }
+}
+
+/** True for a provider key this factory can build — either direct-connection
+ *  track, or an export-drop key for a vendor we have a profile for. */
 export function isKnownErpProvider(provider: string): boolean {
-  return KNOWN_ERP_PROVIDERS.includes(provider);
+  if (KNOWN_ERP_PROVIDERS.includes(provider)) return true;
+  if (!vendorFromExportProvider(provider)) return false;
+  return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }
 
 /** The connection facts both call sites share (a ConnectInput or a ConnRow).
@@ -178,6 +218,30 @@ export function dispatcherForCa(caPem: string | undefined): unknown {
  *  SQL connector (the framework default) so a stray value can never route to a
  *  surprise transport. */
 export function connectorForProvider(sel: ConnectorSelector): Connector {
+  // WARP-1964 — the export-drop track. Matched on the `-export` suffix rather
+  // than an enumerated list because the vendor set is open: an operator profile
+  // can add one without a release.
+  const exportVendor = vendorFromExportProvider(sel.provider);
+  if (exportVendor) {
+    const { profiles, error } = loadOperatorExportProfiles();
+    return new ExportDropConnector(
+      {
+        vendor: exportVendor,
+        // Operator configuration only. `sel.host` is ignored on this track:
+        // the share is mounted by the host, so the practice's file server is
+        // named in the mount, not in a connection row we would then have to
+        // trust with a path.
+        root: config.ERP_EXPORT_DROP_ROOT,
+        // `subdirectory` is intentionally left unset. The connector supports it
+        // (with containment validation) for a future per-practice layout, but
+        // no connection column means "which folder" today, and borrowing
+        // `databaseName` would collide with its "PattersonPM" default and send
+        // every export connection looking for a folder that does not exist.
+      },
+      { profiles, configError: error ?? undefined },
+    );
+  }
+
   if (sel.provider === EAGLESOFT_API_PROVIDER) {
     const credentials = sel.apiCredentials;
     return new EaglesoftApiConnector(
