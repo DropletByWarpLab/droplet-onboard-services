@@ -47,6 +47,7 @@ import { AccessChip, GuardNote } from "./bits";
 // WARP-1533: the option-building logic is shared with the invite modal's
 // role picker (design §7 — "identical control, no new pattern").
 import { RoleSelectOptions } from "./role-options";
+import { CameraAccessSection } from "./CameraAccessSection";
 import "./access.css";
 
 export type PersonAccessValue = `role:${string}` | `tier:${string}`;
@@ -280,6 +281,15 @@ export function PersonAccessSection({
         </div>
       </div>
 
+      {/* ── WARP-1976: which cameras can they see? ──
+          Mounted here, in the person panel, because access is managed where
+          PEOPLE are managed. Owners/admins render as unrestricted rather
+          than getting a checklist that would do nothing. */}
+      <CameraAccessSection
+        userId={person.userId}
+        tier={person.role}
+        displayName={person.displayName || person.id}
+      />
     </div>
   );
 }
