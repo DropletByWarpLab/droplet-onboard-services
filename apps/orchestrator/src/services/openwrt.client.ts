@@ -14,6 +14,7 @@ import {
   routerErrorFromResponse,
   routerErrorFromThrown,
 } from "../types/router-error.js";
+import type { PortWriteGuardDetail } from "../types/router-error.js";
 import type {
   NetworkSummary,
   NetworkInterfaces,
@@ -163,6 +164,19 @@ type RoutingFetchInit = Omit<RequestInit, "headers"> & {
    * it has confirmed genuine OpenWrt connectivity.
    */
   skipContactMark?: boolean;
+  /**
+   * WARP-1907 — statuses whose BODY is the answer, not a failure to classify.
+   * `routingFetch` returns the Response for these instead of throwing, so the
+   * caller can read the typed refusal the routing service put in it and mint a
+   * precise `RouterError`.
+   *
+   * Needed because `routerErrorFromResponse` classifies by status ALONE, and
+   * that is deliberate — the WARP-1673 502 rule and the WARP-816 409 rule both
+   * depend on it. A route whose refusals collide with those statuses cannot be
+   * served by widening the classifier without breaking them; it has to read its
+   * own body. Opt-in, so no existing caller changes behaviour.
+   */
+  passthroughStatuses?: number[];
 };
 
 export type RetryPolicy = {
@@ -205,10 +219,17 @@ async function singleAttempt(
   url: string,
   init: RequestInit,
   label: string,
+  passthroughStatuses: number[] = [],
 ): Promise<AttemptOutcome> {
   try {
     const res = await internalFetch(url, init);
     if (res.ok) {
+      return { kind: "success", res };
+    }
+    // WARP-1907: the caller declared this status carries a body it will read
+    // itself. Hand the Response back unconsumed — no retry (it is a terminal
+    // answer, not a transient fault) and no classification.
+    if (passthroughStatuses.includes(res.status)) {
       return { kind: "success", res };
     }
     const err = routerErrorFromResponse(res, label);
@@ -237,7 +258,14 @@ async function singleAttempt(
  * Exported so tests and WARP-39 (typed RouterError) can compose on top.
  */
 export async function routingFetch(path: string, init: RoutingFetchInit = {}): Promise<Response> {
-  const { headers = {}, label, retry = {}, skipContactMark = false, ...rest } = init;
+  const {
+    headers = {},
+    label,
+    retry = {},
+    skipContactMark = false,
+    passthroughStatuses,
+    ...rest
+  } = init;
   const policy: RetryPolicy = { ...DEFAULT_RETRY, ...retry };
   const sleep = policy.sleep ?? defaultSleep;
   const random = policy.random ?? Math.random;
@@ -261,12 +289,19 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   const fetchInit: RequestInit = { ...rest, headers: merged };
 
   for (let attempt = 1; attempt <= policy.attempts; attempt++) {
-    const outcome = await singleAttempt(url, fetchInit, displayLabel);
+    const outcome = await singleAttempt(url, fetchInit, displayLabel, passthroughStatuses);
     if (outcome.kind === "success") {
       // First confirmed contact this process lifetime — flips the cold-start
       // grace off so subsequent UNREACHABLE errors escalate to `warn`.
       // Skipped for callers that need to verify the payload before confirming
       // reachability (e.g. /health, which returns 200 while OpenWrt provisions).
+      //
+      // WARP-1907, deliberate and worth knowing: a `passthroughStatuses`
+      // 4xx/5xx now reaches this line, where before this ticket every 4xx
+      // aborted above it. That is the correct reading rather than an accident —
+      // the routing service answered, with a considered refusal, which is at
+      // least as good evidence of reachability as a 200. Only the one opt-in
+      // caller can get here.
       if (!skipContactMark) {
         routerContacted = true;
       }
@@ -306,7 +341,22 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   });
 }
 
-async function routingFetchJson<T>(path: string, init?: RoutingFetchInit): Promise<T> {
+/**
+ * `routingFetch` + `res.json() as T`.
+ *
+ * WARP-1907: `passthroughStatuses` is excluded at the TYPE level, not left to
+ * convention. This helper ASSERTS the body is a `T`, and a passthrough status
+ * hands back an unthrown 4xx/5xx whose body is a refusal — so combining the two
+ * would type an error payload as the success shape and pass it to a caller with
+ * no reason to suspect it. Nothing does that today; this makes it a compile
+ * error if anyone tries, because the failure is silent at runtime. A caller that
+ * needs to read its own refusals uses `routingFetch` directly and narrows the
+ * body itself, as `setRouterPortEnabled` does.
+ */
+async function routingFetchJson<T>(
+  path: string,
+  init?: Omit<RoutingFetchInit, "passthroughStatuses">,
+): Promise<T> {
   const res = await routingFetch(path, init);
   return res.json() as Promise<T>;
 }
@@ -353,11 +403,90 @@ export async function fetchAllInterfaces(): Promise<NetworkInterfaceRow[]> {
 
 /**
  * The router's PHYSICAL port map (WARP-1866) — the jacks, not the interfaces.
- * Read-only; there is no write counterpart by design (disabling a router jack
- * from the dashboard would sever the WAN or the switch trunk).
+ *
+ * Every port carries `disable_guard` (WARP-1907): the extra acknowledgement
+ * turning that jack off requires, or null. See `types/network.ts`.
  */
 export async function fetchRouterPorts(): Promise<RouterPortMap> {
   return routingFetchJson<RouterPortMap>("/network/ports", { label: "Router ports" });
+}
+
+/** WARP-1907 — the routing service's typed refusals for a jack write. Their
+ *  bodies are read here rather than classified by status (see below). */
+const PORT_WRITE_REFUSAL_STATUSES = [404, 409, 422, 502];
+
+/** Narrow the routing service's guard body without trusting it into the union. */
+function asGuardDetail(value: unknown): PortWriteGuardDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { code?: unknown; reason?: unknown };
+  if (v.code !== "WAN_PORT" && v.code !== "MANAGEMENT_PORT") return null;
+  if (typeof v.reason !== "string" || !v.reason) return null;
+  return { code: v.code, reason: v.reason };
+}
+
+/**
+ * WARP-1907 — administratively bring a physical jack up or down.
+ *
+ * `force` is the caller's acknowledgement of the routing service's own guard,
+ * which refuses a DISABLE of the WAN jack or of a live management jack with 409
+ * without it. We do not pre-empt that refusal here: the routing service owns the
+ * management-interface set, and a second copy of the rule in TypeScript is a
+ * copy that drifts. The dashboard decides whether to ASK for the extra confirm
+ * from `disable_guard` on the read — the same function, on the same data.
+ *
+ * 🔴 This is the one routing call that reads its OWN error bodies, and it has to
+ * be. `routerErrorFromResponse` classifies by status alone — deliberately, and
+ * two live invariants depend on it: WARP-1673 reserves 502 for "the router
+ * rejected the routing service's rpcd credentials", and WARP-816 reserves 409
+ * for SCAN_UNSUPPORTED. Three of this route's four refusals collide with those,
+ * so routing them through the shared classifier would report a port that didn't
+ * move as an authentication failure, and drop every guard sentence on the
+ * floor. `fetchWirelessScan` above set the precedent for a call minting its own
+ * typed error; this one needs the body as well as the status, hence
+ * `passthroughStatuses`.
+ */
+export async function setRouterPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<WriteResult> {
+  const label = `Router port ${enabled ? "enable" : "disable"} ${port}`;
+  const res = await routingFetch(`/network/ports/${encodeURIComponent(port)}/enable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled, force }),
+    label,
+    passthroughStatuses: PORT_WRITE_REFUSAL_STATUSES,
+  });
+  if (res.ok) return opFrom(res);
+
+  // A refusal we asked to see. Its body is the answer; a body we can't parse is
+  // not a reason to invent one, so those fall through to the shared classifier.
+  const body = (await res.json().catch(() => null)) as {
+    error?: unknown;
+    reason?: unknown;
+    code?: unknown;
+  } | null;
+  const message = typeof body?.error === "string" ? body.error : "";
+
+  if (res.status === 409) {
+    // `reason` is the WHY on its own; `error` carries it plus "confirm again",
+    // which the dashboard renders in a banner where nothing has been confirmed
+    // yet. Prefer the split field, fall back for an older routing build.
+    const reason = typeof body?.reason === "string" ? body.reason : message;
+    const guard = asGuardDetail({ code: body?.code, reason });
+    if (guard) throw RouterError.portWriteRefused(guard, { label });
+  }
+  if (res.status === 502 && body?.code === "PORT_WRITE_NOT_APPLIED") {
+    throw RouterError.portWriteNotApplied(message || undefined, { label });
+  }
+  if (res.status === 404 && body?.code === "PORT_NOT_FOUND" && message) {
+    throw RouterError.portWriteRejected("PORT_NOT_FOUND", message, { label });
+  }
+  if (res.status === 422 && body?.code === "PORT_MAP_UNSUPPORTED" && message) {
+    throw RouterError.portWriteRejected("PORT_MAP_UNSUPPORTED", message, { label });
+  }
+  throw routerErrorFromResponse(res, label);
 }
 
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {

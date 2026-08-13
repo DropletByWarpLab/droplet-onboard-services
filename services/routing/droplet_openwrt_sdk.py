@@ -38,6 +38,16 @@ from typing import Any, Optional
 from urllib.request import Request, urlopen
 
 from request_context import get_request_id
+# WARP-1907: `config device` section resolution for the jack enable/disable
+# write. These are pure functions over a `uci get network` payload, which is
+# `router_ports`' charter — and it imports nothing from here, so there is no
+# cycle. Keeping them there means the read side and the write side agree on
+# what "the section that configures this netdev" means, by construction.
+from router_ports import (
+    device_section_enabled,
+    device_section_name,
+    new_device_section_name,
+)
 
 logger = logging.getLogger("droplet.openwrt")
 
@@ -195,6 +205,25 @@ class UbusError(Exception):
 class ConnectionLost(Exception):
     """Raised when the appliance can no longer reach the OpenWrt device."""
     pass
+
+
+class DeviceWriteNotApplied(Exception):
+    """Raised when a device write returned cleanly but changed nothing (WARP-1907).
+
+    Every uci call in the sequence can succeed while the router still ends up
+    exactly as it started — a section written under the wrong name, an ACL that
+    silently drops the option, a rollback that beat the confirm. That failure
+    mode reports as a 200 and is the worst outcome this feature has: the
+    operator is told a jack is off, walks away, and it is still passing traffic.
+
+    So :meth:`NetworkApi.set_device_enabled` reads uci back from disk after the
+    apply and raises this when the value it asked for is not there. The route
+    turns it into a 502 with `code: PORT_WRITE_NOT_APPLIED` — an honest "we
+    couldn't make that stick", never a success.
+    """
+
+    #: Stable, wire-facing classification.
+    code = "PORT_WRITE_NOT_APPLIED"
 
 
 class LoginDenied(ConnectionLost):
@@ -844,6 +873,66 @@ class NetworkApi:
         with self._r.safe_apply(timeout=60):
             self._r.uci.set("network", name, values)
             self._r.uci.commit("network")
+
+    def set_device_enabled(self, device: str, enabled: bool) -> dict:
+        """Administratively bring a physical jack up or down (WARP-1907).
+
+        netifd has no "shut this jack" ubus call. The mechanism is a uci
+        ``config device`` section carrying ``option enabled '0'``, keyed by
+        ``option name '<netdev>'`` — verified against netifd's source at the
+        revision the shipped router runs (see ``router_ports`` module docstring
+        for the citation and the code path from the option to the link going
+        down).
+
+        Two things make this more than a one-line ``uci.set``:
+
+        1. **Most jacks have no section at all.** On the live RB5009 only
+           ``br_lan``, ``guest_dev`` and ``wan_dev`` exist; p2–p8 are realised
+           from bridge membership. When there is no section we ADD one, named by
+           :func:`new_device_section_name` and carrying ``option name`` so netifd
+           knows which jack it is about. When there IS one we edit it in place —
+           adding a second ``config device`` for the same jack leaves two
+           sections fighting over it.
+        2. **A clean return is not evidence of a change.** After the apply we
+           read uci back off the disk and raise :class:`DeviceWriteNotApplied` if
+           the value we asked for is not there. This is a uci read, not a netifd
+           runtime read, so it is deterministic: it proves the CONFIG landed
+           without racing netifd's teardown of the link.
+
+        Wrapped in ``safe_apply(timeout=60)`` like every other write here, so a
+        change that severs the routing service's own path to the router
+        auto-reverts. 🔴 That arm does NOT cover the WAN jack — the router stays
+        reachable on the LAN, so the probe succeeds and the change is confirmed.
+        The caller is responsible for the blast-radius guard
+        (``router_ports.disable_guard``); this method applies what it is told.
+        """
+        section = device_section_name(self._r.uci.get("network"), device)
+        created = section is None
+        if created:
+            section = new_device_section_name(device, self._r.uci.get("network"))
+        value = "1" if enabled else "0"
+
+        with self._r.safe_apply(timeout=60):
+            if created:
+                self._r.uci.add(
+                    "network", "device", {"name": device, "enabled": value}, name=section,
+                )
+            else:
+                self._r.uci.set("network", section, {"enabled": value})
+            self._r.uci.commit("network")
+
+        applied = device_section_enabled(self._r.uci.get("network"), device)
+        if applied != enabled:
+            raise DeviceWriteNotApplied(
+                f"uci still reports {device} as "
+                f"{'enabled' if applied else 'disabled'} after the apply"
+            )
+        return {
+            "device": device,
+            "section": section,
+            "enabled": enabled,
+            "created_section": created,
+        }
 
     def edit_interface(
         self,

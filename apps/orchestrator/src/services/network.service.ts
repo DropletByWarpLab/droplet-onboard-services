@@ -263,6 +263,24 @@ export async function getRouterPorts(): Promise<openwrt.RouterPortMap> {
   return map;
 }
 
+/**
+ * WARP-1907 — enable/disable a physical router jack.
+ *
+ * Invalidates the whole network cache, not just the port key: a jack going down
+ * changes the interface table (its network loses a member) and the connected-
+ * device list right along with the port map, and leaving those warm would show
+ * the user a port that just went dark still carrying devices.
+ */
+export async function setRouterPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setRouterPortEnabled(port, enabled, force);
+  await invalidateNetworkCache();
+  return result;
+}
+
 // --- Interface write path (KAN-10) ---
 // Thin pass-throughs to the routing service, which wraps each write in
 // safe_apply (60s auto-rollback) and refuses a management-interface write

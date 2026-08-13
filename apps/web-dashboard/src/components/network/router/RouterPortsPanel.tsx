@@ -1,11 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { Router, WifiOff } from "lucide-react";
+import { Router, ShieldCheck, WifiOff } from "lucide-react";
 import { useRouterPorts } from "@/lib/hooks/useRouterPorts";
+import { useAuth } from "@/lib/auth";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
+import { RouterPortRefusedError } from "@/lib/api";
+import type { RouterPort } from "@/lib/types/router-ports";
 import { RouterFaceplate } from "./RouterFaceplate";
 import { RouterPortTable } from "./RouterPortTable";
-import { linkSummary } from "./helpers";
+import { RouterPortDrawer } from "./RouterPortDrawer";
+import { linkSummary, type RouterAction } from "./helpers";
 
 type Layout = "face" | "table";
 
@@ -21,13 +28,16 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * RouterPortsPanel — the router's physical port map (WARP-1866).
+ * RouterPortsPanel — the router's physical port map (WARP-1866) and, since
+ * WARP-1907, its write.
  *
- * The switch has had one since WARP-1674; the router only ever showed its
+ * The switch has had both since WARP-1674; the router only ever showed its
  * logical interfaces, so nothing in the product answered "which jacks are
- * live". Read-only by design: there is no write path to a router jack (see the
- * route comment in apps/orchestrator/src/routes/network-status.routes.ts), so
- * unlike SwitchPanel this panel has no RBAC gate, no drawer and no confirm.
+ * live", and then nothing let you do anything about it. This panel now mirrors
+ * SwitchPanel object for object — RBAC gate, drawer, ConfirmDialog with the
+ * blast copy — because the two port maps sit one above the other on /network
+ * and a router jack that behaved differently from a switch port would read as
+ * a different kind of thing.
  *
  * Four render paths, and the distinction between the last two is the point:
  *   - loading      → skeleton
@@ -38,10 +48,23 @@ function Shell({ children }: { children: React.ReactNode }) {
  * An empty faceplate is never rendered for either of the middle two. Drawing
  * every jack dark would state, with the full confidence of the hardware view,
  * that the router has no cables in it.
+ *
+ * The confirm escalates rather than branching: EVERY write takes the ordinary
+ * blast-radius confirm, and a jack the server guarded takes a second,
+ * destructive one on top. Only that second acknowledgement sends `force: true`
+ * — the flag the routing service demands before it will cut the WAN or a live
+ * management jack. Same shape as `../InterfaceWriteControls`, and for the same
+ * reason: the extra confirm IS the acknowledgement, not a decoration on it.
  */
 export function RouterPortsPanel() {
-  const { map, isLoading, error } = useRouterPorts();
+  const { map, isLoading, error, setPortEnabled } = useRouterPorts();
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const canWrite = user?.role === "owner" || user?.role === "admin";
   const [layout, setLayout] = useState<Layout>("face");
+  const [picked, setPicked] = useState<RouterPort | null>(null);
+  const [action, setAction] = useState<RouterAction | null>(null);
+  const [escalated, setEscalated] = useState<RouterAction | null>(null);
 
   if (isLoading && !map) {
     return (
@@ -77,6 +100,34 @@ export function RouterPortsPanel() {
   }
 
   const ports = map.ports;
+
+  /**
+   * Run the confirmed write. `force` is passed, never inferred: it is the
+   * user's second acknowledgement, and a default would silently clear the
+   * routing service's WAN guard for every write that reached here.
+   *
+   * A `RouterPortRefusedError` is not a failure to report — it is the server
+   * telling us this jack needed the escalation after all. That happens for real:
+   * `disable_guard` is read on a 10s poll, so a jack that was empty when the map
+   * last loaded can have a cable in it by the time someone clicks. Raise the
+   * same second confirm the drawer would have raised, from the server's own
+   * words, instead of toasting "409" at someone who can then never succeed.
+   */
+  async function applyAction(a: RouterAction, force: boolean) {
+    try {
+      await setPortEnabled(a.port.id, a.enabled, force);
+    } catch (err) {
+      if (err instanceof RouterPortRefusedError && !force) {
+        setEscalated({ ...a, guard: err.guard });
+        return;
+      }
+      // Toast AND re-throw: ConfirmDialog's contract is to stay open on a
+      // rejected confirm so the operator can retry, and a write that fails
+      // silently is how someone walks away believing a jack is off.
+      toast(translateError(err, "network"), "error");
+      throw err;
+    }
+  }
 
   return (
     <Shell>
@@ -117,16 +168,89 @@ export function RouterPortsPanel() {
         {layout === "face" ? (
           <>
             <div className="hidden md:block">
-              <RouterFaceplate ports={ports} />
+              <RouterFaceplate ports={ports} onPick={setPicked} />
             </div>
             <div className="md:hidden">
-              <RouterPortTable ports={ports} />
+              <RouterPortTable ports={ports} onPick={setPicked} />
             </div>
           </>
         ) : (
-          <RouterPortTable ports={ports} />
+          <RouterPortTable ports={ports} onPick={setPicked} />
         )}
       </div>
+
+      {/* Port drawer — opens for everyone; the ACTIONS inside are RBAC-gated. */}
+      {picked && (
+        <RouterPortDrawer
+          port={picked}
+          canWrite={canWrite}
+          onClose={() => setPicked(null)}
+          onAction={(a) => {
+            setPicked(null);
+            setAction(a);
+          }}
+        />
+      )}
+
+      {/* Step 1 — the ordinary Tier-2 blast-radius confirm, identical in shape
+          to SwitchPanel's. */}
+      {action && (
+        <ConfirmDialog
+          open
+          title={action.what}
+          description={action.blast}
+          // On a guarded jack this button opens the second acknowledgement
+          // rather than applying anything, so it must not promise to apply.
+          confirmLabel={action.guard ? "Continue" : "Confirm & apply"}
+          variant="neutral"
+          accessory={
+            <div className="flex items-center gap-2.5">
+              <span className="inline-flex items-center gap-1 type-caption-2 font-semibold text-system-orange bg-system-orange/10 px-2 py-0.5 rounded-full">
+                <ShieldCheck size={10} aria-hidden="true" />
+                Write · confirm to apply
+              </span>
+              <span className="type-caption-2 text-[color:var(--text-muted)]">
+                Owner / admin only · logged to Activity
+              </span>
+            </div>
+          }
+          onConfirm={async () => {
+            const a = action;
+            setAction(null);
+            // A guarded jack does not apply here. The server refuses it without
+            // `force`, and `force` is only ever the answer to the question
+            // below — asked in the server's own words.
+            if (a.guard) setEscalated(a);
+            else await applyAction(a, false);
+          }}
+          onCancel={() => setAction(null)}
+        />
+      )}
+
+      {/* Step 2 — the acknowledgement that IS `force: true`. The description is
+          the routing service's `disable_guard.reason`, verbatim: the WAN and
+          management refusals differ on whether anything puts the jack back, and
+          re-writing either sentence here would be a second copy of a rule this
+          client cannot see (DROPLET_MGMT_INTERFACES). */}
+      {escalated?.guard && (
+        <ConfirmDialog
+          open
+          title={
+            escalated.guard.code === "WAN_PORT"
+              ? "Take your home offline?"
+              : "Cut the connection you're using?"
+          }
+          description={escalated.guard.reason}
+          confirmLabel="I understand — turn it off"
+          variant="destructive"
+          onConfirm={async () => {
+            const a = escalated;
+            setEscalated(null);
+            await applyAction(a, true);
+          }}
+          onCancel={() => setEscalated(null)}
+        />
+      )}
     </Shell>
   );
 }

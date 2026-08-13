@@ -1,4 +1,4 @@
-"""Physical port map for the edge router (WARP-1866).
+"""Physical port map for the edge router (WARP-1866), and its write half (WARP-1907).
 
 The Network tab has had a full port map for the managed *switch* since
 WARP-1674 (faceplate + port table: link, speed, traffic, role, VLAN, PoE).
@@ -43,13 +43,59 @@ nor any uci section, so a roster built from those two never contains it. That
 is also why the roster is not filtered by ``devtype=="dsa"`` — that test would
 be right for this one board and wrong for every non-DSA shape (the Pi edge
 router's jacks are plain ``ethernet``).
+
+Turning a jack off (WARP-1907)
+------------------------------
+
+netifd exposes no "shut this jack" ubus call. A jack is administratively downed
+by a uci ``config device`` section carrying ``option enabled '0'``, keyed by
+``option name '<netdev>'``. Verified against netifd's own source at the revision
+the shipped router runs (``netifd 2025.05.23~7901e66c``, OpenWrt 25.12.5
+r33051): ``device.c`` declares ``[DEV_ATTR_ENABLED] = { .name = "enabled",
+.type = BLOBMSG_TYPE_BOOL }``; ``device_init_settings()`` turns a false value
+into ``device_set_disabled(dev, true)``; and ``device_refresh_present()`` then
+forces ``present = false`` **regardless of** ``sys_present`` — so a physically
+present DSA jack really does go down and its bridge drops it. The jack then
+reports ``up: false, carrier: false``, which :func:`derive_ports` already maps
+to ``status: "disabled"``; no new vocabulary is needed on the read side.
+
+🔴 **Most jacks have NO ``config device`` section**, so the write has to create
+one. On the live RB5009 exactly three exist — ``br_lan`` (the bridge),
+``guest_dev`` (the VLAN) and ``wan_dev``, a bare ``config device { option name
+'p1' }``. p2–p8 are realised by netifd from bridge membership alone. Hence
+:func:`device_section_name` (find the existing section, keyed by the NETDEV name
+the section declares — ``config device 'br_lan'`` creates ``br-lan``) and
+:func:`new_device_section_name` (mint a fresh, uci-safe, collision-free section
+name when there is none).
+
+**The disable guard is asymmetric, and the asymmetry is the whole design.**
+``safe_apply``'s 60s auto-rollback fires only when the router stops answering
+the routing service *over the LAN*:
+
+  * **WAN jack** — the router stays reachable on the LAN, so the connectivity
+    probe succeeds, ``uci.confirm()`` runs, and the household is offline until
+    somebody turns it back on. No automatic undo. Guarded, and its copy must
+    never promise one.
+  * **A jack carrying a management network WITH a live link** — this is a
+    genuine self-cut: the probe fails, and OpenWrt reverts after 60s. Guarded,
+    and here the copy may say so.
+  * **A jack carrying a management network with NO link** — allowed. On the
+    RB5009 every LAN jack is a ``br-lan`` member, so a guard that asked only
+    "does this carry ``lan``?" would demand a force-confirm for five empty
+    jacks. An empty jack that merely appears in a bridge's config is carrying
+    nothing.
+
+:func:`disable_guard` is the single source of that policy. It is published on
+the READ (:func:`annotate_write_guards`) so the dashboard can render the right
+confirmation copy without owning a second, drifting copy of the rules, and the
+write route calls the same function — the two cannot disagree.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("droplet.routing.router_ports")
 
@@ -189,6 +235,240 @@ def _device_sections(uci_network: Any) -> dict[str, dict]:
         if isinstance(name, str) and name:
             out[name] = section
     return out
+
+
+# ---------------------------------------------------------------------------
+# Write half (WARP-1907) — `config device` resolution
+# ---------------------------------------------------------------------------
+
+#: uci's boolean spellings. `uci_bool` reads all of them because a hand-edited
+#: config is allowed to use any, and misreading `off` as "not false" would let
+#: the post-write readback pass on a jack that is still up.
+_UCI_FALSE = frozenset({"0", "off", "false", "no", "disabled"})
+_UCI_TRUE = frozenset({"1", "on", "true", "yes", "enabled"})
+
+#: Characters uci permits in a section name. Everything else is folded to `_`.
+_SECTION_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+#: Prefix for a section this service mints. Keeps our sections identifiable in
+#: `uci show network` and out of the way of the image's own names (`wan_dev`,
+#: `br_lan`, `guest_dev`).
+_SECTION_PREFIX = "port_"
+
+
+class DeviceSectionNameExhausted(Exception):
+    """No free uci section name is left for a jack (WARP-1907).
+
+    Only reachable on a config that already carries ~100 sections named after
+    one port — a hand-edited state nobody arrives at by accident. Typed anyway,
+    because the write route catches only the SDK's own exceptions: a bare
+    ``ValueError`` here would leave the operator with a 500, no code, and no
+    sentence describing what is actually wrong with their config.
+    """
+
+    #: Stable, wire-facing classification.
+    code = "PORT_SECTION_NAME_EXHAUSTED"
+
+
+def uci_bool(value: Any, default: bool) -> bool:
+    """A uci option that means a boolean → ``bool``.
+
+    ``default`` is returned for an absent option, which is a real answer rather
+    than a missing one: netifd's ``enabled`` defaults to true, so "no option" is
+    a positive claim that the device is up.
+    """
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in _UCI_FALSE:
+        return False
+    if text in _UCI_TRUE:
+        return True
+    return default
+
+
+def device_section_name(uci_network: Any, netdev: str) -> Optional[str]:
+    """The uci ``config device`` SECTION name that configures ``netdev``.
+
+    ``None`` when no section configures it — the common case, and the reason the
+    write path has to be able to create one (module docstring).
+
+    Matching is on the section's ``option name``, never on the section's own
+    name: ``config device 'br_lan'`` creates the netdev ``br-lan``, and every
+    reference elsewhere in ``/etc/config/network`` uses the netdev name.
+    """
+    if not netdev:
+        return None
+    for section_name, section in _uci_sections(uci_network).items():
+        if section.get(".type") != "device":
+            continue
+        if section.get("name") == netdev:
+            return section_name
+    return None
+
+
+def device_section_enabled(uci_network: Any, netdev: str) -> bool:
+    """Whether uci currently says ``netdev`` is administratively up.
+
+    True when there is no section, and true when the section carries no
+    ``enabled`` option — both mean netifd's default, which is up.
+    """
+    section_name = device_section_name(uci_network, netdev)
+    if section_name is None:
+        return True
+    section = _uci_sections(uci_network).get(section_name, {})
+    return uci_bool(section.get("enabled"), default=True)
+
+
+def new_device_section_name(netdev: str, uci_network: Any) -> str:
+    """Mint a uci-safe, unused section name for a new ``config device``.
+
+    Section names live in ONE namespace per config across every section type, so
+    a name already taken by an unrelated section would be clobbered by
+    ``uci add``. Collisions get a numeric suffix rather than an error: the caller
+    is mid-write and a refusal here would be a worse outcome than a `_2`.
+    """
+    stem = _SECTION_PREFIX + _SECTION_UNSAFE_RE.sub("_", netdev or "")
+    taken = set(_uci_sections(uci_network))
+    if stem not in taken:
+        return stem
+    for suffix in range(2, 100):
+        candidate = f"{stem}_{suffix}"
+        if candidate not in taken:
+            return candidate
+    # 98 sections all named after one jack is a config nobody has; fail loudly
+    # rather than silently reusing one of them. Typed, not a bare ValueError:
+    # the route catches ConnectionLost / DeviceWriteNotApplied / UbusError, so
+    # anything else here surfaces as an untyped 500 with no code and no sentence
+    # the operator can act on.
+    raise DeviceSectionNameExhausted(
+        f"cannot find a free uci section name for device {netdev!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Write half (WARP-1907) — the disable guard
+# ---------------------------------------------------------------------------
+
+#: Refusal codes. The route answers 409 + one of these unless `force` is set.
+GUARD_WAN_PORT = "WAN_PORT"
+GUARD_MANAGEMENT_PORT = "MANAGEMENT_PORT"
+
+#: Interface names that mean "the internet comes in here". Derived from the
+#: read side's role table so the two can't drift apart.
+_WAN_NETWORKS = frozenset(
+    name for name, role in _ROLE_BY_NETWORK.items() if role == "wan"
+)
+
+#: 🔴 The WAN refusal must NOT promise an automatic revert. safe_apply probes
+#: the router over the LAN; cutting the WAN leaves that probe succeeding, so
+#: `uci.confirm()` runs and the change is permanent. Saying "it reverts itself"
+#: would be false at exactly the moment the user is relying on it.
+_WAN_REASON = (
+    "This is the jack your internet comes in on. Turning it off takes everyone "
+    "in the home offline, and it will stay off until you turn it back on — "
+    "nothing puts it back for you."
+)
+
+#: Here the promise IS true: this jack carries the path the appliance is reached
+#: on, so cutting it fails safe_apply's connectivity probe and OpenWrt restores
+#: the old config on its own.
+_MANAGEMENT_REASON = (
+    "This is the jack this dashboard reaches your appliance through, and "
+    "something is plugged into it. Turning it off will cut your own connection "
+    "— the appliance puts it back automatically after a minute."
+)
+
+#: What the caller must DO about the refusal, kept apart from WHY it happened.
+#:
+#: These two sentences travel together in the 409 body but not in the dashboard's
+#: warning banner, which renders `reason` at a point where the user has confirmed
+#: nothing yet — "Confirm again to continue" there is an instruction to do
+#: something they have not been asked to do. Splitting the field, rather than
+#: letting the client compose its own sentence, keeps ONE server-side source of
+#: this policy: the property that made the WAN/management split hold up is that
+#: no second copy of these words exists anywhere.
+_GUARD_INSTRUCTION = "Confirm again to continue."
+
+
+def is_wan_port(port: dict) -> bool:
+    """Whether this jack carries the upstream internet connection.
+
+    Reads the ``networks`` list, NOT the derived ``role``. ``role`` is the first
+    network with a role we recognise, so a jack carrying ``["lan", "wan"]``
+    derives ``role="lan"`` — gating on the role alone would wave the WAN jack
+    straight through the guard that exists for it.
+    """
+    return any(n in _WAN_NETWORKS for n in port.get("networks") or [])
+
+
+def disable_guard(
+    port: dict,
+    is_management_interface: Callable[[str], bool],
+) -> Optional[dict]:
+    """The extra confirmation turning this jack OFF requires, or ``None``.
+
+    ``None`` means an ordinary Tier-2 confirm is enough. A dict means the write
+    is refused with 409 + ``code`` unless the caller passes ``force`` — the
+    explicit acknowledgement, the same shape the interface writes use.
+
+    ``reason`` is WHY, and is the only field safe to render before the user has
+    been asked anything; ``instruction`` is what to do about it, and belongs in
+    the refusal, not in a warning banner. Both live here so there is exactly one
+    server-side source of this policy.
+
+    Enabling a jack is never guarded: it has no blast radius, and requiring the
+    same ceremony to restore the WAN as to cut it would be backwards.
+    """
+    if is_wan_port(port):
+        # Checked first. A jack that is BOTH the WAN and a live management path
+        # gets the WAN refusal, because that is the one with no automatic undo
+        # and therefore the one the copy has to describe.
+        return {
+            "code": GUARD_WAN_PORT,
+            "reason": _WAN_REASON,
+            "instruction": _GUARD_INSTRUCTION,
+        }
+
+    # Link state is half the test: on the RB5009 every LAN jack is a `br-lan`
+    # member, so "carries a management network" alone describes five empty
+    # jacks that are carrying nothing at all.
+    if port.get("link_up") and any(
+        is_management_interface(n) for n in port.get("networks") or []
+    ):
+        return {
+            "code": GUARD_MANAGEMENT_PORT,
+            "reason": _MANAGEMENT_REASON,
+            "instruction": _GUARD_INSTRUCTION,
+        }
+
+    return None
+
+
+def annotate_write_guards(
+    port_map: dict,
+    is_management_interface: Callable[[str], bool],
+) -> dict:
+    """Publish :func:`disable_guard` on every port of a ``GET /network/ports``
+    payload, as ``disable_guard``.
+
+    The dashboard needs to know *before* it opens a confirm dialog whether this
+    jack needs the extra acknowledgement and which sentence to show — and the
+    management-interface list is deployment configuration
+    (``DROPLET_MGMT_INTERFACES``) that no client can know. Publishing the
+    verdict keeps one source of policy instead of a second, drifting copy in
+    TypeScript.
+    """
+    ports = port_map.get("ports")
+    if not isinstance(ports, list):
+        return port_map
+    return {
+        **port_map,
+        "ports": [
+            {**p, "disable_guard": disable_guard(p, is_management_interface)}
+            for p in ports
+        ],
+    }
 
 
 def resolve_members(

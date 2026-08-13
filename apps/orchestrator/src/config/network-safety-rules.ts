@@ -72,6 +72,15 @@ const TIER_2_OPERATIONS = new Set([
   // itself is additionally refused/extra-confirmed at the routing layer.
   "create_interface",
   "edit_interface",
+  // WARP-1907: enable/disable a PHYSICAL router jack. Same tier as the switch's
+  // port writes, and for the same reason — one click takes whatever is plugged
+  // into that jack off the network. The routing service adds a second, narrower
+  // refusal on top (409 unless `force`) for the two jacks where the blast radius
+  // is the household rather than one cable: the WAN, and a management jack with
+  // a live link. Neither operation is in the MCP-admitted set; the routes are
+  // owner/admin only, like create_interface.
+  "router_port_enable",
+  "router_port_disable",
   // Camera subnet
   "camera_subnet_setup",
   "camera_subnet_teardown",
@@ -142,6 +151,16 @@ const BLAST_RADIUS_REASON: Record<string, string> = {
     "Editing a network interface can disconnect devices on it. If it's the interface this dashboard is on, you could lose your connection until it reverts.",
   restart_network:
     "Restarting networking briefly drops every interface and reconnects each device — this dashboard included — for a few seconds.",
+  // WARP-1907. Two sentences, not one shared "port changed" line: turning a jack
+  // on and cutting one off have opposite consequences, and a single reason would
+  // have to be vague enough to cover both. The jack-specific warning (this is
+  // your internet / this is the cable this dashboard arrives on) comes from the
+  // routing service's `disable_guard`, which knows the deployment's management
+  // interfaces; this is the generic Tier-2 line under it.
+  router_port_disable:
+    "Turning off a router port immediately disconnects whatever is plugged into it. If that cable feeds a switch or an access point, everything behind it drops too.",
+  router_port_enable:
+    "Turning a router port back on restores the connection to whatever is plugged into it.",
   set_ap_band_steering:
     "This renames your 5 GHz Wi-Fi network on every access point at once. Devices connected to it will drop and won't come back on their own — you'll need to reconnect each one to the new name.",
   set_ap_wifi_password:

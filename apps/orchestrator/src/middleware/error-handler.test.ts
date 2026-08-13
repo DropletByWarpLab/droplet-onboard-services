@@ -231,4 +231,59 @@ describe("errorHandler", () => {
       expect(bodyOf(res).code).toBeUndefined();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // WARP-1907 — structured `detail` on a trusted typed error
+  // -------------------------------------------------------------------------
+  it("surfaces a trusted RouterError's `detail` so the client can act on it", () => {
+    /* The router-jack write's PORT_WRITE_REFUSED carries the guard the
+       dashboard raises its second, destructive confirm from. Dropped here, the
+       user meets a bare 409 on the race the guard exists for, with no
+       escalation to offer and no way to succeed until the next poll. */
+    const res = mockRes();
+    errorHandler(
+      RouterError.portWriteRefused({
+        code: "WAN_PORT",
+        reason: "This is the jack your internet comes in on.",
+      }),
+      req,
+      res,
+      next,
+    );
+    expect(statusOf(res)).toBe(409);
+    expect(bodyOf(res).code).toBe("PORT_WRITE_REFUSED");
+    expect(bodyOf(res).detail).toEqual({
+      code: "WAN_PORT",
+      reason: "This is the jack your internet comes in on.",
+    });
+    expect(bodyOf(res).message).toBe("This is the jack your internet comes in on.");
+  });
+
+  it("withholds `detail` from an UNTRUSTED error", () => {
+    /* Gated exactly as `code` is: an arbitrary property on a raw error (a
+       Prisma payload, say) must never reach a client just because it happens to
+       be named `detail`. */
+    const res = mockRes();
+    const raw = Object.assign(new Error("boom"), {
+      status: 409,
+      detail: { secret: "internal" },
+    });
+    errorHandler(raw, req, res, next);
+    expect(bodyOf(res).detail).toBeUndefined();
+  });
+
+  it("omits `detail` entirely for a typed error that carries none", () => {
+    const res = mockRes();
+    errorHandler(RouterError.disabled("router"), req, res, next);
+    expect(bodyOf(res).detail).toBeUndefined();
+  });
+
+  it("keeps PORT_WRITE_NOT_APPLIED distinct from AUTH at the handler", () => {
+    /* Both are 5xx and both are trusted, so the only thing separating "your
+       port didn't move" from "check your router credentials" is the code. */
+    const res = mockRes();
+    errorHandler(RouterError.portWriteNotApplied(), req, res, next);
+    expect(statusOf(res)).toBe(502);
+    expect(bodyOf(res).code).toBe("PORT_WRITE_NOT_APPLIED");
+  });
 });

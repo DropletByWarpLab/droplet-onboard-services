@@ -121,6 +121,7 @@ import type {
   AccessExceptionInput,
   EffectiveAccess,
 } from "./types";
+import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
   EmailAccount,
   EmailAccountsResponse,
@@ -2142,6 +2143,72 @@ export async function switchSetPortPoe(
   return data;
 }
 
+/**
+ * WARP-1907 — the server refused a jack write that needs the extra
+ * acknowledgement, and told us which guard and why.
+ *
+ * Thrown for the race the cached read cannot cover: a jack published with
+ * `disable_guard: null` that gains a cable between the poll and the click. The
+ * panel catches this and raises its second, destructive confirm from
+ * `guard.reason` — the same escalation it would have shown had the read been
+ * current. Without it the user meets a bare "409" and retrying fails until the
+ * next poll.
+ */
+export class RouterPortRefusedError extends Error {
+  readonly code = "PORT_WRITE_REFUSED" as const;
+  readonly guard: RouterPortDisableGuard;
+  constructor(guard: RouterPortDisableGuard) {
+    super(guard.reason);
+    this.name = "RouterPortRefusedError";
+    this.guard = guard;
+  }
+}
+
+/** Narrow the orchestrator's `detail` without trusting it into the union. */
+function asPortGuard(value: unknown): RouterPortDisableGuard | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { code?: unknown; reason?: unknown };
+  if (v.code !== "WAN_PORT" && v.code !== "MANAGEMENT_PORT") return null;
+  if (typeof v.reason !== "string" || !v.reason) return null;
+  return { code: v.code, reason: v.reason };
+}
+
+/**
+ * WARP-1907 — turn a physical ROUTER jack on or off.
+ *
+ * `force` is the user's second acknowledgement, and only ever set by the
+ * escalated confirm dialog. The routing service refuses a disable of the WAN
+ * jack or of a live management jack with 409 without it, so sending it
+ * speculatively would quietly delete that guard for every write.
+ */
+export async function routerSetPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(
+    `${BASE}/api/network/ports/${encodeURIComponent(port)}/enable`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, force }),
+    },
+  );
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) {
+    // A guard refusal is not a dead end — it is a question the panel can ask.
+    const guard = data?.code === "PORT_WRITE_REFUSED" ? asPortGuard(data.detail) : null;
+    if (guard) throw new RouterPortRefusedError(guard);
+    // Everything else keeps `message`/`code`/`status` so `translateError` can
+    // do its job instead of meeting a bare Error.
+    throw Object.assign(
+      new Error(data.message || data.error || `Failed to set port state: ${res.status}`),
+      { code: data.code, status: res.status },
+    );
+  }
+  return data;
+}
+
 export async function switchSetPortEnabled(
   port: number,
   enabled: boolean,
@@ -2196,9 +2263,39 @@ export async function confirmNetworkCommand(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirmationToken: token, operation, entityId }),
   });
-  if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
+  if (!res.ok) throw await confirmFailure(res);
   const body = await res.json();
   return { operationId: body?.operationId ?? null };
+}
+
+/**
+ * WARP-1907 — build the error for a refused confirm WITHOUT discarding the body.
+ *
+ * This layer used to read only `res.status`, which made the guard escalation
+ * unreachable on the path that actually runs. A jack write is always classified
+ * Tier 2, so the mint POST returns 202 and the 409 `PORT_WRITE_REFUSED` — the
+ * race where a jack gains a cable between the cached read and the click — can
+ * only ever arrive HERE, on the confirm. `routerSetPortEnabled` translates that
+ * code, but it only ever sees the mint response, so the panel met a bare
+ * `Error`, `err instanceof RouterPortRefusedError` never matched, and the
+ * documented second confirm never opened.
+ *
+ * Shared with the switch, Wi-Fi, DHCP and firewall confirms, so it stays
+ * generic: preserve `code`/`status` for `translateError` the way
+ * `routerSetPortEnabled` already does, and keep the old string as the fallback
+ * for a body that carries no message of its own.
+ */
+async function confirmFailure(res: Response): Promise<Error> {
+  // A refused confirm is not guaranteed to be JSON — a proxy 502 is HTML — so
+  // the error path must degrade to the generic error rather than throw a
+  // parse failure over the top of the real one.
+  const data = await res.json().catch(() => null);
+  const guard = data?.code === "PORT_WRITE_REFUSED" ? asPortGuard(data.detail) : null;
+  if (guard) return new RouterPortRefusedError(guard);
+  return Object.assign(
+    new Error(data?.message || data?.error || `Failed to confirm command: ${res.status}`),
+    { code: data?.code, status: res.status },
+  );
 }
 
 /**

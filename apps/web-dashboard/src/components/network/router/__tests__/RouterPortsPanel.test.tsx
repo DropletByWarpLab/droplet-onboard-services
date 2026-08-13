@@ -25,6 +25,15 @@ vi.mock("@/lib/hooks/useRouterPorts", () => ({
   useRouterPorts: () => useRouterPortsMock(),
 }));
 
+// WARP-1907 gave the panel a write, so it now reads RBAC and can toast a
+// failure. These render paths don't exercise either; the write choreography has
+// its own file (RouterPortWrite.test.tsx).
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" } }),
+  authFetch: vi.fn(),
+}));
+vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+
 import { RouterPortsPanel } from "../RouterPortsPanel";
 
 function port(over: Partial<RouterPort> & { id: string }): RouterPort {
@@ -40,6 +49,7 @@ function port(over: Partial<RouterPort> & { id: string }): RouterPort {
     is_sfp: false,
     traffic: null,
     status: "offline",
+    disable_guard: null,
     ...over,
   };
 }
@@ -157,11 +167,11 @@ describe("the port map", () => {
     render(<RouterPortsPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Port table" }));
     expect(screen.getByText("2.5 Gb")).toBeInTheDocument();
-    const p1 = screen.getByText("p1").closest("div.grid") as HTMLElement;
+    const p1 = screen.getByText("p1").closest(".grid") as HTMLElement;
     expect(within(p1).getByText("↓61 MB ↑201 MB")).toBeInTheDocument();
     // p4 is up-but-empty: no speed, and its zero counters are not shown as
     // though the port had been measured carrying nothing.
-    const p4 = screen.getByText("p4").closest("div.grid") as HTMLElement;
+    const p4 = screen.getByText("p4").closest(".grid") as HTMLElement;
     expect(within(p4).getAllByText("—").length).toBeGreaterThan(0);
     expect(within(p4).queryByText(/↓/)).not.toBeInTheDocument();
     expect(within(p4).queryByText(/Gb|Mb/)).not.toBeInTheDocument();
@@ -170,7 +180,7 @@ describe("the port map", () => {
   it("labels an empty cage 'no module', never 'open' or 'down'", () => {
     render(<RouterPortsPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Port table" }));
-    const sfp = screen.getByText("sfp · SFP").closest("div.grid") as HTMLElement;
+    const sfp = screen.getByText("sfp · SFP").closest(".grid") as HTMLElement;
     expect(within(sfp).getByText("No module")).toBeInTheDocument();
     expect(within(sfp).getByText("no module")).toBeInTheDocument();
     expect(within(sfp).queryByText(/^open$/i)).not.toBeInTheDocument();
@@ -180,33 +190,45 @@ describe("the port map", () => {
   it("distinguishes an empty jack from an unreadable one", () => {
     render(<RouterPortsPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Port table" }));
-    const p4 = screen.getByText("p4").closest("div.grid") as HTMLElement;
+    const p4 = screen.getByText("p4").closest(".grid") as HTMLElement;
     expect(within(p4).getByText("empty")).toBeInTheDocument();
-    const sfp = screen.getByText("sfp · SFP").closest("div.grid") as HTMLElement;
+    const sfp = screen.getByText("sfp · SFP").closest(".grid") as HTMLElement;
     expect(within(sfp).getByText("no module")).toBeInTheDocument();
   });
 
   it("names the interfaces a jack carries, including a VLAN riding the bridge", () => {
     render(<RouterPortsPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Port table" }));
-    const p2 = screen.getByText("p2").closest("div.grid") as HTMLElement;
+    const p2 = screen.getByText("p2").closest(".grid") as HTMLElement;
     expect(within(p2).getByText("lan · guest")).toBeInTheDocument();
-    const p1 = screen.getByText("p1").closest("div.grid") as HTMLElement;
+    const p1 = screen.getByText("p1").closest(".grid") as HTMLElement;
     expect(within(p1).getByText("wan · wan6")).toBeInTheDocument();
   });
 
   it("shows a dash, not an invented network, for a jack nothing claims", () => {
     render(<RouterPortsPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Port table" }));
-    const sfp = screen.getByText("sfp · SFP").closest("div.grid") as HTMLElement;
+    const sfp = screen.getByText("sfp · SFP").closest(".grid") as HTMLElement;
     // Both the link and the networks cell read "—": we measured neither.
     expect(within(sfp).getAllByText("—")).toHaveLength(2);
   });
 
-  it("offers no write control — the panel is read-only", () => {
+  it("puts no write control on the map itself — a jack opens a drawer, it does not toggle", () => {
+    /* WARP-1907 replaced this test's ancestor, which asserted the panel had no
+       write at all. The rule that survived the write landing is the one that
+       mattered: nothing on the map applies a change. Every jack is a button,
+       and every one of them opens the detail drawer, where the action sits
+       behind the RBAC gate and two confirms. A toggle on the faceplate would be
+       one misclick from cutting the WAN. */
     render(<RouterPortsPanel />);
-    const labels = screen.getAllByRole("button").map((b) => b.textContent);
-    expect(labels).toEqual(["Faceplate", "Port table"]);
+    const chrome = ["Faceplate", "Port table"];
+    const labels = screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "");
+    expect(labels.filter((l) => chrome.includes(l))).toEqual(chrome);
+    for (const label of labels.filter((l) => !chrome.includes(l))) {
+      expect(label).toMatch(/^Port \S+ — .*\. Open details$/);
+    }
   });
 });
 
