@@ -476,6 +476,23 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
       });
 
+      // WARP-1912 — the dashboard's translator never echoes `error` prose
+      // (friendly-errors' no-echo rule), so without structured fields the 413
+      // flattened into the generic files fallback — the QA-reported .dmg
+      // toast. The stable wire code + the ACTUAL applied limit let the client
+      // say "too large (max X MB)" without parsing the sentence.
+      it("413 carries the stable wire code and the applied limit (WARP-1912)", async () => {
+        (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
+          maxUploadSizeMb: 1,
+        });
+        const res = await request(app)
+          .post("/api/files/upload?path=/")
+          .attach("files", Buffer.alloc(2 * 1024 * 1024, 1), "big.dmg");
+        expect(res.status).toBe(413);
+        expect(res.body.code).toBe("UPLOAD_TOO_LARGE");
+        expect(res.body.limitMb).toBe(1);
+      });
+
       it("a policy cap LOOSER than config never widens the ceiling (min() wins)", async () => {
         (prismaMock.userUsagePolicy.findUnique as any).mockResolvedValueOnce({
           maxUploadSizeMb: 500, // looser than the 10 MB config default

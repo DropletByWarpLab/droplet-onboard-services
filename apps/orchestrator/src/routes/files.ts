@@ -1764,8 +1764,14 @@ export function createFilesRouter(
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
+          // WARP-1912 — the dashboard's translator never echoes `error`
+          // prose (its no-echo rule), so the stable wire code + the APPLIED
+          // limit are what let the client render "too large (max X MB)"
+          // instead of flattening this into its generic retry fallback.
           res.status(413).json({
             error: `File too large (max ${limitMb}MB for your account)`,
+            code: "UPLOAD_TOO_LARGE",
+            limitMb,
           });
           return;
         }

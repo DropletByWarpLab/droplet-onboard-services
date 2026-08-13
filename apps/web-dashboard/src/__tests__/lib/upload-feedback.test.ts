@@ -109,6 +109,61 @@ describe("uploadOutcomeMessage", () => {
   });
 });
 
+// WARP-1912 — a rejected-as-too-large file must be NAMED as too large, never
+// "try again to finish" (retrying a file that can never fit) and never the
+// generic files fallback (the QA-reported .dmg toast). The cause now carries
+// `status`/`code`/`limitMb` from `uploadBatch` (see api.upload-errors.test.ts);
+// this table pins the copy composed from it.
+describe("uploadOutcomeMessage — too-large rejections (WARP-1912)", () => {
+  const TOO_LARGE = { status: 413, limitMb: 10, message: "Upload failed: 413" };
+
+  it("names the cap when the one file was too large", () => {
+    expect(uploadOutcomeMessage(0, 1, TOO_LARGE)).toBe(
+      "That file is too large to upload (max 10 MB).",
+    );
+  });
+
+  it("stays honest without a cap number (nginx-style bare 413)", () => {
+    expect(uploadOutcomeMessage(0, 1, { status: 413 })).toBe(
+      "That file is too large to upload.",
+    );
+  });
+
+  it("dispatches on the stable wire code too", () => {
+    expect(uploadOutcomeMessage(0, 1, { code: "UPLOAD_TOO_LARGE" })).toBe(
+      "That file is too large to upload.",
+    );
+  });
+
+  it("pluralises a whole selection of too-large files", () => {
+    expect(uploadOutcomeMessage(0, 2, TOO_LARGE)).toBe(
+      "Those files are too large to upload (max 10 MB).",
+    );
+  });
+
+  it("replaces 'try again to finish' on a partial run — retrying cannot help", () => {
+    expect(uploadOutcomeMessage(3, 4, TOO_LARGE)).toBe(
+      "Uploaded 3 of 4 files. 1 was too large to upload (max 10 MB).",
+    );
+    expect(uploadOutcomeMessage(2, 4, TOO_LARGE)).toBe(
+      "Uploaded 2 of 4 files. 2 were too large to upload (max 10 MB).",
+    );
+  });
+
+  it("keeps the unreadable-items sentence alongside the too-large lead", () => {
+    expect(uploadOutcomeMessage(0, 2, TOO_LARGE, 1)).toBe(
+      "That file is too large to upload (max 10 MB)." +
+        " 1 item couldn't be read and wasn't uploaded.",
+    );
+  });
+
+  it("never claims too-large for a cause that isn't one", () => {
+    expect(uploadOutcomeMessage(21, 41, RAW)).toBe(
+      "Uploaded 21 of 41 files. 20 didn't upload — try again to finish.",
+    );
+  });
+});
+
 describe("folderOnlyOutcomeMessage", () => {
   it("says what happened to a drop that had no files in it", () => {
     expect(folderOnlyOutcomeMessage(1)).toBe(
