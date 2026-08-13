@@ -35,6 +35,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_REAL="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="$REPO_ROOT_REAL/docker/nginx/nginx.conf"
+NGINX_DIR="$REPO_ROOT_REAL/docker/nginx"   # nginx.conf AND every conf it includes
 DOCKERFILE="$REPO_ROOT_REAL/docker/nginx/Dockerfile"
 TESTS=0
 FAILURES=0
@@ -318,19 +319,71 @@ else
   fail "the /nextcloud/ leg's proxy_pass must be 'http://\$upstream_nextcloud;' with no URI — a URI on a variable upstream REPLACES the request path with itself"
 fi
 
-# ── File-wide: a variable upstream may NEVER carry a URI ──
+# ── EVERY conf: a variable upstream may never carry a BARE `/` URI ──
 #
-# The invariant above generalised. Any `proxy_pass <scheme>://$var<path>;`
-# discards the caller's path and sends <path> instead. Every leg in this file
-# uses a variable upstream (deferred DNS), so the rule is absolute here — and
-# stating it file-wide is what stops the next leg from reintroducing it under a
-# different prefix. Matches http://, https:// and the $internal_scheme legs.
-uri_on_var=$(grep -nE '^[[:space:]]*proxy_pass[[:space:]]+[^;]*\$[A-Za-z_][A-Za-z0-9_]*/[^;]*;' "$CONF" \
-             | grep -vE '\$[A-Za-z_][A-Za-z0-9_]*;' || true)
-if [ -z "$uri_on_var" ]; then
-  pass "no proxy_pass combines a variable upstream with a URI (file-wide)"
+# WARP-1986. The predecessor of this check called itself "file-wide" and
+# grepped $CONF — nginx.conf alone. That file `include`s six siblings
+# (internal-scheme.*, canonical-host.*, cipher-profile.*, docs-engine.*), none
+# of which were scanned, so docs-engine.onlyoffice.conf carried the identical
+# defect through a guard whose pass message claimed the file was covered. A
+# guard that names a scope it does not have is worse than no guard: it is read
+# as evidence.
+#
+# WHY BARE `/` SPECIFICALLY, and not any URI. With a variable upstream nginx
+# cannot compute the prefix replacement, so the directive's URI REPLACES the
+# request URI. When that URI is `/`, every path under the location collapses to
+# root — the broken prefix-strip idiom. When it is a specific path under an
+# exact-match location it is a deliberate pin and correct:
+# canonical-host.off.conf legitimately has
+# `location = /api/tls/status` -> `proxy_pass http://$upstream_orchestrator/api/tls/status;`
+# where the substitution is a no-op. Flagging every URI would red-light that
+# and the guard would be turned off.
+bare_uri_hits=""
+_scanned=0
+for _cf in "$NGINX_DIR"/*.conf; do
+  _scanned=$((_scanned + 1))
+  _h=$(grep -nE '^[[:space:]]*proxy_pass[[:space:]]+[a-z$][^;]*\$[A-Za-z_][A-Za-z0-9_]*/;[[:space:]]*$' "$_cf" || true)
+  [ -z "$_h" ] || bare_uri_hits="$bare_uri_hits $(basename "$_cf"):$(printf '%s' "$_h" | cut -d: -f1 | tr '
+' ',')"
+done
+if [ -z "$bare_uri_hits" ]; then
+  pass "no proxy_pass in ANY gateway conf combines a variable upstream with a bare '/' URI"
 else
-  fail "proxy_pass with a variable upstream AND a URI at line(s): $(printf '%s' "$uri_on_var" | cut -d: -f1 | tr '\n' ' ')— nginx replaces the request URI with that literal path, so every request under the leg reaches the upstream as that path"
+  fail "variable upstream + bare '/' URI at:$bare_uri_hits — nginx replaces the request URI with '/', so EVERY request under that location reaches the upstream as root. Strip the prefix with 'rewrite … break' and drop the URI."
+fi
+
+# The scan must actually cover the siblings, not just nginx.conf — that blind
+# spot IS the bug this phase exists for. Counted from the loop's own iterations,
+# NOT by listing the directory: an earlier draft did the latter and still
+# reported "covers all 8 confs" after the loop was narrowed back to one file, so
+# the assertion could not detect the regression it was written to catch.
+if [ "${_scanned:-0}" -ge 5 ]; then
+  pass "the shape scan covers all $_scanned confs under docker/nginx/ (nginx.conf plus its includes)"
+else
+  fail "the shape scan saw only ${_scanned:-0} conf file(s) — it is not covering the included variants"
+fi
+
+# Both docs-engine variants strip their prefix the way that actually works.
+for _v in collabora onlyoffice; do
+  _f="$NGINX_DIR/docs-engine.$_v.conf"
+  [ -f "$_f" ] || { fail "docs-engine.$_v.conf is missing"; continue; }
+  if grep -qE '^[[:space:]]*proxy_pass[[:space:]]+http://\$upstream_docserver;[[:space:]]*$' "$_f"; then
+    pass "docs-engine.$_v.conf proxy_pass carries no URI"
+  else
+    fail "docs-engine.$_v.conf must use 'proxy_pass http://\$upstream_docserver;' with no URI"
+  fi
+done
+# Only the onlyoffice variant needs a rewrite: coolwsd's net.service_root keeps
+# the /docs prefix, so collabora must NOT strip it.
+if grep -qE '^[[:space:]]*rewrite \^/docs/\(\.\*\)\$ /\$1 break;' "$NGINX_DIR/docs-engine.onlyoffice.conf"; then
+  pass "docs-engine.onlyoffice.conf strips /docs/ with an explicit rewrite"
+else
+  fail "docs-engine.onlyoffice.conf must strip /docs/ with 'rewrite ^/docs/(.*)\$ /\$1 break;' — the Document Server serves at its root"
+fi
+if grep -qE '^[[:space:]]*rewrite \^/docs/' "$NGINX_DIR/docs-engine.collabora.conf"; then
+  fail "docs-engine.collabora.conf strips /docs/ — coolwsd's net.service_root EXPECTS that prefix; stripping it breaks the collabora engine"
+else
+  pass "docs-engine.collabora.conf leaves /docs/ intact (coolwsd expects the prefix)"
 fi
 
 echo "--- Phase 4: no collision with a dashboard surface ---"

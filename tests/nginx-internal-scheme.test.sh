@@ -67,8 +67,17 @@ fi
 # variant pair (docs-engine.{collabora,onlyoffice}.conf — selected at container
 # start, same pattern as internal-scheme itself). The invariant is unchanged —
 # every user-plane leg stays literal http:// — so the docserver assertion now
-# points at BOTH variants (collabora keeps the /docs prefix ⇒ no trailing
-# slash on its proxy_pass; onlyoffice strips ⇒ trailing slash).
+# points at BOTH variants.
+#
+# WARP-1986: that assertion used to REQUIRE a trailing slash on the onlyoffice
+# variant, on the same false belief corrected below for nextcloud — and this
+# time the guard actively blocked the fix, because correcting the leg turned
+# setup-unit red. It is the third guard in this change set to pin a defect as
+# an invariant. The lesson each time is the same: assert the property you care
+# about (here, the SCHEME) and nothing incidental, because the incidental part
+# is what turns into a trap when the code around it is found to be wrong.
+# Both variants now carry no URI, and the SHAPE is guarded in
+# nginx-nextcloud-assets.test.sh, across every conf rather than just one.
 #
 # WARP-1966: what this check pins is the SCHEME (literal http:// rather than
 # $internal_scheme://), not the presence of a URI on proxy_pass. The nextcloud
@@ -92,7 +101,7 @@ nc_leg=$(awk '
 if printf '%s\n' "$nc_leg" | grep -qE '^[[:space:]]*proxy_pass[[:space:]]+http://\$upstream_nextcloud;[[:space:]]*$' \
    && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_web_dashboard;' "$conf" \
    && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver;' "$NGINX_DIR/docs-engine.collabora.conf" \
-   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver/;' "$NGINX_DIR/docs-engine.onlyoffice.conf"; then
+   && grep -qE 'proxy_pass[[:space:]]+http://\$upstream_docserver;' "$NGINX_DIR/docs-engine.onlyoffice.conf"; then
   pass "user-plane legs (nextcloud, web-dashboard, both docs-engine variants) stay literal http://"
 else
   fail "a user-plane leg was moved off literal http:// (out of mTLS scope)"
