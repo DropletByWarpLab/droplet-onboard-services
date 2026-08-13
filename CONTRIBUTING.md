@@ -8,7 +8,8 @@ droplet-onboard-services/       Turbo monorepo
 │   ├── orchestrator/           Express + TypeScript (port 3000)
 │   └── web-dashboard/          Next.js + React (port 3001)
 ├── services/                   18 Python/TypeScript services, e.g.:
-│   └── ai-gateway/             Python FastAPI + LiteLLM (port 8000)
+│   ├── ai-gateway/             Python FastAPI + LiteLLM (port 8000)
+│   └── erp-connector/          @droplet/erp-connector — imported by the orchestrator
 ├── packages/                   4 shared packages (shared-types, tools-core, …)
 ├── docker/
 │   ├── docker-compose.yml      Full orchestration (29 compose services)
@@ -16,6 +17,17 @@ droplet-onboard-services/       Turbo monorepo
 │   └── mosquitto.conf          MQTT broker
 ├── tests/                      Integration test suite
 └── turbo.json                  Build pipeline
+```
+
+**`@droplet/*` packages are not confined to `packages/`.** The root `workspaces`
+list is `apps/*`, `services/*`, `packages/*`, so a workspace package can live
+under any of the three — `@droplet/erp-connector`, `@droplet/mcp-server`, and
+`@droplet/matter-controller` all live under `services/`. `apps/orchestrator`
+imports `@droplet/erp-connector` directly. Enumerate the real list instead of
+inferring it from `packages/`:
+
+```bash
+npm ls --workspaces --depth 0
 ```
 
 ## Prerequisites
@@ -41,12 +53,38 @@ source .venv/bin/activate    # or .venv\Scripts\activate on Windows
 pip install -r requirements-dev.txt
 cd ../..
 
+# Build the @droplet/* packages the apps import (see "Workspace builds come
+# first" — skipping this is the usual cause of a "broken" fresh checkout)
+npm run build -w @droplet/shared-types -w @droplet/tools-core \
+              -w @droplet/fips-selftest -w @droplet/auth-policy \
+              -w @droplet/erp-connector
+
 # Generate Prisma client
 cd apps/orchestrator && npx prisma generate && cd ../..
 
 # Run all tests
 npm run test
 ```
+
+### Workspace builds come first
+
+These five packages resolve through their built `dist/` (`"types":
+"dist/index.d.ts"`), and `turbo.json`'s `test` task does **not** declare
+`dependsOn: ["^build"]`. Nothing builds them implicitly, so on a fresh checkout
+`tsc` and Vitest fail against packages that are present and healthy in the tree:
+
+```
+src/services/erp.service.ts(40,8): error TS2307:
+  Cannot find module '@droplet/erp-connector' or its corresponding type declarations.
+```
+
+That error means the package has not been built — **not** that it is missing
+from the repo. `@droplet/erp-connector` is the one most often missed, because it
+is the only one of the five that lives under `services/` rather than
+`packages/`. Every CI workflow that typechecks the orchestrator builds it first
+(`ci.yml`, `orchestrator-tests.yml`, `publish-release.yml`), as does
+`apps/orchestrator/Dockerfile`; a local checkout is the only place you have to
+do it yourself.
 
 ### Optional: pre-commit secret scanning
 
@@ -86,6 +124,10 @@ npm run test:dashboard
 # or directly:
 cd apps/web-dashboard && npx vitest run
 ```
+
+The `npx vitest` / `npx tsc --noEmit` forms invoke the tool directly and bypass
+Turbo entirely, so the workspace `dist/` builds from the Quick Start must
+already exist — see [Workspace builds come first](#workspace-builds-come-first).
 
 ### Watch mode (auto-rerun on changes)
 
