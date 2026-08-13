@@ -13,6 +13,15 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# WARP-1918 — the managed birdseye section. The dashboard's multi-camera
+# live view (/cameras/birdseye) renders Frigate's birdseye composite, so
+# the platform owns turning it on: this exact section is shipped in the
+# baseline docker/frigate/config.yml AND converged onto running boxes by
+# ensure_birdseye() at startup. ``mode: continuous`` (not Frigate's
+# ``objects`` default) keeps idle cameras in the frame — the surface is
+# "show me everything", not "show me detections".
+BIRDSEYE_CONFIG: dict = {"enabled": True, "mode": "continuous"}
+
 
 class FrigateClient:
     """HTTP client for the Frigate NVR API."""
@@ -34,6 +43,56 @@ class FrigateClient:
         resp = await self._client.get("/api/config")
         resp.raise_for_status()
         return resp.json()
+
+    async def ensure_birdseye(self) -> bool:
+        """Converge Frigate's ``birdseye`` section on the managed config.
+
+        Reads the *resolved* config first so an already-converged box is
+        a strict no-op — ``PUT /api/config/set`` with ``requires_restart=1``
+        bounces Frigate and takes every camera dark for seconds, which
+        must not happen on a routine service start. When the box differs
+        (birdseye disabled, or the wrong mode), the managed section is
+        deep-merged in and persisted to disk, so the fix survives
+        restarts and every Droplet converges without a manual box step.
+
+        Returns True when a config write was applied, False otherwise.
+        Never raises — the caller is the startup path.
+        """
+        try:
+            config = await self.get_config()
+        except Exception as e:
+            logger.warning("Birdseye convergence skipped (config fetch failed): %s", e)
+            return False
+
+        current = config.get("birdseye") or {}
+        if all(current.get(key) == value for key, value in BIRDSEYE_CONFIG.items()):
+            logger.debug("Birdseye already enabled (mode=%s)", current.get("mode"))
+            return False
+
+        try:
+            resp = await self._client.put(
+                "/api/config/set",
+                json={
+                    "config_data": {"birdseye": dict(BIRDSEYE_CONFIG)},
+                    "requires_restart": 1,
+                },
+            )
+            body = resp.json() if resp.content else {}
+            if resp.status_code in (200, 201) and body.get("success") is True:
+                logger.info(
+                    "Enabled birdseye in Frigate config (mode=%s)",
+                    BIRDSEYE_CONFIG["mode"],
+                )
+                return True
+            logger.warning(
+                "Frigate rejected birdseye config (%d): %s",
+                resp.status_code,
+                str(body.get("message", resp.text))[:200],
+            )
+            return False
+        except Exception as e:
+            logger.error("Failed to enable birdseye in Frigate: %s", e)
+            return False
 
     async def get_cameras(self) -> dict:
         """Get status of all configured cameras."""

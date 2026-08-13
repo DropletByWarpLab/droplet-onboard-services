@@ -148,6 +148,10 @@ jobs:
               - "services/switch/**"
             camera-discovery:
               - "services/camera-discovery/**"
+              # WARP-1918: this leg's pytest guards the baseline birdseye
+              # section in docker/frigate/config.yml, so a config-only PR
+              # must run it pre-merge (not just the push-to-main canary).
+              - "docker/frigate/**"
             erp-sql-bridge:
               - "services/erp-sql-bridge/**"
             email-indexer:

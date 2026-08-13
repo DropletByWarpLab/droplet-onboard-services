@@ -893,6 +893,11 @@ async def startup():
     for _ in range(12):
         if await frigate.health_check():
             await _reconcile_with_frigate()
+            # WARP-1918: birdseye is part of the managed config — converge
+            # any box whose Frigate predates the birdseye baseline so the
+            # dashboard's multi-camera live view works without a hand-edit.
+            # No-op (and no Frigate restart) when already enabled.
+            await frigate.ensure_birdseye()
             break
         logger.info("Waiting for Frigate to be ready...")
         await asyncio.sleep(5)
