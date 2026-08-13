@@ -44,6 +44,14 @@ import { useToast } from "@/components/Toast";
 type View = "month" | "agenda";
 type ReportScope = "day" | "week" | "month";
 
+// WARP-1902 — the "Up next" rail card is a disclosure: collapsible from its
+// header and capped at 6 events when expanded, so a busy calendar can't grow
+// the rail unbounded. The collapsed/expanded choice persists per browser via
+// the same localStorage idiom as the network page's sections
+// (DeviceGridSection); "0" = collapsed, anything else (incl. absent) = expanded.
+const UP_NEXT_MAX = 6;
+const UP_NEXT_LS_KEY = "droplet.calendar.upnext";
+
 function whenLabel(ev: CalendarEvent): string {
   const d = new Date(ev.startsAt);
   const sameDay = d.toDateString() === new Date().toDateString();
@@ -204,9 +212,33 @@ export default function CalendarPage() {
     const now = Date.now();
     return visibleEvents
       .filter((e) => new Date(e.endsAt || e.startsAt).getTime() >= now)
-      .sort(compareByStart)
-      .slice(0, 5);
+      .sort(compareByStart);
   }, [visibleEvents]);
+  const upNext = upcoming.slice(0, UP_NEXT_MAX);
+  const upNextOverflow = upcoming.length - upNext.length;
+
+  // "Up next" disclosure state. Default expanded; the stored preference is
+  // read in an effect (not the useState initializer) so server and first
+  // client render agree — same SSR-safe pattern as DeviceGridSection.
+  const [upNextExpanded, setUpNextExpanded] = useState(true);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(UP_NEXT_LS_KEY) === "0") setUpNextExpanded(false);
+    } catch {
+      // Storage unavailable (private mode) — stay expanded.
+    }
+  }, []);
+  const toggleUpNext = useCallback(() => {
+    setUpNextExpanded((cur) => {
+      const next = !cur;
+      try {
+        window.localStorage.setItem(UP_NEXT_LS_KEY, next ? "1" : "0");
+      } catch {
+        // Storage unavailable — the toggle still works for this page load.
+      }
+      return next;
+    });
+  }, []);
 
   // Schedule report: filter the loaded, visible events to the report window
   // (overlap test) and group them by local day. Derived entirely client-side
@@ -443,31 +475,53 @@ export default function CalendarPage() {
           </div>
 
           <div className="card">
-            <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: "0 0 8px" }}>Up next</h2>
-            {upcoming.length === 0 ? (
+            <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: upNextExpanded ? "0 0 8px" : 0 }}>
+              <button
+                onClick={toggleUpNext}
+                aria-expanded={upNextExpanded}
+                className="w-full flex items-center gap-1.5 max-lg:min-h-[44px] text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                type="button"
+              >
+                <span className="flex-1 truncate">Up next</span>
+                <ChevronRight
+                  size={16}
+                  className={`flex-none transition-transform ${upNextExpanded ? "rotate-90" : ""}`}
+                  style={{ color: "var(--text-muted)" }}
+                  aria-hidden="true"
+                />
+              </button>
+            </h2>
+            {upNextExpanded && (upcoming.length === 0 ? (
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", padding: "4px 0" }}>Nothing scheduled.</p>
             ) : (
-              <ul className="flex flex-col gap-1">
-                {upcoming.map((ev) => (
-                  <li key={ev.id}>
-                    <button
-                      onClick={() => openDetail(ev)}
-                      className="w-full flex items-start gap-2.5 text-left p-1 -mx-1 rounded hover:bg-[var(--hover)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
-                      type="button"
-                    >
-                      <span
-                        className="mt-1.5 h-2 w-2 rounded-full flex-none"
-                        style={{ background: colorOf(ev) }}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate" style={{ fontSize: 13, color: "var(--text)" }}>{ev.title}</span>
-                        <span className="block" style={{ fontSize: 12, color: "var(--text-muted)" }}>{whenLabel(ev)}</span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+              <>
+                <ul className="flex flex-col gap-1">
+                  {upNext.map((ev) => (
+                    <li key={ev.id}>
+                      <button
+                        onClick={() => openDetail(ev)}
+                        className="w-full flex items-start gap-2.5 text-left p-1 -mx-1 rounded hover:bg-[var(--hover)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                        type="button"
+                      >
+                        <span
+                          className="mt-1.5 h-2 w-2 rounded-full flex-none"
+                          style={{ background: colorOf(ev) }}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate" style={{ fontSize: 13, color: "var(--text)" }}>{ev.title}</span>
+                          <span className="block" style={{ fontSize: 12, color: "var(--text-muted)" }}>{whenLabel(ev)}</span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {upNextOverflow > 0 && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "6px 0 0", paddingLeft: 18 }}>
+                    {upNextOverflow} more on the calendar
+                  </p>
+                )}
+              </>
+            ))}
           </div>
 
           <RemindersPanel />
