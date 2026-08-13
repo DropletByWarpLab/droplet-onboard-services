@@ -213,8 +213,18 @@ const ALLOWED: CloudTurnDecision = { kind: "allowed" };
  * mislabels a cloud model as `ollama` is caught by the catalogue or the prefix
  * mirror; a client that forwards a cloud provider for a model neither knows is
  * caught by the forwarded value. No lie opens the gate.
+ *
+ * WARP-1983 — EXPORTED for the stored-content egress gate in `routes/llm.ts`,
+ * which must be able to ask "is this turn leaving the LAN?" on its own.
+ * Deliberately NOT answered by reading `decideCloudTurn`'s verdict: that
+ * function short-circuits to ALLOWED for `service` principals and for sessions
+ * with no person id BEFORE it ever resolves a provider, so a voice-principal
+ * turn on a cloud model returns the same `allowed` as a local one. Keying the
+ * egress gate off that would let exactly the principal with no human in the
+ * loop carry Drive content off-box. "May this person use cloud?" and "is this
+ * request leaving the box?" are different questions and are asked separately.
  */
-async function cloudProviderFor(args: CloudTurnArgs): Promise<string | null> {
+export async function resolveOffLanProvider(args: CloudTurnArgs): Promise<string | null> {
   const forwarded = args.provider?.trim();
   if (forwarded && !isLocalProvider(forwarded)) return forwarded;
 
@@ -255,7 +265,7 @@ export async function decideCloudTurn(args: CloudTurnArgs): Promise<CloudTurnDec
   const userId = args.user?.id;
   if (!userId) return ALLOWED;
 
-  const provider = await cloudProviderFor(args);
+  const provider = await resolveOffLanProvider(args);
   if (!provider) return ALLOWED; // local turn — the resolver is never read
 
   let cloud: boolean;
