@@ -45,3 +45,9 @@ requests>=2.31
 # scheduler (AsyncIOScheduler) and uvicorn share one asyncio event loop.
 fastapi>=0.140.7
 uvicorn[standard]>=0.52.1
+
+# WARP-1948 — OSV floors, kept in LOCKSTEP with tests/retrieval-eval/ragas/
+# requirements.txt (WARP-1406): the osv-nightly resolver scores transitive
+# deps at their minimum resolvable version; these state the real minimums.
+scipy>=1.10.0
+filelock>=3.20.3

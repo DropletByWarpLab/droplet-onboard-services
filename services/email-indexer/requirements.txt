@@ -23,3 +23,8 @@ aiosmtplib==5.1.2
 # orchestrator surface isn't enough (e.g. listing all accounts at boot
 # without paying an extra HTTP round-trip).
 asyncpg==0.31.0
+
+# WARP-1948 — OSV floor: the osv-nightly resolver scores transitive deps at
+# their minimum resolvable version; state the real minimum instead of
+# suppressing the advisory.
+idna>=3.15
