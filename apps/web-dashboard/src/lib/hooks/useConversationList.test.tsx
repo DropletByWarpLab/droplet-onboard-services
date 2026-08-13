@@ -6,6 +6,7 @@ const renameConversationMock = vi.fn();
 const deleteConversationMock = vi.fn();
 const fetchConversationMock = vi.fn();
 const setConversationProjectMock = vi.fn();
+const setConversationPinnedMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   listConversations: (...a: unknown[]) => listConversationsMock(...a),
@@ -13,6 +14,7 @@ vi.mock("@/lib/api", () => ({
   deleteConversation: (...a: unknown[]) => deleteConversationMock(...a),
   fetchConversation: (...a: unknown[]) => fetchConversationMock(...a),
   setConversationProject: (...a: unknown[]) => setConversationProjectMock(...a),
+  setConversationPinned: (...a: unknown[]) => setConversationPinnedMock(...a),
 }));
 
 import { useConversationList } from "./useConversationList";
@@ -35,6 +37,7 @@ beforeEach(() => {
   deleteConversationMock.mockReset();
   fetchConversationMock.mockReset();
   setConversationProjectMock.mockReset();
+  setConversationPinnedMock.mockReset();
 });
 
 describe("useConversationList", () => {
@@ -59,6 +62,72 @@ describe("useConversationList", () => {
     expect(result.current.flat.length).toBe(32);
     expect(result.current.hasMore).toBe(false);
     expect(listConversationsMock).toHaveBeenNthCalledWith(2, { limit: 30, offset: 30 });
+  });
+
+  it("loadMore de-dupes rows already known locally and keeps the server offset aligned (WARP-1917)", async () => {
+    listConversationsMock.mockResolvedValueOnce(
+      Array.from({ length: 30 }, (_, i) => row(`a${i}`)),
+    );
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(30));
+
+    // A pin/unpin mid-session reorders the server list (pinned-first), so
+    // page two can re-serve a row page one already delivered.
+    listConversationsMock.mockResolvedValueOnce([
+      { ...row("a29"), title: "server-restyled" },
+      ...Array.from({ length: 29 }, (_, i) => row(`b${i}`)),
+    ]);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    const ids = result.current.flat.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length); // no duplicate React keys
+    expect(ids).toHaveLength(59); // 30 known + 29 genuinely new
+    // The known row keeps its local (possibly optimistic) state.
+    expect(result.current.flat.find((c) => c.id === "a29")?.title).toBe(
+      "chat-a29",
+    );
+
+    // Offset tracks rows consumed from the SERVER's ordering (the raw page
+    // length), not the de-duped count — otherwise page three would re-read
+    // a row the server already served.
+    expect(result.current.hasMore).toBe(true);
+    listConversationsMock.mockResolvedValueOnce([]);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(listConversationsMock).toHaveBeenLastCalledWith({
+      limit: 30,
+      offset: 60,
+    });
+  });
+
+  it("togglePin restores pinned AND pinnedAt on server failure (WARP-1917)", async () => {
+    const aPinnedAt = "2026-08-01T10:00:00.000Z";
+    const bPinnedAt = "2026-08-02T10:00:00.000Z";
+    listConversationsMock.mockResolvedValue([
+      { ...row("a", 3), pinned: true, pinnedAt: aPinnedAt },
+      { ...row("b", 2), pinned: true, pinnedAt: bPinnedAt },
+    ]);
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(2));
+
+    setConversationPinnedMock.mockRejectedValueOnce(new Error("boom"));
+    await act(async () => {
+      await result.current.togglePin("a", false);
+    });
+    expect(setConversationPinnedMock).toHaveBeenCalledWith("a", false);
+
+    // Rollback must restore BOTH fields — pinnedAt is what preserves the
+    // ordering among multiple pinned chats after a failed unpin.
+    const a = result.current.flat.find((c) => c.id === "a");
+    const b = result.current.flat.find((c) => c.id === "b");
+    expect(a?.pinned).toBe(true);
+    expect(a?.pinnedAt).toBe(aPinnedAt);
+    expect(b?.pinned).toBe(true);
+    expect(b?.pinnedAt).toBe(bPinnedAt);
+    expect(result.current.error).not.toBeNull();
   });
 
   it("setSearch refetches page one with q and resets pagination", async () => {

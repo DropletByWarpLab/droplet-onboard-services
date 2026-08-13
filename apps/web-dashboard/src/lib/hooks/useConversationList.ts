@@ -121,7 +121,16 @@ export function useConversationList(): {
         ...(search ? { q: search } : {}),
       });
       if (!isMountedRef.current) return;
-      setFlat((prev) => [...prev, ...next]);
+      // De-dupe by id (mirrors mergeRows): a pin/unpin mid-session
+      // (WARP-1917) reorders the server list, so a later page can re-serve
+      // a row an earlier page already delivered. Appending it raw would
+      // duplicate a React key and render the chat twice in its date group.
+      setFlat((prev) => {
+        const known = new Set(prev.map((c) => c.id));
+        return [...prev, ...next.filter((c) => !known.has(c.id))];
+      });
+      // Offset advances by the RAW page length — it tracks the server's
+      // ordering, not the locally de-duped count.
       offsetRef.current += next.length;
       setHasMore(next.length === PAGE_SIZE);
     } catch (err) {
