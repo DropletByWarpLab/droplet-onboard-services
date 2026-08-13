@@ -7,7 +7,7 @@ droplet-onboard-services/       Turbo monorepo
 ├── apps/
 │   ├── orchestrator/           Express + TypeScript (port 3000)
 │   └── web-dashboard/          Next.js + React (port 3001)
-├── services/                   18 Python/TypeScript services, e.g.:
+├── services/                   19 Python/TypeScript services (+ _shared), e.g.:
 │   ├── ai-gateway/             Python FastAPI + LiteLLM (port 8000)
 │   └── erp-connector/          @droplet/erp-connector — imported by the orchestrator
 ├── packages/                   4 shared packages (shared-types, tools-core, …)
@@ -104,7 +104,9 @@ pre-commit install
 npm run test
 ```
 
-Turbo fans this out across every workspace — `apps/*`, `services/*`, and `packages/*` (2 apps, 18 services, 4 packages). Each workspace owns its own suite (pytest for the Python services, Vitest for the TypeScript ones); see the per-workspace `tests/` / `__tests__/` directories for what's covered.
+Turbo only reaches directories that carry a `package.json` — that is what makes something a workspace. Today that is the 2 apps, the 4 `packages/*`, and **4 of the 19 services** (`ai-gateway`, `erp-connector`, `matter-controller`, `mcp-server`): 10 workspaces in total.
+
+The other 15 services have no `package.json`, so `npm run test` never reaches them; they run from their own pytest suites and, where one exists, a per-service leg in `ci.yml`. Each workspace owns its own suite — `ai-gateway`'s `test` script shells to pytest, the TypeScript ones to Vitest; see the per-workspace `tests/` / `__tests__/` directories for what's covered.
 
 ### Individual service tests
 
