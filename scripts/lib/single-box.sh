@@ -282,6 +282,31 @@ EOF
     "$host_src/etc-systemd-system/droplet-openwrt-attach-reapply.service" \
     /etc/systemd/system/droplet-openwrt-attach-reapply.service
 
+  # --- SSH access toggle (WARP-1984) ---------------------------------------
+  # Network → System's "Allow SSH" control. The orchestrator (a container)
+  # writes an intent file; this root-owned path+service pair applies it. No
+  # relay unit here: droplet-ssh-access.service is a plain oneshot, so a
+  # path-triggered start really executes (see the note above on why the
+  # openwrt-attach pair needs one and this does not).
+  #
+  # The state dir is created root-owned but group-writable by the droplet
+  # user's group, so the container can write `intent` while `state` — which
+  # the dashboard trusts as the source of truth — stays root-owned and
+  # unforgeable from inside a container.
+  sudo install -d -m 0775 -o root -g "${DROPLET_GROUP:-droplet}" \
+    /var/lib/droplet-ssh-access
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-ssh-access" \
+    /usr/local/sbin/droplet-ssh-access
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-ssh-access.service" \
+    /etc/systemd/system/droplet-ssh-access.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-ssh-access.path" \
+    /etc/systemd/system/droplet-ssh-access.path
+  # Enable the WATCHER, not the service — the service is meant to run only when
+  # the intent file changes. Deliberately no `systemctl start` of the service
+  # here: installing the toggle must not itself change whether SSH is on.
+  sudo systemctl enable --now droplet-ssh-access.path >/dev/null 2>&1 || true
+  log_success "Installed the SSH-access toggle (droplet-ssh-access.path + service)"
+
   # --- /etc/tmpfiles.d/ and /etc/avahi/services/ --------------------------
   sudo install -m 0644 "$host_src/etc-tmpfiles.d/droplet.conf" \
     /etc/tmpfiles.d/droplet.conf

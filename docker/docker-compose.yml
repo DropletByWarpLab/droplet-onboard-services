@@ -390,6 +390,19 @@ services:
       # git-ignored except for its README, so a dev checkout mounts an
       # effectively empty dir and the surface degrades to "nothing staged".
       - ../data/app-downloads:/opt/droplet/app-downloads:ro
+      # WARP-1984: the SSH-access toggle's intent/state directory. The
+      # orchestrator WRITES `intent` here; root-owned systemd watches it and
+      # writes `state` back (see scripts/host/usr-local-sbin/droplet-ssh-access).
+      # Read-write is required — but note this grants the container no
+      # privilege: the host script parses ONE key out of the file and validates
+      # it against `on|off`, so the worst a compromised orchestrator can do
+      # through this mount is toggle SSH, which is exactly what the dashboard
+      # button does anyway. It can NOT forge `state` (root-owned) and it can
+      # NOT reach systemd. Deliberately a directory bind, not a file bind: a
+      # `git checkout` that replaces a single-FILE bind mount's inode detaches
+      # it from the container (the WARP-1908 failure), and the host script
+      # rewrites `state` by rename on every apply.
+      - /var/lib/droplet-ssh-access:/var/lib/droplet-ssh-access
       # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
       # canonical /data/service-tls path — the Redis client reads ca.pem.
       - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
