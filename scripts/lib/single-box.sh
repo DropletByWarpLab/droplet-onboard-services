@@ -1069,9 +1069,36 @@ EOF
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
   upsert_env DROPLET_TPM_BACKEND mock
-  upsert_env OPENWRT_HOST        127.0.0.1
-  upsert_env OPENWRT_PORT        8181
-  upsert_env OPENWRT_USERNAME    root
+  # WARP-1980: an EXTERNAL edge router must survive a setup re-run.
+  #
+  # `single-box` is a statement about the INFERENCE topology, not about routing:
+  # detect_single_box_mode() decides it from the DRM render-node count and an
+  # Ollama probe, and never looks at the router. These three knobs conflated it
+  # with "this box IS the router" and pointed the routing service at the BUNDLED
+  # droplet-openwrt container.
+  #
+  # A single-box appliance behind a real edge router is the shipping customer
+  # shape (RB5009 + managed switch + AP), and on that box the clobber is silent
+  # and total: the bundled container answers, so nothing errors — the Network
+  # tab simply describes a router nobody is on. Recovering it means re-writing
+  # both .env files AND re-enrolling the droplet-ai credential by hand.
+  #
+  # Preserve an operator-configured external host, exactly as the LLM_MODEL
+  # guard above preserves a flipped runtime. Loopback (or unset — a fresh
+  # provision) means the bundled container, the right default for a flat
+  # single-box. This preserves intent; it does not auto-detect a router.
+  local _current_openwrt_host
+  _current_openwrt_host="$(grep -E '^OPENWRT_HOST=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  case "$_current_openwrt_host" in
+    ''|127.0.0.1|localhost|::1)
+      upsert_env OPENWRT_HOST        127.0.0.1
+      upsert_env OPENWRT_PORT        8181
+      upsert_env OPENWRT_USERNAME    root
+      ;;
+    *)
+      log_info "single-box env: external edge router configured (OPENWRT_HOST=$_current_openwrt_host) — preserving OPENWRT_HOST/PORT/USERNAME instead of re-pointing at the bundled container"
+      ;;
+  esac
   upsert_env ROUTING_MODE        real
   # Warning-free droplet.local: on the single-box shape this box IS the
   # router — its dnsmasq answers the split-horizon FQDN for every DHCP
