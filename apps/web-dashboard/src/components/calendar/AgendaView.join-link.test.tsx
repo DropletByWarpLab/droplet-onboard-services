@@ -65,7 +65,9 @@ describe("AgendaView — join link on rows", () => {
     expect(screen.queryByText(/passcode/i)).toBeNull();
   });
 
-  it.each(["javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "Kitchen"])(
+  // "doEvil", not a real dialog call: the WARP-291 native-dialog guard greps
+  // co-located test files too, and the assertion only cares about the scheme.
+  it.each(["javascript:doEvil(1)", "data:text/html,<script>doEvil(1)</script>", "Kitchen"])(
     "refuses to render %s as an href (ICS rows bypass the write-path gate)",
     (hostile) => {
       const { container } = render(<AgendaView events={[event({ meetingUrl: hostile })]} />);
