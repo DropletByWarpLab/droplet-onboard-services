@@ -190,7 +190,7 @@ describe("registerBleAtProcessStart", () => {
       expect(result.bleCommissioning).toBe(false);
       expect(result.reason).toMatch(/not powered/i);
       // Actionable: the reason must point at the fix, not just the fact.
-      expect(result.reason).toMatch(/btmgmt power on|droplet-bt-power/i);
+      expect(result.reason).toMatch(/hciconfig hci0 up|droplet-bt-power/i);
       expect(env.registrations.size).toBe(0);
       expect(env.deleteCalls).toHaveLength(1);
       expect(env.deleteCalls[0].instance).toBeInstanceOf(FakeNodeJsBle);

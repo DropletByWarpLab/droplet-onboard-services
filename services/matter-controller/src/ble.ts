@@ -211,7 +211,7 @@ export async function registerBleAtProcessStart(
     environment.delete(Ble, instance);
     const reason =
       `Bluetooth adapter hci${hciId} is present but not powered — BLE commissioning disabled, IP-only. ` +
-      `Run 'btmgmt power on' or install droplet-bt-power.service (scripts/setup.sh Bluetooth prep, WARP-1939)`;
+      `Run 'hciconfig hci${hciId} up' or install droplet-bt-power.service (scripts/setup.sh Bluetooth prep, WARP-1939)`;
     logger.warn(reason);
     return { bleCommissioning: false, reason };
   }

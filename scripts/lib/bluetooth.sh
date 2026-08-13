@@ -109,7 +109,13 @@ After=multi-user.target
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=120
-ExecStart=/bin/sh -c 'rfkill unblock bluetooth 2>/dev/null || true; i=0; while [ $i -lt 20 ]; do if btmgmt power on >/dev/null 2>&1; then exit 0; fi; i=$((i+1)); sleep 3; done; echo "no Bluetooth adapter came up — matter-controller runs IP-only" >&2; exit 0'
+# hciconfig, NOT btmgmt: `btmgmt power on` HANGS when stdin is not a TTY
+# (verified on the box — rc=124 under `timeout 6 … </dev/null`, instant
+# interactively), and a systemd unit is exactly the no-TTY case; the
+# first install of this unit timed out at TimeoutStartSec and failed on
+# precisely that. `$$` because systemd expands `$` in ExecStart before
+# the shell ever runs.
+ExecStart=/bin/sh -c 'rfkill unblock bluetooth 2>/dev/null || true; i=0; while [ $$i -lt 20 ]; do if hciconfig hci0 up >/dev/null 2>&1; then exit 0; fi; i=$$((i+1)); sleep 3; done; echo "no Bluetooth adapter came up — matter-controller runs IP-only" >&2; exit 0'
 
 [Install]
 WantedBy=multi-user.target
@@ -124,9 +130,10 @@ UNIT
     sudo rfkill unblock bluetooth 2>/dev/null || true
     log_success "  rfkill: bluetooth unblocked"
   fi
-  # btmgmt, NOT bluetoothctl: bluetoothctl needs the (now disabled)
-  # daemon; btmgmt drives the kernel mgmt socket directly.
-  if sudo btmgmt power on >/dev/null 2>&1; then
+  # hciconfig, NOT bluetoothctl (needs the now-disabled daemon) and NOT
+  # btmgmt (`btmgmt power on` hangs when stdin is not a TTY — and this
+  # script runs under automation as often as under a human).
+  if sudo hciconfig hci0 up >/dev/null 2>&1; then
     log_success "  Bluetooth adapter powered on"
   else
     log_warn "  No powered Bluetooth adapter found — matter-controller will run IP-only"
