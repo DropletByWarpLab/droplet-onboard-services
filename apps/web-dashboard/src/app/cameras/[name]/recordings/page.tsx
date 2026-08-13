@@ -90,31 +90,54 @@ export default function RecordingsPage() {
 
   const summaryHook = useRecordingsSummary(name || null);
 
-  // Snap to the most recent hour with activity on first load.
+  // Snap to the most recent hour that actually HAS footage.
+  //
+  // The old rule was `events > 0 || motion > 0`, which is the wrong
+  // question twice over: a camera recording 24/7 over a quiet scene has
+  // neither, so a full hour was skipped; and combined with the summary's
+  // hour bug it landed on an hour with no recordings at all, whose
+  // playback request Frigate answered with a 404 (WARP-1958).
+  // `duration` is the only field that means "there is something here".
   useEffect(() => {
     if (hour !== null) return;
     if (summaryHook.isLoading) return;
     const dayEntry = summaryHook.days.find((d) => d.day === day);
     if (!dayEntry) return;
-    const withEvents = dayEntry.hours.filter((h) => h.events > 0 || h.motion > 0);
-    if (withEvents.length === 0) return;
-    const latest = withEvents.reduce((acc, h) => (h.hour > acc.hour ? h : acc));
+    const withFootage = dayEntry.hours.filter((h) => h.duration > 0);
+    if (withFootage.length === 0) return;
+    const latest = withFootage.reduce((acc, h) => (h.hour > acc.hour ? h : acc));
     setHour(latest.hour);
   }, [day, summaryHook.days, summaryHook.isLoading, hour]);
 
   // [after, before] for the currently-selected hour.
+  //
+  // Clamped to `now`: footage cannot exist ahead of the clock, and asking
+  // for it yields an empty segment list plus a 404 on the VOD manifest,
+  // which the player renders as "we couldn't load that recording" — an
+  // empty hour presented as a broken camera. The orchestrator clamps too;
+  // doing it here as well means we never even issue the request.
   const range = useMemo(() => {
-    if (hour === null) return { after: null as number | null, before: null as number | null };
+    const empty = { after: null as number | null, before: null as number | null };
+    if (hour === null) return empty;
     const [y, m, d] = day.split("-").map(Number);
     const start = Math.floor(new Date(y, m - 1, d, hour, 0, 0).getTime() / 1000);
-    return { after: start, before: start + PLAYBACK_WINDOW_SEC };
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (start >= nowSec) return empty;
+    return { after: start, before: Math.min(start + PLAYBACK_WINDOW_SEC, nowSec) };
   }, [day, hour]);
 
   const rangeHook = useRecordingsRange(name || null, range.after, range.before);
 
+  // An hour with no segments is EMPTY, not broken. Loading the player
+  // into such a range makes Frigate 404 the manifest and hls.js raise a
+  // fatal error, which the operator reads as "the camera is down" — the
+  // single most misleading thing this page did (WARP-1958). Hold the
+  // player back until we know there is something to play.
+  const hasFootage = rangeHook.segments.length > 0;
+  const rangeResolved = range.after !== null && range.before !== null;
   const playbackUrl =
-    range.after !== null && range.before !== null
-      ? getRecordingHlsUrl(name, range.after, range.before)
+    rangeResolved && hasFootage
+      ? getRecordingHlsUrl(name, range.after!, range.before!)
       : null;
 
   // Track the player's current time so the scrubber playhead can move.
@@ -278,12 +301,39 @@ export default function RecordingsPage() {
                 className="w-full h-full object-contain"
               />
             ) : (
-              <div className="absolute inset-0 flex items-center justify-center text-white/70">
-                <p className="type-subheadline">
-                  {summaryHook.isLoading
-                    ? "Loading recordings…"
-                    : "Pick an hour on the timeline to start playback"}
-                </p>
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-6 text-center text-white/70">
+                {summaryHook.isLoading || rangeHook.isLoading ? (
+                  <p className="type-subheadline">Loading recordings…</p>
+                ) : rangeHook.error ? (
+                  // Only a genuine failure to reach the recorder is an
+                  // error. Everything below is a normal, calm state.
+                  <>
+                    <p className="type-subheadline">Couldn&apos;t reach the recorder</p>
+                    <p className="type-caption-1 text-white/50">
+                      The camera may be fine — we couldn&apos;t load its recordings
+                      just now. Try refreshing.
+                    </p>
+                  </>
+                ) : hour === null ? (
+                  <p className="type-subheadline">
+                    Pick an hour on the timeline to start playback
+                  </p>
+                ) : !rangeResolved ? (
+                  <>
+                    <p className="type-subheadline">That hour hasn&apos;t happened yet</p>
+                    <p className="type-caption-1 text-white/50">
+                      Pick an earlier hour on the timeline.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="type-subheadline">No footage kept for this hour</p>
+                    <p className="type-caption-1 text-white/50">
+                      Nothing was recorded, or it has passed this camera&apos;s
+                      retention window. Check Settings to keep footage for longer.
+                    </p>
+                  </>
+                )}
               </div>
             )}
             {playerError && (

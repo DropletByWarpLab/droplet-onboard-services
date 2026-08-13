@@ -113,9 +113,25 @@ export interface RecordingDay {
 export interface RecordingHour {
   hour: number; // 0-23
   events: number;
+  /**
+   * Seconds of footage actually retained for this hour, 0–3600.
+   *
+   * This — not `motion` — is what says "there is something to play here".
+   * A camera recording 24/7 over a static scene reports a full 3600s with
+   * `motion: 0`, so anything keyed on motion alone renders a fully-recorded
+   * hour identically to an empty one (WARP-1959).
+   */
   duration: number;
-  /** 0–100 motion score for the hour — drives the timeline heat-map. */
+  /**
+   * Frigate's motion activity count for the hour. **Unbounded, not a
+   * percentage** — real consecutive hours on the box reported 11, 3,
+   * 954, 160, 0, 774. Scale against the observed range when rendering;
+   * clamping it to 0–100 flattens every busy hour into one tier.
+   */
   motion: number;
+  /** Tracked-object count for the hour. Frigate reports it; we kept
+   *  dropping it, which cost the timeline its only object signal. */
+  objects: number;
 }
 
 /**

@@ -467,11 +467,37 @@ export async function markReviewViewed(reviewId: string): Promise<void> {
  * summaries (motion %, event count). Useful to colour the timeline
  * scrubber without paying for the full segment list.
  */
+/**
+ * Frigate accepts an IANA zone on the summary endpoint and buckets days
+ * and hours in it. Without one it buckets in UTC, which silently
+ * disagrees with a browser that builds its playback ranges in local time
+ * (WARP-1958). We validate before forwarding: an unknown zone makes
+ * Frigate fall back to UTC, which is precisely the mismatch we are
+ * closing, so a bad value must be rejected here rather than quietly
+ * producing buckets on a different clock than the caller assumes.
+ */
+export function isValidIanaTimezone(tz: unknown): tz is string {
+  if (typeof tz !== "string" || tz.length === 0 || tz.length > 64) return false;
+  // Reject anything that isn't zone-shaped before handing it to Intl —
+  // keeps the failure cheap and the value safe to put in a query string.
+  if (!/^[A-Za-z][A-Za-z0-9+_\-]*(\/[A-Za-z0-9+_\-]+)*$/.test(tz)) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchRecordingsSummary(
   cameraName: string,
+  timezone?: string,
 ): Promise<unknown[]> {
+  const qs = isValidIanaTimezone(timezone)
+    ? `?${new URLSearchParams({ timezone }).toString()}`
+    : "";
   const resp = await fetch(
-    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings/summary`,
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings/summary${qs}`,
     { signal: timeout() },
   );
   if (!resp.ok) throw new Error(`Frigate recordings summary: ${resp.status}`);
@@ -775,8 +801,25 @@ export function buildVodSegmentUrl(
 }
 
 /** Fetch and return the body of an HLS playlist (master or media). */
+/**
+ * Thrown when Frigate has no recordings covering the requested window.
+ *
+ * Frigate answers a VOD request for an empty range with a 404, which is
+ * not an upstream failure — it is the honest answer "nothing was kept
+ * for that time". Collapsing it into a 502 is what made an empty hour
+ * render as a broken camera (WARP-1958), so it gets its own type and the
+ * route maps it to 404.
+ */
+export class NoRecordingsInRangeError extends Error {
+  constructor(message = "No recordings in the requested range") {
+    super(message);
+    this.name = "NoRecordingsInRangeError";
+  }
+}
+
 export async function fetchHlsPlaylist(url: string): Promise<string> {
   const resp = await fetch(url, { signal: timeout(15_000) });
+  if (resp.status === 404) throw new NoRecordingsInRangeError();
   if (!resp.ok) throw new Error(`HLS playlist: ${resp.status}`);
   return resp.text();
 }
