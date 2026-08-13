@@ -31,6 +31,10 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/Toast";
 import { Meter, Badge, type BadgeKind } from "@/components/shell/primitives";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+// WARP-1915: typed-name friction for the reclaim wipe — the same
+// DestructiveConfirm the Settings Danger zone puts in front of a reformat.
+// One primitive for every type-to-confirm destructive flow, never a fork.
+import { DestructiveConfirm } from "@/components/settings/DestructiveConfirm";
 import { translateError } from "@/lib/friendly-errors";
 import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
 // Shared destructive-flow helpers (same ones the Settings Danger zone reuses):
@@ -44,6 +48,7 @@ import {
   levelLabel,
   levelBlurb,
   poolStatusBadge,
+  reclaimPoolImpact,
   worstPoolAlarm,
 } from "./pool-display";
 // WARP-1337: the display-name chain (override → displayName → label →
@@ -744,22 +749,42 @@ export function DrivesPanel() {
         triggerRef={destructiveTriggerRef}
       />
 
-      {/* WARP-1048 — reclaim a pool-member disk: break it out of the pool, then
-          erase + add it on its own. Names the disk + size so the owner verifies
-          the target. */}
-      <ConfirmDialog
+      {/* WARP-1048 / WARP-1915 — reclaim a pool-member disk: break it out of
+          the pool, then erase + add it on its own. A wipe deserves more than a
+          one-click confirm (QA: the red Reclaim read as reversible), so this
+          uses the Settings Danger zone's typed-name DestructiveConfirm: the
+          owner types the drive's name to unlock the action, and the accessory
+          line spells out the pool impact — a RAID 1 mirror loses the second
+          copy of the files. Names the disk + size so the owner verifies the
+          target. Success/error both close + toast in doReclaim (same contract
+          as adopt/format — a failed confirm token is not retryable). */}
+      <DestructiveConfirm
         open={reclaimPending !== null}
         onConfirm={doReclaim}
         onCancel={() => setReclaimPending(null)}
         title="Reclaim this drive from the pool?"
-        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. Your pool will have one less drive and won't be protected against a drive failure until you add another. This can't be undone — make sure anything you want is backed up first."
-        confirmLabel="Reclaim & erase"
-        confirmedIdentifier={
+        consequence={
+          reclaimPending
+            ? `This removes ${diskTitle(reclaimPending.disk)} from your storage pool, permanently erases everything on it, and sets it up as a drive of its own. This can't be undone — back up anything you want to keep first.`
+            : ""
+        }
+        affectedSummary={
           reclaimPending
             ? `${diskTitle(reclaimPending.disk)} · ${fmtBytes(reclaimPending.disk.size_bytes)} · ${reclaimPending.disk.name}`
             : ""
         }
-        variant="destructive"
+        confirmPhrase={reclaimPending ? diskTitle(reclaimPending.disk) : ""}
+        confirmLabel="Reclaim & erase"
+        progressMessage="Reclaiming the drive — this can take a moment. Keep this open until it finishes."
+        accessory={
+          reclaimPending ? (
+            <p className="type-footnote" style={{ color: "var(--text)" }}>
+              {reclaimPoolImpact(
+                pools.find((p) => p.device === reclaimPending.disk.md)?.level,
+              )}
+            </p>
+          ) : undefined
+        }
         triggerRef={destructiveTriggerRef}
       />
     </div>
@@ -777,7 +802,8 @@ function diskTitle(d: DiskInfo): string {
 
 /** One available (unmounted) disk card. States:
  *    foreign / available — admin gets the gated "Erase & adopt" action
- *    pool_member         — admin gets the gated "Reclaim" action (WARP-1048):
+ *    pool_member         — admin gets the gated "Reclaim & erase" action
+ *                          (WARP-1048, relabelled WARP-1915):
  *                          break it out of the pool, then adopt it. (Adopting a
  *                          member directly EBUSYs; reclaim detaches first.) */
 function AvailableDiskCard({
@@ -807,7 +833,9 @@ function AvailableDiskCard({
   const blurb =
     disk.state === "pool_member"
       ? reclaimable
-        ? "Part of your storage pool. Reclaim it to remove it from the pool and use it on its own."
+        ? // WARP-1915: say what reclaiming actually does BEFORE the click —
+          // it removes the drive from the pool AND erases everything on it.
+          "Part of your storage pool. Reclaiming removes it from the pool and erases everything on it, so it can be used on its own."
         : "Part of your storage pool — manage it from the pool above."
       : disk.state === "foreign"
         ? "Holds files from another system. Erase it to add its space to your Droplet."
@@ -857,7 +885,9 @@ function AvailableDiskCard({
             disabled={busy}
             className="btn danger sm flex-none whitespace-nowrap"
           >
-            {busy ? "Working…" : reclaimable ? "Reclaim" : "Erase & adopt"}
+            {/* WARP-1915: the label names both halves of the destructive
+                action — mirrors "Erase & adopt"; never a bare "Reclaim". */}
+            {busy ? "Working…" : reclaimable ? "Reclaim & erase" : "Erase & adopt"}
           </button>
         </div>
       )}
