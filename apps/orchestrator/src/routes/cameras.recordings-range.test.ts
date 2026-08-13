@@ -129,6 +129,16 @@ import { NoRecordingsInRangeError } from "../services/frigate.client.js";
 function makeApp() {
   const app = express();
   app.use(express.json());
+  // WARP-1962: these harnesses stub the role gate to a pass-through and
+  // never set `req.user`. In production the auth middleware ALWAYS
+  // populates it (a real session, or a dev owner when AUTH_ENABLED=false),
+  // so "no principal at all" is a test artefact, not a reachable state.
+  // The per-camera guard fails CLOSED on an unknown principal by design —
+  // so present one, exactly as production would.
+  app.use((req, _res, next) => {
+    req.user = { id: "u-test-owner", username: "owner", displayName: "Owner", role: "owner" };
+    next();
+  });
   app.use("/api", createCamerasRouter({} as never));
   return app;
 }

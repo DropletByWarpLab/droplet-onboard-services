@@ -250,7 +250,15 @@ function makeApp(prisma: ReturnType<typeof makePrisma>) {
   // The confirm handler requires an authenticated user (userId); the role gate
   // is stubbed pass-through, so inject a user for every request.
   app.use((req, _res, next) => {
-    (req as unknown as { user: { id: string } }).user = { id: "owner-1" };
+    // WARP-1962: a ROLE is required as well as an id. The per-camera
+    // access guard resolves scope from the principal's role, and this
+    // injector previously supplied an id alone — a shape the real auth
+    // middleware never produces, and which the guard correctly reads as
+    // "unknown principal" and denies.
+    (req as unknown as { user: { id: string; role: string } }).user = {
+      id: "owner-1",
+      role: "owner",
+    };
     next();
   });
   app.use("/api", createCamerasRouter(prisma as never));
