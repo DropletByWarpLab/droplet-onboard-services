@@ -212,13 +212,15 @@ describe("Calendar event detail — Join link", () => {
     });
     openDetail();
 
-    const join = screen.getByRole("link", { name: /Join Zoom/ });
+    // Scoped to the sheet: since WARP-1905 the agenda row behind it ALSO
+    // renders a Join anchor, so an unscoped query would match two.
+    const sheet = screen.getByRole("dialog");
+    const join = within(sheet).getByRole("link", { name: /Join Zoom/ });
     expect(join.getAttribute("href")).toBe(ZOOM);
     expect(join.getAttribute("target")).toBe("_blank");
     expect(join.getAttribute("rel")).toBe("noopener noreferrer");
     // Physical location survives alongside it, in the SAME sheet — the
     // agenda row behind the sheet also renders the location text.
-    const sheet = join.closest('[role="dialog"]') as HTMLElement;
     expect(within(sheet).getByText("Living Room")).toBeTruthy();
   });
 
