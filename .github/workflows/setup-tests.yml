@@ -25,6 +25,8 @@ on:
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
+      # WARP-1947: single-box derives the overlay home endpoint IP
+      - "tests/wireguard-home-endpoint.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -54,6 +56,8 @@ on:
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
+      # WARP-1947: single-box derives the overlay home endpoint IP
+      - "tests/wireguard-home-endpoint.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -126,6 +130,13 @@ jobs:
         # on every orchestrator boot. Also pins that a setup re-run can never
         # flip or un-flip an existing box. Pure bash.
         run: bash tests/dmr-default-provisioning.test.sh
+      - name: Run single-box overlay home-endpoint derivation tests
+        # WARP-1947: single-box must DERIVE WIREGUARD_HOME_ENDPOINT_HOST from the
+        # box's default route so an approved overlay device's profile carries a
+        # reachable `lan` candidate. The live box shipped a dead 192.168.1.87 that
+        # shadowed request-time discovery; deriving + overwriting every run keeps
+        # it correct across DHCP changes and a factory reset. Pure bash, no Docker.
+        run: bash tests/wireguard-home-endpoint.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean
