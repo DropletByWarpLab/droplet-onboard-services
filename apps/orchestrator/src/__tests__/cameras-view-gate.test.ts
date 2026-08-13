@@ -139,10 +139,24 @@ vi.mock("../services/camera-settings.service.js", () => ({
 import { createCamerasRouter, createCameraSharePublicRouter } from "../routes/cameras.js";
 import { isRoleGuard } from "../middleware/auth.js";
 
+// WARP-1962: the per-camera guard resolves grants from the DB, so the stub
+// has to answer. Without `cameraAccessGrant` the guard fails CLOSED with a
+// 503 — and the `family` cases below assert `not.toBe(403)`, which a 503
+// satisfies. They would have kept passing while proving nothing about the
+// role gate, which is precisely the shape of test this repo has been bitten
+// by. Grant `family` every camera these cases touch so a 403 can only come
+// from the ROLE tier, which is what this file is about.
+const GRANTED_TO_FAMILY = ["front", "front_door", "driveway", "bedroom"];
+
 const prismaStub = {
   camera: {
     findMany: vi.fn().mockResolvedValue([]),
     findUnique: vi.fn().mockResolvedValue(null),
+  },
+  cameraAccessGrant: {
+    findMany: vi.fn(async () =>
+      GRANTED_TO_FAMILY.map((name) => ({ camera: { name } })),
+    ),
   },
 } as never;
 
@@ -301,5 +315,45 @@ describe("the standing invariant: no camera route ships ungated", () => {
     expect(cameraRoutes().map((r) => r.path)).not.toContain(
       "/cameras/clips/share/:filename",
     );
+  });
+});
+
+describe("WARP-1962: every camera-scoped route is per-camera guarded too", () => {
+  function nameRoutes() {
+    const router = createCamerasRouter(prismaStub) as unknown as {
+      stack: Array<{ route?: { path: string; stack: Array<{ handle: { name?: string } }> } }>;
+    };
+    return router.stack
+      .map((l) => l.route)
+      .filter((r): r is { path: string; stack: Array<{ handle: { name?: string } }> } =>
+        Boolean(r) && r!.path.startsWith("/cameras/:name"),
+      );
+  }
+
+  it("inspects a meaningful number of :name routes", () => {
+    // Same anti-vacuity guard as the role sweep: an empty stack would make
+    // the assertion below pass while checking nothing.
+    expect(nameRoutes().length).toBeGreaterThan(15);
+  });
+
+  it("puts the per-camera access guard on every route naming a camera", () => {
+    // Role tiers say "may you watch recordings"; this says "may you watch
+    // THIS camera". A route with the first and not the second still leaks
+    // the bedroom to someone granted only the front door.
+    const missing = nameRoutes()
+      .filter((r) => !r.stack.some((h) => h.handle?.name === "cameraAccessGuard"))
+      .map((r) => r.path);
+    expect(missing).toEqual([]);
+  });
+
+  it("orders the guards role-first, then scope", () => {
+    // The role check is a pure in-memory set lookup; the scope check hits
+    // the database. A guest must be rejected without costing a query.
+    for (const r of nameRoutes()) {
+      const roleIdx = r.stack.findIndex((h) => isRoleGuard(h.handle));
+      const scopeIdx = r.stack.findIndex((h) => h.handle?.name === "cameraAccessGuard");
+      expect(roleIdx).toBeGreaterThanOrEqual(0);
+      expect(scopeIdx).toBeGreaterThan(roleIdx);
+    }
   });
 });

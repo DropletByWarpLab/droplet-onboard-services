@@ -837,6 +837,38 @@ model Camera {
 
   notifications  CameraNotificationPref[]
   groupMembers   CameraGroupMember[]
+  accessGrants   CameraAccessGrant[]
+}
+
+/// WARP-1962 — who may see THIS camera.
+///
+/// Role tiers (WARP-1961) answer "may this person watch recordings at all".
+/// They cannot answer "may this person watch THE BEDROOM", which is the
+/// actual household question: a `family` member who should see the front
+/// door and the driveway otherwise sees every camera in the house.
+///
+/// Deliberately a GRANT table, not a deny-list, and access is an explicit
+/// ROW rather than something inferred from a null — same rule that made
+/// `Camera.retentionMode` an enum instead of "budget is null = manual".
+///
+/// The default for a camera with no grants is therefore: owner/admin always
+/// (they administer the appliance), everyone else DENIED until granted. So
+/// adding a camera never silently exposes it to the whole household — the
+/// safe direction to be wrong in.
+model CameraAccessGrant {
+  id        String   @id @default(uuid())
+  userId    String
+  cameraId  String
+  createdAt DateTime @default(now())
+  /// User id of whoever granted it, for the audit trail. Nullable so a
+  /// seed or migration-created grant doesn't have to invent an actor.
+  grantedBy String?
+
+  camera    Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, cameraId])
+  @@index([userId])
+  @@index([cameraId])
 }
 
 /// WARP-1851 — how a camera's retention window is decided.
