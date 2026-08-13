@@ -49,6 +49,33 @@ def test_managed_birdseye_payload_is_enabled_continuous():
     assert BIRDSEYE_CONFIG == {"enabled": True, "mode": "continuous"}
 
 
+def test_ci_path_filter_wires_frigate_config_to_this_suite():
+    """``test_baseline_frigate_config_enables_birdseye`` reads
+    ``docker/frigate/config.yml`` — so a PR editing ONLY that file must
+    trigger this pytest leg. Without ``docker/frigate/**`` in the
+    camera-discovery paths-filter, the baseline guard structurally cannot
+    fail pre-merge on the exact class of change it guards against (it
+    would only fire on the push-to-main canary, after the regression
+    lands).
+    """
+    ci = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    filters_blocks = [
+        step["with"]["filters"]
+        for job in ci["jobs"].values()
+        for step in (job.get("steps") or [])
+        if str(step.get("uses", "")).startswith("dorny/paths-filter")
+    ]
+    assert len(filters_blocks) == 1, "expected exactly one dorny/paths-filter step in ci.yml"
+    camera_discovery = yaml.safe_load(filters_blocks[0])["camera-discovery"]
+    assert "services/camera-discovery/**" in camera_discovery
+    assert "docker/frigate/**" in camera_discovery, (
+        "camera-discovery's CI paths-filter must include docker/frigate/** — "
+        "this suite's baseline birdseye guard reads docker/frigate/config.yml"
+    )
+
+
 # --- Runtime convergence (ensure_birdseye) ---
 
 
