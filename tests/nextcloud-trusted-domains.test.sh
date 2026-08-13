@@ -414,6 +414,62 @@ else
   fail "drift aborted the hook (rc=$LAST_RC) — it must warn, not fail the boot"
 fi
 
+# ── (7b) WILDCARD tokens must actually be WRITTEN (WARP-1981) ──
+#
+# THE TEST THAT WAS MISSING. WARP-1973 put RFC1918 wildcards in compose and
+# asserted they were present IN THE COMPOSE FILE. Nothing drove one through
+# this reconcile, and this reconcile rejected every one of them as "malformed"
+# before reporting "already converged — nothing to do". The container env
+# carried them; the STORED list, which is the only one Nextcloud enforces,
+# never did. Measured on the box: 18 skip lines followed by a success message.
+#
+# Wildcards are a supported Nextcloud feature — isTrustedDomain() expands `*`
+# to [-.a-zA-Z0-9]* exactly so `192.168.*` matches a range. Testing the
+# declaration is not testing the code path that consumes it.
+CASE_STORED="localhost
+nextcloud" CASE_ENV_DOMAINS="localhost nextcloud 192.168.* 10.* 172.20.*" run_case
+wrote="$(cut -d' ' -f2- < "$WORK/state/writes" | tr '
+' ' ')"
+missing=""
+for w in '192.168.*' '10.*' '172.20.*'; do
+  case " $wrote " in *" $w "*) ;; *) missing="$missing $w" ;; esac
+done
+if [ -z "$missing" ]; then
+  pass "wildcard tokens are WRITTEN to trusted_domains (192.168.*, 10.*, 172.20.*)"
+else
+  fail "wildcard tokens were DISCARDED:$missing — the reconcile drops what compose declares, so the RFC1918 coverage never reaches a box (wrote: $wrote)"
+fi
+if ! grep -qi "malformed trusted-domain token '192.168" "$WORK/last.err"; then
+  pass "a wildcard is not reported as malformed"
+else
+  fail "the validator still calls a wildcard malformed — it is stricter than Nextcloud, which supports wildcards"
+fi
+
+# A wildcard with no alphanumeric character matches effectively ANY Host and
+# would turn the allowlist into accept-anything. Permitting `*` must not open
+# that door — this is the counterweight to the case above.
+for bad in '*' '*.*' '.*'; do
+  CASE_STORED="localhost" CASE_ENV_DOMAINS="localhost $bad" run_case
+  bad_wrote="$(cut -d' ' -f2- < "$WORK/state/writes" | tr '
+' ' ')"
+  case " $bad_wrote " in
+    *" $bad "*)
+      fail "the bare wildcard '$bad' was WRITTEN — that trusts every Host and defeats the allowlist entirely"
+      ;;
+    *)
+      pass "the bare wildcard '$bad' is refused"
+      ;;
+  esac
+done
+
+# Refusing must stay loud and non-fatal.
+CASE_STORED="localhost" CASE_ENV_DOMAINS="localhost *" run_case
+if grep -q "HOOK_REACHED_END" "$WORK/last.out" && grep -qiE "REFUSING trusted-domain token|malformed trusted-domain token" "$WORK/last.err"; then
+  pass "a refused token is reported on stderr and does not abort the boot hook"
+else
+  fail "refusal was silent or fatal (rc=$LAST_RC)"
+fi
+
 # (8) The env var being entirely absent must not explode under `set -u`.
 CASE_STORED="$STORED_STALE" run_case
 if grep -q "HOOK_REACHED_END" "$WORK/last.out" && [ "$LAST_RC" -eq 0 ] && [ ! -s "$WORK/state/writes" ]; then

@@ -327,9 +327,36 @@ reconcile_trusted_domains() {
   for td_want in "$@"; do
     # Belt-and-braces: never write something that is not a hostname. A malformed
     # token in the env would otherwise land in the trust list verbatim.
+    #
+    # WARP-1981 — `*` IS permitted, and its absence here was a real outage of a
+    # feature. Nextcloud supports wildcard entries: isTrustedDomain() expands
+    # `*` to [-.a-zA-Z0-9]* precisely so `192.168.*` can match a whole range.
+    # This validator was stricter than the thing it feeds, so every RFC1918
+    # wildcard WARP-1973 added to compose was rejected here as "malformed" and
+    # the reconcile then reported "already converged — nothing to do". The
+    # container env carried them; the STORED list, which is the one Nextcloud
+    # enforces, never did. Observed on the box: 18 skip lines followed by a
+    # success message.
+    #
+    # Still a validator, in two ways that matter:
+    #   1. the character set is closed — anything outside it is refused, so a
+    #      space, quote, slash or shell metacharacter still cannot land in the
+    #      trust list;
+    #   2. a token needs at least one ALPHANUMERIC character. That is what
+    #      keeps `*`, `*.*`, `.*` and `-` out. A bare wildcard would match every
+    #      Host and silently turn this allowlist into accept-anything — the
+    #      exact failure the list exists to prevent, and a far worse outcome
+    #      than the over-strict rule being fixed here.
     case "$td_want" in
-      ""|*[!a-zA-Z0-9._:-]*)
+      ""|*[!a-zA-Z0-9._:*-]*)
         echo "[droplet] WARP-1688: skipping malformed trusted-domain token '${td_want}'" >&2
+        continue
+        ;;
+    esac
+    case "$td_want" in
+      *[a-zA-Z0-9]*) ;;
+      *)
+        echo "[droplet] WARP-1981: REFUSING trusted-domain token '${td_want}' — it has no alphanumeric character, so it would match effectively any Host and defeat the allowlist" >&2
         continue
         ;;
     esac
