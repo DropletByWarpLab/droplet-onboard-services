@@ -156,6 +156,57 @@ export default function RecordingsPage() {
     return Math.min(1, Math.max(0, offset));
   }, [hour, currentTime, range.after]);
 
+  /**
+   * Seconds-since-midnight of "now" — but only when the visible day IS
+   * today. On any past day every hour has happened, and greying the tail
+   * of e.g. last Tuesday would be a lie.
+   */
+  const nowSecOfDay = useMemo(() => {
+    const now = new Date();
+    if (localDayString(now) !== day) return null;
+    return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+  }, [day]);
+
+  /**
+   * Oldest day the summary still knows about — a good proxy for "how far
+   * back can I actually scrub". Lets an empty morning read as *outside
+   * retention* rather than *broken*, which is the distinction the old page
+   * could not make at all.
+   */
+  const retentionOldestDay = useMemo(() => {
+    const days = summaryHook.days.map((d) => d.day).filter(Boolean).sort();
+    return days.length > 0 ? days[0] : null;
+  }, [summaryHook.days]);
+
+  /**
+   * Move playback to a point in the day.
+   *
+   * Selecting an hour re-keys the HLS source, so the seek has to happen
+   * once the new media is live rather than against the outgoing one. We
+   * stash the offset and apply it when the player reports it is ready.
+   */
+  const pendingSeekRef = useRef<number | null>(null);
+  const handleScrubTo = (secOfDay: number) => {
+    const targetHour = Math.floor(secOfDay / 3600);
+    const offsetInHour = secOfDay - targetHour * 3600;
+    if (hour === targetHour) {
+      playerRef.current?.seek(offsetInHour);
+    } else {
+      pendingSeekRef.current = offsetInHour;
+      setHour(targetHour);
+    }
+  };
+
+  // Apply a queued seek once the new hour's playlist is mounted.
+  useEffect(() => {
+    if (pendingSeekRef.current === null) return;
+    if (!playbackUrl) return;
+    const offset = pendingSeekRef.current;
+    pendingSeekRef.current = null;
+    const id = window.setTimeout(() => playerRef.current?.seek(offset), 0);
+    return () => window.clearTimeout(id);
+  }, [playbackUrl]);
+
   // ---------- Export ----------
   //
   // Export prefers the operator's drag selection (minute precision)
@@ -384,6 +435,9 @@ export default function RecordingsPage() {
             onSelectHour={setHour}
             selection={selection}
             onSelectionChange={setSelection}
+            onScrubTo={handleScrubTo}
+            nowSecOfDay={nowSecOfDay}
+            retentionOldestDay={retentionOldestDay}
           />
         </div>
 
