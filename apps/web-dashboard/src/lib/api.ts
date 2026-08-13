@@ -2263,9 +2263,39 @@ export async function confirmNetworkCommand(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirmationToken: token, operation, entityId }),
   });
-  if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
+  if (!res.ok) throw await confirmFailure(res);
   const body = await res.json();
   return { operationId: body?.operationId ?? null };
+}
+
+/**
+ * WARP-1907 — build the error for a refused confirm WITHOUT discarding the body.
+ *
+ * This layer used to read only `res.status`, which made the guard escalation
+ * unreachable on the path that actually runs. A jack write is always classified
+ * Tier 2, so the mint POST returns 202 and the 409 `PORT_WRITE_REFUSED` — the
+ * race where a jack gains a cable between the cached read and the click — can
+ * only ever arrive HERE, on the confirm. `routerSetPortEnabled` translates that
+ * code, but it only ever sees the mint response, so the panel met a bare
+ * `Error`, `err instanceof RouterPortRefusedError` never matched, and the
+ * documented second confirm never opened.
+ *
+ * Shared with the switch, Wi-Fi, DHCP and firewall confirms, so it stays
+ * generic: preserve `code`/`status` for `translateError` the way
+ * `routerSetPortEnabled` already does, and keep the old string as the fallback
+ * for a body that carries no message of its own.
+ */
+async function confirmFailure(res: Response): Promise<Error> {
+  // A refused confirm is not guaranteed to be JSON — a proxy 502 is HTML — so
+  // the error path must degrade to the generic error rather than throw a
+  // parse failure over the top of the real one.
+  const data = await res.json().catch(() => null);
+  const guard = data?.code === "PORT_WRITE_REFUSED" ? asPortGuard(data.detail) : null;
+  if (guard) return new RouterPortRefusedError(guard);
+  return Object.assign(
+    new Error(data?.message || data?.error || `Failed to confirm command: ${res.status}`),
+    { code: data?.code, status: res.status },
+  );
 }
 
 /**
