@@ -30,6 +30,12 @@ import {
 import { serializeIcs } from "../services/ics.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
+// WARP-1906 — premade workspace locations (building + conference room) rank
+// ahead of the Nominatim results in the location autocomplete.
+import {
+  matchRooms,
+  toRoomSuggestion,
+} from "../services/workspace-locations.service.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
 
@@ -363,19 +369,37 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       // WARP-1502: `v2` — the suggestion shape gained `name`/`context`. Bumping
       // the key prefix guarantees we never serve a stale old-shape entry from
       // the 10-minute cache after this ships.
+      // WARP-1906 — premade workspace locations rank AHEAD of the Nominatim
+      // results: on a business box "Aur" should surface "HQ - Room Aurora"
+      // before any city. Read fresh on every request (NEVER cached with the
+      // Nominatim list below) so an admin edit in Settings shows up
+      // immediately; a failed read degrades to Nominatim-only rather than
+      // failing the lookup.
+      let rooms: PlaceSuggestion[] = [];
+      try {
+        const rows = await prisma.workspaceLocation.findMany({
+          orderBy: [{ building: "asc" }, { room: "asc" }],
+        });
+        rooms = matchRooms(rows, q).slice(0, limit).map(toRoomSuggestion);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[calendar/places] workspace-location lookup failed:", err);
+      }
+
       const cacheKey = `places:v2:${limit}:${q.toLowerCase()}`;
       const cached = await cacheGet<PlaceSuggestion[]>(cacheKey);
       if (cached) {
-        res.json({ places: cached });
+        res.json({ places: [...rooms, ...cached] });
         return;
       }
 
       const places = await fetchNominatim(q, limit);
       // 10 minutes — the same prefix lookup is going to repeat as a user
       // types; longer TTLs risk staleness for fast-moving entities (renamed
-      // venues, etc.) but 10 min is a sane compromise.
+      // venues, etc.) but 10 min is a sane compromise. Only the Nominatim
+      // list is cached — the room merge above stays live.
       await cacheSet(cacheKey, places, 600);
-      res.json({ places });
+      res.json({ places: [...rooms, ...places] });
     } catch (err) {
       // Surface a clean empty list rather than a 5xx — the combobox falls
       // back to free-text entry. The error still hits the logger for

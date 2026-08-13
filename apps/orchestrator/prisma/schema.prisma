@@ -4878,3 +4878,30 @@ model ModelIdMigrationEntry {
   @@index([batchId])
   @@index([site, rowKey])
 }
+
+/// WARP-1906 — premade business locations: one named conference room in a
+/// building, offered as a Location suggestion when creating a calendar event
+/// (ahead of the Nominatim results) and managed from Settings → Locations.
+///
+/// One row per room, with the building as a plain grouping label rather than
+/// its own table: v1 carries no building-level metadata, so a separate
+/// Building model would add a join with nothing in it. The box is a
+/// single-workspace appliance (Workspace is the id=1 singleton, WARP-1341
+/// business-only), so there is no workspace FK — every row belongs to THE
+/// workspace, and route auth (any member reads, owner/admin writes) is the
+/// scoping boundary.
+model WorkspaceLocation {
+  id        String   @id @default(uuid())
+  /// Building / site label, e.g. "HQ", "2nd Floor".
+  building  String
+  /// Room name, e.g. "Room Aurora", "Fishbowl".
+  room      String
+  /// Username of the admin who created the row — display/audit attribution,
+  /// same shape as `Workspace.setBy` (never the User.id UUID, WARP-1014).
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([building, room])
+  @@index([building])
+}

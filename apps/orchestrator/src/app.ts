@@ -83,6 +83,7 @@ import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createAccessRouter } from "./routes/access.js";
 import { createDepartmentsRouter } from "./routes/departments.js";
+import { createWorkspaceLocationsRouter } from "./routes/workspace-locations.js";
 import {
   initScopeLoader,
   loadUserEffectiveScopes,
@@ -419,6 +420,10 @@ export function createApp(
   // membership, and integration with Nextcloud groupfolders. Provisioning is
   // async (reconciler converges NC state).
   app.use("/api", createDepartmentsRouter(prisma));
+  // WARP-1906: premade business locations (buildings + named conference
+  // rooms). Reads member-wide (feeds the event-form location suggestions via
+  // /calendar/places); writes owner/admin from Settings → Locations.
+  app.use("/api", createWorkspaceLocationsRouter(prisma));
   // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type).
