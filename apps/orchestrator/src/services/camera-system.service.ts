@@ -161,6 +161,42 @@ export function extractStorage(service: Record<string, unknown>): StorageStat[] 
 }
 
 /**
+ * WARP-1963 — is the recordings volume actually a separate drive?
+ *
+ * `docker-compose.yml` mounts `${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate`.
+ * Nothing validates the target: if the variable is unset, empty, or points
+ * at a path whose filesystem failed to mount, Docker silently falls back to
+ * the `nvrdata` NAMED VOLUME — which lives on the boot disk — and Frigate
+ * keeps recording there quite happily.
+ *
+ * **That is exactly how this box's 2×2 TB RAID1 sat empty and unmounted for
+ * a month** while `/` climbed to 94%: three `/etc/fstab` entries referenced
+ * UUIDs that no longer existed, every one carrying `nofail`, so boot
+ * succeeded silently and `df` simply never showed them.
+ *
+ * The orchestrator does NOT mount the NVR volume (by design — Frigate owns
+ * the recordings index), so it cannot stat the path. But it doesn't need
+ * to: Frigate reports every mount it can see, and a fallback is visible in
+ * the numbers. `/tmp/cache` is always on the container's own filesystem,
+ * i.e. the boot disk. If the recordings mount reports the SAME total and
+ * free bytes as the cache mount, they are one filesystem — recordings are
+ * on the boot disk.
+ *
+ * Measured on a healthy box: recordings 1 876 558 MiB vs cache 236 716 MiB.
+ * On a fallen-back box those two figures are identical.
+ *
+ * Returns `null` when there is nothing to compare against — "unknown" is
+ * reported as unknown rather than guessed either way.
+ */
+export function recordingsOnBootDisk(storage: StorageStat[]): boolean | null {
+  const rec = storage.find((s) => s.role === "recordings" && !s.duplicateOf);
+  const cache = storage.find((s) => s.role === "cache");
+  if (!rec || !cache) return null;
+  if (rec.totalBytes <= 0 || cache.totalBytes <= 0) return null;
+  return rec.totalBytes === cache.totalBytes && rec.freeBytes === cache.freeBytes;
+}
+
+/**
  * The one volume the operator actually asked about.
  *
  * Returns null rather than guessing when Frigate reports no recordings

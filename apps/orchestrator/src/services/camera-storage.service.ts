@@ -22,6 +22,7 @@
  */
 
 import { fetchStats, fetchRecordingsStorage, fetchConfig } from "./frigate.client.js";
+import { extractStorage, recordingsOnBootDisk } from "./camera-system.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -79,6 +80,21 @@ export interface CameraStorageSummary {
   cameras: CameraStorageRow[];
   /** True when the volume has crossed NEAR_FULL_RATIO. */
   nearFull: boolean;
+  /**
+   * WARP-1963 — is footage landing on the BOOT DISK instead of the
+   * dedicated recordings drive?
+   *
+   * `true` means the `${NVR_MEDIA_SOURCE:-nvrdata}` mount fell back to the
+   * named volume on the system disk: nothing validates that target, so an
+   * unset variable or a filesystem that failed to mount is silently
+   * absorbed and Frigate records to `/` instead. That is how this box's
+   * 1.8 TB RAID1 sat empty for a month while the boot drive filled.
+   *
+   * `null` = cannot tell (Frigate reported no cache mount to compare
+   * against). Reported as unknown rather than guessed either way — a false
+   * "all clear" here is the failure mode being fixed.
+   */
+  recordingsOnBootDisk: boolean | null;
   /**
    * Sum of every camera's measured rate, bytes/hour — how fast the volume
    * fills with all cameras recording. `null` when no camera reports a rate.
@@ -204,10 +220,19 @@ export async function getCameraStorage(): Promise<CameraStorageSummary> {
     ? rates.reduce((sum, r) => sum + r, 0)
     : null;
 
+  // Reuse the typed, deduplicated volume list rather than re-parsing the
+  // stats blob: the boot-disk check compares the recordings mount against
+  // the cache mount, and that comparison is only meaningful on rows that
+  // already agree on units and role.
+  const onBootDisk = recordingsOnBootDisk(
+    extractStorage((stats.service ?? {}) as Record<string, unknown>),
+  );
+
   return {
     volume,
     cameras,
     nearFull: volume ? volume.usedPercent >= NEAR_FULL_RATIO * 100 : false,
+    recordingsOnBootDisk: onBootDisk,
     totalBytesPerHour,
   };
 }

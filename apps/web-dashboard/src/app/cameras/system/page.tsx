@@ -430,6 +430,34 @@ export default function CameraSystemPage() {
               </p>
             ) : (
               <>
+                {/* WARP-1963 — footage on the wrong disk.
+                    Louder than near-full on purpose: a full drive shortens
+                    retention, but this means the dedicated recordings drive
+                    is doing nothing at all while the system disk fills. It
+                    is the exact silent failure that left this box's 1.8 TB
+                    array empty for a month. */}
+                {storage.recordingsOnBootDisk === true && (
+                  <div
+                    data-testid="boot-disk-warning"
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                      marginBottom: 12,
+                      color: "#ef4444",
+                      fontSize: 12,
+                    }}
+                  >
+                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>
+                      <strong>Recordings are being written to the system disk.</strong>{" "}
+                      The dedicated recordings drive isn&apos;t mounted, so footage
+                      is filling the same disk the appliance runs on and you have
+                      far less room than you think. Check that the recordings
+                      volume is mounted, then restart the camera service.
+                    </span>
+                  </div>
+                )}
                 {storage.nearFull && (
                   <div
                     style={{
@@ -450,6 +478,59 @@ export default function CameraSystemPage() {
                     </span>
                   </div>
                 )}
+                {/* WARP-1963 — the drive as ONE bar, split by camera.
+                    Per-camera meters each ran 0–100% of the whole drive, so
+                    at 0.24% every camera was an invisible sliver and the
+                    picture answered nothing. Stacked, the segments plus free
+                    space add up to the real capacity, which is what "how is
+                    my space allocated" actually asks. */}
+                {storage.volume && storage.volume.totalBytes > 0 && (
+                  <div style={{ marginBottom: 14 }} data-testid="allocation-bar">
+                    <div
+                      style={{
+                        display: "flex",
+                        height: 14,
+                        borderRadius: 7,
+                        overflow: "hidden",
+                        background: "var(--surface-2)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      {storage.cameras.map((c, i) =>
+                        c.usedBytes === null || c.usedBytes <= 0 ? null : (
+                          <div
+                            key={c.camera}
+                            data-testid={`allocation-seg-${c.camera}`}
+                            title={`${c.camera} — ${fmtBytes(c.usedBytes)}`}
+                            style={{
+                              // Floor at a hairline so a real-but-tiny
+                              // consumer is still visible; the NUMBER below
+                              // carries the precision.
+                              width: `max(2px, ${(c.usedBytes / storage.volume!.totalBytes) * 100}%)`,
+                              background: `color-mix(in srgb, var(--brand) ${85 - Math.min(i, 4) * 15}%, transparent)`,
+                            }}
+                          />
+                        ),
+                      )}
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginTop: 4,
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      <span>
+                        {fmtBytes(storage.volume.usedBytes)} used of{" "}
+                        {fmtBytes(storage.volume.totalBytes)}
+                      </span>
+                      <span>{fmtBytes(storage.volume.freeBytes)} free</span>
+                    </div>
+                  </div>
+                )}
+
                 <ul style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {storage.cameras.map((c) => (
                     <li key={c.camera} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -458,8 +539,21 @@ export default function CameraSystemPage() {
                         <span className="rmeta mono">
                           {/* null ≠ 0: say we don't know, don't imply empty. */}
                           {c.usedBytes === null ? "not recorded yet" : fmtBytes(c.usedBytes)}
+                          {/* The share was an unlabelled bar and nothing else.
+                              At 0.24% that is an invisible sliver — say the
+                              number. */}
+                          {c.sharePercent !== null && (
+                            <>
+                              {" · "}
+                              {c.sharePercent < 0.1 ? "<0.1" : c.sharePercent.toFixed(1)}% of drive
+                            </>
+                          )}
                           {c.bytesPerHour !== null && (
                             <> · {fmtBytes(c.bytesPerHour)}/hr</>
+                          )}
+                          {/* Computed since WARP-1850 and never rendered. */}
+                          {c.daysAtCurrentRate !== null && (
+                            <> · ≈{c.daysAtCurrentRate}d stored</>
                           )}
                         </span>
                       </div>
