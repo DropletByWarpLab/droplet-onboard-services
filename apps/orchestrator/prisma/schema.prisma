@@ -162,6 +162,14 @@ model ChatSession {
   /// turn (latest wins) and returned on GET so the dashboard restores
   /// the textarea when the thread is reloaded. NULL = no custom prompt.
   systemPrompt    String?
+  /// WARP-1917 — sidebar pin. `pinned` is the EXPLICIT state column (per
+  /// CLAUDE.md "no guessing": never derived from pinnedAt IS NULL);
+  /// `pinnedAt` only orders the Pinned section (most recent pin first).
+  /// Both written together by setConversationPinned via raw SQL so the
+  /// @updatedAt column is NOT bumped — unpinning must return the chat to
+  /// its original chronological spot, not to "Today".
+  pinned          Boolean          @default(false)
+  pinnedAt        DateTime?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @default(now()) @updatedAt
   messages        ChatMessage[]
