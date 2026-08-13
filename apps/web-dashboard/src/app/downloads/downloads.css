@@ -1,0 +1,169 @@
+/* /downloads — client-app download surface.
+ *
+ * `dl-`-prefixed so nothing collides with the shell's generic
+ * .card / .badge / .btn, and every value comes from an existing shell
+ * token (droplet-shell.css / indigo-tokens.css) so the surface inherits
+ * light/dark and the indigo brand without inventing colours.
+ */
+
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+/* The detected platform leads. A soft brand wash + ring is enough to
+   draw the eye without shouting — the Badge already names it. */
+.dl-card-rec {
+  border-color: var(--brand);
+  background: linear-gradient(
+    180deg,
+    var(--brand-subtle) 0%,
+    var(--card-bg) 46%
+  );
+}
+
+.dl-rec {
+  margin-bottom: 10px;
+}
+
+/* Primary action. Full-width so it reads as THE thing to do on the card. */
+.dl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 16px;
+  border-radius: var(--radius-input);
+  border: 1px solid transparent;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 160ms var(--ease), transform 160ms var(--ease);
+}
+
+.dl-btn:hover {
+  background: var(--brand-hover);
+}
+
+.dl-btn:active {
+  transform: translateY(1px);
+}
+
+.dl-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* Store links are a different KIND of action (you leave the box), so
+   they read as secondary rather than competing with a real download. */
+.dl-btn-secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.dl-btn-secondary:hover {
+  background: var(--surface);
+}
+
+.dl-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  margin: 14px 0 0;
+  font-size: 12.5px;
+}
+
+.dl-meta > div {
+  display: contents;
+}
+
+.dl-meta dt {
+  color: var(--text-muted);
+}
+
+.dl-meta dd {
+  margin: 0;
+  color: var(--text);
+  min-width: 0;
+}
+
+/* The digest is a copy affordance, not a button-looking control — it
+   should read as the value it is, with the copy glyph as a hint. */
+.digest {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  max-width: 100%;
+}
+
+.digest code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.digest:hover code {
+  color: var(--text);
+}
+
+.digest:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.dl-note {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.dl-note a {
+  color: var(--brand);
+}
+
+.dl-note-muted {
+  margin-top: 0;
+}
+
+.dl-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.spin {
+  animation: dl-spin 900ms linear infinite;
+}
+
+@keyframes dl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Respect a reduced-motion preference — the spinner is decorative and
+   its only job is "something is happening". */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+  .dl-btn {
+    transition: none;
+  }
+}

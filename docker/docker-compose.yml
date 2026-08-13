@@ -363,6 +363,13 @@ services:
       - DROPLET_OTA_APPLY_SCRIPT=${DROPLET_OTA_APPLY_SCRIPT:-}
       - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-/opt/droplet/docker/docker-compose.yml}
       - DROPLET_OTA_UPDATES_DIR=/data/updates
+      # Where the client-app installers are mounted (see the volume below).
+      # REQUIRE_SIGNATURE stays off until the OTA key ceremony runs — the
+      # cosign anchor is still the WARP-535 placeholder, so switching it on
+      # now would 503 every download. The always-on gate is the per-asset
+      # sha256 re-check in services/app-downloads/store.ts.
+      - DROPLET_APP_DOWNLOADS_DIR=/opt/droplet/app-downloads
+      - DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE=${DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE:-0}
       # WARP-234: per-service Redis ACL identity over TLS. Overrides the
       # .env default-user URL (which is ping-only); cache.service.ts pins
       # trust to the internal CA from the /data/service-tls bundle below.
@@ -373,6 +380,16 @@ services:
       # path is what DROPLET_OTA_APPLY_SCRIPT must be set to. Read-only — the
       # orchestrator only ever execs it, never rewrites it.
       - ../scripts/lib/apply-update.sh:/opt/droplet/scripts/lib/apply-update.sh:ro
+      # Client-app installers (Windows/Android/iOS) the box hands to a
+      # browser at /downloads, staged INSIDE the appliance image by
+      # scripts/app-downloads/gen-catalog.mjs at build time. Read-only:
+      # the orchestrator only ever hashes and streams these, never writes
+      # them — and a read-only mount is what makes the serve-time digest
+      # check meaningful rather than self-referential. Container path is
+      # what DROPLET_APP_DOWNLOADS_DIR must be set to. The bind source is
+      # git-ignored except for its README, so a dev checkout mounts an
+      # effectively empty dir and the surface degrades to "nothing staged".
+      - ../data/app-downloads:/opt/droplet/app-downloads:ro
       # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
       # canonical /data/service-tls path — the Redis client reads ca.pem.
       - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
