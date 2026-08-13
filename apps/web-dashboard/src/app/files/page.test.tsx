@@ -1724,3 +1724,78 @@ describe('<FilesPage /> — "My Files" appears once (WARP-1910)', () => {
     expect(screen.getAllByText(/my files/i)).toHaveLength(1);
   });
 });
+
+// WARP-1944 — the root crumb said "My files" no matter which space was active:
+// a Workspace subfolder read "My files > Trips", and a team root read
+// "Engineering / My files". The root crumb now carries the ACTIVE space's
+// display label ("My files" only for the personal space) and keeps navigating
+// to that space's root through the WARP-1547 URL funnel.
+describe("<FilesPage /> — root crumb names the active space (WARP-1944)", () => {
+  const PLATFORM_TEAM: FileSpace = {
+    id: "dept:eng-platform",
+    name: "Platform",
+    root: "/Engineering — Platform",
+    kind: "team",
+    state: "active",
+    right: "contributor",
+    isMember: true,
+    parentName: "Engineering",
+  };
+
+  const crumbs = () => screen.getByRole("navigation", { name: /breadcrumbs/i });
+
+  it("labels the root crumb with the Workspace label inside a Workspace subfolder", () => {
+    mockSearchParamsString = "space=shared&path=%2FTrips";
+    render(<FilesPage />);
+
+    const nav = crumbs();
+    expect(within(nav).getByText("Trips")).toBeInTheDocument();
+    // The root crumb names the active space — never "My files" here.
+    expect(
+      within(nav).getByRole("button", { name: "Workspace" })
+    ).toBeInTheDocument();
+    expect(within(nav).queryByText(/my files/i)).not.toBeInTheDocument();
+
+    // Clicking it still jumps to the SPACE's root, through the URL funnel.
+    fireEvent.click(within(nav).getByRole("button", { name: "Workspace" }));
+    expect(pushMock).toHaveBeenLastCalledWith("/files?space=shared");
+  });
+
+  it("keeps 'My files' for a personal-space subfolder", () => {
+    mockSearchParamsString = "path=%2FDocs";
+    render(<FilesPage />);
+    const nav = crumbs();
+    expect(
+      within(nav).getByRole("button", { name: /my files/i })
+    ).toBeInTheDocument();
+  });
+
+  it("pairs the team name with the department prefix at a team root", () => {
+    mockSpaces = [PERSONAL, PLATFORM_TEAM];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /platform/i }));
+
+    const nav = crumbs();
+    // ADR-029 §D-3 prefix crumb untouched: plain text, never a button.
+    expect(within(nav).getByText("Engineering")).toBeInTheDocument();
+    expect(
+      within(nav).queryByRole("button", { name: /^engineering$/i })
+    ).not.toBeInTheDocument();
+    // The root crumb is the TEAM's own name — "Engineering / Platform",
+    // not "Engineering / My files".
+    expect(
+      within(nav).getByRole("button", { name: "Platform" })
+    ).toBeInTheDocument();
+    expect(within(nav).queryByText(/my files/i)).not.toBeInTheDocument();
+  });
+
+  it("routes a team-subfolder root-crumb click to the team's root via the URL funnel", () => {
+    mockSpaces = [PERSONAL, PLATFORM_TEAM];
+    mockSearchParamsString = "space=dept%3Aeng-platform&path=%2FDocs";
+    render(<FilesPage />);
+
+    const nav = crumbs();
+    fireEvent.click(within(nav).getByRole("button", { name: "Platform" }));
+    expect(pushMock).toHaveBeenLastCalledWith("/files?space=dept%3Aeng-platform");
+  });
+});

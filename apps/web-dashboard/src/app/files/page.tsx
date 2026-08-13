@@ -69,6 +69,9 @@ import {
   createShare,
 } from "@/lib/api";
 import { authFetch, useAuth } from "@/lib/auth";
+// WARP-1944 — display-only space naming for the breadcrumb root crumb, the
+// same mapping the SpaceSwitcher's tabs render with (WARP-1808).
+import { spaceRenderName } from "@/lib/space-attribution";
 import { translateError } from "@/lib/friendly-errors";
 import {
   folderOnlyOutcomeMessage,
@@ -265,6 +268,16 @@ export default function FilesPage() {
   // page's only location label; and a team space keeps its bar at the root for
   // the non-navigating department prefix crumb (WARP-1267, ADR-029 §D-3).
   const breadcrumbPrefix = isTeamSpace ? activeSpace?.parentName : undefined;
+  // WARP-1944 — the root crumb names the ACTIVE space, not always "My files":
+  // a Workspace subfolder read "My files > Trips" and a team root read
+  // "Engineering / My files". Same render mapping the switcher's tabs use
+  // (spaceRenderName — WARP-1808's "Workspace" for the household space, the
+  // space's own name otherwise); a team keeps its BARE name so the bar reads
+  // "Engineering / Platform", pairing with the prefix crumb above rather than
+  // repeating the parent. `undefined` (personal, or the space list not yet
+  // loaded) falls back to BreadcrumbNav's "My files" default.
+  const breadcrumbRootLabel =
+    space !== "personal" && activeSpace ? spaceRenderName(activeSpace) : undefined;
   const showBreadcrumbs =
     currentPath !== "/" ||
     !spaceSwitcherVisible(spaces, isOwnerOrAdmin) ||
@@ -1428,6 +1441,8 @@ export default function FilesPage() {
             // they get a URL and a history entry like any other move.
             onNavigate={(next) => navigateTo(space, next)}
             prefixCrumb={breadcrumbPrefix}
+            // WARP-1944 — root crumb named after the active space.
+            rootLabel={breadcrumbRootLabel}
             labelForSegment={crumbLabelForSegment}
           />
         </div>
