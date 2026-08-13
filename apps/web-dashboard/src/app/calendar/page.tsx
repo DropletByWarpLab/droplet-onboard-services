@@ -302,19 +302,17 @@ export default function CalendarPage() {
     setSelectedKey(undefined);
   };
 
-  // Mini-month day click: move the cursor (drives the month grid + the agenda
-  // fetch window) and, ONLY in Agenda view, mark the picked day so the agenda
-  // scrolls to + highlights it. `selectedKey` is agenda-only context: setting it
-  // from Month view (where the agenda isn't rendered) would make a later switch
-  // to Agenda auto-scroll to a stale date the user never selected there.
-  // The previous build set neither — picking a date did nothing (WARP-944).
-  const pickDay = useCallback(
-    (d: Date) => {
-      setCursor(d);
-      setSelectedKey(view === "agenda" ? dayKey(d) : undefined);
-    },
-    [view],
-  );
+  // Mini-month day pick — wired ONLY in Agenda view, where it has a visible
+  // effect: move the cursor (drives the fetch window) and mark the picked day
+  // so the agenda scrolls to + highlights it (WARP-944). In Month view the
+  // pick had no visible effect (the cursor only moved inside the displayed
+  // month), so the mini-month renders its day grid display-only there instead
+  // of offering a dead click target (WARP-1904 — product decision: no date
+  // navigation).
+  const pickDay = useCallback((d: Date) => {
+    setCursor(d);
+    setSelectedKey(dayKey(d));
+  }, []);
 
   const eventCount = events.length;
   const sub =
@@ -405,7 +403,10 @@ export default function CalendarPage() {
           <MiniMonth
             cursor={cursor}
             eventDays={eventDays}
-            onCursor={pickDay}
+            // Day cells are a pick target only in Agenda view (scroll-to-day,
+            // WARP-944). In Month view a day click had no visible effect, so
+            // the grid renders display-only (WARP-1904).
+            onCursor={view === "agenda" ? pickDay : undefined}
             onMonthNav={(d) => { setCursor(d); setSelectedKey(undefined); }}
           />
 
