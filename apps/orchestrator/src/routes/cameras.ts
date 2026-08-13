@@ -108,6 +108,7 @@ import {
 import {
   filterVisibleCameras,
   listGrantsForUser,
+  principalFromRequest,
   requireCameraAccess,
   setGrantsForUser,
 } from "../services/camera-access.service.js";
@@ -1127,7 +1128,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // A tile you cannot open is worse than no tile: the grid, the home
       // widget and the group rail all read this route, so it must agree
       // with what per-camera playback will actually allow.
-      res.json({ cameras: await filterVisibleCameras(prisma, req.user, cameras) });
+      res.json({ cameras: await filterVisibleCameras(prisma, principalFromRequest(req), cameras) });
     } catch (err) {
       next(err);
     }
