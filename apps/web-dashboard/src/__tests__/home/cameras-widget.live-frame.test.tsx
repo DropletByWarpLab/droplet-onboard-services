@@ -9,7 +9,7 @@
  * implies "live" only renders when something live is actually behind it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent, act } from "@testing-library/react";
 import type { CameraInfo } from "@/lib/types";
 
 const pushMock = vi.fn();
@@ -209,5 +209,77 @@ describe("Home CamerasWidget live frame", () => {
     const requested = probes.map((p) => p.src);
     expect(requested.some((s) => s.includes("/cam_a/snapshot"))).toBe(true);
     expect(requested.some((s) => s.includes("/cam_b/snapshot"))).toBe(true);
+  });
+});
+
+/**
+ * WARP-1946 — the poll cadence and its cache-bust bucket are one contract with
+ * the snapshot route, which answers `Cache-Control: public, max-age=5`
+ * (apps/orchestrator/src/routes/cameras.ts). Polling faster than that only
+ * re-fetches what the browser already holds; a bucket that turns over faster
+ * than the cadence defeats the cache outright. Both numbers were unpinned, so
+ * either could drift in a refactor with every existing test still green.
+ */
+describe("Home CamerasWidget snapshot cadence (WARP-1946)", () => {
+  // Aligned to a 5s boundary so the arithmetic stays legible: at t0 the
+  // bucket (Date.now() / 5000) is a whole number.
+  const T0 = 1_600_000_000_000;
+  const bucketOf = (src: string) =>
+    Number(new URL(src, "http://localhost").searchParams.get("t"));
+
+  beforeEach(() => {
+    cleanup();
+    probes = [];
+    cameras = [cam({})];
+    vi.stubGlobal("Image", FakeImage);
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("polls exactly once per 5s window, and not a tick sooner", () => {
+    render(<CamerasWidget w={4} h={3} />);
+    // The mount loads immediately rather than sitting dark for a full window.
+    expect(probes).toHaveLength(1);
+
+    act(() => {
+      vi.advanceTimersByTime(4999);
+    });
+    expect(probes).toHaveLength(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(probes).toHaveLength(2);
+  });
+
+  it("moves the cache-bust bucket forward exactly one step per window", () => {
+    render(<CamerasWidget w={4} h={3} />);
+    const first = bucketOf(probes[0].src);
+    expect(Number.isFinite(first)).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(bucketOf(probes[1].src)).toBe(first + 1);
+  });
+
+  it("reuses one bucket for every load inside the same window", () => {
+    render(<CamerasWidget w={4} h={3} />);
+    const first = bucketOf(probes[0].src);
+
+    // A tile mounting a second later is still inside the same window, so it
+    // asks for the byte-identical URL the browser already has cached —
+    // that reuse is the whole point of pinning the bucket to the cadence.
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    render(<CamerasWidget w={4} h={3} />);
+
+    expect(probes.length).toBeGreaterThan(1);
+    expect(bucketOf(probes[probes.length - 1].src)).toBe(first);
   });
 });
