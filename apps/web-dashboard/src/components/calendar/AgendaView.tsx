@@ -66,10 +66,13 @@ function PasscodeChip({ link }: { link: NonNullable<ReturnType<typeof parseMeeti
   if (!passcode) return null;
 
   const copy = async () => {
-    // Absent outside secure contexts and in jsdom — the chip still shows
-    // the passcode to read and retype, so failing to copy is not fatal.
+    // clipboard is absent outside secure contexts (http-by-LAN-IP) and in
+    // jsdom. No optional chain here: `clipboard?.writeText` would resolve
+    // to undefined and fall through to a FALSE "Copied" — announced to
+    // screen readers too. Missing clipboard must throw into the catch so
+    // the chip fails quiet; the passcode stays visible to read and retype.
     try {
-      await navigator.clipboard?.writeText(passcode);
+      await navigator.clipboard.writeText(passcode);
     } catch {
       return;
     }

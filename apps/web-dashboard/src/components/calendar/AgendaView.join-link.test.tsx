@@ -10,7 +10,7 @@
  * shows it as a one-click copy chip — the raw URL stays the href.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, within, act } from "@testing-library/react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { AgendaView } from "./AgendaView";
 
@@ -135,6 +135,28 @@ describe("AgendaView — passcode chip", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /copy passcode/i }));
     expect(await within(status).findByText("Copied")).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("never claims Copied when the Clipboard API is absent (http-by-LAN-IP contexts)", async () => {
+    // navigator.clipboard only exists in secure contexts — a box reached
+    // over plain http by LAN IP has none. The chip must fail quiet, not
+    // confirm a copy that never happened (the sr-only live region would
+    // announce the lie to screen readers too).
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+
+    render(<AgendaView events={[event({ meetingUrl: ZOOM })]} />);
+    const status = screen.getByRole("status");
+
+    // act flushes the async click handler's microtasks so a buggy
+    // setCopied(true) would have landed before we assert the negative.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /copy passcode/i }));
+    });
+
+    expect(screen.queryAllByText(/copied/i)).toHaveLength(0);
+    expect(status.textContent).toBe("");
 
     vi.unstubAllGlobals();
   });
