@@ -1,9 +1,201 @@
 # osv-scanner triage — WARP-269-adjacent hygiene for the WARP-243 nightly.
-# Empty on day one BY DESIGN: the nightly is informational-red until the
-# Dependabot burn-down clears the ~85-entry baseline (audited 2026-07-04).
-# Add [[IgnoredVulns]] entries ONLY for triaged non-applicable findings,
-# with reason + ticket, e.g.:
+# First populated 2026-08-13 (WARP-1948): everything with an in-range fix was
+# bumped in that PR; the entries below are the remainder, where the only fix
+# is a major-version migration or no fixed release exists. Each entry cites
+# the ticket that retires it — remove entries as the majors land (WARP-1949).
+# osv-scanner matches aliases, so a GHSA id also suppresses its CVE alias.
 #
 # [[IgnoredVulns]]
 # id = "CVE-2026-47429"
 # reason = "vitest is a dev-only dependency; never ships in images (WARP-xxx)"
+
+# ── next 14.2.35 (apps/web-dashboard) ──────────────────────────────────────
+# All 21 advisories are fixed only in Next 15.x; the dashboard is on the
+# Next 14 line and the 14→15 migration is tracked in WARP-1949. The dashboard
+# is only reachable behind nginx on the trusted Vault side, never exposed to
+# the WAN (FOUNDATION boundary), which keeps these tolerable until the
+# migration lands.
+[[IgnoredVulns]]
+id = "GHSA-36qx-fr4f-26g5"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-3g8h-86w9-wvmq"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-3x4c-7xq6-9pq8"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-4633-3j49-mh5q"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-4c39-4ccg-62r3"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-68g3-v927-f742"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-89xv-2m56-2m9x"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-8h8q-6873-q5fj"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-955p-x3mx-jcvp"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-9g9p-9gw9-jx7f"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-c4j6-fc7j-m34r"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-ffhc-5mcf-pf4q"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-ggv3-7p47-pfv8"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-gx5p-jg67-6x7h"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-h25m-26qc-wcjf"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-h64f-5h5j-jqjh"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-m99w-x7hq-7vfj"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-p9j2-gv94-2wf4"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-q4gf-8mx6-v5v3"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-vfv6-92ff-j949"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-wfc6-r584-vfw7"
+reason = "next: fixed only in 15.x; Next 14→15 migration tracked in WARP-1949"
+
+# ── postcss 8.4.31, next's exact-pinned nested copy ────────────────────────
+# The workspace-level postcss (8.5.26) and tests/ copy are already at fixed
+# versions; the only remaining hit is node_modules/next/node_modules/postcss,
+# which Next 14 pins to exactly 8.4.31. Goes away with the Next 15 migration
+# (WARP-1949). Build-time CSS tooling, not request-path code.
+[[IgnoredVulns]]
+id = "GHSA-6g55-p6wh-862q"
+reason = "postcss 8.4.31 exact-pinned inside next 14; retired by the Next 15 migration (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "GHSA-fxqj-rqcc-2cmp"
+reason = "postcss 8.4.31 exact-pinned inside next 14; retired by the Next 15 migration (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "GHSA-qx2v-qp2m-jg93"
+reason = "postcss 8.4.31 exact-pinned inside next 14; retired by the Next 15 migration (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "GHSA-r28c-9q8g-f849"
+reason = "postcss 8.4.31 exact-pinned inside next 14; retired by the Next 15 migration (WARP-1949)"
+
+# ── nodemailer 6.10.1 (apps/orchestrator) ──────────────────────────────────
+# All 8 advisories are fixed only in the 7.x/8.x/9.x majors. The orchestrator
+# mailer only sends to operator-configured SMTP relays on the Vault side
+# (egress-screened per FOUNDATION); nodemailer 7+ API review tracked in
+# WARP-1949.
+[[IgnoredVulns]]
+id = "GHSA-268h-hp4c-crq3"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-c7w3-x93f-qmm8"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-mm7p-fcc7-pg87"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-p6gq-j5cr-w38f"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-r7g4-qg5f-qqm2"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-rcmh-qjqh-p98v"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-vvjj-xcjg-gr5g"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-wqvq-jvpq-h66f"
+reason = "nodemailer: fixed only in >=7.x majors; upgrade tracked in WARP-1949"
+
+# ── vitest 1.6 / vite 5.4 / esbuild 0.21 dev toolchain (root workspaces) ───
+# Dev-only: test runner + its bundler, never installed in shipped images
+# (multi-stage builds prune devDependencies). Fixes require the vitest 3 /
+# vite 6 major jump; the tests/ workspace is already on vitest 4 and the
+# remaining 7 workspaces migrate under WARP-1949. The esbuild advisory is its
+# dev-server CORS behavior — the dev server never runs on an appliance.
+[[IgnoredVulns]]
+id = "GHSA-5xrq-8626-4rwp"
+reason = "vitest: dev-only test runner, fixed only in 3.x; migration tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-4w7w-66w2-5vf9"
+reason = "vite: dev-only (vitest 1.6 toolchain), fixed only in 6.x; tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-fx2h-pf6j-xcff"
+reason = "vite: dev-only (vitest 1.6 toolchain), fixed only in 6.x; tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-v6wh-96g9-6wx3"
+reason = "vite: dev-only (vitest 1.6 toolchain), fixed only in 6.x; tracked in WARP-1949"
+
+[[IgnoredVulns]]
+id = "GHSA-67mh-4wv8-2f99"
+reason = "esbuild: dev-server CORS issue in vite 5's pinned esbuild; dev server never runs on appliances; fixed only via vite 6 (WARP-1949)"
+
+# ── no fixed release published ─────────────────────────────────────────────
+[[IgnoredVulns]]
+id = "PYSEC-2026-139"
+reason = "torch: no fixed release published; ai-gateway floors torch>=2.13.0 (latest CPU wheel); re-check under WARP-1949"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2447"
+reason = "diskcache: no fixed release published; offline RAGAS eval harness only, never in the serving path (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3046"
+reason = "ragas: no fixed release published; offline eval harness pinned in WARP-1406 lockstep, never in the serving path (WARP-1949)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-76"
+reason = "langchain-openai: fix (1.1.14) conflicts with the WARP-1406 langchain 0.3-line caps the ragas pin requires; offline eval harness only (WARP-1949)"

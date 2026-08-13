@@ -5,3 +5,7 @@ pytest-cov>=7.1.0
 pytest-timeout>=2.4.0
 httpx>=0.28.1
 respx>=0.23.1
+
+# WARP-1948 — OSV floor for pytest's transitive pygments (see the matching
+# floor block in requirements.txt for rationale).
+pygments>=2.20.0

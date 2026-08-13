@@ -5,3 +5,9 @@ pydantic==2.13.4
 # IMAGE, not here — the SAP client is license-governed and operator-supplied.
 # See the Dockerfile. pyodbc is the only Python-side piece.
 pyodbc==5.3.0
+
+# WARP-1948 — OSV floors: the osv-nightly resolver scores transitive deps at
+# their minimum resolvable version; state the real minimum instead of
+# suppressing the advisory. h11 backs uvicorn's HTTP/1.1 parser.
+idna>=3.15
+h11>=0.16.0

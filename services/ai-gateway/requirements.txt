@@ -9,7 +9,12 @@ redis>=8.1.0
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
 sentence-transformers>=5.7.0
-torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.13.0 --index-url https://download.pytorch.org/whl/cpu
+# WARP-1948 — OSV floors. The osv-nightly resolver scores unpinned/transitive
+# deps at their MINIMUM resolvable version, so it flags ancient releases no
+# image actually installs. These floors state the already-true minimum instead
+# of suppressing the advisory (same class as the cryptography>=50 pin above).
+idna>=3.15
 
 # WARP-286 / WARP-644: BGE-reranker-base via optimum + onnxruntime.
 # Used by the Rerank gRPC handler for hybrid retrieval.
