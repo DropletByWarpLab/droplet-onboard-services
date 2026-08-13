@@ -2121,6 +2121,12 @@ export interface CameraStorageSummary {
   } | null;
   cameras: CameraStorageRow[];
   nearFull: boolean;
+  /**
+   * True when footage is landing on the BOOT DISK instead of the dedicated
+   * recordings drive — the `${NVR_MEDIA_SOURCE:-nvrdata}` mount fell back
+   * to a named volume on the system disk. `null` = can't tell.
+   */
+  recordingsOnBootDisk: boolean | null;
   totalBytesPerHour: number | null;
 }
 
