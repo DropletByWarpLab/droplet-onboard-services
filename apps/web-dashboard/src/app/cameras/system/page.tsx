@@ -126,15 +126,25 @@ export default function CameraSystemPage() {
     setRestarting(false);
   };
 
+  // The headline number is the RECORDINGS drive, not a sum.
+  //
+  // Frigate reports four volumes: /media/frigate/recordings and
+  // /media/frigate/clips (the SAME filesystem, so summing double-counts
+  // it), /tmp/cache (the boot SSD) and /dev/shm (256 MiB of tmpfs).
+  // Adding them produced a "% used" that described no real disk — on this
+  // box it would have read ~3% of a phantom 4 TB (WARP-1960).
   const totalStorage = useMemo(() => {
     if (!data) return null;
-    let total = 0;
-    let used = 0;
-    for (const s of data.storage) {
-      total += s.totalBytes;
-      used += s.usedBytes;
-    }
-    return total > 0 ? { total, used, pct: (used / total) * 100 } : null;
+    const vol =
+      data.storage.find((s) => s.role === "recordings" && !s.duplicateOf) ?? null;
+    if (!vol || vol.totalBytes <= 0) return null;
+    return {
+      total: vol.totalBytes,
+      used: vol.usedBytes,
+      free: vol.freeBytes,
+      path: vol.path,
+      pct: (vol.usedBytes / vol.totalBytes) * 100,
+    };
   }, [data]);
 
   const actions = (
@@ -216,14 +226,20 @@ export default function CameraSystemPage() {
             />
             <Kpi
               icon={<HardDrive size={13} />}
-              label="Storage"
-              value={totalStorage ? `${totalStorage.pct.toFixed(0)}% used` : "—"}
+              label="Recordings drive"
+              value={
+                totalStorage
+                  ? totalStorage.pct < 1
+                    ? "<1% used"
+                    : `${totalStorage.pct.toFixed(0)}% used`
+                  : "—"
+              }
               note={
                 totalStorage
-                  ? `${fmtBytes(totalStorage.used)} of ${fmtBytes(totalStorage.total)}`
-                  : "No volumes reported"
+                  ? `${fmtBytes(totalStorage.used)} of ${fmtBytes(totalStorage.total)} · ${fmtBytes(totalStorage.free)} free`
+                  : "No recordings volume reported"
               }
-              dot={totalStorage && totalStorage.pct > 90 ? "#d9a35c" : "var(--success)"}
+              dot={totalStorage && totalStorage.pct > 85 ? "#d9a35c" : "var(--success)"}
             />
           </div>
 
@@ -532,9 +548,18 @@ export default function CameraSystemPage() {
 
 // --- helpers ---
 
+/**
+ * Binary maths with binary labels.
+ *
+ * This divided by 1024 while labelling the result "KB"/"MB"/"GB" — SI
+ * names for binary quantities, so every drive figure on this page read
+ * ~2.4% low against the label it carried (WARP-1960). Frigate reports MiB
+ * and the array is sized in TiB, so binary is the right base; the labels
+ * are what were wrong.
+ */
 function fmtBytes(b: number): string {
   if (!Number.isFinite(b) || b < 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let v = b;
   let i = 0;
   while (v >= 1024 && i < units.length - 1) {

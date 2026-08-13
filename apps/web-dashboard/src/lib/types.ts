@@ -2054,12 +2054,21 @@ export interface GpuStat {
   tempC: number | null;
 }
 
+export type StorageRole = "recordings" | "cache" | "shm" | "other";
+
 export interface StorageStat {
   path: string;
   totalBytes: number;
   usedBytes: number;
   freeBytes: number;
   mountType: string;
+  /** What this volume is for. Only `recordings` answers "how much room
+   *  does my footage have"; summing across roles describes no real disk. */
+  role: StorageRole;
+  /** Set when another entry reports the same filesystem (Frigate lists
+   *  `recordings` and `clips` separately though they are one volume).
+   *  Anything that aggregates must skip these. */
+  duplicateOf: string | null;
 }
 
 /**
