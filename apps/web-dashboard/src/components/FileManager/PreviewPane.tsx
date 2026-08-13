@@ -31,7 +31,7 @@ const CODE_EXT = {
   py: "language-python", sh: "language-shell",
 } as const;
 
-function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "text" | "other" {
+function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "text" | "office" | "other" {
   const mime = file.mimeType ?? "";
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   if (mime.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"].includes(ext)) {
@@ -40,7 +40,15 @@ function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "te
   if (mime === "application/pdf" || ext === "pdf") return "pdf";
   if (mime.startsWith("video/") || ["mp4", "webm", "mov", "mkv", "avi"].includes(ext)) return "video";
   if (mime.startsWith("audio/") || ["mp3", "wav", "ogg", "m4a", "flac"].includes(ext)) return "audio";
+  // WARP-1967: the text branch stays AHEAD of the office branch on purpose. A
+  // .csv is in both sets — isEditableOfficeFile() admits it so the Edit button
+  // can open it in the spreadsheet editor — but rendering it as text here is
+  // faithful, instant, and needs no round-trip to the engine.
   if (TEXT_EXTS.has(ext) || mime.startsWith("text/")) return "text";
+  // WARP-1967: Office documents render as a server-side page image. Same
+  // predicate that gates the Edit button, so the two affordances can never
+  // disagree about what "an Office file" is.
+  if (isEditableOfficeFile(file)) return "office";
   return "other";
 }
 
@@ -64,6 +72,11 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
   // non-editable file (or a page that doesn't mount the editor) never makes a
   // needless call and never shows a dead button.
   const [docsReady, setDocsReady] = useState(false);
+  // WARP-1967: an Office page image is rendered SERVER-side and can legitimately
+  // be unavailable — the docs profile is RAM-gated off on a small box, and the
+  // engine can be mid-restart. When the request fails we fall back to the same
+  // honest empty state a binary blob gets, rather than a broken-image icon.
+  const [officeThumbFailed, setOfficeThumbFailed] = useState(false);
   const editable = !!onEdit && isEditableOfficeFile(file);
   const kind = getKind(file);
 
@@ -74,6 +87,12 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose]);
+
+  // The modal is reused across files (arrow-key paging, reopening on another
+  // row), so a stale failure must not suppress the next file's preview.
+  useEffect(() => {
+    setOfficeThumbFailed(false);
+  }, [file.path]);
 
   useEffect(() => {
     if (!editable) {
@@ -281,7 +300,26 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             </div>
           )}
 
-          {kind === "other" && (
+          {/* WARP-1967: Office documents. The orchestrator's thumbnail proxy
+              asks Nextcloud for a page image, which richdocuments renders
+              through Collabora — the same engine the Edit button opens, so a
+              box that can edit a document can also show it. An <img> is the
+              right tag rather than an iframe: it ignores Content-Disposition
+              (the trap that broke the PDF branch), needs no editing session,
+              and cannot execute anything the document carries. */}
+          {kind === "office" && !officeThumbFailed && (
+            <div className="flex items-center justify-center min-h-full p-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={getThumbnailUrl(file.path, 1024, 1024)}
+                alt={`Preview of ${file.name}`}
+                className="max-w-full max-h-[calc(90vh-64px)] object-contain"
+                onError={() => setOfficeThumbFailed(true)}
+              />
+            </div>
+          )}
+
+          {(kind === "other" || (kind === "office" && officeThumbFailed)) && (
             <div className="empty">
               <div className="ei">
                 <FileText size={22} />
