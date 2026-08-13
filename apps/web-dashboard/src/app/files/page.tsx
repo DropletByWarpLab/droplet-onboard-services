@@ -489,11 +489,18 @@ export default function FilesPage() {
   // switch afterwards is not re-clobbered by the original deep link.
   const searchKey = searchParams?.toString() ?? "";
   const appliedSearchRef = useRef<string | null>(null);
+  // WARP-1934: a reactive mirror of the ref above. The ref has to stay a ref —
+  // it is the SYNCHRONOUS idempotency guard, and a state read would let two
+  // runs in the same commit both pass it. But a ref is invisible to the render
+  // cycle, so anything that must WAIT for the pair to land (the `?preview=`
+  // consumer below) needs a dependency it can actually re-run on.
+  const [appliedSearchKey, setAppliedSearchKey] = useState<string | null>(null);
   useEffect(() => {
     if (appliedSearchRef.current === searchKey) return;
     const requestedSpace = searchParams?.get("space") ?? null;
     if (requestedSpace && spaces.length === 0) return;
     appliedSearchRef.current = searchKey;
+    setAppliedSearchKey(searchKey);
     // A stale/unknown/inaccessible space id (archived library, typo'd link, a
     // library this viewer can't reach) falls back to the personal space
     // silently — same fail-safe as before. Deliberately no error surface and
@@ -1027,6 +1034,13 @@ export default function FilesPage() {
   );
   useEffect(() => {
     if (!pendingPreviewPath || isLoading) return;
+    // WARP-1934: `?space=` applies only once the spaces probe resolves, while
+    // `?preview=` used to be consumed as soon as ANY listing settled. On a
+    // forwarded link (`?space=dept:X&path=…&preview=…`) that first listing is
+    // the PERSONAL space's — the target isn't in it, the pending path is
+    // cleared anyway, and the user gets "Couldn't open that file" for a file
+    // that is sitting right there. Wait for the URL pair to have been applied.
+    if (appliedSearchKey !== searchKey) return;
     const target = files.find((f) => f.path === pendingPreviewPath);
     setPendingPreviewPath(null);
     if (target && !target.isDirectory) {
@@ -1035,7 +1049,15 @@ export default function FilesPage() {
     } else {
       toast("Couldn't open that file — it may have been moved or deleted.");
     }
-  }, [pendingPreviewPath, isLoading, files, handlePreview, toast]);
+  }, [
+    pendingPreviewPath,
+    isLoading,
+    files,
+    handlePreview,
+    toast,
+    appliedSearchKey,
+    searchKey,
+  ]);
 
   // ── Rename ──
   const handleRenameCommit = useCallback(

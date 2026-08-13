@@ -800,6 +800,106 @@ describe("<FilesPage /> — (space, path) round-trip + URL write-back (WARP-1547
   });
 });
 
+// WARP-1934 — `?preview=` must wait for `?space=` to have been applied.
+//
+// The two halves of a forwarded link land at different times: `?space=` can
+// only be applied once the spaces probe resolves (the effect early-returns
+// while `spaces` is empty), but `?preview=` used to be consumed the moment ANY
+// listing settled. On a link into a department library that first listing is
+// the PERSONAL space's — the target isn't in it, the pending path is cleared
+// anyway, and the user is told the file couldn't be opened while it sits right
+// there in the library the link names.
+describe("<FilesPage /> — deep-link preview waits for the space (WARP-1934)", () => {
+  const FINANCE_DEPT: FileSpace = {
+    id: "dept:finance",
+    name: "Finance",
+    root: "/Finance",
+    kind: "department",
+    state: "active",
+    right: "contributor",
+    isMember: true,
+  };
+
+  // Home-relative, the shape `files` entries carry and `?preview=` is matched
+  // against.
+  const BUDGET: FileEntryInfo = {
+    name: "budget.pdf",
+    path: "/Finance/Q1/budget.pdf",
+    isDirectory: false,
+    size: 4096,
+    mimeType: "application/pdf",
+    modifiedAt: "2026-04-16T00:00:00.000Z",
+  };
+
+  const FORWARDED_LINK =
+    "space=dept%3Afinance&path=%2FQ1&preview=%2FFinance%2FQ1%2Fbudget.pdf";
+
+  it("does not fail the preview against the listing that loaded before the space", () => {
+    // The spaces probe has not resolved yet, so the page is still showing the
+    // personal space — and its listing does not contain the forwarded file.
+    mockSpaces = [];
+    mockFiles = FILES;
+    mockSearchParamsString = FORWARDED_LINK;
+
+    render(<FilesPage />);
+
+    // The defect: consumed against the wrong listing, so the user is told the
+    // file was moved or deleted.
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("opens the file once the space has landed and its listing arrived", async () => {
+    mockSpaces = [];
+    mockFiles = FILES;
+    mockSearchParamsString = FORWARDED_LINK;
+    const { rerender } = render(<FilesPage />);
+
+    // Spaces resolve; the library becomes selectable and its listing replaces
+    // the personal one.
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockFiles = [BUDGET];
+    rerender(<FilesPage />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /finance/i })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    // The pending preview survived the early listing and resolved against the
+    // right one — no failure toast at any point.
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("still reports a genuinely missing file once the space HAS been applied", async () => {
+    // The guard must not swallow the real failure it was added around: a
+    // target that is absent from the correct listing still has to say so.
+    mockSpaces = [PERSONAL, FINANCE_DEPT];
+    mockFiles = [];
+    mockSearchParamsString = FORWARDED_LINK;
+
+    render(<FilesPage />);
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith(
+        "Couldn't open that file — it may have been moved or deleted.",
+      ),
+    );
+  });
+
+  it("leaves a spaceless ?preview= link consuming on the first listing", async () => {
+    // No `?space=` means nothing to wait for — a Home "Recent files" link
+    // (WARP-1143) must keep working exactly as before.
+    mockSpaces = [PERSONAL, SHARED];
+    mockFiles = FILES;
+    mockSearchParamsString = `preview=${encodeURIComponent(FILES[0].path)}`;
+
+    render(<FilesPage />);
+
+    await waitFor(() => expect(toastSpy).not.toHaveBeenCalled());
+  });
+});
+
 // WARP-1623 — browsing a department library.
 //
 // `currentPath` is space-root-relative (the page states this at the

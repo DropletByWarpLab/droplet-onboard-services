@@ -27,12 +27,17 @@ import {
 } from "@/lib/api";
 import type {
   FileEntryInfo,
+  FileSpace,
   FileSpaceId,
   FileSpacesResponse,
 } from "@/lib/types";
 // WARP-1808 — display-only "Workspace" mapping for the household space; the
 // option VALUE stays the raw space id the files API expects.
 import { spaceRenderName } from "@/lib/space-attribution";
+// WARP-1934 — the same translation the Files page navigates with. Listing
+// entries are HOME-relative; every path that travels next to a `space` has to
+// be relative to THAT space's root.
+import { toSpaceRelativePath } from "@/components/FileManager/search-target";
 
 export interface PickedFile {
   ncFileId: number;
@@ -115,9 +120,23 @@ export function ForwardFileDialog({
     { shouldRetryOnError: false },
   );
 
-  const spaces = useMemo(
-    () => spacesResp?.spaces ?? [{ id: "personal", name: "My Files" }],
+  // WARP-1934 — the pre-probe fallback is typed as a real FileSpace now that
+  // `root` is read below; "/" is what the server sends for the personal space,
+  // so the placeholder and the real payload agree.
+  const spaces = useMemo<FileSpace[]>(
+    () => spacesResp?.spaces ?? [{ id: "personal", name: "My Files", root: "/" }],
     [spacesResp],
+  );
+
+  // WARP-1934 — the active space's mount point ("/Household", "/Finance", …);
+  // "/" for the personal space, which has no prefix to strip. Listing entries
+  // come back HOME-relative, but `path` here is SPACE-relative: the files API
+  // re-prefixes it server-side from `space` (`rootForSpace`). Feeding an entry
+  // path straight back therefore asked for "/Household/Household/…" — the
+  // WARP-1140 trap, which renders as a silently empty folder.
+  const activeSpaceRoot = useMemo(
+    () => spaces.find((s) => s.id === space)?.root ?? "/",
+    [spaces, space],
   );
 
   function up() {
@@ -195,7 +214,7 @@ export function ForwardFileDialog({
                   type="button"
                   onClick={() => {
                     setQuery("");
-                    setPath(entry.path);
+                    setPath(toSpaceRelativePath(entry.path, activeSpaceRoot));
                   }}
                   className="mx-row items-center"
                 >
@@ -218,7 +237,13 @@ export function ForwardFileDialog({
                   onPick({
                     ncFileId: entry.ncFileId as number,
                     name: entry.name,
-                    path: entry.path,
+                    // WARP-1934 — the path's vocabulary has to match whether a
+                    // space travels with it. Browsed pick: space-relative, to
+                    // be re-prefixed from `space`. Searched pick: no space, so
+                    // the raw HOME-relative path the registry resolves.
+                    path: searching
+                      ? entry.path
+                      : toSpaceRelativePath(entry.path, activeSpaceRoot),
                     // Browsed pick → the selector IS the space. Searched
                     // pick → unknown, so say nothing (see PickedFile).
                     space: searching ? undefined : space,
