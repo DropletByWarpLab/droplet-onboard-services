@@ -587,7 +587,7 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
 // spells out the pool impact — a RAID 1 mirror loses its redundancy.
 // =====================================================================
 
-describe("DrivesPanel — reclaim clarity + typed confirm (WARP-1915)", () => {
+describe("DrivesPanel — reclaim clarity + typed confirmation (WARP-1915)", () => {
   const memberDisk = makeDisk({
     name: "sda",
     state: "pool_member",

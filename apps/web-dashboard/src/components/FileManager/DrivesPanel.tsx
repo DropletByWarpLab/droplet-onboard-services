@@ -751,7 +751,7 @@ export function DrivesPanel() {
 
       {/* WARP-1048 / WARP-1915 — reclaim a pool-member disk: break it out of
           the pool, then erase + add it on its own. A wipe deserves more than a
-          one-click confirm (QA: the red Reclaim read as reversible), so this
+          one-click confirmation (QA: the red Reclaim read as reversible), so this
           uses the Settings Danger zone's typed-name DestructiveConfirm: the
           owner types the drive's name to unlock the action, and the accessory
           line spells out the pool impact — a RAID 1 mirror loses the second
