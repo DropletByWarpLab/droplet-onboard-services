@@ -650,8 +650,17 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             {/* WARP-1507: explain the "Needs attention" state — the failure
                 reason the schema stored, plus the reassurance that the box
                 keeps retrying on its own. Calm, muted treatment; the red
-                "Needs attention" chip already carries the signal. */}
-            {selected.state === "failed" && (
+                "Needs attention" chip already carries the signal.
+
+                WARP-1651: also render whenever a `provisionError` is present,
+                not only on `failed`. WARP-1557 sends an AMBIGUOUS write
+                outcome (a 5xx that may or may not have landed) to
+                `provisioning` WITH the error set, and this panel was gated on
+                `failed` — so the owner saw "Setting up…", a spinner, and no
+                error text at all, where before they saw the reason. The API
+                serves `provisionError` unconditionally; the UI just wasn't
+                reading it. */}
+            {(selected.state === "failed" || selected.provisionError != null) && (
               <div
                 role="status"
                 style={{

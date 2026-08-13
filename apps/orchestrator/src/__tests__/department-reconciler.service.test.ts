@@ -5,7 +5,7 @@
  * in-memory Prisma stub covering Department / DepartmentMembership /
  * User, mirroring the guest-expiry-sweep.test.ts pattern.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const {
   ncEnsureGroupMock,
@@ -105,6 +105,8 @@ interface FakeDepartment {
   ncGroupfolderId: number | null;
   quotaBytes: bigint | null;
   archivedAt: Date | null;
+  /** WARP-1651 — the durable escalation clock; null while converging. */
+  nonConvergedSince: Date | null;
 }
 
 interface FakeMembership {
@@ -140,6 +142,7 @@ function dept(overrides: Partial<FakeDepartment>): FakeDepartment {
     ncGroupfolderId: null,
     quotaBytes: null,
     archivedAt: null,
+    nonConvergedSince: null,
     ...overrides,
   };
 }
@@ -689,36 +692,65 @@ describe("WARP-1557 — a 5xx on a write that SUCCEEDED upstream must not latch 
   });
 });
 
+/**
+ * WARP-1557's escalation, re-based on a DURABLE clock by WARP-1651.
+ *
+ * The budget is unchanged — 6 ticks × the 5-minute cron interval — but it is
+ * now measured in wall-clock against `Department.nonConvergedSince` instead of
+ * counted in a module-level in-memory Map. These tests therefore drive the
+ * clock rather than the tick count; the restart property the change exists for
+ * is pinned in the WARP-1651 block below.
+ */
 describe("WARP-1557 — stuck rows get a louder signal than a debug log line", () => {
-  it("counts a row as stuck only after it has failed every tick for the threshold, then demotes the re-verify state", async () => {
+  const TICK_MS = 5 * 60 * 1000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("counts a row as stuck only once the budget is spent, then demotes the re-verify state", async () => {
     // Ambiguous failures forever: NC is genuinely down, nothing converges.
     isAmbiguousWriteFailureMock.mockReturnValue(true);
     gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
     const d = dept({ state: "pending" });
     const prisma = buildPrisma([d]);
 
-    // Ticks 1-5: unconfirmed, parked in the non-terminal re-verify state.
+    // Ticks 1-5 (0-20 min elapsed): unconfirmed, parked in the non-terminal
+    // re-verify state.
     for (let i = 0; i < 5; i += 1) {
       const r = await reconcileDepartments(prisma as any);
       expect(r.departmentsStuck).toBe(0);
       expect(prisma.deptRows.get(d.id)!.state).toBe("provisioning");
+      vi.setSystemTime(new Date(Date.now() + TICK_MS));
     }
 
-    // Tick 6 crosses STUCK_TICK_THRESHOLD: the row is reported stuck AND the
-    // re-verify budget is spent, so it is demoted to its terminal failure
-    // state rather than implying work is still in progress forever.
+    // At 25 min the budget is still unspent — the boundary is 30, and a test
+    // that passed at 25 would not be testing the threshold.
+    const fifth = await reconcileDepartments(prisma as any);
+    expect(fifth.departmentsStuck).toBe(0);
+    expect(prisma.deptRows.get(d.id)!.state).toBe("provisioning");
+
+    // 30 min: budget spent. The row is reported stuck AND demoted to its
+    // terminal failure state rather than implying work is still in progress.
+    vi.setSystemTime(new Date(Date.now() + TICK_MS));
     const sixth = await reconcileDepartments(prisma as any);
     expect(sixth.departmentsStuck).toBe(1);
     expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
   });
 
-  it("a row that converges clears its stuck counter", async () => {
+  it("a row that converges stops its clock", async () => {
     isAmbiguousWriteFailureMock.mockReturnValue(true);
     gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
     const d = dept({ state: "pending" });
     const prisma = buildPrisma([d]);
 
     await reconcileDepartments(prisma as any);
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince).not.toBeNull();
+    vi.setSystemTime(new Date(Date.now() + TICK_MS));
     await reconcileDepartments(prisma as any);
 
     // NC recovers.
@@ -726,9 +758,11 @@ describe("WARP-1557 — stuck rows get a louder signal than a debug log line", (
     const recovered = await reconcileDepartments(prisma as any);
     expect(prisma.deptRows.get(d.id)!.state).toBe("active");
     expect(recovered.departmentsStuck).toBe(0);
+    // The clock is cleared, so the NEXT failure episode gets a full budget
+    // rather than inheriting a spent one.
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince).toBeNull();
 
-    // Break it again — the counter restarted from zero, so one bad tick is
-    // not immediately "stuck".
+    // Break it again — one bad tick is not immediately "stuck".
     gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
     prisma.deptRows.get(d.id)!.state = "pending";
     prisma.deptRows.get(d.id)!.ncGroupfolderId = null;
@@ -736,21 +770,93 @@ describe("WARP-1557 — stuck rows get a louder signal than a debug log line", (
     expect(again.departmentsStuck).toBe(0);
   });
 
-  it("the stuck ActivityRow carries how many consecutive ticks the row has failed", async () => {
+  it("the stuck ActivityRow carries how long the row has been failing", async () => {
     gfCreateFolderMock.mockRejectedValue(new Error("nc unreachable"));
     const d = dept({ state: "failed", provisionError: "previous failure" });
     const prisma = buildPrisma([d]);
 
     await reconcileDepartments(prisma as any);
+    vi.setSystemTime(new Date(Date.now() + 12 * 60 * 1000));
     await reconcileDepartments(prisma as any);
 
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         what: "Department stuck in failed state",
         severity: "err",
-        refs: expect.objectContaining({ consecutiveTicks: 2 }),
+        refs: expect.objectContaining({ minutesStuck: 12 }),
       }),
     );
+  });
+});
+
+/**
+ * WARP-1651 — the escalation survives an orchestrator restart.
+ *
+ * WARP-1557 counted consecutive ticks in a module-level in-memory Map, and
+ * its comment claimed a restart "at worst delays an escalation by
+ * STUCK_TICK_THRESHOLD ticks". On a box restarting more often than the
+ * threshold — a deploy, a reboot, an OOM, or the very infra instability that
+ * produced the 5xx — the counter never reached the threshold, the demotion
+ * NEVER fired, and the owner saw "Setting up…" with no error text forever.
+ *
+ * A restart is modelled the only way it can be: the process keeps no memory
+ * of previous ticks, so a row whose clock says 40 minutes must escalate on
+ * the very first sweep it is seen in.
+ */
+describe("WARP-1651 — the re-verify budget is durable across restarts", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T01:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("escalates on the FIRST tick after a restart when the row is already past budget", async () => {
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    // The row as a restarted process finds it: parked in the re-verify state
+    // with a clock that started 40 minutes ago.
+    const d = dept({
+      state: "provisioning",
+      provisionError: "Groupfolder create: 503",
+      nonConvergedSince: new Date(Date.now() - 40 * 60 * 1000),
+    });
+    const prisma = buildPrisma([d]);
+
+    const first = await reconcileDepartments(prisma as any);
+
+    expect(first.departmentsStuck).toBe(1);
+    expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
+  });
+
+  it("does not restart the clock on a row that is already counting", async () => {
+    // The bug in counter form: every fresh process began at zero. The stamp
+    // has to be written once per failure EPISODE and read back afterwards.
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const started = new Date(Date.now() - 10 * 60 * 1000);
+    const d = dept({ state: "provisioning", nonConvergedSince: started });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince?.getTime()).toBe(
+      started.getTime(),
+    );
+  });
+
+  it("keeps the clock when it demotes, so the row cannot re-arm its own budget", async () => {
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const started = new Date(Date.now() - 40 * 60 * 1000);
+    const d = dept({ state: "provisioning", nonConvergedSince: started });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince).not.toBeNull();
   });
 });
 
