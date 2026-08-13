@@ -9,6 +9,10 @@ import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import {
+  buildRecordBlock,
+  buildSnapshotsBlock,
+} from "./camera-retention-defaults.js";
 
 const logger = createLogger("frigate-client");
 
@@ -921,6 +925,13 @@ export async function addCamera(
   // cameras are preserved. This is the same call the camera-discovery service
   // uses to auto-adopt. requires_restart=1 persists to disk and reloads so the
   // camera actually starts capturing.
+  //
+  // 🔴 `record` MUST carry the retention windows explicitly. This block used
+  // to be `{ enabled: true }`, which inherits `continuous: 0` / `motion: 0`
+  // from Frigate's own schema — the camera then keeps ONLY segments that
+  // overlap an alert or detection, while every surface reports "Recording"
+  // (WARP-1957). See camera-retention-defaults.ts for why the fix is here
+  // and not in docker/frigate/config.yml.
   const resp = await fetch(`${FRIGATE_URL}/api/config/set`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -930,8 +941,8 @@ export async function addCamera(
           [safeName]: {
             ffmpeg: { inputs: [{ path: rtspUrl, roles: ["detect", "record"] }] },
             detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
-            record: { enabled: true },
-            snapshots: { enabled: true },
+            record: buildRecordBlock(),
+            snapshots: buildSnapshotsBlock(),
           },
         },
       },

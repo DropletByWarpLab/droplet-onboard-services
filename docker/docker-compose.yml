@@ -271,6 +271,18 @@ services:
       # orchestrator rejects a wildcard at startup.
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
+      # WARP-1957 — retention a newly adopted camera is given. MUST match the
+      # camera-discovery service's block below; both adoption writers read
+      # these same names so a manual add and an auto-adopt agree. Leave unset
+      # for the shipped defaults (3d continuous / 30d motion / ±20s padding);
+      # an empty value is treated as absent, not as zero.
+      - NVR_DEFAULT_CONTINUOUS_DAYS=${NVR_DEFAULT_CONTINUOUS_DAYS:-}
+      - NVR_DEFAULT_MOTION_DAYS=${NVR_DEFAULT_MOTION_DAYS:-}
+      - NVR_DEFAULT_ALERTS_RETAIN_DAYS=${NVR_DEFAULT_ALERTS_RETAIN_DAYS:-}
+      - NVR_DEFAULT_DETECTIONS_RETAIN_DAYS=${NVR_DEFAULT_DETECTIONS_RETAIN_DAYS:-}
+      - NVR_DEFAULT_EVENT_PRE_CAPTURE_SEC=${NVR_DEFAULT_EVENT_PRE_CAPTURE_SEC:-}
+      - NVR_DEFAULT_EVENT_POST_CAPTURE_SEC=${NVR_DEFAULT_EVENT_POST_CAPTURE_SEC:-}
+      - NVR_DEFAULT_SNAPSHOT_RETAIN_DAYS=${NVR_DEFAULT_SNAPSHOT_RETAIN_DAYS:-}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
       # camera-discovery is `network_mode: host` like routing/switch/display,
@@ -1783,6 +1795,26 @@ services:
       # certs on first run) with a once-per-process warning; a set-but-missing
       # path fails closed.
       - CAMERA_INIT_CA_CERT=${CAMERA_INIT_CA_CERT:-}
+      # WARP-1957 — what a newly adopted camera keeps. Frigate 0.17 defaults
+      # `continuous` and `motion` to 0, so a camera adopted without these
+      # explicitly set records nothing beyond alert clips while the UI says
+      # "Recording". Both adoption writers (this service and the orchestrator)
+      # read the SAME names — keep the two blocks in step.
+      #
+      # ⚠ Leave these UNSET to get the shipped defaults. Compose expands an
+      # unset variable to an EMPTY STRING, which both readers deliberately
+      # treat as absent — a naive numeric coercion would turn "" into 0,
+      # i.e. "keep nothing", which is the exact bug being fixed.
+      - NVR_DEFAULT_CONTINUOUS_DAYS=${NVR_DEFAULT_CONTINUOUS_DAYS:-}
+      - NVR_DEFAULT_MOTION_DAYS=${NVR_DEFAULT_MOTION_DAYS:-}
+      - NVR_DEFAULT_ALERTS_RETAIN_DAYS=${NVR_DEFAULT_ALERTS_RETAIN_DAYS:-}
+      - NVR_DEFAULT_DETECTIONS_RETAIN_DAYS=${NVR_DEFAULT_DETECTIONS_RETAIN_DAYS:-}
+      # Seconds of footage kept either side of an event. Frigate 0.17 bounds
+      # these at 60 (le=60 on RecordConfig); a larger value fails the WHOLE
+      # config save, so both readers clamp.
+      - NVR_DEFAULT_EVENT_PRE_CAPTURE_SEC=${NVR_DEFAULT_EVENT_PRE_CAPTURE_SEC:-}
+      - NVR_DEFAULT_EVENT_POST_CAPTURE_SEC=${NVR_DEFAULT_EVENT_POST_CAPTURE_SEC:-}
+      - NVR_DEFAULT_SNAPSHOT_RETAIN_DAYS=${NVR_DEFAULT_SNAPSHOT_RETAIN_DAYS:-}
     # NOTE: no `depends_on: frigate` — frigate is profile-gated to "linux"
     # (Linux-only). Compose errors on a depends_on whose target isn't in the
     # active profile set, so camera-discovery waits only on broker and treats
