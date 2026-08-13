@@ -11,6 +11,8 @@ import re
 
 import httpx
 
+from camera_retention_defaults import build_record_block, build_snapshots_block
+
 logger = logging.getLogger(__name__)
 
 # WARP-1918 — the managed birdseye section. The dashboard's multi-camera
@@ -134,6 +136,11 @@ class FrigateClient:
         # Sanitize camera name: lowercase, alphanumeric + underscores only
         safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
 
+        # 🔴 `record` MUST carry the retention windows explicitly. This
+        # block used to be {"enabled": True}, which inherits
+        # continuous: 0 / motion: 0 from Frigate's schema — the camera
+        # then keeps ONLY segments overlapping an alert or detection,
+        # while every surface reports "Recording" (WARP-1957).
         camera_config = {
             "cameras": {
                 safe_name: {
@@ -151,12 +158,8 @@ class FrigateClient:
                         "height": 720,
                         "fps": 5,
                     },
-                    "record": {
-                        "enabled": True,
-                    },
-                    "snapshots": {
-                        "enabled": True,
-                    },
+                    "record": build_record_block(),
+                    "snapshots": build_snapshots_block(),
                 }
             }
         }
