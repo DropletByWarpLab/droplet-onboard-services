@@ -868,6 +868,18 @@ const snapshotSrcFor = (name: string) =>
   `${getCameraSnapshotUrl(name)}?t=${Math.floor(Date.now() / HOME_SNAPSHOT_INTERVAL_MS)}`;
 
 /**
+ * The decoded frame's own width/height, or null when the loader can't report
+ * one. Cameras are not all 16:9 — a 4:3 or portrait doorbell feed squeezed
+ * into a fixed tile shape is exactly the distortion this guards against.
+ */
+const aspectOf = (img: { naturalWidth?: number; naturalHeight?: number }): number | null => {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h || !Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return w / h;
+};
+
+/**
  * One live tile. The gradient tint is the *fallback*, not the content — it
  * shows while the first frame decodes, and again if the feed drops. Frames
  * are preloaded offscreen and only swapped in once decoded, so the tile
@@ -890,6 +902,10 @@ function CamTile({
   // on screen, so it must not render off the wall clock alone.
   const [src, setSrc] = useState<string | null>(null);
   const [stamp, setStamp] = useState<string | null>(null);
+  // The decoded frame's own aspect. Null until a frame lands (and for any
+  // probe that can't report its natural size), which leaves the tile on the
+  // CSS 16/9 default rather than guessing a shape for a feed we haven't seen.
+  const [ratio, setRatio] = useState<number | null>(null);
 
   useEffect(() => {
     if (offline) {
@@ -904,6 +920,7 @@ function CamTile({
       probe.onload = () => {
         if (cancelled) return;
         setSrc(next);
+        setRatio(aspectOf(probe));
         setStamp(
           new Date().toLocaleTimeString([], {
             hour: "2-digit",
@@ -935,7 +952,9 @@ function CamTile({
     <button
       className="w-cam"
       type="button"
-      style={{ background: tint }}
+      // The tile takes the frame's shape so the feed is shown whole and
+      // undistorted; the CSS default (16/9) covers the pre-first-frame tint.
+      style={{ background: tint, ...(ratio ? { aspectRatio: String(ratio) } : {}) }}
       onClick={() => router.push("/cameras")}
       aria-label={`Open ${label} in Cameras`}
     >
@@ -961,7 +980,10 @@ export function CamerasWidget({ w, h }: WidgetProps) {
   }
   const tiny = w <= 2 && h <= 2;
   const n = tiny ? 1 : w >= 4 && h >= 3 ? 4 : 2;
-  const cols = tiny ? 1 : w >= 4 ? 2 : h >= 3 ? 1 : 2;
+  // Never open more columns than there are tiles to fill them: a single
+  // camera in a two-column grid got half the width and the full height, which
+  // is the narrow slot that made the frame unreadable in the first place.
+  const cols = Math.min(tiny ? 1 : w >= 4 ? 2 : h >= 3 ? 1 : 2, cameras.length);
   return (
     <div className="w-cams" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
       {cameras.slice(0, n).map((cam, i) => (
