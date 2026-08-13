@@ -1657,7 +1657,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Recent events across all cameras ---
-  router.get("/cameras/events/recent", requireRole(...CAMERA_VIEW_ROLES), async (req, res, next) => {
+  // MCP-admitting, like the sibling /cameras/events leg above: the camera
+  // tools read this one, and a plain requireRole here denies _service:mcp and
+  // turns them into dead tools (tools-mcp-admission).
+  router.get("/cameras/events/recent", requireRoleOrMcpService(...CAMERA_VIEW_ROLES), async (req, res, next) => {
     try {
       const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
       const events = await getRecentEvents(limit);
@@ -2216,7 +2219,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Camera events ---
-  router.get("/cameras/:name/events", requireRole(...CAMERA_VIEW_ROLES), async (req, res, next) => {
+  // MCP-admitting for the same reason as /cameras/events/recent above.
+  router.get("/cameras/:name/events", requireRoleOrMcpService(...CAMERA_VIEW_ROLES), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
