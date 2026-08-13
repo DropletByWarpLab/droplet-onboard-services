@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { MapPin } from "lucide-react";
+import { Building2, MapPin } from "lucide-react";
 import { fetchPlaces, type PlaceSuggestion } from "@/lib/api";
 
 interface PlaceComboboxProps {
@@ -51,6 +51,10 @@ function primaryName(place: PlaceSuggestion): string {
  * alone when there's no context.
  */
 export function placeStoredValue(place: PlaceSuggestion): string {
+  // WARP-1906 — a premade conference room stores its server-composed
+  // canonical "Building - Room" label verbatim; composing `name, context`
+  // here would flip it to "Room, Building".
+  if (place.kind === "room") return place.displayName;
   const context = place.context?.trim();
   const name = primaryName(place);
   return context ? `${name}, ${context}` : name;
@@ -211,12 +215,23 @@ export function PlaceCombobox({
                     : "hover:bg-[var(--hover)]"
                 }`}
               >
-                <MapPin
-                  size={14}
-                  className="mt-0.5 flex-shrink-0"
-                  style={{ color: "var(--text-muted)" }}
-                  aria-hidden
-                />
+                {/* WARP-1906 — a premade conference room reads as "your
+                    building", not "a place on the map". */}
+                {s.kind === "room" ? (
+                  <Building2
+                    size={14}
+                    className="mt-0.5 flex-shrink-0"
+                    style={{ color: "var(--text-muted)" }}
+                    aria-hidden
+                  />
+                ) : (
+                  <MapPin
+                    size={14}
+                    className="mt-0.5 flex-shrink-0"
+                    style={{ color: "var(--text-muted)" }}
+                    aria-hidden
+                  />
+                )}
                 <span className="min-w-0 flex-1">
                   <span
                     className="type-footnote block truncate"

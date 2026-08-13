@@ -22,6 +22,7 @@ import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
+import { LocationsCard } from "@/components/settings/LocationsCard";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -544,6 +545,11 @@ export default function SettingsPage() {
             (Run business setup / Re-run onboarding). Renders nothing for
             roles whose GET view carries no onboardingState. */}
         <BusinessProfileCard />
+
+        {/* WARP-1906 — premade buildings + conference rooms offered as
+            suggestions in the event form's Location field. Self-gates to
+            owner/admin internally and renders nothing for lesser roles. */}
+        <LocationsCard />
 
         {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
             device actions (reformat/remake storage AND factory reset). The

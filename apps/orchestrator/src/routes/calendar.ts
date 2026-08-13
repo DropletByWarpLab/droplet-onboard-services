@@ -30,6 +30,12 @@ import {
 import { serializeIcs } from "../services/ics.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
+// WARP-1906 — premade workspace locations (building + conference room) rank
+// ahead of the Nominatim results in the location autocomplete.
+import {
+  matchRooms,
+  toRoomSuggestion,
+} from "../services/workspace-locations.service.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
 
@@ -352,7 +358,11 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
   // Result shape is intentionally narrow: just enough for the combobox to
   // render a list and persist a string. Lat/lon are included so a follow-up
   // can store coordinates without changing the wire.
-  router.get("/calendar/places", async (req, res, next) => {
+  router.get("/calendar/places", async (req, res) => {
+    // Declared OUTSIDE the try so the catch can still serve them: on an
+    // offline/air-gapped box (the flagship posture) the premade rooms are
+    // exactly the part that must keep working when Nominatim can't.
+    let rooms: PlaceSuggestion[] = [];
     try {
       const q = String(req.query.q ?? "").trim();
       if (q.length < 2) {
@@ -363,26 +373,52 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       // WARP-1502: `v2` — the suggestion shape gained `name`/`context`. Bumping
       // the key prefix guarantees we never serve a stale old-shape entry from
       // the 10-minute cache after this ships.
-      const cacheKey = `places:v2:${limit}:${q.toLowerCase()}`;
-      const cached = await cacheGet<PlaceSuggestion[]>(cacheKey);
-      if (cached) {
-        res.json({ places: cached });
-        return;
+      // WARP-1906 — premade workspace locations rank AHEAD of the Nominatim
+      // results: on a business box "Aur" should surface "HQ - Room Aurora"
+      // before any city. Read fresh on every request (NEVER cached with the
+      // Nominatim list below) so an admin edit in Settings shows up
+      // immediately; a failed read degrades to Nominatim-only rather than
+      // failing the lookup.
+      try {
+        const rows = await prisma.workspaceLocation.findMany({
+          orderBy: [{ building: "asc" }, { room: "asc" }],
+        });
+        rooms = matchRooms(rows, q).slice(0, limit).map(toRoomSuggestion);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[calendar/places] workspace-location lookup failed:", err);
       }
 
-      const places = await fetchNominatim(q, limit);
-      // 10 minutes — the same prefix lookup is going to repeat as a user
-      // types; longer TTLs risk staleness for fast-moving entities (renamed
-      // venues, etc.) but 10 min is a sane compromise.
-      await cacheSet(cacheKey, places, 600);
-      res.json({ places });
+      // The external lookup is scoped to its own try/catch: a network-level
+      // Nominatim failure (DNS, ECONNREFUSED, the 5s abort — the fetch
+      // REJECTS, unlike a non-OK response which resolves to []) degrades to
+      // rooms-only instead of discarding the rows already read above.
+      let external: PlaceSuggestion[] = [];
+      try {
+        const cacheKey = `places:v2:${limit}:${q.toLowerCase()}`;
+        const cached = await cacheGet<PlaceSuggestion[]>(cacheKey);
+        if (cached) {
+          external = cached;
+        } else {
+          external = await fetchNominatim(q, limit);
+          // 10 minutes — the same prefix lookup is going to repeat as a user
+          // types; longer TTLs risk staleness for fast-moving entities
+          // (renamed venues, etc.) but 10 min is a sane compromise. Only the
+          // Nominatim list is cached — the room merge above stays live.
+          await cacheSet(cacheKey, external, 600);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[calendar/places] external lookup failed:", err);
+      }
+
+      res.json({ places: [...rooms, ...external] });
     } catch (err) {
-      // Surface a clean empty list rather than a 5xx — the combobox falls
-      // back to free-text entry. The error still hits the logger for
-      // operators.
+      // Never 5xx the combobox — it falls back to free-text entry. Serve
+      // whatever local rooms we already read rather than an empty list.
       // eslint-disable-next-line no-console
       console.warn("[calendar/places] lookup failed:", err);
-      res.json({ places: [] });
+      res.json({ places: rooms });
     }
   });
 

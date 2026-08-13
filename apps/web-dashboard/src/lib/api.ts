@@ -5510,6 +5510,11 @@ export async function fetchShareRecipients(): Promise<ShareRecipient[]> {
 // --- WARP-307: Calendar place autocomplete ---
 
 export interface PlaceSuggestion {
+  /** WARP-1906 — "room" marks a premade workspace conference room (admin-
+   *  managed in Settings → Locations). Its `displayName` carries the
+   *  server-composed canonical "Building - Room" label, which a pick stores
+   *  verbatim. Absent on Nominatim results. */
+  kind?: "room";
   /** WARP-1502 — short primary label (place's own name / first display_name
    *  segment). Optional so a stale-cache old-shape item still parses. */
   name?: string;
@@ -5540,6 +5545,73 @@ export async function fetchPlaces(
     return Array.isArray(data?.places) ? (data.places as PlaceSuggestion[]) : [];
   } catch {
     return [];
+  }
+}
+
+// --- WARP-1906: premade workspace locations (buildings + conference rooms) ---
+
+export interface WorkspaceLocation {
+  id: string;
+  building: string;
+  room: string;
+  /** Canonical location string a pick fills into the event form, composed
+   *  server-side: "HQ - Room Aurora". */
+  label: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchWorkspaceLocations(): Promise<WorkspaceLocation[]> {
+  const res = await authFetch(`${BASE}/api/workspace-locations`);
+  if (!res.ok) throw new Error(`Failed to load locations: ${res.status}`);
+  const data = await res.json();
+  return data.locations ?? [];
+}
+
+export async function createWorkspaceLocation(input: {
+  building: string;
+  room: string;
+}): Promise<WorkspaceLocation> {
+  const res = await authFetch(`${BASE}/api/workspace-locations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to add location: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.location;
+}
+
+export async function updateWorkspaceLocation(
+  id: string,
+  input: { building?: string; room?: string },
+): Promise<WorkspaceLocation> {
+  const res = await authFetch(
+    `${BASE}/api/workspace-locations/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update location: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.location;
+}
+
+export async function deleteWorkspaceLocation(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/workspace-locations/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Failed to remove location: ${res.status}`);
   }
 }
 

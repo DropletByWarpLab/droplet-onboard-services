@@ -19,6 +19,11 @@
 
 /** Structured suggestion returned to the dashboard. */
 export interface PlaceSuggestion {
+  /** WARP-1906 — set to "room" when the suggestion is a premade workspace
+   *  conference room (WorkspaceLocation row) rather than a Nominatim place.
+   *  A room's `displayName` is the canonical "Building - Room" label the
+   *  combobox stores verbatim on pick. Absent on Nominatim results. */
+  kind?: "room";
   /** Short primary label — the place's own name / first display_name segment. */
   name: string;
   /** Concise human-scale locality, e.g. "CA", "Anaheim, CA", "Paris,
