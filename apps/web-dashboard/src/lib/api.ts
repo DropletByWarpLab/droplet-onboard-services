@@ -136,6 +136,8 @@ import type {
   SendDraftResult,
 } from "./types-email";
 import { authFetch } from "./auth";
+// WARP-1637 — the scale tag the orchestrator now stamps on /knowledge hits.
+import type { ScoreKind } from "./relevance";
 
 const BASE = "";
 
@@ -6641,6 +6643,12 @@ export interface KnowledgeSearchHit {
   brainItemId?: string | null;
   pageNumber?: number | null;
   score: number;
+  /**
+   * WARP-1637 — the scale `score` is in, as tagged by the orchestrator's
+   * file-search service. Optional: absent means "infer" (`inferScoreKind`),
+   * which is what every hit did before the orchestrator copy was normalized.
+   */
+  scoreKind?: ScoreKind;
   snippet: string;
   // WARP-214: surfaced verbatim from the orchestrator. Null on legacy rows.
   metadata?: ChunkMetadata | null;

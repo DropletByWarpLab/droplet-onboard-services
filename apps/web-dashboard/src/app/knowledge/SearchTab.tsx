@@ -186,6 +186,12 @@ export function SearchTab({
                       mimeType: mime,
                       chunkText: hit.chunkText ?? hit.snippet ?? "",
                       score: hit.score,
+                      // WARP-1637: pass the producer's tag through instead of
+                      // letting `relevancePct` infer. Inference reads anything
+                      // in [0, 1] as a bounded similarity, so an un-normalized
+                      // reranker logit of 0.0 rendered as a confident 0% —
+                      // the reported defect.
+                      scoreKind: hit.scoreKind,
                       anchor,
                     }}
                   />
