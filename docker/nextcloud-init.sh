@@ -394,7 +394,90 @@ reconcile_trusted_domains() {
 }
 # <<< reconcile_trusted_domains (WARP-1688)
 
+# >>> reconcile_overwrite_protocol (WARP-1973)
+# `overwriteprotocol` is the SECOND key caught by the trap WARP-1688 fixed for
+# trusted_domains: docker-compose.yml sets OVERWRITEPROTOCOL=https, but the
+# stock image consumes it ONLY inside its install branch, so a box installed
+# before that env existed — or any box whose config volume predates it —
+# freezes with the key empty forever. Measured on the live box: empty.
+#
+# What that costs, measured: the gateway terminates TLS and the browser is on
+# https, but Nextcloud builds absolute redirects from the REQUEST, so with the
+# key empty it emits `Location: http://<host>/…`. A browser blocks that as
+# mixed content inside an iframe, and the dashboard's embedded editor shows a
+# spinner that never resolves. WARP-1966 removed the particular redirect that
+# exposed it, but every other redirect Nextcloud emits still carries the wrong
+# scheme until this converges.
+#
+# DELIBERATELY NOT `overwritehost`. isTrustedDomain() returns TRUE
+# UNCONDITIONALLY when overwritehost is non-empty
+# (lib/private/Security/TrustedDomainHelper.php), so setting it would silently
+# disable the entire trusted-domains allowlist — turning a Host-header
+# allowlist into an accept-anything. It is the obvious-looking neighbouring
+# knob, which is exactly why it is called out here and guarded by a test.
+reconcile_overwrite_protocol() {
+  # `:-` on purpose: an UNSET *or EMPTY* env still converges to https. This
+  # appliance always terminates TLS at the gateway and 301s plain http, so
+  # https is the only correct value here and there is no "leave it unmanaged"
+  # state worth honouring — a box whose env lost the variable should still end
+  # up right. A non-empty value is honoured verbatim, so an operator who really
+  # means http can still say so in compose.
+  op_want="${OVERWRITEPROTOCOL:-https}"
+
+  # `|| true` INSIDE the substitution — occ exits non-zero for an unset key and
+  # that status would abort the hook under `set -euo pipefail` (WARP-1694).
+  op_got="$( { occ_www config:system:get overwriteprotocol 2>/dev/null || true; } | tr -d '\r\n' )"
+
+  if [ "$op_got" = "$op_want" ]; then
+    echo "[droplet] WARP-1973: overwriteprotocol already '$op_want' — nothing to do"
+  elif occ_www config:system:set overwriteprotocol --value="$op_want" >/dev/null 2>&1; then
+    echo "[droplet] WARP-1973: overwriteprotocol '${op_got:-<unset>}' → '$op_want'"
+  else
+    echo "[droplet] WARP-1973: could not set overwriteprotocol — Nextcloud will emit absolute URLs with the REQUEST's scheme, so an https page can get http redirects (mixed content, blocked in the editor iframe). Non-fatal; the next boot retries." >&2
+  fi
+
+  # An overwritehost that got set by hand nullifies the allowlist. Report it
+  # LOUDLY rather than clearing it: it may be deliberate on some topology, and
+  # silently rewriting another operator's security-relevant config is worse
+  # than telling them. Never SET it here.
+  oh_got="$( { occ_www config:system:get overwritehost 2>/dev/null || true; } | tr -d '\r\n' )"
+  if [ -n "$oh_got" ]; then
+    echo "[droplet] WARP-1973: WARNING — overwritehost is set to '$oh_got'. isTrustedDomain() returns true unconditionally while that is non-empty, so the trusted_domains allowlist above is INERT and Nextcloud accepts any Host header. Clear it unless this box genuinely needs it." >&2
+  fi
+}
+# <<< reconcile_overwrite_protocol (WARP-1973)
+
 reconcile_trusted_domains
+reconcile_overwrite_protocol
+
+# >>> disable_other_connector (WARP-1973)
+# The engine choice must be EXCLUSIVE. This hook configures the connector for
+# the selected DOCS_ENGINE but never disabled the other one, so a box that was
+# ever switched — or that picked the app up any other way — ends up running
+# both. Measured on the live box: richdocuments 8.4.16 AND onlyoffice 9.8.0
+# both enabled, with onlyoffice pointed at http://docserver/ (port 80, where
+# nothing listens; Collabora serves 9980).
+#
+# That is not cosmetic. Both apps register preview providers and file actions
+# for the SAME Office MIME types, so which one answers a preview or an open is
+# not deterministic, and the loser's provider fails: nextcloud.log carries
+# `onlyoffice … getConvertedUri: from docx to jpeg … cURL error 7: Failed to
+# connect to docserver port 80` on every attempt.
+#
+# Disable, never uninstall: a switch back to the other engine then costs an
+# app:enable rather than an appstore round-trip on a box that may have no
+# egress. Non-fatal throughout — a failure here must not take down the hook.
+disable_other_connector() {
+  doc_other="$1"
+  if occ_www app:list 2>/dev/null | grep -qE "^[[:space:]]*- ${doc_other}:"; then
+    if occ_www app:disable "$doc_other" >/dev/null 2>&1; then
+      echo "[droplet] WARP-1973: disabled the '${doc_other}' connector — DOCS_ENGINE selects exactly one"
+    else
+      echo "[droplet] WARP-1973: could not disable '${doc_other}'; two connectors remain enabled and may race for the same Office MIME types" >&2
+    fi
+  fi
+}
+# <<< disable_other_connector (WARP-1973)
 
 if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
   # Connector wiring must not abort shared-space provisioning above; every
@@ -421,6 +504,10 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
           occ_www config:app:set onlyoffice jwt_header \
             --value="Authorization" || true
           echo "[droplet] WARP-882: OnlyOffice connector configured (DOCS_ENGINE=onlyoffice)"
+          # WARP-1973 — only AFTER this engine is known-configured. Disabling
+          # the other one first would leave a box with NO working connector if
+          # the wiring above failed.
+          disable_other_connector richdocuments
         else
           echo "nextcloud-init: OnlyOffice connector install did NOT complete (appstore unreachable?) — leaving it unconfigured; the next boot's idempotent re-run will reconcile it" >&2
         fi
@@ -510,6 +597,10 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
         done
         if [ "$rd_drift" -eq 0 ]; then
           echo "[droplet] WARP-1686: Nextcloud Office connector configured (richdocuments → Collabora CODE); URL trio verified"
+          # WARP-1973 — gated on rd_drift, so a box whose trio did NOT verify
+          # keeps BOTH connectors rather than being left with one that is
+          # known-misconfigured and one that is off.
+          disable_other_connector onlyoffice
         else
           echo "[droplet] WARP-1694: document-engine URL trio did NOT verify — see the lines above. Non-fatal; the next boot re-runs this hook." >&2
         fi

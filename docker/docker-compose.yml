@@ -764,11 +764,16 @@ services:
       # `192.168.*` matches any host in that range. The list stays an ALLOWLIST:
       # only RFC1918 space is trusted, so a public Host header is still refused
       # and the Host-poisoning control the allowlist exists for (password-reset
-      # and other absolute links) still holds for anything off-LAN. 172.16/12 is
-      # deliberately ABSENT: it is the Docker bridge range, not a browser-facing
-      # LAN, the in-compose hosts already have names above, and the only wildcard
-      # that would cover it (`172.*`) reaches far into public address space.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan 192.168.* 10.* ${DROPLET_PUBLIC_FQDN:-}
+      # and other absolute links) still holds for anything off-LAN.
+      #
+      # WARP-1973 — 172.16/12 is enumerated as its SIXTEEN /16 wildcards rather
+      # than written `172.*`. A router handing the box a 172.16–31.x lease is
+      # uncommon but real, and that box's editor would 400 on every Nextcloud
+      # leg with nothing pointing at why. `172.*` would have been the short
+      # spelling and is wrong: it reaches deep into PUBLIC address space
+      # (172.32+ is routable), which stops this being an allowlist at all.
+      # Verbose and exact beats short and over-permissive on a security list.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan 192.168.* 10.* 172.16.* 172.17.* 172.18.* 172.19.* 172.20.* 172.21.* 172.22.* 172.23.* 172.24.* 172.25.* 172.26.* 172.27.* 172.28.* 172.29.* 172.30.* 172.31.* ${DROPLET_PUBLIC_FQDN:-}
       - OVERWRITEPROTOCOL=https
       # WARP-883 (ADR-027 WS-5) — shared "Household" group folder. The
       # post-installation hook (nextcloud-init.sh) reads these to create the

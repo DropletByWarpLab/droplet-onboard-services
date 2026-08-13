@@ -22,6 +22,9 @@ on:
       # Nextcloud asset legs the embedded editor loads from.
       - "tests/nextcloud-trusted-domains.test.sh"
       - "tests/nginx-nextcloud-assets.test.sh"
+      # WARP-1973: overwriteprotocol reconcile, connector exclusivity, and the
+      # RFC1918 coverage that keeps the editor reachable after a DHCP change.
+      - "tests/nextcloud-docs-config-converges.test.sh"
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
@@ -53,6 +56,9 @@ on:
       # Nextcloud asset legs the embedded editor loads from.
       - "tests/nextcloud-trusted-domains.test.sh"
       - "tests/nginx-nextcloud-assets.test.sh"
+      # WARP-1973: overwriteprotocol reconcile, connector exclusivity, and the
+      # RFC1918 coverage that keeps the editor reachable after a DHCP change.
+      - "tests/nextcloud-docs-config-converges.test.sh"
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
@@ -105,6 +111,15 @@ jobs:
         # occ: add-on-rename, zero writes when converged, no empty domain, and
         # errexit survival when the key is unset. Pure bash, no Docker.
         run: bash tests/nextcloud-trusted-domains.test.sh
+      - name: Run Nextcloud docs-config convergence tests
+        # WARP-1973: overwriteprotocol is the SECOND key the stock image applies
+        # only on the install boot (an already-installed box freezes with it
+        # empty, so Nextcloud emits http:// redirects to an https page and the
+        # editor iframe is blocked as mixed content); the DOCS_ENGINE choice must
+        # disable the other connector, or both register providers for the same
+        # Office MIME types; and trusted domains must cover all of RFC1918 so a
+        # new DHCP lease cannot 400 the editor. Pure bash, no Docker.
+        run: bash tests/nextcloud-docs-config-converges.test.sh
       - name: Run nginx Nextcloud asset-routing unit tests
         # WARP-1688: the editor page emits root-absolute /apps/, /core/, /dist/
         # and /index.php/apps/{richdocuments,theming}/ URLs. Asserts those legs
