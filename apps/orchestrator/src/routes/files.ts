@@ -2960,6 +2960,21 @@ export function createFilesRouter(
       }
       const user = getUser(req);
       await ncRestoreTrashItem(await getToken(req), user, parsed.data.name);
+      // WARP-1652: restore is the one mutating route that used to leave every
+      // listing cache entry alone, so a restored file stayed invisible for the
+      // full CACHE_TTL — it appeared to have vanished into nothing.
+      //
+      // It cannot name the directory it landed in: `ncRestoreTrashItem` takes
+      // only the trash-assigned filename and NC restores to the original
+      // location by itself, so there is no (space, path) pair to build a key
+      // from. Rather than guess one, sweep the caller's whole listing
+      // namespace — the same coarse fallback `invalidateListing` already takes
+      // when it cannot resolve a key. It is bounded to this one user, and a
+      // restore is rare and deliberate, so the cost is a few cold listings.
+      //
+      // The two purge routes below need nothing: a trashed file is already
+      // absent from every listing, so removing it permanently changes none.
+      await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
       safePublish(`droplet/files/${user}/trash-restored`, { name: parsed.data.name });
       res.json({ restored: parsed.data.name });
     } catch (err) {
@@ -3084,6 +3099,21 @@ export function createFilesRouter(
   // `activeDeptMountNames` exists). So all three can return cross-space file
   // names and paths, and all three used to be keyed per-user with no
   // membership dimension. Each key below now goes through `aclScopedKey`.
+  /**
+   * WARP-1652 — condense free-form cache-key segments into one that cannot
+   * alias. `aclScopedKey` joins its suffix with ":", which is unambiguous only
+   * while at most ONE segment is free-form and it comes last. Length-prefixing
+   * before hashing makes the input injective regardless of content (a ":" or
+   * even a NUL inside a value can no longer shift the boundary), and the
+   * digest keeps the key bounded however long a search query is.
+   *
+   * Same shape as `aclCacheTag`'s digest — a 16-hex-char sha256 slice.
+   */
+  function freeFormDigest(...parts: string[]): string {
+    const injective = parts.map((p) => `${p.length}:${p}`).join("");
+    return createHash("sha256").update(injective).digest("hex").slice(0, 16);
+  }
+
   const FAVORITES_CACHE_PREFIX = "files:favorites:";
   const RECENTS_CACHE_PREFIX = "files:recents:";
   const SEARCH_CACHE_PREFIX = "files:search:";
@@ -3197,8 +3227,15 @@ export function createFilesRouter(
         req,
         SEARCH_CACHE_PREFIX,
         user,
-        q,
-        mime ?? "",
+        // WARP-1652: `q` and `mime` are both free-form AND non-terminal.
+        // Appended raw they were joined with ":" like every other segment, so
+        // (q="a", mime="b:c") and (q="a:b", mime="c") produced the IDENTICAL
+        // key and the second caller was served the first one's results for the
+        // full SEARCH_TTL. Same class as WARP-1610's listing key, same blast
+        // radius: the key still carries the caller's own username and ACL tag,
+        // so this is content-mixing for one user, not cross-tenant disclosure.
+        // One digest over the pair cannot alias whatever they contain.
+        freeFormDigest(q, mime ?? ""),
         String(limit),
       );
       if (cacheKey) {
