@@ -308,6 +308,138 @@ else
   fail "the reconcile uninstalls the connector — switching engines back would need appstore access"
 fi
 
+echo "--- Phase 3b: the Hub apps that inject into the editor iframe (WARP-1979) ---"
+
+if extract_fn "# >>> disable_hub_apps (WARP-1979)"               "# <<< disable_hub_apps (WARP-1979)" "$WORK/hub.sh"; then
+  pass "disable_hub_apps is delimited by sentinel markers"
+else
+  fail "disable_hub_apps sentinel markers missing"
+fi
+
+if grep -qE '^disable_hub_apps[[:space:]]*$' "$HOOK"; then
+  pass "disable_hub_apps is invoked at top level (runs every boot)"
+else
+  fail "disable_hub_apps is never invoked — the Hub splash comes back on the next new user"
+fi
+
+cat > "$WORK/hub-harness.sh" <<'HARNESS'
+set -euo pipefail
+STATE="${STUB_STATE:?}"
+occ_www() {
+  sub="${1:-}"
+  if [ "$sub" = "app:list" ]; then cat "$STATE/applist"; return 0; fi
+  if [ "$sub" = "app:disable" ]; then
+    printf '%s
+' "${2:-}" >> "$STATE/disabled"
+    [ "${STUB_DISABLE_FAILS:-0}" = "1" ] && return 1
+    return 0
+  fi
+  printf '%s
+' "$sub" >> "$STATE/other"
+  return 0
+}
+# shellcheck disable=SC1090
+. "$FUNC_FILE"
+disable_hub_apps
+echo "HOOK_REACHED_END"
+HARNESS
+
+run_hub() {
+  rm -rf "$WORK/state"; mkdir -p "$WORK/state"
+  : > "$WORK/state/disabled"; : > "$WORK/state/other"
+  printf '%s
+' "${CASE_APPLIST:-}" > "$WORK/state/applist"
+  set +e
+  STUB_STATE="$WORK/state" FUNC_FILE="$WORK/hub.sh"   STUB_DISABLE_FAILS="${CASE_DISABLE_FAILS:-0}"     bash "$WORK/hub-harness.sh" > "$WORK/out" 2> "$WORK/err"
+  LAST_RC=$?
+  set -e
+}
+
+# The live box's state before this landed.
+STOCK="Enabled:
+  - activity: 2.21.1
+  - dashboard: 7.9.0
+  - files: 2.1.1
+  - firstrunwizard: 2.18.0
+  - nextcloud_announcements: 1.18.0
+  - recommendations: 2.1.0
+  - richdocuments: 8.4.16
+  - support: 1.12.0
+  - survey_client: 1.17.0
+  - updatenotification: 1.19.1
+  - weather_status: 1.9.0
+Disabled:
+  - encryption"
+
+CASE_APPLIST="$STOCK" run_hub
+
+# firstrunwizard IS the reported bug: its whole job is the "Welcome to
+# Nextcloud Hub" splash, and it loads inside the embedded editor page.
+if grep -qx "firstrunwizard" "$WORK/state/disabled"; then
+  pass "firstrunwizard is disabled (the 'Welcome to Nextcloud Hub' splash in the editor iframe)"
+else
+  fail "firstrunwizard NOT disabled — clicking Edit still shows the Hub splash to every new user"
+fi
+
+# These two phone home from an appliance whose whole thesis is that it does not.
+for app in survey_client nextcloud_announcements; do
+  if grep -qx "$app" "$WORK/state/disabled"; then
+    pass "$app is disabled (it phones home to Nextcloud)"
+  else
+    fail "$app NOT disabled — it reports to Nextcloud's servers from an air-gapped-mentality appliance"
+  fi
+done
+
+for app in updatenotification support weather_status recommendations; do
+  if grep -qx "$app" "$WORK/state/disabled"; then
+    pass "$app is disabled"
+  else
+    fail "$app NOT disabled — it injects into every Nextcloud-rendered page, editor included"
+  fi
+done
+
+# Structural apps must survive. Disabling the default landing app or the
+# activity backend is a different decision from cleaning up the editor iframe.
+for keep in dashboard activity files richdocuments; do
+  if grep -qx "$keep" "$WORK/state/disabled" 2>/dev/null; then
+    fail "$keep was disabled — that is out of scope and breaks a surface nothing in the editor flow needed changed"
+  else
+    pass "$keep left enabled"
+  fi
+done
+
+# Idempotence. occ prints these under "Disabled:" once they are off, so a match
+# that is not scoped to the Enabled block retries the disable every boot.
+ALREADY="Enabled:
+  - files: 2.1.1
+  - richdocuments: 8.4.16
+Disabled:
+  - firstrunwizard: 2.18.0
+  - survey_client: 1.17.0
+  - weather_status: 1.9.0"
+CASE_APPLIST="$ALREADY" run_hub
+if [ ! -s "$WORK/state/disabled" ]; then
+  pass "already-disabled box: zero disable calls (scoped to the Enabled block)"
+else
+  fail "re-disabled apps already off: [$(tr '
+' '|' < "$WORK/state/disabled")] — the match is not scoped to Enabled:"
+fi
+
+# Non-fatal: the boot hook must survive a failing disable.
+CASE_APPLIST="$STOCK" CASE_DISABLE_FAILS=1 run_hub
+if grep -q HOOK_REACHED_END "$WORK/out" && grep -qi "could not disable" "$WORK/err"; then
+  pass "failed disable: reported on stderr and non-fatal"
+else
+  fail "failed disable aborted the hook (rc=$LAST_RC)"
+fi
+
+# Never remove — re-enabling must not need appstore egress.
+if ! grep -qE 'app:remove|app:uninstall' "$WORK/hub.sh"; then
+  pass "Hub apps are DISABLED, never uninstalled"
+else
+  fail "the hook uninstalls Hub apps — re-enabling one would need appstore access"
+fi
+
 echo "--- Phase 4: compose covers all of RFC1918, and stays an allowlist ---"
 
 TD_LINE="$(grep -E '^[[:space:]]*-[[:space:]]*NEXTCLOUD_TRUSTED_DOMAINS=' "$COMPOSE_FILE" | head -1)"
