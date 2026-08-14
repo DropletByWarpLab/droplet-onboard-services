@@ -24,7 +24,21 @@
 #   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
 #                    registry). DEFAULT (without this flag): RELEASE only — the
 #                    device stays registered/trusted and self-heals (WARP-980).
+#   --keep-storage   Leave attached data drives alone. DEFAULT (without this
+#                    flag): erase Droplet-managed bulk storage (WARP-1988).
 #   -h, --help       Show this help message
+#
+# WARP-1988 (bulk storage is factory state too): a reset used to leave every
+# attached data drive untouched, so a wiped box still carried its old storage
+# pool — assembled, mounted and labelled. Dismantling it by hand afterwards is
+# what left the lab array degraded on 2026-08-14. A reset now stops those
+# arrays, zeroes their md superblocks and wipefs-es their members. Pass
+# --keep-storage for a reset-in-place where the owner keeps their data.
+#
+# The erase is STRUCTURAL, not forensic — it destroys pools, metadata, and
+# filesystems so nothing re-assembles and the next owner starts from clean
+# metal, but it does not overwrite the platters. A box moving from one customer
+# to another needs a separate full-overwrite pass.
 #
 # WARP-980 (AMENDS ADR-023 reset behavior — reset ≠ deregister): a factory-reset
 # now RELEASES the box's HQ name + revokes its cert but KEEPS the device
@@ -62,6 +76,11 @@ DO_BACKUP=false
 # self-heals). --decommission does the full ADR-023 deregister (deletes the
 # device from the fleet registry).
 DECOMMISSION=false
+# WARP-1988 — a reset erases Droplet-managed bulk storage (md pools + drives
+# adopted under /mnt/droplet) by default, so a wiped box really is factory-new.
+# --keep-storage opts out for a reset-in-place where the owner keeps the box
+# and their data. The OS/boot disk is never in scope either way.
+KEEP_STORAGE=false
 
 usage() {
   cat << 'USAGE'
@@ -81,6 +100,7 @@ Options:
   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
                    registry). DEFAULT: RELEASE only — the device stays
                    registered/trusted and self-heals (WARP-980).
+  --keep-storage   Leave attached data drives alone. DEFAULT: erase them.
   -h, --help       Show this help message
 
 What gets deleted:
@@ -91,11 +111,16 @@ What gets deleted:
   - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
   - Accumulated device-backup tarballs (unless --backup is passed)
+  - Droplet-managed bulk storage: every md pool is stopped and its members'
+    superblocks + filesystems wiped, and every drive adopted under
+    /mnt/droplet is wiped (unless --keep-storage is passed)
 
 What is preserved:
   - Source code and git history
   - Docker images (unless --purge-images)
   - Docker engine and system packages
+  - The OS/boot disk and anything sharing a physical disk with it — never
+    in scope for the storage wipe, with or without --keep-storage
 
 Note: reclaiming the build cache means the next setup.sh is a cold (slower)
 rebuild. This is intentional — it stops the OS drive from filling over time.
@@ -112,6 +137,7 @@ while [ $# -gt 0 ]; do
     --backup)         DO_BACKUP=true; shift ;;
     --no-backup)      shift ;;  # deprecated no-op — kept so existing automation doesn't break
     --decommission)   DECOMMISSION=true; shift ;;
+    --keep-storage)   KEEP_STORAGE=true; shift ;;
     -h|--help)        usage ;;
     *)                echo "Unknown option: $1"; usage ;;
   esac
@@ -119,6 +145,8 @@ done
 
 # --- Source logging library ---
 source "$SCRIPT_DIR/lib/logging.sh"
+# WARP-1988 — bulk-storage discovery + erase (see the header).
+source "$SCRIPT_DIR/lib/storage-wipe.sh"
 
 # --- Sanity check ---
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
@@ -155,6 +183,19 @@ printf "    ${_RED}•${_RESET} LLM provider API keys\n"
 printf "    ${_RED}•${_RESET} Smart home configuration and history\n"
 printf "    ${_RED}•${_RESET} Sync targets and file metadata\n"
 printf "    ${_RED}•${_RESET} TLS certificates and device secrets\n"
+# WARP-1988: name the drives BEFORE the operator types RESET. A reset that
+# silently kept the old pool is what shipped a box with its previous storage
+# still on it; a reset that silently erases one would be worse. Say which.
+if [ "$KEEP_STORAGE" = "true" ]; then
+  printf "\n"
+  printf "  ${_DIM}Attached data drives are being KEPT (--keep-storage).${_RESET}\n"
+else
+  _fr_pools="$(sw_assembled_arrays | tr '\n' ' ')"
+  _fr_mounts="$(sw_droplet_mounts | tr '\n' ' ')"
+  printf "    ${_RED}•${_RESET} Bulk storage: ${_BOLD}%s${_RESET}\n" \
+    "${_fr_pools:-no md pools}${_fr_mounts:+ | mounted: $_fr_mounts}"
+  printf "      ${_DIM}(arrays stopped, superblocks zeroed, members wiped — pass --keep-storage to skip)${_RESET}\n"
+fi
 printf "\n"
 printf "  ${_DIM}This action cannot be undone.${_RESET}\n"
 printf "\n"
@@ -190,7 +231,7 @@ elif [ ! -f "$BACKUP_SCRIPT" ]; then
 elif ! command -v docker >/dev/null 2>&1; then
   log_warn "docker not available — skipping safety backup (nothing running to back up)"
 else
-  log_step 0 4 "Emitting a final safety backup before wipe"
+  log_step 0 5 "Emitting a final safety backup before wipe"
   if "$BACKUP_SCRIPT"; then
     log_success "Safety backup complete (default dir: /var/lib/droplet/backups)"
     # Be explicit about what the wipe destroys that the backup does NOT
@@ -239,7 +280,7 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
   else
     _hq_step_label="Releasing public-FQDN DNS + HQ name (device stays registered)"
   fi
-  log_step 0 4 "${_hq_step_label} (${_DEREGISTER_FQDN:-${_DEREGISTER_DEVICE_ID}})"
+  log_step 0 5 "${_hq_step_label} (${_DEREGISTER_FQDN:-${_DEREGISTER_DEVICE_ID}})"
 
   # The split-horizon DNS legs (router + host dnsmasq) are FQDN-keyed, so only
   # run them when we actually have a learned FQDN. The HQ deregistration below
@@ -376,7 +417,7 @@ fi
 # Phase 1: Stop the stack
 # =============================================================================
 
-log_step 1 4 "Stopping all services"
+log_step 1 5 "Stopping all services"
 
 # Use "down -v" to atomically stop containers AND remove named volumes.
 # This is critical — "down" without "-v" leaves volumes intact, which causes
@@ -460,7 +501,7 @@ log_divider
 # Phase 2: Remove Docker volumes
 # =============================================================================
 
-log_step 2 4 "Removing Docker volumes"
+log_step 2 5 "Removing Docker volumes"
 
 # WARP-234: a bind-mounted *.config.php inside a named volume (nextcloud
 # redis-TLS config) leaves a STALE bind-mount after `down -v` that Docker
@@ -690,10 +731,36 @@ fi
 log_divider
 
 # =============================================================================
-# Phase 3: Delete generated files
+# Phase 3: Erase Droplet-managed bulk storage (WARP-1988)
+# =============================================================================
+# Runs AFTER the services are stopped and their volumes removed, so nothing
+# still holds a mount under /mnt/droplet. Never fatal: a drive that refuses to
+# release is reported and skipped, and the reset carries on — an aborted reset
+# leaves a half-wiped box, which is worse than a drive that survives.
+
+log_step 3 5 "Erasing bulk storage"
+
+if [ "$KEEP_STORAGE" = "true" ]; then
+  log_info "Skipping bulk storage — --keep-storage was passed. Attached drives are untouched."
+else
+  sw_wipe_droplet_storage
+  if [ "$SW_WIPED_COUNT" -gt 0 ]; then
+    log_success "Erased Droplet-managed bulk storage ($SW_WIPED_COUNT device(s) wiped)"
+  else
+    log_info "No Droplet-managed bulk storage found to erase"
+  fi
+  if [ "$SW_SKIPPED_COUNT" -gt 0 ]; then
+    log_warn "$SW_SKIPPED_COUNT storage target(s) were skipped — see the refusals above"
+  fi
+fi
+
+log_divider
+
+# =============================================================================
+# Phase 4: Delete generated files
 # =============================================================================
 
-log_step 3 4 "Cleaning generated files"
+log_step 4 5 "Cleaning generated files"
 
 # .env (device secrets)
 if [ -f "$REPO_ROOT/.env" ]; then
@@ -944,7 +1011,7 @@ log_divider
 # Phase 4: Done
 # =============================================================================
 
-log_step 4 4 "Factory reset complete"
+log_step 5 5 "Factory reset complete"
 
 log_divider
 printf "\n"
