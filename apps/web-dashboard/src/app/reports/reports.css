@@ -1,0 +1,259 @@
+/* ============================================================
+   WARP-1992 — Reports bento.
+
+   Scoped under `.droplet-reports`, which sits INSIDE `.droplet-shell`
+   (ShellPage). Two token families are in play and the split is deliberate:
+
+     · surfaces, text, borders, radii, easing, accent  →  the indigo shell
+       scope (`--surface`, `--text`, `--text-muted`, `--border`, `--card-bg`,
+       `--card-bd`, `--brand`, `--brand-subtle`, `--radius-card`, `--ease`).
+       These are what make the page read as a sibling of Files / Network /
+       Health.
+
+     · status colour  →  the GLOBAL `--color-system-*` ramp from
+       globals.css, which already carries light AND dark values and is the
+       same ramp the design handoff names.
+
+   Use `--brand-subtle` for the accent wash, NOT the legacy pre-DESIGN.md
+   accent-subtle token — `scripts/check-dashboard-classes.sh` fails the build
+   on the latter. (That guard greps raw text, comments included, so this note
+   deliberately does not spell the forbidden name.)
+
+   No new tokens are defined here. Note `--color-system-red-text` for red
+   used as BODY TEXT — the vivid red computes ~3.1:1 on a tint and fails
+   WCAG AA (WARP-633). Vivid red stays for dots, borders, and icons.
+   ============================================================ */
+
+.droplet-reports {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Provenance strip ───────────────────────────────────────
+   Persistent, directly under the page header. Brief §3. */
+.rp-provenance {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.rp-provenance svg {
+  flex: 0 0 auto;
+  color: var(--brand);
+}
+
+.rp-provenance time {
+  font-family: var(--font-mono);
+}
+
+/* ── Date scope chips ───────────────────────────────────────── */
+.rp-scope {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--inset);
+}
+
+.rp-scope-chip {
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.25s var(--ease), color 0.25s var(--ease);
+}
+
+.rp-scope-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.rp-scope-chip[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--brand);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(20, 22, 45, 0.08);
+}
+
+/* ── The bento grid ─────────────────────────────────────────
+   Desktop 12-col. Tablet collapses to 6. Mobile is 2-col so the number
+   strip lands as a 2x2 instead of four full-width rows that would push
+   everything else below the fold (brief §8). */
+.rp-bento {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-auto-rows: minmax(132px, auto);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.rp-bento > [data-span="8x2"] { grid-column: span 8; grid-row: span 2; }
+.rp-bento > [data-span="4x2"] { grid-column: span 4; grid-row: span 2; }
+.rp-bento > [data-span="6x2"] { grid-column: span 6; grid-row: span 2; }
+.rp-bento > [data-span="3x1"] { grid-column: span 3; grid-row: span 1; }
+
+@media (max-width: 1279px) {
+  .rp-bento {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+  }
+  .rp-bento > [data-span="8x2"],
+  .rp-bento > [data-span="4x2"],
+  .rp-bento > [data-span="6x2"] { grid-column: span 6; }
+  .rp-bento > [data-span="3x1"] { grid-column: span 3; }
+}
+
+@media (max-width: 767px) {
+  .rp-bento {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .rp-bento > [data-span="8x2"],
+  .rp-bento > [data-span="4x2"],
+  .rp-bento > [data-span="6x2"] { grid-column: span 2; }
+  .rp-bento > [data-span="3x1"] { grid-column: span 1; }
+}
+
+/* ── Tile chrome ────────────────────────────────────────────
+   Every tile is the same card with the same header, so the page's
+   coherence comes from the header being identical everywhere. */
+.rp-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  background: var(--card-bg);
+  box-shadow: 0 1px 2px rgba(20, 22, 45, 0.04);
+  overflow: hidden;
+}
+
+@media (max-width: 767px) {
+  .rp-tile { padding: 16px; }
+}
+
+.rp-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.rp-tile-mark {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+.rp-tile-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* Trailing affordance in a tile header — a link, chip, or icon button. */
+.rp-tile-trail {
+  margin-left: auto;
+  font-size: 13px;
+}
+
+.rp-tile-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* Compact number tiles carry no mark square; the icon sits inline. */
+.rp-num {
+  gap: 6px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.rp-num-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ── Skeletons ──────────────────────────────────────────────
+   This story ships the grid; sibling stories fill the bodies. Under
+   reduced motion the shimmer is replaced by a flat fill (brief §8) —
+   the placeholder still reads as "not yet here" without animating. */
+.rp-skel {
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--inset) 25%,
+    var(--inset-strong) 37%,
+    var(--inset) 63%
+  );
+  background-size: 320px 100%;
+  animation: rp-shimmer 1.4s linear infinite;
+}
+
+@keyframes rp-shimmer {
+  0% { background-position: -160px 0; }
+  100% { background-position: 160px 0; }
+}
+
+/* One full turn on press, then settle — a half-turn that springs back reads
+   as a wobble rather than a refresh. */
+.rp-spin {
+  animation: rp-turn 0.25s var(--ease);
+}
+
+@keyframes rp-turn {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rp-skel {
+    background: var(--inset);
+    animation: none;
+  }
+  .rp-scope-chip {
+    transition: none;
+  }
+  .rp-spin {
+    animation: none;
+  }
+}
+
+/* ── Focus ──────────────────────────────────────────────────
+   Brief §8: 2px brand ring at 2px offset on every interactive element. */
+.droplet-reports :focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
