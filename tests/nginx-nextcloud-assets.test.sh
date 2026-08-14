@@ -386,6 +386,41 @@ else
   pass "docs-engine.collabora.conf leaves /docs/ intact (coolwsd expects the prefix)"
 fi
 
+echo "--- Phase 3c: the WebDAV Destination header follows the rewrite (WARP-1990) ---"
+
+# A `rewrite` edits the REQUEST LINE only. WebDAV MOVE/COPY carry their target
+# as an absolute URL in the Destination header, and paired clients are handed a
+# /nextcloud-prefixed base, so without this the header keeps a prefix the
+# request line no longer has and Sabre answers Forbidden — renames fail while
+# GET/PUT/PROPFIND work, which reads as a client bug rather than routing.
+if grep -qE '^[[:space:]]*map \$http_destination \$dav_destination \{' "$CONF"; then
+  pass "the \$dav_destination map exists at http level"
+else
+  fail "no \$http_destination map — WebDAV MOVE/COPY through /nextcloud/ will 403 on every rename"
+fi
+
+# The default branch is what leaves a non-DAV request (and an already-correct
+# Destination) alone. Without it the map yields "" and nginx DROPS the header.
+if printf '%s' "$(sed -n '/map \$http_destination/,/^[[:space:]]*}/p' "$CONF")"    | grep -qE '^[[:space:]]*default[[:space:]]+\$http_destination;'; then
+  pass "the map passes an unprefixed Destination through unchanged (default branch)"
+else
+  fail "the map has no 'default \$http_destination' — a Destination without the prefix would be dropped, breaking MOVE for clients that never had it"
+fi
+
+if printf '%s' "$NC_BODY" | grep -qE '^[[:space:]]*proxy_set_header Destination \$dav_destination;'; then
+  pass "the /nextcloud/ leg rewrites the Destination header"
+else
+  fail "the /nextcloud/ leg strips the prefix from the request line but not from Destination — MOVE/COPY will 403"
+fi
+
+# Scoped: no other leg strips a prefix, so no other leg may touch this header.
+_dest_legs=$(grep -c 'proxy_set_header Destination' "$CONF" || true)
+if [ "${_dest_legs:-0}" = "1" ]; then
+  pass "exactly one leg rewrites Destination (the only one that strips a prefix)"
+else
+  fail "Destination is rewritten on ${_dest_legs} legs — only /nextcloud/ strips a prefix, so only it should"
+fi
+
 echo "--- Phase 4: no collision with a dashboard surface ---"
 
 # Read the REAL route tree instead of restating a hardcoded list that drifts the
