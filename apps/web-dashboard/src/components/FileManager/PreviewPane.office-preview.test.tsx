@@ -140,6 +140,35 @@ describe("PreviewPane — Office documents render a page image", () => {
     expect(screen.queryByText("No preview available")).toBeNull();
   });
 
+  // WARP-1990 — the failure must be keyed to the PATH that failed, not a bare
+  // boolean reset in an effect. useEffect runs AFTER paint, so a boolean reset
+  // painted one frame of the previous file's failure state under the NEW
+  // file's name. Deriving it during render makes that unrepresentable.
+  //
+  // Asserted by going BACK to the failed file: with derived state its failure
+  // is still correctly remembered, and the intervening file was never
+  // contaminated. A boolean reset cannot express both.
+  it("keys the failure to the file, so paging away and back stays correct", () => {
+    const a = makeFile({ name: "a.docx", path: "/Documents/a.docx" });
+    const b = makeFile({ name: "b.docx", path: "/Documents/b.docx" });
+    const { container, rerender } = render(
+      <PreviewPane file={a} onClose={() => {}} onDownload={() => {}} />,
+    );
+    fireEvent.error(container.querySelector("img")!);
+    expect(screen.getByText("No preview available")).toBeTruthy();
+
+    // B must render its image — never A's failure under B's name.
+    rerender(<PreviewPane file={b} onClose={() => {}} onDownload={() => {}} />);
+    expect(container.querySelector("img")).not.toBeNull();
+    expect(screen.queryByText("No preview available")).toBeNull();
+
+    // Back to A: its failure is still known, so we do not re-request a
+    // thumbnail the server already refused.
+    rerender(<PreviewPane file={a} onClose={() => {}} onDownload={() => {}} />);
+    expect(screen.getByText("No preview available")).toBeTruthy();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
   // Guard the branch ORDER. A .csv is in the editable-Office set (so Edit can
   // open it in the spreadsheet editor) but the text branch must win: rendering
   // it as text is faithful and needs no round-trip to the engine.
