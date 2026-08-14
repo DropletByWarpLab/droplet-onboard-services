@@ -691,8 +691,39 @@ configure_single_box_env() {
     # Stage next to and rename onto the REAL target (encrypted /data when
     # relocated), never the symlink itself — see the $env_target note above.
     local stage="${env_target}.upsert.$$"
+    # A value containing whitespace MUST be quoted. .env is `.`-sourced as a
+    # shell script in four places (setup.sh:605, verify.sh:33,
+    # lib/compose.sh:659, lib/secrets.sh:1103) and bash reads a bare
+    # `KEY=a b` as "assign KEY=a for the duration of the command `b`" — so the
+    # variable reads back EMPTY and the shell exits 127 trying to run the
+    # second field.
+    #
+    # That 127 fails the ENCLOSING step, which is the damaging part. It is how
+    # a space-separated DROPLET_TRUSTED_LAN_IPS aborted
+    # install-device-bridge.sh before its `systemctl enable --now
+    # droplet-panel-claim.service`, leaving the claim code undrawn and the
+    # customer hard-stopped at wizard step 2 — with no symptom beyond
+    # "front-panel host integration had issues (continuing)".
+    #
+    # Only whitespace values change shape; every other value stays byte-for-
+    # byte as before, so the other 49 call sites cannot regress. Compose's own
+    # .env parser strips the quotes, so the container side is unchanged.
+    local rendered
+    case "$val" in
+      *[[:space:]]*)
+        # Escape what survives inside double quotes, so a value can never
+        # execute or expand when sourced.
+        local esc="$val"
+        esc="${esc//\\/\\\\}"
+        esc="${esc//\"/\\\"}"
+        esc="${esc//\$/\\\$}"
+        esc="${esc//\`/\\\`}"
+        rendered="${key}=\"${esc}\""
+        ;;
+      *) rendered="${key}=${val}" ;;
+    esac
     ( umask 077; { grep -vE "^${key}=" "$env_target" 2>/dev/null || true; \
-                   printf '%s=%s\n' "$key" "$val"; } > "$stage" )
+                   printf '%s\n' "$rendered"; } > "$stage" )
     chmod 600 "$stage"
     mv "$stage" "$env_target"
   }
