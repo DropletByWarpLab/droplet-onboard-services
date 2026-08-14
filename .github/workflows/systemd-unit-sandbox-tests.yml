@@ -1,0 +1,78 @@
+name: systemd-unit-sandbox-tests
+
+# A shipped unit may not carve out a `ReadWritePaths=` path that nothing
+# creates. systemd only WHITELISTS those paths — it never creates them — and
+# namespace setup hard-fails 226/NAMESPACE when one is absent, which
+# Restart=on-failure turns into a permanent crash loop. That shipped three
+# times (droplet-egress-audit, droplet-wifi-rotate, and droplet-device-bridge
+# which survives only by an ordering accident), so it is a CI gate now.
+#
+# Everything here is static parsing plus systemd-analyze — no root, no docker,
+# no box.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/host/etc-systemd-system/**"
+      - "services/**/*.service"
+      - "tests/systemd-readwritepaths-must-exist.test.sh"
+      - ".github/workflows/systemd-unit-sandbox-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/etc-systemd-system/**"
+      - "services/**/*.service"
+      - "tests/systemd-readwritepaths-must-exist.test.sh"
+      - ".github/workflows/systemd-unit-sandbox-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: systemd-unit-sandbox-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ReadWritePaths= targets must be guaranteed to exist
+        run: bash tests/systemd-readwritepaths-must-exist.test.sh
+
+      - name: systemd-analyze verify the units this change touches
+        # Parses each unit exactly the way systemd will, so a malformed
+        # directive fails here instead of on a customer box. Two outputs are
+        # expected and ONLY those two: ExecStart binaries are installed by
+        # setup.sh and never exist on a runner, and the "Proceeding anyway"
+        # permission advisories fire on filesystems without POSIX modes. Any
+        # other line fails the job — a filter wide enough to hide a real error
+        # would make this step decorative.
+        run: |
+          set -euo pipefail
+          units="scripts/host/etc-systemd-system/droplet-egress-audit.service
+          services/oled-display/droplet-wifi-rotate.service
+          services/oled-display/droplet-device-bridge.service"
+          rc=0
+          while IFS= read -r u; do
+            u="$(printf '%s' "$u" | tr -d '[:space:]')"
+            [ -n "$u" ] || continue
+            [ -f "$u" ] || continue
+            # The bridge unit is templated; @REPO_ROOT@ is not a valid path to
+            # systemd, so substitute a real directory before verifying.
+            tmp="$(mktemp -d)"
+            sed "s#@REPO_ROOT@#$tmp#g" "$u" > "$tmp/$(basename "$u")"
+            echo "== $u =="
+            out="$(systemd-analyze verify "$tmp/$(basename "$u")" 2>&1 || true)"
+            printf '%s\n' "$out"
+            unexpected="$(printf '%s\n' "$out" \
+              | grep -v 'is not executable: No such file or directory' \
+              | grep -v 'Proceeding anyway' \
+              | grep -v '^$' || true)"
+            if [ -n "$unexpected" ]; then
+              echo "::error::systemd-analyze verify reported a problem in $u" >&2
+              printf '%s\n' "$unexpected" >&2
+              rc=1
+            fi
+          done <<< "$units"
+          exit "$rc"

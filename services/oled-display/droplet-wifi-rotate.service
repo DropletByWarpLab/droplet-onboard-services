@@ -17,15 +17,22 @@ Environment=BRIDGE_URL=http://127.0.0.1:9090
 #   -f    exit non-zero on 4xx/5xx (so systemd marks the run as failed)
 #   --max-time 40  belt against a hung SSH/UCI path on the router
 #   -H    carry the auth token the bridge requires in production
+# Output goes to the journal (`journalctl -u droplet-wifi-rotate`), not a flat
+# file. It used to redirect into /var/log/droplet-wifi-rotate.log, carved out
+# with `ReadWritePaths=` — but nothing ever created that file, and
+# `ReadWritePaths=` is only a whitelist: systemd never creates the path and
+# fails namespace setup with 226/NAMESPACE when it is absent. factory-reset.sh
+# deleted the file too, so a reset armed the failure. The unit survived only
+# because its timer ships disabled; the first `systemctl start` would have
+# exited 226. Nothing read the file — journald is the correct home.
 ExecStart=/bin/sh -c 'curl -sS -f --max-time 40 -X POST \
     -H "X-Droplet-Auth: ${BRIDGE_AUTH_TOKEN:-}" \
-    "$BRIDGE_URL/openwrt/wifi/rotate" >> /var/log/droplet-wifi-rotate.log 2>&1'
+    "$BRIDGE_URL/openwrt/wifi/rotate"'
 
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/log/droplet-wifi-rotate.log
 
 [Install]
 WantedBy=multi-user.target

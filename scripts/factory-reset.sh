@@ -933,8 +933,10 @@ if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
   # Log files. These grow over time and can contain the current wifi
   # key's sha256 digest on "rotated" lines; nothing sensitive but
   # no reason to keep logs that pre-date the reset.
-  sudo rm -f /var/log/droplet-device-bridge.log \
-             /var/log/droplet-wifi-rotate.log 2>/dev/null || true
+  # droplet-wifi-rotate is NOT listed here any more: it logs to the journal, so
+  # there is no file to remove. Deleting one it had carved out with
+  # `ReadWritePaths=` was actively harmful — the next start would 226/NAMESPACE.
+  sudo rm -f /var/log/droplet-device-bridge.log 2>/dev/null || true
   log_success "Removed device-bridge state, env, and logs"
 fi
 
