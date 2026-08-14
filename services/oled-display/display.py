@@ -827,7 +827,15 @@ class TFTDisplay:
             "ip": "-", "hostname": "droplet", "uptime": "-", "now": "",
             "date": "",
             "sparks_cpu": [],
-            "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
+            # WARP-2047 — ssid defaults EMPTY, not to a plausible name. It used
+            # to default to the literal "Droplet-AI", so the System screen's
+            # NETWORK tile printed that on a box whose household network was
+            # called something else entirely (observed on droplet-sys, which
+            # was broadcasting "Warp"). The tile's own `or "—"` fallback could
+            # never fire, because the default was already truthy. A fabricated
+            # SSID is the same species of lie as WARP-1643's fake 0° sensor:
+            # unknown has to render as unknown.
+            "wifi": {"ssid": "", "clients": 0, "channel": 0,
                      "band": "", "key_ttl_seconds": 0, "password": ""},
             # WARP-1800 — the household JOIN credentials, from the bridge's
             # /openwrt/qr. Distinct from "wifi" above, which is the client
@@ -2061,15 +2069,19 @@ class TFTDisplay:
         _v3_text(draw, date_str, 20, ch - 28,
                  font=_get_font(11, weight="bold"), fill=V3_LABEL3, tracking=1.6)
 
-        # Bottom-right green dot + SSID.
-        ssid = str(self._v3["wifi"].get("ssid") or "Droplet-AI")
-        ssid_font = _get_font(11, weight="bold")
-        ssid_w = _v3_text_width(draw, ssid, ssid_font)
-        draw.ellipse([cw - 20 - ssid_w - 14 - 3, ch - 23 - 3,
-                      cw - 20 - ssid_w - 14 + 3, ch - 23 + 3],
-                     fill=V3_GREEN)
-        _v3_text(draw, ssid, cw - 20, ch - 28, font=ssid_font,
-                 fill=V3_ACCENT, anchor="ra")
+        # Bottom-right green dot + SSID. WARP-2047: drawn ONLY when the SSID is
+        # actually known. A green dot is a health claim, and pairing it with a
+        # made-up name asserted a healthy connection to a network that does not
+        # exist. No name, no dot.
+        ssid = self.household_ssid()
+        if ssid:
+            ssid_font = _get_font(11, weight="bold")
+            ssid_w = _v3_text_width(draw, ssid, ssid_font)
+            draw.ellipse([cw - 20 - ssid_w - 14 - 3, ch - 23 - 3,
+                          cw - 20 - ssid_w - 14 + 3, ch - 23 + 3],
+                         fill=V3_GREEN)
+            _v3_text(draw, ssid, cw - 20, ch - 28, font=ssid_font,
+                     fill=V3_ACCENT, anchor="ra")
 
         # Seconds progress hairline along the bottom edge.
         sec_frac = parts["second"] / 60.0
@@ -2217,12 +2229,18 @@ class TFTDisplay:
         card_y = 60
         _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
         wifi = v.get("wifi") or {}
-        # WARP-819: escape WiFi-QR metachars (same helper as the claim screen)
-        # so a special-char SSID/PSK still scans, matching device-bridge.py.
-        payload = _wifi_qr_payload(
-            wifi.get("ssid") or "Droplet-AI", wifi.get("password") or "")
-        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18,
-                      payload=payload)
+        # WARP-2047: source the payload from wifi_qr_payload(), which already
+        # refuses to hand back a half-formed join string (AP down, no
+        # passphrase, creds the radio won't vouch for). This site used to
+        # compose its own from `ssid or "Droplet-AI"` and `password or ""`,
+        # which on a box with no passphrase yielded `WIFI:T:WPA;S:Droplet-AI;P:;;`
+        # — a named-but-open network a phone joins and then cannot reach. That
+        # is the exact empty-passphrase QR WARP-819 removed from the claim
+        # screen; it survived here.
+        payload = self.wifi_qr_payload()
+        if payload:
+            self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18,
+                          payload=payload)
         mc = 26
         mcx = card_x + 9 + (card_w - 18) // 2 - mc // 2
         mcy = card_y + 9 + (card_w - 18) // 2 - mc // 2
@@ -2233,11 +2251,11 @@ class TFTDisplay:
         yy = card_y + card_w + 14
         _v3_text(draw, "NETWORK", RX, yy, font=_get_font(9, weight="bold"),
                  fill=V3_LABEL3, tracking=1.2)
-        _v3_text(draw, str(wifi.get("ssid") or "Droplet-AI"), RX, yy + 12,
+        _v3_text(draw, self.household_ssid() or "—", RX, yy + 12,
                  font=_get_font(14, weight="bold"), fill=V3_TEXT)
         _v3_text(draw, "PASSWORD", RX, yy + 34, font=_get_font(9, weight="bold"),
                  fill=V3_LABEL3, tracking=1.2)
-        _v3_text(draw, str(wifi.get("password") or ""), RX, yy + 46,
+        _v3_text(draw, str(wifi.get("password") or "—"), RX, yy + 46,
                  font=_get_font(13, weight="regular"), fill=V3_ACCENT_INK)
 
         # KEY rotate pill + TTL chip — ONLY when key rotation is enabled.
@@ -3058,6 +3076,28 @@ class TFTDisplay:
         self._set_mode(self.HOME, pause_cycle=False)
 
     # --- WARP-1782: the rail's two QR faces ---------------------------------
+
+    def household_ssid(self) -> str:
+        """The name of the household network, or "" when it isn't known.
+
+        WARP-2047. Reads `wifi_join` FIRST — the bridge's /openwrt/qr, which
+        resolves the household SSID across all three box shapes (own hostapd,
+        UCI router, approved AP) — and only then the `wifi` client-scan feed,
+        which carries an ssid on the single-box shape and nothing on the others.
+        Same feed precedence, and the same reasoning, as wifi_qr_payload().
+
+        Returns "" rather than a placeholder. Callers render their own "—";
+        inventing a name here would put a confident wrong SSID on the glass,
+        which is the defect this exists to close.
+        """
+        join = self._v3.get("wifi_join") or {}
+        # `ok is False` means the bridge told us it could not vouch for these
+        # creds — the refusal WARP-2047 added when no radio is beaconing them.
+        if join.get("ok") is not False:
+            ssid = str(join.get("ssid") or "").strip()
+            if ssid:
+                return ssid
+        return str((self._v3.get("wifi") or {}).get("ssid") or "").strip()
 
     def wifi_qr_payload(self) -> str:
         """The `WIFI:` join string for the rail's Wi-Fi face, or "" if there
