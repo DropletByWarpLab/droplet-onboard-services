@@ -14,6 +14,12 @@ pypdf>=6.14.2
 # pypdf emit letter-spaced token soup ("t a p  t o o l s"). pdfminer
 # rebuilds words from glyph geometry. MIT-licensed.
 # pdfminer.six is pulled in transitively by pdfplumber — no explicit pin needed.
+# Rasterizer for the scanned-PDF OCR fallback (pages with no text layer).
+# Also arrives transitively via pdfplumber, but the OCR path imports it
+# directly, so pin it: a pdfplumber that dropped the dependency would
+# otherwise turn every scanned PDF back into a silent `empty_extraction`.
+# Apache-2.0/BSD-3-Clause.
+pypdfium2>=5.13.0
 readability-lxml>=0.8.4.1
 lxml_html_clean>=0.4.5
 pytesseract>=0.3.13
