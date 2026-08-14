@@ -76,7 +76,14 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
   // be unavailable — the docs profile is RAM-gated off on a small box, and the
   // engine can be mid-restart. When the request fails we fall back to the same
   // honest empty state a binary blob gets, rather than a broken-image icon.
-  const [officeThumbFailed, setOfficeThumbFailed] = useState(false);
+  // Keyed on the PATH that failed, not a bare boolean, and derived during
+  // render rather than reset in an effect. useEffect runs AFTER paint, so
+  // resetting a boolean there meant a reused modal (arrow-key paging, opening
+  // another row) painted one frame of the PREVIOUS file's failure state —
+  // "No preview available" under the new file's name — before the reset
+  // landed. Deriving it makes the stale frame unrepresentable.
+  const [failedThumbPath, setFailedThumbPath] = useState<string | null>(null);
+  const officeThumbFailed = failedThumbPath === file.path;
   const editable = !!onEdit && isEditableOfficeFile(file);
   const kind = getKind(file);
 
@@ -87,12 +94,6 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose]);
-
-  // The modal is reused across files (arrow-key paging, reopening on another
-  // row), so a stale failure must not suppress the next file's preview.
-  useEffect(() => {
-    setOfficeThumbFailed(false);
-  }, [file.path]);
 
   useEffect(() => {
     if (!editable) {
@@ -314,7 +315,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
                 src={getThumbnailUrl(file.path, 1024, 1024)}
                 alt={`Preview of ${file.name}`}
                 className="max-w-full max-h-[calc(90vh-64px)] object-contain"
-                onError={() => setOfficeThumbFailed(true)}
+                onError={() => setFailedThumbPath(file.path)}
               />
             </div>
           )}
