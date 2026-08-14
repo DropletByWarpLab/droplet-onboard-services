@@ -2368,6 +2368,46 @@ export async function fetchCameras(): Promise<CameraInfo[]> {
   return data.cameras ?? [];
 }
 
+// --- Per-camera access (WARP-1962 model, WARP-1976 UI) ---
+
+export interface CameraAccessGrants {
+  /** Camera NAMES this person has been granted. */
+  cameras: string[];
+}
+
+export interface CameraAccessSaveResult {
+  granted: string[];
+  /** Names the server did not recognise. Surfaced, never dropped — a typo
+   *  that silently grants nothing looks exactly like success. */
+  unknown: string[];
+}
+
+export async function fetchCameraAccess(userId: string): Promise<string[]> {
+  const res = await authFetch(`${BASE}/api/cameras/access/${encodeURIComponent(userId)}`);
+  if (!res.ok) throw new Error(`Failed to fetch camera access: ${res.status}`);
+  const body = (await res.json()) as CameraAccessGrants;
+  return body.cameras ?? [];
+}
+
+/**
+ * Replace this person's camera grants wholesale.
+ *
+ * Set semantics, matching the endpoint: we send what the screen shows. A
+ * client-computed delta would race a second admin editing the same person.
+ */
+export async function setCameraAccess(
+  userId: string,
+  cameras: string[],
+): Promise<CameraAccessSaveResult> {
+  const res = await authFetch(`${BASE}/api/cameras/access/${encodeURIComponent(userId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cameras }),
+  });
+  if (!res.ok) throw new Error(`Failed to save camera access: ${res.status}`);
+  return (await res.json()) as CameraAccessSaveResult;
+}
+
 export async function fetchCameraDetail(name: string): Promise<CameraInfo & { recentEvents: DetectionEvent[] }> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Failed to fetch camera: ${res.status}`);
