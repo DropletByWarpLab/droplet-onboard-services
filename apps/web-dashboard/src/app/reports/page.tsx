@@ -44,7 +44,14 @@ import {
   type ScopeId,
 } from "./date-scope";
 import { fetchHome, type HomePayload } from "./api";
-import { ActivityBody, ChainChip, FoldersBody, IntegrationsBody, NumberBody } from "./tiles";
+import {
+  ActivityBody,
+  ChainChip,
+  FoldersBody,
+  IntegrationsBody,
+  MoneyBody,
+  NumberBody,
+} from "./tiles";
 
 import "./reports.css";
 
@@ -93,9 +100,14 @@ const NUMBER_TILE_KEY = {
  *  `admin` is a distinct role and must see both. */
 const ADMIN_TIER = new Set(["owner", "admin"]);
 
+/** Brief §7 — Money and the report are family-and-up. The CONNECTOR GRANT on
+ *  top of that is server-side only (403), so the client cannot pre-judge it. */
+const PHI_TIER = new Set(["owner", "admin", "family"]);
+
 export default function ReportsPage() {
   const { user } = useAuth();
   const isAdminTier = ADMIN_TIER.has(user?.role ?? "");
+  const canSeePhi = PHI_TIER.has(user?.role ?? "");
 
   const [scope, setScope] = useState<ScopeId>(DEFAULT_SCOPE);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
@@ -175,6 +187,7 @@ export default function ReportsPage() {
                 homeFailed,
                 homeLoading: home === null && !homeFailed,
                 isAdminTier,
+                canSeePhi,
                 range,
                 now: refreshedAt,
               })}
@@ -282,6 +295,7 @@ interface BodyDeps {
   homeFailed: boolean;
   homeLoading: boolean;
   isAdminTier: boolean;
+  canSeePhi: boolean;
   range: DateRange | null;
   /** The page's client clock. Relative times ("2 min ago") are rendered
    *  against it rather than each row calling `new Date()`, so every row on
@@ -305,6 +319,9 @@ function tileBody(id: string, d: BodyDeps): ReactNode {
       />
     );
   }
+  // Money's floor is family-and-up PLUS a connector grant; the grant is
+  // enforced server-side (403), which MoneyBody renders as its locked state.
+  if (id === "a2") return <MoneyBody canRead={d.canSeePhi} now={d.now} />;
   if (id === "c1") return <FoldersBody canRead={d.isAdminTier} />;
   if (id === "c2") return <IntegrationsBody now={d.now} />;
   if (id === "d1") return <ActivityBody range={d.range} canRead={d.isAdminTier} />;

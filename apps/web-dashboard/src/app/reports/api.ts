@@ -146,6 +146,39 @@ export async function fetchIntegrations(): Promise<IntegrationSummary[]> {
   return res.json();
 }
 
+// ── GET /api/erp/ar-summary ──────────────────────────────────────────────
+//
+// Accounts RECEIVABLE — money owed TO the business. There is no
+// accounts-payable, expense, payroll or accounting connector anywhere in the
+// registry, so there is no money-OUT figure to fetch and the tile's lower
+// half ships permanently not-connected (brief §9.1).
+//
+// Role floor is family-and-up AND an AccessRoleConnectorGrant for the
+// provider. A role without the grant gets 403 — common, not exotic.
+
+export interface ArSummary {
+  connected: boolean;
+  reason?: string;
+  /**
+   * BOTH are null whenever `connected` is false — never zero-as-a-stand-in.
+   * `$0.00` means genuinely zero; null means we don't know. The tile must
+   * render those differently, and that distinction is the whole point of
+   * this shape.
+   */
+  totalBalance: number | null;
+  accountCount: number | null;
+}
+
+export async function fetchArSummary(): Promise<ArSummary> {
+  const res = await authFetch("/api/erp/ar-summary");
+  if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch AR summary: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── GET /api/activity/verify ─────────────────────────────────────────────
 //
 // Server-side by necessity: the chain is HMAC-signed with a key that never

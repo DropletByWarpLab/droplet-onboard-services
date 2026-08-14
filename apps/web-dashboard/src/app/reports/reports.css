@@ -433,6 +433,77 @@
   color: var(--text-muted);
 }
 
+/* ── Money tile ─────────────────────────────────────────────
+   Two halves split by a rule. The lower half ships permanently in its
+   not-connected state — there is no accounts-payable source anywhere in
+   the product (brief §9.1). */
+.rp-tile[data-tile="a2"] .rp-tile-body,
+.rp-tile[data-tile="a2"] > .rp-money-half:first-of-type {
+  flex: 1;
+}
+
+.rp-money-half {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  min-height: 0;
+}
+
+.rp-money-half + .rp-money-half {
+  border-top: 1px solid var(--card-bd);
+  padding-top: 16px;
+  margin-top: 8px;
+}
+
+.rp-money-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.rp-money-fig {
+  font-family: var(--font-display, var(--font-ui));
+  font-size: 34px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* Stale is greyed but never hidden — a figure the user can see and
+   distrust beats one silently withheld. */
+.rp-money-fig.is-stale { color: var(--text-muted); }
+
+.rp-money-note {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.rp-money-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* A visual anchor, NOT a progress meter — its width never varies by value. */
+.rp-money-bar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  margin-top: 6px;
+}
+
+.rp-money-bar.is-in { background: var(--brand); }
+.rp-money-bar.is-inert { background: var(--card-bd); opacity: 0.5; }
+
+.rp-chip.is-stale { color: #9a5b00; }
+.dark .rp-chip.is-stale { color: var(--color-system-orange); }
+
 /* ── Connector rows ─────────────────────────────────────────
    Two columns on desktop so six connectors fit without scrolling; one on
    anything narrower, where two would crush the pill. */

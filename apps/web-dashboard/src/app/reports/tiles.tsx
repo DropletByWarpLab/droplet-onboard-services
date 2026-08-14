@@ -25,6 +25,8 @@ import {
   Plug,
   RefreshCw,
   ShieldCheck,
+  TrendingDown,
+  TrendingUp,
   Video,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -34,13 +36,22 @@ import type { ActivityItem } from "@/components/audit/types";
 import {
   ForbiddenError,
   fetchActivityRange,
+  fetchArSummary,
   fetchChainVerify,
   fetchIntegrations,
+  type ArSummary,
   type HomeTile,
   type IntegrationSummary,
   type VerifySummary,
 } from "./api";
-import { PILL, providerMark, providerName, statusLine, statusWeight } from "./connectors";
+import {
+  PILL,
+  providerMark,
+  providerName,
+  relativeSince,
+  statusLine,
+  statusWeight,
+} from "./connectors";
 import type { DateRange } from "./date-scope";
 import { UNREADABLE, formatBigint, formatBytes, quotaTone, sumBytes, usedPercent } from "./bytes";
 
@@ -325,6 +336,140 @@ export function ActivityBody({ range, canRead }: { range: DateRange | null; canR
           View all {items.length} events →
         </a>
       ) : null}
+    </>
+  );
+}
+
+// ── A2 · Money ───────────────────────────────────────────────────────────
+
+/**
+ * Currency for the money figure. Locale-formatted, always two decimals, so
+ * `$0.00` and a blank are never confusable.
+ */
+function money(n: number): string {
+  return n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+/** The half that has no data source, ever. Brief §9.1. */
+function MoneyOutHalf() {
+  return (
+    <div className="rp-money-half">
+      <div className="rp-money-label">
+        <TrendingDown size={14} aria-hidden="true" />
+        Paid out
+      </div>
+      <div className="rp-money-note">No accounting system connected</div>
+      <div className="rp-money-sub">Connect one to see money going out.</div>
+      <a href="/integrations" className="rp-state-link">
+        Browse connectors →
+      </a>
+      {/* Present so the two halves stay balanced, but obviously inert. */}
+      <span className="rp-money-bar is-inert" />
+    </div>
+  );
+}
+
+export function MoneyBody({
+  canRead,
+  now,
+  onSource,
+}: {
+  canRead: boolean;
+  now: Date | null;
+  /** Lets the page put the source/staleness chip in the tile header. */
+  onSource?: (chip: { label: string; stale: boolean }) => void;
+}) {
+  const [ar, setAr] = useState<ArSummary | null>(null);
+  const [forbidden, setForbidden] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [syncedAt, setSyncedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canRead) return;
+    let live = true;
+    setFailed(false);
+    fetchArSummary()
+      .then((r) => live && setAr(r))
+      .catch((e) => {
+        if (!live) return;
+        if (e instanceof ForbiddenError) setForbidden(true);
+        else setFailed(true);
+      });
+    // The staleness chip needs the connector's last successful read, which
+    // WARP-1998 put on the hub list. A failure here is not a money failure —
+    // the figure still renders, just without a staleness claim.
+    fetchIntegrations()
+      .then((rows) => {
+        if (!live) return;
+        const connected = rows.filter((r) => r.lastSyncedAt);
+        const newest = connected
+          .map((r) => r.lastSyncedAt!)
+          .sort()
+          .pop();
+        setSyncedAt(newest ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [canRead]);
+
+  const rel = now ? relativeSince(syncedAt, now) : null;
+  // "Stale" is a claim about age, so it is only made when the age is known.
+  const stale = Boolean(syncedAt && now && Date.now() - new Date(syncedAt).getTime() > 3_600_000);
+
+  useEffect(() => {
+    if (!onSource) return;
+    if (forbidden || !canRead) return;
+    if (ar && !ar.connected) onSource({ label: "Not connected", stale: false });
+    else if (ar && stale && rel) onSource({ label: `Stale · ${rel}`, stale: true });
+    else if (ar) onSource({ label: "Eaglesoft", stale: false });
+  }, [ar, stale, rel, forbidden, canRead, onSource]);
+
+  if (!canRead || forbidden) return <LockedBody />;
+  if (failed) return <ErrorBody what="Couldn't read the money figure" />;
+
+  return (
+    <>
+      <div className="rp-money-half">
+        <div className="rp-money-label">
+          <TrendingUp size={14} aria-hidden="true" />
+          Owed to you
+        </div>
+        {ar === null ? (
+          <span className="rp-skel" style={{ width: "76%", height: 34 }} />
+        ) : ar.connected && ar.totalBalance !== null ? (
+          <>
+            {/* Greyed when stale — shown, never hidden. A degraded figure the
+                user can see and distrust beats one silently withheld. */}
+            <div
+              className={`rp-money-fig${stale ? " is-stale" : ""}`}
+              aria-label={`${money(ar.totalBalance)} owed to you`}
+            >
+              {money(ar.totalBalance)}
+            </div>
+            <div className="rp-money-sub">
+              across <span className="rp-mono">{ar.accountCount ?? 0}</span> accounts
+            </div>
+            <span className="rp-money-bar is-in" />
+          </>
+        ) : (
+          <>
+            <div className="rp-money-note">No practice system connected</div>
+            <div className="rp-money-sub">Connect one to see money coming in.</div>
+            <a href="/integrations" className="rp-state-link">
+              Browse connectors →
+            </a>
+            <span className="rp-money-bar is-inert" />
+          </>
+        )}
+      </div>
+      <MoneyOutHalf />
     </>
   );
 }

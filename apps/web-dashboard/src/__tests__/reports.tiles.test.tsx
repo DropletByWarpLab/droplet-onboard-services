@@ -13,6 +13,7 @@ const fetchAdminFilesUsageMock = vi.fn();
 const fetchActivityRangeMock = vi.fn();
 const fetchChainVerifyMock = vi.fn();
 const fetchIntegrationsMock = vi.fn();
+const fetchArSummaryMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   fetchAdminFilesUsage: (...a: unknown[]) => fetchAdminFilesUsageMock(...a),
@@ -23,6 +24,7 @@ vi.mock("@/app/reports/api", async (orig) => ({
   fetchActivityRange: (...a: unknown[]) => fetchActivityRangeMock(...a),
   fetchChainVerify: (...a: unknown[]) => fetchChainVerifyMock(...a),
   fetchIntegrations: (...a: unknown[]) => fetchIntegrationsMock(...a),
+  fetchArSummary: (...a: unknown[]) => fetchArSummaryMock(...a),
 }));
 
 import {
@@ -30,6 +32,7 @@ import {
   ChainChip,
   FoldersBody,
   IntegrationsBody,
+  MoneyBody,
   NumberBody,
 } from "@/app/reports/tiles";
 import type { HomeTile } from "@/app/reports/api";
@@ -316,6 +319,119 @@ describe("ActivityBody (WARP-1993)", () => {
     });
     render(<ActivityBody range={RANGE} canRead />);
     expect(await screen.findByText("9 files added to Operations")).toBeTruthy();
+  });
+});
+
+// ── Money ────────────────────────────────────────────────────────────────
+
+describe("MoneyBody (WARP-1995)", () => {
+  const NOW = new Date("2026-08-14T09:41:00.000Z");
+
+  beforeEach(() => {
+    fetchIntegrationsMock.mockResolvedValue([]);
+  });
+
+  it("renders the balance and the account count when connected", async () => {
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 48213.55,
+      accountCount: 132,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    expect(await screen.findByText("$48,213.55")).toBeTruthy();
+    expect(screen.getByText("132")).toBeTruthy();
+  });
+
+  it("renders a REAL zero as $0.00, not as an empty state", async () => {
+    // Zero owed is a real answer and a good one. Swapping it for
+    // "not connected" would hide a fact the practice cares about.
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 0,
+      accountCount: 0,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    expect(await screen.findByText("$0.00")).toBeTruthy();
+    expect(screen.queryByText("No practice system connected")).toBeNull();
+  });
+
+  it("renders not-connected when the summary says so — nulls are not zero", async () => {
+    // The mirror of the above. `null` means we don't know; rendering it as
+    // $0.00 would be a fabricated figure.
+    fetchArSummaryMock.mockResolvedValue({
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+      totalBalance: null,
+      accountCount: null,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    expect(await screen.findByText("No practice system connected")).toBeTruthy();
+    expect(screen.queryByText("$0.00")).toBeNull();
+  });
+
+  it("locks on a 403 — the connector-grant case", async () => {
+    const { ForbiddenError } = await import("@/app/reports/api");
+    fetchArSummaryMock.mockRejectedValue(new ForbiddenError());
+    render(<MoneyBody canRead now={NOW} />);
+    expect(await screen.findByText("Your role doesn't include this.")).toBeTruthy();
+  });
+
+  it("locks for a role below the PHI floor without calling the endpoint", () => {
+    render(<MoneyBody canRead={false} now={NOW} />);
+    expect(screen.getByText("Your role doesn't include this.")).toBeTruthy();
+    expect(fetchArSummaryMock).not.toHaveBeenCalled();
+  });
+
+  it("greys a stale figure but never hides it", async () => {
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 48213.55,
+      accountCount: 132,
+    });
+    fetchIntegrationsMock.mockResolvedValue([
+      { provider: "eaglesoft-api", status: "CONNECTED", configured: true, writeEnabled: false, lastSyncedAt: "2026-08-14T03:12:00.000Z" },
+    ]);
+    const { container } = render(<MoneyBody canRead now={NOW} />);
+    const fig = await screen.findByText("$48,213.55");
+    // Shown AND marked — a figure the user can see and distrust beats one
+    // silently withheld.
+    await waitFor(() => expect(container.querySelector(".rp-money-fig.is-stale")).toBeTruthy());
+    expect(fig).toBeTruthy();
+  });
+
+  it("ALWAYS ships the paid-out half not-connected — there is no source", async () => {
+    // Brief §9.1: no accounts-payable, expense, payroll or accounting
+    // connector exists anywhere in the registry.
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 48213.55,
+      accountCount: 132,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    await screen.findByText("$48,213.55");
+    expect(screen.getByText("No accounting system connected")).toBeTruthy();
+    expect(screen.getByText("Connect one to see money going out.")).toBeTruthy();
+  });
+
+  it("renders exactly one currency figure — the out half can never be populated", async () => {
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 48213.55,
+      accountCount: 132,
+    });
+    const { container } = render(<MoneyBody canRead now={NOW} />);
+    await screen.findByText("$48,213.55");
+    expect(container.querySelectorAll(".rp-money-fig")).toHaveLength(1);
+  });
+
+  it("spells the figure out for assistive tech", async () => {
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 48213.55,
+      accountCount: 132,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    expect(await screen.findByLabelText(/owed to you/i)).toBeTruthy();
   });
 });
 
