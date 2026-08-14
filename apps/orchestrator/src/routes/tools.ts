@@ -26,7 +26,9 @@ import {
   plannedToolNames,
   runToolSpec,
   type StepDispatcher,
+  type Summarizer,
 } from "../services/tool-spec-runner.service.js";
+import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 import {
   firstToolDeniedForPrincipal,
   resolveToolAccessScope,
@@ -178,6 +180,12 @@ function projectSpec(
 export function createToolsRouter(
   prisma: PrismaClient,
   dispatcher: StepDispatcher,
+  /**
+   * WARP-1996 — injected so tests can drive a `summarize` step without an
+   * inference backend, the same reason `dispatcher` is a parameter. Defaults
+   * to the on-box summarizer; a spec with no summarize step never calls it.
+   */
+  summarizer: Summarizer = createToolSpecSummarizer(),
 ): Router {
   const router = Router();
 
@@ -505,6 +513,7 @@ export function createToolsRouter(
           steps: spec.steps,
           triggeredBy,
           scope,
+          summarizer,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({
