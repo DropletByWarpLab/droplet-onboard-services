@@ -188,6 +188,31 @@ const SETUP_PROBE_RETRY_DELAYS_MS = [1_500, 3_000, 6_000];
 const AUTHFETCH_RETRY_TIMEOUT_MS = 6_000;
 
 /**
+ * WARP-1726 (second pass) — the bound on the two auth SINGLE-FLIGHTS
+ * (`attemptRefresh` and `confirmSessionDead`).
+ *
+ * Both memoise their in-flight promise so an auth storm costs one round trip
+ * rather than one per pending request. That sharing is only safe while the
+ * promise is guaranteed to settle. A box that accepts the TCP connection and
+ * then goes quiet — mid-reboot, a wedged orchestrator, a captive portal
+ * swallowing the request — leaves a bare `fetch` pending indefinitely, so
+ * `.finally()` never runs, the slot is never cleared, and from then on EVERY
+ * `authFetch` that 401s awaits the same dead promise. The tab stops making
+ * progress until the browser's own transport timeout, which is minutes.
+ *
+ * 6s, matching AUTH_INIT_TIMEOUT_MS / AUTHFETCH_RETRY_TIMEOUT_MS — one house
+ * number for "an appliance on the LAN has had long enough to answer", rather
+ * than a third budget to reason about. The upper constraint is the Network
+ * tab's 10s device poll: keeping the bound under it means a silent box costs at
+ * most one abandoned refresh per poll cycle instead of a growing queue of them.
+ *
+ * A timeout must classify as TRANSIENT, never as a dead session — see the two
+ * call sites. Aborting into a logout would just be a slower version of the bug
+ * this ticket removes.
+ */
+const AUTH_SINGLE_FLIGHT_TIMEOUT_MS = 6_000;
+
+/**
  * An AbortSignal that fires after `ms`, with a jsdom/older-runtime fallback for
  * environments where `AbortSignal.timeout` isn't implemented (keeps unit tests
  * from crashing on `AbortSignal.timeout is not a function`).
@@ -211,11 +236,66 @@ function timeoutSignal(ms: number): AbortSignal {
  * On a 401 from a non-auth endpoint we transparently try to refresh the
  * access token (the refresh cookie is scoped to /api/auth and outlives the
  * 15-minute access JWT). If the refresh succeeds we retry the original call
- * once; if it fails we evict the cached user and bounce to /login. Without
- * this, an expired session leaves stale SWR data on screen and every action
- * silently fails with 401 — which is what users see as "delete is broken".
+ * once; if it fails DEFINITIVELY we evict the cached user and bounce to
+ * /login. Without this, an expired session leaves stale SWR data on screen and
+ * every action silently fails with 401 — which is what users see as "delete is
+ * broken".
  */
-let refreshInFlight: Promise<boolean> | null = null;
+
+/**
+ * WARP-1726 — the outcome of one `/api/auth/refresh` attempt.
+ *
+ * This used to collapse to a boolean, so the caller could not tell "someone
+ * else is rotating this token right now" from "this session is over" and
+ * treated both as a logout. On the Network tab — which polls devices every 10s
+ * plus groups, APs, AP Wi-Fi and per-AP radios every 30s — an access-token
+ * expiry 401s a handful of requests at once, and any two browser contexts
+ * sharing the cookie jar race into the refresh endpoint. The loser's 401 then
+ * hard-navigated to /login, AuthGate found the session serviceable and bounced
+ * back, and the round trip cold-reloaded the page. That is the reload loop.
+ *
+ *   refreshed       — new token pair is in the cookie jar; retry the call.
+ *   transient       — the refresh delivered NO verdict about the session.
+ *                     Leave everything alone and let the next poll retry.
+ *   unauthenticated — the refresh looks like a real end-of-session.
+ *                     `confirmed` says whether the server's answer was
+ *                     definitive on its own (see NO_REFRESH_TOKEN_CODE); when
+ *                     it isn't, an independent probe has to agree before we act.
+ */
+type RefreshOutcome =
+  | { kind: "refreshed" }
+  | { kind: "transient"; reason: "rotation" | "network" | "unavailable" }
+  | { kind: "unauthenticated"; confirmed: boolean };
+
+let refreshInFlight: Promise<RefreshOutcome> | null = null;
+
+/**
+ * The orchestrator's label for "another caller holds the exclusive rotation
+ * claim for this refresh token" (apps/orchestrator/src/routes/auth.ts). It is
+ * a 401 because the claim must reject the loser — but it says nothing about
+ * whether the session is alive, and by the next poll the winner's rotation has
+ * landed in the shared cookie jar.
+ */
+const ROTATION_IN_FLIGHT_CODE = "ROTATION_IN_FLIGHT";
+
+/**
+ * WARP-1726 (second pass) — the orchestrator's label for "you presented no
+ * refresh token at all" (apps/orchestrator/src/routes/auth.ts).
+ *
+ * This is the one refresh 401 that needs no second opinion. Reaching it means
+ * the original request 401'd (so the access token is gone or invalid) AND the
+ * browser holds no refresh cookie, so there is no credential left anywhere to
+ * rescue the session with — `/api/auth/me` can only echo the same 401. Skipping
+ * that probe removes a request from every anonymous page load, where the
+ * sequence was /api/auth/me → /api/auth/refresh → /api/auth/me.
+ *
+ * Deliberately narrow: ONLY this code short-circuits, and only on a 401.
+ * SESSION_EXPIRED and USER_NOT_PROVISIONED still get probed — the refresh
+ * cookie has its own path scope and its own rotation state, so a failure there
+ * is evidence about the TOKEN, not proof about the SESSION. An unlabelled 401
+ * likewise still probes.
+ */
+const NO_REFRESH_TOKEN_CODE = "NO_REFRESH_TOKEN";
 
 /**
  * Endpoints that must NOT trigger the 401 → refresh → retry dance. These are
@@ -263,19 +343,105 @@ function isAuthLifecycleUrl(url: string): boolean {
   );
 }
 
-async function attemptRefresh(): Promise<boolean> {
+/**
+ * Single-flighted token refresh. Concurrent 401s share ONE round trip and all
+ * receive the same classified outcome (a plain object, not the Response — a
+ * body can only be read once, and every awaiter needs the verdict).
+ *
+ * Classification rule, in one line: a failure is TRANSIENT when the refresh
+ * endpoint never got as far as judging the session.
+ *
+ *   - fetch rejected (offline, DNS, TLS, aborted) — nothing was judged. This
+ *     is also where the AUTH_SINGLE_FLIGHT_TIMEOUT_MS abort lands: a box that
+ *     never answered told us precisely nothing about the session.
+ *   - 5xx / 429 — the box is unwell or shedding load, not ending the session.
+ *   - 401 + ROTATION_IN_FLIGHT — a deliberate "not you, try again" from the
+ *     rotation claim.
+ *
+ * Everything else — a 401/403 that isn't the rotation label, or any other
+ * non-OK status — is treated as `unauthenticated`, which is still only ACTED on
+ * after `confirmSessionDead()` agrees, EXCEPT for the one server answer that is
+ * definitive by itself (NO_REFRESH_TOKEN_CODE). Erring toward `transient` is
+ * the safe direction: the cost of a false transient is one more 401 on the
+ * next poll, while the cost of a false logout is the full-page bounce this
+ * ticket exists to remove.
+ */
+async function attemptRefresh(): Promise<RefreshOutcome> {
   if (!refreshInFlight) {
     refreshInFlight = fetch("/api/auth/refresh", {
       method: "POST",
       credentials: "same-origin",
+      // Bounded: an unbounded single-flight that never settles poisons the slot
+      // for every later caller (see AUTH_SINGLE_FLIGHT_TIMEOUT_MS).
+      signal: timeoutSignal(AUTH_SINGLE_FLIGHT_TIMEOUT_MS),
+      // Trace this like every other call through authFetch, so an auth incident
+      // can be followed end-to-end in the orchestrator logs. Its own id: this
+      // round trip is SHARED by every 401 that raced into it, so it belongs to
+      // none of their requests.
+      headers: { "x-request-id": crypto.randomUUID() },
     })
-      .then((r) => r.ok)
-      .catch(() => false)
+      .then(async (r): Promise<RefreshOutcome> => {
+        if (r.ok) return { kind: "refreshed" };
+        if (r.status >= 500 || r.status === 429) {
+          return { kind: "transient", reason: "unavailable" };
+        }
+        const body = (await r.json().catch(() => null)) as { code?: unknown } | null;
+        if (r.status === 401 && body?.code === ROTATION_IN_FLIGHT_CODE) {
+          return { kind: "transient", reason: "rotation" };
+        }
+        // The browser holds no refresh credential — nothing a probe could add.
+        if (r.status === 401 && body?.code === NO_REFRESH_TOKEN_CODE) {
+          return { kind: "unauthenticated", confirmed: true };
+        }
+        return { kind: "unauthenticated", confirmed: false };
+      })
+      // A rejection here is the transport failing — offline, DNS, TLS, or our
+      // own timeout abort — or, defensively, a throw while classifying. None of
+      // those is an auth verdict.
+      .catch((): RefreshOutcome => ({ kind: "transient", reason: "network" }))
       .finally(() => {
         refreshInFlight = null;
       });
   }
   return refreshInFlight;
+}
+
+/**
+ * WARP-1726 — the last-resort confirmation before we destroy a session.
+ *
+ * Deliberately a PLAIN `fetch`, never `authFetch`: routing it back through the
+ * wrapper would re-enter the 401 → refresh → probe path recursively.
+ * (`isAuthLifecycleUrl` does NOT exempt `/api/auth/me` — that path is meant to
+ * refresh+retry for ordinary callers — so the plain fetch is what makes this
+ * safe, not the exemption list.)
+ *
+ * Returns true ONLY on a definitive unauthenticated answer. A 200 means the
+ * refresh failure was a false alarm; a 5xx, a rejected fetch, or a probe that
+ * ran out its AUTH_SINGLE_FLIGHT_TIMEOUT_MS budget all mean we simply could not
+ * find out, and an unprovable claim must never cost the user their session
+ * (same posture as DASH-005 in `restoreSession` below). Note which way the
+ * timeout falls here: a box that goes silent is the LEAST trustworthy moment to
+ * destroy a session, so an abort keeps it. Single-flighted so an auth storm
+ * costs one probe, not one per pending request — and bounded for the same
+ * reason `attemptRefresh` is: an immortal promise in this slot would leave
+ * every later confirmed-dead caller waiting on it forever.
+ */
+let sessionProbeInFlight: Promise<boolean> | null = null;
+
+async function confirmSessionDead(): Promise<boolean> {
+  if (!sessionProbeInFlight) {
+    sessionProbeInFlight = fetch("/api/auth/me", {
+      credentials: "same-origin",
+      signal: timeoutSignal(AUTH_SINGLE_FLIGHT_TIMEOUT_MS),
+      headers: { "x-request-id": crypto.randomUUID() },
+    })
+      .then((r) => r.status === 401 || r.status === 403)
+      .catch(() => false)
+      .finally(() => {
+        sessionProbeInFlight = null;
+      });
+  }
+  return sessionProbeInFlight;
 }
 
 export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -324,8 +490,8 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     return res;
   }
 
-  const refreshed = await attemptRefresh();
-  if (refreshed) {
+  const outcome = await attemptRefresh();
+  if (outcome.kind === "refreshed") {
     // Give the retry a FRESH timeout instead of inheriting `init.signal`
     // (onboard#477): the caller's signal may already be spent by the initial
     // request + refresh, and spreading it here would abort the retry instantly.
@@ -337,8 +503,33 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     });
   }
 
-  // Refresh failed — session is truly dead. Drop cached user and bounce to
-  // login so the UI doesn't keep showing stale data while every call 401s.
+  // WARP-1726 — the refresh failed but told us nothing about the session.
+  // Hand the caller its original 401 and change NOTHING else: no cache
+  // eviction, no navigation. Every consumer of authFetch already handles a
+  // 401 (SWR surfaces it as an error and re-polls), and by the next poll the
+  // rotation that beat us has landed in the shared cookie jar. Tearing the
+  // page down here is what produced the reload loop.
+  if (outcome.kind === "transient") {
+    return res;
+  }
+
+  // Looks like a real end-of-session. Before doing anything destructive, ask
+  // ONE independent question — is this session actually unauthenticated? The
+  // refresh cookie has its own path scope and its own rotation state, so a
+  // failure there is evidence, not proof. Only a definitive answer from
+  // /api/auth/me earns the logout.
+  //
+  // The single exception is a server answer that is already conclusive:
+  // NO_REFRESH_TOKEN means the browser presented no refresh credential, so the
+  // probe could only re-derive the same 401 (WARP-1726 second pass). Every
+  // other unauthenticated verdict — including an unlabelled 401 — still pays
+  // for the confirmation.
+  if (!outcome.confirmed && !(await confirmSessionDead())) {
+    return res;
+  }
+
+  // Confirmed dead. Drop cached user and bounce to login so the UI doesn't
+  // keep showing stale data while every call 401s.
   try {
     localStorage.removeItem(USER_KEY);
   } catch {

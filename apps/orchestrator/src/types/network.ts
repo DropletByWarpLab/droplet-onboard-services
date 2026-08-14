@@ -44,6 +44,74 @@ export interface NetworkInterfaces {
   wan: InterfaceStatus;
 }
 
+/**
+ * One PHYSICAL jack on the router — WARP-1866, the router's answer to the
+ * switch's §7 `SwitchPort`. Derived by the routing service from
+ * `network.device status` + board.json + uci; see services/routing/
+ * router_ports.py for the derivation and the honesty rules behind it.
+ */
+export interface RouterPort {
+  /** netdev name — "p1", "sfp", "eth0". The port's stable identity. */
+  id: string;
+  role: "wan" | "lan" | "guest" | "other" | "unused";
+  /** uci interfaces whose traffic reaches this jack, in config order. A bridge
+   *  member carries both `lan` and the `guest` VLAN riding the bridge. */
+  networks: string[];
+  /** netifd reports a device object for this jack. `false` = an empty SFP cage
+   *  or a jack the running config never realised — absent, NOT down. */
+  present: boolean;
+  /** Admin state (`up`). `null` when absent. NEVER the link indicator — on a
+   *  DSA port this is true for every jack, cable or not. */
+  admin_up: boolean | null;
+  /** The real link: netifd `carrier`. */
+  link_up: boolean;
+  /** "2.5 Gb" / "1 Gb" / "100 Mb". Null when there is no link. */
+  speed: string | null;
+  duplex: "full" | "half" | null;
+  mac: string | null;
+  is_sfp: boolean;
+  traffic: { rx_bytes: number; tx_bytes: number } | null;
+  /** online = carrier · offline = admin up, no cable · disabled = admin down ·
+   *  absent = no reading at all. */
+  status: "online" | "offline" | "disabled" | "absent";
+  /**
+   * WARP-1907 — the extra acknowledgement turning this jack OFF requires, or
+   * `null` when the ordinary Tier-2 confirm is enough.
+   *
+   * Computed by the routing service (`router_ports.disable_guard`) and carried
+   * on the read so the dashboard can choose its confirmation copy before it
+   * opens the dialog. It is NOT re-derivable here: the management-interface set
+   * is deployment configuration (`DROPLET_MGMT_INTERFACES`). The write route
+   * calls the same function, so the sentence the user sees and the rule the
+   * server enforces cannot drift.
+   *
+   * `WAN_PORT` and `MANAGEMENT_PORT` differ in more than wording — a live
+   * management jack self-cuts and OpenWrt reverts after 60s, while the WAN jack
+   * leaves the router perfectly reachable on the LAN, so nothing reverts and
+   * the household stays offline.
+   */
+  disable_guard: {
+    code: "WAN_PORT" | "MANAGEMENT_PORT";
+    /** WHY — safe to render before the user has confirmed anything. */
+    reason: string;
+    /** What to DO about it. Belongs in the refusal, not in a warning banner. */
+    instruction?: string;
+  } | null;
+}
+
+/**
+ * `GET /network/ports`. `supported: false` means this router shape reports no
+ * physical port map (with `detail` saying so) — distinct from an unreachable
+ * router, which surfaces as an error. Neither may render as an all-dark
+ * faceplate.
+ */
+export interface RouterPortMap {
+  supported: boolean;
+  detail: string | null;
+  model: string | null;
+  ports: RouterPort[];
+}
+
 export interface WirelessInterfaceConfig {
   mode: string;
   ssid: string;
@@ -275,12 +343,50 @@ export interface FirewallConfig {
   redirects: FirewallRedirects;
 }
 
+/**
+ * Where the household's Wi-Fi radios actually live.
+ *
+ * `NetworkOverview.wireless` is the ROUTER's own netifd wireless status and
+ * nothing else, so on every shape where the router hosts no Wi-Fi it is `{}`.
+ * That is the shipping fabric, not a fault: the RB5009 edge router has no
+ * radio hardware at all and the household SSID is broadcast by the Droplet
+ * access point (see ADR-005 / the "radios never live on the router" rule).
+ * Summarising the router alone therefore reported "0 radios" for a network
+ * that was broadcasting on two — which is what this rollup exists to fix.
+ *
+ * Counts only. The overview is readable by every authenticated principal,
+ * unlike the owner/admin `GET /network/wifi/ap`, so no name or passphrase
+ * crosses this boundary.
+ */
+export interface WirelessRadioSummary {
+  /** Radios the router itself hosts. Zero on every edge-router shape. */
+  router: number;
+  /** Radios reported by ONLINE Droplet-image access points. */
+  ap: number;
+  /** `router + ap` — every radio we can account for. */
+  total: number;
+  /** Of `total`, how many are actually on the air. */
+  active: number;
+  /**
+   * ONLINE APs that did NOT answer. Greater than zero means `total` is a
+   * FLOOR, not a census — the honest "we can't see them right now" that a
+   * plain zero would misreport as "there is no Wi-Fi".
+   */
+  apsNotReporting: number;
+}
+
 export interface NetworkOverview {
   interfaces: NetworkInterfaces;
   wireless: WirelessStatus;
   system: RouterSystemInfo;
   connectedDeviceCount: number;
   routerConnected: boolean;
+  /**
+   * Optional so an older orchestrator build (or a caller that constructs an
+   * overview without an AP source) stays type-compatible; consumers must
+   * handle its absence rather than assuming zero radios.
+   */
+  wirelessRadios?: WirelessRadioSummary;
 }
 
 export interface NetworkCommandResult {

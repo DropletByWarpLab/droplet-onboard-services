@@ -110,8 +110,12 @@ import {
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
 import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
+import { warmDefaultModel } from "../services/model-readiness.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
+// WARP-1558: the create paths below must ensure this box-wide group exists
+// before OCS is asked to provision an admin-tier account into it.
+import { DROPLET_ADMINS_GROUP } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -135,6 +139,39 @@ export function callerIpFromReq(req: Request): string | undefined {
 }
 
 const logger = createLogger("auth-route");
+
+/**
+ * WARP-1558 — make the box-wide `droplet-admins` group exist before a create
+ * path asks OCS to provision an admin-tier account into it.
+ *
+ * `buildNcGroups` now lists `droplet-admins` for owner/admin (ADR-029 §2.5
+ * Tier-1 see-all), and OCS rejects the whole create-user call when ANY listed
+ * group is missing — the WARP-990 failure mode. `droplet-admins` is created
+ * lazily by the department provisioner, so on a box that has never
+ * provisioned a department it simply does not exist yet: /auth/setup on a
+ * fresh appliance is exactly that box. Ensuring here is what stops the
+ * primary fix from turning into a setup-breaking regression.
+ *
+ * Best-effort and non-blocking, matching the household ensure alongside it:
+ * `ncEnsureGroup` is idempotent (OCS 100 = created, 102 = already there), and
+ * a transient failure must not block a create that would otherwise succeed.
+ * If the group is GENUINELY missing and uncreatable, the create below fails
+ * loudly on its own — which is the correct outcome, not a silent half-state.
+ *
+ * Skipped entirely when the caller's group list doesn't reference it, so
+ * family/guest creates pay no extra OCS round-trip.
+ */
+async function ensureDropletAdminsGroupFor(groups: string[]): Promise<void> {
+  if (!groups.includes(DROPLET_ADMINS_GROUP)) return;
+  try {
+    await ncEnsureGroup(DROPLET_ADMINS_GROUP);
+  } catch (err) {
+    logger.warn(
+      { err, group: DROPLET_ADMINS_GROUP },
+      "could not ensure the droplet-admins group exists (continuing — the reconciler's membership sweep converges this)",
+    );
+  }
+}
 
 const usernameField = z
   .string()
@@ -852,6 +889,13 @@ export function createPublicAuthRouter(
         );
       }
 
+      // WARP-1558: same belt-and-braces for `droplet-admins`. The first owner
+      // is created before any department exists, so on a fresh appliance this
+      // group has never been created by the provisioner — without the ensure,
+      // adding it to `ownerGroups` would make ncInstallAndCreateAdmin fail and
+      // roll setup back on EVERY box.
+      await ensureDropletAdminsGroupFor(ownerGroups);
+
       // WARP-989 — setup must be ATOMIC. The local owner row is written
       // first (idempotent, see the ordering comment above), but the N1
       // owner-exists guard makes a leftover row a permanent lockout: if
@@ -1335,6 +1379,21 @@ export function createPublicAuthRouter(
             }
           : {}),
       });
+
+      // WARP-1954 — the user just signed in; their next stop is usually
+      // chat, and after an idle unload (or a reboot) that first completion
+      // eats the full cold model load. Start loading the chat model NOW,
+      // silently, so it's resident by the time they ask anything. Reuses
+      // the WARP-1041/1772 warm (runtime-agnostic Ollama/DMR, 10-min
+      // debounced, error-swallowing) — same call shape as the setup
+      // wizard's trigger: strictly after the response (setImmediate),
+      // never awaited, so a cold/hung runtime can never stall or fail the
+      // login. Placed on the COMPLETED-login path only (password AND
+      // second factor satisfied) so the warm can't become a pre-auth
+      // probe surface.
+      setImmediate(() => {
+        void warmDefaultModel().catch(() => undefined);
+      });
     } catch (err) {
       next(err);
     }
@@ -1452,7 +1511,20 @@ export function createPublicAuthRouter(
       const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME] ?? null;
       const refreshTokenInput = refreshTokenBody ?? refreshTokenCookie;
       if (!refreshTokenInput) {
-        res.status(401).json({ error: "No refresh token available" });
+        // WARP-1726 — label the one refresh 401 the server can settle on its
+        // own. No cookie and no body token means there is nothing to rotate and
+        // nothing to verify: the caller simply has no refresh credential. Every
+        // anonymous page load lands here (/api/auth/me 401s, the dashboard
+        // tries a refresh), and while this answer was unlabelled the client
+        // could not tell it from a 401 it was obliged to double-check, so it
+        // spent a THIRD request re-probing /api/auth/me for an answer that was
+        // already definitive. Status and message are unchanged — only the
+        // machine-readable code is new, and no token is burned or cookie
+        // cleared because none was presented.
+        res.status(401).json({
+          error: "No refresh token available",
+          code: "NO_REFRESH_TOKEN",
+        });
         return;
       }
 
@@ -1487,7 +1559,20 @@ export function createPublicAuthRouter(
         // two valid token pairs from being issued for the same refresh token.
         const claimed = await claimRefreshRotation(refreshTokenInput);
         if (!claimed) {
-          res.status(401).json({ error: "Refresh token is already being rotated" });
+          // WARP-1726 — label the conflict. Losing the claim is NOT a verdict
+          // on the session: the token is still live, the winner's rotation is
+          // landing in the shared cookie jar right now, and the caller only has
+          // to retry. Without a machine-readable code the dashboard couldn't
+          // tell this apart from SESSION_EXPIRED / USER_NOT_PROVISIONED below,
+          // so it evicted the cached user and hard-navigated to /login — the
+          // reload loop on the Network tab, whose many concurrent polls make
+          // this race routine rather than exotic. The claim itself is
+          // unchanged: the loser is still rejected, its token is neither burned
+          // nor its cookies cleared, and no second token pair is minted.
+          res.status(401).json({
+            error: "Refresh token is already being rotated",
+            code: "ROTATION_IN_FLIGHT",
+          });
           return;
         }
 
@@ -1820,6 +1905,11 @@ export function createPublicAuthRouter(
         acceptedAccessRole ? acceptedAccessRole.startingPoint : (invite.role as Role),
         householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
+
+      // WARP-1558: an invite can start its holder at an admin-tier role, in
+      // which case `groups` now carries `droplet-admins` — ensure it exists
+      // before ncCreateUser below refuses the whole call over it.
+      await ensureDropletAdminsGroupFor(groups);
 
       // ── WARP-490: single-use enforcement via compare-and-swap ──
       // Two near-simultaneous POSTs to the same token both clear the
@@ -2917,13 +3007,15 @@ export function createProtectedAuthRouter(
       // same way invite-accept does (owner/admin → NC "admin" group, guest →
       // "guest", family → none) and ALWAYS add the household group so the
       // shared "Household" group folder mounts for them.
-      await ncCreateUser(
-        token,
-        username,
-        password,
-        displayName,
-        buildNcGroups(role as Role, householdGroupName(config.DROPLET_SHARED_FOLDER_NAME)),
+      // WARP-1558: owner/admin additionally land in `droplet-admins` — ensure
+      // it exists first (this route is how the .87 box's admin-tier users
+      // were created, and it is why none of them were ever in the group).
+      const newUserGroups = buildNcGroups(
+        role as Role,
+        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
       );
+      await ensureDropletAdminsGroupFor(newUserGroups);
+      await ncCreateUser(token, username, password, displayName, newUserGroups);
 
       // WARP-1042: audit the creation — invite create/accept and
       // change-password all emit activity rows; direct user creation was the

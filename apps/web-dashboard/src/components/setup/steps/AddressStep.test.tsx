@@ -61,6 +61,11 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     expect(continueCta()).toBeDisabled();
     expect(screen.getByText(".droplet-us.com")).toBeInTheDocument();
+    // WARP-1810: the reassurance tile is business-locative — the address
+    // resolves "on-site and over the VPN", not "at home".
+    expect(
+      screen.getByText(/resolves on-site and over the vpn/i),
+    ).toBeInTheDocument();
   });
 
   it("enables Continue once a valid, available name is entered", async () => {

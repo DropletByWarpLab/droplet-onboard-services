@@ -25,24 +25,63 @@ export type RouterErrorCode =
   | "ROLLED_BACK"
   | "DISABLED"
   | "SCAN_UNSUPPORTED"
+  // WARP-1907 — the router-jack write's four typed refusals. Each is minted by
+  // `setRouterPortEnabled` from the routing service's own body, NOT by
+  // `routerErrorFromResponse`: that function classifies by status alone, and
+  // three of these four statuses already mean something else there (502 is
+  // reserved for a routing↔router credential rejection, 409 for
+  // SCAN_UNSUPPORTED, and a bare 404/422 would land on UNKNOWN with the
+  // server's sentence thrown away).
+  | "PORT_WRITE_NOT_APPLIED"
+  | "PORT_WRITE_REFUSED"
+  | "PORT_NOT_FOUND"
+  | "PORT_MAP_UNSUPPORTED"
   | "UNKNOWN";
+
+/**
+ * WARP-1907 — the guard a jack write tripped, carried on a `PORT_WRITE_REFUSED`
+ * so the dashboard can escalate with the right title and the server's own
+ * sentence.
+ *
+ * This exists for a race the cached read cannot cover: a jack published with
+ * `disable_guard: null` that gains a cable between the poll and the click. The
+ * server refuses it, and without this the dashboard has no escalation to offer
+ * — the user sees a raw 409 and retrying fails until the next poll.
+ */
+export interface PortWriteGuardDetail {
+  code: "WAN_PORT" | "MANAGEMENT_PORT";
+  reason: string;
+}
 
 export class RouterError extends Error {
   readonly code: RouterErrorCode;
   readonly status?: number;
   /** Optional: which call failed, e.g. "Router summary". Carried through from routingFetch's `label`. */
   readonly label?: string;
+  /**
+   * WARP-1907 — structured payload a typed refusal needs the client to act on,
+   * beyond the message. Only ever set by a factory below, so it is leak-free by
+   * construction like `code`; the error handler surfaces it for trusted errors
+   * on exactly the same terms.
+   */
+  readonly detail?: PortWriteGuardDetail;
 
   constructor(
     code: RouterErrorCode,
     message: string,
-    options?: { status?: number; label?: string; cause?: unknown },
+    options?: {
+      status?: number;
+      label?: string;
+      cause?: unknown;
+      detail?: PortWriteGuardDetail;
+    },
   ) {
     super(message, options?.cause ? { cause: options.cause } : undefined);
     this.name = "RouterError";
     this.code = code;
     this.status = options?.status;
     this.label = options?.label;
+    this.detail = options?.detail;
   }
 
   static unreachable(message: string, opts?: { label?: string; cause?: unknown }): RouterError {
@@ -97,13 +136,83 @@ export class RouterError extends Error {
     return new RouterError("SCAN_UNSUPPORTED", message, { ...opts, status: 409 });
   }
 
+  /**
+   * WARP-1907 — the routing service applied a jack write cleanly and uci still
+   * reports the old value (routing `502 PORT_WRITE_NOT_APPLIED`).
+   *
+   * 🔴 This factory exists because `routerErrorFromResponse` maps EVERY 502 to
+   * `AUTH`, on the documented WARP-1673 invariant that "nothing sits between
+   * the orchestrator and routing to mint a 502". This write broke that
+   * invariant. Rather than weaken a status-only rule that a real credential
+   * rejection depends on, the port write reads its own body and mints this —
+   * so the 502 never reaches that classifier. The invariant, and the test
+   * pinning it, stand unchanged.
+   *
+   * 502 (kept): the failure is genuinely upstream of us and genuinely a server
+   * fault. `message` is surfaced verbatim, so it must read as user-facing prose.
+   */
+  static portWriteNotApplied(
+    message = "The router accepted the change but the port didn't move. Nothing was left half-applied — try again.",
+    opts?: { label?: string; cause?: unknown },
+  ): RouterError {
+    return new RouterError("PORT_WRITE_NOT_APPLIED", message, { ...opts, status: 502 });
+  }
+
+  /**
+   * WARP-1907 — the routing service refused a jack write because it would cut
+   * the WAN or a live management jack, and the caller sent no `force`
+   * (routing `409 WAN_PORT` / `MANAGEMENT_PORT`).
+   *
+   * `detail` carries the guard verbatim so the dashboard can raise its second,
+   * destructive confirm from the server's own words. Reachable in normal use
+   * despite the dashboard pre-checking `disable_guard` on the read: a jack that
+   * was empty at poll time can gain a cable before the click.
+   */
+  static portWriteRefused(
+    detail: PortWriteGuardDetail,
+    opts?: { label?: string; cause?: unknown },
+  ): RouterError {
+    return new RouterError("PORT_WRITE_REFUSED", detail.reason, {
+      ...opts,
+      status: 409,
+      detail,
+    });
+  }
+
+  /**
+   * WARP-1907 — the jack named is not on this router's port map (routing `404
+   * PORT_NOT_FOUND`), or this shape publishes no port map at all (routing `422
+   * PORT_MAP_UNSUPPORTED`).
+   *
+   * Both would otherwise land on `UNKNOWN` with the server's sentence replaced
+   * by "Router port disable p9: 404 Not Found". The status is preserved and the
+   * message is the routing service's, verbatim.
+   */
+  static portWriteRejected(
+    code: "PORT_NOT_FOUND" | "PORT_MAP_UNSUPPORTED",
+    message: string,
+    opts?: { label?: string; cause?: unknown },
+  ): RouterError {
+    return new RouterError(code, message, {
+      ...opts,
+      status: code === "PORT_NOT_FOUND" ? 404 : 422,
+    });
+  }
+
   /** Shape sent over the wire to the dashboard. */
-  toJSON(): { code: RouterErrorCode; message: string; status?: number; label?: string } {
+  toJSON(): {
+    code: RouterErrorCode;
+    message: string;
+    status?: number;
+    label?: string;
+    detail?: PortWriteGuardDetail;
+  } {
     return {
       code: this.code,
       message: this.message,
       status: this.status,
       label: this.label,
+      detail: this.detail,
     };
   }
 }

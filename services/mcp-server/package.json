@@ -21,9 +21,9 @@
     "@droplet/tools-core": "0.1.0",
     "@grpc/grpc-js": "^1.14.4",
     "@grpc/proto-loader": "^0.8.1",
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@prisma/client": "^5.14.0",
-    "ioredis": "^5.4.1",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "undici": "^6",
     "zod": "^3.23.8"
@@ -31,7 +31,7 @@
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.12.12",
-    "tsx": "^4.11.0",
+    "tsx": "^4.23.10",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0"
   }

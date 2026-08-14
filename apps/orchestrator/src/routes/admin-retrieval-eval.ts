@@ -255,6 +255,87 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
     }
   });
 
+  /**
+   * WARP-1868 — corpus fingerprint, so the nightly RAGAS run can skip when
+   * nothing changed.
+   *
+   * The eval is GPU-bound: a healthy pass pins the discrete card at 98-100%
+   * for ~10 minutes. It fires eight times a night on a cron regardless of
+   * whether a single file was indexed, so a quiet week costs ~56 GPU-hours
+   * re-measuring an identical corpus. The load itself is not reducible —
+   * inference saturates the card by design, and capping ragas' concurrency
+   * only makes the run longer — so the only lever is whether it runs at all.
+   *
+   * Two fields, because neither is sufficient alone:
+   *   - `chunks`          catches adds and deletes.
+   *   - `latestIndexedAt` catches edits and re-indexes, which leave the
+   *                       count identical.
+   * A delete-plus-add of equal size still moves `latestIndexedAt` (the new
+   * row is newer), and a pure delete moves `chunks`, so the pair covers the
+   * cases that actually occur on an appliance.
+   *
+   * Scoped exactly like /search above — same auth, same production 404, same
+   * explicit `?user=` for the service principal, which owns no corpus. One
+   * table covers both retrieval sources: FileContentChunk carries brain items
+   * too (`source` column), so a new brain memory moves the fingerprint.
+   */
+  router.get(
+    "/admin/retrieval-eval/corpus-fingerprint",
+    requireRoleOrService("_service:rag-eval", "owner", "admin"),
+    async (req, res) => {
+      if (process.env.NODE_ENV === "production") {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      const user = req.user;
+      if (!user) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      let evalUsername = user.username;
+      if (user.id === "_service:rag-eval") {
+        evalUsername = String(req.query.user ?? "").trim();
+        if (!evalUsername) {
+          res.status(400).json({ error: "eval_user_required" });
+          return;
+        }
+      }
+
+      try {
+        // Aggregate rather than fetching rows: the corpus is tens of
+        // thousands of chunks and this runs on a cron. Covered by
+        // @@index([userId, source, indexedAt]).
+        const agg = await prisma.fileContentChunk.aggregate({
+          where: { userId: evalUsername },
+          _count: { _all: true },
+          _max: { indexedAt: true },
+        });
+        const chunks = agg._count._all;
+        const latestIndexedAt = agg._max.indexedAt?.toISOString() ?? null;
+
+        res.json({
+          user: evalUsername,
+          chunks,
+          latestIndexedAt,
+          // Composed server-side so both surfaces can never disagree on the
+          // arithmetic, and so the client stores one opaque string rather
+          // than re-deriving equality from parts.
+          fingerprint: `v1:${chunks}:${latestIndexedAt ?? "none"}`,
+        });
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error)?.message, user: evalUsername },
+          "corpus-fingerprint failed",
+        );
+        // 500, not an empty fingerprint. A caller that cannot read the
+        // fingerprint must fall back to RUNNING the eval — failing toward
+        // measuring, never toward silence — and it can only make that
+        // choice if the failure is visible as a failure.
+        res.status(500).json({ error: "corpus_fingerprint_failed" });
+      }
+    },
+  );
+
   return router;
 }
 

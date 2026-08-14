@@ -1,8 +1,13 @@
 # ops-console runtime deps. Test deps in requirements-dev.txt (matches
 # the file-indexer / voice-io split convention).
 fastapi==0.141.1          # HTTP layer
-uvicorn[standard]==0.52.0 # ASGI server
+uvicorn[standard]==0.52.1 # ASGI server
 pydantic==2.13.4           # request/response schemas
 httpx==0.28.1             # fan-out probes to other services' /health
 docker==7.2.0             # docker SDK — container list/logs/restart
 psutil==6.0.0             # CPU/mem/disk/network/uptime stats
+
+# WARP-1948 — OSV floor: the osv-nightly resolver scores transitive deps at
+# their minimum resolvable version; state the real minimum instead of
+# suppressing the advisory.
+idna>=3.15

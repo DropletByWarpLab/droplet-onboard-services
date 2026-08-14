@@ -1,0 +1,574 @@
+/* ============================================================
+   Droplet — /messages (team chat) in the indigo idiom. WARP-1783.
+
+   The surface shipped (WARP-1683/1685) painting with the legacy
+   iOS-derived ramp from globals.css: the card utility (#2c2c2e in dark),
+   the secondary surface utility (#1c1c1e), and the legacy accent fill
+   under white ink. Because ShellPage already wraps the page in
+   `.droplet-shell`, that put a flat, fully-opaque dark-grey slab inside
+   an indigo shell — off-theme against /chat, / (home bento) and /voice,
+   which all read the indigo ramp.
+
+   (Token names from the legacy ramp are deliberately described rather
+   than spelled here: scripts/check-dashboard-classes.sh greps for them
+   line-by-line and does not skip comments.)
+
+   Scope: every selector lives under `.droplet-shell`, the same
+   convention as chat-indigo.css / droplet-shell.css, so nothing leaks
+   into non-ported surfaces. Every value is an existing token — no new
+   colors, radii, or shadows (droplet-design hard rule 1).
+
+   Bubble mapping mirrors the chat surface one-for-one:
+     theirs -> .msg-bubble.is-assistant  (--surface + --border hairline)
+     mine   -> .msg-bubble.is-user       (--user-bubble / --user-bubble-text)
+
+   That mapping is also the AA fix. The outgoing bubble, the unread
+   badge and the send button all used to be the legacy accent fill under
+   white ink; in dark mode that accent is indigo-400 #818cf8, where white
+   measures 2.98:1 — under WCAG 1.4.3's 4.5:1 floor, the exact hazard
+   indigo-tokens.css flags (never hardcode a white literal on a --brand
+   fill, WARP-1358). Brand fills now take --on-brand, which flips per
+   theme, and the bubble takes the soft --user-bubble pair.
+   ============================================================ */
+
+/* ── Two-pane shell ─────────────────────────────────────────────── */
+
+.droplet-shell .mx-shell {
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+/* The thread rail sits a half-step back from the conversation so the
+   two panes read as one card with a seam, not two stacked slabs. */
+.droplet-shell .mx-rail {
+  background: var(--inset);
+}
+@media (min-width: 1024px) {
+  .droplet-shell .mx-rail {
+    border-right: 1px solid var(--card-bd);
+  }
+}
+
+/* Pane headers — the same glass treatment the shell's toolbars use, so
+   the header stays legible when rows scroll under it. */
+.droplet-shell .mx-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--card-bd);
+  background: var(--glass);
+  backdrop-filter: blur(12px) saturate(150%);
+}
+.droplet-shell .mx-head-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  color: var(--text);
+}
+.droplet-shell .mx-head-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Icon buttons (compose, back, composer actions) ─────────────── */
+
+.droplet-shell .mx-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 160ms var(--ease, ease), color 160ms var(--ease, ease);
+}
+.droplet-shell .mx-iconbtn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.droplet-shell .mx-iconbtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Thread rows ────────────────────────────────────────────────── */
+
+.droplet-shell .mx-row {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 9px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms var(--ease, ease);
+}
+.droplet-shell .mx-row:hover {
+  background: var(--hover);
+}
+.droplet-shell .mx-row.is-active {
+  background: var(--brand-subtle);
+}
+
+.droplet-shell .mx-ava {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+.droplet-shell .mx-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.droplet-shell .mx-row.has-unread .mx-row-name {
+  font-weight: 600;
+}
+/* --text-muted, not --text-faint: a timestamp is information, and faint
+   measures 2.14:1 (light) / 1.57:1 (dark) on the rail. The legacy
+   tertiary-label token this replaces was equally unreadable. */
+.droplet-shell .mx-row-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.droplet-shell .mx-row-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.droplet-shell .mx-row.has-unread .mx-row-preview {
+  color: var(--text);
+}
+/* The selected row's --brand-subtle wash lightens the surface under the
+   secondary text, dropping --text-muted to 3.81:1 (dark). Measured in the
+   browser on the real composite, not derived from the plain rail. Deriving
+   from --text instead keeps the row's own ink relationship intact. */
+.droplet-shell .mx-row.is-active .mx-row-preview,
+.droplet-shell .mx-row.is-active .mx-row-time {
+  color: color-mix(in srgb, var(--text) 68%, transparent);
+}
+
+.droplet-shell .mx-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--brand);
+  color: var(--on-brand);
+}
+
+/* ── Messages ───────────────────────────────────────────────────── */
+
+.droplet-shell .mx-bubble {
+  max-width: 85%;
+  padding: 9px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+@media (min-width: 640px) {
+  .droplet-shell .mx-bubble {
+    max-width: 70%;
+  }
+}
+.droplet-shell .mx-bubble.is-theirs {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-bottom-left-radius: 6px;
+}
+.droplet-shell .mx-bubble.is-mine {
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+  border-bottom-right-radius: 6px;
+}
+
+/* Secondary ink INSIDE a bubble — timestamps, captions, meeting meta.
+   Derived from each bubble's own ink so it stays keyed to its
+   background in both themes rather than reaching for a page-level
+   muted token that isn't guaranteed to clear AA on a bubble fill.
+
+   80% is a measured floor, not a taste call: it is the weakest mix that
+   clears 4.5:1 on all four backgrounds this lands on (either bubble,
+   and the --inset card inside either bubble). The worst case is the
+   card inside the light "mine" bubble at 5.12:1; 68% put that pair at
+   3.81:1. These captions are 11px, so the large-text 3:1 allowance
+   does not apply. */
+.droplet-shell .mx-bubble .mx-sub {
+  color: color-mix(in srgb, currentColor 80%, transparent);
+}
+
+.droplet-shell .mx-sender {
+  padding: 0 4px 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.droplet-shell .mx-time {
+  display: block;
+  margin-top: 2px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cards rendered inside a bubble — shared file, forwarded AI chat,
+   meeting invite/reminder. One inset tone works on BOTH bubble fills
+   (--inset is ink-on-light in the light theme and light-on-ink in the
+   dark one), which is what lets the mine/theirs tone branching the
+   surface used to carry disappear. */
+.droplet-shell .mx-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--card-bd);
+  border-radius: 10px;
+  background: var(--inset);
+  color: inherit;
+  text-align: left;
+  transition: background 160ms var(--ease, ease);
+}
+.droplet-shell button.mx-card,
+.droplet-shell a.mx-card {
+  cursor: pointer;
+}
+.droplet-shell button.mx-card:hover,
+.droplet-shell a.mx-card:hover {
+  background: var(--inset-strong);
+}
+.droplet-shell .mx-card.is-block {
+  display: block;
+}
+/* WARP-1898 — a forwarded file this viewer can't open. It renders as a
+   `div`, so the cursor/hover rules above already don't match it; all that
+   is missing is a cue that it isn't going anywhere. Deliberately a BORDER
+   style, not `opacity` or a muted colour: dimming the card would pull the
+   filename and the reason line below the contrast floor, and this way the
+   inactive state survives a high-contrast / forced-colours mode. The
+   reason line under the name carries the actual explanation. */
+.droplet-shell .mx-card.is-unavailable {
+  border-style: dashed;
+}
+.droplet-shell .mx-card-title {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.droplet-shell .mx-card-meta {
+  display: block;
+  font-size: 11px;
+}
+
+/* Small pill actions inside a meeting card (RSVP, cancel). */
+.droplet-shell .mx-pill {
+  padding: 3px 10px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 160ms var(--ease, ease), border-color 160ms var(--ease, ease);
+}
+.droplet-shell .mx-pill:hover:not(:disabled) {
+  background: var(--inset-strong);
+}
+.droplet-shell .mx-pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.droplet-shell .mx-pill.is-on {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+/* "Yes, cancel it" — the destructive CONFIRM, so it fills rather than
+   tints. An outlined variant can't win here: --danger is dark in both
+   themes (#b91c1c / #7f1d1d), and as ink on the card inset inside a
+   bubble it measured 3.7:1 (dark). Filled, white-on-danger clears AA
+   comfortably in both themes and matches the shell's own `.btn.danger`
+   idiom. The white literal is on a --danger fill, not a --brand one, so
+   the WARP-1358 on-brand rule doesn't apply. */
+.droplet-shell .mx-pill.is-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.droplet-shell .mx-pill.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, #000);
+  border-color: color-mix(in srgb, var(--danger) 85%, #000);
+}
+
+/* WARP-1874 — "Join" on a meeting that carries a video-call link, and the
+   "Add / Remove video call link" affordances in the schedule dialog.
+
+   The pill is reused rather than re-invented so the meeting card keeps one
+   action vocabulary. An anchor needs the flex box a <button> got for free,
+   plus text-decoration reset. */
+.droplet-shell a.mx-pill,
+.droplet-shell button.mx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+}
+/* Join is the only FILLED pill on a scheduled meeting: on a remote
+   meeting it is the action, and RSVP is the earlier, quieter decision.
+   Brand fill + --on-brand ink is the same pairing as `.is-on`, which the
+   surface already measures as AA. */
+.droplet-shell .mx-pill.is-join {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+.droplet-shell .mx-pill.is-join:hover {
+  background: color-mix(in srgb, var(--brand) 88%, #000);
+  border-color: color-mix(in srgb, var(--brand) 88%, #000);
+}
+
+/* Field-level hint under an input — names the recognized provider back to
+   the author, or says what to paste. Quieter than .mx-error, which is for
+   things that went wrong. */
+.droplet-shell .mx-hint {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Composer ───────────────────────────────────────────────────── */
+
+.droplet-shell .mx-composer {
+  flex-shrink: 0;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--card-bd);
+}
+.droplet-shell .mx-composer-inner {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 6px 6px 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface-2);
+  transition: border-color 160ms var(--ease, ease);
+}
+.droplet-shell .mx-composer-inner:focus-within {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+}
+/* The capsule is the visual boundary — nothing inside it draws its own
+   ring (the same correction the chat composer carries). */
+.droplet-shell .mx-composer-inner :focus-visible {
+  outline: none !important;
+}
+
+.droplet-shell .mx-composer-inner textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  max-height: 112px;
+  padding: 5px 2px;
+  resize: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* Placeholders are text and owe 4.5:1. --text-faint is a ~2:1 hairline
+   here and --text-muted still lands at 4.29:1 on --surface-2 (both
+   themes), so the placeholder derives from --text at 65% — 4.91:1 light,
+   5.77:1 dark — which is also the weakest mix that clears the floor. */
+.droplet-shell .mx-composer-inner textarea::placeholder {
+  color: color-mix(in srgb, var(--text) 65%, transparent);
+}
+.droplet-shell .mx-composer-inner textarea:disabled {
+  opacity: 0.6;
+}
+
+.droplet-shell .mx-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--on-brand);
+  cursor: pointer;
+  transition: background 160ms var(--ease, ease), opacity 160ms var(--ease, ease);
+}
+.droplet-shell .mx-send:hover:not(:disabled) {
+  background: var(--brand-hover);
+}
+.droplet-shell .mx-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Quiet states (empty / loading / error) ─────────────────────── */
+
+.droplet-shell .mx-quiet {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.droplet-shell .mx-empty {
+  padding: 40px 24px;
+  text-align: center;
+}
+.droplet-shell .mx-empty-icon {
+  color: var(--text-faint);
+}
+.droplet-shell .mx-empty-title {
+  margin-top: 12px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.droplet-shell .mx-empty-sub {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+/* Inline error copy is ink, not a fill — and the dark --danger (#7f1d1d)
+   is far too dark to read as text on --card-bg, so dark lightens it. Both
+   values measured ≥6.4:1 on the surfaces this lands on. */
+.droplet-shell .mx-error {
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.dark .droplet-shell .mx-error {
+  color: #f87171;
+}
+
+/* ── Dialog bodies ──────────────────────────────────────────────────
+   The shared <Dialog> already paints its scrim and card from the indigo
+   tokens (WARP-1066) and puts `.droplet-shell` on the backdrop, so these
+   selectors resolve inside the portal. Only the BODIES were still legacy.
+   Converted modals elsewhere (ShareDialog, /users) inline the same vars;
+   these are the named equivalents for this surface. */
+
+.droplet-shell .mx-dlg-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: var(--text);
+}
+.droplet-shell .mx-dlg-sub {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.droplet-shell .mx-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.droplet-shell .mx-label .opt {
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.droplet-shell .mx-field {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  transition: border-color 160ms var(--ease, ease);
+}
+/* Same 65%-of-ink placeholder as the composer — see the note there. */
+.droplet-shell .mx-field::placeholder {
+  color: color-mix(in srgb, var(--text) 65%, transparent);
+}
+.droplet-shell .mx-field:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--border));
+}
+.droplet-shell textarea.mx-field {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+/* Bordered scroll list — the roster, the file/chat pickers. */
+.droplet-shell .mx-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden auto;
+  background: var(--surface);
+}
+.droplet-shell .mx-list > * + * {
+  border-top: 1px solid var(--border);
+}
+/* Rows inside a list sit on --surface, so the rail's --inset hover would
+   be invisible there — step up to the stronger inset. */
+.droplet-shell .mx-list .mx-row:hover {
+  background: var(--inset-strong);
+}
+.droplet-shell .mx-list .mx-row.is-disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.droplet-shell .mx-list .mx-row.is-disabled:hover {
+  background: transparent;
+}
+
+/* Reduced motion: the surface's transitions are all color/background,
+   and globals.css already collapses every duration — nothing here
+   animates position or scale, so no extra opt-out is needed. */
+
+/* ── Phone touch targets ──────────────────────────────────────────────────
+   `.mx-iconbtn` is 30x30, under the 44px Apple HIG / WCAG 2.5.5 minimum;
+   measured on /messages at 375px. See
+   04-coding-standards/mobile-web-layout.md in the engineering handbook.
+
+   `.mx-pill` measured ~23px (3px padding-block, 12px text, 1px border), so
+   the whole pill vocabulary was under the same minimum — RSVP, Cancel,
+   Join, and the dialog's link controls alike. Raised as a class rather
+   than per-variant: a Join-only fix would leave "Can't go" at 23px, and
+   the next pill added would arrive under the bar again. The pill is
+   inline-flex/align-items:center, so the label stays centered; desktop is
+   untouched. */
+@media (max-width: 720px) {
+  .droplet-shell .mx-iconbtn { width: 44px; height: 44px; }
+  .droplet-shell .mx-pill { min-height: 44px; padding-block: 0; }
+}

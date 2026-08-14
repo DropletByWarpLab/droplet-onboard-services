@@ -41,7 +41,11 @@ export function useFileSearch(query: string, debounceMs = 300) {
         }
       } catch (err) {
         if (!ctrl.signal.aborted) {
-          setError(translateError(err, "files"));
+          // WARP-1914: this hook serves the search bar's Name mode — the
+          // "files" domain's fallback copy describes file LOADING, which
+          // misreports a failed search. The search-name domain says what
+          // actually failed.
+          setError(translateError(err, "search-name"));
           setItems([]);
           setIsLoading(false);
         }

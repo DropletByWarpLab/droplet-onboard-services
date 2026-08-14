@@ -208,6 +208,34 @@ describe("effective-access drawer (§6.3 — read-only, honest)", () => {
     expect(within(drawer).queryByText("No settings")).not.toBeInTheDocument();
   });
 
+  it("renders deptRights chips kind-keyed: HOUSEHOLD → Workspace, others verbatim (WARP-1809)", async () => {
+    // Every user holds a boot-seeded HOUSEHOLD membership, so before this
+    // mapping every drawer echoed the seeded server name. The raw name here
+    // deliberately DIFFERS from "Household": the mapping keys off kind,
+    // never the name string (orgUnitDisplayName — the WARP-1808 rule).
+    fetchEffectiveAccessMock.mockResolvedValue(
+      effective({
+        deptRights: [
+          { id: "hh", name: "The Smiths", kind: "HOUSEHOLD", right: "manager" },
+          { id: "d1", name: "Finance", kind: "DEPARTMENT", right: "contributor" },
+          { id: "t1", name: "Platform", kind: "TEAM", right: "reader" },
+          // Absent kind (older orchestrator): fail-safe to the raw name.
+          { id: "d2", name: "Reception", right: "reader" },
+        ],
+      }),
+    );
+    renderSection();
+    fireEvent.click(screen.getByRole("button", { name: /Effective access/ }));
+    const drawer = screen.getByTestId("access-effective-drawer");
+    await waitFor(() =>
+      expect(within(drawer).getByText("Workspace: manager")).toBeInTheDocument(),
+    );
+    expect(within(drawer).getByText("Finance: contributor")).toBeInTheDocument();
+    expect(within(drawer).getByText("Platform: reader")).toBeInTheDocument();
+    expect(within(drawer).getByText("Reception: reader")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/The Smiths/)).not.toBeInTheDocument();
+  });
+
   it("renders — for unknown usage and an error line when the resolver is unreachable", async () => {
     fetchEffectiveAccessMock.mockRejectedValue(new Error("boom"));
     renderSection();

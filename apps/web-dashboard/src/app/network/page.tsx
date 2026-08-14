@@ -28,23 +28,22 @@ import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkViewMode } from "@/lib/hooks/useNetworkViewMode";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { DevicesTab } from "@/components/network/DevicesTab";
+// WARP-1723: the Wi-Fi tab is an extracted component (like SchedulesTab /
+// DevicesTab) so its single-editable-surface source split is render-testable.
+import { WifiTab } from "@/components/network/WifiTab";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
-import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { AiAgentAccessCard } from "@/components/network/AiAgentAccessCard";
 import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
-import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { InterfacesTable } from "@/components/network/InterfacesTable";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
-import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
 import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/FirewallRuleForm";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
-import { WifiScanPanel } from "@/components/network/WifiScanPanel";
-import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
-import { WifiChannelCard } from "@/components/network/WifiChannelCard";
+import { RouterPortsPanel } from "@/components/network/router/RouterPortsPanel";
+import { describeWifi } from "@/components/network/wifi-tile-copy";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import { DnsServersForm } from "@/components/network/DnsServersForm";
@@ -56,7 +55,7 @@ import {
   type NetworkOperation,
   type NetworkTopology,
 } from "@/lib/api";
-import { parseNetworkTab, type Tab } from "./tab-url";
+import { networkTabHref, parseNetworkTab, type Tab } from "./tab-url";
 import {
   scrollToScheduleAnchor,
   scheduleHashFromEvent,
@@ -160,8 +159,13 @@ function NetworkPageInner() {
   const setActiveTab = useCallback(
     (next: Tab) => {
       if (next === activeTab) return;
-      // Default to Overview (no ?tab) to keep the canonical URL clean.
-      router.push(next === "overview" ? "/network" : `/network?tab=${next}`);
+      // networkTabHref, not an inline literal (WARP-1723 review finding 2):
+      // that helper exists so cross-tab LINKS build the same URL this switcher
+      // produces. Two builders can drift, and then a link's href — the
+      // middle-click / open-in-new-tab / no-JS path — points somewhere the
+      // switcher never goes. It also owns the "Overview is the bare /network
+      // path" rule that keeps the canonical URL clean.
+      router.push(networkTabHref(next));
     },
     [router, activeTab],
   );
@@ -173,6 +177,10 @@ function NetworkPageInner() {
   // the async gap. Instead, record the keyboard target here and focus it in an
   // effect once `activeTab` reflects it (see below), so the focused tab is
   // already selected at the moment it receives focus.
+  //
+  // WARP-1723 (second pass): cross-tab LINKS inside a tabpanel need the same
+  // treatment for the same reason — the panel unmounts on activation, taking
+  // the focused element with it — so they set this ref too before switching.
   const keyboardFocusTarget = useRef<Tab | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
@@ -326,13 +334,13 @@ function NetworkPageInner() {
           style={{ padding: "48px 20px" }}
           role={isDisabled ? "status" : "alert"}
         >
-          <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+          <WifiOff size={32} className="mx-auto mb-3" style={{ color: "var(--text-faint)" }} />
+          <h2 className="type-title-3 mb-1" style={{ color: "var(--text)" }}>{copy.title}</h2>
+          <p className="type-subheadline max-w-md mx-auto" style={{ color: "var(--text-muted)" }}>
             {copy.body}
           </p>
           {routerErrorMessage && !isDisabled && (
-            <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
+            <p className="type-caption-2 mt-3 font-mono" style={{ color: "var(--text-faint)" }}>
               {routerErrorMessage}
             </p>
           )}
@@ -368,11 +376,7 @@ function NetworkPageInner() {
       <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
         {/* WARP-612: Simple / Advanced segmented control. Simple shows the
             everyday Overview; Advanced reveals the full OpenWrt tab surface. */}
-        <div
-          className="inline-flex rounded-md bg-surface-secondary p-0.5"
-          role="group"
-          aria-label="Network view mode"
-        >
+        <div className="pills" role="group" aria-label="Network view mode">
           {([["simple", "Simple", Gauge], ["advanced", "Advanced", SlidersHorizontal]] as const).map(
             ([id, label, Icon]) => (
               <button
@@ -380,12 +384,9 @@ function NetworkPageInner() {
                 type="button"
                 onClick={() => switchMode(id)}
                 aria-pressed={mode === id}
-                className={[
-                  "inline-flex items-center gap-1.5 px-3 h-8 rounded type-subheadline transition-colors",
-                  mode === id
-                    ? "bg-surface-primary text-label-primary shadow-sm"
-                    : "text-label-tertiary hover:text-label-secondary",
-                ].join(" ")}
+                className={
+                  "inline-flex items-center gap-1.5" + (mode === id ? " active" : "")
+                }
               >
                 <Icon size={14} />
                 {label}
@@ -413,10 +414,10 @@ function NetworkPageInner() {
           className="card mb-4 flex items-center gap-3"
           style={{ borderColor: "var(--brand)", background: "var(--brand-subtle)" }}
         >
-          <Loader2 size={18} className="animate-spin text-system-blue" />
+          <Loader2 size={18} className="animate-spin" style={{ color: "var(--brand)" }} />
           <div className="flex-1">
-            <p className="type-subheadline text-label-primary font-medium">Applying change…</p>
-            <p className="type-footnote text-label-tertiary">
+            <p className="type-subheadline font-medium" style={{ color: "var(--text)" }}>Applying change…</p>
+            <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
               Waiting for the router to confirm the new configuration.
             </p>
           </div>
@@ -429,7 +430,7 @@ function NetworkPageInner() {
           style={{ borderColor: "var(--success)", background: "color-mix(in srgb, var(--success) 7%, transparent)" }}
         >
           <CheckCircle2 size={18} className="text-system-green" />
-          <p className="type-subheadline text-label-primary flex-1">Change applied.</p>
+          <p className="type-subheadline flex-1" style={{ color: "var(--text)" }}>Change applied.</p>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
             className="btn ghost sm"
@@ -442,12 +443,12 @@ function NetworkPageInner() {
       )}
       {opStatus.state === "rejected" && (
         <div role="status" className="card mb-4 flex items-center gap-3">
-          <Info size={18} className="text-label-tertiary" />
+          <Info size={18} style={{ color: "var(--text-muted)" }} />
           <div className="flex-1">
-            <p className="type-subheadline text-label-primary font-medium">
+            <p className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
               No change made
             </p>
-            <p className="type-footnote text-label-tertiary">
+            <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
               {opStatus.reason ??
                 "The router rejected the request, so nothing was changed."}
             </p>
@@ -470,10 +471,10 @@ function NetworkPageInner() {
         >
           <XCircle size={18} className="text-system-red" />
           <div className="flex-1">
-            <p className="type-subheadline text-label-primary font-medium">
+            <p className="type-subheadline font-medium" style={{ color: "var(--text)" }}>
               Change rolled back
             </p>
-            <p className="type-footnote text-label-tertiary">
+            <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
               {opStatus.reason ?? "The router reverted to the previous configuration."}
             </p>
           </div>
@@ -583,7 +584,20 @@ function NetworkPageInner() {
         tabIndex={0}
         hidden={activeTab !== "devices"}
       >
-        {activeTab === "devices" && <DevicesTab />}
+        {activeTab === "devices" && (
+          // WARP-1723 (second pass, a11y): the tabpanels conditionally unmount,
+          // so letting the Coverage Extenders panel's "Change in Wi-Fi
+          // settings" link navigate on its own destroys the focused <a> and
+          // drops focus to <body> — a keyboard/SR user lands nowhere. Reuse
+          // the same record-then-focus machinery the arrow-key nav drives so
+          // the arrival tab takes focus once it reads aria-selected={true}.
+          <DevicesTab
+            onOpenWifiSettings={() => {
+              keyboardFocusTarget.current = "wifi";
+              setActiveTab("wifi");
+            }}
+          />
+        )}
       </div>
       <div
         role="tabpanel"
@@ -645,6 +659,8 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const wan = overview?.interfaces?.wan;
   const system = overview?.system;
 
+  const wifi = describeWifi(overview?.wirelessRadios);
+
   const lanIp = lan?.["ipv4-address"]?.[0]?.address ?? "N/A";
   const wanIp = wan?.["ipv4-address"]?.[0]?.address ?? "N/A";
   const wanProto = wan?.proto ?? "unknown";
@@ -686,7 +702,7 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   return (
     <div className="space-y-6">
       {postureLabel && (
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-2.5 py-1 type-caption-1 text-label-secondary">
+        <span className="badge muted">
           <Router size={12} aria-hidden="true" />
           {postureLabel}
         </span>
@@ -709,9 +725,9 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
         <StatusCard
           icon={Wifi}
           title="WiFi"
-          value={overview?.wireless ? "Active" : "Inactive"}
-          subtitle={Object.keys(overview?.wireless ?? {}).length + " radio(s)"}
-          status={Object.keys(overview?.wireless ?? {}).length > 0 ? "ok" : "warning"}
+          value={wifi.value}
+          subtitle={wifi.subtitle}
+          status={wifi.status}
         />
         <StatusCard
           icon={Monitor}
@@ -722,11 +738,15 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
         />
       </div>
 
-      {/* ADR-018 item 12 — managed-switch panel. Sits below the KPI strip
-          (the design's "throughput chart" anchor doesn't exist on this tabbed
-          page; Overview is only visible in Advanced mode — in Simple mode the
-          wrapper div is hidden and NetworkSimple renders instead). Renders
-          its own empty/loading/error states and self-gates RBAC. */}
+      {/* The two port maps, in the order the cable runs: WARP-1866's router
+          panel, then ADR-018 item 12's managed-switch panel. Both sit below
+          the KPI strip (the design's "throughput chart" anchor doesn't exist
+          on this tabbed page; Overview is only visible in Advanced mode — in
+          Simple mode the wrapper div is hidden and NetworkSimple renders
+          instead). Each renders its own empty/loading/error states; the switch
+          panel additionally self-gates RBAC for its writes, where the router
+          panel is read-only. */}
+      <RouterPortsPanel />
       <SwitchPanel />
     </div>
   );
@@ -750,52 +770,19 @@ function StatusCard({
     <div className="card">
       <div className="flex items-center gap-2 mb-2">
         <Icon size={18} className={statusColor} />
-        <span className="type-footnote text-label-tertiary font-medium uppercase tracking-wider">
+        <span
+          className="type-footnote font-medium uppercase tracking-wider"
+          style={{ color: "var(--text-muted)" }}
+        >
           {title}
         </span>
       </div>
-      <p className="type-title-3 text-label-primary">{value}</p>
-      <p className="type-caption-1 text-label-tertiary mt-0.5">{subtitle}</p>
+      <p className="type-title-3" style={{ color: "var(--text)" }}>{value}</p>
+      <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>{subtitle}</p>
     </div>
   );
 }
 
-
-// --- WiFi Tab ---
-function WifiTab() {
-  return (
-    <div className="space-y-4">
-      {/* Issue #12: editable provisioning form so a user who skipped Wi-Fi
-          during onboarding can set the SSID/password here — same write path as
-          the setup wizard's InternetStep. */}
-      <WifiSettingsForm />
-
-      {/* WARP-871: the channel write path (orchestrator route + routing) shipped
-          at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab
-          never surfaced a channel picker — the one lever for dodging a congested
-          band. */}
-      <WifiChannelCard />
-      {/* Read-only host-radio detail (band/channel/width/country + a
-          Broadcasting chip). Honest for the single combined-radio shape — no
-          enable/disable toggle; every chip is a real iwinfo field or "not
-          reported". */}
-      <RadioDetailCard />
-
-      {/* Guest Wi-Fi — an isolated visitor network (own SSID + firewall zone). */}
-      <GuestWifiCard />
-
-      {/* Camera privacy — network isolation posture (honest, read-only) plus
-          the live "block cameras from the internet" toggle. Sits with the
-          everyday Wi-Fi/network controls per the design's Simple-mode layout. */}
-      <CameraPrivacyCard />
-
-      {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
-          AP-mode "scanning unavailable while broadcasting" state (typed
-          SCAN_UNSUPPORTED signal) from a genuine empty scan. */}
-      <WifiScanPanel />
-    </div>
-  );
-}
 
 // --- Firewall Tab ---
 // A zone's input/output/forward policy chip — green for ACCEPT, red for the
@@ -809,11 +796,16 @@ function PolicyChip({ policy }: { policy: string | undefined }) {
     <span
       className={`type-caption-2 font-mono px-1.5 py-0.5 rounded-sm ${
         value === "—"
-          ? "text-label-quaternary bg-surface-secondary/60"
+          ? ""
           : accepting
             ? "text-system-green bg-system-green/10"
             : "text-system-red bg-system-red/10"
       }`}
+      style={
+        value === "—"
+          ? { color: "var(--text-faint)", background: "var(--inset)" }
+          : undefined
+      }
     >
       {value}
     </span>
@@ -855,10 +847,10 @@ function FirewallTab({
           an owner can see, e.g., that the camera zone forwards to wan only. The
           zone data already ships in getFirewallConfig(); this surfaces it. */}
       <div className="card">
-        <h3 className="type-headline text-label-primary mb-1">
+        <h3 className="type-headline mb-1" style={{ color: "var(--text)" }}>
           Zones ({zones.length})
         </h3>
-        <p className="type-caption-1 text-label-tertiary mb-4">
+        <p className="type-caption-1 mb-4" style={{ color: "var(--text-muted)" }}>
           Default input · output · forward policy per network zone. Managed by
           the box.
         </p>
@@ -866,7 +858,7 @@ function FirewallTab({
           <div className="overflow-x-auto">
             <table className="w-full type-caption-1">
               <thead>
-                <tr className="text-label-tertiary text-left">
+                <tr className="text-left" style={{ color: "var(--text-muted)" }}>
                   <th className="font-medium pb-2 pr-4">Zone</th>
                   <th className="font-medium pb-2 pr-4">Input</th>
                   <th className="font-medium pb-2 pr-4">Output</th>
@@ -881,13 +873,19 @@ function FirewallTab({
                     ? zone.network.join(", ")
                     : zone.network;
                   return (
-                    <tr key={key} className="border-t border-separator/60">
+                    <tr key={key} style={{ borderTop: "1px solid var(--card-bd)" }}>
                       <td className="py-2 pr-4">
-                        <span className="type-subheadline text-label-primary font-medium">
+                        <span
+                          className="type-subheadline font-medium"
+                          style={{ color: "var(--text)" }}
+                        >
                           {zone.name ?? key}
                         </span>
                         {zone.masq === "1" && (
-                          <span className="ml-2 type-caption-2 text-label-quaternary font-mono">
+                          <span
+                            className="ml-2 type-caption-2 font-mono"
+                            style={{ color: "var(--text-faint)" }}
+                          >
                             masq
                           </span>
                         )}
@@ -901,7 +899,7 @@ function FirewallTab({
                       <td className="py-2 pr-4">
                         <PolicyChip policy={zone.forward} />
                       </td>
-                      <td className="py-2 text-label-tertiary font-mono">
+                      <td className="py-2 font-mono" style={{ color: "var(--text-muted)" }}>
                         {nets || "—"}
                       </td>
                       {canAuthor && (
@@ -922,7 +920,7 @@ function FirewallTab({
             </table>
           </div>
         ) : (
-          <p className="type-subheadline text-label-tertiary">
+          <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
             No firewall zones reported.
           </p>
         )}
@@ -933,7 +931,7 @@ function FirewallTab({
       {canAuthor && <FirewallRuleForm zones={zoneNames} onApplied={onApplied} />}
 
       <div className="card">
-        <h3 className="type-headline text-label-primary mb-4">
+        <h3 className="type-headline mb-4" style={{ color: "var(--text)" }}>
           Firewall Rules ({rules.length})
         </h3>
         {rules.length > 0 ? (
@@ -941,13 +939,14 @@ function FirewallTab({
             {rules.map(([key, rule]) => (
               <div
                 key={key}
-                className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
+                className="flex items-center justify-between px-3 py-2 rounded-sm"
+                style={{ background: "var(--inset)" }}
               >
                 <div>
-                  <p className="type-subheadline text-label-primary">
+                  <p className="type-subheadline" style={{ color: "var(--text)" }}>
                     {rule.name ?? key}
                   </p>
-                  <p className="type-caption-2 text-label-tertiary">
+                  <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
                     {rule.src ?? "*"} &rarr; {rule.dest ?? "*"} | Target: {rule.target ?? "—"}
                     {rule.src_mac ? ` | MAC: ${rule.src_mac}` : ""}
                   </p>
@@ -963,12 +962,12 @@ function FirewallTab({
             ))}
           </div>
         ) : (
-          <p className="type-subheadline text-label-tertiary">No custom firewall rules.</p>
+          <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>No custom firewall rules.</p>
         )}
       </div>
 
       <div className="card">
-        <h3 className="type-headline text-label-primary mb-4">
+        <h3 className="type-headline mb-4" style={{ color: "var(--text)" }}>
           Port Forwards ({redirects.length})
         </h3>
         {redirects.length > 0 ? (
@@ -976,25 +975,29 @@ function FirewallTab({
             {redirects.map(([key, fwd]) => (
               <div
                 key={key}
-                className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
+                className="flex items-center justify-between px-3 py-2 rounded-sm"
+                style={{ background: "var(--inset)" }}
               >
                 <div>
-                  <p className="type-subheadline text-label-primary">
+                  <p className="type-subheadline" style={{ color: "var(--text)" }}>
                     {fwd.name ?? key}
                   </p>
-                  <p className="type-caption-2 text-label-tertiary">
+                  <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
                     :{fwd.src_dport ?? "—"} ({Array.isArray(fwd.proto) ? fwd.proto.join("/") : fwd.proto ?? "tcp"}) &rarr;{" "}
                     {fwd.dest_ip ?? "—"}:{fwd.dest_port ?? "—"}
                   </p>
                 </div>
-                <span className={`type-caption-1 ${fwd.enabled === "1" ? "text-system-green" : "text-label-quaternary"}`}>
+                <span
+                  className={`type-caption-1 ${fwd.enabled === "1" ? "text-system-green" : ""}`}
+                  style={fwd.enabled === "1" ? undefined : { color: "var(--text-faint)" }}
+                >
                   {fwd.enabled === "1" ? "Active" : "Disabled"}
                 </span>
               </div>
             ))}
           </div>
         ) : (
-          <p className="type-subheadline text-label-tertiary">No port forwards configured.</p>
+          <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>No port forwards configured.</p>
         )}
       </div>
 
@@ -1044,7 +1047,7 @@ function SystemTab({
   return (
     <div className="space-y-4">
       <div className="card">
-        <h3 className="type-headline text-label-primary mb-4">Hardware</h3>
+        <h3 className="type-headline mb-4" style={{ color: "var(--text)" }}>Hardware</h3>
         <div className="grid grid-cols-2 gap-y-3 gap-x-6">
           <InfoRow label="Model" value={board?.model ?? "Unknown"} />
           <InfoRow label="Hostname" value={board?.hostname ?? "Unknown"} />
@@ -1056,7 +1059,7 @@ function SystemTab({
       </div>
 
       <div className="card">
-        <h3 className="type-headline text-label-primary mb-4">Resources</h3>
+        <h3 className="type-headline mb-4" style={{ color: "var(--text)" }}>Resources</h3>
         <div className="grid grid-cols-2 gap-y-3 gap-x-6">
           <InfoRow label="Uptime" value={`${days}d ${hours}h ${minutes}m`} />
           <InfoRow label="Load Average" value={`${load1} / ${load5} / ${load15}`} />
@@ -1165,8 +1168,8 @@ function RouterRebootCard({
 
   return (
     <div className="card">
-      <h3 className="type-headline text-label-primary mb-1">Restart router</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+      <h3 className="type-headline mb-1" style={{ color: "var(--text)" }}>Restart router</h3>
+      <p className="type-subheadline mb-4" style={{ color: "var(--text-muted)" }}>
         Restarting the router drops every connected device for about a minute
         while it reboots. Wi-Fi and internet come back automatically.
       </p>
@@ -1175,7 +1178,8 @@ function RouterRebootCard({
         type="button"
         onClick={() => setConfirmOpen(true)}
         disabled={status.kind === "rebooting"}
-        className="dp-btn-secondary flex items-center gap-2 text-system-red"
+        className="btn ghost"
+        style={{ color: "var(--danger)" }}
       >
         {status.kind === "rebooting" ? (
           <Loader2 size={16} className="animate-spin" />
@@ -1189,7 +1193,8 @@ function RouterRebootCard({
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote bg-system-orange/10 rounded-sm px-3 py-2"
+          style={{ color: "var(--text)" }}
         >
           <Info size={14} className="mt-0.5 flex-shrink-0 text-system-orange" aria-hidden="true" />
           <span>
@@ -1229,8 +1234,8 @@ function RouterRebootCard({
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="type-caption-1 text-label-tertiary">{label}</p>
-      <p className="type-subheadline text-label-primary">{value}</p>
+      <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>{label}</p>
+      <p className="type-subheadline" style={{ color: "var(--text)" }}>{value}</p>
     </div>
   );
 }

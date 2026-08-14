@@ -19,17 +19,24 @@ let grpc: typeof import("@grpc/grpc-js") | null = null;
 let protoLoader: typeof import("@grpc/proto-loader") | null = null;
 
 let client: any = null;
-let _initialized = false;
+let _initPromise: Promise<boolean> | null = null;
 let _available = false;
 
 /**
- * Initialize the gRPC client. Call once at startup.
+ * Initialize the gRPC client. Safe to call from concurrent request paths:
+ * the first caller kicks off the init and every caller — including ones
+ * arriving while it is still in flight — awaits the same promise, so a
+ * cold-start race can never surface a stale "unavailable" (WARP-1914).
  * If gRPC packages are not installed, silently falls back to HTTP.
  */
-export async function initGrpcClient(): Promise<boolean> {
-  if (_initialized) return _available;
-  _initialized = true;
+export function initGrpcClient(): Promise<boolean> {
+  if (!_initPromise) {
+    _initPromise = doInit();
+  }
+  return _initPromise;
+}
 
+async function doInit(): Promise<boolean> {
   try {
     grpc = await import("@grpc/grpc-js");
     protoLoader = await import("@grpc/proto-loader");

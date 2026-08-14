@@ -47,6 +47,17 @@ export interface SwitchPortDevice {
   name?: string | null;
 }
 
+/**
+ * Cumulative counters for a port, straight off the switch's netdev statistics.
+ * WARP-1716: the evidence that a port is carrying traffic — without it the UI
+ * could only reason about link state, so a busy port and an idle-but-plugged
+ * port looked identical. `null` when the driver doesn't report counters.
+ */
+export interface SwitchPortTraffic {
+  rx_bytes: number;
+  tx_bytes: number;
+}
+
 /** One object per physical port — GET /api/switch/ports */
 export interface SwitchPort {
   port: number;
@@ -61,6 +72,7 @@ export interface SwitchPort {
   poe: SwitchPortPoe | null;
   status: SwitchPortStatus;
   device?: SwitchPortDevice | null;
+  traffic?: SwitchPortTraffic | null;
 }
 
 /** GET /api/switch/vlans */

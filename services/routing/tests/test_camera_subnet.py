@@ -122,3 +122,61 @@ def test_dhcp_real_fault_propagates(client, mock_router):
     resp = client.get("/network/subnets/cameras", headers=AUTH)
     assert resp.status_code == 500
     assert resp.json() != {"enabled": False}
+
+
+# ---------------------------------------------------------------------------
+# POST /network/subnets/cameras/setup — bridge-vlan membership derivation
+# ---------------------------------------------------------------------------
+#
+# The bridge-vlan write used to hardcode "ports": "eth1:t". Port names differ
+# per router hardware (Pi lab unit: eth2/eth0 in br-lan; MikroTik RB5009:
+# p2..p8), and a bridge-vlan naming an absent port is silently inert — netifd
+# accepts it, no camera traffic ever flows, and safe-apply never rolls back
+# because connectivity was not harmed. Membership is now derived from the
+# live bridge at call time.
+
+
+def _wire_setup_router(mock_router, members):
+    mock_router.network.device_status.return_value = {
+        "br-lan": {"up": True, "bridge-members": members},
+    }
+
+
+def _bridge_vlan_writes(mock_router):
+    return [c for c in mock_router.uci.add.call_args_list
+            if tuple(c.args[:2]) == ("network", "bridge-vlan")]
+
+
+def test_setup_derives_tagged_ports_from_live_bridge(client, mock_router):
+    """RB5009-shaped bridge: every current member lands tagged, in bridge
+    order; the absent eth1 appears nowhere."""
+    _wire_setup_router(mock_router, ["p2", "p3", "p4", "p5", "p6", "p7", "p8"])
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    writes = _bridge_vlan_writes(mock_router)
+    assert len(writes) == 1
+    values = writes[0].args[2]
+    assert values["ports"] == [
+        "p2:t", "p3:t", "p4:t", "p5:t", "p6:t", "p7:t", "p8:t",
+    ]
+
+
+def test_setup_pi_shaped_bridge_derives_its_own_names(client, mock_router):
+    """Pi lab unit shape (eth2 + eth0 in br-lan): same derivation, no
+    hardcoded names of any hardware generation."""
+    _wire_setup_router(mock_router, ["eth2", "eth0"])
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    values = _bridge_vlan_writes(mock_router)[0].args[2]
+    assert values["ports"] == ["eth2:t", "eth0:t"]
+
+
+def test_setup_refuses_when_bridge_membership_unknown(client, mock_router):
+    """No members visible → 409 BEFORE the safe-apply window opens and before
+    any uci write. A refusal is diagnosable; a silently inert VLAN is not."""
+    _wire_setup_router(mock_router, [])
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 409
+    assert mock_router.uci.add.call_count == 0
+    assert mock_router.uci.set.call_count == 0
+    mock_router.safe_apply.assert_not_called()

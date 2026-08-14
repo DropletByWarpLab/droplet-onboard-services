@@ -3,6 +3,7 @@ import {
   levelLabel,
   levelBlurb,
   poolStatusBadge,
+  reclaimPoolImpact,
   worstPoolAlarm,
 } from "@/components/FileManager/pool-display";
 import type { PoolInfo } from "@/lib/types";
@@ -28,6 +29,30 @@ describe("pool-display helpers (BUG-3)", () => {
     expect(poolStatusBadge("degraded").alarm).toBe("degraded");
     expect(poolStatusBadge("resyncing").alarm).toBe("resyncing");
     expect(poolStatusBadge("failed").alarm).toBe("failed");
+  });
+
+  // WARP-1915 — the reclaim confirm dialog spells out what removing a member
+  // does to the pool. Mirrored levels get the explicit lost-redundancy
+  // warning; parity levels the softer degraded-protection line; levels with
+  // no redundancy (and an unknown pool — degraded pools fetch) the plain
+  // member loss.
+  it("reclaimPoolImpact names the lost mirror redundancy for mirrored levels", () => {
+    expect(reclaimPoolImpact("raid1")).toMatch(/mirror/i);
+    expect(reclaimPoolImpact("raid1")).toMatch(/protected against a drive failure/i);
+    expect(reclaimPoolImpact("raid10")).toMatch(/mirror/i);
+  });
+
+  it("reclaimPoolImpact warns about reduced protection for parity levels", () => {
+    expect(reclaimPoolImpact("raid5")).toMatch(/less protection/i);
+    expect(reclaimPoolImpact("raid6")).toMatch(/less protection/i);
+    expect(reclaimPoolImpact("raid5")).not.toMatch(/mirror/i);
+  });
+
+  it("reclaimPoolImpact states the plain member loss for non-redundant or unknown pools", () => {
+    for (const level of ["raid0", "jbod", undefined] as const) {
+      expect(reclaimPoolImpact(level)).toMatch(/one less drive/i);
+      expect(reclaimPoolImpact(level)).not.toMatch(/mirror/i);
+    }
   });
 
   it("worstPoolAlarm picks the most severe state across pools", () => {

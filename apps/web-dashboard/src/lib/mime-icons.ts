@@ -49,6 +49,8 @@ const MIME_TO_ICON: Record<string, LucideIcon> = {
   "application/gzip": FileArchive,
   "application/x-gzip": FileArchive,
   "application/x-bzip2": FileArchive,
+  "application/x-7z-compressed": FileArchive,
+  "application/vnd.rar": FileArchive,
   // Phase 1 docs (WARP-201)
   "application/pdf": FileText,
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
@@ -78,11 +80,26 @@ export function iconForMime(mime: string): LucideIcon {
  * SearchTab where the orchestrator's KnowledgeChunkItem doesn't carry a
  * mimeType (the row is keyed by `path`). This keeps WARP-214 frontend-only —
  * no extra orchestrator-side fetch.
+ *
+ * Exported only so mime-labels.test.ts can pin the table-agreement invariant:
+ * every value here needs a `MIME_TO_LABEL` entry, or the Files panel silently
+ * degrades to "XYZ file". Read it through `mimeFromPath`, not directly.
  */
-const EXT_TO_MIME: Record<string, string> = {
+export const EXT_TO_MIME: Record<string, string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   doc: "application/msword",
+  // WARP-1877: the rest of the Office/ODF set, so a listing with no mimeType
+  // still resolves to a named type in the Files detail panel.
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ppt: "application/vnd.ms-powerpoint",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  rtf: "application/rtf",
+  epub: "application/epub+zip",
   txt: "text/plain",
   md: "text/markdown",
   csv: "text/csv",
@@ -95,7 +112,12 @@ const EXT_TO_MIME: Record<string, string> = {
   jpeg: "image/jpeg",
   webp: "image/webp",
   heic: "image/heic",
+  heif: "image/heif",
   gif: "image/gif",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
   mp3: "audio/mpeg",
   m4a: "audio/mp4",
   wav: "audio/wav",
@@ -113,6 +135,8 @@ const EXT_TO_MIME: Record<string, string> = {
   tar: "application/x-tar",
   gz: "application/gzip",
   bz2: "application/x-bzip2",
+  "7z": "application/x-7z-compressed",
+  rar: "application/vnd.rar",
 };
 
 export function mimeFromPath(path: string): string {

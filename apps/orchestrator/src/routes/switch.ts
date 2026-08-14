@@ -12,7 +12,7 @@
  * uses the managed switch driver, production may use a custom ASIC).
  */
 
-import { Router } from "express";
+import { Router, type Response, type NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import * as switchClient from "../services/switch.client.js";
 import {
@@ -30,6 +30,31 @@ import { createLogger } from "../lib/logger.js";
 const logger = createLogger("switch-routes");
 
 /**
+ * A switch write can be REFUSED by the service, with a reason worth reading:
+ * the ADR-035 §7 PoE guard's 409 ("cutting PoE on port 2 would darken the
+ * AP…"), or a 400 from the VLAN membership endpoint ("mode='merge' only
+ * accepts untagged member entries — send mode='replace' to write the whole
+ * member list"). switch.client surfaces both as an Error carrying `.status` +
+ * the service's own message. Relay them with that message instead of
+ * collapsing an actionable refusal into a generic 500; everything else flows
+ * to the error middleware unchanged.
+ */
+function surfaceSwitchConflict(
+  res: Response,
+  err: unknown,
+  next: NextFunction,
+): void {
+  const status = (err as { status?: number } | null | undefined)?.status;
+  if (status === 409 || status === 400) {
+    res.status(status).json({
+      error: err instanceof Error ? err.message : status === 409 ? "Conflict" : "Bad request",
+    });
+    return;
+  }
+  next(err);
+}
+
+/**
  * Protected port: the port the appliance is connected to.
  * Disabling this port or moving it to a non-management VLAN would sever
  * all connectivity. This is configurable via SWITCH_PROTECTED_PORT env var.
@@ -45,7 +70,7 @@ async function evalSwitchCommand(
   userId?: string,
   source: "api" | "ai" = "api"
 ) {
-  return evaluateNetworkCommand(
+  const result = await evaluateNetworkCommand(
     prisma,
     `switch.${operation}`,
     operation,
@@ -53,11 +78,29 @@ async function evalSwitchCommand(
     userId,
     source,
   );
+  // WARP-1982: carry the operation out with the verdict. evaluateNetworkCommand
+  // keeps it only in its server-side pending-confirmation record, so without
+  // this every `safetyResponse` call site would have to repeat the literal it
+  // just passed in — nine routes, nine chances to drift.
+  return { ...result, operation };
 }
 
 /** Helper: check if a port is the protected appliance port. */
 function isProtectedPort(port: number): boolean {
   return PROTECTED_PORT > 0 && port === PROTECTED_PORT;
+}
+
+/**
+ * Validate a caller-supplied VLAN membership mode. Returns `undefined` for
+ * "not specified" and `null` for "specified, but not a mode" — the caller
+ * turns the latter into a 400 rather than silently falling back, because the
+ * two modes differ by whether the VLAN's other members survive.
+ */
+function vlanMembershipMode(
+  value: unknown,
+): switchClient.VlanMembershipMode | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  return value === "merge" || value === "replace" ? value : null;
 }
 
 /**
@@ -85,10 +128,28 @@ function requireUserId(userId: string | undefined): string {
   return userId;
 }
 
-/** Helper: return safety tier response (202 for confirmation, 403/429 for blocked). */
+/**
+ * Helper: return safety tier response (202 for confirmation, 403/429 for blocked).
+ *
+ * WARP-1982 — the 202 body MUST carry `requiresConfirmation` and `operation`.
+ *
+ * `NetworkCommandResult` (the shape every dashboard write is typed against)
+ * declares both, and `useSwitch`'s two-step dance gates the confirm call on
+ * them. Emitting only `status:"confirmation_required"` made that gate false on
+ * every switch write: the confirm was skipped, `refresh()` re-read unchanged
+ * hardware, and the panel snapped back with NO error — the operator was shown
+ * a control that silently did nothing. Cameras hit this exact bug in WARP-861.
+ */
 function safetyResponse(
   res: any,
-  result: { requiresConfirmation?: boolean; confirmationToken?: string; reason?: string; tier?: number; blocked?: boolean }
+  result: {
+    requiresConfirmation?: boolean;
+    confirmationToken?: string;
+    reason?: string;
+    tier?: number;
+    blocked?: boolean;
+    operation?: string;
+  }
 ) {
   if ("blocked" in result && result.blocked) {
     return res.status(result.tier === 3 ? 403 : 429).json({
@@ -100,7 +161,14 @@ function safetyResponse(
   if ("requiresConfirmation" in result && result.requiresConfirmation) {
     return res.status(202).json({
       status: "confirmation_required",
+      // The flag the client actually branches on. `status` is a human string;
+      // making the machine-readable field implicit in it is what broke this.
+      requiresConfirmation: true,
       confirmationToken: result.confirmationToken,
+      // Echoed for the client's benefit and for parity with the router's 202.
+      // The switch confirm endpoint resolves the operation from the token
+      // server-side, so this is descriptive, never load-bearing for execution.
+      operation: result.operation,
       reason: result.reason,
       tier: result.tier,
       expiresIn: 60,
@@ -216,48 +284,68 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
         return res.status(400).json({ error: result.reason });
       }
 
-      // Execute the confirmed operation
+      // Execute the confirmed operation.
+      //
+      // This is the PRIMARY execution path for every Tier-2 switch write (the
+      // §7 routes mint a token and the dashboard confirms it here), so it is
+      // also where a dishonest answer does the most damage: the switch service
+      // returns {status:"planned", dry_run:true} while SWITCH_LIVE_WRITES=0,
+      // and this endpoint used to discard that and answer a hard-coded
+      // {status:"ok"} — the operator was told a change landed on hardware when
+      // nothing had. Keep each client's result and let it speak below.
       const { operation, params } = result;
       const p = (params || {}) as Record<string, unknown>;
+      let op: switchClient.SwitchWriteResult | undefined;
 
       switch (operation) {
         case "switch_port_enable":
-          await switchClient.enablePort(p.port as number);
+          op = await switchClient.enablePort(p.port as number);
           break;
         case "switch_port_disable":
         case "switch_disable_protected_port":
-          await switchClient.disablePort(p.port as number);
+          op = await switchClient.disablePort(p.port as number);
           break;
         case "switch_create_vlan":
-          await switchClient.createVlan(p.vlan_id as number, (p.name as string) || "");
+          op = await switchClient.createVlan(p.vlan_id as number, (p.name as string) || "");
           break;
         case "switch_delete_vlan":
-          await switchClient.deleteVlan(p.vlan_id as number);
+          op = await switchClient.deleteVlan(p.vlan_id as number);
           break;
         case "switch_set_vlan_membership":
-          await switchClient.setVlanMembership(p.vlan_id as number, p.ports as any);
+          // Replay the intent the token recorded. A token minted before `mode`
+          // existed falls back to `merge`: the safe reading of a membership
+          // write, and the only one a one-port list can have meant.
+          op = await switchClient.setVlanMembership(
+            p.vlan_id as number,
+            p.ports as Parameters<typeof switchClient.setVlanMembership>[1],
+            vlanMembershipMode(p.mode) ?? "merge",
+          );
           break;
         case "switch_poe_enable":
-          await switchClient.enablePortPoe(p.port as number);
+          op = await switchClient.enablePortPoe(p.port as number);
           break;
         case "switch_poe_disable":
-          await switchClient.disablePortPoe(p.port as number);
+          op = await switchClient.disablePortPoe(p.port as number);
           break;
         case "switch_setup_cameras":
-          await switchClient.setupCameraPorts(
+          op = await switchClient.setupCameraPorts(
             p.vlan_id as number,
             p.camera_ports as number[],
             p.uplink_ports as number[],
           );
           break;
         case "switch_provision":
-          await switchClient.provisionSwitch();
+          op = await switchClient.provisionSwitch();
           break;
         default:
           return res.status(400).json({ error: `Unknown operation: ${operation}` });
       }
 
-      res.json({ status: "ok", operation, confirmed: true });
+      // The service's own result wins over the optimistic "ok" (so a plan-only
+      // write reads status:"planned" + dry_run:true), while `operation` and
+      // `confirmed` stay authoritative — they describe the confirmation, not
+      // the hardware write.
+      res.json({ status: "ok", ...(op ?? {}), operation, confirmed: true });
     } catch (err) {
       next(err);
     }
@@ -291,10 +379,12 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
         const result = await evalSwitchCommand(prisma, "switch_port_disable", { port }, userId);
         if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       }
-      await switchClient.disablePort(port);
-      res.json({ status: "ok", port, enabled: false });
+      const op = await switchClient.disablePort(port);
+      // Spread the service's result LAST so a plan-only write (dry_run:true,
+      // status:"planned") isn't reported to the user as a success that happened.
+      res.json({ status: "ok", port, enabled: false, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -309,10 +399,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_create_vlan", { vlan_id, name }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.createVlan(vlan_id, name || "");
-      res.json({ status: "ok", vlan_id });
+      const op = await switchClient.createVlan(vlan_id, name || "");
+      res.json({ status: "ok", vlan_id, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -328,10 +418,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_delete_vlan", { vlan_id: vlanId }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.deleteVlan(vlanId);
-      res.json({ status: "ok", vlan_id: vlanId, deleted: true });
+      const op = await switchClient.deleteVlan(vlanId);
+      res.json({ status: "ok", vlan_id: vlanId, deleted: true, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -348,14 +438,30 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       if (!Array.isArray(ports)) {
         return res.status(400).json({ error: "ports must be an array" });
       }
+      // `mode` decides whether the VLAN's OTHER members survive this write, so
+      // it is declared, never inferred from the list. Default `merge` (this is
+      // the port-move endpoint the dashboard and the set_port_vlan tool call);
+      // `replace` is the whole-member-list write, which the switch service
+      // reports back so the caller can see which semantics ran.
+      const mode = vlanMembershipMode(req.body?.mode);
+      if (mode === null) {
+        return res.status(400).json({
+          error: 'mode must be "merge" (move these ports into the VLAN) or "replace" (write the VLAN\'s whole member list)',
+        });
+      }
       const result = await evalSwitchCommand(
-        prisma, "switch_set_vlan_membership", { vlan_id: vlanId, ports }, userId
+        prisma,
+        "switch_set_vlan_membership",
+        // The mode rides in the audited params so the confirm endpoint replays
+        // the intent that was approved instead of re-deciding it.
+        { vlan_id: vlanId, ports, mode: mode ?? "merge" },
+        userId,
       );
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.setVlanMembership(vlanId, ports);
-      res.json({ status: "ok", vlan_id: vlanId });
+      const op = await switchClient.setVlanMembership(vlanId, ports, mode ?? "merge");
+      res.json({ status: "ok", vlan_id: vlanId, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -372,10 +478,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_poe_enable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.enablePortPoe(port);
-      res.json({ status: "ok", port, poe_enabled: true });
+      const op = await switchClient.enablePortPoe(port);
+      res.json({ status: "ok", port, poe_enabled: true, ...op });
     } catch (err) {
-      next(err);
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -390,10 +496,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       }
       const result = await evalSwitchCommand(prisma, "switch_poe_disable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.disablePortPoe(port);
-      res.json({ status: "ok", port, poe_enabled: false });
+      const op = await switchClient.disablePortPoe(port);
+      // dry_run:true (SWITCH_LIVE_WRITES=0) surfaces as status:"planned" so the
+      // dashboard stops reporting a PoE cut that never happened.
+      res.json({ status: "ok", port, poe_enabled: false, ...op });
     } catch (err) {
-      next(err);
+      // A 409 here is the guard refusing to darken a device with no remote
+      // recovery — relay its message verbatim, don't bury it as a 500.
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -478,12 +588,18 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
         return res.json({ status: "ok", port, vlan_id });
       }
       const ports = [{ port, tagged: false, member: true }];
+      // MERGE, always: this route moves ONE port's access VLAN. Sent as a
+      // whole-member-list write it would drop every other member of the target
+      // VLAN — on the flat-LAN default that is the uplink, the AP and the
+      // appliance, i.e. one click strands the rack (audit 2026-08-06).
       const result = await evalSwitchCommand(
-        prisma, "switch_set_vlan_membership", { vlan_id, ports }, userId
+        prisma, "switch_set_vlan_membership", { vlan_id, ports, mode: "merge" }, userId
       );
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.setVlanMembership(vlan_id, ports);
-      res.json({ status: "ok", port, vlan_id });
+      const op = await switchClient.setVlanMembership(vlan_id, ports, "merge");
+      // Spread the service's result LAST: a plan-only write (dry_run:true,
+      // status:"planned") must not be reported as a move that happened.
+      res.json({ status: "ok", port, vlan_id, ...op });
     } catch (err) {
       next(err);
     }
@@ -504,11 +620,16 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       const operation = enabled ? "switch_poe_enable" : "switch_poe_disable";
       const result = await evalSwitchCommand(prisma, operation, { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      if (enabled) await switchClient.enablePortPoe(port);
-      else await switchClient.disablePortPoe(port);
-      res.json({ status: "ok", port, poe_enabled: enabled });
+      const op = enabled
+        ? await switchClient.enablePortPoe(port)
+        : await switchClient.disablePortPoe(port);
+      // …LAST, so a plan-only write reports planned/dry_run instead of a PoE
+      // change the operator can watch NOT happen on the device.
+      res.json({ status: "ok", port, poe_enabled: enabled, ...op });
     } catch (err) {
-      next(err);
+      // A 409 here is the §7 guard refusing to darken a device that has no
+      // remote recovery — relay its message, don't bury it as a 500.
+      surfaceSwitchConflict(res, err, next);
     }
   });
 
@@ -529,15 +650,17 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       if (!enabled && isProtectedPort(port)) {
         const result = await evalSwitchCommand(prisma, "switch_disable_protected_port", { port }, userId);
         if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-        await switchClient.disablePort(port);
-        return res.json({ status: "ok", port, enabled: false });
+        const protectedOp = await switchClient.disablePort(port);
+        return res.json({ status: "ok", port, enabled: false, ...protectedOp });
       }
       const operation = enabled ? "switch_port_enable" : "switch_port_disable";
       const result = await evalSwitchCommand(prisma, operation, { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      if (enabled) await switchClient.enablePort(port);
-      else await switchClient.disablePort(port);
-      res.json({ status: "ok", port, enabled });
+      const op = enabled
+        ? await switchClient.enablePort(port)
+        : await switchClient.disablePort(port);
+      // …LAST: planned/dry_run must reach the panel, not a fabricated "ok".
+      res.json({ status: "ok", port, enabled, ...op });
     } catch (err) {
       next(err);
     }

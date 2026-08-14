@@ -20,6 +20,7 @@ import {
   Heater,
   Mail,
   Brain,
+  MessagesSquare,
   Network,
   ListChecks,
   Network as SwitchIcon,
@@ -49,6 +50,9 @@ const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-899/WARP-900 — data-utility tools (encode/decode, hash, format conversion);
   // WARP-901 — misc dev utilities (timestamp/UUID/regex). Both live in the data domain.
   data: { label: "Data", icon: Braces },
+  // WARP-1685 — Messages send tools (team chat). Slug matches the
+  // team_chat ModuleId / tools-core domain.
+  team_chat: { label: "Messages", icon: MessagesSquare },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

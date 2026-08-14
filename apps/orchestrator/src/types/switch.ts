@@ -128,9 +128,12 @@ export interface SwitchPort {
   poe: SwitchPortPoe | null;
   status: SwitchPortStatusChip;
   device: SwitchPortDevice | null;
+  /** WARP-1716: cumulative counters, or null when the driver reports none. */
+  traffic: SwitchRawTraffic | null;
 }
 
-/** Deferred LLDP/MAC→device join target (always null in v1). */
+/** LLDP/MAC→device join target. Still null until the switch image exposes an
+ *  FDB read (WARP-1717) — the port→MAC mapping has no ACL-legal source today. */
 export interface SwitchPortDevice {
   mac: string;
   ip: string | null;
@@ -160,11 +163,22 @@ export interface SwitchProvisionConfig {
 }
 
 /** GET {switch}/ports/status row. */
+/**
+ * Cumulative byte counters for a port. WARP-1716 — `null`/absent means the
+ * driver reports no counters, which is NOT the same claim as "nothing has
+ * crossed this port", so the two are never collapsed.
+ */
+export interface SwitchRawTraffic {
+  rx_bytes: number;
+  tx_bytes: number;
+}
+
 export interface SwitchRawPortStatus {
   port: number;
   link_up: boolean;
   speed: string;
   is_sfp: boolean;
+  traffic?: SwitchRawTraffic | null;
 }
 
 /** GET {switch}/ports row (vlan_port_stat: PVID/tagging, not link). */

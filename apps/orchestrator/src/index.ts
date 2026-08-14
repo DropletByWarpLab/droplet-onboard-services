@@ -37,13 +37,16 @@ import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
+import { startFabricMemberReconciler } from "./services/fabric-member-reconciler.js";
+import { startWifiIntentConverger } from "./services/wifi-intent-converger.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import {
   reconcileDepartments,
   initReconcileKick,
 } from "./services/department-reconciler.service.js";
 import { seedHouseholdDepartment } from "./services/household-seed.service.js";
-import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
+import { checkStorageNearFull } from "./services/camera-storage.service.js";
+import { reconcileCameraBudgets } from "./services/camera-budget.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
 import { getUpdateAgentSettings } from "./services/update-agent/settings.js";
@@ -95,6 +98,7 @@ import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
+import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
@@ -609,6 +613,41 @@ async function main() {
       easymeshEnabled: config.DROPLET_AP_EASYMESH_ENABLED,
       unifiEnabled: config.DROPLET_AP_UNIFI_ENABLED,
     });
+
+    // WARP-1732 (ADR-035 §5): fabric-member inventory. Rides the SAME
+    // AP-discovery cadence deliberately — both sweeps read one mDNS-derived
+    // routing endpoint, so a second interval would buy nothing but a second
+    // knob to drift. No new env var.
+    //
+    // Distinct advisory lock key, so it is its own single scheduler and
+    // cannot serialise behind (or double-fire with) AP discovery. Strictly
+    // observational: it upserts FabricMember rows, never deletes one, and
+    // never writes to a device — ApDevice above keeps owning AP lifecycle.
+    startFabricMemberReconciler(
+      cronRuntime,
+      prisma,
+      openwrt,
+      apDiscoveryIntervalMs,
+    );
+
+    // WARP-1761 (ADR-035 §1/§7): converge `wifi.primary`. Rides the SAME
+    // cadence as the two sweeps above — the tick is one read per approved
+    // AP, the identical hop `GET /network/wifi/ap` already makes on every
+    // dashboard poll, so a third interval would buy nothing but a third knob
+    // to drift. No new env var.
+    //
+    // Its OWN advisory lock key, so it is its own single scheduler and
+    // cannot serialise behind (or double-fire with) AP discovery or the
+    // fabric reconciler. It writes ONE domain to ONE role: `wifi.primary`,
+    // to fabric members with role='ap' that ADR-005 has approved and ADR-024
+    // marks DROPLET_IMAGE. It never deletes a row, never writes intent, and
+    // holds no passphrase to push.
+    startWifiIntentConverger(
+      cronRuntime,
+      prisma,
+      openwrt,
+      apDiscoveryIntervalMs,
+    );
   }
 
   // WARP-1122 — daily business-profile review check (03:30, offset from the
@@ -970,42 +1009,103 @@ async function main() {
     { lockKey: "droplet:pattern-miner-hourly" },
   );
 
-  // WARP-475 (G3): nightly camera-retention purge. Fires at 03:30 so
-  // it doesn't contend with the 03:00 daily purge or the 03:15 guest
-  // sweep on the advisory-lock pool. Reads retention from
-  // WorkspaceSetting on every tick (no in-process cache that could
-  // drift past a dashboard edit) and calls Frigate's delete API.
-  //
-  // Let errors propagate naked to cron-runtime's `safeRun` — same
-  // posture as the pattern-miner above and every other cron handler
-  // in this file. Swallowing here would zero out the per-handler
-  // `consecutiveFailures` counter that downstream alerting reads.
-  // Per-call Frigate API failures are already absorbed inside
-  // `purgeCameraArtifacts` (the service logs WARN and returns a
-  // result with `clipsSkipped/eventsSkipped` flags), so this only
-  // bubbles up the unexpected — Prisma down, programming errors —
-  // which are exactly what the canary should escalate. Romain on
-  // PR #292 round 2 caught the inner try/catch wrapper that
-  // contradicted this convention.
-  cronRuntime.scheduleCron(
-    "30 3 * * *",
+  // WARP-1685 — team-chat meeting reminders. Every 60s, posts the
+  // meeting_reminder card for meetings whose window (startsAt −
+  // reminderMinutesBefore) has opened; exactly-once via the pending→sent
+  // claim inside the sweep's own transaction, so a tick racing a restart
+  // (or a second replica after an advisory-lock handoff) never
+  // double-posts. Errors propagate naked to cron-runtime's `safeRun` —
+  // same posture as every other handler here; only the per-participant
+  // notification fan-out is absorbed inside the service (leaf effect).
+  cronRuntime.scheduleInterval(
+    60_000,
     async () => {
-      const result = await purgeCameraArtifacts(prisma);
-      if (
-        result.clipsDeleted > 0 ||
-        result.eventsDeleted > 0 ||
-        !result.clipsSkipped ||
-        !result.eventsSkipped
-      ) {
-        logger.info(result, "camera-retention-purge complete");
+      const result = await runTeamChatMeetingReminderSweep(prisma);
+      if (result.remindersSent > 0 || result.markedNotNeeded > 0) {
+        logger.info(result, "team-chat meeting reminder sweep");
       }
     },
-    { lockKey: "droplet:camera-retention-purge" },
+    { lockKey: "droplet:team-chat-meeting-reminders" },
+  );
+
+  // WARP-475's nightly camera-retention purge used to fire here at 03:30.
+  // WARP-1849 removed it: both endpoints it called —
+  // `DELETE /api/recordings?before=` and `DELETE /api/events?before=` —
+  // return 405 on Frigate 0.17. They do not exist and, per Frigate's
+  // route table, never did in the form this cron assumed. The purge had
+  // therefore deleted nothing for its entire lifetime while writing a
+  // nightly ActivityRow that read "0 clips · 0 events" — indistinguishable
+  // from a healthy no-op run.
+  //
+  // Retention is not reimplemented here. Frigate expires recordings per
+  // camera natively (`frigate/record/cleanup.py`) from the config keys
+  // camera-settings.service.ts now writes, and evicts on a full disk via
+  // `frigate/storage.py`. The orchestrator's job is to set that config,
+  // not to duplicate the deletion.
+
+  // WARP-1850: hourly near-full check on the recordings volume. Edge-
+  // triggered inside the service — one ActivityRow per crossing, not one
+  // per tick — so the warning still means something when it appears.
+  //
+  // Hourly rather than by-the-minute because Frigate recomputes usage by
+  // summing segment sizes; the volume cannot go from healthy to full in
+  // under an hour on any realistic camera count, and Frigate evicts
+  // oldest-first before anything is actually lost.
+  //
+  // Errors propagate naked to cron-runtime's `safeRun`, matching every
+  // other handler here: an unreachable Frigate SHOULD increment the
+  // canary rather than be silently absorbed. That is the direct lesson of
+  // WARP-1849, where swallowed failures read as healthy for months.
+  cronRuntime.scheduleCron(
+    "20 * * * *",
+    async () => {
+      const result = await checkStorageNearFull();
+      if (result.warned) {
+        logger.warn(result, "camera storage near-full warning raised");
+      }
+    },
+    { lockKey: "droplet:camera-storage-near-full" },
+  );
+
+  // WARP-1851: re-derive budget-managed retention windows. Fires at 03:40,
+  // after the near-full check has settled and clear of the 03:00/03:15
+  // purges on the advisory-lock pool.
+  //
+  // Daily, not hourly: the input is a camera's average bitrate over its
+  // last 100 segments, which moves slowly. Reconciling more often would
+  // restart budgeted cameras (every Frigate config write does) for
+  // sub-percent drift.
+  //
+  // The pass is idempotent — a camera already at its derived window is
+  // skipped, so a steady system issues no writes at all.
+  cronRuntime.scheduleCron(
+    "40 3 * * *",
+    async () => {
+      const result = await reconcileCameraBudgets(prisma);
+      if (result.applied.length > 0 || result.held.length > 0) {
+        logger.info(result, "camera storage budget reconcile complete");
+      }
+      // A pass where every camera failed must NOT look like a quiet success.
+      // The service collects per-camera errors so one broken camera can't
+      // strand the rest, but a pass that achieved nothing has to reach the
+      // cron canary — reporting success never achieved is the failure mode
+      // this whole epic was created by (WARP-1849).
+      if (result.failed.length > 0) {
+        throw new Error(
+          `camera storage budget reconcile: ${result.failed.length} of ` +
+            `${result.failed.length + result.applied.length + result.held.length} ` +
+            `camera(s) failed — ${result.failed
+              .map((f) => `${f.camera}: ${f.error}`)
+              .join("; ")}`,
+        );
+      }
+    },
+    { lockKey: "droplet:camera-budget-reconcile" },
   );
 
   // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
-  // doesn't contend with the 03:00 daily purge, 03:15 guest sweep, or 03:30
-  // camera purge on the advisory-lock pool. Reads the explicit TlsCert state
+  // doesn't contend with the 03:00 daily purge or the 03:15 guest sweep on the
+  // advisory-lock pool. Reads the explicit TlsCert state
   // row + the installed cert: a BOOTSTRAP_SELF_SIGNED box issues a publicly-
   // trusted cert now; an LE_ISSUED cert renews when <=30 days remain. HQ-
   // unreachable keeps the current cert and sets LE_RENEW_FAILED inside the

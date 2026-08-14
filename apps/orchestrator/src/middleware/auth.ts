@@ -197,6 +197,14 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // /vpn/overlay/devices) match neither, so they stay authed. The /status
   // handler re-gates itself with the X-Overlay-PoP signature + per-IP/global
   // rate limits before revealing even the coarse state.
+  //
+  // WARP-1757: the same trailing-slash prefix also covers
+  // `…/by-token/<id>/profile`, deliberately — it is the same bearer-less
+  // device using the same enrollment identity key. It re-gates itself the same
+  // way, but over a DIFFERENT domain-prefixed PoP message
+  // (`droplet-overlay-enroll-profile:v1:`), so a captured /status signature
+  // cannot be replayed against it, and it additionally requires the enrollment
+  // to be in state 'approved'.
   const PUBLIC_PREFIXES = [
     "/api/setup/box-name",
     "/api/auth/invites/accept/",
@@ -673,6 +681,26 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  {
+    // WARP-1800: the rack panel's device-bridge presents this Bearer on GET
+    // /api/network/wifi/join-code — the ONE route this principal may reach
+    // (pinned by requireRoleOrService, so the coarse `service` role shared by
+    // every principal above is not enough).
+    //
+    // Same token as the orchestrator → oled-display leg (WARP-165); compose
+    // already gives both ends the value, so this adds a direction, not a
+    // secret. The panel needs the household join code because its old source
+    // — the box's own hostapd via the bridge's /openwrt/qr — does not exist
+    // on the edge-router shape, where the household SSID lives only on the
+    // approved AP.
+    token: config.SERVICE_TOKEN_DISPLAY,
+    principal: {
+      id: "_service:display",
+      username: "_service:display",
+      displayName: "Rack Panel Bridge",
+      role: "service",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {
@@ -750,7 +778,7 @@ export function requireRole(
   // invoked thousands of times; the Set avoids a linear scan when
   // a route allows multiple roles.
   const allowedSet = new Set<string>(allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     const role = req.user?.role;
     if (typeof role !== "string" || role.length === 0) {
       recordAccessDenied(req, "no-role");
@@ -763,7 +791,37 @@ export function requireRole(
       return;
     }
     next();
-  };
+  });
+}
+
+/**
+ * Marker stamped on every role-guard middleware.
+ *
+ * A router can be walked to enumerate its routes, but the handlers in each
+ * layer are anonymous closures — there is no way to tell "this route is
+ * guarded" from "this route has two handlers" without one. WARP-1961 needs
+ * that distinction to assert a standing invariant: *no camera route ships
+ * without a guard*. Counting middleware would pass for any route that
+ * happens to have a validator in front of it, which is exactly the kind of
+ * test that stays green while the thing it claims to check rots.
+ *
+ * Non-enumerable so it never shows up in logs or serialisation.
+ */
+export const ROLE_GUARD_MARKER = Symbol.for("droplet.roleGuard");
+
+/** True when `fn` is a role guard produced by this module. */
+export function isRoleGuard(fn: unknown): boolean {
+  if (typeof fn !== "function") return false;
+  return (fn as unknown as Record<symbol, unknown>)[ROLE_GUARD_MARKER] === true;
+}
+
+function markAsRoleGuard<T extends object>(fn: T): T {
+  Object.defineProperty(fn, ROLE_GUARD_MARKER, {
+    value: true,
+    enumerable: false,
+    writable: false,
+  });
+  return fn;
 }
 
 /**
@@ -785,13 +843,13 @@ export function requireRoleOrMcpService(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   const base = requireRole(...allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === "_service:mcp" && req.user.role === "service") {
       next();
       return;
     }
     base(req, res, next);
-  };
+  });
 }
 
 /**

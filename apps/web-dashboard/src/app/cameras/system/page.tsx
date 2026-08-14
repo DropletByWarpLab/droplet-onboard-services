@@ -16,7 +16,8 @@ import {
   Video,
   Zap,
 } from "lucide-react";
-import { fetchCameraSystemStatus, restartFrigate } from "@/lib/api";
+import { fetchCameraSystemStatus, fetchCameraStorage, restartFrigate } from "@/lib/api";
+import type { CameraStorageSummary } from "@/lib/types";
 import { confirmNetworkCommand } from "@/lib/api";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -42,6 +43,19 @@ export default function CameraSystemPage() {
     "/api/cameras/system",
     fetchCameraSystemStatus,
     { refreshInterval: 5000 },
+  );
+
+  // WARP-1850: per-camera storage. Polled slower than the system status —
+  // Frigate recomputes usage by summing segment sizes, so hammering it at
+  // 5s buys nothing but load. `storageError` is surfaced rather than
+  // swallowed: an empty breakdown reads as "nothing is using disk".
+  const {
+    data: storage,
+    error: storageError,
+  } = useSWR<CameraStorageSummary>(
+    "/api/cameras/storage",
+    fetchCameraStorage,
+    { refreshInterval: 60_000 },
   );
 
   const [restarting, setRestarting] = useState(false);
@@ -112,15 +126,25 @@ export default function CameraSystemPage() {
     setRestarting(false);
   };
 
+  // The headline number is the RECORDINGS drive, not a sum.
+  //
+  // Frigate reports four volumes: /media/frigate/recordings and
+  // /media/frigate/clips (the SAME filesystem, so summing double-counts
+  // it), /tmp/cache (the boot SSD) and /dev/shm (256 MiB of tmpfs).
+  // Adding them produced a "% used" that described no real disk — on this
+  // box it would have read ~3% of a phantom 4 TB (WARP-1960).
   const totalStorage = useMemo(() => {
     if (!data) return null;
-    let total = 0;
-    let used = 0;
-    for (const s of data.storage) {
-      total += s.totalBytes;
-      used += s.usedBytes;
-    }
-    return total > 0 ? { total, used, pct: (used / total) * 100 } : null;
+    const vol =
+      data.storage.find((s) => s.role === "recordings" && !s.duplicateOf) ?? null;
+    if (!vol || vol.totalBytes <= 0) return null;
+    return {
+      total: vol.totalBytes,
+      used: vol.usedBytes,
+      free: vol.freeBytes,
+      path: vol.path,
+      pct: (vol.usedBytes / vol.totalBytes) * 100,
+    };
   }, [data]);
 
   const actions = (
@@ -202,14 +226,20 @@ export default function CameraSystemPage() {
             />
             <Kpi
               icon={<HardDrive size={13} />}
-              label="Storage"
-              value={totalStorage ? `${totalStorage.pct.toFixed(0)}% used` : "—"}
+              label="Recordings drive"
+              value={
+                totalStorage
+                  ? totalStorage.pct < 1
+                    ? "<1% used"
+                    : `${totalStorage.pct.toFixed(0)}% used`
+                  : "—"
+              }
               note={
                 totalStorage
-                  ? `${fmtBytes(totalStorage.used)} of ${fmtBytes(totalStorage.total)}`
-                  : "No volumes reported"
+                  ? `${fmtBytes(totalStorage.used)} of ${fmtBytes(totalStorage.total)} · ${fmtBytes(totalStorage.free)} free`
+                  : "No recordings volume reported"
               }
-              dot={totalStorage && totalStorage.pct > 90 ? "#d9a35c" : "var(--success)"}
+              dot={totalStorage && totalStorage.pct > 85 ? "#d9a35c" : "var(--success)"}
             />
           </div>
 
@@ -379,6 +409,179 @@ export default function CameraSystemPage() {
             </Card>
           )}
 
+          {/* Per-camera storage (WARP-1850) */}
+          <Card
+            icon={<HardDrive size={15} />}
+            title="Storage by camera"
+            className="span2"
+            style={{ marginBottom: 16 }}
+          >
+            {storageError ? (
+              <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Storage usage is unavailable right now, so this list may be
+                incomplete. It isn&apos;t a sign that your cameras are using no
+                space.
+              </p>
+            ) : !storage ? (
+              <div style={{ height: 64, background: "var(--surface-2)", borderRadius: 8 }} />
+            ) : storage.cameras.length === 0 ? (
+              <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                No cameras are recording yet.
+              </p>
+            ) : (
+              <>
+                {/* WARP-1963 — footage on the wrong disk.
+                    Louder than near-full on purpose: a full drive shortens
+                    retention, but this means the dedicated recordings drive
+                    is doing nothing at all while the system disk fills. It
+                    is the exact silent failure that left this box's 1.8 TB
+                    array empty for a month. */}
+                {storage.recordingsOnBootDisk === true && (
+                  <div
+                    data-testid="boot-disk-warning"
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                      marginBottom: 12,
+                      color: "#ef4444",
+                      fontSize: 12,
+                    }}
+                  >
+                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>
+                      <strong>Recordings are being written to the system disk.</strong>{" "}
+                      The dedicated recordings drive isn&apos;t mounted, so footage
+                      is filling the same disk the appliance runs on and you have
+                      far less room than you think. Check that the recordings
+                      volume is mounted, then restart the camera service.
+                    </span>
+                  </div>
+                )}
+                {storage.nearFull && (
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                      marginBottom: 12,
+                      color: "#d9a35c",
+                      fontSize: 12,
+                    }}
+                  >
+                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>
+                      This drive is {storage.volume?.usedPercent.toFixed(0)}% full.
+                      When it fills, the oldest footage is deleted first — every
+                      camera quietly keeps less than you asked for. Lower a
+                      retention window, or add storage.
+                    </span>
+                  </div>
+                )}
+                {/* WARP-1963 — the drive as ONE bar, split by camera.
+                    Per-camera meters each ran 0–100% of the whole drive, so
+                    at 0.24% every camera was an invisible sliver and the
+                    picture answered nothing. Stacked, the segments plus free
+                    space add up to the real capacity, which is what "how is
+                    my space allocated" actually asks. */}
+                {storage.volume && storage.volume.totalBytes > 0 && (
+                  <div style={{ marginBottom: 14 }} data-testid="allocation-bar">
+                    <div
+                      style={{
+                        display: "flex",
+                        height: 14,
+                        borderRadius: 7,
+                        overflow: "hidden",
+                        background: "var(--surface-2)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      {storage.cameras.map((c, i) =>
+                        c.usedBytes === null || c.usedBytes <= 0 ? null : (
+                          <div
+                            key={c.camera}
+                            data-testid={`allocation-seg-${c.camera}`}
+                            title={`${c.camera} — ${fmtBytes(c.usedBytes)}`}
+                            style={{
+                              // Floor at a hairline so a real-but-tiny
+                              // consumer is still visible; the NUMBER below
+                              // carries the precision.
+                              width: `max(2px, ${(c.usedBytes / storage.volume!.totalBytes) * 100}%)`,
+                              background: `color-mix(in srgb, var(--brand) ${85 - Math.min(i, 4) * 15}%, transparent)`,
+                            }}
+                          />
+                        ),
+                      )}
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginTop: 4,
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      <span>
+                        {fmtBytes(storage.volume.usedBytes)} used of{" "}
+                        {fmtBytes(storage.volume.totalBytes)}
+                      </span>
+                      <span>{fmtBytes(storage.volume.freeBytes)} free</span>
+                    </div>
+                  </div>
+                )}
+
+                <ul style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {storage.cameras.map((c) => (
+                    <li key={c.camera} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <span className="nm" style={{ minWidth: 0 }}>{c.camera}</span>
+                        <span className="rmeta mono">
+                          {/* null ≠ 0: say we don't know, don't imply empty. */}
+                          {c.usedBytes === null ? "not recorded yet" : fmtBytes(c.usedBytes)}
+                          {/* The share was an unlabelled bar and nothing else.
+                              At 0.24% that is an invisible sliver — say the
+                              number. */}
+                          {c.sharePercent !== null && (
+                            <>
+                              {" · "}
+                              {c.sharePercent < 0.1 ? "<0.1" : c.sharePercent.toFixed(1)}% of drive
+                            </>
+                          )}
+                          {c.bytesPerHour !== null && (
+                            <> · {fmtBytes(c.bytesPerHour)}/hr</>
+                          )}
+                          {/* Computed since WARP-1850 and never rendered. */}
+                          {c.daysAtCurrentRate !== null && (
+                            <> · ≈{c.daysAtCurrentRate}d stored</>
+                          )}
+                        </span>
+                      </div>
+                      {c.sharePercent !== null && <Meter pct={c.sharePercent} />}
+                    </li>
+                  ))}
+                </ul>
+                {storage.totalBytesPerHour !== null && storage.volume && (
+                  <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 12 }}>
+                    All cameras together are writing about{" "}
+                    {fmtBytes(storage.totalBytesPerHour)} an hour.
+                    {storage.totalBytesPerHour > 0 && (
+                      <>
+                        {" "}
+                        At that rate the free space lasts roughly{" "}
+                        {Math.max(
+                          0,
+                          Math.round(storage.volume.freeBytes / (storage.totalBytesPerHour * 24)),
+                        )}{" "}
+                        more days before the oldest footage starts being deleted.
+                      </>
+                    )}
+                  </p>
+                )}
+              </>
+            )}
+          </Card>
+
           {/* Restart card */}
           <Card className="span2">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
@@ -439,9 +642,18 @@ export default function CameraSystemPage() {
 
 // --- helpers ---
 
+/**
+ * Binary maths with binary labels.
+ *
+ * This divided by 1024 while labelling the result "KB"/"MB"/"GB" — SI
+ * names for binary quantities, so every drive figure on this page read
+ * ~2.4% low against the label it carried (WARP-1960). Frigate reports MiB
+ * and the array is sized in TiB, so binary is the right base; the labels
+ * are what were wrong.
+ */
 function fmtBytes(b: number): string {
   if (!Number.isFinite(b) || b < 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let v = b;
   let i = 0;
   while (v >= 1024 && i < units.length - 1) {

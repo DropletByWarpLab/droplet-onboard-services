@@ -28,6 +28,7 @@ import type { PlaceSuggestion } from "@/lib/api";
 
 function place(p: Partial<PlaceSuggestion>): PlaceSuggestion {
   return {
+    kind: p.kind,
     name: p.name,
     context: p.context,
     displayName: p.displayName ?? "",
@@ -79,6 +80,25 @@ describe("placeStoredValue (WARP-1502)", () => {
     expect(
       placeStoredValue(place({ name: "Anywhere", context: "", displayName: "long…" })),
     ).toBe("Anywhere");
+  });
+
+  it("stores a premade room's canonical 'Building - Room' label verbatim (WARP-1906)", () => {
+    // A kind:"room" suggestion carries the server-composed label in
+    // displayName; composing `name, context` here would flip it to
+    // "Room Aurora, HQ".
+    expect(
+      placeStoredValue(
+        place({
+          kind: "room",
+          name: "Room Aurora",
+          context: "HQ",
+          displayName: "HQ - Room Aurora",
+          lat: "",
+          lon: "",
+          type: "conference_room",
+        }),
+      ),
+    ).toBe("HQ - Room Aurora");
   });
 
   it("falls back to the first display_name segment for a stale old-shape item", () => {
@@ -184,6 +204,41 @@ describe("PlaceCombobox (WARP-307 / WARP-1502)", () => {
     await sleep(POST_DEBOUNCE_MS);
     expect(screen.queryByRole("listbox")).toBeNull();
     expect((input as HTMLInputElement).value).toBe("Somewhere obscure");
+  });
+
+  it("offers a premade conference room and picking fills the canonical label (WARP-1906)", async () => {
+    // The orchestrator merge ranks rooms ahead of Nominatim places; the
+    // combobox renders them through the SAME listbox and a pick fills the
+    // location field with the server-composed "Building - Room" string.
+    fetchPlacesMock.mockResolvedValueOnce([
+      place({
+        kind: "room",
+        name: "Room Aurora",
+        context: "HQ",
+        displayName: "HQ - Room Aurora",
+        lat: "",
+        lon: "",
+        type: "conference_room",
+      }),
+      place({
+        name: "Aurora",
+        context: "IL",
+        displayName: "Aurora, Kane County, Illinois, United States",
+      }),
+    ]);
+    const onChangeSpy = vi.fn();
+    render(<Harness onChangeSpy={onChangeSpy} />);
+    const input = screen.getByTestId("place-input");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "Aur" } });
+    const options = await screen.findAllByRole("option");
+    expect(options).toHaveLength(2);
+    // The room ranks first, rendered as room name + muted building context.
+    expect(options[0]).toHaveTextContent("Room Aurora");
+    expect(options[0]).toHaveTextContent("HQ");
+    fireEvent.mouseDown(options[0]);
+    expect(onChangeSpy).toHaveBeenCalledWith("HQ - Room Aurora");
+    expect(onChangeSpy).not.toHaveBeenCalledWith("Room Aurora, HQ");
   });
 
   it("ArrowDown / Enter picks the second suggestion's clean value", async () => {

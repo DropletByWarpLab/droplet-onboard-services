@@ -48,6 +48,7 @@ import {
   overlayApproveErrorCopy,
 } from "@/lib/overlay-enroll";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { peerConnectionCopy } from "@/lib/vpn-peer-liveness";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -65,6 +66,10 @@ export default function RemoteAccessPage() {
   const { user: currentUser } = useAuth();
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
   const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
+  // WARP-1763: false when the orchestrator couldn't read the running
+  // interface. Kept separate from the peer rows because it is a fact about the
+  // OBSERVATION, not about any device.
+  const [liveState, setLiveState] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -85,10 +90,16 @@ export default function RemoteAccessPage() {
     try {
       const [s, p] = await Promise.all([
         fetchVpnStatus().catch(() => null),
-        fetchVpnPeers().catch(() => ({ peers: [] as VpnPeerInfo[] })),
+        fetchVpnPeers().catch(() => ({
+          peers: [] as VpnPeerInfo[],
+          // A failed fetch observed nothing, so the rows must not claim to
+          // know a connection state (WARP-1763).
+          liveStateAvailable: false,
+        })),
       ]);
       setStatus(s);
       setPeers(p.peers || []);
+      setLiveState(p.liveStateAvailable === true);
     } catch (err) {
       setError(translateError(err, "vpn"));
     } finally {
@@ -219,9 +230,9 @@ export default function RemoteAccessPage() {
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
-              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Home address not ready yet</p>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Local address not ready yet</p>
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
-                Once your home address is ready you’ll be able to add a device —
+                Once your Droplet’s local address is ready you’ll be able to add a device —
                 it works on your office Wi-Fi, and the button turns on
                 automatically, with nothing to enter. If this doesn’t clear on
                 its own, restart the box.
@@ -261,7 +272,16 @@ export default function RemoteAccessPage() {
             <PeerRow
               key={peer.id}
               peer={peer}
-              isOwner={peer.userId === currentUser?.username}
+              // WARP-1763: gate on ROLE, matching what the API actually
+              // enforces (`requireRole("owner", "admin")` on
+              // DELETE /api/vpn/peers/:id). The previous gate compared
+              // `peer.userId` to the signed-in username, which was wrong in
+              // both directions: a QR-linked device is stored under the
+              // synthetic userId "overlay" and so could never show the button
+              // to anyone, while a family user WAS shown a button for their
+              // own device that the API would 403.
+              canRevoke={isOwnerOrAdmin}
+              liveStateAvailable={liveState}
               onRevoke={() => setRevokeTarget(peer)}
             />
           ))
@@ -384,11 +404,13 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function PeerRow({
   peer,
-  isOwner,
+  canRevoke,
+  liveStateAvailable,
   onRevoke,
 }: {
   peer: VpnPeerInfo;
-  isOwner: boolean;
+  canRevoke: boolean;
+  liveStateAvailable: boolean;
   onRevoke: () => void;
 }) {
   const isRevoked = peer.status === "revoked";
@@ -396,6 +418,19 @@ function PeerRow({
   // falling back to the stable peer id when the label is empty. Mirrors
   // the WARP-220 pattern applied site-wide in WARP-292.
   const label = peer.deviceLabel?.trim() ? peer.deviceLabel : peer.id;
+  const isLinked = peer.kind === "overlay";
+  const conn = isRevoked
+    ? null
+    : peerConnectionCopy(peer, liveStateAvailable);
+  // Overlay peers carry the synthetic userId "overlay", which is an
+  // implementation detail and means nothing to the person reading the row.
+  // Show who linked it instead, and fall back to the owning username for
+  // static peers, which is a real account name.
+  const attribution = isLinked
+    ? peer.linkTokenEnrolledBy
+      ? `linked by ${peer.linkTokenEnrolledBy}`
+      : "linked by QR"
+    : peer.userId;
   return (
     <div className="lrow">
       <span className={"ri" + (isRevoked ? "" : " brand")}>
@@ -404,20 +439,29 @@ function PeerRow({
       <span className="rt">
         <span className="nm">
           {peer.deviceLabel}
+          {isLinked && (
+            <span className="badge info" style={{ marginLeft: 8, flexShrink: 0 }}>
+              Linked device
+            </span>
+          )}
           {isRevoked && <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-faint)" }}>· revoked</span>}
         </span>
         <span className="sub mono">
-          {peer.assignedIp} · {peer.userId}
+          {peer.assignedIp} · {attribution}
         </span>
-        {/* TODO(WARP-1475): surface overlay provenance (enrolled-by owner +
-            link-token label + enrolled-at) so the owner can tell their device
-            from an unexpected one. The `GET /vpn/peers` DTO doesn't yet carry
-            linkTokenEnrolledBy / linkTokenLabel / enrolledAt (they're stamped
-            on the VpnPeer row by the approve path in WARP-1474 but not
-            selected into the list response) — render only once the DTO does;
-            do not fabricate the fields client-side. */}
+        {conn && (
+          <span
+            className="sub"
+            style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
+          >
+            <span className={`badge ${conn.tone}`}>{conn.text}</span>
+            {isLinked && peer.enrolledAt ? (
+              <span>linked {formatRelativeTime(peer.enrolledAt)}</span>
+            ) : null}
+          </span>
+        )}
       </span>
-      {!isRevoked && isOwner && (
+      {!isRevoked && canRevoke && (
         <button
           onClick={onRevoke}
           aria-label={`Revoke device ${label}`}

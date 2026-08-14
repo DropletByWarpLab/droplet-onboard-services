@@ -63,12 +63,20 @@ COPY docker/nginx/render-canonical-host.sh            /usr/local/bin/render-cano
 COPY docker/nginx/docker-entrypoint-canonical-host.sh /docker-entrypoint.d/02-canonical-host.sh
 COPY docker/nginx/canonical-host.off.conf /etc/nginx/canonical-host.active.conf
 COPY docker/nginx/tls-status/index.html               /usr/share/nginx/tls-status/index.html
+# WARP-1686: document-engine /docs/ proxy variants + the selector that picks
+# one from DOCS_ENGINE at container start (same pattern as the cipher profiles
+# / internal scheme above). Default (unset) = collabora.
+COPY docker/nginx/docs-engine.collabora.conf  /etc/nginx/docs-engine.collabora.conf
+COPY docker/nginx/docs-engine.onlyoffice.conf /etc/nginx/docs-engine.onlyoffice.conf
+COPY docker/nginx/docker-entrypoint-docs-engine.sh /docker-entrypoint.d/03-docs-engine.sh
 RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh /docker-entrypoint.d/01-internal-scheme.sh \
-             /docker-entrypoint.d/02-canonical-host.sh /usr/local/bin/render-canonical-host.sh && \
+             /docker-entrypoint.d/02-canonical-host.sh /docker-entrypoint.d/03-docs-engine.sh \
+             /usr/local/bin/render-canonical-host.sh && \
     # Default the active profile/scheme to the OFF posture so `nginx -t` and
     # a bare run before the entrypoints have selected are well-formed.
     ln -sf /etc/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.active.conf && \
-    ln -sf /etc/nginx/internal-scheme.default.conf /etc/nginx/internal-scheme.active.conf
+    ln -sf /etc/nginx/internal-scheme.default.conf /etc/nginx/internal-scheme.active.conf && \
+    ln -sf /etc/nginx/docs-engine.collabora.conf /etc/nginx/docs-engine.active.conf
 
 # --- Build-time nginx-config self-test: both cipher profiles must parse -------
 # The full nginx.conf server block references TLS certs that don't exist in the
@@ -114,9 +122,31 @@ RUN set -eu; \
     done; \
     rm -f /tmp/ca.key /tmp/ca.crt /tmp/ca.srl /tmp/l.key /tmp/l.csr /tmp/l.crt /tmp/san.cnf /tmp/ch-on.conf; \
     echo "canonical-host self-test OK — OFF + ON variants render and parse"; \
+    # WARP-1686: both document-engine /docs/ variants must parse. They
+    # reference the $connection_upgrade map, so the throwaway config declares
+    # it exactly like nginx.conf does.
+    for eng in collabora onlyoffice; do \
+      printf 'events{}\nhttp{\n map $http_upgrade $connection_upgrade { default upgrade; "" close; }\n server{\n  listen 8080;\n  include /etc/nginx/docs-engine.%s.conf;\n }\n}\n' "$eng" > /tmp/test-nginx.conf; \
+      nginx -t -c /tmp/test-nginx.conf; \
+    done; \
+    # WARP-1688: and finally the REAL /etc/nginx/nginx.conf, end to end.
+    # Everything above validates an INCLUDE variant in a throwaway config —
+    # nothing validated nginx.conf itself, because its server block loads TLS
+    # certs that are runtime volume mounts. So a syntax error added directly to
+    # nginx.conf (a location block, say) shipped unparsed and only surfaced when
+    # the gateway refused to start on a customer's box. Stage the throwaway pair
+    # at the runtime cert path, parse the real config, then remove them — the
+    # image still ships with no certs baked in.
+    mkdir -p /etc/nginx/certs; \
+    cp /tmp/t.crt /etc/nginx/certs/droplet.crt; \
+    cp /tmp/t.key /etc/nginx/certs/droplet.key; \
+    nginx -t -c /etc/nginx/nginx.conf; \
+    rm -rf /etc/nginx/certs; \
     rm -f /tmp/t.key /tmp/t.crt /tmp/test-nginx.conf; \
     echo "WARP-1021 nginx cipher-profile self-test OK — default + fips profiles parse"; \
-    echo "WARP-1061 internal-scheme self-test OK — default + mtls variants parse"
+    echo "WARP-1061 internal-scheme self-test OK — default + mtls variants parse"; \
+    echo "WARP-1686 docs-engine self-test OK — collabora + onlyoffice variants parse"; \
+    echo "WARP-1688 full-config self-test OK — /etc/nginx/nginx.conf parses"
 
 # nginx:1.27-bookworm already EXPOSEs 80/443 and ships the stock entrypoint that
 # runs /docker-entrypoint.d/*.sh before starting nginx — our profile-selector

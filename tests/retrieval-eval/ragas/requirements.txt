@@ -33,3 +33,9 @@ openai>=1.0
 datasets>=2.14
 pandas>=2.0
 pyyaml>=6.0
+
+# WARP-1948 — OSV floors, kept in LOCKSTEP with services/rag-eval/
+# requirements.txt (WARP-1406): the osv-nightly resolver scores transitive
+# deps at their minimum resolvable version; these state the real minimums.
+scipy>=1.10.0
+filelock>=3.20.3

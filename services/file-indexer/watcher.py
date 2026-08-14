@@ -48,6 +48,46 @@ from mqtt_client import publish
 
 logger = logging.getLogger(__name__)
 
+# ── WARP-1842: explicit Office/ODF MIME registrations ──
+# The shipped image (python:3.12-slim) has NO system MIME tables — every
+# path in `mimetypes.knownfiles` is absent — and Python 3.12's built-in
+# table lacks OOXML/ODF. Left to the OS, `guess_type("a.docx")` returned
+# `(None, None)`, `_sniff_text_mime` correctly refused the zip magic (NUL
+# bytes), and every Office/ODF document landed `skipped/unknown_type`
+# before `dispatch()` could route to the existing docx/pptx extractors.
+# Register the types in code so guessing never depends on OS tables (the
+# Dockerfile also installs Debian `media-types` as belt-and-suspenders,
+# but correctness must not hinge on an image detail).
+#
+# Kept to the WARP-1842 set: OOXML + legacy Word + ODF. Registered types
+# WITHOUT an extractor (.xlsx, all ODF) now take the honest
+# `skipped/unsupported_or_failed_extraction` path via dispatch() → None.
+OFFICE_MIME_TYPES: dict[str, str] = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".doc": "application/msword",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".odg": "application/vnd.oasis.opendocument.graphics",
+}
+
+
+def register_office_mime_types() -> None:
+    """Idempotently register the Office/ODF MIME types (WARP-1842).
+
+    ``mimetypes.add_type`` overwrites the extension mapping and de-dupes
+    the inverse map, so repeat calls converge on the same table. Runs at
+    module import; tests re-run it against a pristine ``MimeTypes`` DB to
+    simulate the container's bare tables.
+    """
+    for ext, mime in OFFICE_MIME_TYPES.items():
+        mimetypes.add_type(mime, ext)
+
+
+register_office_mime_types()
+
 # Nextcloud data layout: {root}/{user}/files/{relative_path}
 USER_FILES_PATTERN = re.compile(
     r"^(?P<user>[^/]+)/files/(?P<relpath>.+)$"
@@ -608,6 +648,15 @@ class IndexHandler(FileSystemEventHandler):
 # start (transient causes like the gateway being down usually clear).
 RECONCILE_RETRY_STATUSES = {"indexing", "failed"}
 
+# WARP-1842: 'skipped' is terminal EXCEPT for reasons a code fix genuinely
+# resolves. `unknown_type` rows exist because the container had no MIME
+# tables (Office/ODF guessed None); with the types now registered above,
+# those rows heal on the next startup scan. Other skip reasons
+# (empty_extraction / unsupported_or_failed_extraction / no_chunks) stay
+# terminal — retrying them would re-run the whole skipped corpus on every
+# restart for an outcome that cannot change.
+RECONCILE_RETRY_SKIP_REASONS = {"unknown_type"}
+
 
 def iter_watch_paths() -> Iterator[str]:
     """Yield the absolute path of every file in the watched subtrees:
@@ -642,8 +691,10 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
     crash window) was previously NEVER indexed — and left no trace, so search
     said "no match" for content that simply hadn't been looked at. Walk the
     watched subtrees once and index every file that (a) has no
-    FileIndexStatus row, (b) is stuck in a retryable state, or (c) changed
-    on disk after its last status write.
+    FileIndexStatus row, (b) is stuck in a retryable state ('indexing' /
+    'failed', or — WARP-1842 — 'skipped' with a reason in
+    RECONCILE_RETRY_SKIP_REASONS, which the current code genuinely
+    resolves), or (c) changed on disk after its last status write.
 
     Runs in a daemon thread at startup (a one-shot pass, not a scheduling
     loop — the apscheduler rule governs recurring schedules).
@@ -668,8 +719,16 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
         scanned += 1
         row = status_map.get((target.index_user, target.stored_path))
         if row is not None:
-            status, updated_at = row
-            if status not in RECONCILE_RETRY_STATUSES:
+            status, updated_at = row[0], row[1]
+            # WARP-1842: `reason` is the map's third element. Tolerate the
+            # legacy 2-tuple shape (a caller predating the reason column in
+            # fetch_index_status_map): no reason available means the
+            # pre-1842 behaviour — the row is not skip-retried.
+            reason = row[2] if len(row) > 2 else None
+            retry = status in RECONCILE_RETRY_STATUSES or (
+                status == "skipped" and reason in RECONCILE_RETRY_SKIP_REASONS
+            )
+            if not retry:
                 try:
                     if os.path.getmtime(abs_path) <= updated_at:
                         continue  # already looked at, unchanged since

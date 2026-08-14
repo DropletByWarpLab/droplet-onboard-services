@@ -59,6 +59,7 @@ import type { ChatProject } from "@/lib/api";
 // shared shell set; chat-indigo.css carries the chat-specific surface.
 import "@/components/shell/indigo-tokens.css";
 import "@/components/chat/chat-indigo.css";
+import { isLocalProvider } from "@/lib/provider";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -277,7 +278,7 @@ export default function ChatPage() {
     if (!selectedModel && models.length > 0) {
       const preferred =
         (defaultModel && models.find((m) => m.id === defaultModel)) ||
-        models.find((m) => m.provider === "ollama") ||
+        models.find((m) => isLocalProvider(m.provider)) ||
         models[0];
       setSelectedModel(preferred.id);
     }
@@ -593,7 +594,7 @@ export default function ChatPage() {
 
   // WARP-855 — design-handoff header: conversation title (first user
   // message, clamped) or "New chat", plus the "local · on-device" privacy
-  // tag whenever the selected model runs on the box (ollama provider).
+  // tag whenever the selected model runs on the box (local provider).
   const headerTitle = useMemo(() => {
     const first = messages.find((m) => m.role === "user")?.content.trim();
     if (!first) return "New chat";
@@ -601,7 +602,7 @@ export default function ChatPage() {
     return flat.length > 64 ? `${flat.slice(0, 63)}…` : flat;
   }, [messages]);
   const isLocalModel = useMemo(
-    () => models.find((m) => m.id === selectedModel)?.provider === "ollama",
+    () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
     [models, selectedModel],
   );
 
@@ -1056,7 +1057,14 @@ export default function ChatPage() {
         // (WARP-1153).
         flush
       >
-        <div className="flex flex-col h-full w-[320px] max-w-[85vw]">
+        {/* Width is the Dialog's to own, not this drawer's. The `w-[320px]
+            max-w-[85vw]` this used to carry never bought the nav-drawer
+            sliver it looks like it does — the panel container is already
+            100%-wide and painted with `--card-bg` at any viewport under
+            448px, so all it produced was 57px of empty card beside the list
+            at 375px (and 128px at 700px). WARP-1787 makes the container a
+            full-width sheet below 720px; filling it is the whole point. */}
+        <div className="flex flex-col h-full w-full">
           <h2 id="mobile-history-heading" className="sr-only">
             Chat history
           </h2>
@@ -1064,7 +1072,12 @@ export default function ChatPage() {
             activeConversationId={conversationId}
             onSelect={handleSelectConversation}
             onNewChat={handleNewChatFromPanel}
-          onNewChatInProject={handleNewChatInProject}
+            onNewChatInProject={handleNewChatInProject}
+            // WARP-1787: the drawer is a full-width sheet below 720px, so no
+            // backdrop is left to tap. The rail owns the header row the close
+            // belongs in — hence threading it down rather than floating a
+            // second button over `conv-head`.
+            onClose={() => setMobileHistoryOpen(false)}
           />
         </div>
       </Dialog>

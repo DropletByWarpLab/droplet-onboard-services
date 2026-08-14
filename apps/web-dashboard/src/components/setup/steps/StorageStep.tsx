@@ -1314,7 +1314,7 @@ function AdoptSection({
                     <p className="type-caption-2 text-label-tertiary truncate">
                       {disk.state === "pool_member"
                         ? disk.md
-                          ? `In your storage pool · reclaiming removes it from the pool · ${disk.disk}`
+                          ? `In your storage pool · reclaiming removes it from the pool and erases everything on it · ${disk.disk}`
                           : `Part of your storage pool · ${disk.disk}`
                         : disk.inUse
                           ? `In use by your Droplet · ${disk.disk}`
@@ -1337,7 +1337,10 @@ function AdoptSection({
                         disabled={busy}
                         className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 text-sm font-medium disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
                       >
-                        {busy ? "Working…" : "Reclaim"}
+                        {/* WARP-1945: the label names both halves of the
+                            destructive action — parity with the Drives page
+                            (WARP-1915); never a bare "Reclaim". */}
+                        {busy ? "Working…" : "Reclaim & erase"}
                       </button>
                     ) : (
                       <span className="flex-none whitespace-nowrap type-caption-1 text-label-tertiary">

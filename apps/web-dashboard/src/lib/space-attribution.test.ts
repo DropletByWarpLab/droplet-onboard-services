@@ -253,8 +253,16 @@ describe("spaceDisplayName — mount-name reconstruction", () => {
     expect(spaceDisplayName({ ...PLATFORM, parentName: undefined })).toBe("Platform");
   });
 
-  it("uses the household's own name", () => {
-    expect(spaceDisplayName(HOUSEHOLD)).toBe("Household");
+  // WARP-1808 — the household space's server name ("Household") is a data
+  // contract, but the build is business-only, so the RENDERED name is always
+  // "Workspace". Keyed off `kind`, never the name string.
+  it("renders the household space as 'Workspace' regardless of its server name", () => {
+    expect(spaceDisplayName(HOUSEHOLD)).toBe("Workspace");
+    expect(spaceDisplayName({ ...HOUSEHOLD, name: "Anything" })).toBe("Workspace");
+  });
+
+  it("never maps a non-household space, even one literally named 'Household'", () => {
+    expect(spaceDisplayName({ ...FINANCE, name: "Household" })).toBe("Household");
   });
 });
 
@@ -271,6 +279,12 @@ describe("libraryLabelForPath", () => {
 
   it("returns null for a personal file — no chip, no noise", () => {
     expect(libraryLabelForPath("/Documents/budget.xlsx", ALL)).toBeNull();
+  });
+
+  // WARP-1808 — the chip is display-only: matching still runs on the RAW
+  // "/Household" root, only the rendered label reads "Workspace".
+  it("labels a household file 'Workspace' while matching on the raw root", () => {
+    expect(libraryLabelForPath("/Household/Trips/italy.pdf", ALL)).toBe("Workspace");
   });
 });
 

@@ -48,7 +48,7 @@ export function BleUnavailableNotice({
       <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
         {variant === "no-wifi-provisioning"
           ? "This Droplet can see Bluetooth devices but can't hand them Wi-Fi yet — add devices that are already on your Wi-Fi."
-          : "This Droplet can add devices that are already on your home Wi-Fi. Devices that need Bluetooth for first-time setup aren't supported yet."}
+          : "This Droplet can add devices that are already on your workspace Wi-Fi. Devices that need Bluetooth for first-time setup aren't supported yet."}
       </p>
     </div>
   );

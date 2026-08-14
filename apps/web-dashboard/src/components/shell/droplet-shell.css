@@ -347,6 +347,12 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 
 /* ── Knowledge / tabbed page (tabs + indexed-item lists) ─ */
 .droplet-shell .tabstrip { display: flex; align-items: center; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 22px; }
+/* WARP-1792 (same defect class): the UA rule `[hidden] { display: none }` is
+   an origin-level default and loses to ANY author `display` declaration, so
+   the `hidden={mode === "simple"}` on the Network tab strip
+   (app/network/page.tsx:495) never actually hid it — all seven tabs stayed
+   visible in Simple mode. Restore the attribute's meaning explicitly. */
+.droplet-shell .tabstrip[hidden] { display: none; }
 .droplet-shell .tab { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 14px; margin-bottom: -1px; border: 0; background: transparent; cursor: pointer;
   border-bottom: 2px solid transparent; font-size: 14px; color: var(--text-muted); transition: color 150ms var(--ease), border-color 150ms var(--ease); }
 .droplet-shell .tab:hover { color: var(--text); }
@@ -397,6 +403,26 @@ body:has(.droplet-shell) { background: #f5f6fb; }
   .droplet-shell .grid.stagger > *:nth-child(6) { animation-delay: 310ms; }
   .droplet-shell .grid.stagger > *:nth-child(7) { animation-delay: 360ms; }
   .droplet-shell .grid.stagger > *:nth-child(8) { animation-delay: 410ms; }
+
+  /* WARP-1876 — a page that wraps ALL its content in one drop target (see
+     /files) would otherwise present `.page-inner` with a single child, and
+     the staggered entrance above would collapse into one block fade. The
+     wrapper opts out and re-emits the same stagger one level down, so the
+     page enters exactly as it did before it became droppable. The drag-over
+     overlay is excluded — it owns its own 120ms fade and must not inherit a
+     520ms rise, NOR one of the entrance delays below: it renders last, so an
+     unguarded :nth-child holds the drop feedback back by up to 380ms
+     (WARP-1876 review). EVERY rule in this block carries the same guard. */
+  .droplet-shell .page-inner > .page-dropzone { animation: none; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]) { animation: ds-rise 520ms var(--ease) both; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(1) { animation-delay: 30ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(2) { animation-delay: 80ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(3) { animation-delay: 130ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(4) { animation-delay: 180ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(5) { animation-delay: 230ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(6) { animation-delay: 280ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(7) { animation-delay: 330ms; }
+  .droplet-shell .page-dropzone > *:not([data-dropzone-overlay]):nth-child(8) { animation-delay: 380ms; }
 }
 
 /* ── Severity icon tints (WARP-246 audit timeline) ─────────
@@ -413,4 +439,156 @@ body:has(.droplet-shell) { background: #f5f6fb; }
    crowds out the row's primary text). */
 @media (max-width: 480px) {
   .droplet-shell .hide-narrow { display: none; }
+}
+
+/* ══ Phone layout layer — WARP-1785 / 1788 / 1789 / 1791 ══════════════════
+   Declared last on purpose: these are same-specificity overrides of the
+   desktop primitives defined above (`.pills` and `.tabstrip`), so they only
+   win by source order — the same contract the `.sev-ic` block relies on.
+   Moving this block earlier in the file silently disables it.
+
+   Two distinct desktop-first defects, both reported from QA on a 375px
+   iPhone and both measured in a browser before and after this change:
+
+   1. `.phead` is a two-column header whose text side carries `min-width: 0`
+      while `.phead-actions` carries `flex-shrink: 0`. The buttons therefore
+      hold their full intrinsic width and the text column absorbs the whole
+      shortfall — measured at 53px on a 375px viewport, about four
+      characters, which is why the title and intro paragraph wrapped one
+      word per line down the left edge.
+
+   2. `.tabstrip` (seven Network tabs) is an unwrapped flex row with no
+      overflow handling. Flex items default to `min-width: auto` and refuse
+      to shrink below their content, so the row's min-content width becomes
+      the *page's* width: the document measured 460px inside a 375px
+      viewport. That is what shrinks every card to roughly half width and
+      lets the whole page pan sideways, and it is also why fixed elements
+      that span `inset-x-0` (the bottom tab bar) render wider than the
+      screen and clip their last label to "Mor…".
+
+   Every sibling row in this file (`.toolbar`, `.chiprow`, `.cal-legend`,
+   `.gleg`, `.k-row1`) already carries `flex-wrap: wrap` and was never
+   affected. These two simply missed it.
+
+   Scrollbars are deliberately NOT hidden here: Sam's report calls out that
+   the clipped row gave "no visual hint that the row scrolls", and iOS/Android
+   overlay scrollbars are the affordance that answers it. */
+@media (max-width: 720px) {
+  /* Stack the header rather than starving the text column to ~4 characters. */
+  .droplet-shell .phead { flex-direction: column; align-items: stretch; gap: 14px; }
+  .droplet-shell .phead-actions { flex-wrap: wrap; }
+  .droplet-shell .phead h1 { font-size: 24px; }
+
+  /* Contain the strip's overflow in its own scroll box so it can never widen
+     the page. Tabs keep their intrinsic width and scroll horizontally. */
+  .droplet-shell .tabstrip { overflow-x: auto; overscroll-behavior-x: contain; }
+  .droplet-shell .tabstrip > * { flex: 0 0 auto; }
+
+  /* Same containment for segmented `.pills` controls (file search modes,
+     audit-log time range) so a long segment set scrolls instead of
+     stretching the page behind it. */
+  .droplet-shell .pills { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+  .droplet-shell .pills button { flex: 0 0 auto; }
+
+  /* ── 3. The page-top status chip was still widening every shell route ────
+     `.pt-chip` is `white-space: nowrap` + `flex-shrink: 0` and measures 282px
+     ("droplet.local · All systems operational"); `.pt-id` next to it had no
+     `min-width: 0`. So `.page-top`'s min-content became the DOCUMENT's width:
+     measured at 375px, the document came out 390-437px wide on /network,
+     /knowledge, /messages, /calendar, /users, /projects, /voice, /health,
+     /help, /tools and /admin/rag-eval — i.e. on essentially every page built
+     from `ShellPage`. That is the page-level overflow described in
+     `04-coding-standards/mobile-web-layout.md` §1: the gutters stay correct,
+     content drifts off the RIGHT edge, mobile Safari shrink-to-fits, and
+     `position: fixed; inset-x-0` chrome (the bottom tab bar) clips with it.
+
+     An earlier pass concluded `.pt-chip` did NOT widen the page. That was
+     measured on a transcribed harness with short page titles; against the real
+     app it reproduces on every route that renders a slim bar.
+
+     The host is dropped rather than truncated: at this width truncation would
+     leave it ~29px (three characters). It is long, is the least actionable
+     half on a phone, and is still shown on Health and Settings. The status
+     LABEL stays — the coloured dot alone would be a colour-only signal
+     (WCAG 1.4.1). Their display is owned only here: no Tailwind utility and no
+     `hidden` attribute touches them, so the WARP-1792 trap in §3 of that
+     document does not apply. */
+  .droplet-shell .pt-chip .pt-host,
+  .droplet-shell .pt-chip .pt-sep { display: none; }
+
+  /* Belt and braces. With the host gone the row fits with room to spare, but
+     nothing in this bar may ever be able to push the document again: both
+     sides become shrinkable and ellipsize, so an unusually long section label
+     or status string is absorbed instead of propagating outward. */
+  .droplet-shell .pt-id { min-width: 0; }
+  .droplet-shell .pt-id .pt-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .droplet-shell .pt-chip { min-width: 0; flex-shrink: 1; }
+  .droplet-shell .pt-chip .pt-status { overflow: hidden; text-overflow: ellipsis; }
+
+  /* ── 4. Touch targets ───────────────────────────────────────────────────
+     Every interactive primitive above was sized for a mouse: `.btn` 36px,
+     `.btn.sm` and `.k-iconbtn` 30px, `.chip` 32px, `.cal-leg` 28px,
+     `.icon-btn` 36x36, `.tab` 42px, `.search` 38px. Measured at 375px,
+     /calendar rendered 99 controls under 44px and / rendered 41. 44px is the
+     Apple HIG target and WCAG 2.5.5; it is what "the buttons don't scale or
+     have proper padding" refers to. Heights (and squares for icon-only
+     controls) only — widths still follow content. */
+  .droplet-shell .btn { height: 44px; padding: 0 18px; }
+  .droplet-shell .btn.sm { height: 44px; padding: 0 14px; }
+  .droplet-shell .icon-btn { width: 44px; height: 44px; }
+  .droplet-shell .k-iconbtn { width: 44px; height: 44px; }
+  .droplet-shell .tab { height: 46px; }
+  .droplet-shell .chip { height: 44px; }
+  .droplet-shell .cal-leg { height: 44px; }
+  .droplet-shell .search { height: 44px; }
+  .droplet-shell .pills button { min-height: 44px; }
+  .droplet-shell .ds-ios-nav .x { width: 44px; height: 44px; }
+  .droplet-shell .ds-ios-nav .edit { min-height: 44px; }
+
+  /* The toggle keeps its 38x22 look — a 44px-tall switch would read as a
+     button — and gains the missing hit area from a transparent overlay.
+     Excluded where `.sw` is a colour SWATCH rather than a control (inside
+     `.cal-leg` / `.gleg`), which would otherwise plant a 44px phantom target
+     in the middle of its own row. */
+  .droplet-shell .sw { position: relative; }
+  .droplet-shell .sw::after { content: ""; position: absolute; inset: -11px -4px; }
+  .droplet-shell .cal-leg .sw::after,
+  .droplet-shell .gleg .sw::after { content: none; }
+
+  /* ── 5. iOS Safari zooms on focus for any input under 16px and never zooms
+     back. In that zoomed state the page genuinely overflows and pans, which is
+     why static analysis and a photograph can disagree (mobile-web-layout §4).
+     WARP-1701 fixed five of these; `.search input` regressed back in at
+     13.5px. The global guard in `globals.css` covers the rest of the app. */
+  .droplet-shell .search input { font-size: 16px; }
+  .droplet-shell .ds-ios-note textarea { font-size: 16px; }
+
+  /* `.search` is a 44px box but the <input> inside it only rendered 24px, so
+     the top and bottom 10px of the control did nothing on tap. Fill it. */
+  .droplet-shell .search input { align-self: stretch; }
+
+  /* ── 6. A side panel is a SHEET here, not a drawer ──────────────────────
+     `<Dialog placement="right">` is `w-full max-w-md`, and `max-w-md` is
+     448px — so between 448px and the desktop layout every detail panel in the
+     app renders as a partial-width drawer with the page left visible but
+     unusable beside it. Measured in Chrome against the production CSS bundle:
+     the switch port-detail panel came out 448px at a 700px viewport — 64% of
+     the screen, which is the "~60%" in Sam's report (WARP-1787). At 375px
+     `max-w-md` never binds, which is how a 375-only sweep missed it entirely.
+
+     `mobile-web-layout.md` §4 states the rule the other way round — "a
+     `max-w-md` drawer is a desktop drawer, not a mobile sheet" — and its
+     checklist item 7 has been unimplemented since it was written. This is it.
+
+     The rule lives here rather than at the call site because the shell's
+     breakpoint is 720px while Tailwind's are 640/768/1024, and mixing the two
+     leaves a dead zone (§4). The Dialog is portalled to <body> but carries
+     `droplet-shell` on its own backdrop, so this (0,2,0) selector reaches the
+     panel and outranks the (0,1,0) utility regardless of bundle order.
+
+     Only `.dlg-side-panel` (the `max-w-md` default) opts in. The 520px
+     `sheet` variant is left alone: its design packet locks
+     `min(520px, 100vw)`, which `w-full max-w-[520px]` already is, and
+     widening it between 520 and 720px would contradict the packet. */
+  .droplet-shell .dlg-side-panel { max-width: none; }
 }

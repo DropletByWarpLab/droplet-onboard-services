@@ -9,6 +9,8 @@ export interface CalendarEvent {
   title: string;
   description: string | null;
   location: string | null;
+  /** WARP-1874 — https-only video-call link, alongside `location`. */
+  meetingUrl: string | null;
   startsAt: string;
   endsAt: string;
   allDay: boolean;
@@ -55,6 +57,7 @@ export async function createEvent(input: {
   title: string;
   description?: string;
   location?: string;
+  meetingUrl?: string;
   startsAt: string;
   endsAt: string;
   allDay?: boolean;
@@ -71,6 +74,7 @@ export async function updateEvent(id: string, patch: Partial<{
   title: string;
   description: string | null;
   location: string | null;
+  meetingUrl: string | null;
   startsAt: string;
   endsAt: string;
   allDay: boolean;

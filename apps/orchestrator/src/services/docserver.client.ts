@@ -1,37 +1,159 @@
 /**
- * WARP-882 / WS-4 — In-browser editing + co-authoring document-server client.
+ * WARP-882 / WARP-1686 — in-browser viewing/editing document-server client.
  *
- * The Droplet integrates an OnlyOffice Document Server (the configured ENGINE)
- * via the Nextcloud `onlyoffice` connector app over a WOPI-style handshake.
- * This module is the orchestrator's thin, ENGINE-AGNOSTIC seam:
+ * The Droplet integrates a WOPI document engine via a Nextcloud connector app.
+ * WHICH engine is a CONFIG choice (DOCS_ENGINE, ADR-034), not a code
+ * dependency — this module is the orchestrator's thin, ENGINE-AWARE seam:
  *
- *   - It NEVER speaks the raw WOPI/Document-Server wire protocol. That handshake
- *     (file fetch + save callback + JWT verification) is owned by the Nextcloud
- *     connector and the Document Server itself. Keeping the engine behind WOPI
- *     means the engine is a CONFIG choice (DOCS_INTERNAL_URL + the connector's
- *     DocumentServerUrl), not a code dependency — swapping the Document Server
- *     for any other WOPI-capable engine needs no change here.
+ *   - It NEVER speaks the raw WOPI/Document-Server wire protocol. That
+ *     handshake (file fetch + save callback + token verification) is owned by
+ *     the Nextcloud connector and the engine itself. Keeping the engine behind
+ *     WOPI means swapping it changes DOCS_* config + the two engine-keyed
+ *     branches below (health path + connector page), nothing else.
  *   - `ncMintEditorSession` resolves the Nextcloud numeric fileId for the path
  *     (via `ncGetFileId(token, ncUser, path)` — 3 args) and returns the editor
- *     URL the dashboard iframe loads, plus a short-lived signed access token the
- *     editor presents back on its WOPI calls.
+ *     URL the dashboard iframe loads, plus a short-lived signed access token
+ *     the editor presents back on its WOPI calls.
  *   - `docServerHealthy` is a bounded reachability probe used by the
  *     `/files/docs/status` route.
  *
- * LICENSING NOTE (CE → OEM): we build and test against OnlyOffice Document
- * Server **Community Edition**, which is AGPLv3. Shipping the doc-server engine
- * in the product at GA requires an OnlyOffice OEM/commercial license. There is
- * deliberately NO license-enforcement code here — the engine choice stays
- * config-driven so the commercial swap is an ops/packaging decision, not a code
- * change. See docs/ADR-021 (`docs` profile section) and docs/ENVIRONMENT.md.
+ * ENGINES (DOCS_ENGINE):
+ *   - "collabora" (default) — Collabora CODE (LibreOffice technology; MPLv2
+ *     core, free-of-charge binaries — NO licensing fee, which is why ADR-034
+ *     made it the default). Connector app: `richdocuments`. Readiness =
+ *     GET {DOCS_INTERNAL_URL}/hosting/discovery returning the WOPI discovery
+ *     XML (coolwsd has no /healthcheck).
+ *   - "onlyoffice" — OnlyOffice Document Server CE (AGPLv3; an OnlyOffice
+ *     OEM/commercial license is required to SHIP this engine — kept selectable
+ *     for a future OEM-licensed SKU). Connector app: `onlyoffice`. Readiness =
+ *     GET {DOCS_INTERNAL_URL}/healthcheck returning the literal `true`.
  */
 import { createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { config } from "../config.js";
-import { ncGetFileId } from "./nextcloud.client.js";
+import {
+  ncGetFileId,
+  ncCreateRichdocumentsDirectUrl,
+} from "./nextcloud.client.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("docserver-client");
+
+/**
+ * WARP-1688 — the ONLY path shape accepted from a richdocuments direct-editing
+ * mint. Matches both the default (`/index.php/apps/richdocuments/direct/…`) and
+ * the pretty-URL (`/apps/richdocuments/direct/…`) forms.
+ */
+const RICHDOCUMENTS_DIRECT_PATH = "/apps/richdocuments/direct/";
+
+/**
+ * WARP-1688 — re-base a richdocuments direct-editing URL onto the gateway's
+ * browser-facing Nextcloud path.
+ *
+ * richdocuments returns the URL ABSOLUTE against Nextcloud's own configured
+ * origin (observed on the box: `http://localhost/index.php/apps/richdocuments/
+ * direct/<token>`), which is a compose-internal address no browser can resolve
+ * — the exact WARP-882 class of bug WARP-1686 fixed for the connector URL. So
+ * only the PATH (+ query/fragment) survives, re-prefixed with
+ * NEXTCLOUD_PUBLIC_PATH. Staying path-relative keeps the editor same-origin
+ * with whatever hostname the user browsed in on (FQDN, .local, .lan).
+ *
+ * The result is fed straight into the dashboard's iframe `src`, so the shape is
+ * VERIFIED rather than trusted: anything that is not a richdocuments
+ * direct-view path returns null and the caller keeps the known-good connector
+ * URL. An off-origin absolute URL likewise cannot survive, since only the path
+ * is carried over — and a path that does not match the direct-view prefix is
+ * refused outright.
+ *
+ * The check is on `pathname` ALONE, deliberately. Testing the concatenated
+ * path+query+fragment would only require the literal to appear SOMEWHERE, so
+ * `/index.php/settings/admin?next=/apps/richdocuments/direct/` and
+ * `/index.php/login#/apps/richdocuments/direct/` would both pass and land in
+ * the iframe — the exact opposite of "refused outright". The query and fragment
+ * are still carried into the RETURNED value (richdocuments' route is
+ * `directView#show`, so the fragment is load-bearing); they just get no say in
+ * whether the URL is accepted.
+ */
+function rebaseDirectEditorUrl(
+  mintedUrl: string,
+  ncPublicBase: string,
+): string | null {
+  let parsed: URL;
+  try {
+    // The base is a throwaway: it only lets a path-relative mint parse. Any
+    // absolute input keeps its OWN path, and its origin is discarded below.
+    parsed = new URL(mintedUrl, "http://nextcloud.invalid");
+  } catch {
+    return null;
+  }
+  // Decide on the PATH only…
+  if (!parsed.pathname.startsWith("/")) return null;
+  if (!parsed.pathname.includes(RICHDOCUMENTS_DIRECT_PATH)) return null;
+  // …then carry the query + fragment through untouched.
+  return `${ncPublicBase}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+/**
+ * WARP-1688 — the path words a minted URL may reveal in a log line.
+ *
+ * Fixed Nextcloud routing literals only. A direct-editing token can never BE
+ * one of these, which is what makes the redaction below safe by construction
+ * rather than by pattern-matching what a token "looks like".
+ */
+const LOGGABLE_PATH_SEGMENTS = new Set([
+  "index.php",
+  "apps",
+  "richdocuments",
+  "theming",
+  "direct",
+  "directedit",
+  "core",
+  "dist",
+  "ocs",
+  "v2.php",
+  "v1",
+  "document",
+]);
+
+/**
+ * WARP-1688 — describe a minted direct-editing URL for a LOG line without
+ * revealing it.
+ *
+ * The direct-editing URL is BEARER-EQUIVALENT for its lifetime: whoever holds
+ * it can open that file with no cookie and no Authorization header
+ * (docs/THREAT_MODEL.md T1.8, accepted risk R6 — "must never be logged,
+ * screenshotted into a ticket, or pasted into chat"). Logging it at warn level
+ * would put a working credential into the orchestrator's log.
+ *
+ * Today the only call site fires when the shape check REFUSED the URL, so a
+ * live token would not reach it — but that is INCIDENTAL. If richdocuments
+ * changes its path layout in a future Nextcloud major, EVERY mint fails the
+ * check and that same line starts emitting live tokens. So the redaction is
+ * unconditional and structural: each path segment survives only if it is a
+ * known Nextcloud routing literal, and everything else becomes `*`.
+ *
+ * The result is still diagnosable — an engineer sees WHICH shape was refused
+ * (`/index.php/apps/richdocuments/*`) plus the length, which is what the
+ * "richdocuments changed its route" investigation actually needs.
+ */
+function describeMintedUrl(mintedUrl: string | null): string {
+  if (mintedUrl === null) return "none";
+  let shape: string;
+  try {
+    const parsed = new URL(mintedUrl, "http://nextcloud.invalid");
+    shape = parsed.pathname
+      .split("/")
+      .map((segment) =>
+        segment === "" || LOGGABLE_PATH_SEGMENTS.has(segment) ? segment : "*",
+      )
+      .join("/");
+  } catch {
+    return `<unparseable ${mintedUrl.length} chars>`;
+  }
+  // The query string and fragment are dropped WHOLESALE — richdocuments carries
+  // a requesttoken there, and there is no diagnostic value worth the risk.
+  return `${shape} (${mintedUrl.length} chars)`;
+}
 
 /** Editor mode decided SERVER-SIDE by the route layer; never trusted from the client. */
 export type DocEditorMode = "edit" | "view";
@@ -89,23 +211,33 @@ function docsConfigured(): boolean {
 /**
  * Bounded reachability probe against the internal document-server URL. Returns
  * `false` (never throws) on any failure so `/files/docs/status` can render a
- * calm "unavailable" state instead of 500-ing. The Document Server exposes a
- * `/healthcheck` endpoint that returns `true` when ready.
+ * calm "unavailable" state instead of 500-ing. The readiness endpoint is
+ * ENGINE-SPECIFIC (see the module header): Collabora's coolwsd serves the WOPI
+ * discovery XML at /hosting/discovery; OnlyOffice serves the literal `true` at
+ * /healthcheck.
  */
 export async function docServerHealthy(): Promise<boolean> {
   if (!docsConfigured()) return false;
   if (!config.DOCS_INTERNAL_URL.trim()) return false;
   if (!config.ONLYOFFICE_JWT_SECRET.trim()) return false;
+  const base = config.DOCS_INTERNAL_URL.replace(/\/$/, "");
+  const collabora = config.DOCS_ENGINE !== "onlyoffice";
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const url = `${config.DOCS_INTERNAL_URL.replace(/\/$/, "")}/healthcheck`;
+    const url = collabora ? `${base}/hosting/discovery` : `${base}/healthcheck`;
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return false;
-    const body = (await res.text()).trim().toLowerCase();
-    // Document Server returns the literal `true`; tolerate a JSON-wrapped boolean.
-    if (body === "true") return true;
-    try { return JSON.parse(body) === true; } catch { return false; }
+    const body = (await res.text()).trim();
+    if (collabora) {
+      // coolwsd's discovery document — root element `wopi-discovery`. Any 200
+      // that carries it means the engine parsed its config and is serving.
+      return body.includes("wopi-discovery");
+    }
+    // OnlyOffice returns the literal `true`; tolerate a JSON-wrapped boolean.
+    const lower = body.toLowerCase();
+    if (lower === "true") return true;
+    try { return JSON.parse(lower) === true; } catch { return false; }
   } catch {
     return false;
   } finally {
@@ -124,8 +256,15 @@ export async function docServerHealthy(): Promise<boolean> {
  *      explicitly NOT a DocServerUnavailableError.
  *   4. Build the connector editor URL + sign a short-lived access token bound to
  *      {ncFileId, ncUser, mode}. The token is HS256-signed with the shared
- *      ONLYOFFICE_JWT_SECRET — the same secret the connector and Document Server
- *      verify — so the engine choice stays config-driven.
+ *      ONLYOFFICE_JWT_SECRET (generated unconditionally per-device by
+ *      scripts/lib/secrets.sh, so it is present under BOTH engines).
+ *
+ * The editor URL targets the Nextcloud CONNECTOR PAGE for the configured
+ * engine, addressed via the gateway's browser-facing /nextcloud/ leg
+ * (NEXTCLOUD_PUBLIC_PATH) — NOT the compose-internal NEXTCLOUD_URL, which a
+ * browser can never resolve (the WARP-882 editorUrl host bug WARP-1686 fixes):
+ *   - collabora  → {NEXTCLOUD_PUBLIC_PATH}/index.php/apps/richdocuments/index?fileId={id}
+ *   - onlyoffice → {NEXTCLOUD_PUBLIC_PATH}/index.php/apps/onlyoffice/{id}?mode={mode}
  *
  * `requestedMode` is the ALREADY-server-decided mode passed by the route; this
  * function does not itself authorize edit-vs-view (the route owns that, via the
@@ -161,13 +300,58 @@ export async function ncMintEditorSession(
 
   const ttl = config.DOCS_ACCESS_TOKEN_TTL_SECONDS;
 
-  // The editor is fronted publicly at DOCS_EDITOR_PUBLIC_PATH (nginx /docs/),
-  // but the editable document is opened through the Nextcloud `onlyoffice`
-  // connector, keyed by fileId. The dashboard loads this URL in the iframe.
-  const editorBase = `${config.NEXTCLOUD_URL.replace(/\/$/, "")}/index.php/apps/onlyoffice/${ncFileId}`;
-  const editorUrl = `${editorBase}?mode=${requestedMode}`;
+  // Browser-facing Nextcloud base (gateway `location /nextcloud/`). Kept
+  // path-relative by default so the editor stays same-origin with whatever
+  // hostname the user browsed in on (FQDN, droplet-ai.local, .lan).
+  const ncPublicBase = config.NEXTCLOUD_PUBLIC_PATH.replace(/\/$/, "");
+  const connectorUrl =
+    config.DOCS_ENGINE === "onlyoffice"
+      ? `${ncPublicBase}/index.php/apps/onlyoffice/${ncFileId}?mode=${requestedMode}`
+      : `${ncPublicBase}/index.php/apps/richdocuments/index?fileId=${ncFileId}`;
 
-  // `documentKey` namespaces the co-authoring session in the engine: OnlyOffice
+  // WARP-1688 — SESSION-FREE embed, COLLABORA ONLY.
+  //
+  // The connector page above is session-bound: it needs a Nextcloud session
+  // cookie. The dashboard iframes it from the DASHBOARD's origin, where the
+  // browser has no such cookie, so the embed renders Nextcloud's LOGIN page
+  // instead of the document. richdocuments ships the way out — an OCS
+  // direct-editing token whose `/direct/{token}` page renders with no cookies
+  // and no auth at all (verified on the box: 200, the real editor, no login
+  // bounce). We mint one AS THE USER and iframe that instead.
+  //
+  // The OnlyOffice connector has NO equivalent direct-editing API, so its leg
+  // is deliberately left EXACTLY as WARP-882/WARP-1686 built it. There is no
+  // honest way to give that engine the same session-free embed here; faking
+  // one would only move the failure. DOCS_ENGINE=onlyoffice therefore keeps
+  // the session-bound connector page — a known, documented limitation rather
+  // than a silent difference.
+  //
+  // Every failure DEGRADES to the connector URL: a session-bound editor still
+  // works for a user who happens to hold a Nextcloud cookie, and it is always
+  // better than a 500 on a file the user asked to open.
+  let editorUrl = connectorUrl;
+  if (config.DOCS_ENGINE !== "onlyoffice") {
+    try {
+      const minted = await ncCreateRichdocumentsDirectUrl(token, ncFileId);
+      const rebased = minted ? rebaseDirectEditorUrl(minted, ncPublicBase) : null;
+      if (rebased) {
+        editorUrl = rebased;
+      } else {
+        // `mintedShape` is REDACTED, not the URL — see describeMintedUrl().
+        logger.warn(
+          { ncFileId, ncUser, mintedShape: describeMintedUrl(minted) },
+          "richdocuments direct-editing URL unusable — falling back to the session-bound connector page",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, ncFileId, ncUser },
+        "richdocuments direct-editing mint threw — falling back to the session-bound connector page",
+      );
+    }
+  }
+
+  // `documentKey` namespaces the co-authoring session in the engine: the engine
   // treats two opens with the SAME documentKey as ONE shared live document
   // (real-time co-authoring) and two opens with DIFFERENT keys as separate
   // documents. Co-authoring is the whole point of WS-4, so the key MUST be

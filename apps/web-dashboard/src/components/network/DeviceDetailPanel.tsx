@@ -155,7 +155,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       </h2>
       <div className="p-4 flex items-center justify-between">
         <input
-          className="type-headline text-label-primary bg-transparent border-0 focus:outline-none focus:ring-2 focus:ring-accent rounded px-1 flex-1 min-w-0"
+          className="type-headline text-[color:var(--text)] bg-transparent border-0 focus:outline-none focus:ring-2 focus:ring-[var(--brand)] rounded px-1 flex-1 min-w-0"
           value={displayName}
           onChange={(e) => {
             setDisplayName(e.target.value);
@@ -178,7 +178,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="ml-2 p-1 text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
+          className="ml-2 p-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
         >
           <Icons.X className="w-5 h-5" />
         </button>
@@ -189,7 +189,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
         <button
           type="button"
           onClick={() => setPickerOpen((o) => !o)}
-          className="type-footnote text-label-secondary hover:text-label-primary"
+          className="type-footnote text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
         >
           Change icon
         </button>
@@ -201,13 +201,13 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       </div>
 
       {/* Groups */}
-      <div className="px-4 py-3 border-t border-separator">
-        <p className="type-footnote text-label-tertiary mb-2">Groups</p>
+      <div className="px-4 py-3 border-t border-[var(--card-bd)]">
+        <p className="type-footnote text-[color:var(--text-muted)] mb-2">Groups</p>
         <div className="flex flex-wrap gap-1.5">
           {(data?.device.groups ?? []).map((g) => (
             <span
               key={g.id}
-              className="type-caption-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary inline-flex items-center gap-1.5"
+              className="type-caption-1 px-2 py-0.5 rounded-full bg-[var(--card-inner)] text-[color:var(--text-muted)] inline-flex items-center gap-1.5"
             >
               {g.color && (
                 <span
@@ -221,7 +221,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
                 type="button"
                 onClick={() => void handleRemoveGroup(g.id)}
                 aria-label={`Remove from ${g.name}`}
-                className="text-label-tertiary hover:text-label-primary"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
               >
                 <Icons.X className="w-3 h-3" />
               </button>
@@ -243,8 +243,8 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       />
 
       {/* Notes */}
-      <div className="px-4 py-3 border-t border-separator">
-        <label className="type-footnote text-label-tertiary block mb-2">Notes</label>
+      <div className="px-4 py-3 border-t border-[var(--card-bd)]">
+        <label className="type-footnote text-[color:var(--text-muted)] block mb-2">Notes</label>
         <textarea
           value={notes}
           onChange={(e) => {
@@ -259,48 +259,54 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
             void save("notes", notes);
           }}
           rows={3}
-          className="w-full bg-surface-secondary border border-separator rounded p-2 type-body text-label-primary"
+          className="w-full p-2 type-body outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+          style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
           placeholder="Add a note..."
           aria-label="Notes"
         />
       </div>
 
       {/* 30-day activity */}
-      <div className="px-4 py-3 border-t border-separator">
-        <p className="type-footnote text-label-tertiary mb-2">30-day activity</p>
+      <div className="px-4 py-3 border-t border-[var(--card-bd)]">
+        <p className="type-footnote text-[color:var(--text-muted)] mb-2">30-day activity</p>
         <DeviceSparkline days={data?.presence ?? []} size="lg" />
-        <p className="type-caption-1 text-label-secondary mt-2">Seen {seenDays}/30 days</p>
+        <p className="type-caption-1 text-[color:var(--text-muted)] mt-2">Seen {seenDays}/30 days</p>
       </div>
 
       {/* Advanced */}
-      <div className="px-4 py-3 border-t border-separator">
+      <div className="px-4 py-3 border-t border-[var(--card-bd)]">
         <button
           type="button"
           onClick={() => setAdvancedOpen((o) => !o)}
           aria-expanded={advancedOpen}
-          className="type-footnote text-label-secondary"
+          className="type-footnote text-[color:var(--text-muted)]"
         >
           {advancedOpen ? "Hide advanced" : "Show advanced"}
         </button>
         {advancedOpen && data?.device && (
           <dl className="mt-2 text-sm space-y-1">
             <div className="flex justify-between">
-              <dt className="text-label-tertiary">MAC</dt>
-              <dd className="font-mono text-label-secondary">{data.device.mac}</dd>
+              <dt className="text-[color:var(--text-muted)]">MAC</dt>
+              <dd className="font-mono text-[color:var(--text-muted)]">{data.device.mac}</dd>
             </div>
             <div className="flex justify-between">
-              <dt className="text-label-tertiary">Vendor</dt>
-              <dd className="text-label-secondary">{data.device.vendor ?? "—"}</dd>
+              <dt className="text-[color:var(--text-muted)]">Vendor</dt>
+              <dd className="text-[color:var(--text-muted)]">{data.device.vendor ?? "—"}</dd>
             </div>
             <div className="flex justify-between">
-              <dt className="text-label-tertiary">First seen</dt>
-              <dd className="text-label-secondary">
+              <dt className="text-[color:var(--text-muted)]">First seen</dt>
+              <dd className="text-[color:var(--text-muted)]">
                 {new Date(data.device.firstSeen).toLocaleString()}
               </dd>
             </div>
             <div className="flex justify-between">
-              <dt className="text-label-tertiary">Last seen</dt>
-              <dd className="text-label-secondary">
+              <dt className="text-[color:var(--text-muted)]">Last seen</dt>
+              <dd className="text-[color:var(--text-muted)]">
                 {new Date(data.device.lastSeen).toLocaleString()}
               </dd>
             </div>
@@ -309,7 +315,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-separator flex gap-2">
+      <div className="px-4 py-3 border-t border-[var(--card-bd)] flex gap-2">
         <button
           ref={blockTriggerRef}
           type="button"
@@ -349,7 +355,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
           </button>
         ) : (
           <div className="flex gap-2">
-            <span className="type-footnote text-label-secondary self-center">
+            <span className="type-footnote text-[color:var(--text-muted)] self-center">
               Forget this device?
             </span>
             <button
@@ -362,7 +368,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
             <button
               type="button"
               onClick={() => setConfirmForget(false)}
-              className="type-footnote px-3 py-1.5 rounded bg-surface-secondary text-label-primary"
+              className="type-footnote px-3 py-1.5 rounded bg-[var(--card-inner)] text-[color:var(--text)]"
             >
               Cancel
             </button>
@@ -374,7 +380,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       {toast && (
         <div
           role="alert"
-          className="fixed bottom-4 right-4 bg-system-red text-white px-3 py-2 rounded shadow"
+          className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 lg:bottom-4 z-50 bg-system-red text-white px-3 py-2 rounded shadow"
         >
           {toast}
           <button
@@ -524,16 +530,16 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
   }
 
   return (
-    <div className="px-4 py-3 border-t border-separator">
-      <p className="type-footnote text-label-tertiary mb-2">Schedule</p>
+    <div className="px-4 py-3 border-t border-[var(--card-bd)]">
+      <p className="type-footnote text-[color:var(--text-muted)] mb-2">Schedule</p>
 
       {activeOverride && (
         <div
           role="status"
           data-testid="schedule-override-banner"
-          className="mb-2 flex items-center justify-between gap-2 rounded border border-accent bg-accent/10 px-3 py-2"
+          className="mb-2 flex items-center justify-between gap-2 rounded border border-[var(--brand)] bg-[var(--brand-subtle)] px-3 py-2"
         >
-          <span className="type-footnote text-label-primary">
+          <span className="type-footnote text-[color:var(--text)]">
             Override: {activeOverride.action} until{" "}
             {formatHHMM(new Date(activeOverride.endAt))}
           </span>
@@ -555,7 +561,7 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
             onClick={() =>
               setOverrideModalOpen({ action: "allow", durationMin: 30 })
             }
-            className="type-footnote px-3 py-1.5 rounded-l border border-separator text-label-secondary hover:text-label-primary hover:bg-surface-secondary"
+            className="type-footnote px-3 py-1.5 rounded-l border border-[var(--card-bd)] text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)]"
           >
             + Schedule
           </button>
@@ -564,14 +570,23 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
               type="button"
               onClick={() => setSplitOpen((o) => !o)}
               aria-label="Schedule options"
-              className="px-2 py-1.5 rounded-r border border-l-0 border-separator text-label-secondary hover:text-label-primary hover:bg-surface-secondary"
+              className="px-2 py-1.5 rounded-r border border-l-0 border-[var(--card-bd)] text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)]"
             >
               <Icons.ChevronDown className="w-4 h-4" />
             </button>
             {splitOpen && (
               <div
                 role="menu"
-                className="absolute right-0 mt-1 w-52 bg-surface-primary border border-separator rounded shadow-xl z-10"
+                className="card absolute right-0 mt-1 w-52 z-10"
+                style={{
+                  padding: "4px 0",
+                  background: "var(--glass)",
+                  backdropFilter: "blur(20px) saturate(150%)",
+                  WebkitBackdropFilter: "blur(20px) saturate(150%)",
+                  border: "1px solid var(--card-bd)",
+                  borderRadius: "var(--radius-card)",
+                  boxShadow: "var(--lift)",
+                }}
               >
                 <button
                   type="button"
@@ -580,7 +595,7 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
                     setSplitOpen(false);
                     setEditorOpen(true);
                   }}
-                  className="w-full text-left px-3 py-2 type-footnote text-label-primary hover:bg-surface-secondary"
+                  className="w-full text-left px-3 py-2 type-footnote text-[color:var(--text)] hover:bg-[var(--hover)]"
                 >
                   Create recurring schedule…
                 </button>
@@ -594,13 +609,13 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
             <button
               type="button"
               onClick={() => jumpToSchedulesTab(effective.schedule.id)}
-              className="type-subheadline text-accent hover:underline"
+              className="type-subheadline text-[color:var(--brand)] hover:underline"
             >
               {effective.schedule.name}
             </button>
             <span
               data-testid="schedule-source-badge"
-              className="type-caption-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary"
+              className="type-caption-1 px-2 py-0.5 rounded-full bg-[var(--card-inner)] text-[color:var(--text-muted)]"
             >
               {effective.source === "device"
                 ? "own schedule"
@@ -609,7 +624,7 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
           </div>
 
           {stateLine && (
-            <p className="type-footnote text-label-secondary">{stateLine}</p>
+            <p className="type-footnote text-[color:var(--text-muted)]">{stateLine}</p>
           )}
 
           {/* Quick allow/block actions — suppressed while an override is

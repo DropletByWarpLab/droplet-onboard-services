@@ -1,9 +1,11 @@
 /**
- * WARP-882 / WS-4 — which files the OnlyOffice engine can open for editing.
+ * WARP-882 / WARP-1686 — which files the document engine can open for editing.
  *
  * Used to gate the "Edit" affordance so it never renders for a file the engine
  * can't handle (no dead buttons). Matches on extension AND the common Office
- * MIME types — a Nextcloud listing may carry either.
+ * MIME types — a Nextcloud listing may carry either. The list below is the
+ * intersection both engines edit (Collabora CODE default / OnlyOffice), so the
+ * affordance stays honest regardless of DOCS_ENGINE.
  */
 import type { FileEntryInfo } from "./types";
 

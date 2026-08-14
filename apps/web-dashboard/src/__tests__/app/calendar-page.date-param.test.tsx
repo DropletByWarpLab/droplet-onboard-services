@@ -30,6 +30,7 @@ const fixtureEvent: CalendarEvent = {
   title: "Design review",
   description: null,
   location: null,
+  meetingUrl: null,
   startsAt: TARGET.toISOString(),
   endsAt: new Date(TARGET.getTime() + 3600_000).toISOString(),
   allDay: false,

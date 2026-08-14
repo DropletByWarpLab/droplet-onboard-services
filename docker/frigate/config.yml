@@ -52,6 +52,17 @@ detect:
   height: 720
   fps: 5
 
+# WARP-1918: the dashboard's multi-camera live view (/cameras/birdseye)
+# renders this composite, so it is part of the MANAGED config — do not
+# hand-edit per box. ``continuous`` (not Frigate's ``objects`` default)
+# keeps idle cameras in the frame; ``objects`` blanks any camera without
+# an active detection, which reads as a broken grid. Boxes provisioned
+# before this section existed converge at camera-discovery startup
+# (FrigateClient.ensure_birdseye), which deep-merges the same section.
+birdseye:
+  enabled: true
+  mode: continuous
+
 # ``package`` is intentionally absent — the default yolov9 model shipped
 # with the JP6 image doesn't know that class and Frigate warns about
 # unsupported labels on every camera load. Re-add it once the model ships

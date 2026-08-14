@@ -513,7 +513,7 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
       pools: [md127],
       disks: [makeDisk({ name: "sda", state: "pool_member", md: "md127", model: "WD Red 4TB" })],
     });
-    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim & erase$/i }));
     await waitFor(() =>
       expect(reclaimDrive).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -548,7 +548,7 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
         makeDisk({ name: "sda", state: "pool_member", md: "md127", model: "WD Red 4TB", serial: "WX91A2B3C4D5" }),
       ],
     });
-    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim & erase$/i }));
     await waitFor(() =>
       expect(reclaimDrive).toHaveBeenCalledWith(
         expect.objectContaining({ device: "sda", label: "WD_Red_4TB_C4D5" }),
@@ -576,6 +576,108 @@ describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
   it("never renders a raw /dev/ path in the available-drives section", () => {
     setup({ disks: [makeDisk()] });
     expect(screen.queryByText(/\/dev\//)).not.toBeInTheDocument();
+  });
+});
+
+// =====================================================================
+// WARP-1915 — reclaim clarity. The card must say UP FRONT that reclaiming
+// erases the drive (label + supporting copy), and the destructive call must
+// sit behind an explicit typed-name confirm (the same DestructiveConfirm
+// friction the Settings Danger zone uses) that warns about the wipe and
+// spells out the pool impact — a RAID 1 mirror loses its redundancy.
+// =====================================================================
+
+describe("DrivesPanel — reclaim clarity + typed confirmation (WARP-1915)", () => {
+  const memberDisk = makeDisk({
+    name: "sda",
+    state: "pool_member",
+    md: "md127",
+    model: "WD Red 4TB",
+    serial: "WX91A2B3C4D5",
+  });
+
+  function mockReclaimToken() {
+    (reclaimDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-reclaim",
+      service: "drive_reclaim",
+      resourceId: "sda",
+    });
+    (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+  }
+
+  async function openReclaimDialog() {
+    fireEvent.click(screen.getByRole("button", { name: /reclaim & erase/i }));
+    return await screen.findByRole("dialog");
+  }
+
+  it("says up front that reclaiming erases the drive (CTA label + card copy)", () => {
+    setup({ pools: [md127], disks: [memberDisk] });
+    // The row CTA names BOTH halves of the action — never a bare "Reclaim".
+    expect(
+      screen.getByRole("button", { name: /reclaim & erase/i }),
+    ).toBeInTheDocument();
+    // And the supporting copy says the data goes away, before any click.
+    expect(screen.getByText(/erases everything on it/i)).toBeInTheDocument();
+  });
+
+  it("warns in the dialog that the drive will be wiped, naming the target", async () => {
+    mockReclaimToken();
+    setup({ pools: [md127], disks: [memberDisk] });
+    const dialog = await openReclaimDialog();
+    expect(
+      within(dialog).getByText(/permanently erases everything/i),
+    ).toBeInTheDocument();
+    // The blast-radius line still names the disk + size for verification.
+    expect(within(dialog).getByText(/WD Red 4TB · 1\.8 TB · sda/)).toBeInTheDocument();
+  });
+
+  it("does NOT execute the reclaim until the drive's name is typed (explicit confirm gate)", async () => {
+    mockReclaimToken();
+    setup({ pools: [md127], disks: [memberDisk] });
+    const dialog = await openReclaimDialog();
+    const confirm = within(dialog).getByRole("button", { name: /reclaim & erase/i });
+    // Untyped: the destructive button is locked and clicking it is inert.
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(confirmStorageCommand).not.toHaveBeenCalled();
+    // The wrong name keeps it locked.
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "some other drive" },
+    });
+    fireEvent.click(confirm);
+    expect(confirmStorageCommand).not.toHaveBeenCalled();
+    // Typing the drive's name (as the card shows it) unlocks the action.
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "WD Red 4TB" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /reclaim & erase/i }));
+    await waitFor(() =>
+      expect(confirmStorageCommand).toHaveBeenCalledWith({
+        confirmationToken: "tok-reclaim",
+        service: "drive_reclaim",
+        resourceId: "sda",
+      }),
+    );
+  });
+
+  it("spells out the lost redundancy when the drive is part of a RAID 1 mirror", async () => {
+    mockReclaimToken();
+    setup({ pools: [md127], disks: [memberDisk] }); // md127 is raid1
+    const dialog = await openReclaimDialog();
+    expect(within(dialog).getByText(/mirror/i)).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/protected against a drive failure/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the mirror note out of the dialog for a non-mirrored pool", async () => {
+    mockReclaimToken();
+    setup({ pools: [{ ...md127, level: "jbod" }], disks: [memberDisk] });
+    const dialog = await openReclaimDialog();
+    expect(within(dialog).queryByText(/mirror/i)).toBeNull();
+    // The pool impact is still spelled out, just without the mirror claim.
+    expect(within(dialog).getByText(/one less drive/i)).toBeInTheDocument();
   });
 });
 

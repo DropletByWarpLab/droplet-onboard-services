@@ -17,7 +17,19 @@ import {
   removeGuestWifi,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
-import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import {
+  ApOnboardError,
+  getBandSteering,
+  setBandSteering,
+  getApWifi,
+  setApWifi,
+} from "../services/ap-onboard.service.js";
+import { getCurrentWifi } from "../services/current-wifi.service.js";
+import {
+  requireRole,
+  requireRoleOrMcpService,
+  requireRoleOrService,
+} from "../middleware/auth.js";
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -34,6 +46,64 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       next(err);
     }
   });
+
+  /**
+   * WARP-1714: the Wi-Fi this household is actually broadcasting, so the Wi-Fi
+   * card can open showing the network it's about to edit instead of two empty
+   * boxes. Resolves the router's live AP interface first, then an approved AP
+   * — on the edge-router shape the router hosts nothing and the SSID lives
+   * only on the AP.
+   *
+   * owner/admin only: the body carries the PSK, same tier as the write that
+   * sets it and as the guest-Wi-Fi read directly below.
+   */
+  router.get("/network/wifi/current", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      // A router we can't reach must not fail the card — getCurrentWifi still
+      // answers from the AP, and reports honestly when nothing can be read.
+      const wifi = await getWifiSettings().catch(() => null);
+      res.json(await getCurrentWifi(prisma, wifi));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * WARP-1800: the household join code, for the rack panel.
+   *
+   * Same resolver as /network/wifi/current — this is deliberately NOT a
+   * second opinion about what the household Wi-Fi is (WARP-1723 spent a whole
+   * ticket collapsing three of those into one). What differs is only who may
+   * ask and how much they get back.
+   *
+   * `_service:display` is admitted by ID, not by the coarse `service` role, so
+   * no other service principal reaches a route whose body is credential
+   * material. The panel's previous source was the box's own hostapd via the
+   * bridge's /openwrt/qr; on the edge-router shape that file does not exist,
+   * because the household SSID lives only on the approved AP.
+   *
+   * Returns the SSID and the passphrase but NOT `section`/`radio` — those are
+   * write-path targeting for the dashboard's Wi-Fi form and mean nothing to a
+   * panel. `detail` comes through unchanged so a dark rail can say why.
+   */
+  router.get(
+    "/network/wifi/join-code",
+    requireRoleOrService("_service:display", "owner", "admin"),
+    async (_req, res, next) => {
+      try {
+        const wifi = await getWifiSettings().catch(() => null);
+        const current = await getCurrentWifi(prisma, wifi);
+        res.json({
+          ssid: current.ssid,
+          key: current.key,
+          source: current.source,
+          detail: current.detail,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   router.get("/network/wifi/scan", async (_req, res, next) => {
     try {
@@ -67,6 +137,29 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       const { radio = "radio0", iface_section = "default_radio0", ssid } = req.body;
       if (!ssid || typeof ssid !== "string") {
         return res.status(400).json({ error: "Missing 'ssid' in request body" });
+      }
+
+      // The household Wi-Fi may be broadcast by a separate approved access point
+      // (the edge-router shape), not this router's radio. Writing the SSID here
+      // would land on a disabled/absent radio and FALSELY report success — the
+      // gap that leaves the set_wifi_ssid MCP tool writing into the void (audit
+      // 2026-08-06). Resolve where the Wi-Fi actually lives; when it's on the
+      // AP, refuse with a pointer to the AP control rather than lying. The
+      // dashboard already routes AP-hosted edits to PUT /network/wifi/ap — this
+      // closes the same gap for the MCP tool and any legacy caller. Single-box
+      // (hostapd on the router's own radio) resolves to source:"router" and is
+      // unaffected.
+      const current = await getCurrentWifi(
+        prisma,
+        await getWifiSettings().catch(() => null),
+      );
+      if (current.source === "ap") {
+        return res.status(409).json({
+          error:
+            "This Droplet's Wi-Fi is broadcast by a separate access point — " +
+            "change the network name from the access-point Wi-Fi settings.",
+          code: "WIFI_ON_ACCESS_POINT",
+        });
       }
 
       const userId = req.user?.id;
@@ -229,6 +322,177 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       const op = await setWifiChannel(radio_section, String(channel));
       res.json({ status: "ok", channel, tier: result.tier, operationId: op.operationId });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-1703: band-steering read — no RBAC, matches GET /network/wifi/radio.
+  // The honesty envelope ({supported:false, enabled:false} when no approved
+  // Droplet AP is online) comes from the service, never inferred here.
+  router.get("/network/wifi/band-steering", async (_req, res, next) => {
+    try {
+      res.json(await getBandSteering(prisma));
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  });
+
+  // WARP-1703: band-steering write — owner/admin only, Tier 2
+  // (set_ap_band_steering, classified in network-safety-rules.ts). NOT
+  // set_channel-shaped: the AP applier renames the 5 GHz SSID to `<ssid>-5g`
+  // when steering is off, so flipping this drops every 5 GHz client onto a
+  // network name that no longer exists and each one must be reconnected by
+  // hand — and the write fans out to every ONLINE AP at once. Confirmation is
+  // required, same as set_wifi_password / create_guest_network.
+  // No MCP principal: there is no band-steering tool yet; this is a
+  // deliberate household-admin toggle in the dashboard.
+  router.put("/network/wifi/band-steering", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "`enabled` must be a boolean" });
+      }
+
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, "wireless.band_steering", "set_ap_band_steering", { enabled }, userId
+      );
+
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          operation: "set_ap_band_steering",
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
+
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+
+      const op = await setBandSteering(prisma, enabled);
+      res.json({ status: "ok", enabled, tier: result.tier, operationId: op.operationId });
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  });
+
+  // WARP-1712: the ACCESS POINT's own network name + passphrase, so the
+  // Network tab drives the AP as well as the router.
+  //
+  // owner/admin ONLY on the READ — unlike the band-steering read, the body
+  // carries the live Wi-Fi passphrase so the dashboard can reveal it instead
+  // of sending someone to ssh. Same posture as GET /network/wifi/guest, which
+  // carries the guest PSK for the join QR.
+  //
+  // Nothing is cached: the service dials the AP every time, so this response
+  // and the Coverage Extenders card can never drift apart.
+  router.get("/network/wifi/ap", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      res.json(await getApWifi(prisma));
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  });
+
+  // WARP-1712: write. owner/admin only, and the tier follows the ROUTER's
+  // established split rather than inventing a new posture:
+  //   * name only     → `set_ap_wifi_ssid`     — Tier 1, applies immediately
+  //                      (matches `set_ssid`, the setup-wizard contract);
+  //   * password (±name) → `set_ap_wifi_password` — Tier 2, confirm first
+  //                      (matches `set_wifi_password` — every device on the
+  //                      AP has to re-authenticate with a new secret).
+  // A save carrying both is evaluated at the stronger of the two, so the
+  // confirm always covers the whole change.
+  //
+  // No MCP principal: there is no AP-Wi-Fi tool, and renaming the household
+  // network is a deliberate admin action, not an AI-driven one.
+  router.put("/network/wifi/ap", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { ssid, key } = req.body ?? {};
+      if (ssid !== undefined && typeof ssid !== "string") {
+        return res.status(400).json({ error: "`ssid` must be a string" });
+      }
+      if (key !== undefined && typeof key !== "string") {
+        return res.status(400).json({ error: "`key` must be a string" });
+      }
+      if (ssid === undefined && key === undefined) {
+        return res
+          .status(400)
+          .json({ error: "Provide a network name and/or password — nothing to change." });
+      }
+      // Mirror services/routing/main.py `_validate_ap_wireless` so the box
+      // never sees a payload its hostapd would reject. SSID is capped in
+      // BYTES — the 802.11 element is 32 octets.
+      if (ssid !== undefined) {
+        const bytes = Buffer.byteLength(ssid, "utf8");
+        if (bytes < 1 || bytes > 32) {
+          return res
+            .status(400)
+            .json({ error: "Network name (SSID) must be 1–32 bytes." });
+        }
+      }
+      if (key !== undefined && (key.length < 8 || key.length > 63)) {
+        return res
+          .status(400)
+          .json({ error: "Wi-Fi password must be 8–63 characters." });
+      }
+
+      const operation = key !== undefined ? "set_ap_wifi_password" : "set_ap_wifi_ssid";
+      const userId = req.user?.id;
+      // The params ride the pending-confirmation record, because the Tier-2
+      // confirm executes in a SEPARATE request and the dispatcher in
+      // network-status.routes.ts replays them — exactly how set_wifi_password
+      // and create_guest_network already carry their secrets.
+      const result = await evaluateNetworkCommand(
+        prisma,
+        "wireless.ap",
+        operation,
+        { ssid, key },
+        userId,
+      );
+
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          operation,
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
+
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+
+      // WARP-1761: `userId` rides along as the intent's `writtenBy` — audit
+      // only, nothing branches on it. The response below is unchanged.
+      const op = await setApWifi(prisma, { ssid, key }, userId);
+      res.json({
+        status: "ok",
+        tier: result.tier,
+        ssid: op.ssid,
+        fiveGhzSsid: op.fiveGhzSsid,
+        operationId: op.operationId,
+      });
+    } catch (err) {
+      if (err instanceof ApOnboardError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
       next(err);
     }
   });

@@ -12,7 +12,7 @@
  *   · Recent files → useRecents
  *   · Cameras     → useCameras
  *   · Models      → useModels
- *   · Notes       → local scratchpad (localStorage; real per-device store)
+ *   · Notes       → useNotes (real /api/notes, stored on the box)
  *
  * Widgets whose backend doesn't exist yet (Tasks, Activity, Scenes, scheduled
  * Automations) are gated behind default-off feature flags and tracked in
@@ -50,42 +50,70 @@ import {
   Network,
   Paperclip,
   PenLine,
+  Pin,
+  PinOff,
   Plus,
   Settings,
   ShieldOff,
   Sparkles,
+  Square,
   Thermometer,
+  Trash2,
   Video,
   Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { useChat } from "@/lib/hooks/useChat";
+import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
+import {
+  useNotes,
+  createNote,
+  updateNote,
+  deleteNote,
+  isNoteConflict,
+  conflictingNote,
+  NOTE_MAX_BODY,
+  type Note,
+} from "@/lib/hooks/useNotes";
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth";
+import { isLocalProvider } from "@/lib/provider";
 import {
   createVpnPeer,
   deleteVpnPeer,
   fetchVpnPeers,
   fetchVpnStatus,
+  getCameraSnapshotUrl,
 } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import { dashboardUrlFromConf } from "@/lib/wireguard";
+import { countConnectedNow } from "@/lib/vpn-peer-liveness";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ChatMessage } from "@/components/ChatMessage";
 import type {
+  CameraInfo,
   FileEntryInfo,
+  ModelInfo,
   VpnPeerCreatedInfo,
   VpnPeerInfo,
   VpnStatusInfo,
 } from "@/lib/types";
+// WARP-1803 — the hero's inline conversation reuses the chat surface's
+// message rendering (ChatMessage + the indigo chat skin). Both sheets are
+// fully `.droplet-shell`-scoped, so importing them here styles only the
+// thread wrapper below and leaks nothing into the `.droplet-home` scope.
+import "@/components/shell/indigo-tokens.css";
+import "@/components/chat/chat-indigo.css";
 
 export interface WidgetProps {
   w: number;
@@ -163,10 +191,203 @@ function WEmpty({ children }: { children: React.ReactNode }) {
 }
 
 /* ─────────────────────────── Chat (centerpiece) ─────────────────────────── */
+
+/**
+ * WARP-1803 — the model the hero (and its inline conversation) answers with.
+ * Same preference order as the chat page (WARP-1112): the household's chosen
+ * default → first local (on-box) → first available. Null while the list is
+ * loading or when no model is configured.
+ */
+function usePreferredModel(): ModelInfo | null {
+  const { models, defaultModel } = useModels();
+  return useMemo(
+    () =>
+      (defaultModel && models.find((m) => m.id === defaultModel)) ||
+      models.find((m) => isLocalProvider(m.provider)) ||
+      models[0] ||
+      null,
+    [models, defaultModel],
+  );
+}
+
+/**
+ * WARP-1803 — the hero tile's inline conversation. Mounted only after the
+ * user submits a first prompt, so the chat machinery (and the /api/ws/events
+ * bridge inside useChat) doesn't run for everyone who merely looks at Home.
+ * The thread is the same server-persisted conversation the chat page reads
+ * (WARP-304), so "Open full chat" deep-links to /chat?c=<id> with history
+ * intact — and a stream in flight survives the jump (the orchestrator
+ * finishes and persists the turn server-side, WARP-329).
+ *
+ * `model` is snapshotted by the parent at submit time so a models refetch
+ * (or a transient empty list) can't yank a live conversation back to the
+ * hero mid-answer.
+ *
+ * The message-list wrapper carries `droplet-shell` purely as the chat
+ * surface's token/skin scope so ChatMessage renders exactly as it does on
+ * /chat; `w-chat-thread` (home-widgets.css) neutralizes the shell's
+ * page-level box styles so it behaves as a scroll region inside the tile.
+ */
+function InlineChat({
+  seed,
+  model,
+  onNewChat,
+}: {
+  seed: string;
+  model: ModelInfo;
+  onNewChat: () => void;
+}) {
+  const router = useRouter();
+  const { user } = useAuth();
+  const [chatId] = useState(() => `chat-${Date.now()}`);
+  const {
+    messages,
+    isStreaming,
+    sendMessage,
+    stop,
+    retryMessage,
+    approveScene,
+    conversationId,
+  } = useChat({ chatId, authReady: Boolean(user) });
+  const { scrollRef, onScroll, scrollToBottom, stickyScrollToBottom } =
+    useStickyScroll();
+  const [val, setVal] = useState("");
+
+  // Send the seeding prompt exactly once on mount. Guarded by a ref (not
+  // effect deps) because StrictMode double-invokes mount effects in dev.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    seededRef.current = true;
+    void sendMessage(seed, model.id, undefined, model.provider);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only seed
+  }, []);
+
+  // Same scroll contract as the chat page (WARP-295/331): follow the live
+  // tail only while the user is attached; always snap when a new bubble is
+  // appended (per-token growth keeps the sticky rule).
+  useEffect(() => {
+    stickyScrollToBottom();
+  }, [messages, stickyScrollToBottom]);
+  const prevLenRef = useRef(0);
+  useEffect(() => {
+    if (messages.length > prevLenRef.current) scrollToBottom();
+    prevLenRef.current = messages.length;
+  }, [messages, scrollToBottom]);
+
+  const send = () => {
+    const body = val.trim();
+    if (!body || isStreaming) return;
+    setVal("");
+    void sendMessage(body, model.id, undefined, model.provider);
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+  const handleRetry = (messageId: string) => {
+    void retryMessage(messageId, model.id, undefined, model.provider);
+  };
+  const handleCopy = (text: string) => {
+    try {
+      void navigator.clipboard?.writeText(text);
+    } catch {
+      /* clipboard unavailable — the button is best-effort */
+    }
+  };
+
+  return (
+    <div className="w-chat w-chat--conv">
+      <div className="w-chat-aurora" aria-hidden />
+      <div className="w-chat-conv-head">
+        <span className="w-chat-conv-title">
+          <Sparkles size={14} />
+          Ask AI
+        </span>
+        <button
+          className="w-chat-conv-btn"
+          onClick={() =>
+            conversationId &&
+            router.push(`/chat?c=${encodeURIComponent(conversationId)}`)
+          }
+          disabled={!conversationId}
+          title={
+            conversationId
+              ? "Continue this conversation on the full chat page"
+              : "Waiting for the conversation to be saved"
+          }
+          type="button"
+        >
+          <ArrowUpRight size={13} strokeWidth={2.2} />
+          Open full chat
+        </button>
+        <button className="w-chat-conv-btn" onClick={onNewChat} type="button">
+          <Plus size={13} strokeWidth={2.2} />
+          New chat
+        </button>
+      </div>
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="droplet-shell w-chat-thread"
+        data-testid="home-inline-thread"
+      >
+        <div className="w-chat-thread-inner">
+          {messages.map((msg, idx) => (
+            <ChatMessage
+              key={msg.id}
+              message={msg}
+              isStreaming={
+                isStreaming &&
+                idx === messages.length - 1 &&
+                msg.role === "assistant"
+              }
+              onRetry={handleRetry}
+              onCopy={handleCopy}
+              onApproveScene={approveScene}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="w-chat-capsule focus-within:ring-2 focus-within:ring-accent/40">
+        <textarea
+          rows={1}
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={onKey}
+          aria-label="Ask Droplet"
+          placeholder="Reply…"
+        />
+        <div className="w-chat-cap-row">
+          <span className="w-chat-model">
+            <span className="dot" />
+            <span className="nm">{model.name}</span>
+          </span>
+          {isStreaming ? (
+            <button
+              className="w-chat-send"
+              onClick={() => stop()}
+              title="Stop"
+              type="button"
+            >
+              <Square size={13} strokeWidth={2.4} />
+            </button>
+          ) : (
+            <button className="w-chat-send" onClick={send} title="Send" type="button">
+              <ArrowUpRight size={15} strokeWidth={2.4} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChatWidget({ w, h }: WidgetProps) {
   const router = useRouter();
-  const { models } = useModels();
-  const localModel = models.find((m) => m.provider === "ollama") ?? models[0];
+  const model = usePreferredModel();
   const greeting = greetingNow();
   const fs = w >= 6 ? 33 : w >= 5 ? 29 : w >= 4 ? 25 : 22;
   const nSug = h >= 6 ? 4 : h >= 5 ? 3 : h >= 4 ? 2 : 1;
@@ -177,17 +398,30 @@ function ChatWidget({ w, h }: WidgetProps) {
     "Dim the living-room lights to 30%",
   ].slice(0, nSug);
   const [val, setVal] = useState("");
+  // WARP-1803 — the prompt + model snapshot that flips the tile from hero to
+  // inline conversation. Answering happens right here on Home; the full chat
+  // page stays one click away ("Open full chat").
+  const [inline, setInline] = useState<{ seed: string; model: ModelInfo } | null>(
+    null,
+  );
 
   const go = (text?: string) => {
     const body = (text ?? val).trim();
-    if (body) {
+    if (!body) return;
+    if (!model) {
+      // Nothing to answer with — keep the legacy hand-off: /chat renders the
+      // "select a model" empty state and its pendingPrompt effect sends the
+      // prompt once a model is ready.
       try {
         window.sessionStorage.setItem("droplet.pendingPrompt", body);
       } catch {
         /* private mode — /chat still opens */
       }
+      router.push("/chat");
+      return;
     }
-    router.push("/chat");
+    setVal("");
+    setInline({ seed: body, model });
   };
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -195,6 +429,16 @@ function ChatWidget({ w, h }: WidgetProps) {
       go();
     }
   };
+
+  if (inline) {
+    return (
+      <InlineChat
+        seed={inline.seed}
+        model={inline.model}
+        onNewChat={() => setInline(null)}
+      />
+    );
+  }
 
   return (
     <div className="w-chat">
@@ -212,16 +456,16 @@ function ChatWidget({ w, h }: WidgetProps) {
           placeholder="Ask Droplet anything — your files, cameras, network, devices…"
         />
         <div className="w-chat-cap-row">
-          {localModel ? (
-            <span className="w-chat-model">
+          {model ? (
+            <span className="w-chat-model" title={model.name}>
               <span className="dot" />
-              {localModel.name}
+              <span className="nm">{model.name}</span>
               <ChevronDown size={10} />
             </span>
           ) : (
             <span className="w-chat-model" style={{ opacity: 0.6 }}>
               <span className="dot" style={{ background: "var(--text-muted)" }} />
-              No model
+              <span className="nm">No model</span>
             </span>
           )}
           <button className="w-chat-iconbtn" tabIndex={-1} aria-label="Attach" type="button">
@@ -391,7 +635,21 @@ export function CalendarWidget({ h }: WidgetProps) {
 }
 
 /* ─────────────────────────── System status ─────────────────────────── */
+/**
+ * One System-status stat. `href` is the surface the stat summarises — every
+ * cell/row is a tap target that opens it, so the tile is a set of links into
+ * the app rather than a dead read-out.
+ */
+type StatRow = {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  sub: string;
+  dot: string;
+  href: string;
+};
 function StatusWidget({ w, h }: WidgetProps) {
+  const router = useRouter();
   const { items: recents } = useRecents(50);
   const { models } = useModels();
   const { totalCameras } = useCameras();
@@ -401,59 +659,74 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { state: voiceState, unavailable: voiceUnavailable } =
     useVoiceHealthSummary();
 
-  const local = models.filter((m) => m.provider === "ollama").length;
+  const local = models.filter((m) => isLocalProvider(m.provider)).length;
   const cloud = models.length - local;
 
-  const voiceRow: [LucideIcon, string, string, string, string] =
+  const voice = (value: string, sub: string, dot: string): StatRow => ({
+    icon: Mic, label: "Voice", value, sub, dot, href: "/voice",
+  });
+  const voiceRow: StatRow =
     // Review F7 — voice-io not deployed (macOS/dev installs) is not a
     // fault: render a quiet em-dash row, never a permanent red.
     voiceUnavailable
-      ? [Mic, "Voice", "—", "not available", "var(--color-label-quaternary)"]
+      ? voice("—", "not available", "var(--color-label-quaternary)")
       : voiceState == null
-        ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
+        ? voice("—", "checking…", "var(--color-label-quaternary)")
         : // WARP-1599 — an admin switched voice off: a deliberate,
           // persisted silence, so the row stays quiet grey and says so
           // rather than reporting on a pipeline that isn't running.
           voiceState.kind === "off"
-          ? [Mic, "Voice", "Off", "not listening", "var(--color-label-quaternary)"]
+          ? voice("Off", "not listening", "var(--color-label-quaternary)")
           : voiceState.kind === "calibrated"
-            ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+            ? voice("Calibrated", "wake word ready", "var(--success)")
             : voiceState.kind === "attention"
-              ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+              ? voice("Attention", "needs attention", "var(--color-system-orange)")
               : voiceState.kind === "broken"
-                ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
-                : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
+                ? voice("Not working", "microphone not working", "var(--color-system-red)")
+                : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
-  const stats: [LucideIcon, string, string, string, string][] = [
-    [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],
-    [Video, "Cameras", totalCameras ? String(totalCameras) : "—", totalCameras ? "live feeds" : "none yet", "var(--brand)"],
-    [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart devices online", "var(--success)"],
-    [Cpu, "AI models", models.length ? String(models.length) : "—", `${local} local · ${cloud} cloud`, "var(--success)"],
+  const stats: StatRow[] = [
+    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
+    { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
+    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "smart devices online", dot: "var(--success)", href: "/devices" },
+    { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     voiceRow,
   ];
 
   if (w <= 2 || h <= 2) {
     return (
       <div className="w-stat-list">
-        {stats.map(([Ic, e, v, , dot]) => (
-          <div className="w-stat-row" key={e}>
+        {stats.map(({ icon: Ic, label, value, dot, href }) => (
+          <button
+            className="w-stat-row"
+            key={label}
+            type="button"
+            onClick={() => router.push(href)}
+            aria-label={`Open ${label}`}
+          >
             <span className="ico"><Ic size={14} /></span>
-            <span className="lbl">{e}</span>
+            <span className="lbl">{label}</span>
             <span className="dot" style={{ background: dot }} />
-            <span className="val">{v}</span>
-          </div>
+            <span className="val">{value}</span>
+          </button>
         ))}
       </div>
     );
   }
   return (
     <div className="w-stat">
-      {stats.map(([Ic, e, v, s, dot]) => (
-        <div className="w-stat-cell" key={e}>
-          <span className="e"><Ic size={12} />{e}</span>
-          <span className="v">{v}</span>
-          <span className="s"><span className="dot" style={{ background: dot }} />{s}</span>
-        </div>
+      {stats.map(({ icon: Ic, label, value, sub, dot, href }) => (
+        <button
+          className="w-stat-cell"
+          key={label}
+          type="button"
+          onClick={() => router.push(href)}
+          aria-label={`Open ${label}`}
+        >
+          <span className="e"><Ic size={12} />{label}</span>
+          <span className="v">{value}</span>
+          <span className="s"><span className="dot" style={{ background: dot }} />{sub}</span>
+        </button>
       ))}
     </div>
   );
@@ -585,29 +858,142 @@ const CAM_TINTS = [
   "linear-gradient(135deg,#15171f,#1f2937)",
   "linear-gradient(135deg,#1a1d27,#242a38)",
 ];
-function CamerasWidget({ w, h }: WidgetProps) {
-  const { cameras } = useCameras();
-  const names = cameras.map((c) => c.displayName || c.name);
-  const motionSet = new Set(
-    cameras.filter((c) => c.status === "detecting" || c.lastDetection).map((c) => c.displayName || c.name),
+// The home peek polls slower than the cameras grid. `/api/cameras/:name/
+// snapshot` answers with `Cache-Control: max-age=5`, so busting the URL any
+// faster than that only spends requests the browser would have served from
+// its own cache.
+const HOME_SNAPSHOT_INTERVAL_MS = 5000;
+
+const snapshotSrcFor = (name: string) =>
+  `${getCameraSnapshotUrl(name)}?t=${Math.floor(Date.now() / HOME_SNAPSHOT_INTERVAL_MS)}`;
+
+/**
+ * The decoded frame's own width/height, or null when the loader can't report
+ * one. Cameras are not all 16:9 — a 4:3 or portrait doorbell feed squeezed
+ * into a fixed tile shape is exactly the distortion this guards against.
+ */
+const aspectOf = (img: { naturalWidth?: number; naturalHeight?: number }): number | null => {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h || !Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return w / h;
+};
+
+/**
+ * One live tile. The gradient tint is the *fallback*, not the content — it
+ * shows while the first frame decodes, and again if the feed drops. Frames
+ * are preloaded offscreen and only swapped in once decoded, so the tile
+ * never blinks through a blank state (same rationale as CameraCard).
+ */
+function CamTile({
+  camera,
+  tint,
+  motion,
+  more,
+}: {
+  camera: CameraInfo;
+  tint: string;
+  motion: boolean;
+  more: number;
+}) {
+  const router = useRouter();
+  const offline = camera.status === "offline";
+  // Both null until a frame actually lands — the timestamp marks the frame
+  // on screen, so it must not render off the wall clock alone.
+  const [src, setSrc] = useState<string | null>(null);
+  const [stamp, setStamp] = useState<string | null>(null);
+  // The decoded frame's own aspect. Null until a frame lands (and for any
+  // probe that can't report its natural size), which leaves the tile on the
+  // CSS 16/9 default rather than guessing a shape for a feed we haven't seen.
+  const [ratio, setRatio] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (offline) {
+      setSrc(null);
+      setStamp(null);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      const next = snapshotSrcFor(camera.name);
+      const probe = new window.Image();
+      probe.onload = () => {
+        if (cancelled) return;
+        setSrc(next);
+        setRatio(aspectOf(probe));
+        setStamp(
+          new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }),
+        );
+      };
+      // Drop back to the tint rather than freezing on a stale frame — a
+      // camera that died should stop looking live.
+      probe.onerror = () => {
+        if (cancelled) return;
+        setSrc(null);
+        setStamp(null);
+      };
+      probe.src = next;
+    };
+    load(); // first frame immediately; don't sit dark for a full interval
+    const id = window.setInterval(load, HOME_SNAPSHOT_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [camera.name, offline]);
+
+  const label = camera.displayName || camera.name;
+
+  return (
+    <button
+      className="w-cam"
+      type="button"
+      // The tile takes the frame's shape so the feed is shown whole and
+      // undistorted; the CSS default (16/9) covers the pre-first-frame tint.
+      style={{ background: tint, ...(ratio ? { aspectRatio: String(ratio) } : {}) }}
+      onClick={() => router.push("/cameras")}
+      aria-label={`Open ${label} in Cameras`}
+    >
+      {/* Decorative: the button's aria-label already names the tile, and a
+          live frame has no meaningful static description. */}
+      {src && <img src={src} alt="" />}
+      {/* The rec dot claims "live" — gate it on a frame actually being on
+          screen, not merely the camera not reporting offline. An idle camera
+          or a failing snapshot probe must not pulse red over the tint. */}
+      {src && <span className="rec" />}
+      {stamp && <span className="ts">{stamp}</span>}
+      <span className="lb">{label}</span>
+      {motion && <span className="mo">motion</span>}
+      {more > 0 && <span className="cam-more">+{more}</span>}
+    </button>
   );
-  if (names.length === 0) {
+}
+
+export function CamerasWidget({ w, h }: WidgetProps) {
+  const { cameras } = useCameras();
+  if (cameras.length === 0) {
     return <WEmpty>No cameras yet</WEmpty>;
   }
   const tiny = w <= 2 && h <= 2;
   const n = tiny ? 1 : w >= 4 && h >= 3 ? 4 : 2;
-  const cols = tiny ? 1 : w >= 4 ? 2 : h >= 3 ? 1 : 2;
-  const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  // Never open more columns than there are tiles to fill them: a single
+  // camera in a two-column grid got half the width and the full height, which
+  // is the narrow slot that made the frame unreadable in the first place.
+  const cols = Math.min(tiny ? 1 : w >= 4 ? 2 : h >= 3 ? 1 : 2, cameras.length);
   return (
     <div className="w-cams" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
-      {names.slice(0, n).map((nm, i) => (
-        <div className="w-cam" key={nm + i} style={{ background: CAM_TINTS[i % CAM_TINTS.length] }}>
-          <span className="rec" />
-          <span className="ts">{ts}</span>
-          <span className="lb">{nm}</span>
-          {motionSet.has(nm) && <span className="mo">motion</span>}
-          {tiny && names.length > 1 && i === 0 && <span className="cam-more">+{names.length - 1}</span>}
-        </div>
+      {cameras.slice(0, n).map((cam, i) => (
+        <CamTile
+          key={cam.name}
+          camera={cam}
+          tint={CAM_TINTS[i % CAM_TINTS.length]}
+          motion={cam.status === "detecting" || Boolean(cam.lastDetection)}
+          more={tiny && cameras.length > 1 && i === 0 ? cameras.length - 1 : 0}
+        />
       ))}
     </div>
   );
@@ -617,7 +1003,7 @@ function CamerasWidget({ w, h }: WidgetProps) {
 function ModelsWidget() {
   const { models } = useModels();
   const rows: [boolean, string, string, "local" | "cloud"][] = models.map((m) => {
-    const isLocal = m.provider === "ollama";
+    const isLocal = isLocalProvider(m.provider);
     return [
       !isLocal,
       m.name,
@@ -705,97 +1091,343 @@ function TasksWidget() {
 }
 
 /* ─────────────────────────── Notes ───────────────────────────
- * Single-note scratchpad backed by localStorage. The save is debounced
- * (~500ms) and surfaced through a small status line so the autosave is
- * legible — "Saving…" while a write is pending, "Saved" once it lands —
- * instead of writing on every keystroke with zero feedback. "New note"
- * flushes the pending save and starts a fresh, empty note.
+ * Notes live on the box (`/api/notes`), many per user, each pinnable. The
+ * tile has two views: a list (pinned first, pin/delete per row) and an
+ * editor for the note you tapped. Editing autosaves on a ~500ms debounce
+ * with a legible status line — "Saving…" while a write is pending, "Saved"
+ * once it lands, "Not saved — retrying" if the box refused it — instead of
+ * writing on every keystroke with no feedback.
+ *
+ * Every failure path here is a data-loss path, because the box is now the
+ * only copy: a failed LIST says so rather than rendering the empty state, a
+ * failed SAVE keeps the text pending and keeps trying, and DELETE is
+ * confirm-gated.
+ *
+ * Before this, the tile was a single string in this browser's localStorage:
+ * unsynced, unpinnable, and wiped by "New note". That key is uploaded once
+ * (see `useLegacyNoteImport`) so nobody's existing note disappears.
  */
 const NOTES_KEY = "droplet-home-notes";
+const NOTES_IMPORTED_KEY = "droplet-home-notes-imported";
+/** Prefix of the in-flight-import marker written to `NOTES_IMPORTED_KEY`,
+ *  followed by the epoch-ms the claim was taken. */
+const NOTES_IMPORT_CLAIM = "pending:";
+/** How long a claim is honoured before another tab may take it over. Must
+ *  outlast apiFetch's 20s request timeout (so a slow-but-live upload is never
+ *  raced), and be short enough that a tab closed mid-upload doesn't strand the
+ *  note for the rest of the session. */
+const NOTES_IMPORT_CLAIM_TTL_MS = 30_000;
 const NOTES_SAVE_DEBOUNCE_MS = 500;
-type NotesSaveStatus = "idle" | "saving" | "saved";
+/** Gap before an autosave the box refused (asleep, Wi-Fi dropped) tries
+ *  again. Long enough not to hammer a box that's down; short enough that a
+ *  blip clears itself while the customer is still looking at the tile. */
+const NOTES_SAVE_RETRY_MS = 3000;
+/** Longest note name we render anywhere. */
+const NOTE_TITLE_MAX = 80;
+type NotesSaveStatus = "idle" | "saving" | "saved" | "error" | "conflict";
 
-export function NotesWidget() {
-  const [val, setVal] = useState("");
-  const [hydrated, setHydrated] = useState(false);
-  const [status, setStatus] = useState<NotesSaveStatus>("idle");
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Mirror of `val` + a pending-save flag for the unmount flush, which can't
-  // read the latest state through a stale `[]`-effect closure.
-  const valRef = useRef("");
-  const pendingRef = useRef(false);
+/** The first non-empty line names a note in the list; a brand-new one has none. */
+function noteTitle(n: Note): string {
+  const first = n.body.split("\n").find((l) => l.trim().length > 0)?.trim();
+  if (!first) return "Empty note";
+  // The list ellipsises in CSS, but the delete confirmation echoes this name
+  // as a monospace identifier and screen readers read it out of an aria-label
+  // — neither wants a 2000-character first line.
+  return first.length > NOTE_TITLE_MAX
+    ? `${first.slice(0, NOTE_TITLE_MAX).trimEnd()}…`
+    : first;
+}
 
-  const writeStorage = (next: string) => {
-    try {
-      window.localStorage.setItem(NOTES_KEY, next);
-    } catch {
-      /* ignore — private-mode / quota; the in-memory note still works */
-    }
-  };
-
-  // Persist `val` immediately and reflect the saved state. Used by both the
-  // debounced timer and the explicit "New note" flush so writes never race.
-  const flush = (next: string) => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    pendingRef.current = false;
-    writeStorage(next);
-    setStatus("saved");
-  };
-
+/** One-time lift of the old browser-local note onto the box. Runs once per
+ *  browser (guarded by its own localStorage flag) and only when there is
+ *  something to move — then clears the legacy key so it can't be re-imported
+ *  as a duplicate if the flag is lost.
+ *
+ *  The flag is CLAIMED before the upload, not after: localStorage is shared
+ *  across tabs with no lock, so two tabs opening Home together would both read
+ *  an empty flag and both POST, landing the customer's one old note on the box
+ *  twice. A tab that finds a fresh claim stands down; a stale one (the holder
+ *  was closed mid-upload) is taken over so the note is never stranded. */
+function useLegacyNoteImport(onImported: () => void) {
+  const ran = useRef(false);
   useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+    let legacy: string | null = null;
     try {
-      setVal(window.localStorage.getItem(NOTES_KEY) ?? "");
+      const flag = window.localStorage.getItem(NOTES_IMPORTED_KEY);
+      // Anything that isn't a claim means the import already happened.
+      if (flag && !flag.startsWith(NOTES_IMPORT_CLAIM)) return;
+      if (flag) {
+        const claimedAt = Number(flag.slice(NOTES_IMPORT_CLAIM.length));
+        if (Date.now() - claimedAt < NOTES_IMPORT_CLAIM_TTL_MS) return;
+      }
+      legacy = window.localStorage.getItem(NOTES_KEY);
+    } catch {
+      return; // private mode — nothing to import from
+    }
+    const body = legacy?.trim();
+    if (!body) {
+      try {
+        window.localStorage.setItem(NOTES_IMPORTED_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        NOTES_IMPORTED_KEY,
+        `${NOTES_IMPORT_CLAIM}${Date.now()}`,
+      );
     } catch {
       /* ignore */
     }
-    setHydrated(true);
+    void createNote({ body })
+      .then(() => {
+        try {
+          window.localStorage.setItem(NOTES_IMPORTED_KEY, "1");
+          window.localStorage.removeItem(NOTES_KEY);
+        } catch {
+          /* ignore */
+        }
+        onImported();
+      })
+      // Offline / server down: drop our claim and leave the legacy key alone
+      // so the next mount tries again. Never drop the customer's text.
+      .catch(() => {
+        try {
+          const held = window.localStorage.getItem(NOTES_IMPORTED_KEY);
+          if (held?.startsWith(NOTES_IMPORT_CLAIM)) {
+            window.localStorage.removeItem(NOTES_IMPORTED_KEY);
+          }
+        } catch {
+          /* ignore */
+        }
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
+/** The editor half of the tile: one note's body, debounced-autosaved. */
+function NoteEditor({
+  note,
+  onClose,
+  onSaved,
+}: {
+  note: Note;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [val, setVal] = useState(note.body);
+  const [status, setStatus] = useState<NotesSaveStatus>("idle");
+  // The note as the box holds it, once a save has been refused for being stale.
+  // Non-null means we are showing the customer both versions and letting them
+  // choose — we never pick for them.
+  const [conflict, setConflict] = useState<Note | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of `val` + a pending-save flag for the unmount flush, which can't
+  // read the latest state through a stale `[]`-effect closure.
+  const valRef = useRef(note.body);
+  const pendingRef = useRef(false);
+  // The version every write is based on. Advanced from each save's response, so
+  // a run of edits doesn't conflict with itself.
+  const baseRef = useRef(note.updatedAt);
+  // One PATCH at a time. Without this a keystroke landing mid-request queues a
+  // second write carrying the same base version — the two race, and with a
+  // precondition the loser is dropped rather than merged.
+  const inFlightRef = useRef(false);
+  // Set when we write the textarea ourselves (server refresh, conflict
+  // resolution) so the autosave effect doesn't read it back as typing.
+  const programmaticRef = useRef(false);
+  // False once the editor is gone, so a request that fails after unmount can't
+  // schedule a retry against a component nobody is looking at.
+  const aliveRef = useRef(true);
+
+  // Write the textarea ourselves — a server refresh or a resolved conflict —
+  // without the autosave effect reading it back as typing.
+  //
+  // The flag is only raised for a value that actually differs. React bails out
+  // of a `setVal` to the string already held, so the `[val]` effect never
+  // re-runs to lower the flag, and a flag left raised swallows the customer's
+  // NEXT keystroke instead. That is reachable without any conflict at all:
+  // pinning a note from another device bumps `updatedAt` (Prisma `@updatedAt`)
+  // while leaving the body identical, which lands here with nothing to change.
+  const writeTextarea = useCallback((next: string) => {
+    if (valRef.current !== next) programmaticRef.current = true;
+    valRef.current = next;
+    setVal(next);
   }, []);
 
-  // Debounced autosave: mark "Saving…" on each edit, then commit once the
-  // user pauses. The initial hydration pass is skipped so we don't flash
-  // a status on first paint.
+  // Annotated because the retry below references `save` from inside its own
+  // initializer, which tsc otherwise can't type.
+  const save: (next: string) => void = useCallback(
+    (next: string) => {
+      // Already writing: leave the edit pending and let the in-flight save
+      // pick it up when it settles, with a base version that's actually fresh.
+      if (inFlightRef.current) {
+        pendingRef.current = true;
+        return;
+      }
+      pendingRef.current = false;
+      inFlightRef.current = true;
+      void updateNote(note.id, { body: next, expectedUpdatedAt: baseRef.current })
+        .then(({ note: saved }) => {
+          inFlightRef.current = false;
+          baseRef.current = saved.updatedAt;
+          // A keystroke arrived while this was in flight — write it now. Done
+          // even after unmount: the edit matters more than the status line.
+          if (pendingRef.current) {
+            save(valRef.current);
+            return;
+          }
+          if (!aliveRef.current) return;
+          setStatus("saved");
+          onSaved();
+        })
+        .catch((err: unknown) => {
+          inFlightRef.current = false;
+          // Refused as stale: the note changed somewhere else. Retrying would
+          // just 409 forever, and picking a winner is exactly the data loss
+          // this precondition exists to stop — so stop and ask.
+          const theirs = conflictingNote(err);
+          if (isNoteConflict(err)) {
+            pendingRef.current = false;
+            if (!aliveRef.current) return;
+            if (theirs) setConflict(theirs);
+            setStatus("conflict");
+            return;
+          }
+          // Any other refusal must never eat the typing. Put the edit back in
+          // the pending slot so the unmount flush still carries it, say so on
+          // the status line instead of silently reading "idle", and keep
+          // trying while the editor is open — notes live only on the box now,
+          // so there is no localStorage copy left to recover from.
+          pendingRef.current = true;
+          if (!aliveRef.current) return;
+          setStatus("error");
+          timerRef.current = setTimeout(
+            () => save(valRef.current),
+            NOTES_SAVE_RETRY_MS,
+          );
+        });
+    },
+    [note.id, onSaved],
+  );
+
+  // Debounced autosave. The first render is skipped (val === the note we were
+  // handed) so opening a note doesn't flash a status or write it back.
   useEffect(() => {
     valRef.current = val;
-    if (!hydrated) return;
+    // We wrote this, the customer didn't — don't save it straight back.
+    if (programmaticRef.current) {
+      programmaticRef.current = false;
+      return;
+    }
+    // An unresolved conflict owns the note: autosaving through it would be the
+    // silent overwrite all of this exists to prevent.
+    if (conflict) return;
+    if (val === note.body && !pendingRef.current) return;
     pendingRef.current = true;
     setStatus("saving");
-    timerRef.current = setTimeout(() => {
-      flush(val);
-    }, NOTES_SAVE_DEBOUNCE_MS);
+    timerRef.current = setTimeout(() => save(val), NOTES_SAVE_DEBOUNCE_MS);
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [val, hydrated]);
+  }, [val]);
 
-  // Unmount-only: if a debounced save is still in flight when the widget goes
-  // away (navigate off Home, remove the tile), commit the latest text so we
-  // don't drop up to ~500ms of typing — the old write-every-keystroke code
-  // never lost data on unmount.
+  // The note moved on the box (another device, another tab) while we were
+  // sitting here with nothing half-typed — take their version. This is the
+  // common case behind the conflict, closed before it can become one.
   useEffect(() => {
+    if (pendingRef.current || inFlightRef.current || conflict) return;
+    // Only ever forward. SWR can hand back a cached row older than the version
+    // we just wrote (or just adopted), and rewinding the textarea to it would
+    // itself be the data loss.
+    const seen = new Date(note.updatedAt).getTime();
+    if (!(seen > new Date(baseRef.current).getTime())) return;
+    baseRef.current = note.updatedAt;
+    writeTextarea(note.body);
+  }, [note.updatedAt, note.body, conflict, writeTextarea]);
+
+  // Unmount-only: commit a still-pending edit so navigating off Home (or
+  // closing the editor) never drops up to ~500ms of typing. The rejection is
+  // swallowed — there is no surface left to report it on, and an unhandled
+  // rejection here would surface as a console error on every offline close.
+  useEffect(() => {
+    // Re-armed on mount, not just initialised: React StrictMode (on by default
+    // in dev) mounts → unmounts → remounts, and a ref survives that round trip.
+    // Without this the editor would come back permanently "dead" and stop
+    // reporting or retrying failed saves for the rest of the dev session.
+    aliveRef.current = true;
     return () => {
-      if (pendingRef.current) writeStorage(valRef.current);
+      aliveRef.current = false;
+      // Not while a save is in flight: that one's settle handler already
+      // carries the pending edit, and a second PATCH here would race it with a
+      // base version we know is about to be stale.
+      if (pendingRef.current && !inFlightRef.current) {
+        void updateNote(note.id, {
+          body: valRef.current,
+          expectedUpdatedAt: baseRef.current,
+        }).catch(() => {});
+      }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const newNote = () => {
-    // Flush first so the (now empty) note is committed — never silently
-    // discard the in-flight save.
-    flush("");
-    setVal("");
+  // Both versions are the customer's own writing — neither is "wrong", so the
+  // choice is theirs. Either way we rebase onto what the box holds now, so the
+  // next keystroke isn't refused all over again.
+  const keepMine = () => {
+    if (!conflict) return;
+    baseRef.current = conflict.updatedAt;
+    setConflict(null);
+    pendingRef.current = true;
+    setStatus("saving");
+    save(valRef.current);
+  };
+  const takeTheirs = () => {
+    if (!conflict) return;
+    baseRef.current = conflict.updatedAt;
+    pendingRef.current = false;
+    writeTextarea(conflict.body);
+    setConflict(null);
+    setStatus("idle");
+    onSaved();
   };
 
   return (
     <div className="w-notes-wrap">
+      {conflict && (
+        <div className="w-notes-conflict" role="alert">
+          <span className="w-notes-conflict-msg">
+            <AlertTriangle size={12} aria-hidden />
+            <span>
+              This note changed on another device. Keep the version you typed
+              here, or open theirs — nothing is saved until you pick.
+            </span>
+          </span>
+          <span className="w-notes-conflict-acts">
+            <button type="button" onClick={keepMine}>
+              Keep mine
+            </button>
+            <button type="button" onClick={takeTheirs}>
+              Use theirs
+            </button>
+          </span>
+        </div>
+      )}
       <textarea
         className="w-notes"
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        aria-label="Notes"
+        aria-label="Note"
         placeholder="Jot something down…"
+        // Same ceiling the orchestrator enforces: stop the keystroke rather
+        // than let the autosave take a 400 the customer can't act on.
+        maxLength={NOTE_MAX_BODY}
+        autoFocus
       />
       <div className="w-notes-bar">
         <span
@@ -804,17 +1436,153 @@ export function NotesWidget() {
           aria-live="polite"
           data-state={status}
         >
-          {status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}
+          {status === "saving"
+            ? "Saving…"
+            : status === "saved"
+              ? "Saved"
+              : status === "error"
+                ? "Not saved — retrying"
+                : status === "conflict"
+                  ? "Not saved — changed elsewhere"
+                  : ""}
         </span>
-        <button
-          className="w-notes-new"
-          type="button"
-          onClick={newNote}
-        >
+        <button className="w-notes-new" type="button" onClick={onClose}>
+          <ChevronLeft size={13} />
+          All notes
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function NotesWidget() {
+  const { notes, error, isLoading, refresh } = useNotes();
+  const [openId, setOpenId] = useState<string | null>(null);
+  // Delete-confirm state + the row button that opened it, so focus restores
+  // there on close — same pattern as CoverageExtendersPanel's remove confirm.
+  const [confirmDelete, setConfirmDelete] = useState<Note | null>(null);
+  const deleteTriggerRef = useRef<HTMLElement | null>(null);
+  useLegacyNoteImport(() => void refresh());
+
+  const open = notes.find((n) => n.id === openId) ?? null;
+  // The note was deleted in another tab while open — fall back to the list
+  // rather than editing a row that no longer exists.
+  useEffect(() => {
+    if (openId && !isLoading && !open) setOpenId(null);
+  }, [openId, isLoading, open]);
+
+  const addNote = async () => {
+    const { note } = await createNote({ body: "" });
+    await refresh();
+    setOpenId(note.id);
+  };
+
+  const togglePin = async (n: Note) => {
+    await updateNote(n.id, { pinned: !n.pinned });
+    await refresh();
+  };
+
+  const remove = async (n: Note) => {
+    await deleteNote(n.id);
+    if (openId === n.id) setOpenId(null);
+    await refresh();
+  };
+
+  if (open) {
+    return (
+      <NoteEditor
+        note={open}
+        onClose={() => setOpenId(null)}
+        onSaved={() => void refresh()}
+      />
+    );
+  }
+
+  return (
+    <div className="w-notes-wrap">
+      <div className="w-note-list">
+        {/* A failed load is NOT an empty account. Notes no longer have a
+            localStorage copy behind them, so rendering "No notes yet" over a
+            dead fetch reads as "the migration ate my notes". Branch on the
+            error first and say what actually happened. */}
+        {error ? (
+          <WEmpty>
+            <span className="w-notes-err" role="alert">
+              <AlertTriangle size={12} aria-hidden />
+              <span>{translateError(error, "notes")}</span>
+            </span>
+          </WEmpty>
+        ) : notes.length === 0 ? (
+          <WEmpty>{isLoading ? "Loading notes…" : "No notes yet"}</WEmpty>
+        ) : (
+          notes.map((n) => {
+            const title = noteTitle(n);
+            return (
+              <div className={"w-note" + (n.pinned ? " pinned" : "")} key={n.id}>
+                <button
+                  className="w-note-open"
+                  type="button"
+                  onClick={() => setOpenId(n.id)}
+                >
+                  {n.pinned && <Pin size={11} className="pin" aria-hidden />}
+                  <span className="nm">{title}</span>
+                </button>
+                <button
+                  className="w-note-act"
+                  type="button"
+                  onClick={() => void togglePin(n)}
+                  aria-label={n.pinned ? `Unpin ${title}` : `Pin ${title}`}
+                  aria-pressed={n.pinned}
+                >
+                  {n.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+                </button>
+                <button
+                  className="w-note-act"
+                  type="button"
+                  onClick={(e) => {
+                    deleteTriggerRef.current = e.currentTarget;
+                    setConfirmDelete(n);
+                  }}
+                  aria-label={`Delete ${title}`}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })
+        )}
+      </div>
+      <div className="w-notes-bar">
+        <span className="w-notes-status">
+          {notes.some((n) => n.pinned)
+            ? `${notes.filter((n) => n.pinned).length} pinned`
+            : ""}
+        </span>
+        <button className="w-notes-new" type="button" onClick={() => void addNote()}>
           <FilePlus size={13} />
           New note
         </button>
       </div>
+
+      {/* Delete is irreversible and its 44px target sits next to Pin at the
+          right edge of a scrollable list — on a phone a flick-scroll that
+          lands as a tap would destroy the note, and there is no localStorage
+          copy left to recover it from. Same ConfirmDialog gate every other
+          destructive action in the dashboard uses. */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        triggerRef={deleteTriggerRef}
+        title="Delete this note?"
+        description="The note will be removed from your Droplet and from every device you're signed in on. This can't be undone."
+        confirmLabel="Delete"
+        cancelLabel="Keep it"
+        variant="destructive"
+        confirmedIdentifier={confirmDelete ? noteTitle(confirmDelete) : undefined}
+        onConfirm={async () => {
+          if (confirmDelete) await remove(confirmDelete);
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }
@@ -838,6 +1606,10 @@ export function RemoteAccessWidget(_: WidgetProps) {
   const { user } = useAuth();
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
   const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
+  // WARP-1763: did the orchestrator actually read the router's peer list? When
+  // false the peers carry no handshake facts, and the widget withholds the
+  // live count rather than publishing a zero it cannot support.
+  const [liveState, setLiveState] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
@@ -852,16 +1624,22 @@ export function RemoteAccessWidget(_: WidgetProps) {
       if ((s.peerCount ?? 0) > 0) {
         // Peer list unavailable → fall back to the off-toggle rather than a
         // half-rendered on-state (same posture as VpnStep).
-        const { peers: all } = await fetchVpnPeers().catch(() => ({
-          peers: [] as VpnPeerInfo[],
-        }));
+        const { peers: all, liveStateAvailable } = await fetchVpnPeers().catch(
+          () => ({
+            peers: [] as VpnPeerInfo[],
+            liveStateAvailable: false,
+          }),
+        );
         setPeers(all.filter((p) => p.status === "active"));
+        setLiveState(liveStateAvailable === true);
       } else {
         setPeers([]);
+        setLiveState(false);
       }
     } catch {
       setStatus(null);
       setPeers([]);
+      setLiveState(false);
     } finally {
       setLoaded(true);
     }
@@ -936,16 +1714,30 @@ export function RemoteAccessWidget(_: WidgetProps) {
     else void connect();
   };
 
+  const connectedNow = countConnectedNow(peers, liveState);
+
   const sub = !loaded
     ? "Checking…"
     : endpointBlocked
       ? "Web address not ready yet"
       : homeBlocked
-        ? "Home address not ready yet"
+        ? "Local address not ready yet"
         : submitting
           ? "Connecting this device…"
           : on
-            ? `On · ${peers.length} connected device${peers.length === 1 ? "" : "s"}`
+            ? `On · ${peers.length} device${peers.length === 1 ? "" : "s"} set up${
+                // WARP-1763: this count is of ACTIVE PEER ROWS — devices that
+                // have been set up. It was labelled "connected", which it never
+                // measured: a peer row exists from the moment a config is
+                // minted or a QR link is approved, whether or not that device
+                // has ever completed a handshake. Real handshake recency now
+                // rides on each peer (`lastHandshakeAt`, read from the running
+                // interface), so the live count is appended only when the
+                // orchestrator actually observed it.
+                liveState
+                  ? ` · ${connectedNow} connected now`
+                  : ""
+              }`
             : "Off · tap to connect this device";
 
   const copyConf = () => {
@@ -1071,7 +1863,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
                       response; missing ⇒ stay honest). */}
                   {created.offLanReachable === true
                     ? "that’s this Droplet from anywhere."
-                    : "that’s this Droplet on your home network."}
+                    : "that’s this Droplet on your local network."}
                 </li>
               </ol>
               <div className="flex justify-center">

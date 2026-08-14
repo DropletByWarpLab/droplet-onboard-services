@@ -15,9 +15,32 @@ const logger = pino({ name: "nextcloud-client" });
 
 const WEBDAV_BASE = "/remote.php/dav/files";
 
+/**
+ * Percent-encode each path segment, leaving the `/` separators intact.
+ * `encodeURIComponent` on the whole string would escape the separators too.
+ * Empty segments (leading/trailing/doubled slashes) are preserved verbatim so
+ * callers that pass "/" keep addressing the WebDAV root.
+ */
+function encodePathSegments(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => (segment === "" ? "" : encodeURIComponent(segment)))
+    .join("/");
+}
+
+/**
+ * Build a WebDAV URL for `path` in `user`'s namespace.
+ *
+ * `user` and `path` are raw (already-decoded) values coming from route params,
+ * query strings, and DB records — they MUST be percent-encoded here. Without
+ * it a filename containing `#` truncates the URL at the fragment, `?` starts a
+ * query string, a bare `%` is an invalid escape, and `+`/space are not
+ * path-legal — so the request lands on a DIFFERENT resource than intended. For
+ * DELETE and overwriting PUT/MOVE that means destroying the wrong file.
+ */
 function webdavUrl(user: string, path: string): string {
   const cleanPath = path.replace(/^\/+/, "");
-  return `${config.NEXTCLOUD_URL}${WEBDAV_BASE}/${user}/${cleanPath}`;
+  return `${config.NEXTCLOUD_URL}${WEBDAV_BASE}/${encodeURIComponent(user)}/${encodePathSegments(cleanPath)}`;
 }
 
 function ocsUrl(endpoint: string): string {
@@ -137,20 +160,77 @@ export async function ncDownloadFile(
   return resp.body;
 }
 
+/**
+ * Fetch a file from WebDAV and return the raw upstream Response, so callers can
+ * relay status + headers — needed for inline content serving with Range/206
+ * support (the dashboard citation viewers). Forwards an optional `Range`
+ * header. Returns null on 404.
+ */
+export async function ncFetchFileResponse(
+  token: string,
+  user: string,
+  path: string,
+  rangeHeader?: string | null
+): Promise<Response | null> {
+  const url = webdavUrl(user, path);
+  const headers: Record<string, string> = { ...davHeaders(token) };
+  if (rangeHeader) headers["Range"] = rangeHeader;
+
+  const resp = await fetch(url, { headers });
+
+  if (resp.status === 404) return null;
+  // 416 is the upstream's verdict on the caller's Range header, not a fault —
+  // relay it rather than turning a bad client request into a 5xx.
+  if (!resp.ok && resp.status !== 416) {
+    throw new Error(`WebDAV GET failed: ${resp.status}`);
+  }
+  return resp;
+}
+
+/**
+ * WARP-1682 — what a DELETE actually accomplished. Both values are SUCCESS;
+ * they differ only in whether this call is the one that removed the resource,
+ * which callers may want for logging but never for error handling.
+ */
+export type NcDeleteOutcome = "deleted" | "already-absent";
+
+/**
+ * Delete a file or directory. Idempotent: the caller is asking for an END
+ * STATE ("this path must not exist"), not for a state transition, so a 404 —
+ * the state already holds — is a success (RFC 9110 §9.2.2).
+ *
+ * WARP-1682: this used to throw on 404, and `handleFileError` turned that into
+ * a 404 response, so the dashboard told the user a delete had failed over a
+ * file that really was gone. The resource legitimately can disappear before
+ * our DELETE lands — a retry, a second tab, the file indexer, or the trashbin
+ * race documented at routes/files.ts:2404 ("one of the requests can 500 while
+ * the file ends up half-moved").
+ *
+ * The trade-off is deliberate: a DELETE aimed at the WRONG path also 404s and
+ * now reports success. That is acceptable because the route re-lists
+ * immediately afterwards, so a file that did not actually go away is visibly
+ * still there — whereas the pre-fix behaviour failed the common case to guard
+ * the rare one. Everything else (403 forbidden, 423 locked, 5xx) still throws:
+ * those leave the end state either unchanged or unknown.
+ */
 export async function ncDeleteFile(
   token: string,
   user: string,
   path: string
-): Promise<void> {
+): Promise<NcDeleteOutcome> {
   const url = webdavUrl(user, path);
   const resp = await fetch(url, {
     method: "DELETE",
     headers: davHeaders(token),
   });
 
-  if (!resp.ok && resp.status !== 204) {
+  if (resp.status === 404) return "already-absent";
+
+  if (!resp.ok) {
     throw new Error(`WebDAV DELETE failed: ${resp.status}`);
   }
+
+  return "deleted";
 }
 
 export async function ncCreateDirectory(
@@ -976,6 +1056,28 @@ function escapeXml(s: string): string {
 }
 
 /**
+ * Encode a username for the `<d:href>` scope of a WebDAV SEARCH body.
+ *
+ * The href is a URL path that lives inside an XML document, so the value
+ * crosses TWO encoding layers and the order is load-bearing:
+ *
+ *   1. percent-encode — the username is one path segment of a URI reference.
+ *      Without this a space, `#`, `?`, or `%` addresses a DIFFERENT scope than
+ *      intended (the same defect class as `webdavUrl`).
+ *   2. XML-escape — the percent-encoded result is then serialized as element
+ *      text, so any remaining XML metacharacter must become an entity.
+ *
+ * Do NOT swap these. Escaping first turns `&` into `&amp;`, which encoding then
+ * mangles into `%26amp%3B`; the server percent-decodes that back to the literal
+ * text `&amp;` and resolves the wrong scope. Percent-encoding happens to consume
+ * every XML metacharacter, so step 2 is a no-op for today's encoder — keep it
+ * anyway: it is what makes the layering hold if the encoder is ever loosened.
+ */
+function davScopeUser(user: string): string {
+  return escapeXml(encodeURIComponent(user));
+}
+
+/**
  * Toggle the favorite flag on a file or directory.
  * Uses PROPPATCH to set oc:favorite to 1 or 0.
  */
@@ -1091,7 +1193,7 @@ export async function ncSearchFiles(
     </d:select>
     <d:from>
       <d:scope>
-        <d:href>/files/${user}</d:href>
+        <d:href>/files/${davScopeUser(user)}</d:href>
         <d:depth>infinity</d:depth>
       </d:scope>
     </d:from>
@@ -1139,7 +1241,7 @@ export async function ncListRecents(
     </d:select>
     <d:from>
       <d:scope>
-        <d:href>/files/${user}</d:href>
+        <d:href>/files/${davScopeUser(user)}</d:href>
         <d:depth>infinity</d:depth>
       </d:scope>
     </d:from>
@@ -1599,6 +1701,111 @@ export async function ncGetFileId(
   return m ? parseInt(m[1], 10) : null;
 }
 
+// ── Document editor: richdocuments direct-editing token (WARP-1688) ──
+
+/**
+ * Request budget for the direct-editing mint (WARP-1688).
+ *
+ * 5s, deliberately longer than docServerHealthy()'s 3s probe: the mint WRITES
+ * (richdocuments persists a token row), so it is legitimately slower than a
+ * read under load. Short enough that a wedged Nextcloud degrades the editor to
+ * the connector page inside a request the user is still waiting on, rather than
+ * stalling it.
+ *
+ * Scoped to THIS call. The other fetches in this module are unbounded and stay
+ * that way here — retrofitting them is its own change with its own blast
+ * radius, not a rider on this one.
+ */
+const NC_DIRECT_EDIT_MINT_TIMEOUT_MS = 5000;
+
+/**
+ * WARP-1688 — mint a SESSION-FREE richdocuments editor URL for `fileId`.
+ *
+ * The dashboard embeds the editor in an iframe served from the DASHBOARD's
+ * origin, where the browser holds no Nextcloud session cookie. The ordinary
+ * connector page (`/index.php/apps/richdocuments/index?fileId=…`) therefore
+ * bounces to Nextcloud's login instead of rendering — which is what made the
+ * embed unusable even after WARP-1686 landed the engine itself.
+ *
+ * richdocuments ships the escape hatch: its OCS `createDirect` endpoint
+ * (`POST /ocs/v2.php/apps/richdocuments/api/v1/document`, route table
+ * `apps/richdocuments/appinfo/routes.php`) mints a short-lived direct-editing
+ * token and returns `ocs.data.url` pointing at `directView#show`
+ * (`GET /index.php/apps/richdocuments/direct/{token}`). That page renders the
+ * real editor with NO cookies and NO Authorization header.
+ *
+ * The mint is performed AS THE CALLER (their per-user token — the same
+ * credential `ncGetFileId` uses), never with the admin credential, so the
+ * token inherits exactly that user's permissions on the file. Nextcloud, not
+ * the orchestrator, remains the authority on what the token may do.
+ *
+ * Returns `null` — never throws — on ANY failure (non-2xx, non-JSON body,
+ * missing `data.url`, transport error). The caller degrades to the ordinary
+ * connector URL: a degraded editor beats a hard 500.
+ *
+ * NOTE: the returned URL is ABSOLUTE against Nextcloud's INTERNAL origin
+ * (observed: `http://localhost/…`), which no browser can resolve. Callers MUST
+ * re-base it onto the gateway's browser-facing Nextcloud path — see
+ * `docserver.client.ts`.
+ */
+export async function ncCreateRichdocumentsDirectUrl(
+  token: string,
+  fileId: number
+): Promise<string | null> {
+  const url = ocsUrl("/ocs/v2.php/apps/richdocuments/api/v1/document");
+  // BOUNDED (WARP-1688). "Degrade to the connector URL instead of 500ing" holds
+  // for a Nextcloud that FAILS, but a bare fetch would not save us from one
+  // that HANGS: the whole editor-session request would stall behind it, which
+  // is a worse outcome for the user than the fallback this call exists to
+  // enable. The abort rejects into the catch below, so a hang takes the exact
+  // same degraded path as a refused connection. Same AbortController shape as
+  // docServerHealthy(), with a longer budget: minting writes a row in
+  // Nextcloud, where the health probe only reads.
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    NC_DIRECT_EDIT_MINT_TIMEOUT_MS
+  );
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...ocsHeaders(token),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ fileId: String(fileId) }).toString(),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      logger.warn(
+        { status: resp.status, fileId },
+        "richdocuments createDirect failed — falling back to the connector page"
+      );
+      return null;
+    }
+    const body = (await resp.json()) as {
+      ocs?: { data?: { url?: unknown } };
+    };
+    const direct = body?.ocs?.data?.url;
+    if (typeof direct !== "string" || direct.length === 0) {
+      logger.warn(
+        { fileId },
+        "richdocuments createDirect returned no data.url — falling back to the connector page"
+      );
+      return null;
+    }
+    return direct;
+  } catch (err) {
+    logger.warn(
+      { err, fileId },
+      "richdocuments createDirect errored — falling back to the connector page"
+    );
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * WARP-883 (ADR-027 WS-5) — does a directory exist in this user's WebDAV home?
  *
@@ -1794,6 +2001,10 @@ function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
     const sizeMatch = block.match(/<d:getcontentlength>(\d+)<\/d:getcontentlength>/i);
     const mtimeMatch = block.match(/<d:getlastmodified>([^<]+)<\/d:getlastmodified>/i);
     const typeMatch = block.match(/<d:getcontenttype>([^<]+)<\/d:getcontenttype>/i);
+    // WARP-1683: every PROPFIND body here already requests <oc:fileid/>;
+    // surface it (previously parsed-and-dropped) so pickers can address a
+    // file by the stable id the registry gate keys on.
+    const fileIdMatch = block.match(/<oc:fileid>(\d+)<\/oc:fileid>/i);
 
     entries.push({
       name,
@@ -1802,6 +2013,7 @@ function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
       size: sizeMatch ? parseInt(sizeMatch[1], 10) : 0,
       mimeType: isCollection ? null : (typeMatch?.[1] ?? "application/octet-stream"),
       modifiedAt: mtimeMatch ? new Date(mtimeMatch[1]).toISOString() : new Date().toISOString(),
+      ...(fileIdMatch ? { ncFileId: parseInt(fileIdMatch[1], 10) } : {}),
     });
   }
 

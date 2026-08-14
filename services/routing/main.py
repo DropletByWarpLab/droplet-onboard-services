@@ -21,7 +21,7 @@ import hmac
 import os
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -31,6 +31,7 @@ import operations
 from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
+    DeviceWriteNotApplied,
     LoginDenied,
     UbusError,
     ScanUnsupportedError,
@@ -41,6 +42,12 @@ from droplet_openwrt_sdk import (
     describe_network_for_llm,
     detect_deployment_topology,
     parse_ai_acl_scopes,
+)
+from router_ports import (
+    DeviceSectionNameExhausted,
+    annotate_write_guards,
+    disable_guard,
+    get_router_ports,
 )
 import json
 from schemas import (
@@ -69,6 +76,7 @@ from schemas import (
     CameraSubnetSetupRequest,
     CreateInterfaceRequest,
     EditInterfaceRequest,
+    SetPortEnabledRequest,
     FirewallZoneCollection,
     FirewallRuleCollection,
     FirewallRedirectCollection,
@@ -78,6 +86,8 @@ from schemas import (
     VpnPeerDeleteRequest,
     ApApproveRequest,
     ApTestSeedRequest,
+    ApBandSteeringRequest,
+    ApWirelessRequest,
 )
 import re
 
@@ -720,6 +730,176 @@ def network_interfaces():
     try:
         return get_router().network.get_all_interface_statuses()
     except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# Sits beside the interface reads because it answers the physical half of the
+# same question: those enumerate the logical interfaces, this the jacks.
+@app.get("/network/ports")
+def network_ports():
+    """The router's PHYSICAL port map (WARP-1866), with its write verdicts (WARP-1907).
+
+    Each port carries `disable_guard`: `null` when turning that jack off needs
+    nothing beyond the ordinary Tier-2 confirm, or `{code, reason}` when it
+    needs the explicit `force` acknowledgement that `POST
+    /network/ports/{port}/enable` demands. Published on the read because the
+    dashboard has to choose its confirmation copy BEFORE it opens the dialog,
+    and because the management-interface list is deployment configuration
+    (`DROPLET_MGMT_INTERFACES`) no client can know. One source of policy —
+    `router_ports.disable_guard` — feeds both this read and the write, so the
+    sentence the user is shown and the rule the server enforces cannot drift.
+
+    (Until WARP-1907 this docstring asserted the write path should not exist,
+    on the grounds that disabling a jack "would sever the WAN or the switch
+    trunk with no safe-apply arm to undo it". Half right, and the half that was
+    right is now the guard rather than a reason to ship nothing: a live
+    management jack DOES have a safe-apply arm — cutting it fails the
+    connectivity probe and OpenWrt reverts after 60s — while the WAN jack has
+    none, which is exactly why the two refusals are worded differently.)
+
+    Degrades on shape (`supported: false` + a reason), never on reachability —
+    an unreachable router still surfaces as an error, so the panel can say the
+    router is offline instead of drawing every jack dark.
+    """
+    try:
+        return annotate_write_guards(
+            get_router_ports(get_router()), _is_management_interface,
+        )
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# Refusals for a jack write. Kept beside the route (like _MANAGEMENT_REFUSAL)
+# rather than inside router_ports, because the *reason* copy is policy and the
+# *code* is the wire contract the dashboard branches on.
+_PORT_MAP_UNSUPPORTED = {
+    "error": (
+        "This deployment's router doesn't report a physical port map, so there "
+        "is nothing here to turn on or off."
+    ),
+    "code": "PORT_MAP_UNSUPPORTED",
+}
+
+
+@app.post("/network/ports/{port}/enable")
+def set_network_port_enabled(port: str, req: SetPortEnabledRequest, request: Request):
+    """Administratively bring a physical jack up or down (WARP-1907).
+
+    Write parity with the managed switch's `POST /switch/ports/{port}/enable`,
+    and the same blast-radius posture as the interface writes above: the SDK
+    stages the uci change inside `safe_apply(timeout=60)`, a `ConnectionLost`
+    surfaces as 503 `rollback_pending`, and a refusal is a 409 the caller clears
+    by passing `force`.
+
+    The order of the checks is the contract:
+
+    1. **The port map first.** A shape with no port map (`ROUTING_MODE=mock`,
+       whose MockRouter has no `device_status`) degrades to 422
+       `PORT_MAP_UNSUPPORTED` — the same honest shape-limitation the read
+       reports, never a 500 and never a fake 200.
+    2. **The jack must be ON the map.** `p99` on a router with eight jacks, or
+       `br-lan`, which is a real netdev with a real `config device` section but
+       is a BRIDGE — disabling it takes the whole LAN down in one call. 404.
+    3. **The guard, on disable only.** `router_ports.disable_guard` — 409
+       `WAN_PORT` / `MANAGEMENT_PORT` unless `force`. Enabling is never guarded:
+       it has no blast radius, and making the WAN harder to restore than to cut
+       would be backwards.
+
+    RBAC (owner/admin) and the Tier-2 confirm live one layer up in the
+    orchestrator; this service trusts a valid bearer.
+    """
+    try:
+        port_map = get_router_ports(get_router())
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+    if not port_map.get("supported"):
+        return JSONResponse(
+            status_code=422,
+            content={**_PORT_MAP_UNSUPPORTED, "detail": port_map.get("detail")},
+        )
+
+    target = next((p for p in port_map["ports"] if p.get("id") == port), None)
+    if target is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": f"This router has no physical port called {port!r}.",
+                "code": "PORT_NOT_FOUND",
+            },
+        )
+
+    if not req.enabled and not req.force:
+        guard = disable_guard(target, _is_management_interface)
+        if guard is not None:
+            # `reason` is WHY and `instruction` is what to do about it. They are
+            # separate fields because the dashboard renders the reason as a
+            # warning banner BEFORE the user has confirmed anything, where
+            # "confirm again" is an instruction to do something nobody has
+            # asked them to do. `error` keeps both, for a caller that has only
+            # one place to put a sentence.
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": f"{guard['reason']} {guard['instruction']}",
+                    "reason": guard["reason"],
+                    "instruction": guard["instruction"],
+                    "code": guard["code"],
+                },
+            )
+
+    try:
+        result = get_router().network.set_device_enabled(port, req.enabled)
+        return {
+            "status": "ok",
+            "port": port,
+            "enabled": req.enabled,
+            "created_section": result.get("created_section"),
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost changing the port — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except DeviceSectionNameExhausted as exc:
+        # A config we cannot safely add a section to. 409, not 500: the router
+        # is healthy and the request is well-formed — the deployment's own
+        # /etc/config/network is in a state only a human can resolve.
+        logger.error("no free uci section name for port %s: %s", port, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    f"This router's network config already has too many sections "
+                    f"named after {port}. Tidy up /etc/config/network before "
+                    f"changing this port."
+                ),
+                "detail": str(exc),
+                "code": DeviceSectionNameExhausted.code,
+            },
+        )
+    except DeviceWriteNotApplied as exc:
+        # The uci readback says nothing moved. Reporting this as a success is
+        # the one outcome that would leave an operator believing a live jack is
+        # off, so it is a 5xx with its own code.
+        logger.error("port %s write did not apply: %s", port, exc)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": (
+                    "The router accepted the change but the port didn't move. "
+                    "Nothing was left half-applied — try again."
+                ),
+                "detail": str(exc),
+                "code": DeviceWriteNotApplied.code,
+            },
+        )
+    except UbusError as exc:
         handle_router_error(exc)
 
 
@@ -1386,6 +1566,28 @@ def get_camera_subnet():
         handle_router_error(exc)
 
 
+def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
+    """Every live member of *bridge*, tagged (``:t``), for a bridge-vlan write.
+
+    Port names differ per router hardware (Pi lab unit: eth2/eth0 in br-lan;
+    MikroTik RB5009: p2..p8), so VLAN membership is derived from
+    `network.device status` at call time, never hardcoded. A bridge-vlan that
+    names an absent port is silently inert: netifd accepts the config, no
+    traffic ever flows on the VLAN, and safe-apply's rollback never trips
+    because connectivity was not harmed — the worst kind of wrong.
+    """
+    devices = router.network.device_status()
+    dev = devices.get(bridge) if isinstance(devices, dict) else None
+    members = dev.get("bridge-members") if isinstance(dev, dict) else None
+    ports = [m for m in members if isinstance(m, str) and m] if isinstance(members, list) else []
+    if not ports:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot derive VLAN membership: bridge '{bridge}' reports no members",
+        )
+    return [f"{p}:t" for p in ports]
+
+
 @app.post("/network/subnets/cameras/setup")
 def setup_camera_subnet(req: CameraSubnetSetupRequest):
     """One-click camera subnet setup: VLAN + firewall zone + DHCP + isolation rules.
@@ -1397,6 +1599,10 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
     try:
         r = get_router()
 
+        # Resolved BEFORE the safe-apply window opens, so a derivation fault
+        # cannot leave a rollback timer armed with nothing applied.
+        tagged_ports = _bridge_vlan_tagged_members(r)
+
         with r.safe_apply(timeout=60):
             # 1. Create VLAN interface
             device_name = f"br-lan.{req.vlan_id}"
@@ -1407,11 +1613,11 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
                 "netmask": req.netmask,
             })
 
-            # 2. Create bridge-vlan entry
+            # 2. Create bridge-vlan entry, membership from the live bridge
             r.uci.add("network", "bridge-vlan", {
                 "device": "br-lan",
                 "vlan": str(req.vlan_id),
-                "ports": "eth1:t",
+                "ports": tagged_ports,
             })
             r.uci.commit("network")
 
@@ -1697,13 +1903,20 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
         # Bring the new peer online without a full network restart by reloading
         # the wg interface. apply (without rollback timer) is the same path used
         # by the DNS hostnames endpoint — it triggers ucitrack -> wg reload.
+        applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
+            applied = False
             logger.warning("vpn: uci.apply after add_peer failed (peer is staged): %s", exc)
 
+        # 🔴 Report staged-vs-live honestly. Remote access is the one feature
+        # where a silent "ok" that never went live means the customer simply
+        # cannot get in — so a peer that committed but never applied returns
+        # status "staged", not "ok" (audit 2026-08-06).
         return {
-            "status": "ok",
+            "status": "ok" if applied else "staged",
+            "applied": applied,
             "interface": req.interface,
             "public_key": public_key,
             "private_key": private_key,
@@ -1743,16 +1956,24 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             public_key=req.public_key,
             allowed_ips=allowed_ips_uci,
             description=req.description,
-            endpoint=req.endpoint,
+            # WARP-1757: None means "client-initiated, no endpoint configured".
+            # add_peer's `if endpoint:` guard then omits endpoint_host entirely,
+            # which is what lets wg learn it from the first handshake.
+            endpoint=req.endpoint or "",
             persistent_keepalive=req.persistent_keepalive,
         )
+        applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
+            applied = False
             logger.warning("vpn: uci.apply after overlay add_peer failed (peer is staged): %s", exc)
 
+        # staged-vs-live: an overlay peer that never applied cannot hole-punch,
+        # so the phone would silently fail to connect (audit 2026-08-06).
         return {
-            "status": "ok",
+            "status": "ok" if applied else "staged",
+            "applied": applied,
             "interface": req.interface,
             "public_key": req.public_key,
             "endpoint": req.endpoint,
@@ -1778,11 +1999,21 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
         removed = r.vpn.delete_peer(req.interface, req.public_key)
         if removed == 0:
             raise HTTPException(status_code=404, detail="Peer not found")
+        applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001
+            applied = False
             logger.warning("vpn: uci.apply after delete_peer failed: %s", exc)
-        return {"status": "ok", "interface": req.interface, "removed": removed}
+        # staged-vs-live: on apply failure the peer is removed from config but
+        # STILL ACTIVE until a reload — the caller must know revocation isn't
+        # live yet (audit 2026-08-06).
+        return {
+            "status": "ok" if applied else "staged",
+            "applied": applied,
+            "interface": req.interface,
+            "removed": removed,
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
@@ -2067,16 +2298,50 @@ def _get_ap_namespace(router):
     return router.ap
 
 
-def _router_has_ap_radios(router) -> bool:
-    """False only when the router POSITIVELY reports zero wireless radios
-    (`network.wireless status` → {} — the radio-less Pi edge router). Any
-    probe failure fails OPEN to True so the historical router-side staging
-    path is never skipped on a transient read error."""
+def _router_side_staging_allowed(router) -> bool:
+    """May AP approval/decommission stage a `wifi-iface` on the ROUTER?
+
+    WARP-1721. The previous check (`bool(wireless.status())`) counted a bare
+    radio envelope as "router has AP radios" — and the real Pi edge router
+    answers exactly that: `{"radio0": {"up": true, "disabled": false,
+    "interfaces": []}}` (the `disabled='1'` lives on the wifi-IFACE, not the
+    wifi-DEVICE, so netifd reports the radio as up with nothing on it).
+    Staging a wifi-iface onto that radio puts an ON-BOX AP on the air —
+    the exact thing ADR-033 §3 codifies as forbidden ("onboard radios are
+    never APs"). Verified live 2026-08-04.
+
+    Two rules, checked in order:
+
+    1. SHAPE RULE, deterministic: an AP credential being provisioned is the
+       shape signal this service already keys every AP-direct path on
+       ("Without one (single-box / legacy shapes) the router-side staging
+       remains the whole story" — the WARP-1675 contract). With a credential,
+       approval configures the AP itself and the router NEVER hosts an AP.
+       No probe, no fail-open, no way for a transient error to flip it.
+
+    2. LEGACY PROBE, only without a credential: stage only when the router
+       demonstrably SERVES wireless — a radio with at least one active
+       interface (real netifd shape) or an inline ssid (the historical
+       status shape). A radio that is merely up-with-nothing-on-it is not
+       a serving radio; staging onto it is either dead uci (radio disabled)
+       or an accidental on-box AP (radio enabled) — both correctly skipped.
+       Probe FAILURES still fail open here, unchanged: on single-box the
+       router-side write IS the approval, and skipping it on a transient
+       read error would turn the approval into a silent no-op.
+    """
+    if AP_PASSWORD:
+        return False
     try:
         wireless = getattr(router, "wireless", None)
         if wireless is None or not hasattr(wireless, "status"):
             return True
-        return bool(wireless.status())
+        status = wireless.status()
+        if not isinstance(status, dict) or not status:
+            return False
+        for radio in status.values():
+            if isinstance(radio, dict) and (radio.get("interfaces") or radio.get("ssid")):
+                return True
+        return False
     except (ConnectionLost, UbusError):
         return True
 
@@ -2103,6 +2368,22 @@ def _discovered_ap_ip(ap, canonical: str) -> Optional[str]:
     return None
 
 
+def _connect_ap(host: str):
+    """Dial the EXTERNAL AP's rpcd as `droplet-ai` (AP_* config above).
+
+    Single construction point for every AP-direct call (`_push_ap_wireless`,
+    band steering) so the credential/port wiring can't drift between them.
+    Raises ConnectionLost / UbusError for the caller to classify.
+    """
+    return DropletRouter(
+        host=host,
+        port=AP_PORT,
+        username=AP_USERNAME,
+        password=AP_PASSWORD,
+        auto_login=True,
+    )
+
+
 def _push_ap_wireless(
     host: str,
     *,
@@ -2120,13 +2401,7 @@ def _push_ap_wireless(
     safe_apply so a push that breaks the AP's management path auto-rolls back.
     Raises ConnectionLost / UbusError for the caller to classify.
     """
-    dev = DropletRouter(
-        host=host,
-        port=AP_PORT,
-        username=AP_USERNAME,
-        password=AP_PASSWORD,
-        auto_login=True,
-    )
+    dev = _connect_ap(host)
     envelope = dev.uci.get("wireless", type="wifi-iface") or {}
     sections = envelope.get("values", {}) if isinstance(envelope, dict) else {}
     values: dict[str, str] = {"disabled": "0" if enable else "1"}
@@ -2167,6 +2442,480 @@ def _classify_ap_push_error(exc: Exception, host: str) -> HTTPException:
             "approval is retryable once the AP is reachable."
         ),
     })
+
+
+# WARP-1703 — the AP image's band-steering master switch (droplet-edge-router
+# PR #5): uci `droplet.wifi.band_steering` ('1'/'0', default '1'). Committing
+# the option fires the AP's own procd reload trigger, which unifies/splits the
+# SSIDs and starts/stops dawn — the routing service never touches the AP's
+# wireless sections on this path. The droplet-ai ACL grants uci read/write on
+# the 'droplet' config, so no extra privileges are needed.
+_AP_BAND_STEERING_CONFIG = "droplet"
+_AP_BAND_STEERING_SECTION = "wifi"
+_AP_BAND_STEERING_OPTION = "band_steering"
+
+
+def _get_band_steering_value(dev) -> Optional[bool]:
+    """Read `droplet.wifi.band_steering` off an already-connected AP device.
+
+    None = the AP image doesn't carry the droplet.wifi substrate (an image
+    that predates droplet-edge-router PR #5) — honest "unsupported", never an
+    error. ubus code 4 (NOT_FOUND) / 5 (NO_DATA) mean the config or section is
+    missing; any other UbusError propagates for the caller to classify.
+    """
+    try:
+        envelope = dev.uci.get(
+            _AP_BAND_STEERING_CONFIG, section=_AP_BAND_STEERING_SECTION
+        )
+    except UbusError as exc:
+        if exc.code in (4, 5):
+            return None
+        raise
+    values = envelope.get("values", {}) if isinstance(envelope, dict) else {}
+    if not isinstance(values, dict) or not values:
+        return None
+    # The substrate default is ON — an unset option means steering is active.
+    return str(values.get(_AP_BAND_STEERING_OPTION, "1")) == "1"
+
+
+def _read_ap_band_steering(host: str) -> Optional[bool]:
+    """Dial the AP and read its band-steering state. None = unsupported."""
+    return _get_band_steering_value(_connect_ap(host))
+
+
+def _write_ap_band_steering(host: str, enabled: bool) -> bool:
+    """Dial the AP and set `droplet.wifi.band_steering`.
+
+    Returns False (without writing) when the AP image doesn't carry the
+    substrate — the caller surfaces the honest 422. The write runs under the
+    AP's own safe_apply: set + apply(rollback) + connectivity probe + confirm,
+    so a commit that somehow breaks the AP's management path auto-rolls back.
+    The apply also commits the staged option, which is what fires the AP's
+    procd reload trigger (set+commit is the substrate contract; apply's
+    rollback arm is belt-and-braces on top).
+    """
+    dev = _connect_ap(host)
+    if _get_band_steering_value(dev) is None:
+        return False
+    with dev.safe_apply(timeout=60):
+        dev.uci.set(
+            _AP_BAND_STEERING_CONFIG,
+            _AP_BAND_STEERING_SECTION,
+            {_AP_BAND_STEERING_OPTION: "1" if enabled else "0"},
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# WARP-1712 — the AP's OWN network name + passphrase, read and written live.
+# ---------------------------------------------------------------------------
+#
+# THE SOURCE-OF-TRUTH CONTRACT (read this before touching anything below).
+#
+# The AP is authoritative for its own radios. This service NEVER caches an
+# SSID: every read dials the AP and reports what its uci actually says, and
+# every write goes to the AP's uci. There is no orchestrator-side copy of the
+# network name that could drift (`ApDevice.approvedSsid` is an APPROVAL-TIME
+# audit column and is deliberately not used for display).
+#
+# THE BAND-STEERING INTERACTION. The Droplet AP image ships an applier,
+# `/etc/init.d/droplet-band-steer` (droplet-edge-router PR #5), with a procd
+# reload trigger. On every reload it DERIVES the 5 GHz interface from the
+# 2.4 GHz one:
+#
+#     droplet.wifi.band_steering = '1'  →  default_radio1.ssid = <ssid>
+#     droplet.wifi.band_steering = '0'  →  default_radio1.ssid = <ssid>-5g
+#
+# (the key is copied verbatim either way). So `default_radio0` — resolved by
+# `_ap_primary_iface` — is the ONE section this service may author. Writing
+# `default_radio1` ourselves would be authoring a value the applier
+# recomputes on the next reload: a race whose winner depends on ordering, and
+# a second place for the household's network name to live. We refuse to do
+# it. `uci apply` (inside `safe_apply`) fires the AP's reload triggers, which
+# is what re-derives radio1 and brings the radios back up — the routing
+# service issues no `wifi up` of its own.
+#
+# The one exception is a PRE-SUBSTRATE image (no `droplet.wifi` section, so
+# `_get_band_steering_value` returns None): nothing on that AP derives
+# anything, so every wifi-iface has to be written directly — which is exactly
+# what the WARP-1675 approval push (`_push_ap_wireless`) already does.
+#
+# `_derived_five_ghz_ssid` mirrors the applier's rule for DISPLAY ONLY, so the
+# dashboard can tell an operator what their 5 GHz network will be called
+# without a second round trip. It is never used to author a uci value.
+
+_AP_PRIMARY_RADIO = "radio0"
+_AP_PRIMARY_IFACE_FALLBACK = "default_radio0"
+_AP_FIVE_GHZ_SSID_SUFFIX = "-5g"
+
+# WPA2-PSK limits, same as ApApproveRequest / SetSsidRequest. SSID is capped in
+# BYTES (802.11 SSID element is 32 octets) — a 32-CHARACTER name with any
+# non-ASCII in it overflows the element and hostapd refuses the config, which
+# on a commit would down the radios. Refuse it here instead.
+_AP_SSID_MAX_BYTES = 32
+_AP_KEY_MIN_LEN = 8
+_AP_KEY_MAX_LEN = 63
+
+_AP_WIRELESS_UNAVAILABLE = {
+    "code": "AP_WIRELESS_UNAVAILABLE",
+    "message": (
+        "The network name can't be changed on this access point — it needs an "
+        "approved Droplet AP that reports its own wireless configuration."
+    ),
+}
+
+
+def _ap_wireless_sections(dev) -> tuple[dict, dict]:
+    """Split a connected AP's `wireless` config into (radios, interfaces).
+
+    One `uci get wireless` round trip rather than two type-filtered reads —
+    the per-radio band/channel/htmode live on the `wifi-device` sections and
+    the ssid/key/encryption on the `wifi-iface` sections, and the card needs
+    both joined.
+    """
+    envelope = dev.uci.get("wireless") or {}
+    values = envelope.get("values", {}) if isinstance(envelope, dict) else {}
+    radios: dict[str, dict] = {}
+    ifaces: dict[str, dict] = {}
+    if isinstance(values, dict):
+        for name, section in values.items():
+            if not isinstance(section, dict):
+                continue
+            if section.get(".type") == "wifi-device":
+                radios[name] = section
+            elif section.get(".type") == "wifi-iface":
+                ifaces[name] = section
+    return radios, ifaces
+
+
+def _ap_primary_iface(ifaces: dict) -> Optional[str]:
+    """The wifi-iface section that owns the household's network name.
+
+    Must stay in lock-step with the AP-side applier, which reads
+    `wireless.default_radio0`. Resolved by the radio it is attached to
+    (`device == 'radio0'`) so a renamed section still lands correctly, then by
+    the applier's literal section name, then — last resort, an image whose
+    sections we don't recognise at all — the first interface uci reports.
+    """
+    for name, section in ifaces.items():
+        if section.get("device") == _AP_PRIMARY_RADIO:
+            return name
+    if _AP_PRIMARY_IFACE_FALLBACK in ifaces:
+        return _AP_PRIMARY_IFACE_FALLBACK
+    return next(iter(ifaces), None)
+
+
+def _derived_five_ghz_ssid(ssid: str, band_steering: Optional[bool]) -> Optional[str]:
+    """What the AP's applier will name the 5 GHz network. DISPLAY ONLY.
+
+    Mirrors `/etc/init.d/droplet-band-steer`. None when the AP carries no
+    applier (pre-substrate image) — there is nothing to derive, because every
+    interface is written directly on that shape.
+    """
+    if band_steering is None:
+        return None
+    return ssid if band_steering else f"{ssid}{_AP_FIVE_GHZ_SSID_SUFFIX}"
+
+
+def _validate_ap_wireless(req: ApWirelessRequest) -> tuple[Optional[str], Optional[str]]:
+    """Refuse a payload the AP's hostapd would reject, BEFORE dialing out.
+
+    A commit that hostapd refuses leaves the radios down until someone
+    physically recovers the AP, so an out-of-range name/passphrase is a 400
+    here and no connection is ever opened. Raises HTTPException(400); returns
+    the (ssid, key) to write otherwise.
+    """
+    ssid = req.ssid
+    key = req.key
+    if ssid is None and key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide 'ssid' and/or 'key' — nothing to change.",
+        )
+    if ssid is not None:
+        # Bytes, not characters — see _AP_SSID_MAX_BYTES.
+        length = len(ssid.encode("utf-8"))
+        if length < 1 or length > _AP_SSID_MAX_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Network name (SSID) must be 1-{_AP_SSID_MAX_BYTES} bytes; "
+                    f"got {length}."
+                ),
+            )
+    if key is not None and not (_AP_KEY_MIN_LEN <= len(key) <= _AP_KEY_MAX_LEN):
+        # Never echo the passphrase back — only its length.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Wi-Fi password must be {_AP_KEY_MIN_LEN}-{_AP_KEY_MAX_LEN} "
+                f"characters; got {len(key)}."
+            ),
+        )
+    return ssid, key
+
+
+def _ap_live_overlay(dev, ifaces: dict) -> tuple[dict, dict]:
+    """Best-effort live state off an already-connected AP: (per-iface, device).
+
+    Reuses the ubus surfaces the droplet-ai ACL already grants — no new
+    AP-side endpoint. `network.wireless status` for link state + the kernel
+    ifname, `iwinfo info`/`assoclist` for the real channel/width/client count,
+    `system board`/`info` for model/firmware/uptime.
+
+    UbusError is swallowed per-surface: an AP whose ACL is narrower than ours
+    still gets an honest config read with the live fields reported as None,
+    which is strictly better than 502-ing a page that could have rendered.
+    ConnectionLost deliberately propagates — a connection that dropped
+    mid-read makes the WHOLE answer untrustworthy, so the caller classifies it
+    as AP_UNREACHABLE.
+    """
+    per_iface: dict[str, dict] = {}
+    device: dict[str, Any] = {
+        "model": None,
+        "firmware": None,
+        "hostname": None,
+        "uptime_seconds": None,
+    }
+
+    status: dict = {}
+    try:
+        status = dev.wireless.status() or {}
+    except UbusError:
+        logger.debug("AP live overlay: wireless status unavailable", exc_info=True)
+
+    # netifd's status is keyed by radio; each radio carries the wifi-iface
+    # sections it brought up, with the kernel ifname iwinfo needs.
+    ifname_by_section: dict[str, str] = {}
+    up_by_section: dict[str, bool] = {}
+    if isinstance(status, dict):
+        for radio_state in status.values():
+            if not isinstance(radio_state, dict):
+                continue
+            radio_up = bool(radio_state.get("up"))
+            for entry in radio_state.get("interfaces", []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                section = entry.get("section")
+                if not section:
+                    continue
+                if entry.get("ifname"):
+                    ifname_by_section[section] = entry["ifname"]
+                up_by_section[section] = radio_up
+
+    for section in ifaces:
+        ifname = ifname_by_section.get(section)
+        info: dict = {}
+        clients: Optional[int] = None
+        if ifname:
+            try:
+                info = dev.wireless.radio_info(device=ifname) or {}
+            except UbusError:
+                logger.debug("AP live overlay: iwinfo info failed", exc_info=True)
+            try:
+                clients = len(dev.wireless.connected_clients(device=ifname) or [])
+            except UbusError:
+                logger.debug("AP live overlay: iwinfo assoclist failed", exc_info=True)
+        per_iface[section] = {
+            "ifname": ifname,
+            "up": up_by_section.get(section),
+            "live_channel": info.get("channel"),
+            "live_htmode": info.get("htmode"),
+            "clients": clients,
+        }
+
+    try:
+        board = dev.system.board_info() or {}
+        device["model"] = board.get("model")
+        device["hostname"] = board.get("hostname")
+        release = board.get("release")
+        if isinstance(release, dict):
+            device["firmware"] = release.get("description") or release.get("version")
+    except UbusError:
+        logger.debug("AP live overlay: system board failed", exc_info=True)
+    try:
+        device["uptime_seconds"] = dev.system.uptime_seconds()
+    except UbusError:
+        logger.debug("AP live overlay: system info failed", exc_info=True)
+
+    return per_iface, device
+
+
+def _shape_ap_wireless(dev) -> Optional[dict]:
+    """Build the live wireless snapshot off an already-connected AP.
+
+    None = honest "unsupported": the AP reports no wifi-iface sections at all,
+    so there is no network name to show or change on it.
+    """
+    radios, ifaces = _ap_wireless_sections(dev)
+    if not ifaces:
+        return None
+    band_steering = _get_band_steering_value(dev)
+    primary = _ap_primary_iface(ifaces)
+    live, device = _ap_live_overlay(dev, ifaces)
+
+    shaped = []
+    for section in sorted(ifaces):
+        iface = ifaces[section]
+        radio_name = iface.get("device")
+        radio = radios.get(radio_name, {}) if isinstance(radio_name, str) else {}
+        overlay = live.get(section, {})
+        shaped.append({
+            "section": section,
+            "radio": radio_name,
+            "band": radio.get("band"),
+            "ssid": iface.get("ssid"),
+            "encryption": iface.get("encryption"),
+            # Configured channel ('auto' is a legal uci value); the live
+            # channel iwinfo reports is separate and may differ.
+            "channel": radio.get("channel"),
+            "htmode": radio.get("htmode"),
+            # uci omits `disabled` when the radio is enabled — absence means
+            # "not disabled", which is a documented uci default, not a guess.
+            "disabled": str(iface.get("disabled", "0")) == "1",
+            "primary": section == primary,
+            "ifname": overlay.get("ifname"),
+            "up": overlay.get("up"),
+            "live_channel": overlay.get("live_channel"),
+            "live_htmode": overlay.get("live_htmode"),
+            "clients": overlay.get("clients"),
+        })
+
+    primary_iface = ifaces.get(primary, {}) if primary else {}
+    ssid = primary_iface.get("ssid")
+    return {
+        "supported": True,
+        "band_steering": band_steering,
+        "primary_section": primary,
+        "ssid": ssid,
+        # The live passphrase, so an operator can read it off the dashboard
+        # instead of ssh-ing to the AP. The AP mints a per-unit one at first
+        # boot (/etc/droplet/wifi-psk). Gated owner/admin one layer up, same
+        # posture as the guest-network PSK.
+        "key": primary_iface.get("key"),
+        "encryption": primary_iface.get("encryption"),
+        "five_ghz_ssid": _derived_five_ghz_ssid(ssid, band_steering) if ssid else None,
+        "radios": shaped,
+        "device": device,
+    }
+
+
+def _ap_mode_ifnames(dev) -> list[str]:
+    """Every AP-mode radio interface name the AP is currently running.
+
+    `connected_clients` needs a concrete iwinfo device, and an external AP's
+    interface names aren't knowable up front (phy0-ap0, wlan0, ...) — so read
+    them off the AP's own wireless status rather than guessing. Interfaces
+    with no `ifname` are not up and have no clients to report.
+    """
+    names: list[str] = []
+    status = dev.wireless.status()
+    if not isinstance(status, dict):
+        return names
+    for radio in status.values():
+        if not isinstance(radio, dict):
+            continue
+        for iface in radio.get("interfaces") or []:
+            if not isinstance(iface, dict):
+                continue
+            cfg = iface.get("config") or {}
+            if isinstance(cfg, dict) and str(cfg.get("mode", "")).lower() != "ap":
+                continue
+            ifname = iface.get("ifname")
+            if isinstance(ifname, str) and ifname and ifname not in names:
+                names.append(ifname)
+    return names
+
+
+def _read_ap_clients(host: str) -> list[dict]:
+    """Stations currently associated to the EXTERNAL AP's own radios.
+
+    WARP-1715 — the router's assoclist only covers the ROUTER's radios, so
+    every device joined through a standalone AP looked wired (no signal, no
+    AP attribution) in the dashboard. This reads the AP's own iwinfo assoclist
+    over its rpcd, the same credential path as the approval push.
+
+    Distinct from WARP-1712's `/aps/{mac}/wireless`, whose per-radio `clients`
+    is a COUNT — device attribution needs each station's MAC and signal.
+
+    Each returned client carries the `ifname` it associated on so the caller
+    can attribute a station to the right radio. Raises ConnectionLost /
+    UbusError for the caller to classify.
+    """
+    dev = _connect_ap(host)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ifname in _ap_mode_ifnames(dev):
+        for client in dev.wireless.connected_clients(ifname):
+            if not isinstance(client, dict):
+                continue
+            mac = str(client.get("mac", "")).strip()
+            # A station roaming between the AP's own bands can appear on two
+            # radios at once; first sighting wins so it stays one device.
+            key = _mac_key(mac)
+            if not mac or key in seen:
+                continue
+            seen.add(key)
+            out.append({**client, "ifname": ifname})
+    return out
+
+
+def _read_ap_wireless(host: str) -> Optional[dict]:
+    """Dial the AP and snapshot its wireless state. None = unsupported."""
+    return _shape_ap_wireless(_connect_ap(host))
+
+
+def _write_ap_wireless(host: str, ssid: Optional[str], key: Optional[str]) -> Optional[dict]:
+    """Dial the AP and set the household network name / passphrase.
+
+    Writes ONLY the primary (2.4 GHz) wifi-iface when the AP carries the
+    band-steering applier — see the contract at the top of this block; the
+    applier derives the 5 GHz interface on the reload `uci apply` triggers.
+    A pre-substrate image has no applier, so every interface is written
+    directly (the WARP-1675 approval-push shape).
+
+    Returns the post-write snapshot, or None (having written nothing) when the
+    AP exposes no wireless sections — the caller surfaces the honest 422.
+    """
+    dev = _connect_ap(host)
+    _radios, ifaces = _ap_wireless_sections(dev)
+    if not ifaces:
+        return None
+    band_steering = _get_band_steering_value(dev)
+    primary = _ap_primary_iface(ifaces)
+
+    values: dict[str, str] = {}
+    if ssid is not None:
+        values["ssid"] = ssid
+    if key is not None:
+        values["key"] = key
+
+    if band_steering is None:
+        # No applier on this image — nothing derives the other interfaces.
+        targets = sorted(ifaces)
+    else:
+        targets = [primary] if primary else []
+    if not targets:
+        return None
+
+    with dev.safe_apply(timeout=60):
+        for section in targets:
+            dev.uci.set("wireless", section, values)
+
+    # Report the intent, not a re-read: the AP's radios are mid-reload right
+    # after apply, and a read raced against that would show pre-reload values.
+    # The dashboard revalidates once the operation lands.
+    effective_ssid = ssid if ssid is not None else ifaces.get(primary, {}).get("ssid")
+    return {
+        "sections_written": targets,
+        "band_steering": band_steering,
+        "ssid": effective_ssid,
+        "five_ghz_ssid": (
+            _derived_five_ghz_ssid(effective_ssid, band_steering)
+            if effective_ssid
+            else None
+        ),
+    }
 
 
 @app.get("/aps/discovered")
@@ -2248,8 +2997,327 @@ def aps_test_seed(req: ApTestSeedRequest):
             version=req.version,
             last_ip=req.last_ip,
             hostname=req.hostname,
+            clients=req.clients,
         )
         return {"status": "ok", "mac": req.mac.upper()}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+_AP_BAND_STEERING_UNAVAILABLE = {
+    "code": "AP_BAND_STEERING_UNAVAILABLE",
+    "message": (
+        "Band steering isn't available on this access point — it needs an "
+        "approved Droplet AP running an image with the droplet.wifi substrate."
+    ),
+}
+
+
+@app.get("/aps/{mac}/band-steering")
+def aps_band_steering_get(mac: str):
+    """Read the AP's band-steering master switch (WARP-1703).
+
+    Honesty contract (the UPnP pattern): `supported` is False — never an
+    error — when no AP credential is provisioned (single-box / legacy shapes)
+    or when the AP's image predates the droplet.wifi substrate. Reachability
+    problems on a *configured* AP are typed 502s (AP_AUTH / AP_UNREACHABLE),
+    same classification as the approval push.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock) — the in-memory _MockAp keeps
+        # a per-MAC band-steering flag so dashboard dev can drive the toggle
+        # without a real AP.
+        if hasattr(ap, "get_band_steering"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            return {
+                "supported": True,
+                "enabled": ap.get_band_steering(canonical),
+                "ap_detail": "mock AP",
+            }
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "enabled": False,
+                "ap_detail": "no AP credential configured",
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            state = _read_ap_band_steering(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if state is None:
+            return {
+                "supported": False,
+                "enabled": False,
+                "ap_detail": (
+                    f"AP at {ap_ip} doesn't expose band steering — its image "
+                    "predates the droplet.wifi substrate"
+                ),
+            }
+        return {
+            "supported": True,
+            "enabled": state,
+            "ap_detail": f"AP at {ap_ip}",
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.put("/aps/{mac}/band-steering")
+def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request):
+    """Toggle the AP's band-steering master switch (WARP-1703).
+
+    Sets `droplet.wifi.band_steering` over the AP's rpcd; the commit fires
+    the AP's own procd reload trigger which unifies/splits the SSIDs and
+    starts/stops dawn. Mirrors POST /upnp's honesty: a shape that can't do
+    this answers 422 AP_BAND_STEERING_UNAVAILABLE, never a pretend-success.
+    The Operation-Id is mirrored into the body like aps_approve — some
+    proxies strip non-standard response headers.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock).
+        if hasattr(ap, "set_band_steering"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            ap.set_band_steering(canonical, req.enabled)
+            return {
+                "status": "ok",
+                "mac": canonical,
+                "enabled": req.enabled,
+                "ap_detail": "mock AP",
+                "operation_id": getattr(request.state, "operation_id", None),
+            }
+
+        if not AP_PASSWORD:
+            # Never pretend to toggle steering on an AP we can't configure.
+            return JSONResponse(status_code=422, content=_AP_BAND_STEERING_UNAVAILABLE)
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to configure — "
+                    "is it online? The change is retryable."
+                ),
+            })
+        try:
+            written = _write_ap_band_steering(ap_ip, req.enabled)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if not written:
+            return JSONResponse(status_code=422, content=_AP_BAND_STEERING_UNAVAILABLE)
+        return {
+            "status": "ok",
+            "mac": canonical,
+            "enabled": req.enabled,
+            "ap_detail": f"AP at {ap_ip} band steering {'on' if req.enabled else 'off'}",
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}/clients")
+def aps_clients(mac: str):
+    """Stations associated to this AP's own radios (WARP-1715).
+
+    Distinct from `/aps/{mac}/wireless` (WARP-1712), which reports per-radio
+    STATE and a client COUNT. Device attribution in the orchestrator needs the
+    per-station MAC + signal, which only the assoclist carries.
+
+    Same honesty contract: `supported` is False — never an error — when no AP
+    credential is provisioned (single-box / legacy shapes), because on those
+    shapes the router's own assoclist already covers every wireless client. A
+    *configured* AP that can't be reached is a typed 502 (AP_AUTH /
+    AP_UNREACHABLE), so "no clients" never masks "couldn't ask".
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock) so dashboard dev can drive the
+        # via-AP attribution without a real AP on the bench.
+        if hasattr(ap, "get_clients"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            return {
+                "supported": True,
+                "clients": ap.get_clients(canonical),
+                "ap_detail": "mock AP",
+            }
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "clients": [],
+                "ap_detail": "no AP credential configured",
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            clients = _read_ap_clients(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        return {
+            "supported": True,
+            "clients": clients,
+            "ap_detail": f"AP at {ap_ip}",
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}/wireless")
+def aps_wireless_get(mac: str):
+    """Read the AP's LIVE wireless state (WARP-1712).
+
+    The AP is authoritative for its own radios — this dials it and reports
+    what its uci actually says, so nothing upstream can serve a stale network
+    name. Returns the per-radio detail an operator needs (band, channel,
+    width, link state, associated clients) plus the model/firmware/uptime, all
+    off ubus surfaces the droplet-ai ACL already grants.
+
+    Honesty contract (the band-steering / UPnP pattern): `supported` is False —
+    never an error — when no AP credential is provisioned or the AP reports no
+    wireless sections. Reachability problems on a *configured* AP are typed
+    502s (AP_AUTH / AP_UNREACHABLE).
+
+    The response carries the live passphrase. That is deliberate (an operator
+    should not need ssh to read their own Wi-Fi password) and is why the
+    orchestrator gates this read to owner/admin, same posture as the
+    guest-network PSK read.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock).
+        if hasattr(ap, "get_ap_wireless"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            return {**ap.get_ap_wireless(canonical), "ap_detail": "mock AP"}
+
+        if not AP_PASSWORD:
+            return {
+                "supported": False,
+                "ap_detail": "no AP credential configured",
+                "radios": [],
+            }
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to read — is "
+                    "it online? The read is retryable."
+                ),
+            })
+        try:
+            state = _read_ap_wireless(ap_ip)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if state is None:
+            return {
+                "supported": False,
+                "ap_detail": f"AP at {ap_ip} reports no wireless interfaces",
+                "radios": [],
+            }
+        return {**state, "ap_detail": f"AP at {ap_ip}"}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.put("/aps/{mac}/wireless")
+def aps_wireless_put(mac: str, req: ApWirelessRequest, request: Request):
+    """Set the AP's network name / passphrase (WARP-1712).
+
+    Validation runs BEFORE any dial-out: an SSID or passphrase hostapd would
+    reject is a 400 that pushes nothing, because a rejected commit leaves the
+    AP's radios down. Beyond that the write targets ONLY the primary
+    (2.4 GHz) interface when the AP carries the band-steering applier — the
+    applier derives the 5 GHz interface on the reload that `uci apply` fires.
+    See the contract block above `_ap_primary_iface`.
+
+    Mirrors the band-steering PUT's honesty: a shape that can't do this
+    answers 422 AP_WIRELESS_UNAVAILABLE, never a pretend-success.
+    """
+    canonical = _validate_mac(mac)
+    # Raises 400 before anything is connected to or written.
+    ssid, key = _validate_ap_wireless(req)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock surface first (ROUTING_MODE=mock).
+        if hasattr(ap, "set_ap_wireless"):
+            if not hasattr(ap, "get") or ap.get(canonical) is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+            result = ap.set_ap_wireless(canonical, ssid, key)
+            return {
+                "status": "ok",
+                "mac": canonical,
+                **result,
+                "ap_detail": "mock AP",
+                "operation_id": getattr(request.state, "operation_id", None),
+            }
+
+        if not AP_PASSWORD:
+            # Never pretend to rename a network on an AP we can't configure.
+            return JSONResponse(status_code=422, content=_AP_WIRELESS_UNAVAILABLE)
+
+        ap_ip = _discovered_ap_ip(ap, canonical)
+        if not ap_ip:
+            raise HTTPException(status_code=502, detail={
+                "code": "AP_UNREACHABLE",
+                "message": (
+                    f"AP {canonical} has no discovered address to configure — "
+                    "is it online? The change is retryable."
+                ),
+            })
+        try:
+            written = _write_ap_wireless(ap_ip, ssid, key)
+        except (ConnectionLost, UbusError) as exc:
+            raise _classify_ap_push_error(exc, ap_ip)
+        if written is None:
+            return JSONResponse(status_code=422, content=_AP_WIRELESS_UNAVAILABLE)
+        return {
+            "status": "ok",
+            "mac": canonical,
+            **written,
+            "ap_detail": f"AP at {ap_ip} wireless updated",
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
@@ -2284,10 +3352,11 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
         from droplet_openwrt_sdk import ApApi
         iface_section = ApApi.iface_section_for_mac(canonical)
 
-        # WARP-1675: staging a wifi-iface on a router that HAS no AP radios
-        # (the Pi edge router) would leave a dead uci section that configures
-        # nothing — skip it and rely on the AP-direct push below.
-        router_staged = _router_has_ap_radios(r)
+        # WARP-1675/WARP-1721: router-side wifi-iface staging happens ONLY on
+        # legacy shapes where the router itself serves wireless. With an AP
+        # credential (edge-router shape) the AP-direct push below is the whole
+        # approval, and staging the router would put an on-box AP on the air.
+        router_staged = _router_side_staging_allowed(r)
         if router_staged:
             with r.safe_apply(timeout=60):
                 # Mock router's `push_wireless_config` takes the MAC so it
@@ -2315,8 +3384,10 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
                     )
         else:
             logger.info(
-                "router reports no AP radios (edge-router shape) — skipping "
-                "router-side wifi-iface staging for %s", canonical,
+                "router-side wifi-iface staging skipped for %s (%s)",
+                canonical,
+                "AP credential provisioned — approval is AP-direct"
+                if AP_PASSWORD else "router serves no wireless",
             )
 
         # WARP-1675: configure the AP ITSELF when an AP credential is
@@ -2392,10 +3463,13 @@ def aps_decommission(mac: str, request: Request):
         from droplet_openwrt_sdk import ApApi
         iface_section = ApApi.iface_section_for_mac(canonical)
 
-        # WARP-1675: mirror approve's radio gating — there is nothing staged
-        # on a radio-less router to remove, and safe_apply with zero pending
-        # changes returns NO_DATA.
-        if _router_has_ap_radios(r):
+        # WARP-1675/WARP-1721: mirror approve's gating — on shapes where
+        # approve never staged the router, there is nothing to remove (and
+        # safe_apply with zero pending changes returns NO_DATA). Known edge,
+        # accepted: a router-side section staged on a LEGACY shape before an
+        # AP credential was provisioned is skipped here and stays as inert
+        # uci until the ADR-035 migration deletes the router-side path.
+        if _router_side_staging_allowed(r):
             with r.safe_apply(timeout=60):
                 if hasattr(ap, "discovered"):
                     ap.remove_wireless_config(canonical)
@@ -2427,5 +3501,112 @@ def aps_decommission(mac: str, request: Request):
             "ap_detail": ap_detail,
             "operation_id": getattr(request.state, "operation_id", None),
         }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Fabric member inventory (ADR-035 §5, WARP-1731)
+# ---------------------------------------------------------------------------
+def _synthesize_router_member(router) -> Optional[dict]:
+    """Build the `role=router` member from facts the service already holds.
+
+    The router browses umdns THROUGH itself, so its own
+    `_droplet-router._tcp` advert (WARP-1728) may or may not appear in its
+    own browse results. When it's absent, the inventory would silently lose
+    the one device the service is *connected to* — so synthesize the member
+    from local facts instead: anchor MAC from the wired management bridge
+    (br-lan, falling back to eth0, then to any current br-lan member —
+    ADR-035 §2), model/version/hostname from `system board`, and the
+    connected host as its address.
+
+    Best-effort by design: a ubus fault reading either fact (or a shape
+    without the surfaces, e.g. the mock router) degrades to "no synthesized
+    member" so the mDNS-observed members still return. A total transport
+    loss (`ConnectionLost`) propagates — an unreachable router must surface
+    as 503, not as a quietly router-less inventory.
+    """
+    try:
+        board = router.system.board_info()
+        devices = router.network.device_status()
+    except ConnectionLost:
+        raise
+    except UbusError as exc:
+        logger.warning(
+            "fabric: router-member synthesis skipped (ubus fault reading "
+            "board/device facts): %s", exc,
+        )
+        return None
+    except AttributeError:
+        # Router shape without a device_status surface (ROUTING_MODE=mock).
+        return None
+
+    mac = None
+    if isinstance(devices, dict):
+        candidates = ["br-lan", "eth0"]
+        # Hardware-agnostic tail (ADR-011): on routers where neither named
+        # device carries a MAC — e.g. a DSA board (RB5009) whose conduit is
+        # not eth0 — any current member of the management bridge holds an
+        # equally stable burned-in identity, and is still "the wired
+        # management interface" in the ADR-035 §2 sense.
+        br = devices.get("br-lan")
+        if isinstance(br, dict) and isinstance(br.get("bridge-members"), list):
+            candidates.extend(m for m in br["bridge-members"] if isinstance(m, str))
+        for name in candidates:
+            dev = devices.get(name)
+            if isinstance(dev, dict):
+                candidate = dev.get("macaddr")
+                if isinstance(candidate, str) and candidate:
+                    mac = candidate
+                    break
+    if not mac:
+        # Same discipline as the mac-less browse-record drop: no anchor
+        # MAC, no member — never invent an identity (ADR-035 §2).
+        return None
+
+    member: dict = {"role": "router", "mac": mac, "extra": {}}
+    if isinstance(board, dict):
+        if isinstance(board.get("model"), str) and board["model"]:
+            member["model"] = board["model"]
+        release = board.get("release")
+        if isinstance(release, dict):
+            version = release.get("version")
+            if isinstance(version, str) and version:
+                member["version"] = version
+        if isinstance(board.get("hostname"), str) and board["hostname"]:
+            member["hostname"] = board["hostname"]
+    # The address the routing service reaches the router at — the one
+    # address it verifiably holds for this member.
+    member["last_ip"] = OPENWRT_HOST
+    return member
+
+
+@app.get("/fabric/members")
+def fabric_members():
+    """Read-only inventory of every fabric device announcing on the LAN.
+
+    ADR-035 §5: one consumer for ALL `_droplet-*._tcp` service types —
+    AP, switch (whose rich poe_ports/poe_budget advertisement was
+    previously consumed by nothing), router, and any future role. Parsed
+    by `FabricApi.browse_members()` (same WARP-1720 duplicate-key
+    tolerance as AP discovery); a missing router advert is synthesized
+    from local facts (see `_synthesize_router_member`).
+
+    Observations only — no device writes, no lifecycle state machine.
+    `/aps/discovered` and the ADR-005 AP state machine are untouched;
+    the orchestrator's fabric-member reconciler polls this endpoint on
+    the AP-discovery cadence and upserts `FabricMember` rows.
+    """
+    try:
+        r = get_router()
+        members: list[dict] = []
+        fabric = getattr(r, "fabric", None)
+        if fabric is not None and hasattr(fabric, "browse_members"):
+            members = fabric.browse_members()
+        if not any(m.get("role") == "router" for m in members):
+            synthesized = _synthesize_router_member(r)
+            if synthesized is not None:
+                members.append(synthesized)
+        return {"members": members}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

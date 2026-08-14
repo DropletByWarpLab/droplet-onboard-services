@@ -15,6 +15,7 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createTeamChatRouter } from "./routes/team-chat.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
@@ -55,6 +56,7 @@ import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cam
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
+import { createNotesRouter } from "./routes/notes.js";
 import { createRemindersRouter } from "./routes/reminders.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createVpnRouter } from "./routes/vpn.js";
@@ -81,6 +83,7 @@ import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createAccessRouter } from "./routes/access.js";
 import { createDepartmentsRouter } from "./routes/departments.js";
+import { createWorkspaceLocationsRouter } from "./routes/workspace-locations.js";
 import {
   initScopeLoader,
   loadUserEffectiveScopes,
@@ -280,6 +283,10 @@ export function createApp(
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
+  // WARP-1683 — team chat (member-to-member Messages). Humans only; the
+  // `team_chat` module gate is mounted by mountModuleGates above off the
+  // registry's /api/team-chat prefix.
+  app.use("/api", createTeamChatRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
   app.use("/api", createPersonaRouter(prisma));
@@ -346,6 +353,7 @@ export function createApp(
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
+  app.use("/api", createNotesRouter(prisma));
   app.use("/api", createRemindersRouter(prisma));
   app.use("/api", createNotificationsRouter(prisma));
   app.use("/api", createVpnRouter(prisma));
@@ -412,6 +420,10 @@ export function createApp(
   // membership, and integration with Nextcloud groupfolders. Provisioning is
   // async (reconciler converges NC state).
   app.use("/api", createDepartmentsRouter(prisma));
+  // WARP-1906: premade business locations (buildings + named conference
+  // rooms). Reads member-wide (feeds the event-form location suggestions via
+  // /calendar/places); writes owner/admin from Settings → Locations.
+  app.use("/api", createWorkspaceLocationsRouter(prisma));
   // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type).

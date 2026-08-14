@@ -28,6 +28,16 @@ const inputSchema = {
       },
       description: "Port membership list.",
     },
+    mode: {
+      type: "string",
+      enum: ["merge", "replace"],
+      description:
+        "merge (default): add these ports to the VLAN, keeping its other " +
+        "members. replace: write the VLAN's WHOLE member list — every member " +
+        "not listed is removed, which on the main LAN can cut off the router, " +
+        "the access point and the appliance. Only use replace when the list " +
+        "is the complete intended membership.",
+    },
   },
   required: ["vlan_id", "ports"],
   additionalProperties: false,
@@ -49,9 +59,23 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "INVALID_ARGS", message: "ports must be an array" },
     };
   }
+  // Audit 2026-08-06: the membership endpoint's default is `merge` (add these
+  // ports, keep the VLAN's other members) because a one-port `replace` on the
+  // main LAN strands the router/AP/appliance. Only forward an EXPLICIT mode —
+  // omitting it lets the orchestrator apply the safe default rather than this
+  // handler asserting an intent the model never expressed.
+  if (args.mode !== undefined && args.mode !== "merge" && args.mode !== "replace") {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "INVALID_ARGS", message: 'mode must be "merge" or "replace"' },
+    };
+  }
   const res = await ctx.http.orchestrator.post(
     `/api/switch/vlans/${vlanId}/membership`,
-    { ports: args.ports },
+    args.mode === undefined
+      ? { ports: args.ports }
+      : { ports: args.ports, mode: args.mode },
   );
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);
   if (!res.ok) {

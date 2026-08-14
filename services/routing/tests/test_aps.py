@@ -468,3 +468,70 @@ class TestApEndpointsRequireRouter:
             headers=AUTH,
         )
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# 4. AP-attached stations (WARP-1715)
+# ---------------------------------------------------------------------------
+
+
+class TestApClients:
+    """GET /aps/{mac}/clients — the read that lets the dashboard attribute a
+    station to the AP it actually joined.
+
+    Without it the device list is built purely from the ROUTER's assoclist, so
+    every device on a standalone AP's radios rendered as wired with no signal.
+    """
+
+    VALID_MAC = "B8:27:EB:AA:BB:CC"
+    STATIONS = [
+        {"mac": "AA:BB:CC:00:00:01", "signal": -52, "rx_rate": 300000},
+        {"mac": "AA:BB:CC:00:00:02", "signal": -71},
+    ]
+
+    def _seed(self, ap_client: TestClient, **extra) -> None:
+        payload = {"mac": self.VALID_MAC, "last_ip": "192.168.9.183", **extra}
+        resp = ap_client.post("/aps/_test_seed", json=payload, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+
+    def test_returns_the_stations_associated_to_this_ap(self, ap_client: TestClient) -> None:
+        self._seed(ap_client, clients=self.STATIONS)
+        resp = ap_client.get(f"/aps/{self.VALID_MAC}/clients", headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["supported"] is True
+        assert [c["mac"] for c in body["clients"]] == [
+            "AA:BB:CC:00:00:01",
+            "AA:BB:CC:00:00:02",
+        ]
+        assert body["clients"][0]["signal"] == -52
+
+    def test_an_idle_ap_reports_no_stations_not_an_error(self, ap_client: TestClient) -> None:
+        self._seed(ap_client)
+        resp = ap_client.get(f"/aps/{self.VALID_MAC}/clients", headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"supported": True, "clients": [], "ap_detail": "mock AP"}
+
+    def test_404_for_a_mac_that_never_announced(self, ap_client: TestClient) -> None:
+        resp = ap_client.get("/aps/B8:27:EB:99:99:99/clients", headers=AUTH)
+        assert resp.status_code == 404
+
+    def test_rejects_a_malformed_mac_at_the_boundary(self, ap_client: TestClient) -> None:
+        # `_validate_mac` answers 404 for a bad MAC in the path — a malformed
+        # MAC names no resource. Same posture as the other /aps/{mac} routes.
+        resp = ap_client.get("/aps/not-a-mac/clients", headers=AUTH)
+        assert resp.status_code == 404
+
+    def test_503_when_disconnected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(main, "router_instance", None)
+        resp = TestClient(main.app).get(f"/aps/{self.VALID_MAC}/clients", headers=AUTH)
+        assert resp.status_code == 503
+
+    def test_seeding_clients_does_not_pollute_the_ap_identity(
+        self, ap_client: TestClient
+    ) -> None:
+        """`GET /aps/{mac}` echoes the discovery record wholesale — an
+        assoclist leaking into it would ship stations as AP metadata."""
+        self._seed(ap_client, clients=self.STATIONS)
+        body = ap_client.get(f"/aps/{self.VALID_MAC}", headers=AUTH).json()
+        assert "clients" not in body

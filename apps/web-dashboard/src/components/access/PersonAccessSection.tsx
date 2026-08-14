@@ -38,11 +38,16 @@ import {
   formatStorageBytes,
   tierLabel,
 } from "@/lib/access";
+// WARP-1809: every user holds a boot-seeded HOUSEHOLD membership, so the
+// drawer's deptRights chips would otherwise echo the seeded server name;
+// the shared kind-keyed mapping renders it as "Workspace" instead.
+import { orgUnitDisplayName } from "@/lib/org-unit-name";
 import { ACCESS_COPY } from "./copy";
 import { AccessChip, GuardNote } from "./bits";
 // WARP-1533: the option-building logic is shared with the invite modal's
 // role picker (design §7 — "identical control, no new pattern").
 import { RoleSelectOptions } from "./role-options";
+import { CameraAccessSection } from "./CameraAccessSection";
 import "./access.css";
 
 export type PersonAccessValue = `role:${string}` | `tier:${string}`;
@@ -258,7 +263,7 @@ export function PersonAccessSection({
                       </AccessChip>
                     ))}
                     {drawer.data.deptRights.map((d) => (
-                      <AccessChip key={d.id}>{`${d.name}: ${d.right}`}</AccessChip>
+                      <AccessChip key={d.id}>{`${orgUnitDisplayName(d.kind, d.name)}: ${d.right}`}</AccessChip>
                     ))}
                     <AccessChip mono>
                       Storage {formatStorageBytes(drawer.data.usage.storageQuotaBytes) === "—"
@@ -276,6 +281,15 @@ export function PersonAccessSection({
         </div>
       </div>
 
+      {/* ── WARP-1976: which cameras can they see? ──
+          Mounted here, in the person panel, because access is managed where
+          PEOPLE are managed. Owners/admins render as unrestricted rather
+          than getting a checklist that would do nothing. */}
+      <CameraAccessSection
+        userId={person.userId}
+        tier={person.role}
+        displayName={person.displayName || person.id}
+      />
     </div>
   );
 }

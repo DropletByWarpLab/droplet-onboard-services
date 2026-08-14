@@ -49,7 +49,8 @@ trap 'rm -rf "$WORK"' EXIT
 reset_work() {
   rm -rf "${WORK:?}/state" "${WORK:?}/pci" "${WORK:?}/usb" "${WORK:?}/bin" \
          "${WORK:?}/docker" "${WORK:?}/klog" "${WORK:?}/rescan" \
-         "${WORK:?}/daemon.json"
+         "${WORK:?}/daemon.json" "${WORK:?}/host_units_exit" \
+         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log"
   mkdir -p "$WORK/bin" "$WORK/docker"
   : > "$WORK/klog"
 }
@@ -129,8 +130,21 @@ run_wd() {
       DROPLET_WATCHDOG_XVF_HOST="$WORK/bin/xvf_host" \
       DROPLET_WATCHDOG_XVF_COOLDOWN_S=0 \
       DROPLET_WATCHDOG_DOCKER_DAEMON_JSON="$WORK/daemon.json" \
+      DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
       "$@" \
       bash "$WATCHDOG" 2>&1
+}
+
+# WARP-1829 droplet-host-units stub: logs its invocation, prints
+# $WORK/host_units_out, exits with $WORK/host_units_exit (default 0).
+mk_host_units_stub() {
+  cat > "$WORK/bin/droplet-host-units" <<EOF
+#!/bin/sh
+printf 'droplet-host-units %s\n' "\$*" >> "$WORK/host_units.log"
+cat "$WORK/host_units_out" 2>/dev/null
+exit \$(cat "$WORK/host_units_exit" 2>/dev/null || echo 0)
+EOF
+  chmod +x "$WORK/bin/droplet-host-units"
 }
 
 STATUS_JSON="$WORK/state/status.json"
@@ -201,7 +215,7 @@ else
 fi
 
 all_present=1
-for c in wifi voice_dsp docker_dns container_crashloop; do
+for c in wifi voice_dsp docker_dns container_crashloop host_unit_staleness; do
   s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
   case "$s" in
     ok|healed|heal_failed|escalated|not_applicable) : ;;
@@ -209,7 +223,7 @@ for c in wifi voice_dsp docker_dns container_crashloop; do
   esac
 done
 if [ "$all_present" = 1 ]; then
-  pass "all four checks carry an explicit enum status (none inferred from absence)"
+  pass "every known check carries an explicit enum status (none inferred from absence)"
 else
   fail "a check is missing or carries a non-enum status: $(cat "$STATUS_JSON")"
 fi
@@ -627,6 +641,88 @@ if "$PYBIN" -m json.tool "$STATUS_JSON" >/dev/null 2>&1; then
   pass "status.json stays valid JSON with quotes/backslashes in messages"
 else
   fail "status.json broken by special characters: $(cat "$STATUS_JSON")"
+fi
+
+# =============================================================================
+# Phase 8: host_unit_staleness (WARP-1829)
+# =============================================================================
+echo "--- Phase 8: host_unit_staleness ---"
+
+# No detector installed on this box → explicitly not_applicable, with a
+# pointer at how to get it. Never a silent absence.
+reset_work
+run_wd DROPLET_WATCHDOG_CHECKS="host_unit_staleness" \
+       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/absent" >/dev/null || true
+if [ "$(wd_field host_unit_staleness status)" = "not_applicable" ]; then
+  pass "host_unit_staleness: not_applicable when droplet-host-units is absent"
+else
+  fail "expected not_applicable, got $(wd_field host_unit_staleness status)"
+fi
+
+# Detector says everything is current.
+reset_work
+mk_host_units_stub
+echo 0 > "$WORK/host_units_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="host_unit_staleness" >/dev/null || true
+if [ "$(wd_field host_unit_staleness status)" = "ok" ]; then
+  pass "host_unit_staleness: ok when every unit is at or ahead of its sources"
+else
+  fail "expected ok, got $(wd_field host_unit_staleness status)"
+fi
+if grep -q 'droplet-host-units check' "$WORK/host_units.log"; then
+  pass "host_unit_staleness delegates to the detector in read-only check mode"
+else
+  fail "the check did not invoke the detector: $(cat "$WORK/host_units.log" 2>/dev/null)"
+fi
+if grep -q 'refresh' "$WORK/host_units.log"; then
+  fail "the watchdog invoked refresh — restarting the panel feed on a 3-minute cadence"
+else
+  pass "the watchdog never invokes refresh (detect-and-report only)"
+fi
+
+# Detector found a stale unit → heal_failed, naming the unit and the fix.
+reset_work
+mk_host_units_stub
+echo 1 > "$WORK/host_units_exit"
+cat > "$WORK/host_units_out" <<'HOST_UNITS_FIXTURE'
+  host units matched by droplet-*: 2
+  STALE    droplet-device-bridge.service      started 2026-08-03T22:22:39Z  sources 2026-08-08T02:37:27Z
+  ok       droplet-host-net.service           started 2026-08-09T10:00:00Z  sources 2026-08-08T00:00:00Z
+HOST_UNITS_FIXTURE
+run_wd DROPLET_WATCHDOG_CHECKS="host_unit_staleness" >/dev/null || true
+if [ "$(wd_field host_unit_staleness status)" = "heal_failed" ]; then
+  pass "host_unit_staleness: heal_failed when a unit runs code older than the tree"
+else
+  fail "expected heal_failed, got $(wd_field host_unit_staleness status)"
+fi
+hu_msg="$(wd_field host_unit_staleness message)"
+case "$hu_msg" in
+  *droplet-device-bridge.service*) pass "the message names the stale unit" ;;
+  *) fail "message does not name the stale unit: $hu_msg" ;;
+esac
+case "$hu_msg" in
+  *refresh*) pass "the message carries the one-line fix" ;;
+  *) fail "message does not say how to fix it: $hu_msg" ;;
+esac
+
+# Two consecutive detections escalate — a CRITICAL line, not a quiet repeat.
+hu_out="$(run_wd DROPLET_WATCHDOG_CHECKS="host_unit_staleness")"
+if [ "$(wd_field host_unit_staleness status)" = "escalated" ] \
+   && printf '%s\n' "$hu_out" | grep -q 'CRITICAL'; then
+  pass "a persistently stale unit escalates to CRITICAL"
+else
+  fail "no escalation on the second detection: status=$(wd_field host_unit_staleness status)"
+fi
+
+# The detector itself failing is NOT evidence of staleness.
+reset_work
+mk_host_units_stub
+echo 2 > "$WORK/host_units_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="host_unit_staleness" >/dev/null || true
+if [ "$(wd_field host_unit_staleness status)" = "not_applicable" ]; then
+  pass "a detector that cannot run reports not_applicable, not a fake verdict"
+else
+  fail "expected not_applicable for a broken detector, got $(wd_field host_unit_staleness status)"
 fi
 
 # =============================================================================

@@ -45,6 +45,23 @@ import { aggregateArSummary, mapRows, sortByKey } from "./api-dto.js";
 export const DEFAULT_API_HTTPS_PORT = 9888;
 
 /**
+ * What the REST track is waiting on — the counterpart to
+ * `SQL_TRACK_REMEDIATION`. Every blocked error this connector raises carries
+ * it, so an operator triaging a failed connect is pointed at the things that
+ * can actually be wrong on THIS track (vendor enrollment, the discovered route
+ * contract, the box's certificate) rather than at a SQL Anywhere client that
+ * has no bearing on it.
+ *
+ * The operation string already carries the specific cause (`connect (request
+ * to Authentication.Authenticate failed: ...)`); this is the standing "what
+ * would unblock it" half.
+ */
+export const API_TRACK_REMEDIATION =
+  "needs Patterson vendor enrollment (integrationKey + Provider login behind the " +
+  "secret_ref), the route contract discovered from the box's /help page, and a " +
+  "reachable box whose certificate verifies";
+
+/**
  * Connection config for the API provider. `credentialsSecretRef` is a POINTER
  * into the encrypted secret store — the CLIENTID/SERIALKEY + Provider login
  * live behind it, NEVER cleartext here (deliberately named without the literal
@@ -105,7 +122,7 @@ export class EaglesoftApiConnector implements Connector {
   /** The discovered route map, or a blocked error naming what's missing. */
   private requireRouteMap(op: string): EaglesoftApiRouteMap {
     if (!this.config.routeMap) {
-      throw new ConnectorBlockedError(`${op} (route map not discovered — needs the box /help contract)`);
+      throw new ConnectorBlockedError(`${op} (route map not discovered)`, API_TRACK_REMEDIATION);
     }
     return this.config.routeMap;
   }
@@ -148,12 +165,12 @@ export class EaglesoftApiConnector implements Connector {
   async health(): Promise<{ ok: boolean }> {
     // Health is only meaningful after a successful connect(); before that the
     // connector is blocked (mirrors the SQL connector's contract).
-    if (!this.token) throw new ConnectorBlockedError("health (connect required first)");
+    if (!this.token) throw new ConnectorBlockedError("health (connect required first)", API_TRACK_REMEDIATION);
     return { ok: true };
   }
 
   async introspect(): Promise<IntrospectionResult> {
-    if (!this.schema) throw new ConnectorBlockedError("introspect (connect required first)");
+    if (!this.schema) throw new ConnectorBlockedError("introspect (connect required first)", API_TRACK_REMEDIATION);
     return this.schema;
   }
 
@@ -163,7 +180,7 @@ export class EaglesoftApiConnector implements Connector {
     // blocked/route error), so callers get the same validation behaviour.
     getReadQuery(name);
     if (!this.token || !this.schema) {
-      throw new ConnectorBlockedError("runRead (connect required first)");
+      throw new ConnectorBlockedError("runRead (connect required first)", API_TRACK_REMEDIATION);
     }
     const map = this.requireRouteMap("runRead");
     try {
@@ -203,7 +220,7 @@ export class EaglesoftApiConnector implements Connector {
     // stays honestly blocked — never a fake APPLIED.
     const cmd = getWriteCommand(name); // throws UnknownWriteCommandError
     assertTargetAllowed(cmd.targetTable); // throws ForbiddenTargetError
-    throw new ConnectorBlockedError("applyWrite (REST write slice deferred to a later PR)");
+    throw new ConnectorBlockedError("applyWrite (REST write slice deferred to a later PR)", API_TRACK_REMEDIATION);
   }
 
   /** Map transport/auth/route/secret failures to the shared ConnectorBlockedError
@@ -212,8 +229,8 @@ export class EaglesoftApiConnector implements Connector {
    *  (UnknownReadQueryError etc.) are thrown before this and never reach here. */
   private asBlocked(op: string, err: unknown): Error {
     if (err instanceof ConnectorBlockedError) return err;
-    if (err instanceof EaglesoftApiError) return new ConnectorBlockedError(`${op} (${err.message})`);
-    if (err instanceof Error) return new ConnectorBlockedError(`${op} (${err.message})`);
-    return new ConnectorBlockedError(op);
+    if (err instanceof EaglesoftApiError) return new ConnectorBlockedError(`${op} (${err.message})`, API_TRACK_REMEDIATION);
+    if (err instanceof Error) return new ConnectorBlockedError(`${op} (${err.message})`, API_TRACK_REMEDIATION);
+    return new ConnectorBlockedError(op, API_TRACK_REMEDIATION);
   }
 }

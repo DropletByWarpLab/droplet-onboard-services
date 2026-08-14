@@ -528,7 +528,14 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       .set("x-test-role", "admin")
       .send({
         model: "ollama/qwen3",
-        messages: [{ role: "user", content: "what can you do?" }],
+        // WARP-1921 — was "what can you do?", which matches no §3 domain rule
+        // and therefore advertises the core set only once TOOL_SELECTION_MODE
+        // ships as "domains". This test is about ROLE narrowing (an admin
+        // keeps write tools where a lesser role loses them), so the prompt
+        // has to reach the network domain or selection, not RBAC, is what it
+        // measures. The neighbouring family-role test already phrases it this
+        // way.
+        messages: [{ role: "user", content: "can you block a device on the network?" }],
       });
     expect(res.status).toBe(200);
   });

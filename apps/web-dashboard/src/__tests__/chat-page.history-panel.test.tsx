@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 
 // Mock api so the page renders without hitting the network.
 const listConversationsMock = vi.fn().mockResolvedValue([]);
@@ -76,6 +76,21 @@ describe("/chat page mounts the history panel", () => {
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByText(/no chats yet/i)).toBeInTheDocument(),
+    );
+  });
+
+  // WARP-1787: the drawer is a full-width sheet below 720px, so there is no
+  // backdrop strip left to tap and a phone has no Escape key. The rail's
+  // header Close button is the only remaining way out.
+  it("closes the mobile history drawer from its own header button", async () => {
+    render(<ChatPage />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /open chat history/i }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^close$/i }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
   });
 

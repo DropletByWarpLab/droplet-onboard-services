@@ -370,7 +370,7 @@ function MotifRemoteFqdn({ fqdn }: { fqdn: string }) {
       <div className="flex items-center gap-2">
         <Smartphone size={15} className="flex-none text-label-tertiary" aria-hidden="true" />
         <span className="type-caption-1 text-label-secondary">
-          Same secure address at home and away
+          Same secure address on-site and away
         </span>
         <span className="ml-auto inline-flex flex-none items-center gap-1 type-caption-1 text-label-tertiary">
           <ShieldCheck size={13} aria-hidden="true" />

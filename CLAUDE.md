@@ -183,6 +183,24 @@ Full rationale: WARP-1670; device-side trust model: `docs/SECURITY.md`.
 
 ## Ollama call path (chat vs lifecycle)
 
+> Heading kept verbatim on purpose: it is a named anchor cited from five
+> places, two of them live source comments (`scripts/lib/secrets.sh`,
+> `services/voice-io/voice/llm.py`). Renaming it dangles those references.
+>
+> **Read `INFERENCE_RUNTIME` before anything below applies (WARP-1870).** A box
+> provisioned after 2026-08-11 defaults to the **Docker Model Runner** on
+> `:12434` — no `ollama-manager`, no `:8002`, no `/proxy`, nothing on `:11434`,
+> and the whole proxy-timeout class below simply does not exist. The section
+> below describes the Ollama shape, still selectable with
+> `INFERENCE_RUNTIME=ollama ./scripts/setup.sh`.
+>
+> `OLLAMA_URL`, `RAGAS_OLLAMA_URL` and `OLLAMA_CHAT_PATH` are **how DMR is
+> consumed too** — the names are historical. Never infer the runtime from a
+> variable's name; read its value. A DMR-shaped URL with a non-dmr runtime
+> means the variable was lost, every model silently reports `tools=false`, and
+> `docker restart` will not fix it — only `--force-recreate` re-reads env.
+> Full debugging both ways: the `debug-ollama-call-path` skill.
+
 The inference host runs **Ollama** (`:11434`, inference) and
 **ollama-manager** (`:8002`, lifecycle + opt-in observability sidecar).
 They are NOT interchangeable:
@@ -228,7 +246,7 @@ npm run test:ai-gateway     # ai-gateway only
 
 ## Docker stack
 
-29 compose services (13 default-on, the rest profile-gated) behind
+30 compose services (13 default-on, the rest profile-gated) behind
 nginx (dashboard at `/`, orchestrator at `/api/`, ai-gateway at `/ai/`,
 Nextcloud at `/nextcloud/`). Full service/port/profile table +
 .env-update procedure: the **`docker-stack`** skill. Two
@@ -240,9 +258,11 @@ always-relevant gotchas:
   auto-merges `single-box`, which makes ollama, openwrt, switch, and
   camera-discovery default-on. On other shapes, switch/camera-discovery
   stay opt-in via `full` (real hardware + operator credentials). The
-  `docs` profile (OnlyOffice `docserver`, in-browser editing/co-authoring,
-  WARP-882) is **default-on** on the 32 GB box (~2 GB additive); a ≤8 GB
-  box drops `docs` AND sets `DOCS_ENABLED=0`.
+  `docs` profile (`docserver` document engine, in-browser viewing/editing,
+  WARP-882/WARP-1686) is **default-on** on the 32 GB box (~2 GB additive);
+  a ≤8 GB box drops `docs` AND sets `DOCS_ENABLED=0`. The engine is
+  selectable via `DOCS_ENGINE` — Collabora CODE by default (LibreOffice,
+  no licensing fee, ADR-034), OnlyOffice retained for an OEM-licensed SKU.
 - `docker restart` does **not** re-read the env_file — after editing
   `.env` (including `*_MEM_LIMIT` resource limits, ADR-021), recreate:
   `docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate <service>`.
@@ -264,11 +284,15 @@ Full per-variable reference (defaults, ports, resource limits):
   `http://orchestrator:3000/api/files`). Raw Nextcloud cannot serve
   these tools — see WARP-861.
 - `DOCS_ENABLED` is an EXPLICIT boolean (never derived from
-  `DOCS_INTERNAL_URL` emptiness); `ONLYOFFICE_JWT_SECRET` is the shared
-  secret the engine, the Nextcloud `onlyoffice` connector, AND the
-  orchestrator all verify (per-device, never tracked). **License:**
-  OnlyOffice CE (AGPLv3) is what we build/test; an OnlyOffice
-  OEM/commercial license is required before GA (WARP-882). Full row set:
+  `DOCS_INTERNAL_URL` emptiness); `DOCS_ENGINE` selects the engine
+  (`collabora` default / `onlyoffice`) and `DOCS_ENGINE_IMAGE` +
+  `DOCS_INTERNAL_URL` must track it (single-box.sh writes the trio
+  together). `ONLYOFFICE_JWT_SECRET` stays required under BOTH engines —
+  the orchestrator signs editor-session tokens with it (per-device, never
+  tracked). **License (ADR-034):** default engine Collabora CODE has NO
+  licensing fee (MPLv2 core); OnlyOffice CE (AGPLv3) needs an OnlyOffice
+  OEM/commercial license before GA and is kept only as the
+  `DOCS_ENGINE=onlyoffice` option (WARP-882/WARP-1686). Full row set:
   `docs/ENVIRONMENT.md`.
 - `DROPLET_FIPS_MODE` is the SINGLE FIPS 140-3 knob (per-customer,
   default OFF; flipped only via `setup.sh --fips` / `--no-fips`, which

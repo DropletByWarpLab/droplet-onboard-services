@@ -123,6 +123,46 @@ removes them.
 | `BOOT_READINESS_URL` | `http://127.0.0.1/api/health` | Health endpoint polled to leave the boot screen (loopback orchestrator behind the gateway) |
 | `BOOT_MAX_SECONDS` | `90` | Timeout fallback — surface the live UI even if readiness never reports healthy |
 | `SIM_OUTPUT` | `/tmp/tft_preview.png` | Simulated output path (also used as preview cache for PyPortal) |
+| `PANEL_RAIL_WIFI_QR` | `1` | Rack panel only. `0` removes the rail's Wi-Fi QR face — see below |
+| `PANEL_RAIL_WIFI_SECONDS` | `45` | How long the rail's Wi-Fi face stays up before reverting on its own |
+
+## The rack panel's QR rail has two faces (WARP-1782)
+
+On the wide rack panel, tapping the right-hand rail flips the QR between:
+
+| Face | Payload | Caption |
+|---|---|---|
+| Dashboard *(resting)* | `https://<public_host>/dashboard` | `SCAN TO OPEN` |
+| Wi-Fi | `WIFI:T:WPA;S:<ssid>;P:<psk>;;` | `JOIN WI-FI` |
+
+Two dots above the QR card mark which face is up. Tap again to go straight
+back; otherwise the panel reverts on its own after `PANEL_RAIL_WIFI_SECONDS`.
+
+**Why this is not the thing the design brief §8 forbids.** That rule — never
+render the PSK in LIVE state — is about a credential *sitting* on a rack front
+in a shared room. This one is *revealed*: it is not on the glass until someone
+standing at the rack asks for it, and it takes itself back off. Three
+properties make that hold, and none of them is optional:
+
+- **The passphrase is never drawn as text.** It exists only inside the QR,
+  which has to be scanned from roughly 25 cm. Text on a rack front is readable
+  across the room and already in frame of whatever camera points at the rack.
+  The rail's typed-fallback line carries the SSID and the way back, nothing else.
+- **The window is derived from a deadline, not a timer.** `rail_face()`
+  recomputes on every call, so the revert cannot be missed — and the face also
+  drops instantly if the Wi-Fi feed goes away mid-reveal.
+- **`PANEL_RAIL_WIFI_QR=0` removes it entirely**, restoring the single-face
+  rail exactly as it was, for a deployment that will not take the trade.
+
+Residual risk, stated plainly: anyone who can touch the panel can photograph
+the code and decode it. Anyone who can touch the panel is already standing at
+the rack.
+
+The face refuses to arm at all when there is no passphrase, when the AP is
+disabled or unreachable, or when the payload exceeds the ~62-byte budget that
+keeps the code above the 4 px/module scan floor (a 32-char SSID plus a 16-char
+passphrase clears it). A rail that stays on the dashboard is the honest
+failure; a card nobody can scan is the one the brief calls worse than no QR.
 
 ## Wi-Fi QR (static password, default)
 
@@ -147,6 +187,30 @@ so the bridge sources the QR creds differently per `DROPLET_AP_MODE`:
 | `uci` (default) | multi-box | OpenWrt router's UCI `wireless.*` over SSH (`OPENWRT_*`) |
 | `hostapd` | single-box | `DROPLET_AP_SSID` / `DROPLET_AP_PSK` from the bridge env; falls back to parsing `/etc/hostapd.conf` inside the `droplet-openwrt` container |
 | `auto` | either | hostapd when `DROPLET_AP_SSID` is set or UCI wireless is empty/unreachable; otherwise uci |
+
+`DROPLET_AP_MODE` gates the **Wi-Fi scan** behind `GET /wifi` as well, not
+just the QR creds (WARP-1830). Only the `uci` shape has a router to ask, so
+only it opens the SSH `iwinfo` scan; the other shapes go straight to the host
+`nmcli` fallback. When neither can answer, the two cases are reported
+differently on purpose:
+
+| `state` | Meaning |
+|---------|---------|
+| `unavailable` | a router we were right to ask did not answer — a **fault**, with `error` set |
+| `not-applicable` | this shape has no router of its own to scan; Wi-Fi is served by the external AP. `error` is `null` and `detail` says so |
+
+That distinction matters on the `edge-router` shape (ADR-033 §3), where the
+box is a wired DHCP client with its radio deactivated and an **empty network
+list is the correct answer** — not a degraded one.
+
+> **`sshpass` is a runtime dependency of the `uci` shape only.** When
+> `OPENWRT_PASS` is set the bridge wraps `ssh` in `sshpass`, and that binary
+> is not installed by `install-device-bridge.sh` or any image build. Install
+> it (`apt-get install sshpass`) on a multi-box appliance, or leave
+> `OPENWRT_PASS` empty and give the `droplet` user a key-based login to the
+> router — the bridge already builds a plain `ssh` argv in that case. If it
+> is missing, `GET /wifi` and `GET /openwrt/qr` say so in `error` rather than
+> surfacing a bare `[Errno 2] ... 'sshpass'`.
 
 The single-box shape runs a **raw hostapd AP on the host** (via the
 `droplet-openwrt-attach` script), not OpenWrt/UCI — so `uci show wireless`

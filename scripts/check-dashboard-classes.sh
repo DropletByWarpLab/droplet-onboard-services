@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
-# check-dashboard-classes.sh — WARP-288 (classes) + WARP-291 (native dialogs).
+# check-dashboard-classes.sh — WARP-288 (classes) + WARP-291 (native
+# dialogs) + the DESIGN.md design-token ratchet.
 #
-# Two guards in one script:
+# Five guards in one script. 1 and 2 are clean-tree guards on things that
+# DON'T EXIST; 3–5 are a shrink-only ratchet on things that DO exist and
+# still shouldn't be used — see the block above them for the full design.
 #
 # 1. Bad Tailwind utility class names that don't exist in
 #    `apps/web-dashboard/src/app/globals.css` or
@@ -23,7 +26,8 @@
 #
 # Exit 0 when clean, 1 with a per-hit summary when any rule fires.
 #
-# Excluded from both scans:
+# Excluded from the guard-1 and guard-2 scans (guards 3–5 exclude more,
+# see EXCLUDED_PATHS_REGEX):
 #   - `__tests__/` directories (tests intentionally reference these
 #     names as strings).
 #   - any `*.md` files (audit doc + ROADMAP reference both by name).
@@ -210,3 +214,182 @@ if [ "$dialog_exit_code" -ne 0 ]; then
 fi
 
 echo "check-native-dialogs: OK (0 native confirm/alert/prompt calls across $SRC_ROOT)"
+
+# ─────────────────────────────────────────────────────────────────────
+# Guards 3–5: the design-token ratchet.
+#
+# Guards 1 and 2 above catch things that DON'T EXIST. These three catch
+# things that DO exist and still shouldn't be used:
+#
+#   3. legacy-token    — pre-DESIGN.md tokens (`dp-card`, `bg-surface-*`,
+#                        `text-label-*`, …). All valid CSS, which is
+#                        exactly why 1k+ occurrences sailed through
+#                        review. New code must use the ratified system.
+#   4. accent-alpha    — `-accent/NN` alpha utilities. `accent` is
+#                        declared as `var(--color-accent)` in
+#                        tailwind.config.ts with no `<alpha-value>`
+#                        placeholder, and `--color-accent` is a hex, so
+#                        Tailwind silently drops EVERY `-accent/NN`
+#                        utility. `focus-visible:ring-accent/40` renders
+#                        no ring at all — DESIGN.md requires "3px accent
+#                        focus rings, everywhere, without exception".
+#   5. white-on-accent — `text-white`/`bg-white`/`#fff` on the same
+#                        className as an accent fill. DESIGN.md: "Don't
+#                        hardcode `#fff` on the accent" — On-Accent flips
+#                        to near-black (#1d1d1f) in dark mode, so white
+#                        is a contrast failure there (shipped twice,
+#                        caught by hand at 2.98:1).
+#
+# This is a SHRINK-ONLY RATCHET, not a clean-tree guard. Today's debt is
+# grandfathered in `scripts/dashboard-token-allowlist.txt`; anything not
+# on that list fails. The allowlist may only ever get shorter — an entry
+# whose file no longer matches is a hard failure, because a stale entry
+# is how a ratchet quietly stops ratcheting.
+#
+# Scope carve-outs (see EXCLUDED_PATHS_REGEX): the setup wizard and the
+# auth routes are a deliberately separate visual identity (WARP-1078),
+# and co-located `*.test.ts(x)` files reference these tokens on purpose
+# (WARP-288 negative guards, plus contrast-pinning assertions).
+#
+# Refs: DESIGN.md + .impeccable/design.json (umbrella repo root).
+# ─────────────────────────────────────────────────────────────────────
+
+ALLOWLIST_FILE="$REPO_ROOT/scripts/dashboard-token-allowlist.txt"
+
+if [ ! -f "$ALLOWLIST_FILE" ]; then
+  echo "check-dashboard-tokens: cannot find $ALLOWLIST_FILE" >&2
+  exit 2
+fi
+
+# Paths (relative to SRC_ROOT) that the ratchet does not police at all.
+#   - app/{login,setup,change-password,invite,tour} + components/setup:
+#     the onboarding + auth identity, deliberately its own look
+#     (WARP-1078).
+#   - The components those routes solely own. PasswordRulesChecklist is
+#     NOT here: /settings and /users consume it too, so it is in scope.
+#   - Co-located `*.test.ts(x)`. `__tests__/` is already dropped by
+#     --exclude-dir; these are the same thing in a different place.
+EXCLUDED_PATHS_REGEX='^(app/(login|setup|change-password|invite|tour)/|components/setup/|components/tour/ProductTour\.tsx:|components/auth/(SignInForm|AuthLayout|WelcomeFlourish|AuroraPanel)\.tsx:|[^:]*\.test\.(ts|tsx):)'
+
+# Whole-token match, same anchoring style as BAD_CLASSES above.
+LEGACY_TOKEN_REGEX='(^|[^A-Za-z0-9_-])(dp-card|dp-btn[A-Za-z0-9_-]*|dp-input|bg-surface-[A-Za-z0-9_-]+|text-label-[A-Za-z0-9_-]+|text-accent|bg-accent|border-separator|bg-separator|bg-label-[A-Za-z0-9_-]+|ring-accent|--color-accent[A-Za-z0-9_-]*)([^A-Za-z0-9_-]|$)'
+
+# Any `<utility>-accent/<number>`: ring-accent/40, bg-accent/10, …
+ACCENT_ALPHA_REGEX='(^|[^A-Za-z0-9_-])[a-z-]*-accent/[0-9]+'
+
+# An accent fill. Paired with a white-literal grep below to approximate
+# "white sitting on the accent". Deliberately same-line only — see the
+# note on false negatives in the failure message.
+ACCENT_FILL_REGEX='(^|[^A-Za-z0-9_-])(bg-accent|bg-brand|bg-\[var\(--brand\)\])([^A-Za-z0-9_-]|$)'
+WHITE_LITERAL_REGEX='(text-white|bg-white|#fff)'
+
+# Emit `relpath:line:content` for every non-excluded match of $1.
+# Pure-comment lines are dropped the same way the dialog guard drops
+# them: doc comments legitimately name these tokens (`lib/brand.ts`
+# documents `--color-accent`) and commented-out code never ships.
+scan_src() {
+  set +e
+  grep -rEn \
+    --include='*.ts' \
+    --include='*.tsx' \
+    --include='*.css' \
+    --exclude-dir='__tests__' \
+    --exclude-dir='node_modules' \
+    --exclude-dir='.next' \
+    "$1" \
+    "$SRC_ROOT" \
+    | sed "s|^${SRC_ROOT}/||" \
+    | grep -vE "$EXCLUDED_PATHS_REGEX" \
+    | grep -vE ':[0-9]+:[[:space:]]*\*' \
+    | grep -vE ':[0-9]+:[[:space:]]*//' \
+    | grep -vE ':[0-9]+:[[:space:]]*\{/\*'
+  set -e
+}
+
+# Allowlisted paths for rule $1, in file order.
+allowlist_for() {
+  grep -E "^$1[[:space:]]" "$ALLOWLIST_FILE" | awk '{print $2}' || true
+}
+
+ratchet_exit_code=0
+
+# Compare one rule's hits against its allowlist.
+#   $1 rule name   $2 hit lines (`relpath:line:content`)   $3 explanation
+#
+# Paths are compared as exact strings via awk, never as regexes: Next.js
+# dynamic segments (`app/cameras/[name]/page.tsx`) are character classes
+# to grep and would silently never match their own allowlist entry.
+check_ratchet_rule() {
+  rule="$1"
+  hits="$(printf '%s\n' "$2" | grep -v '^$' || true)"
+  explanation="$3"
+
+  allowed="$(allowlist_for "$rule" | grep -v '^$' || true)"
+
+  # New violations: hits in files that are not allowlisted.
+  new_hits="$(awk '
+    NR == FNR { ok[$0] = 1; next }
+    NF { p = $0; sub(/:.*/, "", p); if (!(p in ok)) print }
+  ' <(printf '%s\n' "$allowed") <(printf '%s\n' "$hits"))"
+
+  if [ -n "$new_hits" ]; then
+    count="$(printf '%s\n' "$new_hits" | wc -l | tr -d '[:space:]')"
+    ratchet_exit_code=1
+    echo
+    echo "✘ [${rule}] ${count} new violation(s) — ${explanation}"
+    printf '%s\n' "$new_hits" | sed 's/^/    /'
+  fi
+
+  # Stale entries: allowlisted files that no longer match.
+  stale="$(awk '
+    NR == FNR { p = $0; sub(/:.*/, "", p); if (p != "") seen[p] = 1; next }
+    NF && !($0 in seen)
+  ' <(printf '%s\n' "$hits") <(printf '%s\n' "$allowed"))"
+
+  if [ -n "$stale" ]; then
+    ratchet_exit_code=1
+    echo
+    echo "✘ [${rule}] allowlist entries that no longer match — delete them:"
+    printf '%s\n' "$stale" | sed 's/^/    /'
+  fi
+}
+
+check_ratchet_rule "legacy-token" "$(scan_src "$LEGACY_TOKEN_REGEX")" \
+  "pre-DESIGN.md token in a file that is not grandfathered"
+
+check_ratchet_rule "accent-alpha" "$(scan_src "$ACCENT_ALPHA_REGEX")" \
+  "silently-dropped \`-accent/NN\` utility (no <alpha-value> on the accent token)"
+
+check_ratchet_rule "white-on-accent" \
+  "$(scan_src "$ACCENT_FILL_REGEX" | grep -E "$WHITE_LITERAL_REGEX" || true)" \
+  "hardcoded white on an accent fill (On-Accent is #1d1d1f in dark mode)"
+
+if [ "$ratchet_exit_code" -ne 0 ]; then
+  cat <<'EOF'
+
+check-dashboard-tokens: the design-token ratchet fired.
+
+New violations: use the ratified system instead of the legacy token.
+  See DESIGN.md + .impeccable/design.json at the umbrella repo root.
+  - legacy-token    → the DESIGN.md surface/label/separator tokens.
+  - accent-alpha    → drop the `/NN`, or use an explicit
+                      color-mix()/rgba value. `-accent/NN` compiles to
+                      nothing at all today.
+  - white-on-accent → use the on-accent token (`--on-brand` /
+                      `text-accent-foreground`), never `text-white`.
+                      Note this rule only sees a white literal and an
+                      accent fill on the SAME line; splitting them
+                      across lines is a known blind spot, not a
+                      loophole to use.
+
+Stale allowlist entries: a file was cleaned but its grandfather line was
+  left behind. Delete the line from scripts/dashboard-token-allowlist.txt
+  in the same PR — the allowlist is only allowed to shrink, and an entry
+  nobody removes is how the ratchet silently stops ratcheting.
+
+Never add a line to the allowlist to make this pass.
+EOF
+  exit 1
+fi
+
+echo "check-dashboard-tokens: OK (0 new legacy-token / accent-alpha / white-on-accent sites)"

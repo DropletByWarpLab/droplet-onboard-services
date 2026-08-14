@@ -14,6 +14,7 @@ import {
   splitLocalInput,
   joinLocalInput,
   quarterHourOptions,
+  quarterHourOptionsForDevice,
   snapTimeToQuarter,
 } from "@/components/calendar/datetime-picker-helpers";
 
@@ -76,6 +77,63 @@ describe("datetime picker helpers", () => {
         expect(o.label.length).toBeGreaterThan(0);
       }
     });
+
+    it("stays pinned to a 24-hour clock — it is the SSR/hydration baseline", () => {
+      // If this ever localizes, every non-en-GB visitor gets a hydration
+      // mismatch on the calendar form. The device-locale swap belongs in
+      // quarterHourOptionsForDevice(), called after mount.
+      const byValue = new Map(quarterHourOptions().map((o) => [o.value, o.label]));
+      expect(byValue.get("09:45")).toBe("09:45");
+      expect(byValue.get("14:30")).toBe("14:30");
+      expect(quarterHourOptions().some((o) => /AM|PM/i.test(o.label))).toBe(false);
+    });
+  });
+
+  // WARP-1793: QA read "09:45"/"14:30" on a US iPhone with no AM/PM anywhere.
+  describe("quarterHourOptionsForDevice", () => {
+    const resolved = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+    }).resolvedOptions();
+    const is12Hour =
+      resolved.hourCycle === "h11" || resolved.hourCycle === "h12";
+
+    it("keeps the machine values byte-identical to the pinned grid", () => {
+      // Only the label is localized. If values drifted, the <select> would
+      // stop matching its state and every onChange payload would change shape.
+      expect(quarterHourOptionsForDevice().map((o) => o.value)).toEqual(
+        quarterHourOptions().map((o) => o.value),
+      );
+    });
+
+    it("gives every slot a non-empty label", () => {
+      for (const o of quarterHourOptionsForDevice()) {
+        expect(o.label.length).toBeGreaterThan(0);
+      }
+    });
+
+    it.runIf(is12Hour)(
+      "renders a 12-hour clock with a meridiem on a 12-hour runtime",
+      () => {
+        const byValue = new Map(
+          quarterHourOptionsForDevice().map((o) => [o.value, o.label]),
+        );
+        // `hour: "numeric"` (not "2-digit") so this reads "9:45 AM", which is
+        // what QA asked for, rather than the clumsier "09:45 AM".
+        expect(byValue.get("09:45")).toMatch(/^9:45\s?AM$/i);
+        expect(byValue.get("14:30")).toMatch(/^2:30\s?PM$/i);
+      },
+    );
+
+    it.runIf(!is12Hour)(
+      "keeps a 24-hour clock on a 24-hour runtime",
+      () => {
+        const byValue = new Map(
+          quarterHourOptionsForDevice().map((o) => [o.value, o.label]),
+        );
+        expect(byValue.get("14:30")).toMatch(/14[:.]30/);
+        expect(byValue.get("14:30")).not.toMatch(/PM/i);
+      },
+    );
   });
 
   describe("snapTimeToQuarter", () => {

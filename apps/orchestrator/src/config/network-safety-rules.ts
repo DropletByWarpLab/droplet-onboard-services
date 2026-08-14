@@ -38,6 +38,26 @@ const TIER_2_OPERATIONS = new Set([
   "set_hostname",
   // UPnP/NAT-PMP automatic port opening — a firewall-class exposure change.
   "set_upnp",
+  // WARP-1703 — band steering is an SSID-IDENTITY change, not a frequency
+  // one, so it belongs beside set_wifi_password rather than set_channel.
+  // The AP-side applier (droplet-edge-router `/etc/init.d/droplet-band-steer`)
+  // sets `wireless.default_radio1.ssid` to the 2.4 GHz SSID when ON and to
+  // `<ssid>-5g` when OFF. Flipping it therefore RENAMES the 5 GHz network:
+  // every client associated on that band drops and has to be reconnected by
+  // hand to a differently-named SSID — the same "re-auth every device" cost
+  // that put create_guest_network here. And the orchestrator fans the write
+  // across every ONLINE Droplet-image AP at once, so the blast radius is the
+  // whole household, not one device.
+  "set_ap_band_steering",
+  // WARP-1712 — changing the ACCESS POINT's passphrase, mirroring
+  // `set_wifi_password` on the router: the radios restart and every device on
+  // the extender has to re-authenticate with the new secret, across every
+  // ONLINE Droplet-image AP at once. Its sibling `set_ap_wifi_ssid` is
+  // deliberately absent from this set: an SSID-only change matches the
+  // router's Tier-1 `set_ssid` (same blast radius, same setup-wizard
+  // contract). The route picks whichever operation the payload warrants, so a
+  // save that carries a new password is always confirmed.
+  "set_ap_wifi_password",
   "create_firewall_zone",
   "add_firewall_rule",
   // Rewriting a zone's default input/output/forward policy can sever the
@@ -52,6 +72,15 @@ const TIER_2_OPERATIONS = new Set([
   // itself is additionally refused/extra-confirmed at the routing layer.
   "create_interface",
   "edit_interface",
+  // WARP-1907: enable/disable a PHYSICAL router jack. Same tier as the switch's
+  // port writes, and for the same reason — one click takes whatever is plugged
+  // into that jack off the network. The routing service adds a second, narrower
+  // refusal on top (409 unless `force`) for the two jacks where the blast radius
+  // is the household rather than one cable: the WAN, and a management jack with
+  // a live link. Neither operation is in the MCP-admitted set; the routes are
+  // owner/admin only, like create_interface.
+  "router_port_enable",
+  "router_port_disable",
   // Camera subnet
   "camera_subnet_setup",
   "camera_subnet_teardown",
@@ -122,6 +151,20 @@ const BLAST_RADIUS_REASON: Record<string, string> = {
     "Editing a network interface can disconnect devices on it. If it's the interface this dashboard is on, you could lose your connection until it reverts.",
   restart_network:
     "Restarting networking briefly drops every interface and reconnects each device — this dashboard included — for a few seconds.",
+  // WARP-1907. Two sentences, not one shared "port changed" line: turning a jack
+  // on and cutting one off have opposite consequences, and a single reason would
+  // have to be vague enough to cover both. The jack-specific warning (this is
+  // your internet / this is the cable this dashboard arrives on) comes from the
+  // routing service's `disable_guard`, which knows the deployment's management
+  // interfaces; this is the generic Tier-2 line under it.
+  router_port_disable:
+    "Turning off a router port immediately disconnects whatever is plugged into it. If that cable feeds a switch or an access point, everything behind it drops too.",
+  router_port_enable:
+    "Turning a router port back on restores the connection to whatever is plugged into it.",
+  set_ap_band_steering:
+    "This renames your 5 GHz Wi-Fi network on every access point at once. Devices connected to it will drop and won't come back on their own — you'll need to reconnect each one to the new name.",
+  set_ap_wifi_password:
+    "This changes the Wi-Fi password on your access point. Every device connected to it will drop and won't come back on their own — you'll need to reconnect each one with the new password.",
 };
 
 /** Rate limit for network commands: max per entity per minute. */

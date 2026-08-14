@@ -183,8 +183,19 @@ done
 # The env_file-inheriting trio would also receive OPENSSL_CONF=<fips cnf> from
 # a FIPS-on .env; their images carry the cnf but not the module, so crypto
 # would break at first use. Pin the stock config (environment beats env_file).
+#
+# ⚠ Capture the block FIRST, exactly like the DROPLET_FIPS_REQUIRED loop
+# above. `svc_block "$svc" | grep -q …` looks equivalent but is a race under
+# this file's `set -o pipefail`: grep -q exits the instant it matches, awk
+# takes SIGPIPE (141) while still writing the rest of the block, and
+# pipefail promotes that to the pipeline's status — so a PRESENT pin reads
+# as absent. It only fires when enough of the block follows the matched
+# line, which is why this passed for a year and then failed the moment the
+# camera-discovery block grew from 70 lines to 90 (WARP-1957). A guard that
+# silently flips to "fail" on unrelated growth is worse than no guard.
 for svc in device-identity-svc camera-discovery fleet-agent; do
-  if svc_block "$svc" | grep -qE '^\s+(- OPENSSL_CONF=/etc/ssl/openssl\.cnf|OPENSSL_CONF: /etc/ssl/openssl\.cnf)$'; then
+  block="$(svc_block "$svc")"
+  if printf '%s\n' "$block" | grep -qE '^\s+(- OPENSSL_CONF=/etc/ssl/openssl\.cnf|OPENSSL_CONF: /etc/ssl/openssl\.cnf)$'; then
     pass "compose pins stock OPENSSL_CONF for $svc (env_file would leak the FIPS cnf)"
   else
     fail "compose does not pin stock OPENSSL_CONF for $svc"

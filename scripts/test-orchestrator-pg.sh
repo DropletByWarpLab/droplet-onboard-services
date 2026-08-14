@@ -56,7 +56,19 @@ run_pg_tests() {
   (cd "$REPO_ROOT/apps/orchestrator" && npx prisma migrate deploy)
 
   echo "--- vitest (pg-gated files) ---"
-  RUN_PG_INTEGRATION=1 npm run -w @droplet/orchestrator test -- pg.test
+  # Keep this env in lockstep with the pg-integration job in
+  # .github/workflows/orchestrator-tests.yml — erp-api-e2e.pg.test.ts drives the
+  # real Express app over HTTP, so it needs the app configured (auth off, and an
+  # encryption key for the stored ERP credentials), not just a database. The
+  # rationale is spelled out in that workflow.
+  #
+  # The key is minted per run, never committed: the suite encrypts and decrypts
+  # within one process, so a stable value buys nothing and a literal here would
+  # be a key checked into the repo.
+  RUN_PG_INTEGRATION=1 \
+  AUTH_ENABLED=false \
+  DEVICE_SECRET_KEY="$(openssl rand -base64 32)" \
+    npm run -w @droplet/orchestrator test -- pg.test
 }
 
 # ---------------------------------------------------------------------------

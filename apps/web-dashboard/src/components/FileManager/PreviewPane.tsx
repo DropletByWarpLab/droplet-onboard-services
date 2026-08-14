@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { X, Download, FileText, Pencil } from "lucide-react";
-import { getDownloadUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
+import { getDownloadUrl, getPreviewUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import { isEditableOfficeFile } from "@/lib/office-files";
+import { labelForMime } from "@/lib/mime-labels";
 import type { FileEntryInfo } from "@/lib/types";
 import { ReindexButton } from "./ReindexButton";
 
@@ -30,7 +31,7 @@ const CODE_EXT = {
   py: "language-python", sh: "language-shell",
 } as const;
 
-function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "text" | "other" {
+function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "text" | "office" | "other" {
   const mime = file.mimeType ?? "";
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   if (mime.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"].includes(ext)) {
@@ -39,14 +40,29 @@ function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "te
   if (mime === "application/pdf" || ext === "pdf") return "pdf";
   if (mime.startsWith("video/") || ["mp4", "webm", "mov", "mkv", "avi"].includes(ext)) return "video";
   if (mime.startsWith("audio/") || ["mp3", "wav", "ogg", "m4a", "flac"].includes(ext)) return "audio";
+  // WARP-1967: the text branch stays AHEAD of the office branch on purpose. A
+  // .csv is in both sets — isEditableOfficeFile() admits it so the Edit button
+  // can open it in the spreadsheet editor — but rendering it as text here is
+  // faithful, instant, and needs no round-trip to the engine.
   if (TEXT_EXTS.has(ext) || mime.startsWith("text/")) return "text";
+  // WARP-1967: Office documents render as a server-side page image. Same
+  // predicate that gates the Edit button, so the two affordances can never
+  // disagree about what "an Office file" is.
+  if (isEditableOfficeFile(file)) return "office";
   return "other";
 }
 
 /**
  * Full-bleed preview modal supporting images, PDFs, video, audio, and text.
- * Videos and audio stream directly from the download endpoint. PDFs use a
- * native <object> tag with the browser's PDF viewer — no external JS lib.
+ * Videos and audio stream directly from the file endpoint. PDFs use a native
+ * <object> tag with the browser's PDF viewer — no external JS lib.
+ *
+ * Every embedded tag loads `getPreviewUrl`, NOT `getDownloadUrl`. The download
+ * URL answers with `Content-Disposition: attachment`, and a browser honours that
+ * inside <object> by downloading the file — which made Preview raise a Save-As
+ * dialog over an empty modal instead of rendering. The preview URL is the same
+ * bytes served inline. The Download button still uses the attachment URL, which
+ * is the one place that behaviour is wanted.
  */
 export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPaneProps) {
   const [textContent, setTextContent] = useState<string | null>(null);
@@ -56,6 +72,18 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
   // non-editable file (or a page that doesn't mount the editor) never makes a
   // needless call and never shows a dead button.
   const [docsReady, setDocsReady] = useState(false);
+  // WARP-1967: an Office page image is rendered SERVER-side and can legitimately
+  // be unavailable — the docs profile is RAM-gated off on a small box, and the
+  // engine can be mid-restart. When the request fails we fall back to the same
+  // honest empty state a binary blob gets, rather than a broken-image icon.
+  // Keyed on the PATH that failed, not a bare boolean, and derived during
+  // render rather than reset in an effect. useEffect runs AFTER paint, so
+  // resetting a boolean there meant a reused modal (arrow-key paging, opening
+  // another row) painted one frame of the PREVIOUS file's failure state —
+  // "No preview available" under the new file's name — before the reset
+  // landed. Deriving it makes the stale frame unrepresentable.
+  const [failedThumbPath, setFailedThumbPath] = useState<string | null>(null);
+  const officeThumbFailed = failedThumbPath === file.path;
   const editable = !!onEdit && isEditableOfficeFile(file);
   const kind = getKind(file);
 
@@ -103,7 +131,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
     };
   }, [file.path, kind]);
 
-  const downloadUrl = getDownloadUrl(file.path);
+  const previewUrl = getPreviewUrl(file.path);
 
   return (
     <div
@@ -127,11 +155,16 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             >
               {file.name}
             </h3>
+            {/* WARP-1877: the type reads as words here for the same reason it
+                does in the Files detail panel — this modal is one click from
+                it, so a raw MIME leaking here undoes the fix. The full string
+                stays reachable as the tooltip, and only when there is one. */}
             <p
               className="type-caption-1"
-              style={{ color: "var(--text-faint)", fontFamily: "var(--font-mono)" }}
+              title={file.mimeType || undefined}
+              style={{ color: "var(--text-faint)" }}
             >
-              {file.mimeType || "Unknown type"}
+              {labelForMime(file.mimeType, file.name)}
             </p>
           </div>
           <div className="flex items-center gap-1.5">
@@ -182,8 +215,8 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
                 alt={file.name}
                 className="max-w-full max-h-[calc(90vh-64px)] object-contain"
                 onError={(e) => {
-                  // Fall back to the raw download endpoint if the preview API 404s
-                  (e.target as HTMLImageElement).src = downloadUrl;
+                  // Fall back to the raw file bytes if the thumbnail API 404s
+                  (e.target as HTMLImageElement).src = previewUrl;
                 }}
               />
             </div>
@@ -191,7 +224,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
 
           {kind === "pdf" && (
             <object
-              data={`${downloadUrl}#toolbar=0`}
+              data={`${previewUrl}#toolbar=0`}
               type="application/pdf"
               className="w-full h-[calc(90vh-64px)]"
             >
@@ -211,7 +244,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
           {kind === "video" && (
             <div className="flex items-center justify-center min-h-full p-4">
               <video
-                src={downloadUrl}
+                src={previewUrl}
                 controls
                 className="max-w-full max-h-[calc(90vh-64px)]"
               />
@@ -234,7 +267,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
                 >
                   {file.name}
                 </p>
-                <audio src={downloadUrl} controls className="w-full" />
+                <audio src={previewUrl} controls className="w-full" />
               </div>
             </div>
           )}
@@ -268,7 +301,26 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             </div>
           )}
 
-          {kind === "other" && (
+          {/* WARP-1967: Office documents. The orchestrator's thumbnail proxy
+              asks Nextcloud for a page image, which richdocuments renders
+              through Collabora — the same engine the Edit button opens, so a
+              box that can edit a document can also show it. An <img> is the
+              right tag rather than an iframe: it ignores Content-Disposition
+              (the trap that broke the PDF branch), needs no editing session,
+              and cannot execute anything the document carries. */}
+          {kind === "office" && !officeThumbFailed && (
+            <div className="flex items-center justify-center min-h-full p-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={getThumbnailUrl(file.path, 1024, 1024)}
+                alt={`Preview of ${file.name}`}
+                className="max-w-full max-h-[calc(90vh-64px)] object-contain"
+                onError={() => setFailedThumbPath(file.path)}
+              />
+            </div>
+          )}
+
+          {(kind === "other" || (kind === "office" && officeThumbFailed)) && (
             <div className="empty">
               <div className="ei">
                 <FileText size={22} />

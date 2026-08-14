@@ -6,7 +6,7 @@
  *   - the three reads (status / ports / vlans) mapped to the §7 JSON exactly,
  *   - `connected` derived from status.connected,
  *   - the four write actions going through the Tier-2 confirm dance
- *     (202 → confirmationToken → confirmNetworkCommand).
+ *     (202 → confirmationToken → confirmSwitchCommand).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
@@ -26,7 +26,7 @@ vi.mock("@/lib/api", () => ({
   switchSetPortPoe: vi.fn(),
   switchSetPortEnabled: vi.fn(),
   switchProvision: vi.fn(),
-  confirmNetworkCommand: vi.fn(),
+  confirmSwitchCommand: vi.fn(),
 }));
 
 import { authFetch } from "@/lib/auth";
@@ -35,7 +35,7 @@ import {
   switchSetPortPoe,
   switchSetPortEnabled,
   switchProvision,
-  confirmNetworkCommand,
+  confirmSwitchCommand,
 } from "@/lib/api";
 
 const STATUS = {
@@ -134,43 +134,52 @@ describe("useSwitch — §7 reads", () => {
 });
 
 describe("useSwitch — Tier-2 write dance", () => {
-  beforeEach(() => {
-    mockReads();
-    // Every write helper returns a 202 confirm token; confirm resolves with an op id.
-    (switchSetPortVlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: "pending",
-      requiresConfirmation: true,
-      confirmationToken: "tok-vlan",
-      operation: "switch.port.vlan",
-    });
-    (switchSetPortPoe as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: "pending",
-      requiresConfirmation: true,
-      confirmationToken: "tok-poe",
-      operation: "switch.port.poe",
-    });
-    (switchSetPortEnabled as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: "pending",
-      requiresConfirmation: true,
-      confirmationToken: "tok-en",
-      operation: "switch.port.enable",
-    });
-    (switchProvision as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: "pending",
-      requiresConfirmation: true,
-      confirmationToken: "tok-prov",
-      operation: "switch.provision",
-    });
-    (confirmNetworkCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ operationId: "op-1" });
+  // WARP-1982 — these fixtures are the shape `safetyResponse` in
+  // apps/orchestrator/src/routes/switch.ts ACTUALLY emits on a 202.
+  //
+  // They used to be invented: `status:"pending"` and a dotted
+  // `operation:"switch.port.vlan"` that exists nowhere in the orchestrator
+  // (the real vocabulary is `switch_set_vlan_membership`). Inventing the
+  // response meant the suite passed while every switch control in production
+  // was a silent no-op — the server sent no `requiresConfirmation`, the hook's
+  // gate was false, and the confirm never fired. A mock that disagrees with
+  // the server tests nothing but itself.
+  const s202 = (token: string, operation: string) => ({
+    status: "confirmation_required",
+    requiresConfirmation: true,
+    confirmationToken: token,
+    operation,
+    reason: "This operation requires confirmation",
+    tier: 3,
+    expiresIn: 60,
   });
 
-  it("changeVlan posts then confirms with the issued token + operation", async () => {
+  beforeEach(() => {
+    mockReads();
+    (switchSetPortVlan as ReturnType<typeof vi.fn>).mockResolvedValue(
+      s202("tok-vlan", "switch_set_vlan_membership"),
+    );
+    (switchSetPortPoe as ReturnType<typeof vi.fn>).mockResolvedValue(
+      s202("tok-poe", "switch_poe_disable"),
+    );
+    (switchSetPortEnabled as ReturnType<typeof vi.fn>).mockResolvedValue(
+      s202("tok-en", "switch_port_enable"),
+    );
+    (switchProvision as ReturnType<typeof vi.fn>).mockResolvedValue(
+      s202("tok-prov", "switch_provision"),
+    );
+    // The §7 writes apply synchronously on confirm, so the response IS the
+    // outcome — there is no operation id to poll.
+    (confirmSwitchCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ status: "ok" });
+  });
+
+  it("changeVlan posts then confirms with the issued token", async () => {
     const { result } = renderHook(() => useSwitch(), { wrapper });
     await act(async () => {
       await result.current.changeVlan(4, 100);
     });
     expect(switchSetPortVlan).toHaveBeenCalledWith(4, 100);
-    expect(confirmNetworkCommand).toHaveBeenCalledWith("tok-vlan", "switch.port.vlan");
+    expect(confirmSwitchCommand).toHaveBeenCalledWith("tok-vlan");
   });
 
   it("togglePoe posts then confirms", async () => {
@@ -179,7 +188,7 @@ describe("useSwitch — Tier-2 write dance", () => {
       await result.current.togglePoe(4, false);
     });
     expect(switchSetPortPoe).toHaveBeenCalledWith(4, false);
-    expect(confirmNetworkCommand).toHaveBeenCalledWith("tok-poe", "switch.port.poe");
+    expect(confirmSwitchCommand).toHaveBeenCalledWith("tok-poe");
   });
 
   it("setPortEnabled posts then confirms", async () => {
@@ -188,7 +197,7 @@ describe("useSwitch — Tier-2 write dance", () => {
       await result.current.setPortEnabled(6, true);
     });
     expect(switchSetPortEnabled).toHaveBeenCalledWith(6, true);
-    expect(confirmNetworkCommand).toHaveBeenCalledWith("tok-en", "switch.port.enable");
+    expect(confirmSwitchCommand).toHaveBeenCalledWith("tok-en");
   });
 
   it("reapplyConfig posts then confirms", async () => {
@@ -197,7 +206,42 @@ describe("useSwitch — Tier-2 write dance", () => {
       await result.current.reapplyConfig();
     });
     expect(switchProvision).toHaveBeenCalledTimes(1);
-    expect(confirmNetworkCommand).toHaveBeenCalledWith("tok-prov", "switch.provision");
+    expect(confirmSwitchCommand).toHaveBeenCalledWith("tok-prov");
+  });
+
+  // THE REGRESSION. This is the exact body the server sent before WARP-1982:
+  // a token, and no `operation`. The old gate also required `operation`, so it
+  // was false, the confirm was skipped, refresh() re-read unchanged hardware,
+  // and the toggle snapped back with no error at all. The confirm endpoint
+  // resolves the operation from the token server-side, so `operation` must
+  // never be load-bearing on the client.
+  it("confirms even when the 202 carries no operation field", async () => {
+    (switchSetPortPoe as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      requiresConfirmation: true,
+      confirmationToken: "tok-no-op",
+      tier: 3,
+      expiresIn: 60,
+    });
+    const { result } = renderHook(() => useSwitch(), { wrapper });
+    await act(async () => {
+      await result.current.togglePoe(4, false);
+    });
+    expect(confirmSwitchCommand).toHaveBeenCalledWith("tok-no-op");
+  });
+
+  // A failed confirm must reject so SwitchPanel can toast it, never resolve
+  // quietly into a refresh that shows the unchanged state as success.
+  it("propagates a confirm failure instead of silently refreshing", async () => {
+    (confirmSwitchCommand as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Confirm failed: 400"),
+    );
+    const { result } = renderHook(() => useSwitch(), { wrapper });
+    await expect(
+      act(async () => {
+        await result.current.togglePoe(4, false);
+      }),
+    ).rejects.toThrow(/Confirm failed/);
   });
 
   it("does not call confirm when the server did not request confirmation", async () => {
@@ -206,6 +250,6 @@ describe("useSwitch — Tier-2 write dance", () => {
     await act(async () => {
       await result.current.togglePoe(4, true);
     });
-    expect(confirmNetworkCommand).not.toHaveBeenCalled();
+    expect(confirmSwitchCommand).not.toHaveBeenCalled();
   });
 });

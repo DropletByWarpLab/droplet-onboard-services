@@ -365,7 +365,7 @@ describe("DrivesPanel — one pooled entry with real capacity (WARP-1339)", () =
     // The degraded banner still fires.
     expect(screen.getByRole("alert")).toHaveTextContent(/degraded/i);
     // The dropped member stays in Available drives with its Reclaim action.
-    expect(screen.getByRole("button", { name: /^reclaim$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^reclaim & erase$/i })).toBeInTheDocument();
     // And the pool card still shows the (still-mounted) array's capacity.
     const poolsList = screen.getByRole("list", { name: /storage pools/i });
     expect(poolsList).toHaveTextContent(/3\.0 TB free/);

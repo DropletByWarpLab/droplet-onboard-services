@@ -31,6 +31,14 @@ export function getRedis(): Redis {
     redis = new Redis(config.REDIS_URL, {
       maxRetriesPerRequest: 3,
       lazyConnect: true,
+      // ioredis 6 made RESP3 the default. Nothing we issue (GET/SET/SETEX/DEL/
+      // EXISTS/EXPIRE/ZADD/ZRANGE/ZREM/EVAL/PING/SCAN/UNLINK) has a different
+      // RESP3 reply shape, but ioredis 6 does NOT fall back when HELLO 3 is
+      // refused — it throws — so a REDIS_URL pointed at anything older than
+      // Redis 6 would go from "works" to "cannot connect". Pin the v5 wire
+      // protocol so this dependency bump is byte-identical on the wire; adopt
+      // RESP3 deliberately, on its own, when we want its features.
+      protocol: 2,
       ...redisConnectionOptions(config.REDIS_URL),
     });
   }

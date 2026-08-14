@@ -132,7 +132,7 @@ export function SubscriptionsPanel() {
         </div>
         <button
           onClick={() => setShowNew((v) => !v)}
-          className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
+          className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
         >
           <Plus size={16} />
         </button>
@@ -296,7 +296,7 @@ export function SubscriptionsPanel() {
               <button
                 onClick={() => handleSync(s.id)}
                 disabled={busy === s.id}
-                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
+                className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
                 title="Sync now"
               >
                 <RefreshCw size={14} className={busy === s.id ? "animate-spin" : ""} />
@@ -321,7 +321,7 @@ export function SubscriptionsPanel() {
             <code className="type-caption-1 flex-1 truncate" style={{ color: "var(--text-muted)" }}>{publishUrl}</code>
             <button
               onClick={copyPublish}
-              className="text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
+              className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
               title="Copy"
             >
               {copied ? <Check size={14} style={{ color: "var(--success)" }} /> : <Copy size={14} />}

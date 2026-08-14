@@ -2,6 +2,8 @@ import { Router, Request, Response, NextFunction } from "express";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
 import { PrismaClient, type DepartmentRight } from "@prisma/client";
@@ -10,6 +12,7 @@ import {
   ncListFiles,
   ncUploadFile,
   ncDownloadFile,
+  ncFetchFileResponse,
   ncDeleteFile,
   ncCreateDirectory,
   ncListShares,
@@ -44,7 +47,12 @@ import {
   type SendOptions as EmailSendOptions,
 } from "../services/email-channel.service.js";
 import type { BulkOperationResult } from "../types/index.js";
-import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  invalidatePrefix,
+} from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import {
   ncMintEditorSession,
@@ -57,6 +65,12 @@ import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { isPathUnderUser } from "../services/brain-memory.service.js";
+import {
+  classifyFileContentId,
+  inlinePreviewContentType,
+  parseRangeHeader,
+} from "../lib/file-content.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
@@ -856,6 +870,83 @@ function handleFileError(
   next(err);
 }
 
+/**
+ * WARP-1920 — decide, and apply, how `GET /files/:id/content` hands a file to
+ * the browser.
+ *
+ * That route serves stored files with `Content-Disposition: inline` from the
+ * dashboard's own cookie-authenticated origin, and is reachable by top-level
+ * navigation (it sits behind `authMiddleware`, so a direct navigation carries
+ * the session cookie and renders as a document — not only inside the citation
+ * viewers' `<object>`/`<video>` tags).
+ *
+ * Inline is therefore granted ONLY for `inlinePreviewContentType()`'s safelist
+ * of inert types. `text/html` and `image/svg+xml` both execute script, so
+ * rendering a user-supplied one here would be stored XSS against the session.
+ * Anything off the safelist still gets served — as an `attachment`, which the
+ * browser saves instead of interpreting. The affordance degrades; the
+ * invariant does not.
+ *
+ * The `filename` argument is the ONLY input to the decision. The brain branch
+ * used to prefer `item.mimeType`, which `POST /files/brain` writes from
+ * `file.mimetype` (files-brain.ts) — i.e. the multipart `Content-Type` the
+ * UPLOADING CLIENT chose. Echoing that back as the served type let a caller
+ * name its own Content-Type, which no extension safelist could have contained.
+ * The stored MIME is deliberately not consulted.
+ *
+ * `nosniff` stops a browser re-interpreting safelisted bytes as markup, and
+ * `Content-Security-Policy: sandbox` drops the response into an opaque origin
+ * with scripting disabled. helmet's global default already sets both a CSP and
+ * nosniff on every `/api` response today, which is why this endpoint is not
+ * presently exploitable — but that is an incidental global default that
+ * nothing asserts, and one `'unsafe-inline'` added elsewhere for an unrelated
+ * dashboard feature would silently re-arm this route. These headers make the
+ * guarantee local to the response that needs it.
+ */
+function applyCitationContentHeaders(res: Response, filename: string): void {
+  const inlineType = inlinePreviewContentType(filename);
+
+  // Both branches get nosniff: it is what stops content-sniffing from
+  // promoting either an inline safelisted file or a downloaded one back into
+  // markup.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  if (inlineType) {
+    res.setHeader("Content-Type", inlineType);
+    res.setHeader("Content-Disposition", "inline");
+    // `application/pdf` is exempt from the sandbox CSP — and ONLY it.
+    // PdfCitation.tsx consumes this route in an <iframe>, whose document is
+    // governed by this response's CSP, and Chromium's plugin-class PDF viewer
+    // refuses to run in a sandboxed document (blank frame or a forced
+    // download), so `sandbox` here would break every PDF citation card. The
+    // exemption is safe: a PDF is not same-origin-scriptable in the browser,
+    // and every type that is (html, svg, ...) is already off the inline
+    // safelist entirely. nosniff (above) still applies to PDFs.
+    if (inlineType !== "application/pdf") {
+      res.setHeader("Content-Security-Policy", "sandbox");
+    }
+    return;
+  }
+
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Disposition", contentDispositionAttachment(filename));
+}
+
+/**
+ * An `attachment` Content-Disposition that survives a hostile filename.
+ *
+ * A bare `attachment; filename="${name}"` breaks on any name containing a
+ * quote or backslash — the value stops being one quoted-string and the rest is
+ * reparsed as disposition parameters. Node rejects CR/LF in a header value, so
+ * response splitting is already off the table, but parameter smuggling is not.
+ * The ASCII fallback is stripped to a conservative set, and the real name is
+ * carried in RFC 5987 `filename*`, which every current browser prefers.
+ */
+function contentDispositionAttachment(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
 export function createFilesRouter(
   prisma: PrismaClient,
   // WARP-941: injectable transport seam for the person-share notification
@@ -929,10 +1020,24 @@ export function createFilesRouter(
    * Invalidate the listing cache for one already-resolved (space, path).
    *
    * WARP-1556: goes through `listCacheKey` so the del names exactly the key
-   * the read wrote. A null key means the caller's ACL tag or the space
-   * couldn't be resolved — there is nothing to name, and nothing readable
-   * either (the read path bypasses the cache in that state), so skipping is
-   * correct.
+   * the read wrote.
+   *
+   * WARP-1682 — a null key must NOT mean "skip". The original reasoning was
+   * that there is "nothing readable either, since the read path bypasses the
+   * cache in that state", but that treats a PER-REQUEST condition as durable
+   * state. `aclCacheTag` returns null whenever `visibleDeptsForCaller` fails
+   * to resolve, which it does on any transient Prisma hiccup (it swallows the
+   * throw and reports `resolved: false`). The entry we are trying to drop was
+   * written by an EARLIER request whose ACL walk DID resolve — so a live key
+   * exists, and skipping the del pins the pre-write listing for the rest of
+   * CACHE_TTL. On a delete that means the file the user just removed is served
+   * back to them until the entry expires.
+   *
+   * Fallback: sweep every listing entry for this user. It is broader than the
+   * one key we wanted — a cache miss on the user's other directories — but
+   * over-invalidating a cache is always safe, and this only runs on the rare
+   * unresolved-visibility path. The trailing ":" keeps the prefix from
+   * matching a different user whose name merely starts the same way.
    */
   async function invalidateListing(
     req: Request,
@@ -940,7 +1045,11 @@ export function createFilesRouter(
     target: SpacedPath,
   ): Promise<void> {
     const key = await listCacheKey(req, user, target);
-    if (key) await cacheDel(key);
+    if (key) {
+      await cacheDel(key);
+      return;
+    }
+    await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
   }
 
   /**
@@ -1018,15 +1127,16 @@ export function createFilesRouter(
   // ════════════════════════════════════════════════════════════════════
   // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
   // ════════════════════════════════════════════════════════════════════
-  // The configured engine (OnlyOffice Document Server CE today; an OEM/
-  // commercial license is required before GA — see docs/ADR-021 `docs`
-  // profile + the docserver.client.ts header) is reached via the Nextcloud
-  // `onlyoffice` connector over a WOPI-style handshake. The orchestrator stays
-  // engine-agnostic: it only mints sessions + reports status.
+  // The configured engine (Collabora CODE by default — LibreOffice technology,
+  // no licensing fee; OnlyOffice DS CE via DOCS_ENGINE=onlyoffice, which
+  // requires an OEM license before GA — see ADR-034 + the docserver.client.ts
+  // header) is reached via its Nextcloud connector app over a WOPI-style
+  // handshake. The orchestrator stays engine-agnostic: it only mints sessions
+  // + reports status.
 
   // The engine identifier surfaced on /files/docs/status. Config drives the
   // actual engine; this string is informational for the dashboard.
-  const DOCS_ENGINE = "onlyoffice";
+  const DOCS_ENGINE = config.DOCS_ENGINE;
 
   // 10s-cached doc-server readiness so the dashboard can gate the "Edit" entry
   // without hammering the engine's health endpoint on every files-page load.
@@ -1654,8 +1764,14 @@ export function createFilesRouter(
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
+          // WARP-1912 — the dashboard's translator never echoes `error`
+          // prose (its no-echo rule), so the stable wire code + the APPLIED
+          // limit are what let the client render "too large (max X MB)"
+          // instead of flattening this into its generic retry fallback.
           res.status(413).json({
             error: `File too large (max ${limitMb}MB for your account)`,
+            code: "UPLOAD_TOO_LARGE",
+            limitMb,
           });
           return;
         }
@@ -1900,7 +2016,20 @@ export function createFilesRouter(
     }
   });
 
-  // ── Download a file ──
+  // ── Download a file, or serve it inline for the preview modal ──
+  //
+  // `?disposition=inline` (PreviewPane's `getPreviewUrl`) flips this route from
+  // "save to disk" to "render in place". It exists because the preview modal
+  // feeds this URL to an `<object>`/`<video>`/`<audio>` tag, and a browser
+  // honours `Content-Disposition: attachment` inside `<object>` by DOWNLOADING —
+  // which is why clicking Preview on a PDF used to raise a Save-As dialog over
+  // an empty modal instead of showing the document.
+  //
+  // Inline is granted ONLY for `inlinePreviewContentType()`'s safelist, never
+  // for an arbitrary upload: `text/html` and `image/svg+xml` execute script, so
+  // rendering a user-supplied one inline on the dashboard origin would be stored
+  // XSS against the session cookie. An off-safelist file still downloads,
+  // exactly as before — the affordance degrades, the invariant does not.
   router.get("/files/download", async (req, res, next) => {
     try {
       const filePath = req.query.path as string;
@@ -1912,6 +2041,12 @@ export function createFilesRouter(
       const filename = path.basename(filePath);
       const ext = path.extname(filename).toLowerCase();
 
+      // Resolve the disposition BEFORE fetching bytes so the safelist decision
+      // is one branch, evaluated once, and visible in every header below.
+      const inlineType =
+        req.query.disposition === "inline" ? inlinePreviewContentType(filename) : null;
+      const serveInline = inlineType !== null;
+
       const stream = await ncDownloadFile(await getToken(req), getUser(req), filePath);
       if (!stream) {
         res.status(404).json({ error: "File not found" });
@@ -1921,21 +2056,56 @@ export function createFilesRouter(
       // WARP-237: file-level data-access record (chunk-level RAG reads are
       // deferred — see the WARP-237 gap analysis). Fire-and-forget so the
       // byte stream is not delayed by the append lock.
-      void recordActivity({
-        kind: "file",
-        severity: "info",
-        sourceIcon: "download",
-        what: "File downloaded",
-        sub: filePath,
-        refs: { path: filePath },
-        actor: actorFromRequest(req),
-      });
+      //
+      // Only a real download is recorded. Opening the preview modal is a read,
+      // not an export, and logging it as "File downloaded" would make the
+      // Activity feed's download trail useless for the question it exists to
+      // answer — which files actually left the box.
+      if (!serveInline) {
+        void recordActivity({
+          kind: "file",
+          severity: "info",
+          sourceIcon: "download",
+          what: "File downloaded",
+          sub: filePath,
+          refs: { path: filePath },
+          actor: actorFromRequest(req),
+        });
+      }
 
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      res.setHeader(
-        "Content-Type",
-        ext === ".pdf" ? "application/pdf" : "application/octet-stream"
-      );
+      // RFC 6266 quoted-string: strip the two characters that would break
+      // out of (or escape within) the quoted filename parameter.
+      const dispositionFilename = filename.replace(/[\\"]/g, "");
+
+      if (serveInline) {
+        // The filename matters on inline too: without it, saving from the
+        // browser's viewer yields a file literally named "download".
+        res.setHeader("Content-Disposition", `inline; filename="${dispositionFilename}"`);
+        res.setHeader("Content-Type", inlineType);
+        // Belt-and-braces for the safelist: `nosniff` stops a browser
+        // re-interpreting safelisted bytes as markup, and the `sandbox` CSP
+        // strips scripting/same-origin from the rendered document even if a
+        // future edit widens the safelist by mistake.
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        // application/pdf is EXEMPT from the sandbox CSP: Chromium's PDF
+        // viewer is plugin-backed and cannot run inside a sandboxed document —
+        // a sandboxed PDF response renders a blank frame (or forces a
+        // download), which is the exact regression WARP-1919 exists to fix.
+        // The exemption is safe: PDF is not same-origin-scriptable, and the
+        // safelist above already excludes every scriptable type, so the
+        // sandbox buys nothing for PDF while breaking its preview. (The
+        // app-level helmet() baseline CSP still applies to the PDF response;
+        // only the `sandbox` directive breaks the viewer.)
+        if (inlineType !== "application/pdf") {
+          res.setHeader("Content-Security-Policy", "sandbox");
+        }
+      } else {
+        res.setHeader("Content-Disposition", `attachment; filename="${dispositionFilename}"`);
+        res.setHeader(
+          "Content-Type",
+          ext === ".pdf" ? "application/pdf" : "application/octet-stream"
+        );
+      }
 
       const nodeStream = Readable.fromWeb(stream as any);
       nodeStream.pipe(res);
@@ -2132,10 +2302,22 @@ export function createFilesRouter(
       const filePath = await rootForSpace(prisma, space, rawPath);
 
       const user = getUser(req);
-      await ncDeleteFile(await getToken(req), user, filePath);
-
       const parentPath = path.posix.dirname(filePath) || "/";
-      await invalidateListing(req, user, { space, path: parentPath });
+
+      // WARP-1682: invalidate the parent listing whether or not the WebDAV
+      // call succeeded. A FAILED delete is precisely when the cached listing
+      // is least trustworthy — `runBulk` below documents Nextcloud's trashbin
+      // race, where a request can 500 while the file "ends up half-moved
+      // (trash entry created but source not unlinked)". Skipping the del on
+      // the throw path left that half-applied state readable out of Redis for
+      // the rest of CACHE_TTL, which is how a delete that errored could still
+      // show the file until a page reload. `bulk-delete` already invalidates
+      // unconditionally; this matches it.
+      try {
+        await ncDeleteFile(await getToken(req), user, filePath);
+      } finally {
+        await invalidateListing(req, user, { space, path: parentPath });
+      }
 
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });
@@ -2784,6 +2966,21 @@ export function createFilesRouter(
       }
       const user = getUser(req);
       await ncRestoreTrashItem(await getToken(req), user, parsed.data.name);
+      // WARP-1652: restore is the one mutating route that used to leave every
+      // listing cache entry alone, so a restored file stayed invisible for the
+      // full CACHE_TTL — it appeared to have vanished into nothing.
+      //
+      // It cannot name the directory it landed in: `ncRestoreTrashItem` takes
+      // only the trash-assigned filename and NC restores to the original
+      // location by itself, so there is no (space, path) pair to build a key
+      // from. Rather than guess one, sweep the caller's whole listing
+      // namespace — the same coarse fallback `invalidateListing` already takes
+      // when it cannot resolve a key. It is bounded to this one user, and a
+      // restore is rare and deliberate, so the cost is a few cold listings.
+      //
+      // The two purge routes below need nothing: a trashed file is already
+      // absent from every listing, so removing it permanently changes none.
+      await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
       safePublish(`droplet/files/${user}/trash-restored`, { name: parsed.data.name });
       res.json({ restored: parsed.data.name });
     } catch (err) {
@@ -2908,6 +3105,21 @@ export function createFilesRouter(
   // `activeDeptMountNames` exists). So all three can return cross-space file
   // names and paths, and all three used to be keyed per-user with no
   // membership dimension. Each key below now goes through `aclScopedKey`.
+  /**
+   * WARP-1652 — condense free-form cache-key segments into one that cannot
+   * alias. `aclScopedKey` joins its suffix with ":", which is unambiguous only
+   * while at most ONE segment is free-form and it comes last. Length-prefixing
+   * before hashing makes the input injective regardless of content (a ":" or
+   * even a NUL inside a value can no longer shift the boundary), and the
+   * digest keeps the key bounded however long a search query is.
+   *
+   * Same shape as `aclCacheTag`'s digest — a 16-hex-char sha256 slice.
+   */
+  function freeFormDigest(...parts: string[]): string {
+    const injective = parts.map((p) => `${p.length}:${p}`).join("");
+    return createHash("sha256").update(injective).digest("hex").slice(0, 16);
+  }
+
   const FAVORITES_CACHE_PREFIX = "files:favorites:";
   const RECENTS_CACHE_PREFIX = "files:recents:";
   const SEARCH_CACHE_PREFIX = "files:search:";
@@ -3021,8 +3233,15 @@ export function createFilesRouter(
         req,
         SEARCH_CACHE_PREFIX,
         user,
-        q,
-        mime ?? "",
+        // WARP-1652: `q` and `mime` are both free-form AND non-terminal.
+        // Appended raw they were joined with ":" like every other segment, so
+        // (q="a", mime="b:c") and (q="a:b", mime="c") produced the IDENTICAL
+        // key and the second caller was served the first one's results for the
+        // full SEARCH_TTL. Same class as WARP-1610's listing key, same blast
+        // radius: the key still carries the caller's own username and ACL tag,
+        // so this is content-mixing for one user, not cross-tenant disclosure.
+        // One digest over the pair cannot alias whatever they contain.
+        freeFormDigest(q, mime ?? ""),
         String(limit),
       );
       if (cacheKey) {
@@ -3500,30 +3719,55 @@ export function createFilesRouter(
       // Lazy-import the gRPC embedding function. It's optional — if gRPC
       // isn't available (e.g. ai-gateway down), we return a helpful error
       // rather than a generic 500.
+      //
+      // WARP-1914: every semantic-unavailable answer carries the stable wire
+      // code `semantic_unavailable`. The dashboard's translator
+      // (`translateError`) never surfaces `err.message`, so without a
+      // machine-readable code these specific errors all flattened into the
+      // generic "We couldn't load those files right now" banner.
       let embedVec: number[];
       try {
-        const { grpcEmbedText, isGrpcAvailable } = await import(
+        const { grpcEmbedText, initGrpcClient } = await import(
           "../services/ai-gateway.grpc-client.js"
         );
-        if (!isGrpcAvailable()) {
-          res.status(503).json({ error: "AI gateway not available for semantic search" });
+        // WARP-1914 root cause: nothing at runtime ever called
+        // `initGrpcClient()`, so `isGrpcAvailable()` reported false on every
+        // box and EVERY semantic/hybrid query 503'd even with a healthy
+        // ai-gateway. Initialize on demand instead — idempotent: the first
+        // call loads the proto and creates the (lazily-connecting) channel;
+        // subsequent calls return the cached availability.
+        const available = await initGrpcClient();
+        if (!available) {
+          res.status(503).json({
+            error: "AI gateway not available for semantic search",
+            code: "semantic_unavailable",
+          });
           return;
         }
         const vectors = await grpcEmbedText([q]);
         if (!vectors || vectors.length === 0 || !Array.isArray(vectors[0])) {
-          res.status(502).json({ error: "Embedding service returned no vectors" });
+          res.status(502).json({
+            error: "Embedding service returned no vectors",
+            code: "semantic_unavailable",
+          });
           return;
         }
         embedVec = vectors[0];
         // Validate every element is a finite number — a buggy/compromised gRPC
         // response with NaN/Infinity/strings would cause a Postgres cast error.
         if (!embedVec.every((v) => typeof v === "number" && Number.isFinite(v))) {
-          res.status(502).json({ error: "Embedding service returned invalid vector" });
+          res.status(502).json({
+            error: "Embedding service returned invalid vector",
+            code: "semantic_unavailable",
+          });
           return;
         }
       } catch (err) {
         logger.warn({ err }, "Semantic search: embedding failed");
-        res.status(503).json({ error: "Embedding service unavailable" });
+        res.status(503).json({
+          error: "Embedding service unavailable",
+          code: "semantic_unavailable",
+        });
         return;
       }
 
@@ -3596,6 +3840,7 @@ export function createFilesRouter(
         logger.warn({ err }, "Semantic search: database error (pgvector?)");
         res.status(503).json({
           error: "Semantic search is not available. The pgvector extension may not be installed.",
+          code: "semantic_unavailable",
         });
         return;
       }
@@ -3631,15 +3876,17 @@ export function createFilesRouter(
       // `checkSpaceAccess`).
       const { corpora: searchUserIds } = await deptSearchCorpora(req, prisma, user);
 
-      // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
-      // which reflects the latest init attempt; a hot reload from "down"
-      // to "up" lands on the next probe without restart.
+      // Probe gRPC. WARP-1914: initialize on demand — nothing at startup
+      // ever called `initGrpcClient()`, so the never-set availability flag
+      // reported "gateway down" forever and the semantic readiness pill was
+      // red on every box. `initGrpcClient()` is idempotent: first call does
+      // the real init, later calls return the cached availability.
       let gatewayHealthy = false;
       try {
-        const { isGrpcAvailable } = await import(
+        const { initGrpcClient } = await import(
           "../services/ai-gateway.grpc-client.js"
         );
-        gatewayHealthy = isGrpcAvailable();
+        gatewayHealthy = await initGrpcClient();
       } catch {
         gatewayHealthy = false;
       }
@@ -3711,6 +3958,147 @@ export function createFilesRouter(
       });
     } catch (err) {
       next(err);
+    }
+  });
+
+  // ── GET /api/files/:id/content — inline content for the citation viewers ──
+  //
+  // `apps/web-dashboard/src/components/citations/PdfCitation.tsx` and
+  // `MediaCitation.tsx` both load their preview from
+  // `/api/files/${encodeURIComponent(hit.fileId)}/content` (PDFs append the
+  // `#page=N` fragment). `hit.fileId` is polymorphic — the producers set it to
+  // a numeric Nextcloud file id, a "/"-prefixed home-relative path, or a
+  // brain-memory item id (`SearchTab.tsx`: `hit.ncFileId ? String(hit.ncFileId)
+  // : hit.path`; `ChatMessage.tsx`: `c.brainItemId ? String(c.brainItemId) :
+  // c.path`) — so `classifyFileContentId` dispatches on shape.
+  //
+  // Served inline with HTTP Range support, so `<iframe>`/`<video>` can render
+  // and seek — but ONLY for the inert types on `inlinePreviewContentType()`'s
+  // safelist. See `applyCitationContentHeaders` for why the served type is
+  // derived from the filename alone and never from the stored MIME.
+  //
+  // Registered LAST so the static sibling routes above (`/files/search/content`
+  // in particular, which `:id` would otherwise shadow) keep winning.
+  router.get("/files/:id/content", async (req, res, next) => {
+    try {
+      const classified = classifyFileContentId(req.params.id);
+
+      // ── Brain-memory item: original bytes on local disk ──
+      // Ownership + zip-slip posture mirrors
+      // `GET /api/files/brain/:itemId/download` in files-brain.ts: the owner
+      // key is `req.user.id` (what BrainMemoryItem.userId stores), a
+      // cross-user hit 404s rather than 403s (no existence leak), and a
+      // storagePath outside the user's tree is refused, never served.
+      if (classified.kind === "brain") {
+        const userId = (req as Request & { user?: { id?: string } }).user?.id;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const item = await prisma.brainMemoryItem.findUnique({
+          where: { id: classified.itemId },
+        });
+        if (
+          !item ||
+          item.userId !== userId ||
+          !item.storagePath ||
+          !isPathUnderUser(userId, item.storagePath)
+        ) {
+          res.status(404).json({ error: "not_found" });
+          return;
+        }
+
+        let size: number;
+        try {
+          size = (await stat(item.storagePath)).size;
+        } catch {
+          res.status(404).json({ error: "not_found" });
+          return;
+        }
+
+        // WARP-1920: safelist-gated. `item.mimeType` is NOT consulted — it is
+        // the uploader's own multipart Content-Type (files-brain.ts writes
+        // `file.mimetype` verbatim), so trusting it would let a caller pick
+        // the type its bytes are rendered as.
+        applyCitationContentHeaders(res, item.filename);
+        res.setHeader("Accept-Ranges", "bytes");
+
+        const range = parseRangeHeader(req.header("range"), size);
+        if (range && "unsatisfiable" in range) {
+          res.setHeader("Content-Range", `bytes */${size}`);
+          res.status(416).end();
+          return;
+        }
+        if (range) {
+          res.status(206);
+          res.setHeader(
+            "Content-Range",
+            `bytes ${range.start}-${range.end}/${size}`,
+          );
+          res.setHeader("Content-Length", String(range.end - range.start + 1));
+          createReadStream(item.storagePath, {
+            start: range.start,
+            end: range.end,
+          }).pipe(res);
+        } else {
+          res.setHeader("Content-Length", String(size));
+          createReadStream(item.storagePath).pipe(res);
+        }
+        return;
+      }
+
+      // ── Nextcloud-backed: a numeric ncFileId (resolve to a path via the
+      // content index) or an already-explicit path. Authorization is the
+      // caller's own NC token against the caller's own home — a path lifted
+      // from someone else's index simply doesn't resolve there.
+      let ncPath: string | null;
+      if (classified.kind === "ncfile") {
+        const chunk = await prisma.fileContentChunk.findFirst({
+          where: { ncFileId: classified.ncFileId },
+          select: { path: true },
+        });
+        ncPath = chunk?.path ?? null;
+      } else {
+        ncPath = classified.path;
+      }
+      if (!ncPath) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+
+      const upstream = await ncFetchFileResponse(
+        await getToken(req),
+        getUser(req),
+        ncPath,
+        req.header("range"),
+      );
+      if (!upstream) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+
+      // 200, or 206/416 when WebDAV ruled on the forwarded Range.
+      res.status(upstream.status);
+      // WARP-1920: same safelist gate as the brain branch above. An
+      // off-safelist file (.html, .svg, unknown) downloads instead of
+      // rendering; Range/206/416 below is unaffected either way.
+      applyCitationContentHeaders(res, path.basename(ncPath));
+      res.setHeader(
+        "Accept-Ranges",
+        upstream.headers.get("accept-ranges") ?? "bytes",
+      );
+      const contentRange = upstream.headers.get("content-range");
+      if (contentRange) res.setHeader("Content-Range", contentRange);
+      const contentLength = upstream.headers.get("content-length");
+      if (contentLength) res.setHeader("Content-Length", contentLength);
+
+      if (!upstream.body) {
+        res.end();
+        return;
+      }
+      Readable.fromWeb(upstream.body as never).pipe(res);
+    } catch (err) {
+      handleFileError(err, res, next);
     }
   });
 

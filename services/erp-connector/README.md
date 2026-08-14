@@ -13,36 +13,46 @@ build spec this README implements §5–§12 of is an unpublished working doc, n
 (MySQL), Dentrix, and generic ODBC ERPs slot in later behind the same
 `Connector` interface.
 
-> ## ⛔ Blocked on: SAP SQL Anywhere client + a restored copy of `PattersonPM.db`
+> ## ⚠ Status: the driver bridge ships; the SAP client is operator-supplied
 >
-> This package is the **DB-independent foundation only** (Phase 0, brief §17).
-> Everything that touches a live database is **stubbed** behind a typed
-> `ConnectorBlockedError` and marked `// TODO(WARP-1094): blocked on SAP SQL
-> Anywhere client + copy of PattersonPM.db`. The blocked slice needs two things
-> that are **not present in this environment**:
+> The direct-SQL track's I/O now goes through **`services/erp-sql-bridge`**
+> (WARP-1106) — a unixODBC + pyodbc sidecar reached over internal REST via
+> `src/sql-bridge-client.ts`. Python owns the driver because the Node
+> `sqlanywhere` addon is abandoned at a Node 12 ceiling and does not build on
+> the control plane (open decision **O-4 resolved → Python**, per
+> `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md` §5).
 >
-> 1. the **SAP SQL Anywhere client** — **unixODBC + `libdbodbc17_r.so`** driven
->    from a Python/pyodbc bridge (the modern, maintained Linux path; the Node
->    `sqlanywhere` npm addon is abandoned at Node 12 and does not build on the
->    control plane — open decision **O-4 resolved → Python**, per
->    `EAGLESOFT-DIRECT-SQL-RESEARCH-2026-07-07.md` §5), and
-> 2. a **restored copy of `PattersonPM.db`** to introspect and to prove every
->    read query and write command against (brief §16 — production is never the
->    first place a write runs).
+> Two things remain outside this repo, and both fail **honestly** rather than
+> silently:
 >
-> The driver + Python bridge are **deliberately not added yet** — they require
-> the (license-governed) SAP client redistributable, and there is nothing to
-> connect to. The DB-touching sidecar is **x86_64-only**: SAP ships no aarch64
-> client, so an ARM box needs qemu or jConnect+TDS (research §5). What **does**
-> ship and is fully unit-tested: the connection-string builder, engine-version
-> detection, the schema map + drift fingerprint, the introspection SQL, the
-> read-query registry, and the write-command registry (all pure — no I/O, no
-> faked database).
+> 1. the **SAP SQL Anywhere client** (`libdbodbc17_r.so`) is license-governed
+>    and account-walled, so it cannot ship in our image — an operator vendors
+>    it (`services/erp-sql-bridge/vendor/README.md`). The sidecar is
+>    **x86_64-only**: SAP ships no aarch64 client, so an ARM box uses the
+>    `eaglesoft-api` REST track instead (research §5).
+> 2. a **restored copy of `PattersonPM.db`** is still what proves the read
+>    queries and write commands against Eaglesoft's real schema (brief §16 —
+>    production is never the first place a write runs).
+>
+> With no bridge configured, or a bridge that cannot reach the practice, every
+> I/O method throws `ConnectorBlockedError` and the orchestrator surfaces
+> `ERP_NOT_CONNECTED`. That is the design, not a gap.
+>
+> **What is proven end-to-end today:** `scripts/test-erp-sql-bridge.sh` boots a
+> real Postgres seeded with a shape-faithful synthetic `PattersonPM`
+> (`harness/init/`) and its least-privilege grants, points the bridge's ODBC
+> driver at psqlODBC, and runs the **real** registry SQL through the **real**
+> connector into a **real** database — connect → introspect → schema map →
+> fingerprint → named reads → the guarded write
+> (`__tests__/sql-bridge.live.test.ts`). unixODBC is driver-agnostic, so
+> everything above `pyodbc.connect` is identical against SQL Anywhere. What
+> stays unproven until an install is the SAP connection string itself
+> (unit-tested) and SQL Anywhere's own dialect behaviour.
 >
 > **This does NOT satisfy the full WARP-1094 Definition of Done**, which
-> requires connecting to a copy DB as `droplet_ro`, printing the introspected
-> schema map + fingerprint, and the offline CI egress gate (brief §17 Phase 0
-> DoD). Those land once the client + copy DB are available.
+> requires connecting to a copy of the real `PattersonPM.db` as `droplet_ro`
+> and printing the introspected schema map + fingerprint from it (brief §17
+> Phase 0 DoD).
 
 ## What ships in this slice
 
@@ -54,24 +64,30 @@ build spec this README implements §5–§12 of is an unpublished working doc, n
 | `src/introspection.ts` | `SYS.SYSTAB` / `SYS.SYSTABCOL` / `SYS.SYSIDX` catalog SQL (§9.1) + v7 legacy fallbacks + `catalogQueriesFor(dialect)` + trigger / FK / DEFAULT-TIMESTAMP-watermark discovery for write-safety (review B-4/B-5) | ✅ |
 | `src/read-queries.ts` | Parameterized named read queries; identifiers resolve only through the schema map; unknown names rejected (§10.1) | ✅ |
 | `src/write-commands.ts` | Named write commands `{name, targetTable, allowedColumns, requiredParams, buildStatement, reversalPlan, verifyQuery}`; ledger/clinical/claim tables are impossible targets (§11.3, invariant 5) | ✅ |
-| `src/connector.ts` | `Connector` provider interface + `EaglesoftConnector` (all driver/network calls stubbed) | ✅ (stub contract) |
+| `src/connector.ts` | `Connector` provider interface + `EaglesoftConnector`; database I/O goes through the `erp-sql-bridge` sidecar, blocked when none is configured | ✅ (+ live suite) |
+| `src/sql-bridge-client.ts` | HTTP client for `services/erp-sql-bridge`. Sends a built statement + which box to reach; **never** a credential (WARP-1106) | ✅ (+ live suite) |
 | `sql/provision.sql` / `sql/revoke.sql` | `droplet_ro` SELECT-only + `droplet_rw` with no grants at creation (§8.1) | — |
 
 ## Internal REST contract (orchestrator ↔ sidecar)
 
-The connector runs as a **sidecar** (`erp-connector`, brief §6.1), reachable
-**only over the internal compose network** (`erp-connector:9090`) — never
-exposed off-box (invariant 10). The orchestrator is the only caller; the
-dashboard talks to the orchestrator, and the LLM reaches reads through
-tools-core handlers (never this service directly). The wire contract the
-orchestrator depends on (implemented once the driver lands):
+The DB-touching half runs as a **sidecar** — `services/erp-sql-bridge`
+(brief §6.1) — reachable **only over the internal compose network**
+(`erp-sql-bridge:9095`), never exposed off-box (invariant 10). The
+orchestrator is the only caller; the dashboard talks to the orchestrator, and
+the LLM reaches reads through tools-core handlers (never this service
+directly). `src/sql-bridge-client.ts` is this side of the wire:
 
 | Method + path | Body | Returns | Notes |
 |---|---|---|---|
-| `GET /health` | — | `{ ok, lastReadAt, fingerprint, pool }` | `SELECT 1`-class probe + drift state (§7.3). Orchestrator maps this to the connection's `IntegrationStatus` enum. |
-| `POST /introspect` | — | `{ tables, fingerprint }` | Runs the §9.1 catalog queries and fingerprints the result (§9.2). |
-| `POST /read/:query` | `{ params }` | `{ rows }` | Runs a **named** read query (invariant 4). Values bind as `?`. Unknown query name → 404. |
-| `POST /write/:command` | `{ params }` | `{ result, reversal, verify }` | Applies a **named** write command in ONE transaction as `droplet_rw` (§11.1 step 3). Gated by write opt-in + confirmation + drift re-check upstream. |
+| `GET /health` | — | `{ ok, reason?, lastReadAt, pool }` | `SELECT 1`-class probe (§7.3). `ok:false` when the practice's DB is unreachable — a running bridge is not a working one. The connector adds the drift state, which it owns. |
+| `POST /introspect` | `{ queries, target? }` | `{ results }` | Runs caller-supplied catalog queries. Fingerprinting stays in TypeScript, against the same `computeSchemaFingerprint` the drift check uses (§9.2) — a second hash would be a second definition of "the schema changed". |
+| `POST /read/:query` | `{ sql, params, target? }` | `{ rows, rowCount }` | Executes an **already-built** named read as `droplet_ro` (invariant 4). A non-SELECT is refused. |
+| `POST /write/:command` | `{ sql, params, target? }` | `{ rowCount, applied }` | Executes an **already-built** named write in ONE transaction as `droplet_rw` (§11.1 step 3). `rowCount: 0` is the optimistic guard missing, not an error. Gated by write opt-in + confirmation + drift re-check upstream. |
+
+Note what the body carries and what it does not: the **statement is built
+here**, by the registries above, so the bridge has no second copy of the SQL —
+and **no credential ever crosses the wire**. The bridge resolves `droplet_ro` /
+`droplet_rw` from its own environment and picks between them by route.
 
 The REST layer is language-agnostic to the orchestrator (brief §6.2). Open
 decision **O-4 is resolved → the DB-touching bridge is Python** (unixODBC +
@@ -101,9 +117,38 @@ contract, so the bridge language is invisible to it.
 ```bash
 # From the repo root (matches the package's own scripts):
 npm run -w @droplet/erp-connector build   # tsc
-npm run -w @droplet/erp-connector test    # vitest run — 58/58
+npm run -w @droplet/erp-connector test    # vitest run (live SQL suite skips)
+
+# Adds the live SQL lane: boots Postgres + the bridge, then runs the
+# connector -> bridge -> database suite. Needs postgresql + unixodbc +
+# odbc-postgresql on the host.
+./scripts/test-erp-sql-bridge.sh
 ```
 
-All tests are pure unit tests. There are **no mock-database integration
-tests** (team rule): DB-touching paths stay stubbed and are proven against a
-restored copy of `PattersonPM.db` in a later phase, never a faked database.
+**The SQL track is never tested against a database pretending to be
+Eaglesoft** (team rule): the registries are proven against a restored copy of
+`PattersonPM.db` in a later phase. Two suites guard it in the meantime, and
+neither claims to be that copy:
+
+* `__tests__/harness-postgres-drift.test.ts` parses the dry-run harness's DDL,
+  rebuilds every registered query and grant against it, and fails when they
+  drift — it asserts the harness still matches the code.
+* `__tests__/sql-bridge.live.test.ts` (gated on `ERP_BRIDGE_LIVE_URL`, run by
+  `scripts/test-erp-sql-bridge.sh`) drives the real connector through the real
+  `erp-sql-bridge` into a real Postgres. What it proves is the **transport and
+  the pipeline** — connect, live catalog introspection, schema-map resolution,
+  fingerprint stability, `?` binding, `LIKE` escaping, the optimistic-guard
+  write, and honest degradation when the bridge is absent or unreachable. It
+  does not claim the synthetic schema is Eaglesoft's; the schema map is
+  discovered at runtime precisely because it is not.
+
+**The REST track is different, and is tested against a live server.**
+`__tests__/api-connector.live.test.ts` starts the dummy Eaglesoft API box in
+[`harness/eaglesoft-api/`](harness/eaglesoft-api/) and drives the real
+`EaglesoftApiConnector` across a real TLS socket. That is not a faked
+Eaglesoft standing in for the real one: the connector's blocked-by-default
+contract is unchanged, and what the suite proves is the transport — TLS
+verification, the auth handshake, timeouts, 5xx, dropped connections, non-JSON
+bodies, and the honest degradation each produces. Those are the failures an
+install hits, and a mocked `fetch` cannot produce any of them. It needs no
+Docker (in-process, ephemeral port) and runs in the existing CI leg.

@@ -191,13 +191,24 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── cameras ─────────────────────────────────────────────────────────────
   { tool: "list_cameras", client: "orchestrator", hops: [admit("get", "/api/cameras")] },
-  none("list_discovered_cameras"), // ctx.prisma
+  // WARP-1847: was `none` (ctx.prisma). The direct
+  // `{ enabled: false, autoDiscovered: true }` query could never match a
+  // freshly discovered camera, so this now reads the orchestrator's merged
+  // live + DB candidate list — the same one the dashboard renders.
+  { tool: "list_discovered_cameras", client: "orchestrator", hops: [
+    admit("get", "/api/cameras/discovered"),
+  ] },
   { tool: "list_camera_events", client: "orchestrator", hops: [
     admit("get", "/api/cameras/:name/events"),
     admit("get", "/api/cameras/events/recent"),
   ] },
   { tool: "scan_for_cameras", client: "orchestrator", hops: [admit("post", "/api/cameras/scan")] },
-  none("accept_discovered_camera"), // ctx.prisma
+  // WARP-1847: was `none` (ctx.prisma). A live candidate's id is `mac:<MAC>`,
+  // which has no camera row to flip `enabled` on — and only camera-discovery
+  // holds the probed RTSP URL and verifies the stream before the Frigate write.
+  { tool: "accept_discovered_camera", client: "orchestrator", hops: [
+    admit("post", "/api/cameras/discovered/:id/accept"),
+  ] },
   none("get_camera_snapshot"), // returns a URL string (no ctx.http hop)
   { tool: "list_clips", client: "orchestrator", hops: [admit("get", "/api/cameras/clips")] },
   { tool: "export_clip", client: "orchestrator", hops: [admit("post", "/api/cameras/:name/clips/export")] },
@@ -205,6 +216,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "share_clip", client: "orchestrator", hops: [admit("post", "/api/cameras/clips/share")] },
   { tool: "search_camera_events", client: "orchestrator", hops: [admit("get", "/api/cameras/events/search")] },
   { tool: "get_camera_health", client: "orchestrator", hops: [admit("get", "/api/cameras/system")] },
+  { tool: "get_camera_storage", client: "orchestrator", hops: [admit("get", "/api/cameras/storage")] },
   { tool: "set_camera_detection", client: "orchestrator", hops: [
     admit("post", "/api/cameras/:name/enable"),
     admit("post", "/api/cameras/:name/disable"),
@@ -212,6 +224,12 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   ] },
   { tool: "set_detection_zones", client: "orchestrator", hops: [admit("patch", "/api/cameras/:name/settings")] },
   { tool: "delete_clip", client: "orchestrator", hops: [admit("delete", "/api/cameras/events/:eventId")] },
+  // WARP-1893: two hops — the GET resolves the user's phrasing ("the driveway
+  // camera") to a config key before the PATCH writes the new label.
+  { tool: "rename_camera", client: "orchestrator", hops: [
+    admit("get", "/api/cameras"),
+    admit("patch", "/api/cameras/:name"),
+  ] },
 
   // ── switch ──────────────────────────────────────────────────────────────
   { tool: "get_switch_ports", client: "orchestrator", hops: [admit("get", "/api/switch/ports")] },
@@ -246,6 +264,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── system ──────────────────────────────────────────────────────────────
   { tool: "get_system_health", client: "orchestrator", hops: [admit("get", "/api/orchestrator/health")] },
+  { tool: "get_gpu_status", client: "orchestrator", hops: [admit("get", "/api/hardware/gpu")] },
   { tool: "list_drives", client: "orchestrator", hops: [admit("get", "/api/storage/drives")] },
   { tool: "list_storage_pools", client: "orchestrator", hops: [admit("get", "/api/storage/pools")] },
   { tool: "get_drive_health", client: "orchestrator", hops: [admit("get", "/api/storage/drives")] },
@@ -288,6 +307,28 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── business ────────────────────────────────────────────────────────────
   none("business_profile_get"), // ctx.prisma
+
+  // ── team chat (WARP-1685) ───────────────────────────────────────────────
+  // Both tools act as the forwarded X-Droplet-User human; the routes admit
+  // the mcp principal via requireRoleOrMcpService (routes/team-chat.ts).
+  {
+    tool: "team_chat_send_message",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/team-chat/contacts"),
+      admit("post", "/api/team-chat/threads"),
+      admit("post", "/api/team-chat/threads/:id/messages"),
+    ],
+  },
+  {
+    tool: "team_chat_send_meeting_invite",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/team-chat/contacts"),
+      admit("post", "/api/team-chat/threads"),
+      admit("post", "/api/team-chat/threads/:id/meetings"),
+    ],
+  },
 
   // ── data ────────────────────────────────────────────────────────────────
   none("encode_text"),

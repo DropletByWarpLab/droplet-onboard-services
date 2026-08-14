@@ -20,18 +20,21 @@ export function DnsOverTlsCard() {
   return (
     <div className="card">
       <div className="flex items-start gap-3">
-        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-surface-secondary text-label-tertiary">
+        <div
+          className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+        >
           <Lock size={18} aria-hidden="true" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="type-headline text-label-primary">DNS over TLS</h3>
-          <p className="type-caption-1 text-label-tertiary mt-0.5">
+          <h3 className="type-headline" style={{ color: "var(--text)" }}>DNS over TLS</h3>
+          <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
             Not available on this build — this Droplet&apos;s DNS resolver
             doesn&apos;t support encrypted upstream lookups yet. Your custom
             upstream DNS servers above still apply.
           </p>
         </div>
-        <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full flex-shrink-0 bg-surface-secondary text-label-tertiary">
+        <span className="badge muted">
           Off
         </span>
       </div>

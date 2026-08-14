@@ -31,6 +31,8 @@ services:
     volumes: !override
       - nextcloud-data:/var/www/html
       - ./nextcloud-skeleton:/skeleton:ro
-      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      # WARP-1694 — keep in step with docker-compose.yml: before-starting runs
+      # on every container start, post-installation only on the install boot.
+      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/before-starting/init-droplet.sh:ro
       - ./nextcloud/zz-redis-tls.config.php:/var/www/html/config/zz-redis-tls.config.php:ro
       - ../data/secrets/service-tls/nextcloud:/data/service-tls:ro

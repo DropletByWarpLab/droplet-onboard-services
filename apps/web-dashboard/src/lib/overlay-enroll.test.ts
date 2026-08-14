@@ -36,13 +36,16 @@ describe("buildOverlayEnrollUri", () => {
     expect(uri).not.toContain("+");
   });
 
+  // The encoder must handle a colon, but the example is deliberately NOT the
+  // WireGuard port: WARP-1593: `server` is the HTTPS enroll API host, and the
+  // orchestrator now refuses to mint a QR carrying a WG transport address.
   it("URL-encodes a server host with a port colon", () => {
     const uri = buildOverlayEnrollUri({
-      server: "box.example:51820",
+      server: "box.example:8443",
       token: "t0ken",
       boxName: "Droplet",
     });
-    expect(uri).toContain("server=box.example%3A51820");
+    expect(uri).toContain("server=box.example%3A8443");
   });
 
   it("leaves a base64url token byte-for-byte intact (no %-escapes)", () => {

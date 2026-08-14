@@ -142,6 +142,103 @@ else
 fi
 
 # =============================================================================
+# WARP-1980 — the FILTER half of the overlay NAT.
+#
+# Live on 192.168.9.250 (2026-08-13): with the WARP-1385 rules above installed
+# and correct, inbound udp/51820 STILL never reached wg0. A DNAT only rewrites
+# the destination; the packet then has to survive the filter FORWARD path, and
+# Docker runs `-P FORWARD DROP` with its DOCKER chain ending in
+#   -A DOCKER ! -i br-<id> -o br-<id> -j DROP
+# whose only ACCEPTs are per-PUBLISHED-port. droplet-openwrt publishes 80/tcp
+# alone, so the DNATed udp/51820 was silently dropped — no REJECT, no log line.
+# Packet capture: the probe drew no ICMP port-unreachable (the DNAT consumed
+# it), yet 0 packets arrived on the docker bridge. One DOCKER-USER accept and
+# all 6 probes landed on the container.
+#
+# `docker port` publishing writes BOTH halves; doing it by hand writes only one.
+#
+# ⚠ This CANNOT be fixed with another nft table. In nftables a verdict is
+# per-chain: an `accept` in our own base chain does not stop Docker's chain at
+# the same hook from being evaluated, and only `drop` is final. The accept must
+# live inside the traversal that contains the DROP — i.e. DOCKER-USER, which
+# Docker documents as the user hook evaluated before its own rules.
+#
+# Checks 5a-5f above all pass on the broken code — full coverage on paper, a
+# structurally dead feature in practice. These are the assertions that bite.
+# =============================================================================
+
+# --- 5g. A filter ACCEPT is INSERTED for the DNATed udp/51820 ---------------
+# ⚠ Match the INSERT specifically (-I/-A). An earlier draft of this check
+# accepted any `iptables … --dport 51820 -j ACCEPT`, which the delete-before-
+# insert line (`-D DOCKER-USER … -j ACCEPT`) satisfies all on its own — so
+# deleting the actual insert left the check green. Mutation testing caught it.
+if grep -E "iptables -[IA] DOCKER-USER .*--dport 51820 -j ACCEPT" "$ATTACH" >/dev/null; then
+  pass "filter half: an ACCEPT is inserted to admit the DNATed udp/51820"
+else
+  fail "no inserted filter ACCEPT for udp/51820 — Docker's FORWARD DROP eats the DNATed packet"
+fi
+
+# --- 5h. The mechanism is DOCKER-USER, never an nft forward chain -----------
+# In nftables a verdict is per-chain: an `accept` in our own base chain does not
+# stop Docker's chain at the same hook, and only `drop` is final. So "fixing"
+# this by adding a forward hook to droplet_overlay_nat is a plausible-looking
+# no-op. Assert the working mechanism AND the absence of the broken one.
+if grep -E "iptables -[IA] DOCKER-USER .*--dport 51820 -j ACCEPT" "$ATTACH" >/dev/null \
+   && ! grep -E "nft add (chain|rule) ip droplet_overlay_nat forward" "$ATTACH" >/dev/null; then
+  pass "filter ACCEPT uses DOCKER-USER, not an nft forward chain that cannot override a DROP"
+else
+  fail "the udp/51820 ACCEPT must go in DOCKER-USER — an nft forward chain cannot override Docker's DROP"
+fi
+
+# --- 5i. The inserted ACCEPT is scoped, not a blanket hole ------------------
+# Must pin BOTH the container as destination and the uplink as ingress, so this
+# is no broader than the published port it replaces. Anchored on `-I` so the
+# delete line cannot satisfy it.
+if grep -E "iptables -I DOCKER-USER -i \"?\\\$OVERLAY_UPLINK_IFACE\"? -d \"?\\\$OVERLAY_OPENWRT_IP\"? -p udp --dport 51820 -j ACCEPT" "$ATTACH" >/dev/null; then
+  pass "filter ACCEPT is scoped to the uplink iface AND the container IP"
+else
+  fail "filter ACCEPT must pin -i \$OVERLAY_UPLINK_IFACE and -d \$OVERLAY_OPENWRT_IP (no blanket hole)"
+fi
+
+# --- 5j. The ACCEPT is idempotent across re-attaches ------------------------
+# The nft table is torn down + rebuilt each attach; DOCKER-USER is NOT ours to
+# flush, so the rule must be deleted-if-present before insert or copies pile up
+# on every container restart.
+if grep -E "iptables .*-D DOCKER-USER .*51820" "$ATTACH" >/dev/null; then
+  pass "prior DOCKER-USER accept is removed before re-insert (no duplicate pile-up)"
+else
+  fail "re-attach would stack duplicate DOCKER-USER accepts — delete before insert"
+fi
+
+# =============================================================================
+# WARP-1980 — the DNAT must answer on EVERY uplink address, not just route-src.
+#
+# `ip route get 1.1.1.1` yields ONE src. The box holds 192.168.9.250 (static)
+# AND 192.168.9.195 (DHCP lease) on the same NIC; the rule bound only .195, so
+# a client dialling the static .250 got ICMP port-unreachable (captured live).
+# The advertised endpoint and the answering address were different addresses.
+# Keep the anti-hijack scoping — widen it to the interface's own addresses.
+# =============================================================================
+
+# --- 5k. DNAT daddr covers all uplink addresses ------------------------------
+if grep -E 'nft add rule ip droplet_overlay_nat prerouting .*ip daddr \{ ?\$\{?OVERLAY_UPLINK_ADDRS' "$ATTACH" >/dev/null; then
+  pass "DNAT matches every IPv4 address on the uplink iface (static + lease)"
+else
+  fail "DNAT still bound to the single route-src IP — the static address 503s/unreachables"
+fi
+
+# --- 5l. The address set is still a real hijack guard -----------------------
+# Widening must not become `ip daddr any`: the set is built from the uplink
+# interface's OWN addresses, so a stray udp/51820 on br-lan/docker0 still can't
+# be hijacked into the container.
+if grep -E 'OVERLAY_UPLINK_ADDRS=' "$ATTACH" >/dev/null && \
+   grep -E 'ip -o -4 addr show dev "\$OVERLAY_UPLINK_IFACE"' "$ATTACH" >/dev/null; then
+  pass "uplink address set is derived from the uplink iface's own addresses"
+else
+  fail "uplink address set must come from the uplink iface, not a wildcard"
+fi
+
+# =============================================================================
 # WARP-1385 — the compose port publish is REMOVED (docker-proxy must not own
 # host:51820, or the host nft rules above never see the packets and the
 # ephemeral-source-port masquerade returns).

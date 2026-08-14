@@ -211,10 +211,10 @@ export function ScheduleEditorModal({
     // own their padding; scroll comes from the primitive body (WARP-1153).
     <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl" flush>
       <div data-testid="schedule-editor-backdrop">
-        <div className="p-4 border-b border-separator flex items-center justify-between">
+        <div className="p-4 border-b border-[var(--card-bd)] flex items-center justify-between">
           <h2
             id={headingId}
-            className="type-title-3 text-label-primary"
+            className="type-title-3 text-[color:var(--text)]"
           >
             {isEditing ? "Edit schedule" : "New schedule"}
           </h2>
@@ -222,7 +222,7 @@ export function ScheduleEditorModal({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
+            className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
           >
             <Icons.X className="w-5 h-5" />
           </button>
@@ -233,7 +233,7 @@ export function ScheduleEditorModal({
           <div className="space-y-1">
             <label
               htmlFor="schedule-name"
-              className="type-caption-1 text-label-secondary"
+              className="type-caption-1 text-[color:var(--text-muted)]"
             >
               Name
             </label>
@@ -244,17 +244,17 @@ export function ScheduleEditorModal({
               value={form.name}
               onChange={(e) => update("name", e.target.value)}
               placeholder="e.g. Bedtime"
-              className="dp-input"
+              className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] placeholder:text-[color:var(--text-muted)] focus:border-[var(--brand)]"
             />
           </div>
 
           {/* Subject */}
           <fieldset className="space-y-2" disabled={isEditing}>
-            <legend className="type-caption-1 text-label-secondary">
+            <legend className="type-caption-1 text-[color:var(--text-muted)]">
               Subject
             </legend>
             <div className="flex gap-4">
-              <label className="type-subheadline text-label-primary flex items-center gap-2">
+              <label className="type-subheadline text-[color:var(--text)] flex items-center gap-2">
                 <input
                   type="radio"
                   name="subjectType"
@@ -265,7 +265,7 @@ export function ScheduleEditorModal({
                 />
                 Device
               </label>
-              <label className="type-subheadline text-label-primary flex items-center gap-2">
+              <label className="type-subheadline text-[color:var(--text)] flex items-center gap-2">
                 <input
                   type="radio"
                   name="subjectType"
@@ -284,7 +284,7 @@ export function ScheduleEditorModal({
                 onChange={(e) => update("deviceMac", e.target.value)}
                 disabled={isEditing}
                 aria-label="Device"
-                className="dp-input"
+                className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] focus:border-[var(--brand)]"
               >
                 <option value="">Select a device…</option>
                 {devices.map((d) => (
@@ -299,7 +299,7 @@ export function ScheduleEditorModal({
                 onChange={(e) => update("groupId", e.target.value)}
                 disabled={isEditing}
                 aria-label="Group"
-                className="dp-input"
+                className="w-full px-3 py-2.5 rounded-[var(--radius-input)] outline-none transition-colors bg-[var(--surface)] border border-[var(--border)] text-[color:var(--text)] focus:border-[var(--brand)]"
               >
                 <option value="">Select a group…</option>
                 {groups.map((g) => (
@@ -311,7 +311,8 @@ export function ScheduleEditorModal({
             )}
           </fieldset>
 
-          {/* Enabled */}
+          {/* Enabled. `.sw` / `.ball` are the shell's toggle primitive — same
+              button + span structure as before, so this stays a class swap. */}
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -319,25 +320,20 @@ export function ScheduleEditorModal({
               aria-checked={form.enabled}
               aria-label="Enabled"
               onClick={() => update("enabled", !form.enabled)}
-              className={`w-10 h-6 rounded-full relative transition-colors ${
-                form.enabled ? "bg-accent" : "bg-surface-secondary"
-              }`}
+              className={`sw${form.enabled ? " on" : ""}`}
             >
-              <span
-                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                  form.enabled ? "translate-x-4" : ""
-                }`}
-                aria-hidden="true"
-              />
+              <span className="ball" aria-hidden="true" />
             </button>
-            <span className="type-subheadline text-label-primary">
+            <span className="type-subheadline text-[color:var(--text)]">
               {form.enabled ? "Enabled" : "Disabled"}
             </span>
           </div>
 
           {/* Windows */}
           <div className="space-y-2">
-            <h3 className="type-caption-1 text-label-secondary">Windows</h3>
+            <h3 className="type-caption-1 text-[color:var(--text-muted)]">
+              Windows
+            </h3>
             <WeeklyWindowsEditor
               value={form.windows}
               onChange={(ws) => update("windows", ws)}
@@ -346,17 +342,19 @@ export function ScheduleEditorModal({
 
           {/* Heatmap preview */}
           <div className="space-y-2">
-            <h3 className="type-caption-1 text-label-secondary">Preview</h3>
+            <h3 className="type-caption-1 text-[color:var(--text-muted)]">
+              Preview
+            </h3>
             <ScheduleHeatmap windows={form.windows} />
           </div>
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-separator flex justify-end gap-2">
+        <div className="p-4 border-t border-[var(--card-bd)] flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="dp-btn-secondary"
+            className="btn"
           >
             Cancel
           </button>
@@ -364,7 +362,7 @@ export function ScheduleEditorModal({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="dp-btn-primary disabled:opacity-50"
+            className="btn primary"
           >
             {saving ? "Saving…" : "Save"}
           </button>
@@ -373,7 +371,7 @@ export function ScheduleEditorModal({
         {toast && (
           <div
             role="alert"
-            className="fixed bottom-4 right-4 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
+            className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 lg:bottom-4 z-50 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
           >
             <span>{toast}</span>
             <button

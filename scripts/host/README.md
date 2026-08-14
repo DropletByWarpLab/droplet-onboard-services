@@ -17,6 +17,7 @@ Installed by `setup.sh` (via `scripts/lib/single-box.sh`) to
 | `voice_dsp` | ReSpeaker XVF3800 DSP wedge ("listening but never detecting"; xhci overrun spam in the kernel log) | `xvf_host REBOOT 1` over USB (`DROPLET_WATCHDOG_XVF_HOST`); `not_applicable` when the XMOS USB device is absent |
 | `docker_dns` | DNS broken inside containers — `getent hosts` probe via an **already-running** container (no heavy spawns) | Detect-and-report only: the durable fix (daemon.json `"dns": ["1.1.1.1", "8.8.8.8"]` pin) needs a dockerd restart that would take the stack down, so it is documented in the status message, never auto-applied |
 | `container_crashloop` | `docker inspect` RestartCount deltas between runs (persisted); any service restarting more than the threshold per window | Detect-and-report only (docker's restart policy already retries); captures a `docker logs --tail 200` snapshot to `diagnostics/` once per episode |
+| `host_unit_staleness` | A host unit's running process started BEFORE the sources it executes were last modified — a merged fix sitting inert in a live process (WARP-1829). Delegates to `droplet-host-units check` | Detect-and-report only: the heal (`droplet-host-units refresh`) belongs to the deploy path, not a 3-minute timer — `droplet-device-bridge` owns the panel feed and the console handback, and a supervisor able to restart it on its own cadence is the thundering herd, not the fix |
 
 **Status contract:** every known check ALWAYS appears in
 `/var/lib/droplet/watchdog/status.json` with an explicit enum —
@@ -50,6 +51,141 @@ sudo journalctl -u droplet-watchdog --no-pager -n 50
 
 # Tests (no root/hardware/docker needed)
 bash tests/droplet-watchdog.test.sh
+```
+
+## Host-unit refresh (WARP-1829)
+
+Host units execute their source **straight out of the git working tree**:
+
+```ini
+# droplet-device-bridge.service
+ExecStart=/usr/bin/python3 /home/droplet/edge-platform/services/oled-display/device-bridge.py
+```
+
+Python reads that file **once**, at process start. The box's refresh pulls
+`main` and restarts **containers** — nothing restarted host units — so a host
+unit kept running whatever the file said when it launched, across every
+subsequent pull, forever.
+
+It is silent by construction: the code on disk is correct, so reading the repo
+confirms the fix is present; `systemctl status` says `active (running)`. Only
+the running process disagrees. Measured live on 2026-08-09 —
+`droplet-device-bridge.service` had run 5d20h (PID 5602, started
+`2026-08-03 22:22:39 UTC`) on a file with mtime `2026-08-08 02:37:27 UTC`.
+Restarting it (same file, same env, new process) flipped `/openwrt/qr` from
+`ok:false` to `ok=true`. Blast radius: **every host-service fix merged since
+2026-08-03** — WARP-1800 sat inert for two days and caused a full misdiagnosis,
+WARP-1830 was inert the hour it merged.
+
+`droplet-host-units.sh` installs to `/usr/local/sbin/droplet-host-units` (via
+`setup.sh` → `scripts/lib/single-box.sh`) and has two subcommands:
+
+```bash
+# The detection check. Stands entirely on its own, never touches systemd
+# (no restart, no daemon-reload — it does keep its own digest baseline under
+# /var/lib/droplet/host-units), and is the ONE-LINE answer next time a merged
+# fix "isn't working" on the box.
+sudo droplet-host-units check          # exit 1 if any unit runs stale code
+sudo droplet-host-units check --json
+
+# The fix. Restarts exactly the stale units.
+sudo droplet-host-units refresh
+sudo systemctl start droplet-host-units.service   # same thing, journald-logged
+```
+
+**Anything that updates the checkout should run `refresh` afterwards.**
+`setup.sh` already does (last step of a provision run, where it is normally a
+no-op because the installers it just ran restarted those units themselves).
+
+### What counts as a source
+
+mtime of the files the unit **actually executes**, confirmed by a content
+digest — not a git diff of the pulled range. The checkout moves by pull, bundle
+apply, rsync and the odd hand-edit, so a range is often undefined; and the
+question being answered is "is this process older than its own code", which the
+standalone check has to answer anyway. Git only rewrites files whose content
+changed, so checkout mtime is a faithful "this pull touched this file".
+
+| Included | Why |
+|---|---|
+| `FragmentPath` + drop-ins | A changed unit definition means the loaded `ExecStart` may differ from disk — these also force a `daemon-reload` before the restart |
+| Every `ExecStartPre`/`ExecStart`/`ExecStartPost` argv token that is a real file | Catches both `/usr/bin/python3 <repo>/x.py` and `/usr/local/sbin/foo` |
+| Every `*.py` under a `*.py` entry point's directory | An `ExecStart` names ONE file that imports many siblings from the same tree; a change to an imported module is just as stale-making |
+| Payload paths under `/usr/local/lib`, `/usr/local/share`, `/opt/droplet` referenced by a shell entry point | `droplet-egress-audit` is a launcher whose real payload is `/usr/local/lib/droplet-egress-audit/collector.py` — invisible from argv alone |
+
+`EnvironmentFile` is deliberately **excluded**: `droplet-device-bridge` writes
+its own `/var/lib/droplet-bridge/openwrt-attach.env`, so counting it would have
+the unit restart itself on every key rotation. Credential changes have their own
+restart path (`droplet-openwrt-attach.path`).
+
+**mtime is the trigger, a content digest is the confirmation.** `setup.sh`
+rewrites unit files and `/usr/local/sbin` copies unconditionally (`sed > "$dst"`,
+`install -m 0644`), so their mtime moves on every provision whether or not a
+byte changed — mtime alone would restart `droplet-host-net` on every single
+`setup.sh` run for nothing. A unit is stale only when the bytes it would read
+now differ from the bytes it was last known to be running. That digest
+(`/var/lib/droplet/host-units/digests/<unit>`) is recorded at exactly the two
+moments the process is *provably* at or ahead of its sources: when a sweep
+observes `start >= newest source mtime`, and after a restart this script
+verified came back. With no digest on file (fresh install) a newer mtime reads
+as stale — being conservative on the first run costs one restart; guessing
+"probably fine" costs another multi-hour misdiagnosis.
+
+### Which units are in scope
+
+Enumerated from systemd (`droplet-*`), never hardcoded — a host unit added
+tomorrow is covered the day it lands. A unit is a **restart candidate** only
+with a live main PID, a long-running `Type`, `RemainAfterExit != yes`, at least
+one resolved source, and off the deny-list. Everything else is reported
+`skipped` **with a reason** (never silently absent).
+
+- `oneshot` units re-execute their source on **every** activation, so they can
+  never be stale — `droplet-watchdog`, `droplet-net-selfheal`, the panel units.
+- `droplet.service` is a `RemainAfterExit` oneshot whose `ExecStop` is
+  `docker compose down`. "Restarting" it would take the whole box down. Excluded
+  structurally **and** deny-listed, because the cost of being wrong is the
+  appliance.
+
+Today that resolves to exactly three units — `droplet-device-bridge` (tree),
+`droplet-host-net` and `droplet-egress-audit` (installed copies). **None touch
+the management NIC**: `host-net` owns `br-lan` (192.168.20.0/24) DHCP plus the
+`/32` route to the switch, `egress-audit` only reads conntrack. Restarting them
+cannot drop SSH. Whoever adds a new long-running host unit must confirm its own
+blast radius — one that reconfigures the management interface belongs in
+`DROPLET_HOST_UNITS_NEVER_RESTART`.
+
+### Bounds
+
+Sequential with a settle wait, **one attempt per unit per invocation**, ordered
+alphabetically except `DROPLET_HOST_UNITS_RESTART_LAST` (default
+`droplet-device-bridge.service`) which goes **last** — it owns the rack panel's
+data feed and the console-handback path (WARP-1639), so restarting it briefly
+blanks panel data; doing it last means the one visible blip happens with every
+other unit already verified back up, and `droplet-panel-deadman.timer` is the
+safety net if it does not return.
+
+A unit that does not come back is logged `CRITICAL`, recorded in
+`/var/lib/droplet/host-units/suspended`, and **not retried** on later runs — a
+restarter that keeps retrying a unit that cannot start IS the restart loop. The
+suspension lifts by itself as soon as that unit's sources change again (new code
+may be the fix) or with `--force`. The whole thing is self-terminating: a
+successful restart moves `ExecMainStartTimestamp` past the source mtime, so the
+next run has nothing to do.
+
+### Install drift
+
+A unit executing `/usr/local/sbin/<name>` runs a **copy** installed by
+`setup.sh`. If the repo pulled but `setup.sh` has not re-run, the copy is behind
+the tree — the process matches the copy, so it is not stale, but it is not
+running the merged fix either. That is reported as `install_drift` with the repo
+path. It deliberately does **not** set a failing exit code and does **not**
+trigger a restart: drift is the expected state between a pull and the next
+`setup.sh`, only `setup.sh` can fix it, and red-by-default would just teach
+people to ignore the check.
+
+```bash
+# Tests (no root, no systemd, no box)
+bash tests/droplet-host-units.test.sh
 ```
 
 ## Restic backup + restore drill (WARP-254)

@@ -46,7 +46,7 @@ describe("SpaceSwitcher", () => {
       />
     );
     expect(screen.getByRole("tab", { name: /my files/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /household/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /workspace/i })).toBeInTheDocument();
   });
 
   it("marks the active space as selected", () => {
@@ -57,7 +57,7 @@ describe("SpaceSwitcher", () => {
         onChange={() => {}}
       />
     );
-    expect(screen.getByRole("tab", { name: /household/i })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: /workspace/i })).toHaveAttribute(
       "aria-selected",
       "true"
     );
@@ -76,7 +76,7 @@ describe("SpaceSwitcher", () => {
         onChange={onChange}
       />
     );
-    fireEvent.click(screen.getByRole("tab", { name: /household/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
     expect(onChange).toHaveBeenCalledWith("shared");
   });
 
@@ -118,7 +118,7 @@ describe("SpaceSwitcher", () => {
         onChange={() => {}}
       />
     );
-    expect(screen.getByRole("tab", { name: /household/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /workspace/i })).toBeInTheDocument();
     expect(
       screen.queryByRole("tab", { name: /engineering/i })
     ).not.toBeInTheDocument();
@@ -131,7 +131,11 @@ describe("SpaceSwitcher", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("uses the shared space's name for its label (not a hardcoded string)", () => {
+  // WARP-1808 — the shared space's server name is a data contract (mounts,
+  // grouping, prefix math all key off it), but the RENDERED label is always
+  // "Workspace" for the household kind. Keyed off `kind`, never the name, so
+  // a renamed server row still reads "Workspace".
+  it("renders the household-kind space as 'Workspace' regardless of its server name", () => {
     render(
       <SpaceSwitcher
         spaces={[PERSONAL, { ...SHARED, name: "Family" }]}
@@ -139,8 +143,20 @@ describe("SpaceSwitcher", () => {
         onChange={() => {}}
       />
     );
-    expect(screen.getByRole("tab", { name: /family/i })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /^household$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^workspace$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /family/i })).not.toBeInTheDocument();
+  });
+
+  it("never maps a non-household space's name — even one literally named 'Household'", () => {
+    render(
+      <SpaceSwitcher
+        spaces={[PERSONAL, { ...DEPARTMENT, name: "Household" }]}
+        active="personal"
+        onChange={() => {}}
+      />
+    );
+    expect(screen.getByRole("tab", { name: /^household$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^workspace$/i })).not.toBeInTheDocument();
   });
 
   it("stays segmented (no Spaces menu) with exactly 3 active spaces — ≤3 regression", () => {
@@ -225,10 +241,10 @@ describe("SpaceSwitcher — Spaces menu (>3 spaces)", () => {
     RECORDS_FAILED,
   ];
 
-  it("keeps My Files + Household pinned and collapses the rest behind a Spaces trigger", () => {
+  it("keeps My Files + the shared Workspace pinned and collapses the rest behind a Spaces trigger", () => {
     render(<SpaceSwitcher spaces={SIX_SPACES} active="personal" onChange={() => {}} />);
     expect(screen.getByRole("tab", { name: /my files/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /household/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /workspace/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /spaces/i })).toBeInTheDocument();
     // Department rows aren't in the DOM until the menu opens.
     expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();

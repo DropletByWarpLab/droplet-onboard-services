@@ -51,6 +51,18 @@ class InvalidPortError(SwitchError):
     pass
 
 
+class PoweredMemberError(SwitchError):
+    """Refused: this port powers a device the fabric depends on (WARP-1734).
+
+    ADR-035 §7. Cutting PoE to an enrolled fabric member is the one action in
+    this rack with NO remote recovery: a de-powered device cannot roll itself
+    back, cannot confirm, and cannot be reached to undo the change. It is
+    therefore a hard refusal rather than a warning — the caller must pass
+    ``force=True``, which is the operator saying "I know this darkens the AP".
+    """
+    pass
+
+
 # --- Abstract Driver ---
 
 class SwitchDriver(ABC):
@@ -127,13 +139,17 @@ class SwitchDriver(ABC):
 
         Returns one dict per physical port::
 
-            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool}
+            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool,
+             "traffic": {"rx_bytes": int, "tx_bytes": int} | None}
 
-        ``speed`` is a display label ("1 Gb" / "10 Gb" / "" when down). A driver
-        whose primary port read (``get_ports``) cannot report link state
-        overrides this with a dedicated read. The default derives from
-        ``get_ports`` so every driver — and the test fakes — answer this without
-        bespoke code. The orchestrator §7 aggregation joins this read in.
+        ``speed`` is a display label ("1 Gb" / "10 Gb" / "" when down).
+        ``traffic`` carries the port's cumulative byte counters when the driver
+        reports them and ``None`` when it can't — the two are distinct claims
+        (WARP-1716), so absence is never flattened to zero. A driver whose
+        primary port read (``get_ports``) cannot report link state overrides
+        this with a dedicated read. The default derives from ``get_ports`` so
+        every driver — and the test fakes — answer this without bespoke code.
+        The orchestrator §7 aggregation joins this read in.
         """
         out: list[dict] = []
         for p in await self.get_ports():
@@ -142,6 +158,7 @@ class SwitchDriver(ABC):
                 "link_up": bool(p.get("link_up")),
                 "speed": p.get("speed") or "",
                 "is_sfp": bool(p.get("is_sfp")),
+                "traffic": p.get("traffic"),
             })
         return out
 
@@ -198,11 +215,45 @@ class SwitchDriver(ABC):
     async def set_vlan_membership(
         self, vlan_id: int, membership: list[dict]
     ) -> None:
-        """Set port membership for a VLAN.
+        """Set port membership for a VLAN. REPLACES the VLAN's whole member list.
 
         membership: list of {"port": int, "tagged": bool, "member": bool}
+
+        Callers that mean "add ONE port to its access VLAN" must use
+        set_port_access_vlan — passing a single-port list here wipes every other
+        member (audit 2026-08-06).
         """
         ...
+
+    # NOT abstract: a correct default composes the two membership primitives,
+    # so no existing backend or test fake needs to change. The OpenWrt driver
+    # overrides this to operate on RAW uci entries (a read→re-serialise there is
+    # lossy — a bare VLAN-1 entry comes back tagged).
+    async def set_port_access_vlan(self, port: int, vlan_id: int) -> None:
+        """Make `port` the untagged (access/PVID) member of `vlan_id` WITHOUT
+        disturbing that VLAN's other members, and remove it from every other
+        VLAN's untagged membership (a port has exactly one access VLAN; tagged
+        trunk memberships are left alone).
+
+        The provisioner previously called set_vlan_membership with a single-port
+        list to "move" a port, which replaced the VLAN's entire member list and
+        could strand the uplink/AP/appliance on VLAN 1 (audit 2026-08-06).
+        """
+        target = await self.get_vlan_membership(vlan_id)
+        members = [m for m in target.get("ports", []) if m.get("port") != port]
+        members.append({"port": port, "tagged": False, "member": True})
+        await self.set_vlan_membership(vlan_id, members)
+        for v in await self.get_vlans():
+            vid = v.get("vlan_id")
+            if vid == vlan_id:
+                continue
+            vm = await self.get_vlan_membership(vid)
+            kept = [
+                m for m in vm.get("ports", [])
+                if not (m.get("port") == port and not m.get("tagged"))
+            ]
+            if len(kept) != len(vm.get("ports", [])):
+                await self.set_vlan_membership(vid, kept)
 
     # --- PoE Control ---
 
@@ -231,6 +282,33 @@ class SwitchDriver(ABC):
     async def set_port_poe(self, port: int, enabled: bool) -> None:
         """Enable or disable PoE on a port. Raises InvalidPortError for SFP ports."""
         ...
+
+    # --- Topology (WARP-1734, ADR-035 §6) ---
+
+    # NOT abstract, deliberately: FDB is an optional capability, and the
+    # contract below already defines the answer for a backend that lacks it
+    # ("returns []"). Forcing every driver to implement a method whose only
+    # correct implementation would be `return []` buys nothing and breaks
+    # every existing backend the day topology lands.
+    async def get_fdb(self) -> list[dict]:
+        """Which MAC addresses the switch has learned, and on which port.
+
+        This is the port↔device edge — the switch is the only device in the
+        fabric that knows it, and without it the control plane cannot answer
+        "what is plugged into port N", so it cannot know that cutting PoE on
+        a port would darken the AP serving the household's Wi-Fi.
+
+        Returns one entry per LEARNED address (the switch's own permanent
+        addresses and CPU-side ports are excluded by the source, not here)::
+
+            [{"mac": "80:ea:0b:39:ae:23", "port": "lan2", "vlan": 1}, ...]
+
+        Returns [] — never raises — when the backend cannot supply an FDB
+        (a driver without the capability, or a switch image whose ACL does
+        not grant the read). Absence of topology must degrade the guard to
+        "cannot prove this port is safe", never break unrelated calls.
+        """
+        return []
 
     # --- Higher-Level Operations ---
 

@@ -29,13 +29,12 @@
  *     falls out of that for free, no extra client-side filtering needed.
  */
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
   Building2,
   Eye,
-  Home,
   KeyRound,
   Loader2,
   Pencil,
@@ -47,25 +46,20 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Department, DepartmentDetail, DepartmentRight, RosterUser } from "@/lib/types";
-import {
-  formatStorageBytes,
-  storageInputToBytes,
-  type StorageUnit,
-} from "@/lib/storage-units";
+import { CreateLibraryDialog } from "./CreateLibraryDialog";
+import { formatStorageBytes } from "@/lib/storage-units";
 import {
   listDepartments,
   getDepartment,
-  createDepartment,
-  createTeam,
   archiveDepartment,
   restoreDepartment,
   addDepartmentMember,
   updateDepartmentMemberRight,
   removeDepartmentMember,
 } from "@/lib/api";
-import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { orgUnitDisplayName } from "@/lib/org-unit-name";
 import { Badge, Meter, type BadgeKind } from "@/components/shell/primitives";
 
 const RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
@@ -80,13 +74,26 @@ const RIGHT_ICON: Record<DepartmentRight, LucideIcon> = {
   manager: KeyRound,
 };
 
+/**
+ * WARP-1808 — display-only name for a unit. The server seeds the HOUSEHOLD
+ * unit's name as "Household" (a data contract — ids drive selection/lookup and
+ * the name feeds nothing structural here), but the build is business-only, so
+ * the RENDERED name is always "Workspace". Keyed off `kind`, never the name
+ * string, and used at render sites only. WARP-1809 moved the mapping to the
+ * shared `orgUnitDisplayName` (the People-page access drawer renders the same
+ * rule on deptRights chips); this wrapper just adapts a Department row.
+ */
+function deptDisplayName(d: Department): string {
+  return orgUnitDisplayName(d.kind, d.name);
+}
+
 /** Verbatim copy (design brief §2–§5) — ships as-is. */
 const COPY = {
   emptyDepts:
     "No departments yet — create the first one to give a group of people their own file library.",
   removeConfirm: (name: string, lib: string) =>
     `Remove ${name} from ${lib}? They lose access to these files immediately.`,
-  householdTip: "Household access follows each person's role for now.",
+  householdTip: "Workspace-wide access follows each person's role for now.",
   archiveBody: "Files stay stored and admins can still retrieve them. Members lose access now.",
   restoreBody: "Members regain access with the rights they had before it was archived.",
   syncingShort: "Syncing…",
@@ -119,16 +126,6 @@ function quotaBand(usedBytes: string | null, quotaBytes: string | null): "" | "o
   if (pct > 95) return "danger";
   if (pct >= 80) return "warn";
   return "ok";
-}
-
-/** Client-side slug preview only — the server (nameToSlug in
- *  routes/departments.ts) is the authoritative slug generator. */
-function slugPreview(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
 }
 
 function StateChip({ state }: { state: Department["state"] }) {
@@ -176,18 +173,6 @@ function Avatar({ name }: { name: string }) {
   return <span className="ava">{initials || "?"}</span>;
 }
 
-interface QuotaFormState {
-  value: string;
-  unit: StorageUnit;
-}
-
-/** `undefined` (omit the field) rather than the shared encoder's `null`: the
- *  create payload has no "clear the quota" case, so an empty field means
- *  "don't send one" — the server default applies. */
-function quotaToBytes(q: QuotaFormState): string | undefined {
-  return storageInputToBytes(q.value, q.unit) ?? undefined;
-}
-
 const fieldStyle: React.CSSProperties = {
   background: "var(--surface)",
   border: "1px solid var(--border)",
@@ -219,28 +204,6 @@ const RMETA_STYLE: React.CSSProperties = {
   color: "var(--text-muted)",
 };
 
-// Shell typography for the create dialog (WARP-1347 — indigo idiom, no
-// legacy `type-*` utilities). Metrics mirror the old `type-headline` /
-// `type-caption-1` / `type-footnote` classes 1:1 so the visual hierarchy
-// is unchanged.
-const DIALOG_HEADING_STYLE: React.CSSProperties = {
-  margin: 0,
-  fontSize: 17,
-  lineHeight: "22px",
-  fontWeight: 600,
-  letterSpacing: "-0.41px",
-  color: "var(--text)",
-};
-const FIELD_LABEL_STYLE: React.CSSProperties = {
-  fontSize: 12,
-  lineHeight: "16px",
-  color: "var(--text-muted)",
-};
-const FOOTNOTE_STYLE: React.CSSProperties = {
-  fontSize: 13,
-  lineHeight: "18px",
-  letterSpacing: "-0.08px",
-};
 
 export interface DepartmentsPanelProps {
   /** Roster used to populate the "add member" picker — passed down so this
@@ -273,12 +236,6 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   // ── Create department / team modal state ──
   const [createOpen, setCreateOpen] = useState(false);
   const [createParent, setCreateParent] = useState<Department | null>(null); // null = new department
-  const [createName, setCreateName] = useState("");
-  const [createDescription, setCreateDescription] = useState("");
-  const [createQuota, setCreateQuota] = useState<QuotaFormState>({ value: "", unit: "GB" });
-  const [createBusy, setCreateBusy] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const createHeadingId = useId();
   const createTriggerRef = useRef<HTMLButtonElement | null>(null);
   const newDeptTriggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -344,7 +301,11 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
 
   const selected = departments.find((d) => d.id === selectedId) ?? null;
   const canManage = !!selected && (isAdminTier || selected.myRight === "manager");
-  const libraryLabel = selected?.name ?? "this library";
+  // WARP-1809 defense-in-depth: display name, not the raw row name. Today
+  // this only ever names a DEPARTMENT/TEAM (member removal is HOUSEHOLD-
+  // gated), for which the helper is identity — but a future gate change
+  // must not be able to leak the seeded unit name into the confirm copy.
+  const libraryLabel = selected ? deptDisplayName(selected) : "this library";
 
   const availablePeople = useMemo(() => {
     const memberIds = new Set((detail?.members ?? []).map((m) => m.userId));
@@ -355,63 +316,23 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   function openCreateDepartment() {
     createTriggerRef.current = newDeptTriggerRef.current;
     setCreateParent(null);
-    setCreateName("");
-    setCreateDescription("");
-    setCreateQuota({ value: "", unit: "GB" });
-    setCreateError(null);
     setCreateOpen(true);
   }
 
   function openCreateTeam(parent: Department, trigger: HTMLButtonElement | null) {
     createTriggerRef.current = trigger;
     setCreateParent(parent);
-    setCreateName("");
-    setCreateDescription("");
-    setCreateQuota({ value: "", unit: "GB" });
-    setCreateError(null);
     setCreateOpen(true);
   }
 
-  const closeCreate = useCallback(() => {
-    if (createBusy) return;
-    setCreateOpen(false);
-  }, [createBusy]);
-
-  async function handleCreateSubmit() {
-    const name = createName.trim();
-    if (!name) {
-      setCreateError("Name is required.");
-      return;
-    }
-    setCreateBusy(true);
-    setCreateError(null);
-    // Optimistic: an interim "Setting up…" card appears via the reload
-    // below once the server responds with state=pending — the design
-    // brief's "optimistic row, honest state" (no fabricated active state).
-    try {
-      const payload = {
-        name,
-        description: createDescription.trim() || undefined,
-        quotaBytes: quotaToBytes(createQuota),
-      };
-      if (createParent) {
-        const { team } = await createTeam(createParent.id, payload);
-        setCreateOpen(false);
-        await reload();
-        setSelectedId(team.id);
-        toast(`${team.name} is setting up…`, "success");
-      } else {
-        const { department } = await createDepartment(payload);
-        setCreateOpen(false);
-        await reload();
-        setSelectedId(department.id);
-        toast(`${department.name} is setting up…`, "success");
-      }
-    } catch (err: any) {
-      setCreateError(err?.message || "Failed to create");
-    } finally {
-      setCreateBusy(false);
-    }
+  /** The dialog owns the form and the create call; what happens AFTER a
+   *  successful create is this panel's own posture — reload (the server
+   *  returns state=pending and a reconciler provisions the groupfolder, so
+   *  never fabricate an active row), select it, say it's setting up. */
+  async function handleCreated(created: Department) {
+    await reload();
+    setSelectedId(created.id);
+    toast(`${created.name} is setting up…`, "success");
   }
 
   // ── Rights / membership ──
@@ -431,7 +352,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   async function performRemoveMember() {
     if (!selected || !removeTarget) return;
     await removeDepartmentMember(selected.id, removeTarget.userId);
-    toast(`${removeTarget.displayName} removed from ${selected.name}.`, "success");
+    toast(`${removeTarget.displayName} removed from ${deptDisplayName(selected)}.`, "success");
     await loadDetail(selected.id);
   }
 
@@ -451,10 +372,13 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   }
 
   // ── Archive / restore ──
+  // WARP-1809: toast labels route through deptDisplayName — identity for
+  // every archivable unit today (archive/restore are HOUSEHOLD-gated), but
+  // a future gate change can't leak the raw seeded name.
   async function performArchive() {
     if (!archiveTarget) return;
     await archiveDepartment(archiveTarget.id);
-    toast(`${archiveTarget.name} archived.`, "success");
+    toast(`${deptDisplayName(archiveTarget)} archived.`, "success");
     if (selectedId === archiveTarget.id) setSelectedId(null);
     await reload();
   }
@@ -462,7 +386,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
   async function performRestore() {
     if (!restoreTarget) return;
     await restoreDepartment(restoreTarget.id);
-    toast(`${restoreTarget.name} is being restored…`, "success");
+    toast(`${deptDisplayName(restoreTarget)} is being restored…`, "success");
     await reload();
   }
 
@@ -624,7 +548,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             <div className="sect">
               <h2>System</h2>
             </div>
-            <div className="card" data-testid="household-card">
+            <div className="card" data-testid="workspace-card">
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <span
                   style={{
@@ -639,10 +563,10 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                     color: "var(--text-muted)",
                   }}
                 >
-                  <Home size={17} />
+                  <Building2 size={17} />
                 </span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={NM_STYLE}>{household.name}</span>
+                  <span style={NM_STYLE}>{deptDisplayName(household)}</span>
                   <span style={SUB_STYLE}>
                     {household.memberCount} {household.memberCount === 1 ? "member" : "members"}
                   </span>
@@ -676,7 +600,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             <div style={{ display: "flex", alignItems: "flex-start", gap: 14, paddingBottom: 18, borderBottom: "1px solid var(--card-bd)" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "0.35px" }}>{selected.name}</h2>
+                  <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "0.35px" }}>{deptDisplayName(selected)}</h2>
                   <span className="chip" style={{ cursor: "default", fontWeight: 500, color: "var(--text)" }}>
                     {selected.kind === "TEAM" ? "Team" : selected.kind === "HOUSEHOLD" ? "System" : "Department"}
                   </span>
@@ -726,8 +650,17 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
             {/* WARP-1507: explain the "Needs attention" state — the failure
                 reason the schema stored, plus the reassurance that the box
                 keeps retrying on its own. Calm, muted treatment; the red
-                "Needs attention" chip already carries the signal. */}
-            {selected.state === "failed" && (
+                "Needs attention" chip already carries the signal.
+
+                WARP-1651: also render whenever a `provisionError` is present,
+                not only on `failed`. WARP-1557 sends an AMBIGUOUS write
+                outcome (a 5xx that may or may not have landed) to
+                `provisioning` WITH the error set, and this panel was gated on
+                `failed` — so the owner saw "Setting up…", a spinner, and no
+                error text at all, where before they saw the reason. The API
+                serves `provisionError` unconditionally; the UI just wasn't
+                reading it. */}
+            {(selected.state === "failed" || selected.provisionError != null) && (
               <div
                 role="status"
                 style={{
@@ -844,7 +777,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       <button
                         type="button"
                         onClick={() => setRemoveTarget({ userId: m.userId, displayName: m.displayName })}
-                        aria-label={`Remove ${m.displayName} from ${selected.name}`}
+                        aria-label={`Remove ${m.displayName} from ${deptDisplayName(selected)}`}
                         className="p-2.5 rounded-sm text-[var(--text-faint)] hover:text-[#ef4444] hover:bg-[rgba(239,68,68,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
                       >
                         <Trash2 size={14} />
@@ -917,7 +850,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
         open={archiveTarget !== null}
         onConfirm={performArchive}
         onCancel={() => setArchiveTarget(null)}
-        title={archiveTarget ? `Archive ${archiveTarget.name}?` : "Archive department?"}
+        title={archiveTarget ? `Archive ${deptDisplayName(archiveTarget)}?` : "Archive department?"}
         description={COPY.archiveBody}
         confirmLabel="Archive"
         variant="destructive"
@@ -927,7 +860,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
         open={restoreTarget !== null}
         onConfirm={performRestore}
         onCancel={() => setRestoreTarget(null)}
-        title={restoreTarget ? `Restore ${restoreTarget.name}?` : "Restore department?"}
+        title={restoreTarget ? `Restore ${deptDisplayName(restoreTarget)}?` : "Restore department?"}
         description={COPY.restoreBody}
         confirmLabel="Restore"
         variant="neutral"
@@ -935,103 +868,15 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
     </div>
   );
 
-  // WARP-1353 (WCAG 2.4.7): every control below wears `fieldStyle`, which sets
-  // `border: 1px solid var(--border)` INLINE — an inline declaration outranks any
-  // stylesheet rule, so the `focus:border-[var(--brand)]` idiom used on
-  // stylesheet-bordered inputs elsewhere in the dashboard would render as a
-  // silent no-op here. The affordance therefore has to be a ring (box-shadow),
-  // which an inline border cannot defeat — same conclusion WARP-1347 reached for
-  // the three converted selects above.
   function renderCreateDialog() {
-    const headingLabel = createParent ? `New team in ${createParent.name}` : "New department";
     return (
-      <Dialog
+      <CreateLibraryDialog
         open={createOpen}
-        onClose={closeCreate}
+        parent={createParent}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleCreated}
         triggerRef={createTriggerRef}
-        labelledBy={createHeadingId}
-        maxWidth="sm"
-      >
-        <div className="space-y-3">
-          <h2 id={createHeadingId} style={DIALOG_HEADING_STYLE}>
-            {headingLabel}
-          </h2>
-          <div>
-            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
-              Name
-            </label>
-            <input
-              autoFocus
-              value={createName}
-              onChange={(e) => setCreateName(e.target.value)}
-              placeholder={createParent ? "Platform" : "Finance"}
-              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-              style={fieldStyle}
-            />
-            {createName.trim() && (
-              <p className="mt-1.5" style={FIELD_LABEL_STYLE}>
-                <span className="mono">
-                  {createParent ? `${createParent.slug}-` : ""}
-                  <b style={{ color: "var(--brand)" }}>{slugPreview(createName)}</b>
-                </span>
-              </p>
-            )}
-          </div>
-          <div>
-            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
-              Description (optional)
-            </label>
-            <input
-              value={createDescription}
-              onChange={(e) => setCreateDescription(e.target.value)}
-              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-              style={fieldStyle}
-            />
-          </div>
-          <div>
-            <label className="mb-1.5 block" style={FIELD_LABEL_STYLE}>
-              Storage quota (optional)
-            </label>
-            <div className="flex gap-1.5">
-              <input
-                type="number"
-                min={0}
-                step="any"
-                inputMode="decimal"
-                value={createQuota.value}
-                onChange={(e) => setCreateQuota((q) => ({ ...q, value: e.target.value }))}
-                placeholder="No limit"
-                aria-label="Quota amount"
-                className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-                style={fieldStyle}
-              />
-              <select
-                value={createQuota.unit}
-                onChange={(e) => setCreateQuota((q) => ({ ...q, unit: e.target.value as StorageUnit }))}
-                aria-label="Quota unit"
-                className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
-                style={fieldStyle}
-              >
-                <option value="GB">GB</option>
-                <option value="TB">TB</option>
-              </select>
-            </div>
-          </div>
-          {createError && (
-            <p role="alert" className="text-system-red" style={FOOTNOTE_STYLE}>
-              {createError}
-            </p>
-          )}
-          <div className="flex items-center justify-end gap-2 pt-1">
-            <button type="button" onClick={closeCreate} className="btn ghost" disabled={createBusy}>
-              Cancel
-            </button>
-            <button type="button" onClick={handleCreateSubmit} className="btn primary" disabled={createBusy}>
-              {createBusy ? "Creating…" : createParent ? "Create team" : "Create department"}
-            </button>
-          </div>
-        </div>
-      </Dialog>
+      />
     );
   }
 }

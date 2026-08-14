@@ -1,6 +1,6 @@
 // WARP-1458 — create_document: seed a new empty Word (.docx) or
 // spreadsheet (.xlsx) file in the user's files. The file opens in the
-// dashboard's Files app (OnlyOffice editing when the docs engine is
+// dashboard's Files app (in-browser editing when the docs engine is
 // enabled); this tool only creates the empty document — content goes in
 // via the editor.
 //

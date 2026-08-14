@@ -56,8 +56,13 @@ COPY services/matter-controller/package.json ./services/matter-controller/packag
 COPY services/mcp-server/package.json ./services/mcp-server/package.json
 COPY packages/tools-core/package.json ./packages/tools-core/package.json
 COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
+# WARP-1874: tools-core now imports @droplet/shared-types (the meeting-link
+# parser). Mirrors apps/orchestrator/Dockerfile, which already carries all
+# four shared-types lines.
+COPY packages/shared-types/package.json ./packages/shared-types/package.json
 
-# Targeted install: mcp-server + its in-repo deps (tools-core + fips-selftest),
+# Targeted install: mcp-server + its in-repo deps (tools-core + fips-selftest
+# + shared-types),
 # plus the orchestrator workspace so its `prisma` devDep CLI is available
 # for client generation. Web-dashboard + ai-gateway are still excluded.
 # WARP-1065: persistent npm download cache — package tarballs survive
@@ -69,11 +74,13 @@ RUN --mount=type=cache,target=/root/.npm \
     -w @droplet/mcp-server \
     -w @droplet/tools-core \
     -w @droplet/fips-selftest \
+    -w @droplet/shared-types \
     --include-workspace-root
 
 # Sources required to build the mcp-server image.
 COPY packages/tools-core ./packages/tools-core
 COPY packages/fips-selftest ./packages/fips-selftest
+COPY packages/shared-types ./packages/shared-types
 COPY services/mcp-server ./services/mcp-server
 # Schema-only copy from the orchestrator workspace — the mcp-server's
 # `new PrismaClient()` at boot needs the generated client. We don't
@@ -91,7 +98,12 @@ COPY proto ./proto
 # schema at the default `./prisma/schema.prisma` location.
 RUN npm run -w @droplet/orchestrator db:generate
 
-# Build in dependency order.
+# Build in dependency order. shared-types first: its package.json points
+# `types` at ./src/index.ts (so tsc typechecks from source) but
+# `exports["."].require` at ./dist/index.js — so tools-core's EMITTED JS
+# needs shared-types' dist at runtime. Copying the sources alone would fix
+# the TS2307 and leave a runtime landmine.
+RUN npm run -w @droplet/shared-types build
 RUN npm run -w @droplet/tools-core build
 RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/mcp-server build
@@ -167,6 +179,12 @@ COPY --from=builder /app/packages/tools-core/package.json ./packages/tools-core/
 COPY --from=builder /app/packages/tools-core/dist ./packages/tools-core/dist
 COPY --from=builder /app/packages/fips-selftest/package.json ./packages/fips-selftest/package.json
 COPY --from=builder /app/packages/fips-selftest/dist ./packages/fips-selftest/dist
+# WARP-1874: node_modules above carries the @droplet/shared-types workspace
+# symlink, so the target directory has to exist in the run stage too or
+# tools-core's require() resolves to nothing. Same pair the orchestrator
+# run stage already copies.
+COPY --from=builder /app/packages/shared-types/package.json ./packages/shared-types/package.json
+COPY --from=builder /app/packages/shared-types/dist ./packages/shared-types/dist
 COPY --from=builder /app/services/mcp-server/package.json ./services/mcp-server/package.json
 COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
 # Proto file consumed by the runtime gRPC client. embedding.client.ts

@@ -102,21 +102,18 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "hardware.cameras_enabled", section: "hardware", type: "bool", value: true },
   { key: "hardware.switch_supervision", section: "hardware", type: "bool", value: true },
   { key: "hardware.matter_enabled", section: "hardware", type: "bool", value: true },
-  // WARP-475 (G3) — camera retention windows. Both rows are
-  // operator-editable from the dashboard via `PATCH /api/settings`.
-  // The values below are first-boot DEFAULTS only:
+  // WARP-475 (G3) seeded `hardware.camera_retention_days` (14) and
+  // `hardware.event_retention_days` (null) here. WARP-1849 removed both.
   //
-  //   - camera_retention_days = 14: the §2.5 first-boot promise. The
-  //     operator can raise (e.g. 30, 90) or lower (e.g. 7) it later.
-  //     The nightly camera-retention-purge cron + the `/cameras`
-  //     response read the live value, not this constant.
-  //   - event_retention_days = null: the explicit "kept forever" state
-  //     (NOT IS NULL ambiguity — the seeder writes `null` deliberately
-  //     so the dashboard can render "forever" without inventing a
-  //     sentinel value). Operator can replace null with a finite
-  //     number of days to put events on a finite TTL too.
-  { key: "hardware.camera_retention_days", section: "hardware", type: "number", value: 14 },
-  { key: "hardware.event_retention_days", section: "hardware", type: "json", value: null },
+  // Their only reader was the nightly camera-retention purge, which
+  // called Frigate endpoints that return 405 — so these rows described a
+  // retention policy nothing enforced, while Frigate expired footage on
+  // its own config. Two sources of truth, one of them fictional.
+  //
+  // Camera retention now lives solely in Frigate's config: per-camera via
+  // `GET/PATCH /api/cameras/:name/settings`, appliance-wide via the
+  // top-level `record:` block in docker/frigate/config.yml. Frigate
+  // enforces both natively.
 
   // ── appearance ──
   // Dashboard theme, density, and the initial landing page. The

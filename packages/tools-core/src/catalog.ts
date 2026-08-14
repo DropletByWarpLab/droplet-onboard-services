@@ -44,7 +44,10 @@ export type ToolDomain =
   | "erp"
   | "business"
   | "system"
-  | "data";
+  | "data"
+  // WARP-1685 — Messages (member-to-member team chat). Slug matches the
+  // `team_chat` ModuleId so the module toggle gates the domain.
+  | "team_chat";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -136,9 +139,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "share_clip",
     "search_camera_events",
     "get_camera_health",
+    "get_camera_storage",
     "set_camera_detection",
     "set_detection_zones",
     "delete_clip",
+    "rename_camera",
   ],
   switch: [
     "get_switch_ports",
@@ -185,8 +190,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "erp_schedule_appointment",
   ],
   business: ["business_profile_get"],
+  // WARP-1685 — Messages sends on the acting human's behalf.
+  team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   system: [
     "get_system_health",
+    "get_gpu_status",
     "list_drives",
     "list_storage_pools",
     "get_drive_health",
@@ -297,8 +305,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   share_clip: "Create a link to share a camera clip with someone",
   search_camera_events: "Search your camera recordings, like 'delivery truck yesterday'",
   get_camera_health: "Check that your cameras are streaming and healthy",
+  get_camera_storage: "See which camera is using the most recording space, and how full the drive is",
   set_camera_detection: "Turn a camera's detection and recording on or off",
   set_detection_zones: "Choose the areas of a camera view that trigger motion alerts",
+  rename_camera: "Give a camera a name you'll recognise, like \"Driveway\"",
   delete_clip: "Permanently delete a saved camera clip",
   // Switch
   get_switch_ports: "See what's plugged into each network port",
@@ -324,6 +334,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   list_notifications: "See notifications you've received",
   // System
   get_system_health: "Check that your Droplet is running smoothly",
+  get_gpu_status: "See what's using your Droplet's graphics chip right now",
   list_drives: "See your storage drives and free space",
   list_storage_pools: "Check your storage pools and whether any need attention",
   get_drive_health: "Check your drives' health and temperature",
@@ -358,6 +369,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
   // Business (business-knowledge profile)
   business_profile_get: "Look up what Droplet knows about your business",
+  // Team chat (Messages)
+  team_chat_send_message: "Send a Messages chat to someone for you (you approve it first)",
+  team_chat_send_meeting_invite:
+    "Set up a meeting and invite members in Messages (you approve it first)",
   // Data (encode/decode, hashing, format conversion)
   encode_text: "Encode text as base64, hex, or a URL-safe form",
   decode_text: "Decode base64, hex, or URL-encoded text back to plain text",

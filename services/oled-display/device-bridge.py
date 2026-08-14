@@ -27,6 +27,7 @@ import re
 import secrets
 import shlex
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -156,11 +157,21 @@ def _orchestrator_tls_context():
     # in files_snapshot's case).
     #
     # Verification is therefore skipped for LOOPBACK LITERALS ONLY. The
-    # trade is deliberate and narrow: this connection never leaves the box, the
-    # payload is unauthenticated health data with no credential material, and
+    # trade is deliberate and narrow: this connection never leaves the box, and
     # anyone positioned to MITM the box's own loopback interface already has
     # code execution on it — so verification is buying nothing here that the
     # host's own integrity does not already provide.
+    #
+    # ⚠ WARP-1800 CHANGED WHAT RIDES THIS PATH. It used to carry only
+    # unauthenticated health data, and the original note leaned on that. The
+    # join-code read now sends a Bearer token and receives the household PSK.
+    # The conclusion holds but the reasoning is different, so state it: an
+    # attacker who can answer 127.0.0.1 ahead of the gateway, or read this
+    # process's memory, already has the token out of BRIDGE_AUTH_TOKEN in the
+    # bridge's own environment and passwordless `sudo -n` besides. Unverified
+    # loopback TLS does not widen that boundary. It would be wrong to extend
+    # the same skip to a NON-loopback host on the strength of this comment —
+    # _is_loopback_url is what keeps that from happening, not this note.
     #
     # What was NOT done, and why:
     #   * publishing the orchestrator on a host port — a fixed port collides
@@ -188,6 +199,70 @@ def _orchestrator_base_url_raw():
 
 def _orchestrator_base_url():
     return _orchestrator_base_url_raw()
+
+
+def _orchestrator_household_wifi(timeout=4.0):
+    """The household join credentials, from the orchestrator's canonical
+    resolver. Returns (creds, None) or (None, reason).
+
+    WARP-1800. This is the THIRD shape a box can be, and the only one the two
+    local sources below cannot see:
+
+      * single-box  — the box's own hostapd IS the household AP  (local)
+      * multi-box   — an OpenWrt/UCI router hosts it             (local, SSH)
+      * edge-router — a standalone approved AP hosts it, and the box's
+                      hostapd/UCI genuinely hold nothing         (here)
+
+    On the edge-router shape the household SSID lives only on the approved AP,
+    so /etc/hostapd.conf does not exist and reading UCI returns the Pi's
+    disabled `OpenWrt` placeholder — an answer that is worse than none because
+    it looks real. Rather than teach the bridge to talk to APs (a second
+    opinion about household Wi-Fi, which is exactly what WARP-1723 collapsed),
+    ask the orchestrator, which already resolves router-then-approved-AP.
+
+    Deliberately NOT a general orchestrator client: one URL, short timeout,
+    every failure a reason string. The panel renders a dark rail on "" and
+    that has to stay true when the orchestrator is the thing that is down.
+    """
+    if not BRIDGE_AUTH_TOKEN:
+        return None, "no service token configured for the orchestrator"
+    url = _orchestrator_base_url() + "/api/network/wifi/join-code"
+    req = urlrequest.Request(
+        url, headers={"Authorization": "Bearer " + BRIDGE_AUTH_TOKEN})
+    try:
+        with urlrequest.urlopen(req, timeout=timeout,
+                                context=_orchestrator_tls_context()) as r:
+            body = json.loads(r.read().decode())
+    except Exception as e:                                          # noqa: BLE001
+        # 401 here means the orchestrator does not know SERVICE_TOKEN_DISPLAY
+        # — say so plainly rather than "unreachable", because the fix is a
+        # `setup.sh --sync-secrets`, not a reboot.
+        code = getattr(e, "code", None)
+        if code in (401, 403):
+            return None, ("orchestrator rejected the panel's service token "
+                          "— run ./scripts/setup.sh --sync-secrets")
+        logger.debug("household wifi read failed: %s", e)
+        return None, "orchestrator unreachable: {}".format(e)
+
+    ssid = str(body.get("ssid") or "")
+    key = str(body.get("key") or "")
+    if not ssid or not key:
+        # `detail` is the resolver's own operator-facing explanation ("no
+        # access point has been approved", "run --sync-secrets", …). Pass it
+        # through — a generic string here would throw away the one field that
+        # tells someone at the rack what to do.
+        return None, str(body.get("detail") or "no household Wi-Fi is set")
+
+    return {
+        "ssid": ssid,
+        "key": key,
+        # The resolver only ever reports a PSK network; it has no WEP/open
+        # path. `psk2` maps to `T:WPA` in _wifi_payload.
+        "encryption": "psk2",
+        "hidden": False,
+        "disabled": False,
+        "source": str(body.get("source") or ""),
+    }, None
 FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
 
 BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
@@ -344,6 +419,17 @@ def _ssh_openwrt(remote_cmd, timeout=20):
         remote_cmd,
     ]
     if OPENWRT_PASS:
+        # WARP-1830: `sshpass` is an UNDOCUMENTED runtime dependency — it
+        # appears in no Dockerfile, no install script and no package manifest
+        # in this repo, and it is absent on the shipping box. Without this
+        # check the failure arrives as `_run`'s stringified OSError,
+        # "[Errno 2] No such file or directory: 'sshpass'", which reads like a
+        # missing *config file* and sent this bug's first triage after the
+        # wrong thing. Name the package and the alternative instead.
+        if shutil.which("sshpass") is None:
+            return 1, "", ("sshpass is not installed but OPENWRT_PASS is set "
+                           "— install sshpass, or clear OPENWRT_PASS and use "
+                           "a key-based SSH login")
         cmd = ["sshpass", "-p", OPENWRT_PASS] + ssh_args
     else:
         cmd = ssh_args
@@ -716,22 +802,50 @@ def scan_via_nmcli():
                       "connected_to": connected}
 
 
+def _uci_router_is_the_right_question():
+    """Whether asking an OpenWrt/UCI router over SSH makes sense on this box.
+
+    WARP-1830. `wifi_snapshot()` used to run `scan_via_openwrt()` on EVERY
+    shape. That is only correct on multi-box, where a router really does sit
+    at OPENWRT_HOST. On the other two it dials a phone number nobody owns:
+
+      * single-box  — the box's own hostapd is the AP; there is no UCI router
+      * edge-router — the Pi owns the fabric and an external AP serves Wi-Fi;
+                      the box is a wired DHCP client with its radio
+                      deactivated (ADR-033 §3, and the founder rule of
+                      2026-07-28 that onboard radios are never APs)
+
+    Reuses the SAME shape decision as the credential path (WARP-654/834) so
+    the scan can no longer disagree with the QR about what kind of box this
+    is — the two answering differently is what let this sit unnoticed.
+    """
+    return not _use_hostapd_mode()
+
+
 def wifi_snapshot():
     out = {
         "networks": [], "source": None, "adapter": None,
         "connected_to": None, "state": "unknown",
         "scanned_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "error": None,
+        "error": None, "detail": None,
     }
-    networks, err = scan_via_openwrt()
-    if networks is not None:
-        out["networks"] = networks[:20]
-        out["source"] = "openwrt"
-        out["adapter"] = OPENWRT_IFACE
-        out["connected_to"] = _openwrt_connected_ssid()
-        out["state"] = "connected" if out["connected_to"] else "ready"
-        return out
-    out["error"] = err
+    # WARP-1830 — shape first, transport second. On a box with no UCI router
+    # the SSH scan produced a failure that LOOKED like a broken dependency
+    # ("[Errno 2] ... 'sshpass'") while the real fault was that OPENWRT_HOST
+    # still pointed at the multi-box default, 192.168.50.1 — unreachable from
+    # behind the Pi. Not asking is the fix; installing the binary would only
+    # have swapped an instant honest error for a slow misleading one.
+    uci_shape = _uci_router_is_the_right_question()
+    if uci_shape:
+        networks, err = scan_via_openwrt()
+        if networks is not None:
+            out["networks"] = networks[:20]
+            out["source"] = "openwrt"
+            out["adapter"] = OPENWRT_IFACE
+            out["connected_to"] = _openwrt_connected_ssid()
+            out["state"] = "connected" if out["connected_to"] else "ready"
+            return out
+        out["error"] = err
     nets, meta = scan_via_nmcli()
     if nets is not None and meta:
         out["networks"] = nets[:20]
@@ -740,7 +854,17 @@ def wifi_snapshot():
         out["state"] = meta.get("state") or "unknown"
         out["connected_to"] = meta.get("connected_to")
         return out
-    out["state"] = "unavailable"
+    if uci_shape:
+        # A router we were right to ask, that did not answer. A real fault.
+        out["state"] = "unavailable"
+        return out
+    # Nothing to scan, and nothing broken. Report that plainly rather than
+    # borrowing the vocabulary of failure: on this shape an empty network list
+    # is the CORRECT answer, and `error` here would be a lie that costs
+    # somebody an afternoon.
+    out["state"] = "not-applicable"
+    out["detail"] = ("this box has no OpenWrt router of its own to scan — "
+                     "Wi-Fi is served by the external access point")
     return out
 
 
@@ -847,12 +971,32 @@ def qr_snapshot():
         creds, err = hostapd_wifi_credentials()
     else:
         creds, err = openwrt_wifi_credentials()
-    if creds is None:
-        out["error"] = err or ("hostapd AP unavailable" if hostapd
-                               else "router unreachable")
-        return out
 
-    if hostapd:
+    # WARP-1800 — the edge-router shape. Neither local source can answer when
+    # the household SSID lives on a standalone approved AP, so fall through to
+    # the orchestrator's canonical resolver rather than reporting "router
+    # unreachable" for a router that is fine and simply hosts no Wi-Fi.
+    #
+    # Strictly a FALLBACK: a box whose own radio is the household AP keeps
+    # answering locally, with no orchestrator dependency added to the path
+    # that already worked. Only the shapes that were returning an error now
+    # make a network call, so the happy path costs nothing.
+    from_orchestrator = False
+    if creds is None:
+        creds, orch_err = _orchestrator_household_wifi()
+        from_orchestrator = creds is not None
+        if creds is None:
+            # Lead with the LOCAL reason: on a single-box the local failure is
+            # the real one and the orchestrator is a red herring. Carry the
+            # orchestrator's reason too — on the edge-router shape the local
+            # error is the red herring ("hostapd.conf: No such file" is
+            # expected there, not a fault).
+            out["error"] = " / ".join(
+                m for m in (err, orch_err) if m
+            ) or ("hostapd AP unavailable" if hostapd else "router unreachable")
+            return out
+
+    if hostapd and not from_orchestrator:
         # Single-box hostapd AP is WPA2-PSK; use the fixed-security T;S;P
         # payload the single-box pairing flow expects.
         payload = _hostapd_wifi_payload(creds["ssid"], creds["key"])
@@ -865,7 +1009,17 @@ def qr_snapshot():
         return out
     out.update({
         "ok": True, "ssid": creds["ssid"],
-        "security": "WPA" if hostapd else creds["encryption"],
+        # Track the branch actually taken, not the box shape: an edge-router
+        # fallback on a hostapd box goes through _wifi_payload, so reporting
+        # the hostapd constant here would describe a payload we did not build.
+        "security": ("WPA" if (hostapd and not from_orchestrator)
+                     else creds["encryption"]),
+        # WARP-1800 — which of the three sources answered. The endpoint is
+        # still called /openwrt/qr for compatibility with the panel and the
+        # single-box pairing flow, but it is no longer always OpenWrt telling
+        # us; anyone debugging a wrong SSID needs to know which one did.
+        "source": "orchestrator" if from_orchestrator else (
+            "hostapd" if hostapd else "uci"),
         "hidden": creds["hidden"],
         "disabled": creds["disabled"], "payload": payload,
         # Cleartext key is already inside `payload` (the phone QR scanner
@@ -3176,6 +3330,208 @@ def services_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# GPU telemetry (WARP-1861)
+# ---------------------------------------------------------------------------
+#
+# The bridge runs on the host, so it can read both halves of "why is the GPU
+# busy": the card's counters under /sys/class/drm, and the processes holding
+# it under /sys/class/kfd. Container attribution comes from /proc/<pid>/cgroup,
+# whose path already carries the container id — no Docker socket, so this stays
+# a read-only probe with no privilege beyond what the bridge already has.
+#
+# Module-level so tests can repoint them at a fixture tree.
+_SYS_DRM = "/sys/class/drm"
+_SYS_KFD_PROC = "/sys/class/kfd/kfd/proc"
+_PROC = "/proc"
+
+# `card1` yes; `card1-HDMI-A-3` (a connector) no.
+_DRM_CARD_RE = re.compile(r"card(\d+)$")
+# The 12-char short id, as `docker ps` shows it, out of a cgroup path like
+# /system.slice/docker-<64 hex>.scope or /docker/<64 hex>.
+_CGROUP_CONTAINER_RE = re.compile(r"(?:docker[-/]|containerd.*?[-/])([0-9a-f]{64})")
+
+
+def _read_sysfs_int(path):
+    """Read a single integer from sysfs, or None if it isn't readable.
+
+    None — never 0. A missing counter and an idle card are different facts,
+    and the `|| echo 0` reflex collapses them into a reading that every
+    threshold check happily passes.
+    """
+    try:
+        with open(path, "r") as fh:
+            return int(fh.read().strip().split()[0])
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+def _drm_cards():
+    """DRM card node names, numerically sorted, connector entries excluded.
+
+    Numeric sort so card10 doesn't precede card2 — lexical order would make
+    the enumeration depend on how many cards happen to be present.
+    """
+    try:
+        names = os.listdir(_SYS_DRM)
+    except Exception:                                                # noqa: BLE001
+        return []
+    cards = []
+    for name in names:
+        m = _DRM_CARD_RE.match(name)
+        if not m:
+            continue
+        if not os.path.isdir(os.path.join(_SYS_DRM, name, "device")):
+            continue
+        cards.append((int(m.group(1)), name))
+    return [name for _, name in sorted(cards)]
+
+
+def resolve_gpu_card():
+    """Return the discrete GPU's card node name, or None.
+
+    Resolved by LARGEST mem_info_vram_total — not lowest index, and not a
+    hardcoded name. The mini-rack exposes a 15.9 GiB discrete card alongside
+    a 512 MiB iGPU carve-out, and the iGPU publishes the same attributes;
+    its ~17 MiB of usage sits permanently below any multi-GiB "is the card
+    free?" threshold. A lowest-index resolver therefore reports a card that
+    is idle by construction while the real one is saturated. Same rule as
+    scripts/dmr/flip-single-box.sh's resolve_vram_node().
+
+    BRIDGE_GPU_CARD pins a specific node. A pin naming a card that isn't
+    present resolves to None rather than falling back: an operator who
+    mistyped the pin should get "unavailable", not plausible numbers from a
+    different device.
+    """
+    cards = _drm_cards()
+    pinned = os.environ.get("BRIDGE_GPU_CARD", "").strip()
+    if pinned:
+        return pinned if pinned in cards else None
+    best, best_size = None, -1
+    for name in cards:
+        size = _read_sysfs_int(
+            os.path.join(_SYS_DRM, name, "device", "mem_info_vram_total"))
+        if size is not None and size > best_size:
+            best, best_size = name, size
+    return best
+
+
+def _hwmon_value(device_dir, filename):
+    """Read a hwmon attribute from whichever hwmonN subdir exposes it."""
+    hwmon_root = os.path.join(device_dir, "hwmon")
+    try:
+        subdirs = sorted(os.listdir(hwmon_root))
+    except Exception:                                                # noqa: BLE001
+        return None
+    for sub in subdirs:
+        val = _read_sysfs_int(os.path.join(hwmon_root, sub, filename))
+        if val is not None:
+            return val
+    return None
+
+
+def gpu_processes():
+    """Processes currently holding the GPU, newest-listed first.
+
+    Sourced from /sys/class/kfd/kfd/proc, whose entries are named by pid.
+    A pid can exit between listing and reading — that race is ordinary, so
+    the entry is dropped rather than surfacing a half-null row.
+    """
+    try:
+        entries = os.listdir(_SYS_KFD_PROC)
+    except Exception:                                                # noqa: BLE001
+        return []
+    procs = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        base = os.path.join(_PROC, entry)
+        try:
+            with open(os.path.join(base, "comm"), "r") as fh:
+                comm = fh.read().strip()
+        except Exception:                                            # noqa: BLE001
+            continue                    # exited between listing and read
+        try:
+            with open(os.path.join(base, "cmdline"), "r") as fh:
+                # /proc renders argv NUL-separated; spaces make it readable
+                # and keep it a single JSON string.
+                cmdline = fh.read().replace("\x00", " ").strip()
+        except Exception:                                            # noqa: BLE001
+            cmdline = ""
+        container_id = None
+        try:
+            with open(os.path.join(base, "cgroup"), "r") as fh:
+                m = _CGROUP_CONTAINER_RE.search(fh.read())
+                if m:
+                    container_id = m.group(1)[:12]
+        except Exception:                                            # noqa: BLE001
+            pass
+        procs.append({
+            "pid": pid,
+            "comm": comm,
+            # Bounded: a llama-server argv with a long model path is fine to
+            # truncate, and an unbounded string here would be echoed into
+            # every dashboard poll.
+            "cmdline": cmdline[:300],
+            "container_id": container_id,
+        })
+    procs.sort(key=lambda p: p["pid"])
+    return procs
+
+
+def gpu_snapshot():
+    """Read-only GPU telemetry: card counters plus who is holding it.
+
+    `available: false` when no card resolves — with every counter null and a
+    `reason`, so a caller can never mistake "nothing found" for "idle".
+    """
+    card = resolve_gpu_card()
+    if not card:
+        pinned = os.environ.get("BRIDGE_GPU_CARD", "").strip()
+        reason = (
+            f"BRIDGE_GPU_CARD={pinned} names a card that is not present"
+            if pinned else "no DRM card exposing mem_info_vram_total"
+        )
+        return {
+            "available": False,
+            "card": None,
+            "reason": reason,
+            "busy_percent": None,
+            "vram_total_bytes": None,
+            "vram_used_bytes": None,
+            "vram_used_fraction": None,
+            "power_watts": None,
+            "temp_c": None,
+            "processes": [],
+        }
+
+    dev = os.path.join(_SYS_DRM, card, "device")
+    total = _read_sysfs_int(os.path.join(dev, "mem_info_vram_total"))
+    used = _read_sysfs_int(os.path.join(dev, "mem_info_vram_used"))
+    power_uw = _hwmon_value(dev, "power1_average")
+    temp_mc = _hwmon_value(dev, "temp1_input")
+
+    # Derived here rather than in each consumer so the dashboard tile and the
+    # assistant tool can never disagree on the arithmetic.
+    fraction = None
+    if total and used is not None:
+        fraction = round(used / total, 3)
+
+    return {
+        "available": True,
+        "card": card,
+        "reason": None,
+        "busy_percent": _read_sysfs_int(os.path.join(dev, "gpu_busy_percent")),
+        "vram_total_bytes": total,
+        "vram_used_bytes": used,
+        "vram_used_fraction": fraction,
+        "power_watts": round(power_uw / 1_000_000, 1) if power_uw is not None else None,
+        "temp_c": round(temp_mc / 1000, 1) if temp_mc is not None else None,
+        "processes": gpu_processes(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 
@@ -3301,6 +3657,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, host_topology_snapshot())
+            if path == "/gpu":
+                # WARP-1861: read-only GPU telemetry — card counters plus the
+                # processes holding it. Auth-gated like /host/topology: the
+                # snapshot names running processes and their command lines,
+                # which is box-internal detail, and with BRIDGE_BIND=0.0.0.0
+                # this is LAN-reachable.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, gpu_snapshot())
             if path == "/logs/bundle":
                 # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
                 # and /drives — the logs can carry box-internal (and, pre-host-

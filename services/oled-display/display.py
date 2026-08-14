@@ -62,6 +62,63 @@ logger = logging.getLogger("droplet.tft")
 WIDTH = int(os.environ.get("LCD_WIDTH", "480"))
 HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 
+
+# ---------------------------------------------------------------------------
+# The safe area — WARP-1702
+# ---------------------------------------------------------------------------
+# The screens further down are authored against the raw frame edge: their
+# margins are literals measured from x=0 and from WIDTH/HEIGHT. That is correct
+# on a 480x320 TFT, where every pixel reaches the eye. On the 1424x280 rack bar
+# it is not — the bezel/driver board eats a strip on each side, which is why
+# WARP-1644 gave layout_wide a safe area.
+#
+# Only `system` and `debug` route through layout_wide, so every other screen
+# still ran off the glass: the founder's photo of the home tile grid had the
+# mark sliced, "Ask AI" reading "sk AI" and the status ribbon cut off.
+#
+# Rather than re-derive coordinates in eight renderers, those renderers draw
+# onto a canvas the size of the SAFE AREA and hand it to `_fit_panel()`, which
+# composites it into the panel frame at the inset. Their literals stay correct
+# because every one of them is relative to the canvas origin — which is exactly
+# why this is done with a canvas rather than by threading an origin through.
+#
+# On a 480x320 panel the inset is (0, 0), the canvas IS the frame and
+# `_fit_panel` is a no-op, so that path renders byte-identically to before.
+def _is_wide_panel() -> bool:
+    """True on the rack bar panel. Same deferred-import reason as _safe_inset.
+
+    Fails CLOSED: a geometry probe that raises must not add polling to a panel
+    that may not want it, and must never take the display service down.
+    """
+    try:
+        import layout_wide
+        return layout_wide.is_wide()
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+def _safe_inset() -> Tuple[int, int]:
+    """(x, y) bezel inset for the current panel. (0, 0) unless wide.
+
+    Deferred import: layout_wide imports us, so this cannot be module-level.
+    It is also the single source of the inset — the env knobs stay documented
+    in one place (layout_wide.SAFE_INSET_*) rather than being read twice.
+    """
+    try:
+        import layout_wide
+        if not layout_wide.is_wide():
+            return 0, 0
+        return layout_wide.SAFE_INSET_X, layout_wide.SAFE_INSET_Y
+    except Exception:                                           # noqa: BLE001
+        # A display backend must never take the service down over geometry.
+        return 0, 0
+
+
+def _safe_canvas(bg) -> Image.Image:
+    """Blank canvas for a 480x320-authored screen: the panel minus the bezel."""
+    ix, iy = _safe_inset()
+    return Image.new("RGB", (WIDTH - 2 * ix, HEIGHT - 2 * iy), bg)
+
 # ---------------------------------------------------------------------------
 # Backend selection
 # ---------------------------------------------------------------------------
@@ -126,6 +183,15 @@ CAMERAS_REFRESH_SECONDS = int(os.environ.get("CAMERAS_REFRESH_SECONDS", "15"))
 # WARP-1645 — the orchestrator's health monitor refreshes on its own 15s
 # cadence, so there is nothing to gain by polling faster than it updates.
 SERVICES_REFRESH_SECONDS = int(os.environ.get("SERVICES_REFRESH_SECONDS", "15"))
+# WARP-1800 — the household join code behind the rail's Wi-Fi face.
+#
+# Slow on purpose. A passphrase changes only when someone rotates it (and
+# rotation pushes a fresh snapshot itself), while the read behind it can cost
+# a `docker exec` and, on the edge-router shape, an orchestrator round trip —
+# so polling it at the scan feed's 20s would spend real work to re-learn a
+# constant. The tap handler must never block on this: it reads whatever the
+# last poll left, which is why the face is derived rather than fetched.
+JOIN_REFRESH_SECONDS = int(os.environ.get("JOIN_REFRESH_SECONDS", "120"))
 
 # ---------------------------------------------------------------------------
 # Design tokens — mirror apps/web-dashboard/src/app/globals.css (dark mode).
@@ -214,6 +280,34 @@ AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 # after the first tap. Long enough to be a deliberate second press, short
 # enough that walking away disarms it.
 CONSOLE_CONFIRM_SECONDS = float(os.environ.get("CONSOLE_CONFIRM_SECONDS", "4"))
+
+# WARP-1782 — the rail's second QR face: the Wi-Fi join code.
+#
+# Design brief §8 says never render the PSK in LIVE state, because a
+# permanently-displayed credential on a rack front in a shared room is a
+# standing leak. This is a deliberate, narrow exception to that rule, and the
+# distinction it turns on is display vs REVEAL: the Wi-Fi code is not on the
+# glass until someone standing at the rack asks for it, and it takes itself
+# back off. Nothing about the panel's resting state changes.
+#
+# The mitigations are the reason this is defensible, so do not quietly drop
+# any of them:
+#   - the PSK is never drawn as TEXT here. It exists only inside the QR, which
+#     needs a camera at roughly 25cm; text is readable across a room and by
+#     whatever camera is already pointed at the rack.
+#   - the face is time-boxed and self-reverting, so there is no way to leave
+#     the panel parked on it.
+#   - PANEL_RAIL_WIFI_QR=0 removes the face entirely.
+RAIL_WIFI_QR = os.environ.get("PANEL_RAIL_WIFI_QR", "1") != "0"
+RAIL_WIFI_SECONDS = float(os.environ.get("PANEL_RAIL_WIFI_SECONDS", "45"))
+
+# Mirrors layout_wide.QR_BYTE_BUDGET — the byte count above which the encoder
+# drops below the 4px/module scan floor. Duplicated rather than imported
+# because layout_wide imports THIS module; a test pins the two together. A
+# 32-char SSID plus a 16-char passphrase really does clear it, and the honest
+# response to that is to not arm the face at all rather than to paint a card
+# nobody can scan.
+RAIL_QR_BYTE_BUDGET = 62
 
 # ---------------------------------------------------------------------------
 # Boot readiness (WARP-624; redirect/TLS fix WARP-638)
@@ -735,6 +829,12 @@ class TFTDisplay:
             "sparks_cpu": [],
             "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
                      "band": "", "key_ttl_seconds": 0, "password": ""},
+            # WARP-1800 — the household JOIN credentials, from the bridge's
+            # /openwrt/qr. Distinct from "wifi" above, which is the client
+            # SCAN feed (/wifi: adapter, networks, connected_to) and has never
+            # carried an SSID+key pair. Conflating them is what left the
+            # rail's Wi-Fi face permanently dark.
+            "wifi_join": {},
             "cameras": {"online": 0, "total": 0},
             # WARP-1645 — filled by fetch_services(). All-None so a cold box
             # renders em dashes; see WARP-1643 on why not zeros.
@@ -755,6 +855,11 @@ class TFTDisplay:
         # WARP-1641 — debug screen's two-tap console handback.
         self._console_confirm_until: float = 0.0
         self._console_last_result: str = ""
+        # WARP-1782 — the rail's Wi-Fi QR face is a DEADLINE, not a flag. The
+        # revert is then a property of the clock rather than of something
+        # remembering to fire, so there is no timer to leak and no path where
+        # a missed callback strands a credential on the rack's front panel.
+        self._rail_wifi_until: float = 0.0
 
         self._init_device()
         self._load_logo()
@@ -894,6 +999,8 @@ class TFTDisplay:
                 self.update_cameras(data)
             elif mode == "services":
                 self.update_services(data)
+            elif mode == "qr":
+                self.update_wifi_join(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -994,6 +1101,29 @@ class TFTDisplay:
 
     # ----- Push to display ---------------------------------------------
 
+    def _fit_panel(self, img: Image.Image, bg) -> Image.Image:
+        """Composite a safe-area canvas into the full panel frame (WARP-1702).
+
+        Returns `img` untouched when it already fills the panel — which covers
+        both the wide-native screens (layout_wide draws at full size and does
+        its own insetting) and every screen on a 480x320 panel.
+
+        Touch regions are recorded by the renderers in CANVAS coordinates, so
+        they are translated here, in the same place and by the same offset as
+        the pixels. Doing it anywhere else is how the two drift apart.
+        """
+        if img.size == (WIDTH, HEIGHT):
+            return img
+        ox = (WIDTH - img.width) // 2
+        oy = (HEIGHT - img.height) // 2
+        frame = Image.new("RGB", (WIDTH, HEIGHT), bg)
+        frame.paste(img, (ox, oy))
+        with self._touch_regions_lock:
+            for r in self._touch_regions:
+                r.x += ox
+                r.y += oy
+        return frame
+
     def _push(self, image: Image.Image):
         # Every backend writes the preview PNG: the PyPortal renders the frame
         # itself from the data commands we stream over serial, the sim backend
@@ -1028,9 +1158,12 @@ class TFTDisplay:
 
         Returns the y-coordinate where the header ends (content starts).
         """
+        # Extents come off the canvas, not WIDTH: on the rack panel the canvas
+        # is the safe area, not the whole frame (WARP-1702).
+        cw = img.width
         bar_h = 52
-        draw.rectangle([(0, 0), (WIDTH, bar_h)], fill=SURFACE_SECONDARY)
-        draw.line([(0, bar_h), (WIDTH, bar_h)], fill=SEPARATOR, width=1)
+        draw.rectangle([(0, 0), (cw, bar_h)], fill=SURFACE_SECONDARY)
+        draw.line([(0, bar_h), (cw, bar_h)], fill=SEPARATOR, width=1)
 
         font_title = _get_font(17, bold=True)
         font_small = _get_font(12, bold=True)
@@ -1065,7 +1198,7 @@ class TFTDisplay:
         clock = time.strftime("%H:%M")
         bbox = draw.textbbox((0, 0), clock, font=font_clock)
         clock_w = bbox[2] - bbox[0]
-        draw.text((WIDTH - clock_w - 14, 14), clock,
+        draw.text((cw - clock_w - 14, 14), clock,
                   fill=TEXT_COLOR, font=font_clock)
 
         # Status chip between clock and brand
@@ -1074,7 +1207,7 @@ class TFTDisplay:
             chip_bbox = draw.textbbox((0, 0), status, font=chip_font)
             chip_w = (chip_bbox[2] - chip_bbox[0]) + 22
             chip_h = 20
-            chip_x = WIDTH - clock_w - 14 - chip_w - 10
+            chip_x = cw - clock_w - 14 - chip_w - 10
             chip_y = (bar_h - chip_h) // 2
             draw.rounded_rectangle(
                 [(chip_x, chip_y), (chip_x + chip_w, chip_y + chip_h)],
@@ -1122,7 +1255,8 @@ class TFTDisplay:
 
     def render_home(self) -> Image.Image:
         """Dashboard-style tile grid. This is the root interactive screen."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1131,15 +1265,6 @@ class TFTDisplay:
             img, draw, show_home=False,
             status="Online",
         )
-
-        # Tile grid: 2 columns x 2 rows of primary destinations + a
-        # compact system status ribbon at the foot.
-        pad = 10
-        tile_gap = 10
-        grid_w = WIDTH - 2 * pad
-        grid_h = HEIGHT - content_y - 66  # leave space for footer
-        tile_w = (grid_w - tile_gap) // 2
-        tile_h = (grid_h - tile_gap) // 2
 
         font_label = _get_font(12, bold=True)
         font_title = _get_font(19, bold=True)
@@ -1151,9 +1276,26 @@ class TFTDisplay:
             ("NET",  "Network", self._get_ip(),   self.DEVICES,  self._go_devices),
             ("CFG",  "Settings", "Brightness & more", self.SETTINGS, self._go_settings),
         ]
+
+        # Tile grid + a compact system status ribbon at the foot.
+        #
+        # WARP-1702 — the column count follows the panel shape. A tile needs
+        # ~100px of height for its pill, title and subtitle, and the rack bar
+        # has only ~270 to spend on header + grid + ribbon. Two rows do not fit
+        # there: the subtitles were clipped by the tile edge and then again by
+        # the ribbon. A 5:1 bar wants a single row of four anyway, and it has
+        # the width to spare.
+        pad = 10
+        tile_gap = 10
+        cols = 4 if cw >= 3 * ch else 2
+        rows = -(-len(tiles) // cols)
+        grid_h = ch - content_y - 66  # leave space for footer
+        tile_w = (cw - 2 * pad - (cols - 1) * tile_gap) // cols
+        tile_h = (grid_h - (rows - 1) * tile_gap) // rows
+
         for idx, (tag, title, sub, _mode, action) in enumerate(tiles):
-            col = idx % 2
-            row = idx // 2
+            col = idx % cols
+            row = idx // cols
             tx = pad + col * (tile_w + tile_gap)
             ty = content_y + row * (tile_h + tile_gap)
             self._draw_tile(draw, tx, ty, tile_w, tile_h,
@@ -1163,10 +1305,10 @@ class TFTDisplay:
                                                tx, ty, tile_w, tile_h, action))
 
         # Status ribbon (mirrors dashboard's StatusSegment row)
-        ribbon_y = HEIGHT - 56
-        self._draw_status_ribbon(draw, pad, ribbon_y, WIDTH - 2 * pad, 44)
+        ribbon_y = ch - 56
+        self._draw_status_ribbon(draw, pad, ribbon_y, cw - 2 * pad, 44)
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def _draw_tile(self, draw, x, y, w, h,
                    tag, title, sub,
@@ -1261,7 +1403,8 @@ class TFTDisplay:
 
     def render_stats(self) -> Image.Image:
         """Detailed health screen — 2x2 metric cards, back button."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1287,8 +1430,8 @@ class TFTDisplay:
 
         pad = 10
         gap = 10
-        card_w = (WIDTH - 2 * pad - gap) // 2
-        card_h = (HEIGHT - content_y - 56 - gap) // 2
+        card_w = (cw - 2 * pad - gap) // 2
+        card_h = (ch - content_y - 56 - gap) // 2
 
         self._draw_metric_card(
             draw, pad, content_y, card_w, card_h,
@@ -1320,7 +1463,7 @@ class TFTDisplay:
         )
 
         # Footer: IP + hostname (mirrors dashboard status ribbon)
-        foot_y = HEIGHT - 42
+        foot_y = ch - 42
         draw.text((pad, foot_y), "IP",
                   fill=LABEL_TERTIARY, font=_get_font(10, bold=True))
         draw.text((pad + 24, foot_y - 2),
@@ -1332,12 +1475,12 @@ class TFTDisplay:
         mins = int((up % 3600) // 60)
         up_str = f"{days}d {hours}h" if days else f"{hours}h {mins}m"
         bbox = draw.textbbox((0, 0), up_str, font=_get_font(14))
-        draw.text((WIDTH - (bbox[2] - bbox[0]) - pad, foot_y - 2),
+        draw.text((cw - (bbox[2] - bbox[0]) - pad, foot_y - 2),
                   up_str, fill=TEXT_COLOR, font=_get_font(14))
-        draw.text((WIDTH - (bbox[2] - bbox[0]) - pad - 28, foot_y),
+        draw.text((cw - (bbox[2] - bbox[0]) - pad - 28, foot_y),
                   "UP", fill=LABEL_TERTIARY, font=_get_font(10, bold=True))
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_chat(self) -> Image.Image:
         """Chat-prep screen — mirrors the dashboard's hero prompt capsule.
@@ -1346,7 +1489,8 @@ class TFTDisplay:
         screen shows a reminder that the user should speak (or use the
         web UI) and displays the latest LLM-pushed message when present.
         """
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1364,7 +1508,7 @@ class TFTDisplay:
         # Capsule (faux prompt input — touch target routes to web UI)
         cap_x = 16
         cap_y = content_y + 92
-        cap_w = WIDTH - 32
+        cap_w = cw - 32
         cap_h = 48
         draw.rounded_rectangle(
             [(cap_x, cap_y), (cap_x + cap_w, cap_y + cap_h)],
@@ -1396,9 +1540,9 @@ class TFTDisplay:
 
         # Last message panel (if any)
         msg_y = cap_y + cap_h + 16
-        msg_h = HEIGHT - msg_y - 16
+        msg_h = ch - msg_y - 16
         draw.rounded_rectangle(
-            [(16, msg_y), (WIDTH - 16, msg_y + msg_h)],
+            [(16, msg_y), (cw - 16, msg_y + msg_h)],
             radius=12, fill=SURFACE_RAISED,
         )
         font_label = _get_font(10, bold=True)
@@ -1422,12 +1566,13 @@ class TFTDisplay:
                       "Tool calls and replies appear here.",
                       fill=LABEL_TERTIARY, font=_get_font(12))
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_devices(self) -> Image.Image:
         """Network / devices summary screen — derived from dashboard's
         devices tile + status-ribbon row."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1445,7 +1590,7 @@ class TFTDisplay:
         card_h = 96
         draw.rounded_rectangle(
             [(pad, content_y + 4),
-             (WIDTH - pad, content_y + 4 + card_h)],
+             (cw - pad, content_y + 4 + card_h)],
             radius=14, fill=SURFACE_RAISED,
         )
         draw_droplet_mark(draw, pad + 16, content_y + 18, 52,
@@ -1460,8 +1605,8 @@ class TFTDisplay:
 
         # Two secondary cards
         sub_y = content_y + 4 + card_h + 12
-        sub_h = HEIGHT - sub_y - 16
-        col_w = (WIDTH - 2 * pad - 12) // 2
+        sub_h = ch - sub_y - 16
+        col_w = (cw - 2 * pad - 12) // 2
         for idx, (label, primary, secondary) in enumerate([
             ("LAN", self._get_ip(), "Via gateway"),
             ("UPLINK", "Online", "DNS reachable"),
@@ -1477,11 +1622,12 @@ class TFTDisplay:
                       primary, fill=TEXT_COLOR, font=font_title)
             draw.text((sx + 14, sub_y + sub_h - 26),
                       secondary, fill=LABEL_SECONDARY, font=font_meta)
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_settings(self) -> Image.Image:
         """Settings screen — brightness slider + quick actions."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1497,7 +1643,7 @@ class TFTDisplay:
         card_y = content_y + 4
         card_h = 130
         draw.rounded_rectangle(
-            [(pad, card_y), (WIDTH - pad, card_y + card_h)],
+            [(pad, card_y), (cw - pad, card_y + card_h)],
             radius=14, fill=SURFACE_RAISED,
         )
         draw.text((pad + 16, card_y + 14),
@@ -1508,8 +1654,8 @@ class TFTDisplay:
 
         # Stepper buttons
         btn_font = _get_font(20, bold=True)
-        minus_x = WIDTH - pad - 120
-        plus_x = WIDTH - pad - 60
+        minus_x = cw - pad - 120
+        plus_x = cw - pad - 60
         btn_y = card_y + 18
         self._draw_button(
             draw, minus_x, btn_y, 50, 44, "-", btn_font,
@@ -1527,7 +1673,7 @@ class TFTDisplay:
         # Brightness bar
         bar_x = pad + 16
         bar_y = card_y + card_h - 22
-        bar_w = WIDTH - 2 * pad - 32
+        bar_w = cw - 2 * pad - 32
         draw.rounded_rectangle(
             [(bar_x, bar_y), (bar_x + bar_w, bar_y + 8)],
             radius=4, fill=SURFACE_SECONDARY,
@@ -1541,8 +1687,8 @@ class TFTDisplay:
 
         # Quick actions row
         act_y = card_y + card_h + 14
-        act_h = HEIGHT - act_y - 16
-        col_w = (WIDTH - 2 * pad - 12) // 2
+        act_h = ch - act_y - 16
+        col_w = (cw - 2 * pad - 12) // 2
 
         # Show logo
         draw.rounded_rectangle(
@@ -1574,10 +1720,11 @@ class TFTDisplay:
             self._toggle_cycle,
         ))
 
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_message(self, title: str, lines: List[str]) -> Image.Image:
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = _safe_canvas(BG_COLOR)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1588,14 +1735,14 @@ class TFTDisplay:
         font_body = _get_font(17)
         y = content_y + 18
         draw.rounded_rectangle(
-            [(16, content_y + 6), (WIDTH - 16, HEIGHT - 16)],
+            [(16, content_y + 6), (cw - 16, ch - 16)],
             radius=14, fill=SURFACE_RAISED,
         )
         for line in lines[:10]:
             draw.text((28, y), line[:52],
                       fill=TEXT_COLOR, font=font_body)
             y += 24
-        return img
+        return self._fit_panel(img, BG_COLOR)
 
     def render_boot(self, stage=None, detail: str = "",
                     pct: Optional[int] = None, *,
@@ -1809,6 +1956,16 @@ class TFTDisplay:
         for k, v in data.items():
             self._v3["wifi"][k] = v
 
+    def update_wifi_join(self, data: dict) -> None:
+        """WARP-1800. Replaces wholesale rather than merging, for the same
+        reason update_services does: `ok` going False, or `payload` going
+        away, is the signal that the face must go dark. A merge would leave
+        the last good payload pinned in place and the rail would keep offering
+        a join code for a network that is no longer there — the credential
+        equivalent of WARP-1643's frozen sensor reading."""
+        if isinstance(data, dict):
+            self._v3["wifi_join"] = data
+
     def update_services(self, data: dict) -> None:
         """WARP-1645. Replaces wholesale rather than merging: `degraded` is a
         list, and merging would leave a service showing as down after it
@@ -1841,7 +1998,8 @@ class TFTDisplay:
         """Editorial hero clock (design_handoff §1 / preview.html drawIdle)."""
         if now is None:
             now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
-        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        img = _safe_canvas(V3_BG)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -1854,7 +2012,7 @@ class TFTDisplay:
 
         # 12/24 segmented toggle — top-right (two 38px cells, h26).
         seg_w, seg_h, tg_y = 38, 26, 17
-        tg_x = WIDTH - 20 - seg_w * 2
+        tg_x = cw - 20 - seg_w * 2
         _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, fill=V3_SURFACE)
         _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, outline=V3_SEP, width=1)
         for i, opt in enumerate(("12", "24")):
@@ -1883,7 +2041,7 @@ class TFTDisplay:
         suffix_font = _get_font(24, weight="heavy")
         suffix_w = (_v3_text_width(draw, parts["suffix"], suffix_font, 1)
                     + suffix_gap) if parts["is12"] else 0
-        cx_center = WIDTH / 2 - suffix_w / 2
+        cx_center = cw / 2 - suffix_w / 2
         _v3_text(draw, time_str, int(cx_center), clock_y, font=hero,
                  fill=V3_TEXT, anchor="mm", tracking=-6)
         if parts["is12"]:
@@ -1894,34 +2052,34 @@ class TFTDisplay:
 
         # 56x3 accent rule under the clock at y=220.
         rule_w = 56
-        _rrect(draw, WIDTH // 2 - rule_w // 2, clock_y + 70, rule_w, 3, 1.5,
+        _rrect(draw, cw // 2 - rule_w // 2, clock_y + 70, rule_w, 3, 1.5,
                fill=V3_ACCENT)
 
         # Bottom-left date.
         date_str = (self._v3.get("date") or
                     now.strftime("%A, %b %d")).upper()
-        _v3_text(draw, date_str, 20, HEIGHT - 28,
+        _v3_text(draw, date_str, 20, ch - 28,
                  font=_get_font(11, weight="bold"), fill=V3_LABEL3, tracking=1.6)
 
         # Bottom-right green dot + SSID.
         ssid = str(self._v3["wifi"].get("ssid") or "Droplet-AI")
         ssid_font = _get_font(11, weight="bold")
         ssid_w = _v3_text_width(draw, ssid, ssid_font)
-        draw.ellipse([WIDTH - 20 - ssid_w - 14 - 3, HEIGHT - 23 - 3,
-                      WIDTH - 20 - ssid_w - 14 + 3, HEIGHT - 23 + 3],
+        draw.ellipse([cw - 20 - ssid_w - 14 - 3, ch - 23 - 3,
+                      cw - 20 - ssid_w - 14 + 3, ch - 23 + 3],
                      fill=V3_GREEN)
-        _v3_text(draw, ssid, WIDTH - 20, HEIGHT - 28, font=ssid_font,
+        _v3_text(draw, ssid, cw - 20, ch - 28, font=ssid_font,
                  fill=V3_ACCENT, anchor="ra")
 
         # Seconds progress hairline along the bottom edge.
         sec_frac = parts["second"] / 60.0
-        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
-        draw.rectangle([0, HEIGHT - 2, max(2, int(WIDTH * sec_frac)), HEIGHT],
+        draw.rectangle([0, ch - 2, cw, ch], fill=V3_TRACK)
+        draw.rectangle([0, ch - 2, max(2, int(cw * sec_frac)), ch],
                        fill=V3_ACCENT_DIM)
 
         self._touch_regions.append(TouchRegion(
-            "idle_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
-        return img
+            "idle_wake", 0, 0, cw, ch, lambda: self._go_system()))
+        return self._fit_panel(img, V3_BG)
 
     def render_debug(self, now: Optional[_dt_datetime] = None) -> Image.Image:
         """WARP-1641 — the rack panel's debug / recovery screen.
@@ -2292,7 +2450,8 @@ class TFTDisplay:
         """
         has_wifi = bool(wifi_qr_matrix and wifi_ssid)
 
-        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        img = _safe_canvas(V3_BG)
+        cw, ch = img.size
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
@@ -2305,18 +2464,18 @@ class TFTDisplay:
                  fill=V3_LABEL3, tracking=2)
         setup_lbl = "FIRST-TIME SETUP"
         slw = _v3_text_width(draw, setup_lbl, font_eyebrow, 1.4)
-        _v3_text(draw, setup_lbl, WIDTH - 20, 21, font=font_eyebrow,
+        _v3_text(draw, setup_lbl, cw - 20, 21, font=font_eyebrow,
                  fill=V3_ACCENT, anchor="ra", tracking=1.4)
         # Status dot left of the label. Static on BOTH halves — the design's
         # slow alpha pulse is dropped on firmware (heap discipline: the
         # WAITING dots carry the claim screen's only motion).
-        dcx = int(WIDTH - 20 - slw - 12)
+        dcx = int(cw - 20 - slw - 12)
         draw.ellipse([dcx - 3, 23, dcx + 3, 29], fill=V3_ACCENT)
-        draw.rectangle([20, 44, WIDTH - 20, 44], fill=V3_SEP)
+        draw.rectangle([20, 44, cw - 20, 44], fill=V3_SEP)
 
         # ---- Column divider ------------------------------------------------
         div_x = 284
-        draw.rectangle([div_x, 58, div_x, HEIGHT - 26], fill=V3_SEP)
+        draw.rectangle([div_x, 58, div_x, ch - 26], fill=V3_SEP)
 
         # ================= LEFT — claim code hero + steps ===================
         _v3_text(draw, "CLAIM CODE", 20, 56, font=font_eyebrow,
@@ -2410,7 +2569,7 @@ class TFTDisplay:
 
         # ================= RIGHT — scan QR card =============================
         rx = div_x + 16
-        rw = WIDTH - 20 - rx
+        rw = cw - 20 - rx
         # Resolve the card's matrix FIRST so the eyebrow/caption stay honest:
         # a card with no scannable matrix must never read "SCAN TO CLAIM".
         # The firmware applies the same rule, so preview and panel agree in
@@ -2483,20 +2642,20 @@ class TFTDisplay:
         # ---- Foot: waiting status + scan track -----------------------------
         waiting = "WAITING TO BE CLAIMED"
         wlw = _v3_text_width(draw, waiting, font_eyebrow, 0.6)
-        _v3_text(draw, waiting, WIDTH - 20, HEIGHT - 27, font=font_eyebrow,
+        _v3_text(draw, waiting, cw - 20, ch - 27, font=font_eyebrow,
                  fill=V3_ACCENT, anchor="ra", tracking=0.6)
         for i in range(3):
-            ddx = int(WIDTH - 20 - wlw - 22 + i * 7)
-            draw.ellipse([ddx - 2, HEIGHT - 25, ddx + 2, HEIGHT - 21],
+            ddx = int(cw - 20 - wlw - 22 + i * 7)
+            draw.ellipse([ddx - 2, ch - 25, ddx + 2, ch - 21],
                          fill=V3_ACCENT if i == 0 else V3_ACCENT_FAINT)
 
         # 2px scan track with an accent segment. Static on BOTH halves — the
         # design's travelling shimmer is dropped on firmware (same heap
         # discipline; the WAITING dots are the only claim-screen motion).
-        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
-        seg_x = (WIDTH - 90) // 2
-        draw.rectangle([seg_x, HEIGHT - 2, seg_x + 90, HEIGHT], fill=V3_ACCENT)
-        return img
+        draw.rectangle([0, ch - 2, cw, ch], fill=V3_TRACK)
+        seg_x = (cw - 90) // 2
+        draw.rectangle([seg_x, ch - 2, seg_x + 90, ch], fill=V3_ACCENT)
+        return self._fit_panel(img, V3_BG)
 
     @staticmethod
     def _draw_metric_card(draw, x, y, w, h, label, value, pct,
@@ -2897,6 +3056,103 @@ class TFTDisplay:
         self._console_confirm_until = 0.0
         self._console_last_result = ""
         self._set_mode(self.HOME, pause_cycle=False)
+
+    # --- WARP-1782: the rail's two QR faces ---------------------------------
+
+    def wifi_qr_payload(self) -> str:
+        """The `WIFI:` join string for the rail's Wi-Fi face, or "" if there
+        is nothing safe and scannable to show.
+
+        Prefers the payload device-bridge already built: it is the side that
+        knows the encryption mode and whether the SSID is hidden, and it does
+        the metachar escaping once (WARP-819) instead of every caller doing it
+        slightly differently. Falls back to composing one locally so a bridge
+        that predates that field still lights the face up.
+
+        Returns "" — never a half-formed payload — when the AP is down or
+        disabled, when there is no passphrase, or when the string is too long
+        to encode above the scan floor. Each of those is a reason NOT to offer
+        the face, and the caller reads "" as exactly that.
+
+        WARP-1800 — WHICH FEED. This reads `wifi_join` (the bridge's
+        /openwrt/qr, whose whole job is the household join code), not `wifi`
+        (the bridge's /wifi, which is the client SCAN: adapter, networks,
+        connected_to, state). WARP-1782 read the latter, which has never
+        carried an ssid+key pair on any box — so the face could not light up
+        anywhere, and the tests missed it by writing credentials straight into
+        `_v3["wifi"]` instead of feeding a real bridge response through.
+
+        `wifi` is still read as a fallback, and that is not just politeness to
+        old bridges: on the single-box shape the System screen's wifi frame
+        genuinely does carry `ssid` + `password`.
+        """
+        join = self._v3.get("wifi_join") or {}
+        wifi = self._v3.get("wifi") or {}
+        # `ok` is absent until the first bridge snapshot lands, so only an
+        # explicit False counts as "the bridge told us the AP is unreachable".
+        if join.get("ok") is False or join.get("disabled"):
+            return ""
+        if join.get("payload") or join.get("ssid"):
+            wifi = join
+        elif wifi.get("ok") is False or wifi.get("disabled"):
+            return ""
+
+        payload = str(wifi.get("payload") or "")
+        if not payload:
+            ssid = str(wifi.get("ssid") or "")
+            # The bridge sends `key`; the older py-v3 System screen reads
+            # `password`. Accept either rather than caring which fed us.
+            key = str(wifi.get("key") or wifi.get("password") or "")
+            if not ssid or not key:
+                return ""
+            payload = _wifi_qr_payload(ssid, key)
+
+        if len(payload) > RAIL_QR_BYTE_BUDGET:
+            logger.warning(
+                "Wi-Fi QR payload is %d bytes, over the %d-byte rail budget — "
+                "it would encode below the scan floor, so the rail's Wi-Fi "
+                "face stays off. Shorten the SSID or the passphrase.",
+                len(payload), RAIL_QR_BYTE_BUDGET)
+            return ""
+        return payload
+
+    def rail_face(self) -> str:
+        """Which QR the rail is showing: "wifi" or "dashboard".
+
+        DERIVED, every time it is asked. `dashboard` is therefore the state
+        the panel falls back into on its own — after the window, if the Wi-Fi
+        feed goes away mid-reveal, or if the face is switched off under the
+        panel. Nothing has to run for the credential to leave the glass.
+        """
+        if not RAIL_WIFI_QR:
+            return "dashboard"
+        if time.time() >= self._rail_wifi_until:
+            return "dashboard"
+        if not self.wifi_qr_payload():
+            return "dashboard"
+        return "wifi"
+
+    def _tap_rail_qr(self) -> None:
+        """Tap the rail to flip the QR between the dashboard link and the
+        Wi-Fi join code.
+
+        A plain toggle, deliberately: unlike the console handback this is
+        reversible, harmless and guest-facing, so making it a two-tap confirm
+        would only make it feel broken. Tapping back is instant — someone who
+        opened the Wi-Fi code by accident should not have to wait out the
+        window to clear it.
+        """
+        if not RAIL_WIFI_QR:
+            return
+        if self.rail_face() == "wifi":
+            self._rail_wifi_until = 0.0
+        elif self.wifi_qr_payload():
+            self._rail_wifi_until = time.time() + RAIL_WIFI_SECONDS
+        else:
+            # Nothing to flip to. Re-render anyway so the tap is not silent —
+            # the pager below shows a single dot when the face is unavailable.
+            logger.info("rail Wi-Fi face unavailable — no scannable payload")
+        self._render_current()
 
     # --- WARP-1641: the panel's debug / recovery screen ---------------------
 
@@ -3307,6 +3563,15 @@ class TFTDisplay:
                 except Exception as e:
                     logger.warning("Touch action %s failed: %s", r.name, e)
                 return r.name
+        # WARP-1801 — a miss used to be completely silent: the caller only logs
+        # when a region matched, so tapping a control that is 96px from where
+        # it is drawn produced no log line, no on-glass change, and no way to
+        # tell "the panel is wedged" from "you missed". That is what turned a
+        # mis-targeted BACK button into a bug report saying there was no BACK
+        # button at all. Log the miss with the screen it happened on, so the
+        # next mis-aimed control leaves a trace instead of vanishing.
+        logger.info("Tap MISS at (%d,%d) on %s — no region (%d registered)",
+                    x, y, self._current_mode, len(regions))
         return None
 
     # ----- Boot readiness ----------------------------------------------
@@ -3473,6 +3738,7 @@ class TFTDisplay:
         last_files_push = 0.0
         last_cams_push = 0.0
         last_services_push = 0.0
+        last_join_push = 0.0
         last_backend_retry = 0.0
         serial_buf = b""
         while self._cycle_running:
@@ -3587,6 +3853,22 @@ class TFTDisplay:
                 if svc is not None:
                     self._pyportal_send("services", svc)
                 last_services_push = now
+            # WARP-1800 — the household join code for the rail's Wi-Fi face.
+            #
+            # Wide panels only. On a PyPortal the QR already arrives on demand
+            # (REQUEST_QR / NAV:qr from the firmware) and there is no rail to
+            # feed, so polling there would add serial traffic to a device that
+            # did not ask for it — a behaviour change on hardware this branch
+            # cannot test. The bar panel has no firmware to ask, which is
+            # exactly why the face had no data.
+            if (self._wants_data() and _is_wide_panel()
+                    and (now - last_join_push) > JOIN_REFRESH_SECONDS):
+                qr = self.fetch_qr()
+                if qr is not None:
+                    # Carries data, so this does NOT navigate a display — only
+                    # a BARE {"mode": ...} frame is a nav (pyportal/code.py).
+                    self._pyportal_send("qr", qr)
+                last_join_push = now
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
             if self._wants_data():
                 if not hasattr(self, "_last_drives_push"):

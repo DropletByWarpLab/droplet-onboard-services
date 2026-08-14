@@ -46,9 +46,6 @@ vi.mock("../services/frigate.client.js", () => ({
   ptzGoToPreset: vi.fn(), ptzMove: vi.fn(), restartFrigate: vi.fn(),
 }));
 vi.mock("../services/camera-system.service.js", () => ({ getCameraSystemStatus: vi.fn() }));
-vi.mock("../services/camera-retention-purge.service.js", () => ({
-  loadCameraRetentionPolicy: vi.fn().mockResolvedValue({}),
-}));
 vi.mock("../services/camera-groups.service.js", () => ({
   isValidGroupName: () => true, isValidGroupIcon: () => true,
   listGroups: vi.fn(), createGroup: vi.fn(), updateGroup: vi.fn(), deleteGroup: vi.fn(),
@@ -105,6 +102,18 @@ const guest: AuthUser = {
 };
 
 const prismaShim = {
+  // WARP-1975: camera routes now scope to the ACTING human behind the MCP
+  // principal, resolved from X-Nextcloud-User. Without a user table the
+  // resolution throws and the guard fails CLOSED with a 503 — correct
+  // behaviour, wrong test fixture. Model what production has.
+  user: {
+    findUnique: vi.fn(async ({ where }: { where: { nextcloudUsername?: string } }) =>
+      where.nextcloudUsername
+        ? { id: `u-${where.nextcloudUsername}`, role: "owner" }
+        : null,
+    ),
+  },
+  cameraAccessGrant: { findMany: vi.fn(async () => []) },
   camera: {
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -130,7 +139,10 @@ beforeEach(() => {
 
 describe("camera write-route guards admit the MCP service principal (WARP-1440)", () => {
   it("POST /cameras/:name/enable — MCP principal toggles inline", async () => {
-    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/front/enable");
+    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/front/enable")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "enabled", camera: "front" });
@@ -141,7 +153,10 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
     mockEvaluate.mockResolvedValue({
       requiresConfirmation: true, confirmationToken: "tok-1", reason: "tier2", tier: 2,
     } as never);
-    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/front/disable");
+    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/front/disable")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
 
     expect(res.status).toBe(202);
     expect(res.body.confirmationToken).toBe("tok-1");
@@ -154,6 +169,9 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
     } as never);
     const res = await request(buildApp(mcpPrincipal))
       .post("/api/cameras/command/confirm")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice")
       .send({ confirmationToken: "tok-1", operation: "disable_camera" });
 
     expect(res.status).toBe(200);
@@ -168,6 +186,7 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
     mockUpdateSettings.mockResolvedValue({ ok: true } as never);
     const res = await request(buildApp(mcpPrincipal))
       .patch("/api/cameras/front/settings")
+      .set("X-Nextcloud-User", "alice")
       .send({ zones: [] });
 
     // Pin guard admission only: whatever the settings handler answers, it
@@ -177,10 +196,16 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
   });
 
   it("human roles unchanged: owner enable 200, guest enable 403 without Frigate", async () => {
-    const ok = await request(buildApp(owner)).post("/api/cameras/front/enable");
+    const ok = await request(buildApp(owner)).post("/api/cameras/front/enable")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
     expect(ok.status).toBe(200);
 
-    const denied = await request(buildApp(guest)).post("/api/cameras/front/enable");
+    const denied = await request(buildApp(guest)).post("/api/cameras/front/enable")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
     expect(denied.status).toBe(403);
     expect(mockEnable).toHaveBeenCalledTimes(1);
   });
@@ -193,7 +218,10 @@ describe("POST /cameras/scan guard admits the MCP service principal (WARP-1462)"
         status: 200,
       }),
     );
-    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/scan");
+    const res = await request(buildApp(mcpPrincipal)).post("/api/cameras/scan")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
 
     expect([401, 403]).not.toContain(res.status);
     expect(res.status).toBe(200);
@@ -207,12 +235,26 @@ describe("POST /cameras/scan guard admits the MCP service principal (WARP-1462)"
         status: 200,
       }),
     );
-    const ok = await request(buildApp(owner)).post("/api/cameras/scan");
+    const ok = await request(buildApp(owner)).post("/api/cameras/scan")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
     expect(ok.status).toBe(200);
 
-    const denied = await request(buildApp(guest)).post("/api/cameras/scan");
+    const denied = await request(buildApp(guest)).post("/api/cameras/scan")
+      // WARP-1975: camera routes scope to the acting human; the real
+      // tools assert one, so the test must too.
+      .set("X-Nextcloud-User", "alice");
     expect(denied.status).toBe(403);
-    // Guest is rejected at the guard — the proxy only ran for the owner call.
-    expect(mockInternalFetch).toHaveBeenCalledTimes(1);
+    // Guest is rejected at the guard — the sweep only ran for the owner call.
+    // Asserted on the URL rather than a total call count: WARP-1847 made an
+    // authorized scan also read back the candidate list (/cameras/discovered +
+    // /cameras/known) so the response can carry what it found, so the total is
+    // no longer 1-per-scan. The guard contract is that /scan itself is reached
+    // exactly once — by the owner, never by the guest.
+    const scanCalls = mockInternalFetch.mock.calls.filter(([url]) =>
+      String(url).endsWith("/scan"),
+    );
+    expect(scanCalls).toHaveLength(1);
   });
 });

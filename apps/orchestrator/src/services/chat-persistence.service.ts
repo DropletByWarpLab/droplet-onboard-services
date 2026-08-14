@@ -68,6 +68,10 @@ export interface PersistedConversationSummary {
   provider: string | null;
   /** WARP-845 — owning project, or null when ungrouped. */
   projectId: string | null;
+  /** WARP-1917 — sidebar pin. Explicit boolean state; `pinnedAt` orders
+   *  the Pinned section (most recent pin first) and is null when unpinned. */
+  pinned: boolean;
+  pinnedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -140,6 +144,8 @@ export class ChatPersistenceService {
       model: row.model,
       provider: row.provider,
       projectId: row.projectId ?? null,
+      pinned: row.pinned,
+      pinnedAt: row.pinnedAt?.toISOString() ?? null,
       systemPrompt: row.systemPrompt,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -164,6 +170,64 @@ export class ChatPersistenceService {
         provider: m.provider ?? null,
       })),
     };
+  }
+
+  /**
+   * WARP-1921 — the distinct tool names already used in a conversation, for
+   * the agent-budgets §3 CONTINUITY rule ("the domains of any tools already
+   * called earlier in the conversation stay advertised").
+   *
+   * Why this exists rather than reading `tool_calls` off the replayed
+   * messages: `chatRequestSchema` declares only `{role, content,
+   * tool_call_id}`, so zod strips `tool_calls` from every replayed assistant
+   * turn. Continuity therefore only ever worked WITHIN a single turn's
+   * iterations — never across HTTP requests — which is the exact prerequisite
+   * the spec's §6 outcome named before `TOOL_SELECTION_MODE` could flip.
+   *
+   * Reading the persisted trace rather than trusting the request body is
+   * deliberate: the client cannot claim to have used a tool it never used.
+   * That matters less than it sounds (selection only ever SUBSETS the
+   * RBAC-narrowed pool, so a lie could never widen reach past the user's own
+   * permissions) but a server-authoritative answer costs nothing extra here
+   * and removes the question entirely.
+   *
+   * Deliberately NOT `getConversationForUser`: that loads every message and
+   * its full content to answer a question about a handful of names. This
+   * selects one nullable JSON column off the `(sessionId, createdAt)` index.
+   *
+   * Scoped by `userId` via the session relation, so a guessed conversation id
+   * from another household member reveals nothing — same rule as
+   * `getConversationForUser`. Returns `[]` for unknown/foreign ids rather
+   * than throwing: continuity is an optimisation, and a turn must never fail
+   * because we could not enrich it.
+   */
+  async getConversationToolNames(
+    conversationId: string,
+    userId: string,
+  ): Promise<string[]> {
+    const rows = await this.prisma.chatMessage.findMany({
+      where: {
+        sessionId: conversationId,
+        session: { userId },
+        role: "assistant",
+        // Prisma's canonical "JSON column is not SQL NULL" filter.
+        toolCalls: { not: Prisma.DbNull },
+      },
+      select: { toolCalls: true },
+      orderBy: { createdAt: "desc" },
+      // A conversation only has so many distinct domains; the most recent
+      // turns are the ones continuity is for. Bounds the read on a long thread.
+      take: 50,
+    });
+    const names = new Set<string>();
+    for (const row of rows) {
+      const calls = row.toolCalls as unknown as PersistedToolCall[] | null;
+      if (!Array.isArray(calls)) continue;
+      for (const c of calls) {
+        if (c && typeof c.name === "string" && c.name.length > 0) names.add(c.name);
+      }
+    }
+    return [...names];
   }
 
   /**
@@ -206,7 +270,13 @@ export class ChatPersistenceService {
             }
           : {}),
       },
-      orderBy: { updatedAt: "desc" },
+      // WARP-1917 — pinned rows first, so they always land inside the
+      // sidebar's FIRST page regardless of how old their activity is
+      // (offset pagination would otherwise strand an old pinned chat
+      // several scroll-loads deep). Within each half, newest-first as
+      // before. The dashboard orders the Pinned section by pinnedAt desc
+      // itself.
+      orderBy: [{ pinned: "desc" }, { updatedAt: "desc" }],
       take: Math.min(Math.max(limit, 1), 100),
       skip: Math.max(offset, 0),
     });
@@ -216,6 +286,8 @@ export class ChatPersistenceService {
       model: r.model,
       provider: r.provider,
       projectId: r.projectId ?? null,
+      pinned: r.pinned,
+      pinnedAt: r.pinnedAt?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
     }));
@@ -327,6 +399,34 @@ export class ChatPersistenceService {
       data: { projectId },
     });
     return r.count > 0;
+  }
+
+  /**
+   * WARP-1917 — pin (or unpin) a conversation in the caller's sidebar.
+   * `pinned` and `pinnedAt` always move in lockstep: pinning stamps now(),
+   * unpinning clears it.
+   *
+   * Raw SQL for the same reason as renameConversationForUser below:
+   * `ChatSession.updatedAt` carries `@updatedAt`, and pin state is
+   * metadata, not activity. A `chatSession.update()` would bump the
+   * column and the chat would surface under "Today" after unpinning
+   * instead of returning to its chronological position (the AC). The
+   * single UPDATE is also atomic and ownership-scoped; returns false
+   * when no row matched (other user, or doesn't exist — callers map
+   * both to 404, no existence leak).
+   */
+  async setConversationPinned(
+    conversationId: string,
+    userId: string,
+    pinned: boolean,
+  ): Promise<boolean> {
+    const rowsAffected = await this.prisma.$executeRaw`
+      UPDATE "ChatSession"
+      SET pinned = ${pinned},
+          "pinnedAt" = CASE WHEN ${pinned} THEN NOW() ELSE NULL END
+      WHERE id = ${conversationId} AND "userId" = ${userId}
+    `;
+    return rowsAffected > 0;
   }
 
   /** Delete a conversation owned by the user. No-op when it doesn't exist. */

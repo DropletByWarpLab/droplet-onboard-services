@@ -32,7 +32,17 @@ def _set_token(monkeypatch):
 
 
 class TestLocalProviderShortCircuit:
-    def test_ollama_is_local(self):
+    def test_local_is_local(self):
+        # WARP-1926 — `local` is the name the router now emits. If this set
+        # ever stops containing it, EVERY on-box chat turn 451s: this gate is
+        # fail-closed, and `local` is the provider of the appliance's hot path.
+        assert is_local_provider("local") is True
+        assert is_local_provider("LOCAL") is True
+
+    def test_legacy_ollama_names_stay_local(self):
+        # `provider` is PERSISTED (ChatSession.provider / ChatMessage.provider),
+        # so turns recorded before WARP-1926 carry `ollama` on disk. They must
+        # keep clearing the gate or conversation history 451s on replay.
         assert is_local_provider("ollama") is True
         assert is_local_provider("OLLAMA") is True
         assert is_local_provider("ollama_local") is True
@@ -45,6 +55,13 @@ class TestLocalProviderShortCircuit:
     async def test_gate_no_op_for_local(self):
         # The gate must not even attempt to fetch when the provider
         # is local — running locally has nothing to do with off-LAN.
+        with patch.object(
+            off_lan_gating, "_fetch_off_lan_posture", new=AsyncMock(return_value=False),
+        ) as mock_fetch:
+            await check_off_lan_gate("local")
+            mock_fetch.assert_not_called()
+
+    async def test_gate_no_op_for_legacy_ollama(self):
         with patch.object(
             off_lan_gating, "_fetch_off_lan_posture", new=AsyncMock(return_value=False),
         ) as mock_fetch:

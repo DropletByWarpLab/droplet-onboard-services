@@ -38,7 +38,7 @@ vi.mock("../config.js", () => ({
     // `/api/files/knowledge/*` mount, so knowledge must read as available or
     // the gate 404s it. The real config defaults this URL.
     FILE_INDEXER_URL: "http://file-indexer:8090",
-    // camera-retention-purge.service.ts derefs this at module scope;
+    // camera-settings.service.ts derefs this at module scope;
     // the real config defaults it, so the mock must carry it too.
     FRIGATE_URL: "http://frigate:5000",
     agentMaxIter: { defaultIter: 5, capIter: 10 },

@@ -118,7 +118,7 @@ describe("StorageStep — adopt/reclaim seed the sanitized fs label (WARP-1337 A
     await openAdoptList();
     // sda is a pool member with no mounted filesystems — nothing usable to
     // seed a label from, so the request must NOT carry one.
-    fireEvent.click(screen.getByRole("button", { name: /^reclaim$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^reclaim & erase$/i }));
     await waitFor(() => expect(reclaimDrive).toHaveBeenCalledTimes(1));
     expect(reclaimDrive.mock.calls[0][0]).toMatchObject({ device: "sda", md: "md127" });
     expect((reclaimDrive.mock.calls[0][0] as { label?: string }).label).toBeUndefined();

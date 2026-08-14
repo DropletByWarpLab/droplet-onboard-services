@@ -31,12 +31,6 @@ vi.mock("../middleware/auth.js", () => ({
       next(),
 }));
 
-vi.mock("../services/camera-retention-purge.service.js", () => ({
-  loadCameraRetentionPolicy: vi
-    .fn()
-    .mockResolvedValue({ clipDays: 14, eventDays: null }),
-}));
-
 const addCamera = vi.fn();
 const syncCamerasFromDb = vi.fn();
 vi.mock("../services/frigate.client.js", () => ({

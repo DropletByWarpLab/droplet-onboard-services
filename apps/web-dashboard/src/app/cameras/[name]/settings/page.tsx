@@ -8,7 +8,9 @@ import {
   ArrowLeft,
   Camera,
   Check,
+  HardDrive,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -16,7 +18,13 @@ import {
   X,
 } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
-import { fetchCameraSettings, patchCameraSettings } from "@/lib/api";
+import {
+  fetchCameraSettings,
+  patchCameraSettings,
+  fetchCameraBudget,
+  setCameraBudget,
+  renameCamera,
+} from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -67,7 +75,7 @@ export default function CameraSettingsPage() {
     [params],
   );
 
-  const { cameras } = useCameras();
+  const { cameras, refresh: refreshCameras } = useCameras();
   const camera: CameraInfo | undefined = cameras.find((c) => c.name === name);
 
   const { data: fetched, error, isLoading, mutate } = useSWR<CameraSettings>(
@@ -94,6 +102,85 @@ export default function CameraSettingsPage() {
 
   const update = <K extends keyof CameraSettings>(key: K, value: CameraSettings[K]) => {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
+  };
+
+  // WARP-1893 — display name. Kept out of `draft` for the same reason as the
+  // budget below: it is not part of the Frigate settings patch and saves
+  // through its own endpoint. Critically it also does NOT restart the camera,
+  // so it must not ride the sticky save bar, whose copy warns that it will.
+  const [nameDraft, setNameDraft] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [renameMsg, setRenameMsg] = useState<string | null>(null);
+
+  // Hydrate from server truth once the camera list resolves. Keyed on the
+  // camera's own displayName so a rename made elsewhere (chat, another tab)
+  // reflects here instead of leaving a stale draft in the field.
+  useEffect(() => {
+    if (camera?.displayName !== undefined) setNameDraft(camera.displayName ?? "");
+  }, [camera?.displayName]);
+
+  const trimmedName = nameDraft.trim();
+  const nameDirty = camera ? trimmedName !== (camera.displayName ?? "") : false;
+
+  const saveName = async () => {
+    setRenaming(true);
+    setRenameMsg(null);
+    try {
+      await renameCamera(name, trimmedName);
+      refreshCameras();
+      setRenameMsg("Saved.");
+    } catch (e) {
+      setRenameMsg(e instanceof Error ? e.message : "Couldn't rename this camera.");
+    } finally {
+      setRenaming(false);
+    }
+  };
+
+  // WARP-1851 — storage budget. Kept out of `draft` because it is not part
+  // of the Frigate settings patch: it is orchestrator state that DERIVES a
+  // retention window, and it saves through its own endpoint.
+  const [budgetGb, setBudgetGb] = useState("");
+  const [budgetSaving, setBudgetSaving] = useState(false);
+  const [budgetMsg, setBudgetMsg] = useState<string | null>(null);
+
+  // WARP-1851: hydrate from the stored allocation. Without this the control
+  // rendered blank over a saved budget — the field contradicted the state.
+  const { data: budget, mutate: mutateBudget } = useSWR(
+    name ? ["camera-budget", name] : null,
+    () => fetchCameraBudget(name),
+    { revalidateOnFocus: false },
+  );
+  useEffect(() => {
+    if (budget?.retentionMode === "BUDGET" && budget.budgetBytes) {
+      setBudgetGb(String(Math.round(budget.budgetBytes / (1024 * 1024 * 1024))));
+    } else if (budget?.retentionMode === "MANUAL") {
+      setBudgetGb("");
+    }
+  }, [budget]);
+
+  const saveBudget = async (bytes: number | null) => {
+    setBudgetSaving(true);
+    setBudgetMsg(null);
+    try {
+      const r = await setCameraBudget(name, bytes);
+      await mutateBudget();
+      if (r.retentionMode === "MANUAL") {
+        setBudgetGb("");
+        setBudgetMsg(r.note ?? "Back to setting retention in days yourself.");
+      } else if (r.applied) {
+        // Say what actually changed, not what will change later.
+        setBudgetMsg(
+          `Retention adjusted to fit: alerts ${r.applied.alerts}d, other detections ${r.applied.detections}d.`,
+        );
+        void mutate();
+      } else {
+        setBudgetMsg(r.note ?? "Saved.");
+      }
+    } catch (e) {
+      setBudgetMsg(e instanceof Error ? e.message : "Couldn't save the budget.");
+    } finally {
+      setBudgetSaving(false);
+    }
   };
 
   const updateFilter = (label: string, patch: Partial<ObjectFilter>) => {
@@ -159,8 +246,13 @@ export default function CameraSettingsPage() {
     }
     if (Object.keys(filterPatch).length > 0) patch.objectFilters = filterPatch;
     if (draft.recordEnabled !== fetched.recordEnabled) patch.recordEnabled = draft.recordEnabled;
-    if (draft.recordRetainDays !== fetched.recordRetainDays) {
-      patch.recordRetainDays = draft.recordRetainDays;
+    for (const field of [
+      "continuousRetainDays",
+      "motionRetainDays",
+      "alertsRetainDays",
+      "detectionsRetainDays",
+    ] as const) {
+      if (draft[field] !== fetched[field]) patch[field] = draft[field];
     }
     if (draft.snapshotsEnabled !== fetched.snapshotsEnabled) {
       patch.snapshotsEnabled = draft.snapshotsEnabled;
@@ -252,6 +344,48 @@ export default function CameraSettingsPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Name — WARP-1893. Saves through its own endpoint and does NOT
+              restart the camera, so it stays off the sticky save bar. */}
+          <div className="card space-y-3 lg:col-span-2">
+            <div className="flex items-center gap-2">
+              <Pencil size={16} className="text-accent" />
+              <h2 className="type-headline text-label-primary">Name</h2>
+            </div>
+            <p className="type-caption-1 text-label-tertiary">
+              What this camera is called around the house. Renaming is instant
+              and doesn&apos;t affect any recordings you already have.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                maxLength={64}
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                placeholder="e.g. Driveway"
+                className="input"
+                style={{ maxWidth: 280 }}
+                aria-label="Camera name"
+              />
+              <button
+                type="button"
+                className="btn"
+                disabled={renaming || !nameDirty || trimmedName.length === 0}
+                onClick={saveName}
+              >
+                {renaming ? "Saving…" : "Rename"}
+              </button>
+            </div>
+            {renameMsg && (
+              <p
+                className={`type-caption-1 ${
+                  renameMsg === "Saved." ? "text-system-green" : "text-system-red"
+                }`}
+              >
+                {renameMsg}
+              </p>
+            )}
+          </div>
+
           {/* Detection */}
           <div className="card space-y-3">
             <div className="flex items-center gap-2">
@@ -285,20 +419,66 @@ export default function CameraSettingsPage() {
               <h2 className="type-headline text-label-primary">Recording</h2>
             </div>
             <ToggleRow
-              label="Continuous recording"
+              label="Recording"
               value={draft.recordEnabled}
               onChange={(v) => update("recordEnabled", v)}
             />
+            {/* WARP-1849: Frigate keeps four independent retention windows.
+                Continuous and motion cover raw footage; alerts and
+                detections cover the clips that show up in the events list.
+                A single "Retention" control could only ever set one of
+                them, which is how the previous version silently kept
+                nothing. */}
             <SliderRow
-              label="Retention"
+              label="Keep 24/7 footage"
               min={0}
               max={90}
               step={1}
-              value={draft.recordRetainDays}
-              onChange={(v) => update("recordRetainDays", v)}
-              format={(v) => (v === 0 ? "Off" : `${v} day${v === 1 ? "" : "s"}`)}
+              value={draft.continuousRetainDays}
+              onChange={(v) => update("continuousRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
               disabled={!draft.recordEnabled}
             />
+            <SliderRow
+              label="Keep footage with motion"
+              min={0}
+              max={90}
+              step={1}
+              value={draft.motionRetainDays}
+              onChange={(v) => update("motionRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
+              disabled={!draft.recordEnabled}
+            />
+            <p className="type-caption-1 text-label-tertiary">
+              24/7 footage is by far the largest consumer of disk. Keeping
+              only motion gives you most of what you&apos;d go looking for at
+              a fraction of the space.
+            </p>
+            <SliderRow
+              label="Keep alert clips"
+              min={0}
+              max={90}
+              step={1}
+              value={draft.alertsRetainDays}
+              onChange={(v) => update("alertsRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
+              disabled={!draft.recordEnabled}
+            />
+            <SliderRow
+              label="Keep other detections"
+              min={0}
+              max={90}
+              step={1}
+              value={draft.detectionsRetainDays}
+              onChange={(v) => update("detectionsRetainDays", v)}
+              format={(v) => (v === 0 ? "Don't keep" : `${v} day${v === 1 ? "" : "s"}`)}
+              disabled={!draft.recordEnabled}
+            />
+            <p className="type-caption-1 text-label-tertiary">
+              Alerts are the clips worth your attention — a person or car
+              your camera is watching for. Other detections are everything
+              else it noticed.
+            </p>
             <ToggleRow
               label="Save event snapshots"
               value={draft.snapshotsEnabled}
@@ -314,6 +494,55 @@ export default function CameraSettingsPage() {
               format={(v) => (v === 0 ? "Off" : `${v} day${v === 1 ? "" : "s"}`)}
               disabled={!draft.snapshotsEnabled}
             />
+          </div>
+
+          {/* Storage budget (WARP-1851) */}
+          <div className="card space-y-3">
+            <div className="flex items-center gap-2">
+              <HardDrive size={16} className="text-accent" />
+              <h2 className="type-headline text-label-primary">Storage budget</h2>
+            </div>
+            <p className="type-caption-1 text-label-tertiary">
+              Give this camera an amount of disk instead of a number of days.
+              We check what it&apos;s actually using and trim its retention to
+              fit, then give the days back if usage drops. Recording modes you
+              have switched off stay off.
+            </p>
+            <label className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={budgetGb}
+                onChange={(e) => setBudgetGb(e.target.value)}
+                placeholder="e.g. 200"
+                className="input"
+                style={{ maxWidth: 140 }}
+                aria-label="Storage budget in gigabytes"
+              />
+              <span className="type-body text-label-secondary">GB</span>
+            </label>
+            {budgetMsg && (
+              <p className="type-caption-1 text-label-tertiary">{budgetMsg}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="btn"
+                disabled={budgetSaving || !budgetGb}
+                onClick={() => saveBudget(Number(budgetGb) * 1024 * 1024 * 1024)}
+              >
+                {budgetSaving ? "Saving…" : "Use this budget"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={budgetSaving}
+                onClick={() => saveBudget(null)}
+              >
+                Set days myself
+              </button>
+            </div>
           </div>
 
           {/* Tracked objects + filters — full-width on lg */}

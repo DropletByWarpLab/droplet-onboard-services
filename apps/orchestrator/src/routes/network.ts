@@ -26,6 +26,7 @@ import { registerVlanRoutes } from "./network-vlan.routes.js";
 import { registerDeviceRoutes } from "./network-devices.routes.js";
 import { registerScheduleRoutes } from "./network-schedules.routes.js";
 import { registerPhoneHomeRoutes } from "./network-phone-home.routes.js";
+import { registerFabricRoutes } from "./network-fabric.routes.js";
 
 export function createNetworkRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -37,20 +38,60 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   // last-known state, just without signal bars.
   const networkDeviceService = createNetworkDeviceService(prisma, async () => {
     try {
-      const [leases, wirelessClients] = await Promise.all([
+      // WARP-1715: the router's assoclist only covers the ROUTER's radios. On
+      // the edge-router shape the household Wi-Fi is served by standalone APs,
+      // so a device joined through one holds a router DHCP lease but appears in
+      // no router assoclist — it rendered as wired, with no signal and no way
+      // to tell which AP it was on. Ask each approved AP for its own stations
+      // and merge them in, tagged with the AP they came from.
+      const [leases, routerClients, apRows] = await Promise.all([
         openwrt.fetchDhcpLeases().catch(() => []),
         openwrt.fetchWirelessClients().catch(() => []),
+        prisma.apDevice
+          .findMany({ where: { status: "ONLINE" }, select: { mac: true } })
+          .catch(() => [] as Array<{ mac: string }>),
       ]);
+
+      const wirelessClients = routerClients.map((w) => ({
+        mac: w.mac,
+        signal: w.signal,
+        viaApMac: undefined as string | undefined,
+      }));
+
+      // One unreachable AP must not cost us the whole device list, so each leg
+      // settles independently and a failure contributes nothing.
+      const apResults = await Promise.all(
+        apRows.map((ap) =>
+          openwrt
+            .fetchApClients(ap.mac)
+            .then((res) => ({ mac: ap.mac, clients: res.clients }))
+            .catch(() => ({ mac: ap.mac, clients: [] })),
+        ),
+      );
+
+      // The router's own radios win on a duplicate MAC: a station the router
+      // can see directly is on the router's radio, whatever an AP also reports.
+      const seen = new Set(wirelessClients.map((w) => w.mac.toUpperCase()));
+      for (const { mac: apMac, clients } of apResults) {
+        for (const client of clients) {
+          const key = client.mac?.toUpperCase();
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          wirelessClients.push({
+            mac: client.mac,
+            signal: client.signal,
+            viaApMac: apMac,
+          });
+        }
+      }
+
       return {
         leases: leases.map((l) => ({
           mac: l.macaddr,
           ip: l.ipaddr,
           hostname: l.hostname,
         })),
-        wirelessClients: wirelessClients.map((w) => ({
-          mac: w.mac,
-          signal: w.signal,
-        })),
+        wirelessClients,
       };
     } catch {
       return { leases: [], wirelessClients: [] };
@@ -70,6 +111,9 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   registerDeviceRoutes(router, { networkDeviceService });
   registerScheduleRoutes(router, { scheduleApi });
   registerPhoneHomeRoutes(router, { prisma });
+  // WARP-1732 (ADR-035 §5): read-only fabric inventory. Serves FabricMember
+  // rows straight from Postgres — no routing-service call, no device write.
+  registerFabricRoutes(router, { prisma });
 
   return router;
 }

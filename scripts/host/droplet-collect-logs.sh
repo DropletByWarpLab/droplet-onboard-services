@@ -60,7 +60,17 @@ DEFAULT_HOURS=24
 # Canonical Droplet service set. Names double as the docker container name
 # suffix (the compose project prefix is resolved at run time) and, where a
 # service is a host systemd unit, the unit base name.
-DEFAULT_SERVICES="orchestrator ai-gateway routing camera-discovery file-indexer mqtt nextcloud ollama-manager web-dashboard"
+# WARP-1748: `ollama-manager` -> `inference-manager`. BOTH are listed, and both
+# must stay listed through the deprecation window. `capture_one` resolves these
+# against `docker ps --format '{{.Names}}'`, i.e. against CONTAINER NAMES — the
+# compose network alias that keeps `ollama-manager` resolvable over DNS does
+# NOT help here. A box still running the pre-rename image has a container named
+# `…-ollama-manager-1`; a box on the new image has `…-inference-manager-1`.
+# Listing only one silently drops the model-lifecycle manager's logs from the
+# diagnostic bundle, with a bland "no source" note — the exact soft failure this
+# rename went out of its way to avoid everywhere else. A miss costs nothing:
+# `capture_one` already tolerates a service that is not running.
+DEFAULT_SERVICES="orchestrator ai-gateway routing camera-discovery file-indexer mqtt nextcloud inference-manager ollama-manager web-dashboard"
 SERVICES="${DROPLET_LOGS_SERVICES:-$DEFAULT_SERVICES}"
 
 FIXTURE_DIR="${DROPLET_LOGS_FIXTURE_DIR:-}"
@@ -87,9 +97,23 @@ redact() {
   #    line so no base64 key body survives. The range match spans lines.
   # 2) Single-line shapes: Bearer tokens, auth headers, sensitive KEY=value /
   #    KEY: value (PASSWORD|PASSWD|SECRET|TOKEN|KEY|PSK|CREDENTIAL|AUTH, with a
-  #    PUBLIC_KEY / KEY_ID carve-out), and URI userinfo credentials.
+  #    PUBLIC_KEY / KEY_ID carve-out), URI userinfo credentials, and the
+  #    richdocuments direct-editing token.
+  #
+  # WARP-1688 — that last one lives in a URL PATH SEGMENT, which none of the
+  # other shapes can see. `/…/apps/richdocuments/direct/<token>` renders the
+  # editor with NO cookie and NO Authorization header, so the URL IS the
+  # credential while it lives (docs/THREAT_MODEL.md T1.8 / R6 — "must never be
+  # logged"). It arrives here unwritten-by-anyone: the gateway has no
+  # `access_log` directive so nginx logs `$request` verbatim, and
+  # `nextcloud:29-apache` symlinks its Apache access log to stdout while
+  # `nextcloud` is in DEFAULT_SERVICES above. The ROUTE is kept and only the
+  # token replaced, so the line still says what was requested.
+  # Mirrors the `richdocuments-direct-token` rule in log-redaction.ts — keep
+  # the two in sync.
   sed -E \
     -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\'"$REDACT_PLACEHOLDER (private key)" \
+    -e 's@((/index\.php)?/apps/richdocuments/direct/)[^[:space:]"'"'"'?#]+@\1'"$REDACT_PLACEHOLDER"'@gI' \
     -e 's/(\bBearer[[:space:]]+)[A-Za-z0-9._+/=-]{8,}/\1'"$REDACT_PLACEHOLDER"'/g' \
     -e 's/((X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)[[:space:]]*[:=][[:space:]]*)[^[:space:]",;]{6,}/\1'"$REDACT_PLACEHOLDER"'/gI' \
     -e 's/(([A-Za-z][A-Za-z0-9+.-]*):\/\/[^[:space:]:\/@]*:)[^[:space:]@\/]+(@)/\1'"$REDACT_PLACEHOLDER"'\3/g' \

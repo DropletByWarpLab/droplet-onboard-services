@@ -20,6 +20,14 @@ const restoreDepartmentMock = vi.fn();
 const addDepartmentMemberMock = vi.fn();
 const updateDepartmentMemberRightMock = vi.fn();
 const removeDepartmentMemberMock = vi.fn();
+// WARP-1809 — toast LABELS are part of the panel's display-name contract
+// (every unit name a toast interpolates routes through deptDisplayName),
+// so the spy replaces the ToastContext default no-op.
+const toastMock = vi.fn();
+
+vi.mock("@/components/Toast", () => ({
+  useToast: () => ({ toast: toastMock }),
+}));
 
 vi.mock("@/lib/api", () => ({
   listDepartments: (...a: any[]) => listDepartmentsMock(...a),
@@ -90,6 +98,7 @@ beforeEach(() => {
   addDepartmentMemberMock.mockReset();
   updateDepartmentMemberRightMock.mockReset();
   removeDepartmentMemberMock.mockReset();
+  toastMock.mockReset();
 });
 
 describe("DepartmentsPanel — empty state", () => {
@@ -145,10 +154,42 @@ describe("DepartmentsPanel — list + detail", () => {
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("household-card")).toBeInTheDocument();
+      expect(screen.getByTestId("workspace-card")).toBeInTheDocument();
     });
-    expect(within(screen.getByTestId("household-card")).getByText("Household")).toBeInTheDocument();
+    // WARP-1808 — the server seeds the unit's name as "Household" (data
+    // contract), but the rendered card always reads "Workspace".
+    expect(within(screen.getByTestId("workspace-card")).getByText("Workspace")).toBeInTheDocument();
+    expect(within(screen.getByTestId("workspace-card")).queryByText("Household")).not.toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument();
+    // WARP-1810 — the Workspace card's glyph is Building2, not the residential
+    // Home/House glyph (lucide-react renders Home as the "house" icon).
+    const card = screen.getByTestId("workspace-card");
+    expect(card.querySelector("svg.lucide-building-2")).toBeInTheDocument();
+    expect(card.querySelector("svg.lucide-house")).not.toBeInTheDocument();
+  });
+
+  // WARP-1808 — display mapping keys off `kind`, never the name string: a
+  // HOUSEHOLD unit whose server name differs still renders "Workspace" on the
+  // overview card AND in the detail header.
+  it("renders 'Workspace' for a HOUSEHOLD unit whose server name differs", async () => {
+    const household = dept({ id: "hh", name: "The Smiths", kind: "HOUSEHOLD", memberCount: 2, myRight: null });
+    listDepartmentsMock.mockResolvedValue({ departments: [household] });
+    getDepartmentMock.mockResolvedValue(detail(household));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-card")).toBeInTheDocument();
+    });
+    expect(within(screen.getByTestId("workspace-card")).getByText("Workspace")).toBeInTheDocument();
+    expect(screen.queryByText("The Smiths")).not.toBeInTheDocument();
+    // Household is the only unit, so it auto-selects — the detail header maps
+    // too. waitFor + a fresh query: the detail load re-renders the header
+    // (detail, then loading-flag, land as separate renders), so a node held
+    // across that boundary can be detached by the time it's asserted.
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 2, name: "Workspace" })).toBeInTheDocument();
+    });
   });
 
   it("changing a member's rights calls updateDepartmentMemberRight and reloads", async () => {
@@ -194,6 +235,33 @@ describe("DepartmentsPanel — list + detail", () => {
     await waitFor(() => {
       expect(removeDepartmentMemberMock).toHaveBeenCalledWith("d1", "u1");
     });
+    // WARP-1809 — the toast label routes through the display helper too
+    // (identity for a DEPARTMENT; defense-in-depth for the seeded unit).
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Priya Nair removed from Finance.", "success");
+    });
+  });
+
+  // WARP-1809 — the display mapping is KIND-keyed, never word-keyed: a
+  // user-created DEPARTMENT that happens to be NAMED "Household" keeps its
+  // raw name everywhere the removal flow prints it (confirm copy + toast).
+  it("a DEPARTMENT literally named 'Household' keeps its raw name in remove confirm + toast", async () => {
+    const named = dept({ name: "Household", slug: "household" });
+    listDepartmentsMock.mockResolvedValue({ departments: [named] });
+    getDepartmentMock.mockResolvedValue(detail(named));
+    removeDepartmentMemberMock.mockResolvedValue(undefined);
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    const removeBtn = await screen.findByRole("button", { name: /remove priya nair from household/i });
+    fireEvent.click(removeBtn);
+
+    const dialog = await screen.findByRole("dialog", { name: /remove member/i });
+    expect(dialog.textContent).toMatch(/Remove Priya Nair from Household\?/);
+    fireEvent.click(dialog.querySelector("button.danger") as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Priya Nair removed from Household.", "success");
+    });
   });
 
   it("a HOUSEHOLD unit's rights select is disabled with the honest tooltip copy", async () => {
@@ -204,7 +272,7 @@ describe("DepartmentsPanel — list + detail", () => {
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
 
-    expect(screen.getByText("Household access follows each person's role for now.")).toBeInTheDocument();
+    expect(screen.getByText("Workspace-wide access follows each person's role for now.")).toBeInTheDocument();
     expect(screen.getByLabelText(/rights for priya nair/i)).toBeDisabled();
   });
 });
@@ -274,6 +342,41 @@ describe("DepartmentsPanel — failure explanations (WARP-1507)", () => {
     const finance = dept();
     listDepartmentsMock.mockResolvedValue({ departments: [finance] });
     getDepartmentMock.mockResolvedValue(detail(finance));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+
+    expect(screen.queryByText(/retries automatically/i)).not.toBeInTheDocument();
+  });
+
+  // WARP-1651 — the notice was gated on `state === "failed"`, but WARP-1557
+  // sends an AMBIGUOUS write outcome (a 5xx that may or may not have landed)
+  // to `provisioning` WITH `provisionError` set. The owner then saw
+  // "Setting up…", a spinner, and no error text at all — strictly less than
+  // before WARP-1557, and the UI actively reassuring while nothing works.
+  it("explains a provisioning department that is carrying an error", async () => {
+    const unconfirmed = dept({
+      state: "provisioning",
+      provisionError: "Groupfolder create: 503",
+    });
+    listDepartmentsMock.mockResolvedValue({ departments: [unconfirmed] });
+    getDepartmentMock.mockResolvedValue(detail(unconfirmed));
+
+    render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Groupfolder create: 503")).toBeInTheDocument();
+      expect(screen.getByText(/retries automatically/i)).toBeInTheDocument();
+    });
+  });
+
+  it("stays quiet for a department that is provisioning normally", async () => {
+    // The guard is `provisionError != null`, not "any non-active state" — a
+    // first-run department mid-setup has nothing to explain and must not grow
+    // a warning box.
+    const fresh = dept({ state: "provisioning", provisionError: null });
+    listDepartmentsMock.mockResolvedValue({ departments: [fresh] });
+    getDepartmentMock.mockResolvedValue(detail(fresh));
 
     render(<DepartmentsPanel people={PEOPLE} isAdminTier />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
@@ -415,6 +518,10 @@ describe("DepartmentsPanel — archive / restore", () => {
     await waitFor(() => {
       expect(archiveDepartmentMock).toHaveBeenCalledWith("d1");
     });
+    // WARP-1809 — archive toast label routes through the display helper.
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Finance archived.", "success");
+    });
   });
 
   it("an archived unit shows Restore instead of Archive; confirming calls restoreDepartment", async () => {
@@ -437,6 +544,10 @@ describe("DepartmentsPanel — archive / restore", () => {
 
     await waitFor(() => {
       expect(restoreDepartmentMock).toHaveBeenCalledWith("d1");
+    });
+    // WARP-1809 — restore toast label routes through the display helper.
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith("Finance is being restored…", "success");
     });
   });
 

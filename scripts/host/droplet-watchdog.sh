@@ -30,6 +30,16 @@
 #                        threshold per window is flagged and its log tail is
 #                        captured to a diagnostics file on first detection.
 #                        Detect-and-report only (docker already restarts it).
+#   host_unit_staleness  A host unit's running process is older than the
+#                        sources it executes — i.e. a merged fix is sitting
+#                        inert in a process that read the file days ago
+#                        (WARP-1829). Delegates detection to
+#                        /usr/local/sbin/droplet-host-units. Detect-and-report
+#                        only: the heal (`droplet-host-units refresh`) belongs
+#                        to the deploy path, not to a 3-minute timer — the
+#                        device-bridge owns the panel feed and the console
+#                        handback, so a supervisor able to restart it on its
+#                        own cadence is the thundering herd, not the fix.
 #
 # Status contract (architecture-guard rule: explicit enums, never inferred
 # from absence): every known check ALWAYS appears in
@@ -69,6 +79,7 @@
 #   DROPLET_WATCHDOG_KLOG_FILE           file read instead of `journalctl -k`
 #   DROPLET_WATCHDOG_XVF_HOST            xvf_host stub
 #   DROPLET_WATCHDOG_DOCKER_DAEMON_JSON  daemon.json fixture
+#   DROPLET_WATCHDOG_HOST_UNITS_BIN      droplet-host-units stub
 #   (docker is resolved via PATH, so a stub earlier on PATH intercepts it)
 # =============================================================================
 # Deliberately NOT `set -e`: a supervisor must survive any single probe
@@ -77,7 +88,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -104,7 +115,12 @@ WD_DOCKER_DAEMON_JSON="${DROPLET_WATCHDOG_DOCKER_DAEMON_JSON:-/etc/docker/daemon
 WD_CRASHLOOP_THRESHOLD="${DROPLET_WATCHDOG_CRASHLOOP_THRESHOLD:-3}"
 WD_LOG_TAIL="${DROPLET_WATCHDOG_LOG_TAIL:-200}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop"
+# WARP-1829 — the standalone host-unit staleness detector this check delegates
+# to. Installed by setup.sh (scripts/lib/single-box.sh); not_applicable when
+# absent, so the check is safe on any shape.
+WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-host-units}"
+
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -529,6 +545,50 @@ wd_check_container_crashloop() {
     CHECK_OUTCOME=ok
     CHECK_MESSAGE="no container crash-loops"
   fi
+  return 0
+}
+
+# --- host_unit_staleness -----------------------------------------------------
+# WARP-1829. Host units execute their source out of the git working tree
+# (droplet-device-bridge.service runs
+# `/usr/bin/python3 <repo>/services/oled-display/device-bridge.py`), and the
+# box's refresh restarts CONTAINERS only. Python reads source once at process
+# start, so a merged fix can sit inert in a running process indefinitely while
+# the repo, the file on disk and `systemctl status` all look correct. Measured
+# live on 2026-08-09: the bridge had run 5d20h on a file 4 days newer than the
+# process. Nothing reported it, and diagnosing it cost hours.
+#
+# DETECT-AND-REPORT ONLY, deliberately. The heal (restart the unit) exists and
+# is proven — `droplet-host-units refresh` — but it belongs to the deploy
+# path, not to a 3-minute timer: droplet-device-bridge owns the rack panel's
+# data feed and the console-handback path (WARP-1639), and a supervisor that
+# can restart it on its own cadence is precisely the thundering herd the
+# design forbids. So the watchdog names the problem and the one-line fix; a
+# human or the refresh flow applies it.
+wd_check_host_unit_staleness() {
+  if [ ! -x "$WD_HOST_UNITS_BIN" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units not installed at $WD_HOST_UNITS_BIN (re-run ./scripts/setup.sh)"
+    return 0
+  fi
+  local out rc=0
+  out="$("$WD_HOST_UNITS_BIN" check 2>&1)" || rc=$?
+  if [ "$rc" = 0 ]; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="every running host unit is at or ahead of its own sources"
+    return 0
+  fi
+  if [ "$rc" != 1 ]; then
+    # The detector itself failed (missing systemctl, unreadable state). That
+    # is not evidence of staleness — say so instead of inventing a verdict.
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units check could not run (exit $rc) — inspect '$WD_HOST_UNITS_BIN check'"
+    return 0
+  fi
+  local units
+  units="$(printf '%s\n' "$out" | awk '$1 == "STALE" || $1 == "FAILED" { print $2 }' | tr '\n' ' ')"
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="host units running code older than the tree: ${units:-<see detail>}— the process started before its own sources were last modified, so a merged fix is inert in it. Fix: sudo $WD_HOST_UNITS_BIN refresh (detail: $WD_HOST_UNITS_BIN check)"
   return 0
 }
 

@@ -13,6 +13,7 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ReasoningDisclosure } from "@/components/chat/ReasoningDisclosure";
+import { isLocalProvider } from "@/lib/provider";
 
 // Module-level constants so ReactMarkdown receives stable references across
 // re-renders (model-poll ticks, error state toggles). Inline object/array
@@ -723,7 +724,7 @@ export function AiStep({
 export function isLocalModel(m: ModelInfo): boolean {
   if (!m) return false;
   const provider = (m.provider || "").toLowerCase();
-  if (provider === "ollama" || provider === "local") return true;
+  if (isLocalProvider(provider)) return true;
   if (provider === "openai" || provider === "anthropic" || provider === "azure")
     return false;
   // No provider field? Treat name-prefix matches as local — these are

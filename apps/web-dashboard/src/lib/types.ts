@@ -41,8 +41,21 @@ export interface ChatMessage {
   /**
    * WARP-458 — concatenated deep-reasoning trace for this assistant
    * turn. Accumulated live from `reasoning_step` SSE events and carried
-   * through loadConversation from the persisted row. Rendered as the
-   * collapsed "Thought process" disclosure above the bubble.
+   * through loadConversation from the persisted row.
+   *
+   * WARP-1602/WARP-1605 — this is a FLATTENED LIST, not free text: one entry
+   * per agent iteration that produced thinking, joined with the orchestrator's
+   * `REASONING_STEP_SEPARATOR` (mirrored in
+   * `@/components/chat/reasoning-trace`). Use `splitReasoningSteps()` to read
+   * it; never render the raw string. Both sources agree on the shape, so a
+   * live turn and the same turn after reload split identically. A trace with
+   * no separator — every pre-WARP-1602 row and every single-iteration turn —
+   * is simply a one-entry list.
+   *
+   * A non-empty trace promotes the turn's thinking into its own message row
+   * (`<ThinkingMessage>`) above the answer bubble; the trace itself stays
+   * collapsed behind the "Thought process" disclosure (harmony analysis text
+   * must not be shown to users unbidden).
    */
   reasoning?: string;
   /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
@@ -254,6 +267,71 @@ export interface LocalModelRow {
   /** ISO timestamp of the last throughput benchmark (drives tokensPerSec);
    *  null when never measured. */
   benchmarkedAt?: string | null;
+  // WARP-1749 honest metrics, part two: WHY a number is missing.
+  /** `measured` → the value next to it is real. `unreported` → this box's AI
+   *  runtime can report the field but didn't for this model (render "—"; it
+   *  may arrive on a later poll). `unsupported` → this runtime has no way to
+   *  report it, so waiting won't help and the card SAYS so rather than leaving
+   *  the reader to guess what a dash means. Optional: an orchestrator that
+   *  predates the flag omits it and the card falls back to today's rendering. */
+  gbOnDiskState?: MetricState;
+  /** Same three-way for `vramGb`. `unsupported` on a Docker-Model-Runner box:
+   *  its /api/ps never populates `size_vram` on any accelerator, so per-model
+   *  graphics memory is genuinely unobtainable there — printing "0 GB" would
+   *  be a confident wrong number on a page whose point is honesty. */
+  vramState?: MetricState;
+  // WARP-1827 placement (additive/optional): where a LOADED model sits.
+  /** min(1, size_vram/size), 3 decimals, or null when unknowable. */
+  gpuFraction?: number | null;
+  /** "gpu" / "partial" / "cpu". Null when not loaded or the runtime can't
+   *  say — absence of data is NOT health, so the page only warns on an
+   *  explicit "cpu"/"partial", never on a missing value. */
+  placement?: ModelPlacement | null;
+  /** Why `placement` is null, when it is; null itself for an unloaded row. */
+  placementState?: MetricState | null;
+}
+
+/** Why a metric has no number. Mirrors the orchestrator's `MetricState`
+ *  (model-metrics.service.ts) 1:1 — state is stated on the wire, never
+ *  inferred by the dashboard from the absence of a value. */
+export type MetricState = "measured" | "unreported" | "unsupported";
+
+/** WARP-1827 — where a LOADED local model's weights actually sit. Mirrors the
+ *  orchestrator's `ModelPlacement`; the arithmetic (min(1, size_vram/size),
+ *  0.9 GPU threshold) matches the appliance-side enforcement (WARP-1825). */
+export type ModelPlacement = "gpu" | "partial" | "cpu";
+
+// ── WARP-1827: pull-from-catalog (`/api/models/catalog` + pull) ──
+
+/** One eligible catalog entry, as the box's inference-manager reports it via
+ *  the orchestrator proxy. Every descriptive field is nullable — a gap the
+ *  sidecar didn't fill stays a gap, never fabricated. */
+export interface CatalogModelEntry {
+  /** Catalog identity — also what POST /api/models/:name/pull takes. */
+  name: string;
+  /** The runtime tag the sidecar will pull (may differ from `name`). */
+  pull_tag: string | null;
+  min_vram_gb: number | null;
+  /** Sidecar's size class, e.g. "flagship" / "compact". */
+  class: string | null;
+  /** True for the catalog's default recommendation at this VRAM tier. */
+  default: boolean;
+  display_name: string | null;
+  maker: string | null;
+  description: string | null;
+  capabilities: string[];
+  roles: string[];
+  /** Approximate download size in GB, when the catalog knows it. */
+  disk_gb: number | null;
+  /** True when the model is already installed on this box. */
+  pulled: boolean;
+}
+
+/** Wire shape of `GET /api/models/catalog` — the ELIGIBLE set (VRAM-gated,
+ *  decided appliance-side by the inference-manager) with `pulled` flags. */
+export interface ModelsCatalogPayload {
+  detected_vram_gb: number | null;
+  models: CatalogModelEntry[];
 }
 
 /** One opt-in cloud provider. Read-only on this surface — enabling a provider
@@ -268,18 +346,53 @@ export interface CloudProviderRow {
   spendUsd: number;
 }
 
-/** GPU stats block — null until ai-gateway exposes a `/gpu` probe. */
+/**
+ * GPU stats block — the host device-bridge's reading (WARP-1861), null only
+ * when no card resolved at all. Mirrors the orchestrator's `GpuInfo`
+ * (services/models-summary.service.ts).
+ */
 export interface ModelsGpuInfo {
   name: string;
-  vramGb: number;
-  utilPct: number;
-  tempC: number;
+  // WARP-1861: EVERY counter is nullable, because the bridge legitimately
+  // cannot always read each one and they fail independently. When nothing
+  // holds the card, amdgpu runtime-SUSPENDS it and the sysfs reads return
+  // EBUSY rather than a number — so on an idle appliance that is the common
+  // case, not an edge case. `0` would be a lie a threshold check would
+  // happily pass.
+  //
+  // GiB, not GB: the conversion behind these is binary (1024³), which is how
+  // VRAM is sized, and the tile labels them to match.
+  /** Total VRAM. Null on a BRIDGE_GPU_CARD-pinned node whose
+   *  mem_info_vram_total is unreadable — the card is still present. */
+  vramGiB: number | null;
+  /** VRAM in use. Distinct from `utilPct`, which is COMPUTE utilisation and
+   *  says nothing about how full the card is. */
+  vramUsedGiB: number | null;
+  utilPct: number | null;
+  tempC: number | null;
 }
+
+/**
+ * WARP-1861 — why `gpu` is null, when it is. Mirrors the orchestrator's
+ * `GpuReason` (services/models-summary.service.ts).
+ *
+ * `no_card` is a MEASUREMENT: the device-bridge answered and resolved no card.
+ * `unreachable` is not — the orchestrator couldn't ask (no token, bridge down,
+ * timeout, non-2xx, malformed body), which says nothing about the customer's
+ * hardware. Rendering both as "No accelerator detected" is how a box with a
+ * working dGPU tells its owner the card is missing because a host unit didn't
+ * restart. The two get different copy.
+ */
+export type ModelsGpuReason = "unreachable" | "no_card" | null;
 
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
   gpu: ModelsGpuInfo | null;
+  /** WARP-1861 (additive; optional so an older orchestrator that predates the
+   *  field still parses). Absent ⇒ we know nothing about why, and the tile
+   *  must not guess — see `ModelsGpuReason`. */
+  gpuReason?: ModelsGpuReason;
   avgLatencyMs: number;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by
@@ -332,6 +445,14 @@ export interface FileEntryInfo {
   size: number;
   mimeType: string | null;
   modifiedAt: string;
+  /**
+   * WARP-1683 — Nextcloud numeric fileId (oc:fileid), surfaced by the
+   * orchestrator's listing/search parsers so the Messages forward picker
+   * can address a file by the stable id the server-side space gate keys
+   * on. Optional: older orchestrators (and entries whose PROPFIND
+   * response omitted the prop) don't carry it.
+   */
+  ncFileId?: number;
 }
 
 /** WARP-882 — document-server availability for the gated "Edit" affordance. */
@@ -365,8 +486,9 @@ export interface FileSpace {
   root: string;
   /** The effective right the caller has in this space (personal→undefined, dept→'reader'|'contributor'|'manager'). */
   right?: string;
-  /** Department kind: 'personal'|'household'|'department'|'team'. */
-  kind?: string;
+  /** Space kind — the documented wire values (WARP-1809 narrowed this from
+   *  `string` so a typo'd comparison is a type error, not a silent false). */
+  kind?: "personal" | "household" | "department" | "team";
   /** Provision state (active, pending, failed, archiving, archived). */
   state?: string;
   /**
@@ -567,6 +689,30 @@ export interface VpnPeerInfo {
   status: "active" | "revoked";
   createdAt: string;
   revokedAt?: string | null;
+  /** WARP-1763 — how this peer came to exist. `"overlay"` is a device the
+   *  owner linked by scanning the dashboard QR; those rows carry the synthetic
+   *  `userId: "overlay"`, so this is the only field that identifies them. */
+  kind?: "static" | "overlay";
+  /** Link-token provenance, present only on QR-linked devices. */
+  linkTokenLabel?: string | null;
+  linkTokenEnrolledBy?: string | null;
+  enrolledAt?: string | null;
+  /** WARP-1763 — read from the ROUTER, not from the database. The two are not
+   *  read the same way and the difference is load-bearing:
+   *
+   *  `provisioned` is read from the interface's CONFIGURATION (UCI). False
+   *  means the row is active but nothing was ever written for this peer on the
+   *  router — the WARP-1757 `tunnel_ready: false` case. True means configured,
+   *  which is NOT the same as loaded in the running interface; a config change
+   *  that never got applied still reads true.
+   *
+   *  `lastHandshakeAt` is a runtime reading of the running interface: `null`
+   *  when it reports a peer that has never handshaken, and ABSENT when the
+   *  observation could not be made at all. Never collapse the two: absent
+   *  means unknown, and rendering it as "never connected" is the bug this
+   *  field replaced. Both are absent whenever `liveStateAvailable` is false. */
+  provisioned?: boolean;
+  lastHandshakeAt?: string | null;
 }
 
 /** Snapshot the dashboard polls before deciding whether to enable the
@@ -1132,7 +1278,8 @@ export type AccessModuleId =
   | "cameras"
   | "smart_home"
   | "network"
-  | "managed_switch";
+  | "managed_switch"
+  | "team_chat";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -1217,8 +1364,11 @@ export interface EffectiveAccess {
     /** Where the effective value came from (T7 "roster shows source"). */
     source?: "person" | "role" | "default";
   };
-  /** Read-only reference — ADR-029 owns these; never merged into grants. */
-  deptRights: Array<{ id: string; name: string; right: DepartmentRight }>;
+  /** Read-only reference — ADR-029 owns these; never merged into grants.
+   *  `kind` is WARP-1809-additive (optional: an older orchestrator omits it)
+   *  — the drawer renders HOUSEHOLD entries kind-keyed as "Workspace" via
+   *  `orgUnitDisplayName`, falling back to the raw name when absent. */
+  deptRights: Array<{ id: string; name: string; kind?: DepartmentKind; right: DepartmentRight }>;
   exceptions?: Array<AccessExceptionInput & { id?: string }>;
 }
 
@@ -1525,6 +1675,14 @@ export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;
   version: string;
+  /**
+   * WARP-1926 — the local inference runtime this box serves from: `dmr`
+   * (Docker Model Runner, the shipped default since WARP-1870) or `ollama`.
+   * Optional because a box running an orchestrator older than WARP-1926 does
+   * not send it; `inferenceRuntimeLabel` renders a generic truth in that case
+   * rather than guessing a daemon name.
+   */
+  inferenceRuntime?: "dmr" | "ollama";
   services: {
     db: boolean;
     redis: boolean;
@@ -1609,7 +1767,19 @@ export interface MatterDiscoveredDevice {
   deviceName?: string;
   deviceType?: number;
   commissioningMode: number;
-  addresses: Array<{ ip: string; port: number; type: string }>;
+  /**
+   * Mirror of `services/matter-controller/src/types.ts`. `type` is the
+   * transport label — "udp" | "tcp" | "ble" | "ip" — always a non-empty
+   * string. "ip" appears from matter.js 0.17 onward for a transport-agnostic
+   * DNS-SD record; treat anything other than "ble" as an IP address.
+   * `peripheralAddress` is present only on BLE records (no ip/port).
+   */
+  addresses: Array<{
+    ip: string;
+    port: number;
+    type: string;
+    peripheralAddress?: string;
+  }>;
 }
 
 /**
@@ -1669,7 +1839,13 @@ export interface CameraInfo {
   macAddress: string | null;
   enabled: boolean;
   autoDiscovered: boolean;
-  status: "recording" | "detecting" | "idle" | "offline";
+  /**
+   * ⚠ `recording` means footage is being KEPT, not merely that frames are
+   * arriving. `live` is the state that used to be mislabelled "recording":
+   * a healthy stream whose retention windows are all zero, so there will be
+   * nothing to scrub back to (WARP-1974).
+   */
+  status: "recording" | "detecting" | "live" | "idle" | "offline";
   lastSeen: string;
   lastDetection: DetectionEvent | null;
 }
@@ -1770,8 +1946,11 @@ export interface FilteredReviewsResult {
 export interface RecordingHour {
   hour: number;
   events: number;
+  /** Seconds of footage retained for this hour, 0–3600. This — not
+   *  `motion` — is what says there is something to play. */
   duration: number;
   motion: number;
+  objects: number;
 }
 
 export interface RecordingDay {
@@ -1884,12 +2063,77 @@ export interface GpuStat {
   tempC: number | null;
 }
 
+export type StorageRole = "recordings" | "cache" | "shm" | "other";
+
 export interface StorageStat {
   path: string;
   totalBytes: number;
   usedBytes: number;
   freeBytes: number;
   mountType: string;
+  /** What this volume is for. Only `recordings` answers "how much room
+   *  does my footage have"; summing across roles describes no real disk. */
+  role: StorageRole;
+  /** Set when another entry reports the same filesystem (Frigate lists
+   *  `recordings` and `clips` separately though they are one volume).
+   *  Anything that aggregates must skip these. */
+  duplicateOf: string | null;
+}
+
+/**
+ * WARP-1850 — per-camera NVR storage. `null` is load-bearing throughout:
+ * it means "not known", which the UI must render differently from zero.
+ */
+export interface CameraStorageRow {
+  camera: string;
+  /** Bytes used, or null when Frigate has no segments for this camera yet. */
+  usedBytes: number | null;
+  /** Measured bytes/hour, or null when not yet measured. */
+  bytesPerHour: number | null;
+  /** Share of the recordings volume, 0–100, or null if uncomputable. */
+  sharePercent: number | null;
+  /** Days of footage the current usage represents at the measured rate. */
+  daysAtCurrentRate: number | null;
+}
+
+/** WARP-1851 — retention windows the budget controller manages, in days. */
+export interface RetentionWindows {
+  continuous: number;
+  motion: number;
+  alerts: number;
+  detections: number;
+}
+
+/** WARP-1851 — a camera's current storage allocation. */
+export interface CameraBudget {
+  retentionMode: "MANUAL" | "BUDGET";
+  budgetBytes: number | null;
+  /** The operator's preferred windows; the controller scales down from here
+   *  and never raises a window stored as 0. */
+  retentionCeiling: RetentionWindows | null;
+  /** Windows written by the immediate reconcile, when one was applied. */
+  applied?: RetentionWindows | null;
+  /** Operator-facing note — present when there's something to say. */
+  note?: string;
+}
+
+export interface CameraStorageSummary {
+  volume: {
+    path: string;
+    totalBytes: number;
+    usedBytes: number;
+    freeBytes: number;
+    usedPercent: number;
+  } | null;
+  cameras: CameraStorageRow[];
+  nearFull: boolean;
+  /**
+   * True when footage is landing on the BOOT DISK instead of the dedicated
+   * recordings drive — the `${NVR_MEDIA_SOURCE:-nvrdata}` mount fell back
+   * to a named volume on the system disk. `null` = can't tell.
+   */
+  recordingsOnBootDisk: boolean | null;
+  totalBytesPerHour: number | null;
 }
 
 export interface CameraSystemStatus {
@@ -1915,7 +2159,13 @@ export interface CameraSettings {
   trackedLabels: string[];
   objectFilters: Record<string, ObjectFilter>;
   recordEnabled: boolean;
-  recordRetainDays: number;
+  /** WARP-1849 — the four retention windows Frigate 0.17 enforces. The
+   *  old single `recordRetainDays` wrote `record.retain`, a key 0.17
+   *  rejects outright, which failed the whole save. */
+  continuousRetainDays: number;
+  motionRetainDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
   snapshotsEnabled: boolean;
   snapshotRetainDays: number;
   zones: CameraZone[];
@@ -1928,21 +2178,60 @@ export interface CameraSettingsPatch {
   trackedLabels?: string[];
   objectFilters?: Record<string, Partial<ObjectFilter>>;
   recordEnabled?: boolean;
-  recordRetainDays?: number;
+  continuousRetainDays?: number;
+  motionRetainDays?: number;
+  alertsRetainDays?: number;
+  detectionsRetainDays?: number;
   snapshotsEnabled?: boolean;
   snapshotRetainDays?: number;
   zones?: CameraZone[];
   motionMasks?: MotionMaskPolygon[];
 }
 
+/**
+ * How far along a camera found on the network is toward being usable (WARP-1847).
+ *  - `ready`             — a stream we can reach; adding it should just work.
+ *  - `needs_credentials` — it's a camera, but the stream wants a username /
+ *                          password or a vendor-specific RTSP path.
+ *  - `unverified`        — something answered on a camera port, nothing has
+ *                          confirmed a stream yet.
+ */
+export type CameraCandidateStatus = "ready" | "needs_credentials" | "unverified";
+
 export interface DiscoveredCamera {
+  /** `mac:<MAC>` for a live discovery record, a uuid for a database row. */
   id: string;
   name: string;
   ip: string;
   mac: string | null;
   manufacturer: string | null;
   model: string | null;
-  discoveredAt: string;
+  discoveredAt: string | null;
+  /** Absent on older payloads — treat a missing status as `unverified`. */
+  status?: CameraCandidateStatus;
+  displayName?: string;
+  /** RTSP URL with credentials already stripped server-side; never a password. */
+  rtspUrl?: string | null;
+  /** True when discovery holds working credentials for the stream. */
+  hasCredentials?: boolean;
+  detectionMethod?: string | null;
+  source?: "live" | "database";
+}
+
+export interface CameraCandidateList {
+  cameras: DiscoveredCamera[];
+  /**
+   * False when the camera-discovery service couldn't be reached — the
+   * difference between "nothing is on your network" and "nothing is looking".
+   */
+  discoveryOnline: boolean;
+}
+
+export interface CameraScanResult extends CameraCandidateList {
+  status: string;
+  known?: number;
+  pending?: number;
+  message?: string;
 }
 
 // --- Camera groups ---
@@ -2054,6 +2343,35 @@ export interface NetworkOverview {
   };
   connectedDeviceCount: number;
   routerConnected: boolean;
+  /**
+   * Whole-fabric radio rollup — mirrors the orchestrator's
+   * `WirelessRadioSummary` (apps/orchestrator/src/types/network.ts).
+   *
+   * Read this, NOT `wireless`, for anything that counts radios or decides
+   * whether Wi-Fi is up. `wireless` above is the router's own netifd status
+   * and nothing else, so it is `{}` on every shape where the household SSID
+   * is broadcast by the access point rather than the router — which is the
+   * shipping fabric, and is how the Overview tile came to report "0 radio(s)"
+   * over a live two-radio network.
+   *
+   * Optional: an orchestrator that predates the rollup omits it, and absent
+   * means UNKNOWN, not zero.
+   */
+  wirelessRadios?: WirelessRadioSummary;
+}
+
+/** Counts only — no SSID or passphrase crosses this boundary. */
+export interface WirelessRadioSummary {
+  /** Radios the router itself hosts. Zero on every edge-router shape. */
+  router: number;
+  /** Radios reported by online Droplet access points. */
+  ap: number;
+  /** `router + ap`. */
+  total: number;
+  /** Of `total`, how many are actually broadcasting. */
+  active: number;
+  /** Online APs that didn't answer — `total` is then a floor, not a census. */
+  apsNotReporting: number;
 }
 
 export interface ConnectedDevice {
@@ -2065,6 +2383,20 @@ export interface ConnectedDevice {
   signal?: number;
   rxRate?: number;
   txRate?: number;
+}
+
+/**
+ * WARP-1714 — GET /api/network/wifi/current. `source: null` means we could not
+ * read the Wi-Fi (and `detail` says why), which is deliberately distinct from
+ * a successfully-read network that happens to have no PSK.
+ */
+export interface CurrentWifi {
+  ssid: string | null;
+  key: string | null;
+  source: "router" | "ap" | null;
+  detail: string;
+  section: string | null;
+  radio: string | null;
 }
 
 export interface WirelessScanResult {
@@ -2182,6 +2514,14 @@ export interface EnrichedNetworkDevice {
   signal?: number;
   groups: DeviceGroupRef[];
   presenceDays?: DevicePresenceDay[];
+  // WARP-1715: the coverage APs are part of the household network, not a
+  // separate silo. `isAccessPoint` marks a row that IS an approved AP (so it
+  // renders as named infrastructure rather than an anonymous DHCP lease);
+  // `viaAp` names the AP a station joined through, null on the router's own
+  // radio. Before this join, every device on an AP's Wi-Fi read as wired.
+  isAccessPoint?: boolean;
+  apModel?: string | null;
+  viaAp?: string | null;
 }
 
 export interface DeviceGroupWithCount extends DeviceGroupRef {

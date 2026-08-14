@@ -98,6 +98,25 @@ function VolumeTile({
   );
 }
 
+/**
+ * WARP-1876 — column count capped at the tile count.
+ *
+ * The grid was a flat `sm:grid-cols-2 xl:grid-cols-3`, so a box with a
+ * single volume rendered one card and two columns of nothing — "a large
+ * empty region to the right of the Nvr storage card". Static class strings
+ * (never interpolated) so Tailwind's scanner still emits them.
+ */
+const VOLUME_GRID_COLUMNS = [
+  "grid-cols-1",
+  "grid-cols-1",
+  "grid-cols-1 sm:grid-cols-2",
+  "grid-cols-1 sm:grid-cols-2 xl:grid-cols-3",
+] as const;
+
+function volumeGridColumns(tileCount: number): string {
+  return VOLUME_GRID_COLUMNS[Math.min(tileCount, VOLUME_GRID_COLUMNS.length - 1)];
+}
+
 export function VolumesPanel() {
   const { drives, isLoading, bridgeError } = useDrives();
   // WARP-1339: pools feed the join only — a pool with no mounted md
@@ -107,7 +126,7 @@ export function VolumesPanel() {
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
         {Array.from({ length: 2 }).map((_, i) => (
           <div
             key={i}
@@ -142,7 +161,7 @@ export function VolumesPanel() {
 
   return (
     <div
-      className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mb-6"
+      className={`grid ${volumeGridColumns(pooled.length + standalone.length)} gap-3 mb-4`}
       role="list"
       aria-label="Storage volumes"
     >

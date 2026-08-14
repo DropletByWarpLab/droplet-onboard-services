@@ -162,6 +162,14 @@ model ChatSession {
   /// turn (latest wins) and returned on GET so the dashboard restores
   /// the textarea when the thread is reloaded. NULL = no custom prompt.
   systemPrompt    String?
+  /// WARP-1917 — sidebar pin. `pinned` is the EXPLICIT state column (per
+  /// CLAUDE.md "no guessing": never derived from pinnedAt IS NULL);
+  /// `pinnedAt` only orders the Pinned section (most recent pin first).
+  /// Both written together by setConversationPinned via raw SQL so the
+  /// @updatedAt column is NOT bumped — unpinning must return the chat to
+  /// its original chronological spot, not to "Today".
+  pinned          Boolean          @default(false)
+  pinnedAt        DateTime?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @default(now()) @updatedAt
   messages        ChatMessage[]
@@ -172,6 +180,11 @@ model ChatSession {
   /// most one profile points here). SetNull on delete so deleting the
   /// interview session doesn't cascade the singleton profile away.
   businessProfile BusinessProfile?
+  /// WARP-1683 — back-relation for TeamChatMessage.sharedChatSession (an
+  /// AI-chat transcript forwarded into a team-chat thread). SetNull on
+  /// delete: the forward keeps serving from its immutable
+  /// `sharedChatSnapshot` after the source conversation is deleted.
+  teamChatShares  TeamChatMessage[]
 
   @@index([userId, updatedAt(sort: Desc)])
   /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
@@ -788,8 +801,82 @@ model Camera {
   lastSeen       DateTime                 @default(now())
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
+
+  // WARP-1851 — storage allocation.
+  //
+  // `retentionMode` is an EXPLICIT enum rather than "budget is null =
+  // manual", per CLAUDE.md's no-guessing-from-absence rule. The two are
+  // not redundant: an operator can clear a budget while the column keeps
+  // the last value, and MANUAL must win unambiguously in that case.
+  //
+  // MANUAL — retention days are whatever the operator set on the camera
+  //          settings page. Nothing derives them.
+  // BUDGET — `storageBudgetBytes` is authoritative; the reconciler derives
+  //          retention days from it and the camera's measured bitrate, and
+  //          writes those days into Frigate's config.
+  retentionMode      CameraRetentionMode @default(MANUAL)
+  /// Target bytes of recordings for this camera. Only meaningful when
+  /// retentionMode = BUDGET. BigInt because a multi-TB budget overflows Int.
+  storageBudgetBytes BigInt?
+  /// The operator's PREFERRED retention windows — the ceiling the budget
+  /// controller scales down from and grows back toward:
+  ///   { continuous, motion, alerts, detections }  (days)
+  ///
+  /// Needed because enforcement is a feedback loop, not a formula. Without a
+  /// remembered ceiling the controller cannot tell "I reduced this to fit the
+  /// budget" from "the operator wants it low", so it could never restore
+  /// retention after the camera's usage drops.
+  ///
+  /// A window recorded as 0 stays 0 forever: scaling never ENABLES a window
+  /// the operator has switched off. That is what made the first cut of this
+  /// feature turn 24/7 recording on when asked to cap storage.
+  ///
+  /// Null while retentionMode = MANUAL, and captured from the camera's live
+  /// Frigate config the moment a budget is set.
+  retentionCeiling   Json?
+
   notifications  CameraNotificationPref[]
   groupMembers   CameraGroupMember[]
+  accessGrants   CameraAccessGrant[]
+}
+
+/// WARP-1962 — who may see THIS camera.
+///
+/// Role tiers (WARP-1961) answer "may this person watch recordings at all".
+/// They cannot answer "may this person watch THE BEDROOM", which is the
+/// actual household question: a `family` member who should see the front
+/// door and the driveway otherwise sees every camera in the house.
+///
+/// Deliberately a GRANT table, not a deny-list, and access is an explicit
+/// ROW rather than something inferred from a null — same rule that made
+/// `Camera.retentionMode` an enum instead of "budget is null = manual".
+///
+/// The default for a camera with no grants is therefore: owner/admin always
+/// (they administer the appliance), everyone else DENIED until granted. So
+/// adding a camera never silently exposes it to the whole household — the
+/// safe direction to be wrong in.
+model CameraAccessGrant {
+  id        String   @id @default(uuid())
+  userId    String
+  cameraId  String
+  createdAt DateTime @default(now())
+  /// User id of whoever granted it, for the audit trail. Nullable so a
+  /// seed or migration-created grant doesn't have to invent an actor.
+  grantedBy String?
+
+  camera    Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, cameraId])
+  @@index([userId])
+  @@index([cameraId])
+}
+
+/// WARP-1851 — how a camera's retention window is decided.
+enum CameraRetentionMode {
+  /// Operator sets retention days directly.
+  MANUAL
+  /// Retention days are derived from a byte budget + measured bitrate.
+  BUDGET
 }
 
 model CameraNotificationPref {
@@ -1293,6 +1380,30 @@ model ScheduleEvent {
   @@index([occurredAt])
 }
 
+// ── Notes ──
+//
+// The Home "Notes" tile used to keep a single string in the browser's
+// localStorage: per-browser, unsynced, and wiped by "New note". Notes now live
+// on the box like every other piece of customer data — many per user, each
+// pinnable, so the pinned ones can surface on Home from any device.
+//
+// `pinned` is an explicit column, not derived from ordering or a magic
+// position (CLAUDE.md — no guessing from absence).
+
+model Note {
+  id        String   @id @default(uuid())
+  userId    String // Nextcloud username — the note's owner
+  body      String
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Home reads "this user's pinned notes, newest first"; the notes surface
+  // reads "this user's notes, pinned first, newest first". One index serves
+  // both.
+  @@index([userId, pinned, updatedAt])
+}
+
 // ── Calendar / Reminders / Notifications (PR #2) ──
 //
 // One canonical calendar per user lives in CalendarEvent. External calendars
@@ -1308,6 +1419,21 @@ model CalendarEvent {
   title        String
   description  String?
   location     String?
+  /// WARP-1874 — an https-only video-call link (Zoom / Teams / Meet / Webex
+  /// or any other https URL), EXPLICIT rather than sniffed out of
+  /// `location`. Deriving "is this location string actually a link" from
+  /// the text would be exactly the guessing CLAUDE.md rule 10 forbids, and
+  /// it is what made the field unusable for remote attendees.
+  ///
+  /// Nullable and additive: rows written before this column keep working,
+  /// including the ones whose `location` already holds a pasted URL —
+  /// those still render as the plain text they always were.
+  ///
+  /// Admission is `https:` ONLY, enforced on every write path by
+  /// `parseMeetingLink` in @droplet/shared-types. The stored value is that
+  /// parser's normalized href, so what was validated is what becomes an
+  /// anchor on another household member's screen.
+  meetingUrl   String?
   startsAt     DateTime
   endsAt       DateTime
   allDay       Boolean  @default(false)
@@ -1690,6 +1816,166 @@ enum ApOnboardBackend {
   DROPLET_IMAGE
   EASYMESH
   UNIFI
+}
+
+/// WARP-1732 (ADR-035 §2/§5/§6) — persisted inventory of every device
+/// announcing on the fabric: the edge router, the switch, each AP, and
+/// whatever role ships next.
+///
+/// **Observations only.** This table is a ledger of what the routing
+/// service's `GET /fabric/members` reported, nothing more. It owns no
+/// lifecycle state machine and drives no device writes — `ApDevice` keeps
+/// owning AP lifecycle (ADR-005), and this row existing for an AP MAC says
+/// only "something answered mDNS with that anchor MAC", never "approved".
+/// Deliberately no `status` column: there is no state to machine here, and
+/// inventing one would be exactly the derived-state drift ADR-035 argues
+/// against.
+///
+/// `anchorMac` is the primary key per ADR-035 §2 — the wired management
+/// interface's MAC is the one identifier every observer (mDNS TXT, DHCP,
+/// both FDBs, ARP, the beacon) agrees on. Every write path canonicalizes
+/// it through the existing `src/lib/mac.ts` `normalizeMac`, so the stored
+/// form is always `AA:BB:CC:DD:EE:FF` and a member cannot land twice under
+/// two spellings of the same address.
+///
+/// `role` is a bare String, NOT an enum: ADR-035 §5 explicitly plans for
+/// roles to grow (router | switch | ap today; box and beyond later), and a
+/// role the routing service starts announcing must be storable without a
+/// migration. That is the one place this schema prefers openness — every
+/// other state column in this file stays an explicit enum.
+///
+/// Staleness is a READ, never a delete (ADR-035 §6 — "stale edges dim,
+/// never silently vanish"). A member that stops announcing keeps its row
+/// with `lastSeen` frozen at the last real observation; the reconciler has
+/// no delete path at all. That is what makes "the switch dropped off the
+/// fabric at 10:05" answerable instead of indistinguishable from "the
+/// switch was never here".
+model FabricMember {
+  /// Wired management-interface MAC, canonical `AA:BB:CC:DD:EE:FF`.
+  anchorMac String   @id
+  /// `router` | `switch` | `ap` | … — free-form by design (see above).
+  role      String
+  /// Product string as announced (`Zyxel GS1900-10HP`, `Raspberry Pi 5
+  /// Model B`, …). Null until a member announces one.
+  model     String?
+  /// Firmware/overlay version as announced. Diverging versions across the
+  /// fabric are a dashboard yellow flag; nothing here auto-upgrades.
+  version   String?
+  /// Last IPv4 the member was observed at. A property of the observation,
+  /// not an identity — ADR-035 §2 forbids keying on it.
+  lastIp    String?
+  /// Last hostname the member announced.
+  hostname  String?
+  /// Switch-only PoE facts, parsed from the `poe_ports` / `poe_budget`
+  /// TXT keys the GS1900 already advertises (and which, before ADR-035,
+  /// were consumed by nothing). Null on every non-PoE member — null means
+  /// "not advertised", never "zero ports".
+  poePorts  Int?
+  poeBudget Int?
+  /// First time the orchestrator ever saw this anchor MAC. Write-once.
+  firstSeen DateTime @default(now())
+  /// Last time this member was present in a poll. The staleness signal.
+  lastSeen  DateTime @default(now())
+
+  @@index([role])
+  @@index([lastSeen])
+}
+
+/// WARP-1761 (ADR-035 §1/§7) — the INTENDED state of a fabric-owned config
+/// domain. One row per domain key; `wifi.primary` is the first and, today,
+/// the only one.
+///
+/// ADR-035 §1 draws a hard line this model sits on one side of:
+///   * **observed** state — "what IS the AP broadcasting" — is read LIVE off
+///     the device on every request and is never cached here; and
+///   * **intended** state — "what SHOULD it broadcast" — lives here.
+/// The two are rendered side by side plus the delta. This table must NEVER
+/// be read by a display path: the moment intent answers "what is my Wi-Fi
+/// called", drift stops being visible and starts being hidden, which is the
+/// exact failure ADR-035 exists to kill. `getApWifi()` keeps dialing the AP.
+///
+/// Why it exists: before this table a Wi-Fi write was a synchronous RPC at
+/// one device. An unreachable AP (the lab unit was, for ~20 minutes, during
+/// a firmware experiment) meant the call failed and the operator's intent
+/// was DISCARDED with nothing left to retry. Now the write records intent
+/// and still pushes; if the push fails the intent remains and the converger
+/// applies it when the device comes back.
+///
+/// `value` is Json so a domain can carry a shape without a migration per
+/// domain — but it is a small, closed, documented shape per key, never a
+/// junk drawer. For `wifi.primary` it is exactly `{ "ssid": string }`.
+///
+/// **No secret ever lands in `value`.** The Wi-Fi passphrase is deliberately
+/// NOT stored: the orchestrator has never persisted one (the audit writer
+/// redacts it via `redactSecretParams`, the Tier-2 pending record that
+/// carries it is in-memory with a 60 s TTL, and `ApDevice` stores only the
+/// approval-time `approvedSsid`), and this ticket is not the place to open a
+/// durable Wi-Fi-secret surface. Passphrase convergence waits for the
+/// per-device escrow rows of ADR-035 §3. Passphrase WRITES are unchanged:
+/// they still push directly, exactly as before.
+///
+/// `generation` is monotonic and bumped atomically (`{ increment: 1 }`) on
+/// every write, so the converger can distinguish "this device already
+/// applied the current intent" from "this device is behind". Rows are never
+/// deleted (ADR-035 §6) — a domain that stops being written keeps its last
+/// intent rather than silently reverting to "no opinion".
+model NetworkIntent {
+  /// Domain key, dot-namespaced: `wifi.primary` today. A bare String, not
+  /// an enum, for the same reason `FabricMember.role` is — ADR-035 §7 lists
+  /// six more domains (VLANs, DHCP, band steering, …) and a new one must be
+  /// storable without a migration.
+  key        String   @id
+  /// The intended fact. Closed shape per key; `{ "ssid": string }` for
+  /// `wifi.primary`. Never holds a secret (see above).
+  value      Json
+  /// Monotonic, incremented on every write. Never reset, never decremented.
+  generation Int      @default(0)
+  /// `User.id` of the last writer, or null for a write with no authenticated
+  /// principal. Audit only — nothing branches on it.
+  writtenBy  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+/// WARP-1761 (ADR-035 §7) — per-device convergence bookkeeping: how far a
+/// single fabric member has got with a single intent key.
+///
+/// Keyed on `(anchorMac, key)` — the same anchor MAC that is `FabricMember`'s
+/// primary key (ADR-035 §2), canonicalized through `src/lib/mac.ts`
+/// `normalizeMac`. No FK: `FabricMember` is an observation ledger whose rows
+/// may lag or lead this one, and a convergence record must not be deletable
+/// as a side effect of inventory churn.
+///
+/// All three data columns are OBSERVATION TIMESTAMPS / values, not a state
+/// machine — there is deliberately no derived-state column, and nothing
+/// infers status from a NULL. Read them as facts:
+///   * `appliedGeneration` — the `NetworkIntent.generation` this device was
+///     last VERIFIED to be running. Null = never yet verified.
+///   * `lastVerifiedAt`    — when that verification happened.
+///   * `driftDetectedAt`   — the last time the device was found disagreeing
+///     with intent. It is NEVER cleared: ADR-035 §6's "stale observations
+///     dim, they do not vanish" applied to drift. A dashboard shows drift as
+///     current by comparing it against `lastVerifiedAt`, and "this AP was
+///     edited in LuCI at 14:02 and repaired at 14:03" stays answerable
+///     instead of collapsing into "nothing ever happened".
+///
+/// Rows are never deleted, consistent with `FabricMember`.
+model DeviceIntentState {
+  /// Wired management-interface MAC, canonical `AA:BB:CC:DD:EE:FF`.
+  anchorMac         String
+  /// The `NetworkIntent.key` this row tracks.
+  key               String
+  /// Last generation VERIFIED on the device. Null = never verified.
+  appliedGeneration Int?
+  /// When the device was last read and found to match intent.
+  lastVerifiedAt    DateTime?
+  /// When the device was last found NOT to match. Never cleared.
+  driftDetectedAt   DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@id([anchorMac, key])
+  @@index([key])
 }
 
 // ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
@@ -3233,6 +3519,8 @@ enum ModuleId {
   smart_home
   network
   managed_switch
+  /// WARP-1683 — Team chat (member-to-member Messages surface).
+  team_chat
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -4034,6 +4322,11 @@ model IntegrationConnection {
   provider      String
   status        IntegrationStatus @default(NOT_CONFIGURED)
   host          String
+  /// TCP port of the practice's box. NULL = the track's default (2638 direct
+  /// SQL, 9888 REST). Persisted because `connect()` has always ACCEPTED a port
+  /// and, before this column, silently dropped it — so a site on a non-default
+  /// port could not be configured at all.
+  port          Int?
   databaseName  String
   secretRef     String
   schemaVersion String?
@@ -4042,6 +4335,26 @@ model IntegrationConnection {
   lastHealthyAt DateTime?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
+
+  // --- REST-track ("eaglesoft-api") connection material ---------------------
+  // All three are nullable and unused by the direct-SQL provider, which keeps
+  // its credentials behind `secretRef` and needs no route contract.
+
+  /// aes-256-gcm blob (encryption.service) of {integrationKey,userId,password}.
+  /// `secretRef` stays the human-facing POINTER/label; this is the ciphertext
+  /// it points at. Cleartext is never stored, logged, or returned by the API.
+  apiCredentialsEnc String?
+
+  /// The DISCOVERED route contract (verbs/templates/field maps) for this box,
+  /// shaped as `EaglesoftApiRouteMap`. Supplied by the operator from the box's
+  /// own /help page — never guessed, and never auto-parsed from a format we
+  /// have not seen (see erp-connector/src/api-route-map.ts).
+  apiRouteMap Json?
+
+  /// PEM of the CA to trust for this box's certificate (Patterson's private
+  /// PdcoTechCA in production; the harness's own CA in a rehearsal). Absent =
+  /// use the system trust store. Certificate verification is never disabled.
+  apiCaCert String?
 
   @@index([provider, status])
 }
@@ -4125,6 +4438,12 @@ model Department {
   kind            DepartmentKind         @default(DEPARTMENT)
   state           ProvisionState         @default(pending)
   provisionError  String?
+  /// WARP-1651: when this row FIRST failed to converge, or null while it is
+  /// converging normally. The durable clock the reconciler bounds the
+  /// re-verify state with — `updatedAt` cannot serve, because
+  /// provisionDepartment rewrites `state` on every retry and so refreshes it
+  /// each tick. Stamped once per failure episode, cleared on convergence.
+  nonConvergedSince DateTime?
   ncGroupRw       String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
   ncGroupRo       String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
   ncGroupfolderId Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
@@ -4346,4 +4665,281 @@ model DeviceAlias {
   updatedAt DateTime @updatedAt
 
   @@index([roomId])
+}
+
+/// WARP-1683 — Team chat v1: thread shape. `direct` is a 1:1 DM (deduped —
+/// one thread per user pair); `group` is a small named group. Lowercase
+/// members per the ChatMessageStatus enum style.
+enum TeamChatThreadKind {
+  direct
+  group
+}
+
+/// WARP-1683 — what a team-chat message carries: plain text, a forwarded
+/// Files document (cached name/path + ncFileId), or a forwarded AI-chat
+/// transcript (immutable snapshot taken at send time).
+/// WARP-1685 appends the two meeting kinds: `meeting_invite` (the card a
+/// meeting create posts into its thread) and `meeting_reminder` (the card
+/// the reminder sweep posts as the meeting approaches). Append-only.
+enum TeamChatMessageKind {
+  text
+  file_share
+  ai_chat_share
+  meeting_invite
+  meeting_reminder
+}
+
+/// WARP-1685 — meeting lifecycle. Explicit column, never derived from
+/// absence (CLAUDE.md no-guessing rule). `cancelled` keeps the row (and
+/// its invite card) around so the thread history stays truthful.
+enum TeamChatMeetingStatus {
+  scheduled
+  cancelled
+}
+
+/// WARP-1685 — reminder lifecycle for the 60s sweep. `pending` → `sent`
+/// happens in the SAME transaction as the meeting_reminder message insert
+/// (exactly-once, restart-safe); `not_needed` is the explicit terminal for
+/// meetings that were cancelled or slipped past the grace window — never a
+/// silent skip.
+enum TeamChatMeetingReminderStatus {
+  pending
+  sent
+  not_needed
+}
+
+/// WARP-1685 — a participant's RSVP. Two-state on purpose: "no row yet"
+/// is the honest representation of "hasn't answered", and rows are only
+/// ever created with an answer (upsert), so absence is a real state here,
+/// not a guessed one.
+enum TeamChatRsvpResponse {
+  accepted
+  declined
+}
+
+/// WARP-1683 — an internal member-to-member conversation (DM or small
+/// group). LAN-local only; served by routes/team-chat.ts behind the
+/// `team_chat` module gate.
+///
+/// `createdById` is the LOCAL `User.id` UUID (`req.user.id`) — NEVER the
+/// username (ADR-027 IDOR rule; FileComment.authorUserId precedent: a bare
+/// column, no FK, so user deletion never cascades a shared history away).
+/// `lastMessageAt` is denormalized for the thread-list sort + is bumped in
+/// the same transaction as every message insert.
+model TeamChatThread {
+  id            String                @id @default(uuid())
+  kind          TeamChatThreadKind
+  /// Optional display title for `group` threads; `direct` threads render
+  /// the other participant's name instead.
+  title         String?
+  createdById   String
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @default(now()) @updatedAt
+  lastMessageAt DateTime              @default(now())
+  participants  TeamChatParticipant[]
+  messages      TeamChatMessage[]
+  meetings      TeamChatMeeting[]
+
+  @@index([lastMessageAt(sort: Desc)])
+}
+
+/// WARP-1683 — membership + per-member read cursor. `userId` is the LOCAL
+/// `User.id` UUID (ADR-027 — never username). Unread for a member = messages
+/// in the thread newer than THEIR `lastReadAt` from OTHER senders — an
+/// explicit cursor defaulted to now() at join, never null-absence semantics
+/// (CLAUDE.md no-guessing rule).
+model TeamChatParticipant {
+  id         String         @id @default(uuid())
+  threadId   String
+  thread     TeamChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  userId     String
+  joinedAt   DateTime       @default(now())
+  lastReadAt DateTime       @default(now())
+
+  @@unique([threadId, userId])
+  @@index([userId])
+}
+
+/// WARP-1683 — one message in a team-chat thread. `senderId` is the LOCAL
+/// `User.id` UUID (ADR-027). `body` is the text for kind=text and the
+/// optional caption for the two forward kinds.
+///
+/// file_share: `sharedNcFileId` + cached `sharedFileName`/`sharedFilePath`
+/// (display cache stamped at send time — the card keeps rendering after a
+/// rename/move; the link resolves through /files' own access control).
+///
+/// ai_chat_share: `sharedChatSnapshot` holds the immutable
+/// `{title, messages:[{role, content, createdAt}]}` transcript taken at
+/// send time; `sharedChatSessionId` is provenance only — SetNull on session
+/// delete so the forward survives the source conversation's deletion.
+model TeamChatMessage {
+  id                  String              @id @default(uuid())
+  threadId            String
+  thread              TeamChatThread      @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  senderId            String
+  kind                TeamChatMessageKind
+  body                String?
+  sharedNcFileId      Int?
+  sharedFileName      String?
+  sharedFilePath      String?
+  /// WARP-1898 — the Files space `sharedFilePath` is relative to
+  /// ("personal" | "shared" | "dept:<uuid>"). Without it the recipient's
+  /// link fell through to /files' silent personal-space default and
+  /// resolved the SENDER's path inside the RECIPIENT's own namespace.
+  /// Derived server-side from the file registry where a row exists; the
+  /// sender's claim is only a fallback. Null on rows written before this
+  /// ticket — treated as unknown, never as personal.
+  sharedFileSpace     String?
+  sharedChatSessionId String?
+  sharedChatSession   ChatSession?        @relation(fields: [sharedChatSessionId], references: [id], onDelete: SetNull)
+  sharedChatSnapshot  Json?
+  /// WARP-1685 — set on meeting_invite / meeting_reminder messages so the
+  /// card renders from the live meeting row in one fetch. SetNull on
+  /// meeting delete: the message survives as history.
+  meetingId           String?
+  meeting             TeamChatMeeting?    @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  createdAt           DateTime            @default(now())
+
+  @@index([threadId, createdAt])
+  @@index([sharedChatSessionId])
+  @@index([meetingId])
+}
+
+/// WARP-1685 — a meeting scheduled inside a team-chat thread. Invitees are
+/// the THREAD's participants (no separate invite list). `createdById` is
+/// the organizer's LOCAL `User.id` UUID — a bare column, no FK, per the
+/// v1 TeamChatThread.createdById / FileComment.authorUserId precedent.
+///
+/// `inviteMessageId` links back to the meeting_invite card posted in the
+/// same transaction as the meeting create. `calendarEventId` links the
+/// local CalendarEvent mirrored onto the organizer's calendar — created
+/// best-effort AFTER the transaction (a calendar hiccup never loses the
+/// meeting), deleted best-effort on cancel. Both are bare columns: the
+/// message/event tables never cascade a meeting away.
+///
+/// `@@index([reminderStatus, startsAt])` is the sweep's scan key.
+model TeamChatMeeting {
+  id                    String                        @id @default(uuid())
+  threadId              String
+  thread                TeamChatThread                @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  inviteMessageId       String?
+  calendarEventId       String?
+  title                 String
+  startsAt              DateTime
+  durationMinutes       Int?
+  location              String?
+  /// WARP-1874 — https-only video-call link for the meeting. Mirrors onto
+  /// the organizer's CalendarEvent.meetingUrl; same parseMeetingLink gate.
+  meetingUrl            String?
+  note                  String?
+  createdById           String
+  status                TeamChatMeetingStatus         @default(scheduled)
+  reminderMinutesBefore Int                           @default(15)
+  reminderStatus        TeamChatMeetingReminderStatus @default(pending)
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @default(now()) @updatedAt
+  rsvps                 TeamChatMeetingRsvp[]
+  messages              TeamChatMessage[]
+
+  @@index([reminderStatus, startsAt])
+  @@index([threadId])
+}
+
+/// WARP-1685 — one participant's answer to a meeting. `userId` is the
+/// LOCAL `User.id` UUID (ADR-027 — never username). Upsert-only surface:
+/// a member may flip accepted ↔ declined; `@@unique` keeps one answer per
+/// member per meeting.
+model TeamChatMeetingRsvp {
+  id          String               @id @default(uuid())
+  meetingId   String
+  meeting     TeamChatMeeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId      String
+  response    TeamChatRsvpResponse
+  respondedAt DateTime             @default(now())
+
+  @@unique([meetingId, userId])
+  @@index([userId])
+}
+
+/// WARP-1749 (ADR-036 Phase 2) — rollback journal for the model-id migration.
+///
+/// The Ollama→OCI map is LOSSY: `gemma4:26b` and `gemma4:31b` both become
+/// `ai/gemma4` (see `services/model-id-map.ts`). A reversed lookup table
+/// therefore cannot restore what a row held — only a record of the actual
+/// before-value can. That is what this pair of tables is.
+///
+/// Created EMPTY by its migration and stays empty until an operator runs
+/// `npm run model-id-migrate -- --apply`. Nothing on the boot path writes
+/// here: `migrate deploy` (scripts/migrate-and-start.sh) adds the tables, the
+/// data rewrite is an explicit operator step and never runs by itself.
+///
+/// `state` is an EXPLICIT column, never derived from the absence of a later
+/// row (CLAUDE.md rule 10 — same discipline as ADR-035's ApDevice states).
+///   - `direction`  `forward` (Ollama→OCI) | `backward` (the revert)
+///   - `state`      `applied` | `reverted`. A `backward` batch is born
+///                  `applied` and is never itself reverted — re-running the
+///                  forward migration creates a NEW forward batch instead.
+model ModelIdMigrationBatch {
+  id             String                  @id @default(uuid())
+  direction      String
+  state          String
+  /// Set on a `backward` batch: the `forward` batch it undid. NULL on a
+  /// forward batch — this is provenance, not state.
+  revertsBatchId String?
+  /// Free-text operator note (`--note`), so a box can say WHY it was run.
+  note           String?
+  startedAt      DateTime                @default(now())
+  entries        ModelIdMigrationEntry[]
+
+  @@index([direction, state, startedAt])
+}
+
+/// WARP-1749 — one column of one row, rewritten by one batch.
+///
+/// `beforeValue`/`afterValue` are stored verbatim (not normalised): rollback
+/// re-checks that the row STILL holds `afterValue` before restoring, so a row
+/// somebody changed by hand in between is skipped and reported rather than
+/// clobbered.
+model ModelIdMigrationEntry {
+  id          String                @id @default(uuid())
+  batchId     String
+  batch       ModelIdMigrationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  /// `workspace_setting` | `chat_session` | `chat_message`
+  site        String
+  /// Primary key of the row (or the WorkspaceSetting `key`).
+  rowKey      String
+  /// `valueJson` | `model`
+  column      String
+  beforeValue String
+  afterValue  String
+
+  @@index([batchId])
+  @@index([site, rowKey])
+}
+
+/// WARP-1906 — premade business locations: one named conference room in a
+/// building, offered as a Location suggestion when creating a calendar event
+/// (ahead of the Nominatim results) and managed from Settings → Locations.
+///
+/// One row per room, with the building as a plain grouping label rather than
+/// its own table: v1 carries no building-level metadata, so a separate
+/// Building model would add a join with nothing in it. The box is a
+/// single-workspace appliance (Workspace is the id=1 singleton, WARP-1341
+/// business-only), so there is no workspace FK — every row belongs to THE
+/// workspace, and route auth (any member reads, owner/admin writes) is the
+/// scoping boundary.
+model WorkspaceLocation {
+  id        String   @id @default(uuid())
+  /// Building / site label, e.g. "HQ", "2nd Floor".
+  building  String
+  /// Room name, e.g. "Room Aurora", "Fishbowl".
+  room      String
+  /// Username of the admin who created the row — display/audit attribution,
+  /// same shape as `Workspace.setBy` (never the User.id UUID, WARP-1014).
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([building, room])
+  @@index([building])
 }

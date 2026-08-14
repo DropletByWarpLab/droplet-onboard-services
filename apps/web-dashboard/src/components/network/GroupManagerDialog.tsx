@@ -61,26 +61,26 @@ export function GroupManagerDialog({ open, onClose }: Props) {
     // own their padding; scroll comes from the primitive body (WARP-1153).
     <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="lg" flush>
       <div>
-        <div className="p-4 border-b border-separator flex items-center justify-between">
-          <h2 id={headingId} className="type-title-3 text-label-primary">
+        <div className="p-4 border-b border-[var(--card-bd)] flex items-center justify-between">
+          <h2 id={headingId} className="type-title-3 text-[color:var(--text)]">
             Manage groups
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
+            className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
           >
             <Icons.X className="w-5 h-5" />
           </button>
         </div>
 
         {groups.length === 0 ? (
-          <p className="p-4 type-subheadline text-label-tertiary">
+          <p className="p-4 type-subheadline text-[color:var(--text-muted)]">
             No groups yet. Create one below to start organizing devices.
           </p>
         ) : (
-          <ul className="divide-y divide-separator">
+          <ul className="divide-y divide-[var(--card-bd)]">
             {groups.map((g) => (
               <GroupRow
                 key={g.id}
@@ -92,7 +92,7 @@ export function GroupManagerDialog({ open, onClose }: Props) {
           </ul>
         )}
 
-        <div className="p-3 border-t border-separator flex gap-2">
+        <div className="p-3 border-t border-[var(--card-bd)] flex gap-2">
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
@@ -103,14 +103,20 @@ export function GroupManagerDialog({ open, onClose }: Props) {
               }
             }}
             placeholder="New group name"
-            className="flex-1 bg-surface-secondary border border-separator rounded px-3 py-1.5 type-body"
+            className="flex-1 px-3 py-1.5 type-body outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
             aria-label="New group name"
           />
           <button
             type="button"
             onClick={() => void handleCreate()}
             disabled={!newName.trim()}
-            className="dp-btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn primary sm"
           >
             Create
           </button>
@@ -119,14 +125,14 @@ export function GroupManagerDialog({ open, onClose }: Props) {
         {toast && (
           <div
             role="alert"
-            className="px-4 py-2 text-system-red flex items-center justify-between border-t border-separator"
+            className="px-4 py-2 text-system-red flex items-center justify-between border-t border-[var(--card-bd)]"
           >
             <span>{toast}</span>
             <button
               type="button"
               onClick={() => setToast(null)}
               aria-label="Dismiss"
-              className="ml-2 text-label-secondary"
+              className="ml-2 text-[color:var(--text-muted)]"
             >
               ×
             </button>

@@ -491,6 +491,17 @@ class _MockAp:
         # Track which MACs have been decommissioned so /aps/{mac} reports
         # the right state after the row has been cleared from `_pushed`.
         self._decommissioned: set[str] = set()
+        # WARP-1703: per-MAC band-steering flag mirroring the AP image's
+        # `droplet.wifi.band_steering` master switch. Absent = the substrate
+        # default (ON) — same semantics as an unset uci option.
+        self._band_steering: dict[str, bool] = {}
+        # WARP-1715: { mac -> [assoclist rows] } — stations associated to this
+        # AP's own radios, seeded via /aps/_test_seed. Distinct from the
+        # per-radio client COUNT in `get_ap_wireless`: attribution needs MACs.
+        self._clients: dict[str, list[dict[str, Any]]] = {}
+        # WARP-1712: per-MAC { ssid, key } standing in for the AP's own
+        # `wireless.default_radio0` section — the household network name.
+        self._wireless: dict[str, dict[str, str]] = {}
 
     @staticmethod
     def iface_section_for_mac(mac: str) -> str:
@@ -516,6 +527,12 @@ class _MockAp:
         the way in so the rest of the SDK's normalisation invariants
         hold."""
         canonical = mac.upper()
+        # WARP-1715: stations live in their own map, not in the discovery
+        # record — `get()` echoes `_discovered` wholesale and an assoclist has
+        # no business in the AP's mDNS identity.
+        clients = info.pop("clients", None)
+        if clients is not None:
+            self._clients[canonical] = list(clients)
         existing = self._discovered.get(canonical, {})
         existing.update({k: v for k, v in info.items() if v is not None})
         self._discovered[canonical] = existing
@@ -576,6 +593,97 @@ class _MockAp:
         self._pushed.pop(canonical, None)
         self._decommissioned.add(canonical)
         logger.info("mock: AP remove_wireless_config mac=%s — no-op", canonical)
+
+    def get_band_steering(self, mac: str) -> bool:
+        """WARP-1703: the AP image's `droplet.wifi.band_steering` master
+        switch. Defaults ON — same as the substrate's unset-option default."""
+        return self._band_steering.get(mac.upper(), True)
+
+    def set_band_steering(self, mac: str, enabled: bool) -> None:
+        canonical = mac.upper()
+        self._band_steering[canonical] = bool(enabled)
+        logger.info(
+            "mock: AP set_band_steering mac=%s enabled=%s — no-op", canonical, enabled
+        )
+
+    def get_clients(self, mac: str) -> list[dict[str, Any]]:
+        """WARP-1715: stations associated to this AP's own radios.
+
+        Seeded per-MAC by `/aps/_test_seed`; an AP nobody seeded reports an
+        empty list, which is the honest mock answer (an approved-but-idle AP
+        really does have no stations).
+        """
+        return list(self._clients.get(mac.upper(), []))
+
+    def get_ap_wireless(self, mac: str) -> dict[str, Any]:
+        """WARP-1712: the AP's own network name + passphrase, mock edition.
+
+        Mirrors the real `_shape_ap_wireless` envelope closely enough for
+        dashboard dev: two radios, radio0 as the primary source of truth, and
+        the 5 GHz name DERIVED from the band-steering flag exactly the way the
+        AP-side applier derives it (`<ssid>` when steering is on, `<ssid>-5g`
+        when off). Getting that derivation wrong in the mock would let a
+        dashboard bug ship green, so it stays in lock-step.
+        """
+        canonical = mac.upper()
+        state = self._wireless.setdefault(
+            canonical, {"ssid": "Droplet", "key": "droplet-mock-psk"}
+        )
+        steering = self.get_band_steering(canonical)
+        five = state["ssid"] if steering else f"{state['ssid']}-5g"
+        return {
+            "supported": True,
+            "band_steering": steering,
+            "primary_section": "default_radio0",
+            "ssid": state["ssid"],
+            "key": state["key"],
+            "encryption": "psk2+ccmp",
+            "five_ghz_ssid": five,
+            "radios": [
+                {
+                    "section": "default_radio0", "radio": "radio0", "band": "2g",
+                    "ssid": state["ssid"], "encryption": "psk2+ccmp",
+                    "channel": "auto", "htmode": "HE20", "disabled": False,
+                    "primary": True, "ifname": "phy0-ap0", "up": True,
+                    "live_channel": 6, "live_htmode": "HE20", "clients": 2,
+                },
+                {
+                    "section": "default_radio1", "radio": "radio1", "band": "5g",
+                    "ssid": five, "encryption": "psk2+ccmp",
+                    "channel": "auto", "htmode": "HE80", "disabled": False,
+                    "primary": False, "ifname": "phy1-ap0", "up": True,
+                    "live_channel": 44, "live_htmode": "HE80", "clients": 5,
+                },
+            ],
+            "device": {
+                "model": "Droplet Coverage Extender (mock)",
+                "firmware": "OpenWrt 25.12 (mock)",
+                "hostname": "droplet-ap-mock",
+                "uptime_seconds": 86_400,
+            },
+        }
+
+    def set_ap_wireless(
+        self, mac: str, ssid: Optional[str], key: Optional[str]
+    ) -> dict[str, Any]:
+        canonical = mac.upper()
+        state = self._wireless.setdefault(
+            canonical, {"ssid": "Droplet", "key": "droplet-mock-psk"}
+        )
+        if ssid is not None:
+            state["ssid"] = ssid
+        if key is not None:
+            state["key"] = key
+        steering = self.get_band_steering(canonical)
+        logger.info("mock: AP set_ap_wireless mac=%s ssid=%s — no-op", canonical, ssid)
+        return {
+            # Only the primary section is authored — the mock keeps the real
+            # service's contract that the applier owns radio1.
+            "sections_written": ["default_radio0"],
+            "band_steering": steering,
+            "ssid": state["ssid"],
+            "five_ghz_ssid": state["ssid"] if steering else f"{state['ssid']}-5g",
+        }
 
 
 class _MockUci:

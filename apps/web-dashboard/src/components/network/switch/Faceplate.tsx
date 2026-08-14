@@ -16,18 +16,18 @@ function Cell({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void
   const cellBorder =
     p.status === "warn"
       ? "border-system-orange/50"
-      : "border-separator";
+      : "border-[var(--card-bd)]";
   const cellOpacity = p.status === "blocked" ? "opacity-[0.62]" : "";
   return (
     <button
       type="button"
       onClick={() => onPick(p)}
-      title={portName(p.name)}
+      title={portName(p)}
       className={[
-        "flex flex-col items-center gap-1.5 rounded-[9px] border bg-surface-primary",
+        "flex flex-col items-center gap-1.5 rounded-[9px] border bg-[var(--card-bg)]",
         "px-1.5 pt-2.5 pb-2 min-w-0 cursor-pointer transition-all duration-150 ease-smooth",
-        "hover:-translate-y-0.5 hover:border-accent/40 hover:shadow-sm",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+        "hover:-translate-y-0.5 hover:border-[color-mix(in_srgb,var(--brand)_40%,var(--card-bd))] hover:shadow-sm",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]",
         cellBorder,
         cellOpacity,
       ].join(" ")}
@@ -46,17 +46,17 @@ function Cell({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void
           </span>
         )}
       </span>
-      <span className="type-caption-2 font-semibold text-label-secondary font-mono">
+      <span className="type-caption-2 font-semibold text-[color:var(--text-muted)] font-mono">
         {p.is_sfp ? "SFP " : ""}
         {p.port}
       </span>
-      <span className="text-label-tertiary flex">
+      <span className="text-[color:var(--text-muted)] flex">
         <Icon size={11} aria-hidden="true" />
       </span>
-      <span className="type-caption-2 max-w-full truncate text-label-primary">
-        {portName(p.name)}
+      <span className="type-caption-2 max-w-full truncate text-[color:var(--text)]">
+        {portName(p)}
       </span>
-      <span className="text-[10px] leading-none text-label-tertiary font-mono">
+      <span className="text-[10px] leading-none text-[color:var(--text-muted)] font-mono">
         {p.poe ? (poeDelivering ? `${p.poe.power_w.toFixed(1)} W` : "off") : "—"}
       </span>
     </button>
@@ -73,20 +73,20 @@ export function Faceplate({ ports, onPick }: Props) {
   const sfp = ports.filter((p) => p.is_sfp);
   return (
     <div>
-      <div className="flex gap-[18px] items-stretch bg-surface-secondary border border-separator rounded-[12px] p-3.5">
+      <div className="flex gap-[18px] items-stretch bg-[var(--card-inner)] border border-[var(--card-bd)] rounded-[12px] p-3.5">
         <div className="grid grid-flow-col auto-cols-fr gap-2 flex-1">
           {copper.map((p) => (
             <Cell key={p.port} p={p} onPick={onPick} />
           ))}
         </div>
-        <div className="w-px bg-separator" aria-hidden="true" />
+        <div className="w-px bg-[var(--card-bd)]" aria-hidden="true" />
         <div className="grid grid-flow-col gap-2 flex-none" style={{ gridAutoColumns: "110px" }}>
           {sfp.map((p) => (
             <Cell key={p.port} p={p} onPick={onPick} />
           ))}
         </div>
       </div>
-      <div className="flex items-center gap-4 mt-2.5 type-caption-2 text-label-tertiary flex-wrap">
+      <div className="flex items-center gap-4 mt-2.5 type-caption-2 text-[color:var(--text-muted)] flex-wrap">
         <span className="inline-flex items-center gap-1.5">
           <span className={[styles.led, styles.ledLinkOn, styles.ledInline].join(" ")} aria-hidden="true" />
           link up

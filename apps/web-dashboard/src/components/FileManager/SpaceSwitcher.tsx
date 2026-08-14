@@ -14,6 +14,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { FileSpace, FileSpaceId } from "@/lib/types";
+// WARP-1808 — display-only "Workspace" mapping for the household space, used
+// at RENDER SITES ONLY. Grouping and parent lookups below (`teamsByParent`,
+// `claimedParentNames`) keep keying off RAW server names — the data contract.
+import { spaceRenderName } from "@/lib/space-attribution";
 
 interface SpaceSwitcherProps {
   spaces: FileSpace[];
@@ -93,6 +97,24 @@ function isVisibleNonActive(space: FileSpace, isOwnerOrAdmin: boolean): boolean 
 }
 
 /**
+ * WARP-1910 — whether the switcher renders at all for this viewer: at least
+ * two visible spaces (active ones, plus the provisioning/failed rows this
+ * viewer may see). Exported because the Files page keys off it too — the
+ * breadcrumb bar's lone root crumb is suppressed only while the switcher is
+ * actually on screen. Single source of truth: the component's own
+ * nothing-to-switch-between early return uses this same predicate.
+ */
+export function spaceSwitcherVisible(
+  spaces: FileSpace[],
+  isOwnerOrAdmin = false
+): boolean {
+  const visible = spaces.filter(
+    (s) => isActiveState(s) || isVisibleNonActive(s, isOwnerOrAdmin)
+  );
+  return visible.length >= 2;
+}
+
+/**
  * WARP-883 (ADR-027 WS-5) — segmented control to switch between the user's
  * private "My Files" space and other spaces (shared Household, and — as of
  * WARP-1267 — N departments/teams with one level of nesting).
@@ -116,7 +138,6 @@ export function SpaceSwitcher({
   const nonActiveVisible = spaces.filter(
     (s) => !isActiveState(s) && isVisibleNonActive(s, isOwnerOrAdmin)
   );
-  const allVisible = [...activeVisible, ...nonActiveVisible];
 
   // Light dismiss + Esc on the Spaces menu.
   useEffect(() => {
@@ -137,8 +158,9 @@ export function SpaceSwitcher({
     };
   }, [menuOpen]);
 
-  // Nothing to switch between → don't show a lone control.
-  if (allVisible.length < 2) return null;
+  // Nothing to switch between → don't show a lone control. Same predicate
+  // the Files page uses to decide the root breadcrumb's fate (WARP-1910).
+  if (!spaceSwitcherVisible(spaces, isOwnerOrAdmin)) return null;
 
   // ── ≤3 spaces, all active: the shipped segmented tablist, untouched. ──
   const useMenu = activeVisible.length > 3 || nonActiveVisible.length > 0;
@@ -164,7 +186,7 @@ export function SpaceSwitcher({
               }}
             >
               <Icon size={14} aria-hidden="true" />
-              {space.name}
+              {spaceRenderName(space)}
             </button>
           );
         })}
@@ -181,7 +203,8 @@ export function SpaceSwitcher({
 
   const activeSpace = spaces.find((s) => s.id === active);
   const activeIsInMenu = !!activeSpace && !PINNED_IDS.has(activeSpace.id);
-  const triggerLabel = activeIsInMenu && activeSpace ? activeSpace.name : "Spaces";
+  const triggerLabel =
+    activeIsInMenu && activeSpace ? spaceRenderName(activeSpace) : "Spaces";
 
   const departments = menuItems.filter((s) => s.kind === "department");
   const teams = menuItems.filter((s) => s.kind === "team");
@@ -229,7 +252,7 @@ export function SpaceSwitcher({
           aria-hidden="true"
           className="flex-none text-label-secondary"
         />
-        <span className="flex-1 min-w-0 truncate">{space.name}</span>
+        <span className="flex-1 min-w-0 truncate">{spaceRenderName(space)}</span>
         {isProvisioning && (
           <span className="inline-flex items-center gap-1.5 type-caption-1 text-system-orange flex-none">
             <Loader2
@@ -272,7 +295,7 @@ export function SpaceSwitcher({
             }}
           >
             <Icon size={14} aria-hidden="true" />
-            {space.name}
+            {spaceRenderName(space)}
           </button>
         );
       })}

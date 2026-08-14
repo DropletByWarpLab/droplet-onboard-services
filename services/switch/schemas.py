@@ -1,7 +1,7 @@
 """Pydantic models for the switch service REST API."""
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 
 
 # --- Response models ---
@@ -80,7 +80,28 @@ class CreateVlanRequest(BaseModel):
 
 
 class SetVlanMembershipRequest(BaseModel):
+    """A VLAN membership write, with its INTENT declared rather than guessed.
+
+    `mode` exists because the two intents look identical on the wire — a
+    one-element list is both "move this port here" and "this VLAN now has
+    exactly one member" — and getting it wrong in the second direction strands
+    the fabric (replacing VLAN 1's member list drops the uplink, the AP and the
+    appliance, which have no remote recovery).
+
+    * ``merge`` (default) — every entry is an ACCESS move: the port becomes the
+      VLAN's untagged member and every other member is preserved. Entries that
+      cannot be expressed as an access move (``tagged`` or ``member: false``)
+      are refused with a 400 that names ``replace``, so a full-membership
+      caller is never silently downgraded to merge semantics.
+    * ``replace`` — write the whole member list (the historical behaviour).
+
+    Merge is the default because the blast radii are not symmetric: a wrong
+    merge leaves a stale member (visible, fixable with an explicit replace); a
+    wrong replace needs a rack visit.
+    """
+
     ports: list[VlanPortMembership]
+    mode: Literal["merge", "replace"] = "merge"
 
 
 class SetPortPoeRequest(BaseModel):

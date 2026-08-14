@@ -40,6 +40,35 @@ describe("BreadcrumbNav", () => {
   });
 });
 
+// WARP-1944 — the root crumb names the ACTIVE SPACE, not always "My files".
+// Browsing a Workspace/department/team folder showed "My files > Trips" even
+// though the user was inside the shared library; the caller now hands the
+// active space's display label down. Navigation is unchanged: the root crumb
+// still targets the space's root ("/").
+describe("BreadcrumbNav — rootLabel (WARP-1944)", () => {
+  it('defaults the root crumb to "My files" when no rootLabel is given', () => {
+    render(<BreadcrumbNav path="/Docs" onNavigate={() => {}} />);
+    expect(screen.getByRole("button", { name: "My files" })).toBeInTheDocument();
+  });
+
+  it("renders the supplied space label instead of 'My files'", () => {
+    render(
+      <BreadcrumbNav path="/Trips" onNavigate={() => {}} rootLabel="Workspace" />
+    );
+    expect(screen.getByRole("button", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.queryByText("My files")).not.toBeInTheDocument();
+  });
+
+  it("still navigates to the space root ('/') via the relabelled root crumb", () => {
+    const onNavigate = vi.fn();
+    render(
+      <BreadcrumbNav path="/Trips" onNavigate={onNavigate} rootLabel="Workspace" />
+    );
+    screen.getByRole("button", { name: "Workspace" }).click();
+    expect(onNavigate).toHaveBeenCalledWith("/");
+  });
+});
+
 // WARP-1338 (UX review) — a volume deep-link lands on /files?path=/<mount-tail>;
 // for the live box's legacy pool the tail is the FULL fs UUID, and the crumb
 // rendered it raw — the exact GUID-as-primary-label WARP-1337 banned. The

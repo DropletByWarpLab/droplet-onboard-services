@@ -1,5 +1,6 @@
 /**
  * WARP-823 — secret redaction for the downloadable log bundle.
+ * WARP-1718 — and for structured audit params (see {@link redactSecretParams}).
  *
  * The Settings → "Download diagnostics" log bundle ships journald + container
  * logs off the box to the operator. Those logs routinely echo secret material:
@@ -24,21 +25,34 @@
  * This module is pure + synchronous so the planted-secret unit test
  * (`log-redaction.test.ts`) is the authoritative proof that known secrets never
  * survive, independent of any host.
+ *
+ * Two entry points, one shared notion of "secret" ({@link SENSITIVE_WORDS}):
+ *   - {@link redactSecrets} scrubs free TEXT (the log bundle).
+ *   - {@link redactSecretParams} scrubs a STRUCTURED object by key (audit
+ *     params on their way into `CommandAuditLog.data`).
  */
 
 /** The fixed marker that replaces any redacted secret value. */
 export const REDACTION_PLACEHOLDER = "[REDACTED]";
 
 /**
+ * The generic secret-bearing words. A key containing any of these names a value
+ * we must not emit. Kept as one alternation so the log-bundle text scrub
+ * ({@link redactSecrets}) and the structured-params scrub
+ * ({@link redactSecretParams}) can never drift apart on what "secret" means.
+ */
+const SENSITIVE_WORDS =
+  "PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|KEY|PSK|CREDENTIAL|AUTH";
+
+/**
  * Env/key names whose VALUE is always a secret. Matched case-insensitively as a
  * whole word, so `JWT_SECRET`, `redis_password`, `service-token-display` etc.
- * all hit. We match on the generic suffixes (TOKEN/SECRET/KEY/PASSWORD/PASSWD/
- * PSK/CREDENTIAL) rather than enumerating every var so a NEW secret env added
- * later is redacted with no code change — the opposite of an allow-list that
- * silently leaks the next addition.
+ * all hit. We match on the generic suffixes ({@link SENSITIVE_WORDS}) rather
+ * than enumerating every var so a NEW secret env added later is redacted with
+ * no code change — the opposite of an allow-list that silently leaks the next
+ * addition.
  */
-const SENSITIVE_KEY_WORD =
-  "[A-Za-z0-9_.-]*(?:PASSWORD|PASSWD|SECRET|TOKEN|KEY|PSK|CREDENTIAL|AUTH)[A-Za-z0-9_.-]*";
+const SENSITIVE_KEY_WORD = `[A-Za-z0-9_.-]*(?:${SENSITIVE_WORDS})[A-Za-z0-9_.-]*`;
 
 /**
  * Carve-out: env keys that match {@link SENSITIVE_KEY_WORD} on `KEY` but are
@@ -106,6 +120,31 @@ const RULES: readonly RedactionRule[] = [
       `${header}${sep}${REDACTION_PLACEHOLDER}`,
   },
   {
+    // WARP-1688 — the richdocuments DIRECT-EDITING token, which lives in a URL
+    // PATH SEGMENT rather than a header or an assignment: none of the shapes
+    // above can see it.
+    //
+    // `/…/apps/richdocuments/direct/<token>` renders the editor with NO cookie
+    // and NO Authorization header, so the URL IS the credential for as long as
+    // it lives (docs/THREAT_MODEL.md T1.8, accepted risk R6 — "must never be
+    // logged"). It lands in logs without anyone writing a log statement: the
+    // gateway has no `access_log` directive so nginx logs `$request` verbatim,
+    // and `nextcloud:29-apache` symlinks its Apache access log to stdout while
+    // `nextcloud` sits in the collector's DEFAULT_SERVICES. A bundle pulled
+    // during an active editing session would otherwise carry live credentials
+    // into a downloadable ZIP.
+    //
+    // The ROUTE is preserved and only the token replaced — an access log with
+    // the path scrubbed away is useless for the editor problem the bundle was
+    // pulled for. Matches both route shapes (`/index.php/apps/…` and the
+    // pretty-URL `/apps/…`); the token class stops at `?`, `#`, quote or
+    // whitespace so a following query string or the access log's ` HTTP/1.1"`
+    // stays readable.
+    name: "richdocuments-direct-token",
+    pattern: /((?:\/index\.php)?\/apps\/richdocuments\/direct\/)([^\s"'?#]+)/gi,
+    replace: (_m, route: string) => `${route}${REDACTION_PLACEHOLDER}`,
+  },
+  {
     // Sensitive KEY=value or KEY: value (env dumps, structured logs). The value
     // may be bare, single- or double-quoted. We keep the key + the operator so
     // the line stays legible; only the value is replaced.
@@ -138,6 +177,98 @@ export function redactSecrets(text: string): string {
   let out = text;
   for (const rule of RULES) {
     out = out.replace(rule.pattern, rule.replace as (...args: string[]) => string);
+  }
+  return out;
+}
+
+// ── Structured (object) redaction — WARP-1718 ────────────────────────────────
+
+/**
+ * Whole-key form of {@link SENSITIVE_KEY_WORD}, for testing an object key
+ * rather than scanning free text.
+ */
+const SENSITIVE_KEY_RE = new RegExp(`^${SENSITIVE_KEY_WORD}$`, "i");
+
+/**
+ * Does this object key name a secret VALUE?
+ *
+ * Substring match on {@link SENSITIVE_WORDS} (fail closed — `password`, `key`,
+ * `encryption_key`, `psk`, `secret`, `token`, `wpa_passphrase` all hit), minus
+ * the {@link SAFE_KEY_RE} carve-out so a public key / key *id* stays legible.
+ */
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key) && !SAFE_KEY_RE.test(key);
+}
+
+/**
+ * Depth ceiling for {@link redactSecretParams}. Audit params are shallow; the
+ * bound exists so a cyclic or pathologically nested object can't spin, and so
+ * anything past it fails CLOSED (collapses to the placeholder) rather than
+ * falling through unredacted.
+ */
+const MAX_REDACTION_DEPTH = 8;
+
+/**
+ * WARP-1718 — deep-copy `value` with every secret-bearing entry replaced by
+ * {@link REDACTION_PLACEHOLDER}.
+ *
+ * Used at the audit-logging boundary (`logNetworkCommand`), where the raw
+ * command params carry household Wi-Fi passphrases that must never be
+ * persisted: `set_wifi_password` → `{iface_section, password}`,
+ * `create_guest_network` → `{radio, ssid, password, network}`, and
+ * `camera_subnet_setup`, which forwards `req.body` wholesale.
+ *
+ * Two properties the audit depends on:
+ *
+ *  1. **The key survives.** A redacted entry keeps its key with a placeholder
+ *     value, so the audit trail still proves a secret WAS set — only its value
+ *     is gone. Non-secret siblings (`ssid`, `radio`, `iface_section`) stay
+ *     readable, which is most of what makes the row useful.
+ *  2. **A missing secret stays missing.** `undefined`/`null` under a sensitive
+ *     key is left as-is rather than replaced, so an SSID-only edit (WARP-1712's
+ *     `{ssid, key: undefined}` → `set_ap_wifi_ssid`) doesn't get a placeholder
+ *     that falsely implies a passphrase was set.
+ *
+ * String values under NON-sensitive keys are still run through
+ * {@link redactSecrets}, so a secret embedded in a value — a `redis://:pw@host`
+ * URI, a bearer token — is caught even when the key name gives no hint.
+ *
+ * Pure; never mutates its input.
+ */
+export function redactSecretParams<T>(value: T): T {
+  return redactValue(value, 0) as T;
+}
+
+function redactValue(value: unknown, depth: number): unknown {
+  if (depth > MAX_REDACTION_DEPTH) return REDACTION_PLACEHOLDER;
+
+  if (typeof value === "string") return redactSecrets(value);
+  if (value === null || typeof value !== "object") return value;
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item, depth + 1));
+  }
+
+  // Objects that define their OWN JSON form (Date, Buffer, Prisma Decimal…)
+  // serialize to something other than their own properties, so walking them
+  // would corrupt the audit payload — hand those back untouched.
+  //
+  // Everything else IS walked, class instances included. Bailing out on
+  // "not a plain object" would fail OPEN: `JSON.stringify` emits an instance's
+  // own enumerable properties regardless, so a secret-bearing field would ride
+  // through unredacted. Walking is also exactly faithful for those — the
+  // rebuilt plain object serializes identically (as it does for Map/Set/RegExp/
+  // Error, which have no own enumerable properties and no toJSON).
+  if (typeof (value as { toJSON?: unknown }).toJSON === "function") return value;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (isSensitiveKey(key)) {
+      // Keep a genuinely absent secret absent — see property (2) above.
+      out[key] = entry === undefined || entry === null ? entry : REDACTION_PLACEHOLDER;
+    } else {
+      out[key] = redactValue(entry, depth + 1);
+    }
   }
   return out;
 }

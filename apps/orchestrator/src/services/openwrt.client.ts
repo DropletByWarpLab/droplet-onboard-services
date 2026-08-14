@@ -14,10 +14,12 @@ import {
   routerErrorFromResponse,
   routerErrorFromThrown,
 } from "../types/router-error.js";
+import type { PortWriteGuardDetail } from "../types/router-error.js";
 import type {
   NetworkSummary,
   NetworkInterfaces,
   NetworkInterfaceRow,
+  RouterPortMap,
   AiNetworkAccess,
   InterfaceStatus,
   WirelessStatus,
@@ -39,7 +41,13 @@ import { createLogger } from "../lib/logger.js";
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
-export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../types/network.js";
+export type {
+  SystemControls,
+  NetworkInterfaceRow,
+  RouterPort,
+  RouterPortMap,
+  AiNetworkAccess,
+} from "../types/network.js";
 
 const logger = createLogger("openwrt-client");
 
@@ -156,6 +164,19 @@ type RoutingFetchInit = Omit<RequestInit, "headers"> & {
    * it has confirmed genuine OpenWrt connectivity.
    */
   skipContactMark?: boolean;
+  /**
+   * WARP-1907 — statuses whose BODY is the answer, not a failure to classify.
+   * `routingFetch` returns the Response for these instead of throwing, so the
+   * caller can read the typed refusal the routing service put in it and mint a
+   * precise `RouterError`.
+   *
+   * Needed because `routerErrorFromResponse` classifies by status ALONE, and
+   * that is deliberate — the WARP-1673 502 rule and the WARP-816 409 rule both
+   * depend on it. A route whose refusals collide with those statuses cannot be
+   * served by widening the classifier without breaking them; it has to read its
+   * own body. Opt-in, so no existing caller changes behaviour.
+   */
+  passthroughStatuses?: number[];
 };
 
 export type RetryPolicy = {
@@ -198,10 +219,17 @@ async function singleAttempt(
   url: string,
   init: RequestInit,
   label: string,
+  passthroughStatuses: number[] = [],
 ): Promise<AttemptOutcome> {
   try {
     const res = await internalFetch(url, init);
     if (res.ok) {
+      return { kind: "success", res };
+    }
+    // WARP-1907: the caller declared this status carries a body it will read
+    // itself. Hand the Response back unconsumed — no retry (it is a terminal
+    // answer, not a transient fault) and no classification.
+    if (passthroughStatuses.includes(res.status)) {
       return { kind: "success", res };
     }
     const err = routerErrorFromResponse(res, label);
@@ -230,7 +258,14 @@ async function singleAttempt(
  * Exported so tests and WARP-39 (typed RouterError) can compose on top.
  */
 export async function routingFetch(path: string, init: RoutingFetchInit = {}): Promise<Response> {
-  const { headers = {}, label, retry = {}, skipContactMark = false, ...rest } = init;
+  const {
+    headers = {},
+    label,
+    retry = {},
+    skipContactMark = false,
+    passthroughStatuses,
+    ...rest
+  } = init;
   const policy: RetryPolicy = { ...DEFAULT_RETRY, ...retry };
   const sleep = policy.sleep ?? defaultSleep;
   const random = policy.random ?? Math.random;
@@ -254,12 +289,19 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   const fetchInit: RequestInit = { ...rest, headers: merged };
 
   for (let attempt = 1; attempt <= policy.attempts; attempt++) {
-    const outcome = await singleAttempt(url, fetchInit, displayLabel);
+    const outcome = await singleAttempt(url, fetchInit, displayLabel, passthroughStatuses);
     if (outcome.kind === "success") {
       // First confirmed contact this process lifetime — flips the cold-start
       // grace off so subsequent UNREACHABLE errors escalate to `warn`.
       // Skipped for callers that need to verify the payload before confirming
       // reachability (e.g. /health, which returns 200 while OpenWrt provisions).
+      //
+      // WARP-1907, deliberate and worth knowing: a `passthroughStatuses`
+      // 4xx/5xx now reaches this line, where before this ticket every 4xx
+      // aborted above it. That is the correct reading rather than an accident —
+      // the routing service answered, with a considered refusal, which is at
+      // least as good evidence of reachability as a 200. Only the one opt-in
+      // caller can get here.
       if (!skipContactMark) {
         routerContacted = true;
       }
@@ -299,7 +341,22 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   });
 }
 
-async function routingFetchJson<T>(path: string, init?: RoutingFetchInit): Promise<T> {
+/**
+ * `routingFetch` + `res.json() as T`.
+ *
+ * WARP-1907: `passthroughStatuses` is excluded at the TYPE level, not left to
+ * convention. This helper ASSERTS the body is a `T`, and a passthrough status
+ * hands back an unthrown 4xx/5xx whose body is a refusal — so combining the two
+ * would type an error payload as the success shape and pass it to a caller with
+ * no reason to suspect it. Nothing does that today; this makes it a compile
+ * error if anyone tries, because the failure is silent at runtime. A caller that
+ * needs to read its own refusals uses `routingFetch` directly and narrows the
+ * body itself, as `setRouterPortEnabled` does.
+ */
+async function routingFetchJson<T>(
+  path: string,
+  init?: Omit<RoutingFetchInit, "passthroughStatuses">,
+): Promise<T> {
   const res = await routingFetch(path, init);
   return res.json() as Promise<T>;
 }
@@ -342,6 +399,94 @@ export async function fetchAllInterfaces(): Promise<NetworkInterfaceRow[]> {
     { label: "Interface enumeration" },
   );
   return data.interfaces;
+}
+
+/**
+ * The router's PHYSICAL port map (WARP-1866) — the jacks, not the interfaces.
+ *
+ * Every port carries `disable_guard` (WARP-1907): the extra acknowledgement
+ * turning that jack off requires, or null. See `types/network.ts`.
+ */
+export async function fetchRouterPorts(): Promise<RouterPortMap> {
+  return routingFetchJson<RouterPortMap>("/network/ports", { label: "Router ports" });
+}
+
+/** WARP-1907 — the routing service's typed refusals for a jack write. Their
+ *  bodies are read here rather than classified by status (see below). */
+const PORT_WRITE_REFUSAL_STATUSES = [404, 409, 422, 502];
+
+/** Narrow the routing service's guard body without trusting it into the union. */
+function asGuardDetail(value: unknown): PortWriteGuardDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { code?: unknown; reason?: unknown };
+  if (v.code !== "WAN_PORT" && v.code !== "MANAGEMENT_PORT") return null;
+  if (typeof v.reason !== "string" || !v.reason) return null;
+  return { code: v.code, reason: v.reason };
+}
+
+/**
+ * WARP-1907 — administratively bring a physical jack up or down.
+ *
+ * `force` is the caller's acknowledgement of the routing service's own guard,
+ * which refuses a DISABLE of the WAN jack or of a live management jack with 409
+ * without it. We do not pre-empt that refusal here: the routing service owns the
+ * management-interface set, and a second copy of the rule in TypeScript is a
+ * copy that drifts. The dashboard decides whether to ASK for the extra confirm
+ * from `disable_guard` on the read — the same function, on the same data.
+ *
+ * 🔴 This is the one routing call that reads its OWN error bodies, and it has to
+ * be. `routerErrorFromResponse` classifies by status alone — deliberately, and
+ * two live invariants depend on it: WARP-1673 reserves 502 for "the router
+ * rejected the routing service's rpcd credentials", and WARP-816 reserves 409
+ * for SCAN_UNSUPPORTED. Three of this route's four refusals collide with those,
+ * so routing them through the shared classifier would report a port that didn't
+ * move as an authentication failure, and drop every guard sentence on the
+ * floor. `fetchWirelessScan` above set the precedent for a call minting its own
+ * typed error; this one needs the body as well as the status, hence
+ * `passthroughStatuses`.
+ */
+export async function setRouterPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<WriteResult> {
+  const label = `Router port ${enabled ? "enable" : "disable"} ${port}`;
+  const res = await routingFetch(`/network/ports/${encodeURIComponent(port)}/enable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled, force }),
+    label,
+    passthroughStatuses: PORT_WRITE_REFUSAL_STATUSES,
+  });
+  if (res.ok) return opFrom(res);
+
+  // A refusal we asked to see. Its body is the answer; a body we can't parse is
+  // not a reason to invent one, so those fall through to the shared classifier.
+  const body = (await res.json().catch(() => null)) as {
+    error?: unknown;
+    reason?: unknown;
+    code?: unknown;
+  } | null;
+  const message = typeof body?.error === "string" ? body.error : "";
+
+  if (res.status === 409) {
+    // `reason` is the WHY on its own; `error` carries it plus "confirm again",
+    // which the dashboard renders in a banner where nothing has been confirmed
+    // yet. Prefer the split field, fall back for an older routing build.
+    const reason = typeof body?.reason === "string" ? body.reason : message;
+    const guard = asGuardDetail({ code: body?.code, reason });
+    if (guard) throw RouterError.portWriteRefused(guard, { label });
+  }
+  if (res.status === 502 && body?.code === "PORT_WRITE_NOT_APPLIED") {
+    throw RouterError.portWriteNotApplied(message || undefined, { label });
+  }
+  if (res.status === 404 && body?.code === "PORT_NOT_FOUND" && message) {
+    throw RouterError.portWriteRejected("PORT_NOT_FOUND", message, { label });
+  }
+  if (res.status === 422 && body?.code === "PORT_MAP_UNSUPPORTED" && message) {
+    throw RouterError.portWriteRejected("PORT_MAP_UNSUPPORTED", message, { label });
+  }
+  throw routerErrorFromResponse(res, label);
 }
 
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {
@@ -490,6 +635,43 @@ export async function fetchWirelessClients(device?: string): Promise<WirelessCli
     { label: "Wireless clients" },
   );
   return data.clients;
+}
+
+/**
+ * Stations associated to a specific coverage AP's own radios (WARP-1715).
+ *
+ * `fetchWirelessClients` only covers the ROUTER's radios. On the edge-router
+ * shape the Wi-Fi is served by standalone APs, so without this every device on
+ * the household Wi-Fi looked wired: it held a router DHCP lease but appeared in
+ * no assoclist the orchestrator could see.
+ *
+ * `supported: false` is the honest answer on shapes with no AP credential
+ * (single-box / legacy), where the router's own assoclist is already complete —
+ * it is NOT an error, and is distinct from a typed 502 for a configured AP we
+ * couldn't reach.
+ */
+export async function fetchApClients(
+  mac: string,
+): Promise<{ supported: boolean; clients: WirelessClient[] }> {
+  const data = await routingFetchJson<{
+    supported?: boolean;
+    clients?: WirelessClient[];
+  }>(`/aps/${encodeURIComponent(mac)}/clients`, {
+    label: "AP clients",
+    // Single attempt, deliberately. This sits on the DEVICE-LIST hot path, and
+    // it is best-effort enrichment: losing it costs a signal bar and an AP
+    // attribution, never a row. `routingFetch` carries no client-side timeout
+    // and the routing service dials the AP with the SDK's 10s default per call,
+    // so the stock 3-attempt policy would let one half-alive AP (SYN accepted,
+    // never answers) stall the Devices page for tens of seconds. Failing fast
+    // and degrading is the right trade here; the 10s list cache means a
+    // genuinely slow AP is re-probed at most once per cache miss.
+    retry: { attempts: 1 },
+  });
+  return {
+    supported: data.supported !== false,
+    clients: Array.isArray(data.clients) ? data.clients : [],
+  };
 }
 
 export async function setWirelessSsid(
@@ -1068,7 +1250,12 @@ export async function createVpnPeer(opts: {
 export async function installOverlayVpnPeer(opts: {
   interface?: string;
   publicKey: string;
-  endpoint: string;
+  /** WARP-1757: OPTIONAL. Supply it only when the BOX must initiate — the NAT
+   *  hole-punch. A peer installed at approval time is client-initiated, and
+   *  WireGuard learns its endpoint from the first authenticated handshake, so
+   *  omitting it is what lets the direct / port-mapped / LAN paths work with no
+   *  rendezvous at all. */
+  endpoint?: string;
   allowedIps: string[];
   persistentKeepalive?: number;
   description?: string;
@@ -1076,15 +1263,16 @@ export async function installOverlayVpnPeer(opts: {
   status: "ok";
   interface: string;
   public_key: string;
-  endpoint: string;
+  endpoint: string | null;
   allowed_ips: string[];
   persistent_keepalive: number;
 }> {
   const body: Record<string, unknown> = {
     public_key: opts.publicKey,
-    endpoint: opts.endpoint,
     allowed_ips: opts.allowedIps,
   };
+  // Omitted, not null — the schema's pattern only applies to a present string.
+  if (opts.endpoint !== undefined) body.endpoint = opts.endpoint;
   if (opts.interface) body.interface = opts.interface;
   if (opts.persistentKeepalive !== undefined)
     body.persistent_keepalive = opts.persistentKeepalive;
@@ -1094,16 +1282,50 @@ export async function installOverlayVpnPeer(opts: {
     status: "ok";
     interface: string;
     public_key: string;
-    endpoint: string;
+    endpoint: string | null;
     allowed_ips: string[];
     persistent_keepalive: number;
   }>;
 }
 
+/** Outcome of `DELETE /vpn/peers` on the routing service.
+ *
+ *  A 200 here is NOT proof the peer is off the interface. Routing removes the
+ *  peer from UCI and then calls `uci.apply`; when that apply fails (a busy
+ *  router timing out the 5s budget is the realistic case) it still answers
+ *  200, but with `status: "staged"` / `applied: false` — meaning the config no
+ *  longer lists the peer while the peer is STILL LIVE on wg0 until something
+ *  reloads the interface.
+ *
+ *  That distinction has to survive the type boundary. Hard-coding
+ *  `status: "ok"` here made the staged branch invisible to TypeScript, and the
+ *  revoke route duly reported "revoked" over a working tunnel.
+ *
+ *  `applied` is optional because older routing builds omit it. Absent is not
+ *  false — see `isRevokeApplied`. */
+export interface DeleteVpnPeerResult {
+  status: "ok" | "staged";
+  /** `false` ⇒ removed from config but still live on the interface. Absent on
+   *  routing builds predating the staged-vs-live split. */
+  applied?: boolean;
+  interface: string;
+  removed: number;
+}
+
+/** True unless routing EXPLICITLY said the delete was not applied.
+ *
+ *  Absent-means-applied is deliberate: an older sidecar that cannot report
+ *  `applied` at all would otherwise fail every revoke, which trades a rare
+ *  half-revoke for a total loss of revocation. Only an explicit `false` — the
+ *  one case routing actually observed and reported — is treated as staged. */
+export function isRevokeApplied(result: DeleteVpnPeerResult): boolean {
+  return result.applied !== false;
+}
+
 export async function deleteVpnPeer(opts: {
   interface?: string;
   publicKey: string;
-}): Promise<{ status: "ok"; interface: string; removed: number }> {
+}): Promise<DeleteVpnPeerResult> {
   const body: Record<string, unknown> = { public_key: opts.publicKey };
   if (opts.interface) body.interface = opts.interface;
   const res = await routingFetch("/vpn/peers", {
@@ -1112,7 +1334,7 @@ export async function deleteVpnPeer(opts: {
     body: JSON.stringify(body),
     label: "VPN delete peer",
   });
-  return res.json() as Promise<{ status: "ok"; interface: string; removed: number }>;
+  return res.json() as Promise<DeleteVpnPeerResult>;
 }
 
 /** Fetch the state of a previously-started operation (WARP-40).
@@ -1194,6 +1416,51 @@ export async function listDiscoveredAps(): Promise<DiscoveredApInfo[]> {
   return data.discovered;
 }
 
+/**
+ * WARP-1731/WARP-1732 (ADR-035 §5) — one fabric member as the routing
+ * service reports it on `GET /fabric/members`.
+ *
+ * Deliberately snake_case and loosely typed: this is the wire shape from
+ * `FabricApi.browse_members()`, not the orchestrator's domain model. The
+ * mapping to `FabricMember` columns (MAC normalization, PoE coercion)
+ * happens once, at the reconciler boundary.
+ *
+ * `mac` is optional in the TYPE even though the routing service drops
+ * mac-less records — the reconciler must not assume a contract it doesn't
+ * enforce, and a mac-less record is skipped rather than trusted.
+ *
+ * `extra` carries the role-specific TXT keys verbatim. Values arrive as
+ * strings (mDNS TXT is text), hence the `string | number` union rather
+ * than plain `number` for `poe_ports` / `poe_budget`.
+ */
+export type FabricMemberInfo = {
+  role: string;
+  mac?: string;
+  model?: string;
+  version?: string;
+  last_ip?: string;
+  hostname?: string;
+  extra?: Record<string, string | number | undefined>;
+};
+
+/**
+ * Read-only inventory of every `_droplet-*._tcp` announcer on the LAN.
+ *
+ * Pure observation — this endpoint performs no device writes, and neither
+ * does anything downstream of it. `/aps/discovered` and the ADR-005 AP
+ * state machine are a separate path and are untouched by this call.
+ */
+export async function listFabricMembers(): Promise<FabricMemberInfo[]> {
+  const data = await routingFetchJson<{ members: FabricMemberInfo[] }>(
+    "/fabric/members",
+    { label: "Fabric member inventory" },
+  );
+  // Belt-and-suspenders against an older routing build that predates
+  // WARP-1731 and answers 200 with a body that has no `members` key: an
+  // empty inventory is a fine degradation, `undefined.length` is not.
+  return Array.isArray(data?.members) ? data.members : [];
+}
+
 export async function getApStatus(opts: { mac: string }): Promise<ApStatusResponse | null> {
   try {
     return await routingFetchJson<ApStatusResponse>(
@@ -1236,6 +1503,140 @@ export async function decommissionAp(opts: { mac: string }): Promise<ApDecommiss
     label: "AP decommission",
   });
   return res.json() as Promise<ApDecommissionResponse>;
+}
+
+/**
+ * WARP-1703: the AP image's band-steering master switch
+ * (`droplet.wifi.band_steering`). `supported: false` is the honest
+ * "can't do it on this shape" answer — no AP credential provisioned, or the
+ * AP's image predates the droplet.wifi substrate — never an error.
+ */
+export type ApBandSteering = {
+  supported: boolean;
+  enabled: boolean;
+  ap_detail?: string;
+};
+
+export async function getApBandSteering(opts: { mac: string }): Promise<ApBandSteering> {
+  return routingFetchJson<ApBandSteering>(
+    `/aps/${encodeURIComponent(opts.mac)}/band-steering`,
+    { label: "AP band steering" },
+  );
+}
+
+export async function setApBandSteering(opts: {
+  mac: string;
+  enabled: boolean;
+}): Promise<WriteResult> {
+  const res = await routingFetch(`/aps/${encodeURIComponent(opts.mac)}/band-steering`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: opts.enabled }),
+    label: "AP band steering write",
+  });
+  return opFrom(res);
+}
+
+/**
+ * WARP-1712: the AP's OWN wireless state, read live off its uci every time.
+ *
+ * There is deliberately no orchestrator-side cache of the network name — the
+ * AP is authoritative for its own radios, so a stale copy here is exactly the
+ * "two places disagreeing" failure this ticket exists to remove.
+ *
+ * `supported: false` is the honest "can't do it on this shape" answer (no AP
+ * credential provisioned, or the AP reports no wireless interfaces) — never
+ * an error.
+ */
+export type ApWirelessRadio = {
+  section: string;
+  radio: string | null;
+  /** '2g' / '5g' / '6g' as uci reports it. */
+  band: string | null;
+  ssid: string | null;
+  encryption: string | null;
+  /** Configured channel — 'auto' is a legal uci value. */
+  channel: string | null;
+  htmode: string | null;
+  disabled: boolean;
+  /** True for the interface that owns the household name (the write target). */
+  primary: boolean;
+  ifname: string | null;
+  up: boolean | null;
+  /** Live channel/width off iwinfo; may differ from the configured value. */
+  live_channel: number | null;
+  live_htmode: string | null;
+  clients: number | null;
+};
+
+export type ApWirelessDevice = {
+  model: string | null;
+  firmware: string | null;
+  hostname: string | null;
+  uptime_seconds: number | null;
+};
+
+export type ApWireless = {
+  supported: boolean;
+  ap_detail?: string;
+  /** Null when the AP image predates the band-steering substrate. */
+  band_steering?: boolean | null;
+  primary_section?: string | null;
+  ssid?: string | null;
+  /** The live per-unit passphrase — owner/admin surfaces only. */
+  key?: string | null;
+  encryption?: string | null;
+  /** What the AP's applier will name the 5 GHz network. Display only. */
+  five_ghz_ssid?: string | null;
+  radios: ApWirelessRadio[];
+  device?: ApWirelessDevice;
+};
+
+export type ApWirelessWriteResponse = WriteResult & {
+  ssid?: string | null;
+  five_ghz_ssid?: string | null;
+  sections_written?: string[];
+};
+
+export async function getApWireless(opts: { mac: string }): Promise<ApWireless> {
+  return routingFetchJson<ApWireless>(
+    `/aps/${encodeURIComponent(opts.mac)}/wireless`,
+    { label: "AP wireless" },
+  );
+}
+
+export async function setApWireless(opts: {
+  mac: string;
+  ssid?: string;
+  key?: string;
+}): Promise<ApWirelessWriteResponse> {
+  const body: Record<string, unknown> = {};
+  if (opts.ssid !== undefined) body.ssid = opts.ssid;
+  if (opts.key !== undefined) body.key = opts.key;
+  const res = await routingFetch(`/aps/${encodeURIComponent(opts.mac)}/wireless`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    label: "AP wireless write",
+  });
+  // opFrom only reads a header, so the body is still ours to consume. The
+  // routing service reports the name it wrote, letting the dashboard confirm
+  // what the network will be called without racing the AP's reload with an
+  // immediate re-read. It also MIRRORS the Operation-Id into the body — some
+  // proxies strip non-standard response headers — so fall back to that.
+  const op = opFrom(res);
+  const payload = (await res.json().catch(() => ({}))) as {
+    ssid?: string | null;
+    five_ghz_ssid?: string | null;
+    sections_written?: string[];
+    operation_id?: string | null;
+  };
+  return {
+    operationId: op.operationId ?? payload.operation_id ?? null,
+    ssid: payload.ssid,
+    five_ghz_ssid: payload.five_ghz_ssid,
+    sections_written: payload.sections_written,
+  };
 }
 
 /** Test-only seam — only available when routing is in ROUTING_MODE=mock. */

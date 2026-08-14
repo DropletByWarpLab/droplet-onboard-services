@@ -1,5 +1,5 @@
 fastapi==0.141.1
-uvicorn[standard]==0.52.0
+uvicorn[standard]==0.52.1
 httpx==0.28.1
 paho-mqtt==2.1.0
 onvif-zeep==0.2.12
@@ -10,4 +10,9 @@ wsdiscovery==2.1.2
 # Pinned to the same version services/routing/requirements.txt uses.
 APScheduler==3.11.3
 # RSA-OAEP/PKCS1v15 for vendor_init.py (Hanwha first-run password encryption)
-cryptography==49.0.0
+cryptography==50.0.0
+
+# WARP-1948 — OSV floor: the osv-nightly resolver scores transitive deps at
+# their minimum resolvable version; state the real minimum instead of
+# suppressing the advisory.
+idna>=3.15

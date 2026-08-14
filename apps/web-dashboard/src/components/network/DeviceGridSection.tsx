@@ -5,7 +5,11 @@ import type { EnrichedNetworkDevice, DeviceGroupRef } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
 
 interface Props {
-  group: DeviceGroupRef | { id: "__ungrouped"; name: "Ungrouped" };
+  group:
+    | DeviceGroupRef
+    | { id: "__ungrouped"; name: "Ungrouped" }
+    // WARP-1715: the household's own APs, sectioned off from client devices.
+    | { id: "__infrastructure"; name: "Network infrastructure" };
   devices: EnrichedNetworkDevice[];
   onOpen: (device: EnrichedNetworkDevice) => void;
   // Forwarded to each DeviceCard so block/unblock errors can bubble up to
@@ -49,7 +53,7 @@ export function DeviceGridSection({ group, devices, onOpen, onError }: Props) {
       <button
         type="button"
         onClick={toggle}
-        className="flex items-center gap-2 mb-3 text-label-primary"
+        className="flex items-center gap-2 mb-3 text-[color:var(--text)]"
         aria-expanded={expanded}
       >
         <ChevronRight
@@ -59,7 +63,7 @@ export function DeviceGridSection({ group, devices, onOpen, onError }: Props) {
         <h2 id={`section-${group.id}`} className="type-title-3">
           {group.name}
         </h2>
-        <span className="type-footnote text-label-tertiary">{devices.length}</span>
+        <span className="type-footnote text-[color:var(--text-muted)]">{devices.length}</span>
       </button>
       {expanded && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

@@ -441,6 +441,63 @@ class TestVpnPeersEndpoint:
         listed = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
         assert listed == []
 
+    def test_delete_reports_applied_true_on_the_happy_path(
+        self, vpn_client: TestClient,
+    ) -> None:
+        """The orchestrator's revoke route branches on `applied`.
+
+        WARP-1763: it now refuses to mark a peer revoked unless this field says
+        the removal actually took effect, so the happy path has to state it
+        positively — a response that merely omits `applied` is a different,
+        weaker claim (see the staged case below).
+        """
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        peer = vpn_client.post(
+            "/vpn/peers", json={"allowed_ips": ["10.13.13.2/32"]}, headers=AUTH,
+        ).json()
+
+        body = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"public_key": peer["public_key"]},
+            headers=AUTH,
+        ).json()
+        assert body["status"] == "ok"
+        assert body["applied"] is True
+
+    def test_delete_reports_staged_when_the_apply_fails(
+        self, vpn_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`uci.apply` failing leaves the peer LIVE on the interface.
+
+        The section is out of the config, but nothing reloaded wg0, so the
+        device still has a working tunnel until something else applies. This
+        endpoint deliberately answers 200 — the config write DID succeed — and
+        the honesty rides entirely on `status`/`applied`. The orchestrator
+        turns this into a 502 REVOKE_STAGED rather than telling an owner their
+        stolen phone is cut off; if this contract ever silently becomes
+        `applied: True`, that whole guard goes quiet. Hence this test.
+        """
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        peer = vpn_client.post(
+            "/vpn/peers", json={"allowed_ips": ["10.13.13.2/32"]}, headers=AUTH,
+        ).json()
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise TimeoutError("router busy; apply timed out")
+
+        monkeypatch.setattr(main.router_instance.uci, "apply", boom)
+
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"public_key": peer["public_key"]},
+            headers=AUTH,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "staged"
+        assert body["applied"] is False
+        assert body["removed"] == 1
+
     def test_delete_missing_returns_404(self, vpn_client: TestClient) -> None:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub_unknown = VPNApi.generate_keypair()
@@ -515,8 +572,62 @@ class TestVpnOverlayPeerEndpoint:
         assert len(match) == 1  # refreshed in place, no duplicate section
         assert match[0]["endpoint_host"] == "198.51.100.9:40000"
 
+    def test_installs_peer_without_an_endpoint(self, vpn_client: TestClient) -> None:
+        """WARP-1757 — a client-initiated peer needs no endpoint.
+
+        WireGuard learns a peer's endpoint from its first authenticated
+        handshake. The box needs one configured only when the BOX must initiate
+        (the NAT hole-punch). A peer installed at approval time — before any
+        punch, and for a box that is its own edge router, behind a successful
+        port map, or reached over the LAN — must install WITHOUT one, or those
+        paths would be forced through a rendezvous they don't need.
+        """
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        resp = vpn_client.post(
+            "/vpn/peers/overlay",
+            json={
+                "public_key": pub,
+                "allowed_ips": ["10.13.13.9/32"],
+                "persistent_keepalive": 25,
+                "description": "Phone",
+            },
+            headers=AUTH,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["endpoint"] is None
+        assert "private_key" not in resp.json()
+
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert len(match) == 1
+        # endpoint_host must be ABSENT (or empty), never the literal "None".
+        assert not match[0].get("endpoint_host")
+        assert match[0]["allowed_ips"] == ["10.13.13.9/32"]
+
+    def test_punch_can_add_an_endpoint_to_a_peer_installed_without_one(
+        self, vpn_client: TestClient
+    ) -> None:
+        """The connect tick still upgrades an endpoint-less peer when a punch
+        genuinely is needed — approval-time install must not foreclose it."""
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        _, pub = VPNApi.generate_keypair()
+        base = {"public_key": pub, "allowed_ips": ["10.13.13.9/32"], "persistent_keepalive": 25}
+        vpn_client.post("/vpn/peers/overlay", json=base, headers=AUTH)
+        vpn_client.post(
+            "/vpn/peers/overlay",
+            json={**base, "endpoint": "198.51.100.9:40000"},
+            headers=AUTH,
+        )
+        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
+        match = [p for p in peers if p["public_key"] == pub]
+        assert len(match) == 1  # refreshed in place, no duplicate section
+        assert match[0]["endpoint_host"] == "198.51.100.9:40000"
+
     @pytest.mark.parametrize("bad_ep", ["notanip", "203.0.113.7", "203.0.113.7:", "203.0.113.7:99999999"])
     def test_rejects_bad_endpoint(self, vpn_client: TestClient, bad_ep: str) -> None:
+        """A PRESENT endpoint is still strictly validated — WARP-1757 made it
+        optional, not unvalidated."""
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
         resp = vpn_client.post(

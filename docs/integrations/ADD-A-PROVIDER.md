@@ -12,6 +12,9 @@ The orchestrator service + route layer and the dashboard hub are **provider-agno
 
 Today all providers live in the `@droplet/erp-connector` package (`services/erp-connector/`). If you're adding an ERP/PMS-shaped provider, add it there behind the same `Connector` interface. A radically different category (non-database, API-based) may warrant its own sidecar package following the same contract — discuss in an ADR first (`droplet-architecture-guard`).
 
+> **Before writing a connector at all — can the export-drop track cover it?**
+> If the product can export its reports to a file, adding it is a **declarative profile**, not a provider: a header signature plus a column map, in code or in an operator's JSON. No connector, no driver, no vendor enrolment, and read-only by construction. See [`export-drop.md`](export-drop.md) §4. Sections 1–4 below are for a provider that needs a live connection to the system of record — reach for them when the practice needs data fresher than an export, or needs writes.
+
 ---
 
 ## 1. Implement the `Connector`

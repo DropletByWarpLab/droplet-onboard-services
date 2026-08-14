@@ -8,7 +8,7 @@ import {
   switchSetPortPoe,
   switchSetPortEnabled,
   switchProvision,
-  confirmNetworkCommand,
+  confirmSwitchCommand,
 } from "@/lib/api";
 import type {
   SwitchStatus,
@@ -28,7 +28,7 @@ import type { NetworkCommandResult } from "@/lib/types";
  *
  * Writes (owner/admin, Tier-2 confirm-gated, Activity-logged server-side):
  * each POST returns a 202 confirm token, then we echo it back through
- * `confirmNetworkCommand`. The §7 per-port writes apply **synchronously** on
+ * `confirmSwitchCommand`. The §7 per-port writes apply **synchronously** on
  * confirm (no async apply-then-rollback), so — unlike the router's safe-apply
  * writes — there is no operation-status poll: the confirm call's result IS the
  * outcome (a failure rejects, and SwitchPanel toasts it). The caller
@@ -92,14 +92,26 @@ export function useSwitch(): UseSwitchResult {
   }, [statusSwr, portsSwr, vlansSwr]);
 
   // The shared Tier-2 dance: POST → if the server issued a confirm token,
-  // echo it back through the canonical confirm endpoint. Re-fetch after ANY
+  // echo it back through the switch's confirm endpoint. Re-fetch after ANY
   // successful write — a confirmed Tier-2 write OR an immediate apply (no
   // token) — so the panel always reflects new state without a manual refresh.
   // (A failed write rejects before reaching here and SwitchPanel toasts it.)
+  //
+  // WARP-1982 — two bugs lived in these three lines, and together they made
+  // every switch control a silent no-op:
+  //
+  //   1. The gate also required `result.operation`, which the 202 never
+  //      carried. It was always false, so the confirm was SKIPPED entirely,
+  //      `refresh()` re-read unchanged hardware and the toggle snapped back
+  //      with no error. Gate only on what the confirm actually needs.
+  //   2. It confirmed via `confirmNetworkCommand` → /api/network/command/confirm,
+  //      whose dispatcher has NO `switch_*` case. Even a correct token would
+  //      have resolved and then executed nothing. The switch's own endpoint is
+  //      the only one wired to the executor.
   const runWrite = useCallback(
     async (result: NetworkCommandResult) => {
-      if (result.requiresConfirmation && result.confirmationToken && result.operation) {
-        await confirmNetworkCommand(result.confirmationToken, result.operation);
+      if (result.requiresConfirmation && result.confirmationToken) {
+        await confirmSwitchCommand(result.confirmationToken);
       }
       refresh();
     },

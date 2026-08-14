@@ -16,6 +16,8 @@ import {
   getDhcpLeases,
   getSystemInfo,
   getAllInterfaces,
+  getRouterPorts,
+  setRouterPortEnabled,
   addStaticDhcpLease,
   setDnsServers,
   getTopology,
@@ -53,6 +55,13 @@ import {
   getNetworkAuditLog,
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
+// WARP-1703 — band steering is Tier 2, so its write executes on the confirm
+// path rather than in the PUT handler.
+import {
+  setBandSteering,
+  setApWifi,
+  getApRadioSummary,
+} from "../services/ap-onboard.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -61,6 +70,15 @@ export interface StatusDeps {
   prisma: PrismaClient;
   networkDeviceService: ReturnType<typeof createNetworkDeviceService>;
 }
+
+/**
+ * WARP-1907 — a netdev name, the identity of a physical jack ("p1", "sfp",
+ * "eth0"). Mirrors the routing service's `_DEVICE_PATTERN` so a name the router
+ * could never have is rejected at this boundary rather than travelling on to be
+ * interpolated into a URL path. The routing service still checks the jack is
+ * actually on the port map — this only bounds the shape.
+ */
+const ROUTER_PORT_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$/;
 
 export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   const { prisma, networkDeviceService } = deps;
@@ -71,7 +89,13 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       // WARP-39: typed Result — on error, surface the RouterError code to the
       // dashboard so it can render per-code messaging instead of a generic
       // "Router Not Connected".
-      const result = await getNetworkOverview();
+      //
+      // The AP source makes `wirelessRadios` whole-fabric. Without it the
+      // summary counts only the router's own radios, which is zero on every
+      // shape where the SSID lives on the access point — the RB5009 edge
+      // router has no radio hardware at all. Counts only: this route is open
+      // to every authenticated principal, so no SSID or PSK rides along.
+      const result = await getNetworkOverview(() => getApRadioSummary(prisma));
       if (result.ok) {
         res.json(result.value);
       } else {
@@ -155,6 +179,97 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       next(err);
     }
   });
+
+  // --- Physical ports — WARP-1866 (read) + WARP-1907 (write) ---
+  // The jacks behind the interfaces above, to the same standard the managed
+  // switch has had since WARP-1674 — including, since WARP-1907, the write.
+  //
+  // This comment used to say a write counterpart could not exist, because
+  // disabling a jack "severs the WAN or the switch trunk, with no safe-apply
+  // arm to undo it". That named the real hazard and then drew the wrong
+  // conclusion from it. There IS a safe-apply arm for a live management jack —
+  // cutting it fails the routing service's connectivity probe and OpenWrt
+  // reverts after 60s — and there is genuinely none for the WAN, which is why
+  // the two are refused with different codes and different copy rather than
+  // why the feature was skipped. See router_ports.disable_guard.
+  //
+  // Each port carries `disable_guard`: null, or the extra acknowledgement a
+  // disable needs. A `supported: false` map (this router shape reports no port
+  // roster) is a 200 — it's an answer. Only an unreachable router is an error,
+  // and it must stay one so the panel says "offline" instead of drawing every
+  // jack dark.
+  router.get("/network/ports", async (_req, res, next) => {
+    try {
+      res.json(await getRouterPorts());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Enable/disable one jack — owner/admin, Tier 2, no MCP principal.
+  // Shutting the port the household's internet arrives on is a deliberate human
+  // action, the same call `create_interface` makes.
+  //
+  // Validation happens BEFORE a token is minted, so a junk request never leaves
+  // a pending confirmation behind. `enabled` must be a real boolean: accepting a
+  // truthy string is how `"false"` turns a jack off.
+  router.post(
+    "/network/ports/:port/enable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const port = req.params.port;
+        if (!ROUTER_PORT_RE.test(port)) {
+          return res.status(400).json({
+            error:
+              "Invalid port — a netdev name starts with a letter or digit and contains only letters, digits, '.', '_', '@' or '-'",
+          });
+        }
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        if (typeof body.enabled !== "boolean") {
+          return res.status(400).json({ error: "Provide 'enabled' as a boolean" });
+        }
+        const enabled = body.enabled;
+        // `force` is the user's acknowledgement of the routing service's WAN /
+        // live-management refusal. Anything that isn't an explicit `true` is no
+        // acknowledgement at all.
+        const force = body.force === true;
+        const operation = enabled ? "router_port_enable" : "router_port_disable";
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          `network.port.${port}`,
+          operation,
+          { port, enabled, force },
+          userId,
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation,
+            port,
+            enabled,
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        // Tier 1 is never returned for these operations, but guard the arm so a
+        // future tier downgrade can't silently no-op the write.
+        const op = await setRouterPortEnabled(port, enabled, force);
+        res.json({ status: "ok", port, enabled, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // --- DHCP ---
   router.get("/network/dhcp/leases", async (_req, res, next) => {
@@ -754,6 +869,47 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         case "set_upnp":
           // Tier-2 confirm for POST /network/upnp.
           writeResult = await setUpnp(params?.enabled as boolean);
+          break;
+        case "router_port_enable":
+        case "router_port_disable":
+          // WARP-1907 — Tier-2 confirm for POST /network/ports/:port/enable.
+          // Every field is replayed from the token, never recomputed: the
+          // direction is what the user confirmed (a re-derived one could cut
+          // the jack they asked to restore), and `force` is their explicit
+          // acknowledgement of the WAN / live-management refusal, so it has to
+          // be exactly what they gave — `=== true`, never a truthy default.
+          writeResult = await setRouterPortEnabled(
+            params?.port as string,
+            params?.enabled === true,
+            params?.force === true,
+          );
+          break;
+        case "set_ap_band_steering":
+          // WARP-1703 — Tier-2 confirm for PUT /network/wifi/band-steering.
+          // This is where the 5 GHz SSID rename actually fires, and where the
+          // service's honest 422 (AP_BAND_STEERING_UNAVAILABLE) surfaces: the
+          // PUT only mints the token, so nothing reaches the APs until here.
+          writeResult = await setBandSteering(prisma, params?.enabled as boolean);
+          break;
+        case "set_ap_wifi_password":
+          // WARP-1712 — Tier-2 confirm for PUT /network/wifi/ap when the save
+          // carries a new passphrase. Nothing reached the APs on the original
+          // PUT (it only minted the token), so this is where the write —
+          // and the service's honest 422 (AP_WIRELESS_UNAVAILABLE) — lands.
+          // An SSID-only save is Tier 1 and never arrives here.
+          // WARP-1761: the intent record is written INSIDE setApWifi, so this
+          // separate-request replay records it exactly like the Tier-1 path —
+          // there is one seam, not two. `userId` is the confirming human, who
+          // is the same principal that minted the token (confirmNetworkCommand
+          // enforces the match), so `writtenBy` stays truthful.
+          writeResult = await setApWifi(
+            prisma,
+            {
+              ssid: params?.ssid as string | undefined,
+              key: params?.key as string | undefined,
+            },
+            userId,
+          );
           break;
         case "set_dhcp_pool":
           // Tier-2 confirm for POST /network/dhcp/pool. The route validated the
