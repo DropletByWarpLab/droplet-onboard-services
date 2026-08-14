@@ -10,7 +10,7 @@
  * invents its own empty state is the thing to avoid.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Activity as ActivityIcon,
@@ -25,6 +25,7 @@ import {
   Plug,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   TrendingDown,
   TrendingUp,
   Video,
@@ -38,8 +39,12 @@ import {
   fetchActivityRange,
   fetchArSummary,
   fetchChainVerify,
+  fetchDailyReportRuns,
   fetchIntegrations,
+  reportFromRun,
+  runDailyReport,
   type ArSummary,
+  type DailyReport,
   type HomeTile,
   type IntegrationSummary,
   type VerifySummary,
@@ -337,6 +342,148 @@ export function ActivityBody({ range, canRead }: { range: DateRange | null; canR
         </a>
       ) : null}
     </>
+  );
+}
+
+// ── A1 · Daily report ────────────────────────────────────────────────────
+
+/** Up to this many source chips before the rest collapse to "+N". */
+const MAX_CHIPS = 5;
+
+export function ReportBody({
+  range,
+  canRead,
+  now,
+}: {
+  range: DateRange | null;
+  canRead: boolean;
+  now: Date | null;
+}) {
+  const [report, setReport] = useState<DailyReport | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canRead) return;
+    let live = true;
+    setLoaded(false);
+    setError(null);
+    fetchDailyReportRuns()
+      .then((runs) => {
+        if (!live) return;
+        // The newest run that actually produced prose. A failed run in front
+        // of a good one must not hide the good one.
+        const found = runs.map(reportFromRun).find((r): r is DailyReport => r !== null);
+        setReport(found ?? null);
+        setLoaded(true);
+      })
+      .catch((e) => {
+        if (!live) return;
+        setError(e instanceof ForbiddenError ? "forbidden" : "Couldn't read the report");
+        setLoaded(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [canRead]);
+
+  const write = useCallback(async () => {
+    setWriting(true);
+    setError(null);
+    try {
+      const run = await runDailyReport();
+      const next = run ? reportFromRun(run) : null;
+      if (next) setReport(next);
+      // A run that produced no prose is a failure, not an empty report —
+      // never leave a stale paragraph on screen pretending it is new.
+      else setError(run?.error ?? "Couldn't write the report");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setWriting(false);
+    }
+  }, []);
+
+  if (!canRead || error === "forbidden") return <LockedBody />;
+
+  if (writing) {
+    return (
+      <div className="rp-report is-writing" aria-live="polite" aria-busy="true">
+        <span className="rp-report-writing">Writing…</span>
+        <SkeletonRows n={4} />
+      </div>
+    );
+  }
+
+  if (!loaded) return <SkeletonRows n={4} />;
+
+  if (error) {
+    return (
+      <div className="rp-report">
+        <ErrorBody what="Couldn't write the report" onRetry={write} />
+        {/* The returned reason verbatim — never paraphrased into something
+            more reassuring than what actually happened. */}
+        <div className="rp-report-reason">{error}</div>
+      </div>
+    );
+  }
+
+  if (!report) {
+    return (
+      <EmptyBody icon={<Sparkles size={28} aria-hidden="true" />} text="No report for this range yet">
+        <button type="button" className="rp-retry" onClick={write}>
+          Write report
+        </button>
+      </EmptyBody>
+    );
+  }
+
+  // Stale = the report predates the range now selected. Its facts are about a
+  // different span, so the timestamp is marked rather than the prose hidden.
+  const stale = Boolean(range && new Date(report.at).getTime() < new Date(range.from).getTime());
+  const shown = report.sources.slice(0, MAX_CHIPS);
+  const overflow = report.sources.length - shown.length;
+
+  return (
+    <div className="rp-report">
+      {/* Announced once on settle, not per token. */}
+      <div className="rp-report-prose" aria-live="polite">
+        {report.prose.split(/\n{2,}/).map((para, i) => (
+          <p key={i}>{para}</p>
+        ))}
+      </div>
+
+      <div className="rp-report-foot">
+        <span className={`rp-report-stamp${stale ? " is-stale" : ""}`}>
+          Written by Droplet from <span className="rp-mono">{report.sources.length}</span> tool
+          result{report.sources.length === 1 ? "" : "s"} ·{" "}
+          <span className="rp-mono">
+            {now
+              ? new Date(report.at).toLocaleTimeString(undefined, {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : ""}
+          </span>
+        </span>
+        <span className="rp-report-chips">
+          {/* Provenance, not navigation — static, no hover lift. A generated
+              paragraph that looks like a hand-written fact is the failure
+              mode this footer exists to prevent. */}
+          {shown.map((s) => (
+            <span className="rp-src-chip" key={s}>
+              {s}
+            </span>
+          ))}
+          {overflow > 0 ? <span className="rp-src-chip">+{overflow}</span> : null}
+        </span>
+      </div>
+
+      {stale ? (
+        <div className="rp-report-stale">Out of date for this range — rewrite to refresh.</div>
+      ) : null}
+    </div>
   );
 }
 

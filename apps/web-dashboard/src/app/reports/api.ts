@@ -146,6 +146,107 @@ export async function fetchIntegrations(): Promise<IntegrationSummary[]> {
   return res.json();
 }
 
+// ── The daily report — /api/tools/daily-report/runs ──────────────────────
+//
+// There is no /api/reports/* route and none is needed. The report is a
+// tool-spec RUN: POST generates, GET is the archive. That is what lets the
+// Yesterday chip show yesterday's actual prose instead of re-summarizing old
+// data with today's model.
+//
+// The narrative lives in the LAST step's `result` — the `summarize` step
+// added in WARP-1996. No column stores prose; the trace does.
+
+export const DAILY_REPORT_SLUG = "daily-report";
+
+/** Reserved trace `tool` for the step that calls no tool. Must match the
+ *  orchestrator's SUMMARIZE_PSEUDO_TOOL. */
+export const SUMMARIZE_PSEUDO_TOOL = "(summarize)";
+
+export interface RunTraceEntry {
+  idx: number;
+  tool: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export interface ToolRunRow {
+  id: string;
+  startedAt: string;
+  endedAt: string | null;
+  status: "ok" | "failed" | "cancelled";
+  error: string | null;
+  trace: RunTraceEntry[] | null;
+}
+
+/** A run projected into what the tile actually renders. */
+export interface DailyReport {
+  runId: string;
+  at: string;
+  prose: string;
+  /** Tool names that fed it — provenance, derived from the run, not fixed. */
+  sources: string[];
+  status: ToolRunRow["status"];
+}
+
+/**
+ * Pull the narrative out of a run.
+ *
+ * Returns null when the run produced no prose — a failed run, or one whose
+ * summarize step didn't complete. The tile renders its failure state rather
+ * than a partial paragraph, so a half-written report never reaches the page.
+ */
+export function reportFromRun(run: ToolRunRow): DailyReport | null {
+  const trace = run.trace ?? [];
+  const summary = trace.find((t) => t.tool === SUMMARIZE_PSEUDO_TOOL && t.ok);
+  if (!summary || typeof summary.result !== "string" || !summary.result.trim()) {
+    return null;
+  }
+  return {
+    runId: run.id,
+    at: run.endedAt ?? run.startedAt,
+    prose: summary.result.trim(),
+    // Every tool that actually ran, in run order. Derived so a spec change
+    // updates the chips without anyone editing the tile.
+    sources: trace.filter((t) => t.tool !== SUMMARIZE_PSEUDO_TOOL).map((t) => t.tool),
+    status: run.status,
+  };
+}
+
+export async function fetchDailyReportRuns(limit = 10): Promise<ToolRunRow[]> {
+  const res = await authFetch(`/api/tools/${DAILY_REPORT_SLUG}/runs?limit=${limit}`);
+  // A box that has never had the spec seeded 404s. That is "no report yet",
+  // not an error — the tile offers to write one.
+  if (res.status === 404) return [];
+  if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch report history: ${res.status}`);
+  }
+  const body = await res.json();
+  return (body.runs ?? []) as ToolRunRow[];
+}
+
+export async function runDailyReport(): Promise<ToolRunRow | null> {
+  const res = await authFetch(`/api/tools/${DAILY_REPORT_SLUG}/runs`, { method: "POST" });
+  if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
+  // 207 = the run completed with a failed step. Still a run; the tile reads
+  // its trace and decides whether prose came out.
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Couldn't write the report (${res.status})`);
+  }
+  const body = await res.json();
+  return {
+    id: body.runId,
+    startedAt: body.startedAt ?? new Date().toISOString(),
+    endedAt: body.endedAt ?? null,
+    status: body.status,
+    error: body.error ?? null,
+    trace: body.trace ?? null,
+  };
+}
+
 // ── GET /api/erp/ar-summary ──────────────────────────────────────────────
 //
 // Accounts RECEIVABLE — money owed TO the business. There is no

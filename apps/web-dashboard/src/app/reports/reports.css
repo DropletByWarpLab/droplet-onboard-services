@@ -433,6 +433,106 @@
   color: var(--text-muted);
 }
 
+/* ── Daily report tile ──────────────────────────────────────
+   The prose is generated, and the footer's job is to make that visible.
+   A generated paragraph that reads as a hand-written fact is the failure
+   mode this tile is designed against. */
+.rp-report {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* The only sustained motion on the page, and only while writing. */
+.rp-report.is-writing {
+  animation: rp-breathe 2s ease-in-out infinite;
+}
+
+@keyframes rp-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.92; }
+}
+
+.rp-report-writing {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.rp-report-prose {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Max measure — long prose lines are the fastest way to make a briefing
+     unreadable. */
+  max-width: 68ch;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.rp-report-prose p { margin: 0 0 10px; }
+.rp-report-prose p:last-child { margin-bottom: 0; }
+
+.rp-report-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--card-bd);
+}
+
+.rp-report-stamp {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rp-report-stamp.is-stale { color: #9a5b00; }
+.dark .rp-report-stamp.is-stale { color: var(--color-system-orange); }
+
+.rp-report-chips {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+/* Provenance, NOT navigation — no hover, no pointer, no lift. */
+.rp-src-chip {
+  padding: 2px 7px;
+  border-radius: 9999px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.rp-report-stale {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #9a5b00;
+}
+
+.dark .rp-report-stale { color: var(--color-system-orange); }
+
+.rp-report-reason {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The "Writing…" label carries the state instead. */
+  .rp-report.is-writing { animation: none; }
+}
+
 /* ── Money tile ─────────────────────────────────────────────
    Two halves split by a rule. The lower half ships permanently in its
    not-connected state — there is no accounts-payable source anywhere in

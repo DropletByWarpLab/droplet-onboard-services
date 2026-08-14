@@ -51,6 +51,7 @@ import {
   IntegrationsBody,
   MoneyBody,
   NumberBody,
+  ReportBody,
 } from "./tiles";
 
 import "./reports.css";
@@ -321,6 +322,7 @@ function tileBody(id: string, d: BodyDeps): ReactNode {
   }
   // Money's floor is family-and-up PLUS a connector grant; the grant is
   // enforced server-side (403), which MoneyBody renders as its locked state.
+  if (id === "a1") return <ReportBody range={d.range} canRead={d.canSeePhi} now={d.now} />;
   if (id === "a2") return <MoneyBody canRead={d.canSeePhi} now={d.now} />;
   if (id === "c1") return <FoldersBody canRead={d.isAdminTier} />;
   if (id === "c2") return <IntegrationsBody now={d.now} />;
