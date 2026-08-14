@@ -70,7 +70,7 @@ async function evalSwitchCommand(
   userId?: string,
   source: "api" | "ai" = "api"
 ) {
-  return evaluateNetworkCommand(
+  const result = await evaluateNetworkCommand(
     prisma,
     `switch.${operation}`,
     operation,
@@ -78,6 +78,11 @@ async function evalSwitchCommand(
     userId,
     source,
   );
+  // WARP-1982: carry the operation out with the verdict. evaluateNetworkCommand
+  // keeps it only in its server-side pending-confirmation record, so without
+  // this every `safetyResponse` call site would have to repeat the literal it
+  // just passed in — nine routes, nine chances to drift.
+  return { ...result, operation };
 }
 
 /** Helper: check if a port is the protected appliance port. */
@@ -123,10 +128,28 @@ function requireUserId(userId: string | undefined): string {
   return userId;
 }
 
-/** Helper: return safety tier response (202 for confirmation, 403/429 for blocked). */
+/**
+ * Helper: return safety tier response (202 for confirmation, 403/429 for blocked).
+ *
+ * WARP-1982 — the 202 body MUST carry `requiresConfirmation` and `operation`.
+ *
+ * `NetworkCommandResult` (the shape every dashboard write is typed against)
+ * declares both, and `useSwitch`'s two-step dance gates the confirm call on
+ * them. Emitting only `status:"confirmation_required"` made that gate false on
+ * every switch write: the confirm was skipped, `refresh()` re-read unchanged
+ * hardware, and the panel snapped back with NO error — the operator was shown
+ * a control that silently did nothing. Cameras hit this exact bug in WARP-861.
+ */
 function safetyResponse(
   res: any,
-  result: { requiresConfirmation?: boolean; confirmationToken?: string; reason?: string; tier?: number; blocked?: boolean }
+  result: {
+    requiresConfirmation?: boolean;
+    confirmationToken?: string;
+    reason?: string;
+    tier?: number;
+    blocked?: boolean;
+    operation?: string;
+  }
 ) {
   if ("blocked" in result && result.blocked) {
     return res.status(result.tier === 3 ? 403 : 429).json({
@@ -138,7 +161,14 @@ function safetyResponse(
   if ("requiresConfirmation" in result && result.requiresConfirmation) {
     return res.status(202).json({
       status: "confirmation_required",
+      // The flag the client actually branches on. `status` is a human string;
+      // making the machine-readable field implicit in it is what broke this.
+      requiresConfirmation: true,
       confirmationToken: result.confirmationToken,
+      // Echoed for the client's benefit and for parity with the router's 202.
+      // The switch confirm endpoint resolves the operation from the token
+      // server-side, so this is descriptive, never load-bearing for execution.
+      operation: result.operation,
       reason: result.reason,
       tier: result.tier,
       expiresIn: 60,

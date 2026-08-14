@@ -179,6 +179,42 @@ describe("§7 write routes route to the right Tier-2 op", () => {
   });
 });
 
+// --- The 202 body is a CLIENT CONTRACT, not just a status code --------------
+//
+// WARP-1982. Every assertion above checks the status code and the op that was
+// evaluated, and all of them stayed green while the panel was inert: the body
+// carried `status:"confirmation_required"` but not `requiresConfirmation`, and
+// `useSwitch` gates its confirm call on that flag. The confirm never fired,
+// `refresh()` re-read unchanged hardware, and the control snapped back with no
+// error — a switch panel that looked alive and changed nothing.
+//
+// `status` is a human string. The machine-readable flag has to be explicit, and
+// it has to be asserted, or the next refactor drops it again. Every other
+// domain's 202 already carries both (see clips-share-confirmation.routes.test).
+
+describe("§7 the 202 confirm body carries what the client branches on", () => {
+  const writes: Array<[string, string, Record<string, unknown>, string]> = [
+    ["/api/switch/ports/4/vlan", "vlan move", { vlan_id: 100 }, "switch_set_vlan_membership"],
+    ["/api/switch/ports/3/poe", "PoE off", { enabled: false }, "switch_poe_disable"],
+    ["/api/switch/ports/3/enable", "port disable", { enabled: false }, "switch_port_disable"],
+    ["/api/switch/provision", "re-provision", {}, "switch_provision"],
+  ];
+
+  for (const [url, label, body, operation] of writes) {
+    it(`${label}: 202 carries requiresConfirmation + the real operation`, async () => {
+      const res = await request(buildApp(owner)).post(url).send(body);
+      expect(res.status).toBe(202);
+      // The flag useSwitch actually reads. Without it the confirm is skipped.
+      expect(res.body.requiresConfirmation).toBe(true);
+      expect(res.body.confirmationToken).toBeTruthy();
+      // The operation must be the orchestrator's own vocabulary. The dashboard
+      // test used to invent a dotted `switch.port.vlan` that exists nowhere.
+      expect(res.body.operation).toBe(operation);
+      expect(res.body.status).toBe("confirmation_required");
+    });
+  }
+});
+
 // --- Protected-port → Tier-3 ------------------------------------------------
 
 describe("protected port is Tier-3 on enable/disable + vlan", () => {
