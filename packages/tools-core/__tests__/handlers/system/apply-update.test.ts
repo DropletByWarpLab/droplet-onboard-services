@@ -55,20 +55,22 @@ const PENDING_ROW = {
 // second status read (WARP-2002 re-reads the row before dispatch) would see a
 // consumed body and decode as `{}`. That is a mock artifact, not production
 // behaviour: real fetches return a new Response each time.
-function statusGet(pending: unknown = PENDING_ROW): ReturnType<typeof vi.fn> {
-  return vi.fn().mockImplementation(async () =>
-    new Response(
-      JSON.stringify({
-        current: null,
-        pending,
-        lastVerdict: null,
-        degraded: false,
-        settings: { channel: "stable", applyWindowCron: "0 3 * * *", autoApply: false },
-        applyAvailable: true,
-      }),
-      { status: 200 },
-    ),
+function statusGetResponse(pending: unknown = PENDING_ROW): Response {
+  return new Response(
+    JSON.stringify({
+      current: null,
+      pending,
+      lastVerdict: null,
+      degraded: false,
+      settings: { channel: "stable", applyWindowCron: "0 3 * * *", autoApply: false },
+      applyAvailable: true,
+    }),
+    { status: 200 },
   );
+}
+
+function statusGet(pending: unknown = PENDING_ROW): ReturnType<typeof vi.fn> {
+  return vi.fn().mockImplementation(async () => statusGetResponse(pending));
 }
 
 function postResponse(status: number, body: unknown): ReturnType<typeof vi.fn> {
@@ -166,6 +168,50 @@ describe("apply_update", () => {
       const res = await runApproved(applyUpdate, {}, ctx);
       expectError(res, "STATUS_UNAVAILABLE");
       expect(post).not.toHaveBeenCalled();
+    });
+  });
+
+  // WARP-2002 — this tool takes NO arguments, so the pending update's id is
+  // the only thing a token can bind to. That binding is the entire reason the
+  // status row is re-read before dispatch.
+  // Mutation that proves these bite: drop `pending.id` from the fingerprint in
+  // apply-update.ts — both cases below turn red.
+  describe("the token is bound to the pending update it approved", () => {
+    async function tokenFrom(ctx: ToolContext): Promise<string> {
+      const first = await applyUpdate.handler({}, ctx);
+      if (first.ok) throw new Error("expected confirmation_required");
+      const details = first.error.details as { confirmationToken?: string };
+      if (typeof details?.confirmationToken !== "string") {
+        throw new Error("no token minted");
+      }
+      return details.confirmationToken;
+    }
+
+    it("refuses to dispatch when a DIFFERENT update became pending", async () => {
+      const post = postResponse(202, { started: true, deviceUpdateId: "du-other" });
+      const get = statusGet();
+      const { ctx } = ctxWith({ post, get }, "owner");
+      const token = await tokenFrom(ctx);
+
+      // A new release lands (or the row is replaced) between approval and use.
+      get.mockImplementation(async () =>
+        statusGetResponse({ ...PENDING_ROW, id: "du-other", releaseTag: "v9.9.9" }),
+      );
+
+      const res = await applyUpdate.handler({ confirmation_token: token }, ctx);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.status).toBe("confirmation_required");
+      // The approval the user gave was for v1.4.2 — nothing was dispatched.
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("does dispatch for the SAME pending update, so the above is not vacuous", async () => {
+      const post = postResponse(202, { started: true, deviceUpdateId: "du-pending" });
+      const { ctx } = ctxWith({ post, get: statusGet() }, "owner");
+      const token = await tokenFrom(ctx);
+      const res = await applyUpdate.handler({ confirmation_token: token }, ctx);
+      expect(res.ok).toBe(true);
+      expect(post).toHaveBeenCalledTimes(1);
     });
   });
 
