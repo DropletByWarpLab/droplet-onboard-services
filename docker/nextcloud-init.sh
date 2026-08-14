@@ -527,7 +527,18 @@ disable_hub_apps
 # egress. Non-fatal throughout — a failure here must not take down the hook.
 disable_other_connector() {
   doc_other="$1"
-  if occ_www app:list 2>/dev/null | grep -qE "^[[:space:]]*- ${doc_other}:"; then
+  # WARP-1989 — scope the match to the Enabled block. `occ app:list` prints the
+  # same app names under BOTH "Enabled:" and "Disabled:", so an unscoped match
+  # still succeeds once the app is off: the hook re-issued app:disable on every
+  # boot and logged "disabled the '<app>' connector" forever. A log line
+  # claiming a state change that did not happen is worse than silence — it is
+  # what an operator reads when working out whether the engine actually flipped.
+  #
+  # disable_hub_apps below already does this and says why. The fix was
+  # understood and simply not applied to the function beside it.
+  if occ_www app:list 2>/dev/null \
+     | sed -n '/Enabled:/,/Disabled:/p' \
+     | grep -qE "^[[:space:]]*- ${doc_other}:"; then
     if occ_www app:disable "$doc_other" >/dev/null 2>&1; then
       echo "[droplet] WARP-1973: disabled the '${doc_other}' connector — DOCS_ENGINE selects exactly one"
     else

@@ -294,10 +294,17 @@ run_doc() {
 }
 
 # THE MEASURED LIVE STATE: both connectors enabled.
+# WARP-1989: every fixture carries a Disabled: block, because a box that has
+# run this hook even once has one — and `occ app:list` prints the SAME app
+# names in both sections. A fixture without it cannot distinguish "matched in
+# Enabled" from "matched anywhere", which is exactly the bug that shipped.
 BOTH="Enabled:
   - richdocuments: 8.4.16
   - onlyoffice: 9.8.0
-  - groupfolders: 16.0.5"
+  - groupfolders: 16.0.5
+Disabled:
+  - encryption
+  - user_ldap"
 
 CASE_APPLIST="$BOTH" CASE_TARGET="onlyoffice" run_doc
 if grep -qx "onlyoffice" "$WORK/state/disabled"; then
@@ -308,19 +315,23 @@ fi
 
 # Absent app: nothing to do, and no spurious disable call.
 ONLY_RD="Enabled:
-  - richdocuments: 8.4.16"
+  - richdocuments: 8.4.16
+Disabled:
+  - onlyoffice: 9.8.0"
 CASE_APPLIST="$ONLY_RD" CASE_TARGET="onlyoffice" run_doc
 if [ ! -s "$WORK/state/disabled" ]; then
-  pass "connector absent: no disable attempted (idempotent, quiet)"
+  pass "connector ALREADY DISABLED: no disable re-issued (idempotent, quiet)"
 else
-  fail "connector absent: disabled anyway [$(tr '\n' '|' < "$WORK/state/disabled")]"
+  fail "re-disabled a connector already in the Disabled block — the match is not scoped to Enabled:, so every boot re-issues app:disable and logs a state change that did not happen"
 fi
 
 # It must key on the app NAME, not a substring. `onlyoffice_extra` is not
 # `onlyoffice`, and a loose grep would disable a bystander.
 NEAR="Enabled:
   - richdocuments: 8.4.16
-  - onlyoffice_extra: 1.0.0"
+  - onlyoffice_extra: 1.0.0
+Disabled:
+  - encryption"
 CASE_APPLIST="$NEAR" CASE_TARGET="onlyoffice" run_doc
 if [ ! -s "$WORK/state/disabled" ]; then
   pass "a similarly-named app is not mistaken for the connector"
@@ -517,6 +528,19 @@ if grep -qE 'upsert_env DROPLET_TRUSTED_LAN_IPS' "$SB"; then
   pass "DROPLET_TRUSTED_LAN_IPS is written to .env on every provision (survives a DHCP change)"
 else
   fail "nothing ever writes DROPLET_TRUSTED_LAN_IPS — the deriver is dead code"
+fi
+
+# WARP-1989 — PRECONDITION, because everything below eval-extracts the deriver
+# and asserts on its output. If the extraction comes back empty (function
+# renamed, sentinel moved), `bash -c` runs nothing, the captured output is the
+# empty string, and every "deriver excludes X" assertion passes — the empty
+# string contains no X. The suite would report green against a function that no
+# longer exists. Assert the extraction is non-empty FIRST.
+_deriver_src="$(sed -n '/^derive_single_box_lan_ips()/,/^}/p' "$SB")"
+if [ "$(printf '%s' "$_deriver_src" | grep -c .)" -ge 5 ]; then
+  pass "extracted derive_single_box_lan_ips() ($(printf '%s' "$_deriver_src" | grep -c .) lines) — the asserts below are not vacuous"
+else
+  fail "could not extract derive_single_box_lan_ips() from $SB — every deriver assertion below would pass vacuously against empty output"
 fi
 
 # Behavioural: run the real deriver against a stubbed `ip` and check what it emits.
