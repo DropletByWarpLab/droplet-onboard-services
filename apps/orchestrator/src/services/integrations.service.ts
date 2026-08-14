@@ -61,6 +61,25 @@ export interface IntegrationSummary {
   status: IntegrationStatusName;
   configured: boolean;
   writeEnabled: boolean;
+  /**
+   * WARP-1998 — ISO of the last successful read, or `null` when the provider
+   * has never synced. Derived from the existing `lastHealthyAt` column, the
+   * same source `toDetail` uses; no new state, no migration.
+   *
+   * It lives on the SUMMARY (not just the detail) because the only detail
+   * route is `/api/integrations/eaglesoft` — provider-specific — so any
+   * surface listing N connectors previously had no way to say how stale each
+   * one is. Reports needs it twice: the connector sub-line and the money
+   * tile's staleness chip, which is what stops a stale figure being shown as
+   * current.
+   *
+   * Not PHI: a sync timestamp says WHEN the connector last succeeded, never
+   * what it read.
+   *
+   * `null` is explicit, never an omitted key — absence must not be ambiguous
+   * with "never synced".
+   */
+  lastSyncedAt: string | null;
 }
 
 /** Connection detail (brief §13 `GET /api/integrations/eaglesoft`). Shaped to
@@ -240,6 +259,10 @@ export function createIntegrationsService(
           status: (row?.status as IntegrationStatusName) ?? "NOT_CONFIGURED",
           configured: !!row,
           writeEnabled: row?.writeEnabled ?? false,
+          // Same source as toDetail's lastSyncedAt. `?? null` rather than
+          // `?.` alone so an unconfigured provider carries the key with an
+          // explicit null instead of `undefined`, which JSON would drop.
+          lastSyncedAt: row?.lastHealthyAt ? row.lastHealthyAt.toISOString() : null,
         };
       });
     },
