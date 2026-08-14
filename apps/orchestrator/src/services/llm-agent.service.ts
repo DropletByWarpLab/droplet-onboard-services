@@ -2034,10 +2034,21 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
       // Bound the tool result we feed back to the model so one giant
       // payload doesn't blow the next-turn context window.
+      //
+      // WARP-2002 — and REDACT any confirmation token first. A Tier-2 tool
+      // mints a single-use token into `error.details` so the dashboard chip
+      // above can render "Approve & run". That same JSON is the tool's reply
+      // to the MODEL, and the loop treats confirmation_required as ok:true and
+      // keeps going — so a token left in here lets the model read it and
+      // re-issue the call itself, in the same turn, with no human anywhere.
+      // That is the exact bypass server-minted tokens exist to close; minting
+      // without redacting reproduces the old `confirmed: true` bug with extra
+      // steps. The token still reaches the dashboard via `evt.confirmation`,
+      // which is emitted from `details` before this point.
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: text.slice(0, 8000),
+        content: redactConfirmationTokens(text).slice(0, 8000),
       });
     }
 
@@ -2162,6 +2173,24 @@ function stripPresentationCruft(raw: string | null): string {
     .replace(/【[^】]*】/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+/**
+ * WARP-2002 — strip minted confirmation tokens from anything handed back to
+ * the model.
+ *
+ * Operates on the serialized text rather than the parsed object on purpose:
+ * the tool reply is fed to the model verbatim, tokens can be nested at any
+ * depth (`passThroughConfirmation` splats a whole orchestrator 202 body into
+ * `details`), and a malformed payload must still be scrubbed. A regex over the
+ * wire format catches every shape a parse-walk-reserialize would, without
+ * risking a reserialization that changes what the model sees.
+ */
+export function redactConfirmationTokens(text: string): string {
+  return text.replace(
+    /("confirmationToken"\s*:\s*)"(?:[^"\\]|\\.)*"/g,
+    '$1"[redacted]"',
+  );
 }
 
 function sanitizeFinalContent(raw: string | null): string {

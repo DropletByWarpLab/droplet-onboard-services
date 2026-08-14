@@ -7,17 +7,23 @@
  * server nor the agent loop enforces the `requiresConfirmation` flag
  * generically, so the first call resolves the device and returns
  * `confirmation_required` (no side effects) with the device named in
- * the message. The model relays it to the user and re-issues the call
- * with `confirmed: true` only after an explicit yes — same
- * handler-enforced two-phase contract as `memory_forget`.
+ * the message. WARP-2002: the second call must carry a SERVER-MINTED
+ * single-use token bound to this tool and this node id — the model
+ * cannot self-approve, and never sees the token.
  *
  * The `device` argument accepts either the household name
  * (`friendlyName` from the DeviceAlias overlay, or the Matter-reported
  * product name — both case-insensitive) or the exact node id, mirroring
  * how `list_smart_home_devices` tells the model to resolve devices.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+
+const TOOL_NAME = "remove_device";
 
 /** The slice of the orchestrator's grouped-devices entries we match on
  *  (`MatterCommissionedDevice` in the orchestrator's smart-home types —
@@ -38,10 +44,10 @@ const inputSchema = {
       description:
         "The device to remove — its household name (e.g. \"kitchen strip\"), its Matter product name, or its exact node id. Name matching is case-insensitive; use list_smart_home_devices to see names and node ids.",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved removing this exact device in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required naming the device for the user to approve.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required naming the device, and the user approves from that prompt.",
     },
   },
   required: ["device"],
@@ -144,15 +150,17 @@ async function handler(
     };
   }
 
-  // Confirmation gate — AFTER resolution (so the prompt names the real
-  // device) and BEFORE any side effect.
-  if (args.confirmed !== true) {
+  // Confirmation gate — AFTER resolution (so the prompt names the real device,
+  // and so the token is bound to the device we actually resolved) and BEFORE
+  // any side effect.
+  const fingerprint = confirmationFingerprint([TOOL_NAME, target.nodeId]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to remove "${label(target)}" (node ${target.nodeId}) from the home. ` +
         "It will be unpaired from the Droplet fabric and stop responding until it is commissioned again. " +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
-      { type: "remove_device", nodeId: target.nodeId, name: label(target) },
+        "Ask the user to approve — they will get an approval prompt for this exact device.",
+      { type: TOOL_NAME, nodeId: target.nodeId, name: label(target) },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -190,7 +198,7 @@ async function handler(
 const tool: Tool = {
   name: "remove_device",
   description:
-    "Unpair (remove) a Matter device from the home — factory-unlinks it from the Droplet fabric, after which it stops responding until it is commissioned again (use commission_device to re-add it later). Accepts the device's name or node id. Two-step: the first call returns confirmation_required naming the device — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Unpair (remove) a Matter device from the home — factory-unlinks it from the Droplet fabric, after which it stops responding until it is commissioned again (use commission_device to re-add it later). Accepts the device's name or node id. Two-step: the first call returns confirmation_required naming the device — relay that to the user. Approval is handled outside this conversation; you cannot approve on the user's behalf.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

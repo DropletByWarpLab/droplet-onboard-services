@@ -2,7 +2,7 @@
  * WARP-1447 — `remove_device` tool tests.
  *
  * Pins the handler-enforced two-step contract (confirmation first, no
- * side effects until `confirmed: true`), resolution by household name /
+ * side effects until a server-minted token is presented), resolution by name /
  * Matter name / exact node id, ambiguity and not-found behavior, and
  * the DEVICE_NOT_FOUND vs REMOVE_FAILED error mapping on the actual
  * decommission call.
@@ -63,6 +63,25 @@ describe("remove_device metadata", () => {
   });
 });
 
+/**
+ * WARP-2002 — drive the real two-phase flow: the first call is inert and
+ * carries a server-minted token in its confirmation prompt; only that exact
+ * token executes. The model cannot mint one and never sees it (the
+ * orchestrator redacts it from the tool reply it feeds back).
+ */
+async function approved(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<Record<string, unknown>> {
+  const first = await removeDevice.handler(args, ctx);
+  if (first.ok) throw new Error("expected confirmation_required on the first call");
+  const details = first.error.details as { confirmationToken?: string };
+  if (typeof details?.confirmationToken !== "string") {
+    throw new Error("first call minted no confirmation token");
+  }
+  return { ...args, confirmation_token: details.confirmationToken };
+}
+
 describe("remove_device argument validation", () => {
   it("rejects a missing device arg without touching the fabric", async () => {
     const { ctx, decommission } = ctxWith({});
@@ -91,15 +110,52 @@ describe("remove_device confirmation-first contract", () => {
     expect(decommission).not.toHaveBeenCalled();
   });
 
-  it("treats confirmed: false the same as unconfirmed", async () => {
+  // WARP-2002 — the model used to be able to self-approve by setting a boolean
+  // it authored. These three cases are the regression guard for that.
+  it("ignores a model-authored confirmed: true — self-attestation is dead", async () => {
     const { ctx, decommission } = ctxWith({});
     const r = await removeDevice.handler(
-      { device: "kitchen strip", confirmed: false },
+      { device: "kitchen strip", confirmed: true },
       ctx,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.status).toBe("confirmation_required");
     expect(decommission).not.toHaveBeenCalled();
+  });
+
+  it("refuses a fabricated confirmation_token", async () => {
+    const { ctx, decommission } = ctxWith({});
+    const r = await removeDevice.handler(
+      { device: "kitchen strip", confirmation_token: "f".repeat(64) },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(decommission).not.toHaveBeenCalled();
+  });
+
+  it("refuses a token minted for a DIFFERENT device", async () => {
+    const { ctx, decommission } = ctxWith({});
+    // Approve removing node 8, then try to spend that approval on node 7.
+    const forNode8 = await approved({ device: "8" }, ctx);
+    const r = await removeDevice.handler(
+      { device: "kitchen strip", confirmation_token: forNode8.confirmation_token },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(decommission).not.toHaveBeenCalled();
+  });
+
+  it("is single-use — replaying an approved token is refused", async () => {
+    const decommission = vi.fn().mockResolvedValue({ status: "decommissioned" });
+    const { ctx } = ctxWith({ decommission });
+    const args = await approved({ device: "kitchen strip" }, ctx);
+    expect((await removeDevice.handler(args, ctx)).ok).toBe(true);
+    const replay = await removeDevice.handler(args, ctx);
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.status).toBe("confirmation_required");
+    expect(decommission).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -110,7 +166,7 @@ describe("remove_device confirmed happy path", () => {
       .mockResolvedValue({ status: "decommissioned", nodeId: "7" });
     const { ctx } = ctxWith({ decommission });
     const r = await removeDevice.handler(
-      { device: "kitchen strip", confirmed: true },
+      await approved({ device: "kitchen strip" }, ctx),
       ctx,
     );
     expect(decommission).toHaveBeenCalledWith("7");
@@ -130,7 +186,7 @@ describe("remove_device resolution", () => {
   it("resolves by exact node id", async () => {
     const decommission = vi.fn().mockResolvedValue({});
     const { ctx } = ctxWith({ decommission });
-    const r = await removeDevice.handler({ device: "8", confirmed: true }, ctx);
+    const r = await removeDevice.handler(await approved({ device: "8" }, ctx), ctx);
     expect(decommission).toHaveBeenCalledWith("8");
     expect(r.ok).toBe(true);
   });
@@ -139,7 +195,7 @@ describe("remove_device resolution", () => {
     const decommission = vi.fn().mockResolvedValue({});
     const { ctx } = ctxWith({ decommission });
     const r = await removeDevice.handler(
-      { device: "hue BULB", confirmed: true },
+      await approved({ device: "hue BULB" }, ctx),
       ctx,
     );
     expect(decommission).toHaveBeenCalledWith("7");
@@ -154,7 +210,7 @@ describe("remove_device resolution", () => {
       ],
     });
     const { ctx, decommission } = ctxWith({ listDevices });
-    const r = await removeDevice.handler({ device: "lamp", confirmed: true }, ctx);
+    const r = await removeDevice.handler({ device: "lamp" }, ctx);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error.code).toBe("AMBIGUOUS_DEVICE");
@@ -167,7 +223,7 @@ describe("remove_device resolution", () => {
 
   it("returns DEVICE_NOT_FOUND for an unknown name, with no side effects", async () => {
     const { ctx, decommission } = ctxWith({});
-    const r = await removeDevice.handler({ device: "toaster", confirmed: true }, ctx);
+    const r = await removeDevice.handler({ device: "toaster" }, ctx);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("DEVICE_NOT_FOUND");
     expect(decommission).not.toHaveBeenCalled();
@@ -181,7 +237,7 @@ describe("remove_device failure mapping", () => {
       .mockRejectedValue(new Error("decommission: no device with node ID 7"));
     const { ctx } = ctxWith({ decommission });
     const r = await removeDevice.handler(
-      { device: "kitchen strip", confirmed: true },
+      await approved({ device: "kitchen strip" }, ctx),
       ctx,
     );
     expect(r.ok).toBe(false);
@@ -196,7 +252,7 @@ describe("remove_device failure mapping", () => {
       );
     const { ctx } = ctxWith({ decommission });
     const r = await removeDevice.handler(
-      { device: "kitchen strip", confirmed: true },
+      await approved({ device: "kitchen strip" }, ctx),
       ctx,
     );
     expect(r.ok).toBe(false);
@@ -209,10 +265,9 @@ describe("remove_device failure mapping", () => {
   it("maps a listDevices failure to REMOVE_FAILED without calling decommission", async () => {
     const listDevices = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
     const { ctx, decommission } = ctxWith({ listDevices });
-    const r = await removeDevice.handler(
-      { device: "kitchen strip", confirmed: true },
-      ctx,
-    );
+    // No approval flow here: resolution fails before the gate is reached, so
+    // the caller never gets a prompt to approve.
+    const r = await removeDevice.handler({ device: "kitchen strip" }, ctx);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("REMOVE_FAILED");
     expect(decommission).not.toHaveBeenCalled();
