@@ -24,6 +24,26 @@ vi.mock("@/components/shell/ShellPage", () => ({
   ),
 }));
 
+let mockRole = "owner";
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", username: "alice", role: mockRole }, isLoading: false }),
+  authFetch: vi.fn(),
+}));
+
+// The tiles' own data paths are pinned in reports.tiles.test.tsx; here they
+// are stubbed to a never-settling promise so the shell renders its frame
+// without four fetches racing the assertions. The factories are hoisted
+// above any top-level const, so the promise is inlined in each.
+vi.mock("@/app/reports/api", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  fetchHome: vi.fn(() => new Promise(() => {})),
+  fetchActivityRange: vi.fn(() => new Promise(() => {})),
+  fetchChainVerify: vi.fn(() => new Promise(() => {})),
+}));
+vi.mock("@/lib/api", () => ({
+  fetchAdminFilesUsage: vi.fn(() => new Promise(() => {})),
+}));
+
 import ReportsPage from "@/app/reports/page";
 
 /** Brief §4 — this order IS the reading order, and mobile preserves it. */

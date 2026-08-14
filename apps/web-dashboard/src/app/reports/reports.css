@@ -205,10 +205,269 @@
   text-transform: uppercase;
 }
 
+/* Trailing affordance slot in a tile header. */
+.rp-tile-trail-slot {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Visually hidden but present for assistive tech. */
+.rp-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Number tiles ───────────────────────────────────────────
+   The tile is position:relative so the status dot can sit top-right. */
+.rp-tile[data-tile^="b"] {
+  position: relative;
+  gap: 6px;
+}
+
+.rp-num-count {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.rp-num-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── Status dot ─────────────────────────────────────────────
+   Never the only signal — every dot sits beside a label or an icon
+   (brief §8). `unknown` is the neutral tone, not a colour. */
+.rp-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--text-muted);
+}
+
+.rp-tile[data-tile^="b"] .rp-dot {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.rp-dot.is-ok { background: var(--color-system-green); }
+.rp-dot.is-warn { background: var(--color-system-orange); }
+.rp-dot.is-offline,
+.rp-dot.is-err { background: var(--color-system-red); }
+.rp-dot.is-info { background: var(--brand); }
+.rp-dot.is-unknown { background: var(--text-muted); }
+
+/* Activity rows use a smaller dot inline with the row. */
+.rp-evt .rp-dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* ── Shared tile states ─────────────────────────────────────
+   Locked / error / empty all share one frame so a tile can't invent its
+   own. The tile keeps its dimensions — a bento with holes reads as
+   broken, a bento with locked tiles reads as designed (brief §7). */
+.rp-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.rp-state p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.rp-state-err {
+  /* Icon, not body text — the vivid red is fine here. Body text uses
+     --color-system-red-text (WARP-633). */
+  color: var(--color-system-red);
+}
+
+.rp-state-link {
+  font-size: 13px;
+  color: var(--brand);
+  text-decoration: none;
+}
+
+.rp-state-link:hover { text-decoration: underline; }
+
+.rp-retry {
+  padding: 5px 12px;
+  border: 1px solid var(--card-bd);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rp-retry:hover { background: var(--hover); }
+
+/* ── Scrolling row lists (Folders, Activity) ────────────────
+   Capped so a long list scrolls INSIDE its tile rather than growing the
+   grid row and shunting every neighbour down. */
+.rp-rows {
+  flex: 1;
+  min-height: 0;
+  max-height: 236px;
+  overflow-y: auto;
+}
+
+@media (max-width: 767px) {
+  .rp-rows { max-height: 168px; }
+}
+
+.rp-foot {
+  padding-top: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.rp-mono { font-family: var(--font-mono); font-size: 13px; }
+.rp-muted { color: var(--text-muted); }
+
+/* ── Folders rows ───────────────────────────────────────────── */
+.rp-folder {
+  display: grid;
+  grid-template-columns: 1fr 84px 84px 96px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--card-bd);
+}
+
+.rp-folder-name { min-width: 0; }
+
+.rp-folder-title {
+  display: block;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-folder-kind {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.rp-folder .rp-mono { text-align: right; }
+
+.rp-bar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--inset-strong);
+  overflow: hidden;
+}
+
+.rp-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+
+.rp-bar-fill.is-ok { background: var(--brand); }
+.rp-bar-fill.is-warn { background: var(--color-system-orange); }
+.rp-bar-fill.is-over { background: var(--color-system-red); }
+
+@media (max-width: 767px) {
+  /* The bar is the first thing to go — the numbers carry the fact. */
+  .rp-folder { grid-template-columns: 1fr 72px 72px; }
+  .rp-folder .rp-bar { display: none; }
+}
+
+/* ── Activity rows ──────────────────────────────────────────── */
+.rp-evt {
+  display: grid;
+  grid-template-columns: 56px 6px 16px 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.rp-evt-time {
+  color: var(--text-muted);
+  padding-top: 1px;
+}
+
+.rp-evt .rp-dot { margin-top: 6px; }
+
+.rp-evt-ico {
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.rp-evt-tx {
+  min-width: 0;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.rp-evt-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Chain-verify chip ──────────────────────────────────────
+   Renders a server-side fact, not a control — styled as a static pill
+   with no hover or press affordance. */
+.rp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.rp-chip.is-ok { color: var(--color-system-green); }
+/* Red as TEXT needs the darker ramp — the vivid red is ~3.1:1 and fails
+   WCAG AA at this size (WARP-633). */
+.rp-chip.is-broken { color: var(--color-system-red-text); }
+
+.dark .rp-chip.is-broken { color: var(--color-system-red); }
+
 /* ── Skeletons ──────────────────────────────────────────────
    This story ships the grid; sibling stories fill the bodies. Under
    reduced motion the shimmer is replaced by a flat fill (brief §8) —
    the placeholder still reads as "not yet here" without animating. */
+.rp-skel-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
 .rp-skel {
   border-radius: 6px;
   background: linear-gradient(

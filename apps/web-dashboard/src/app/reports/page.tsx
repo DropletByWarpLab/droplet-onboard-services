@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { useAuth } from "@/lib/auth";
 import {
   DEFAULT_SCOPE,
   NUMBER_STRIP_SCOPE_NOTE,
@@ -42,6 +43,8 @@ import {
   type DateRange,
   type ScopeId,
 } from "./date-scope";
+import { fetchHome, type HomePayload } from "./api";
+import { ActivityBody, ChainChip, FoldersBody, NumberBody } from "./tiles";
 
 import "./reports.css";
 
@@ -78,10 +81,30 @@ const TILES: TileSpec[] = [
 
 const NUMBER_TILE_IDS = new Set(["b1", "b2", "b3", "b4"]);
 
+/** Tile id → the `/api/home` tile it renders. */
+const NUMBER_TILE_KEY = {
+  b1: "files",
+  b2: "cameras",
+  b3: "devices",
+  b4: "network",
+} as const;
+
+/** Brief §7 — Folders and Activity are admin-tier. NOT `role === "owner"`:
+ *  `admin` is a distinct role and must see both. */
+const ADMIN_TIER = new Set(["owner", "admin"]);
+
 export default function ReportsPage() {
+  const { user } = useAuth();
+  const isAdminTier = ADMIN_TIER.has(user?.role ?? "");
+
   const [scope, setScope] = useState<ScopeId>(DEFAULT_SCOPE);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
   const [spinning, setSpinning] = useState(false);
+
+  // One round-trip for all four number tiles. Deliberately NOT keyed on the
+  // date scope — /api/home is point-in-time (WARP-1999).
+  const [home, setHome] = useState<HomePayload | null>(null);
+  const [homeFailed, setHomeFailed] = useState(false);
 
   // Stamped on the client only. Rendering a clock during SSR would hydrate
   // against a different second and warn on every load.
@@ -102,6 +125,20 @@ export default function ReportsPage() {
     () => (refreshedAt ? rangeFor(scope, refreshedAt) : null),
     [scope, refreshedAt],
   );
+
+  // Re-runs on refresh: `refreshedAt` is the page's one refetch key, so a
+  // press of Refresh re-reads every tile without each owning a timer.
+  useEffect(() => {
+    if (!refreshedAt) return;
+    let live = true;
+    setHomeFailed(false);
+    fetchHome()
+      .then((h) => live && setHome(h))
+      .catch(() => live && setHomeFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [refreshedAt]);
 
   const onRefresh = useCallback(() => {
     setSpinning(true);
@@ -129,7 +166,19 @@ export default function ReportsPage() {
 
         <div className="rp-bento">
           {TILES.map((t) => (
-            <TileShell key={t.id} spec={t} range={range} />
+            <TileShell
+              key={t.id}
+              spec={t}
+              range={range}
+              body={tileBody(t.id, {
+                home,
+                homeFailed,
+                homeLoading: home === null && !homeFailed,
+                isAdminTier,
+                range,
+              })}
+              trail={t.id === "d1" ? <ChainChip canRead={isAdminTier} /> : trailLink(t.id)}
+            />
           ))}
         </div>
       </div>
@@ -212,12 +261,66 @@ function ProvenanceStrip({ at }: { at: Date | null }) {
   );
 }
 
+/** Header link out to the surface that owns each tile's data. */
+function trailLink(id: string): ReactNode {
+  const to: Record<string, [string, string]> = {
+    c1: ["/admin/files", "Manage"],
+    c2: ["/integrations", "All connectors"],
+  };
+  const hit = to[id];
+  if (!hit) return null;
+  return (
+    <a href={hit[0]} className="rp-tile-trail">
+      {hit[1]} →
+    </a>
+  );
+}
+
+interface BodyDeps {
+  home: HomePayload | null;
+  homeFailed: boolean;
+  homeLoading: boolean;
+  isAdminTier: boolean;
+  range: DateRange | null;
+}
+
 /**
- * The tile frame every sibling story fills. It owns the card, the header,
- * and the loading body — so a tile that gains real content cannot
- * accidentally drift from its neighbours.
+ * Route a tile id to its body. Tiles whose story hasn't landed yet fall
+ * through to the skeleton, so the grid stays whole while the epic fills in.
  */
-function TileShell({ spec, range }: { spec: TileSpec; range: DateRange | null }) {
+function tileBody(id: string, d: BodyDeps): ReactNode {
+  const numberKey = NUMBER_TILE_KEY[id as keyof typeof NUMBER_TILE_KEY];
+  if (numberKey) {
+    return (
+      <NumberBody
+        which={numberKey}
+        tile={d.home ? d.home.tiles[numberKey] : null}
+        loading={d.homeLoading}
+        failed={d.homeFailed}
+      />
+    );
+  }
+  if (id === "c1") return <FoldersBody canRead={d.isAdminTier} />;
+  if (id === "d1") return <ActivityBody range={d.range} canRead={d.isAdminTier} />;
+  return null;
+}
+
+/**
+ * The tile frame every story fills. It owns the card, the header, and the
+ * fallback skeleton — so a tile that gains real content cannot accidentally
+ * drift from its neighbours.
+ */
+function TileShell({
+  spec,
+  range,
+  body,
+  trail,
+}: {
+  spec: TileSpec;
+  range: DateRange | null;
+  body?: ReactNode;
+  trail?: ReactNode;
+}) {
   const Icon = spec.icon;
   const headingId = `rp-t-${spec.id}`;
   const isNumber = NUMBER_TILE_IDS.has(spec.id);
@@ -231,23 +334,28 @@ function TileShell({ spec, range }: { spec: TileSpec; range: DateRange | null })
       data-range-to={range?.to ?? undefined}
       aria-labelledby={headingId}
     >
+      {/* A number tile's label IS its heading; the others get the mark +
+          title header. Both paths must label the section — an unlabelled
+          <section> is invisible structure to a screen reader. */}
       {isNumber ? (
-        <div className="rp-num-label">
-          <Icon size={16} aria-hidden="true" />
-          <span id={headingId}>{spec.title}</span>
-        </div>
+        <span id={headingId} className="rp-sr">
+          {spec.title}
+        </span>
       ) : (
         <div className="rp-tile-head">
           <span className="rp-tile-mark">
             <Icon size={16} aria-hidden="true" />
           </span>
           <h2 id={headingId}>{spec.title}</h2>
+          {trail ? <span className="rp-tile-trail-slot">{trail}</span> : null}
         </div>
       )}
 
-      <div className="rp-tile-body">
-        <TilePlaceholder isNumber={isNumber} />
-      </div>
+      {body ?? (
+        <div className="rp-tile-body">
+          <TilePlaceholder isNumber={isNumber} />
+        </div>
+      )}
     </section>
   );
 }
