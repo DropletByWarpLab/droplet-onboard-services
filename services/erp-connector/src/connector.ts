@@ -125,6 +125,14 @@ export interface EaglesoftConnectorDeps {
   /** Pick the catalog family by engine band instead of supplying it outright.
    *  Ignored when `catalog` is set. Defaults to "modern". */
   dialect?: CatalogDialect;
+  /**
+   * Owner attributed to a table whose catalog row reports none (WARP-2011).
+   * Defaults to `"dba"`, the SQL Anywhere convention — but the owner enters the
+   * drift fingerprint, so a non-SA catalog that does not alias an owner column
+   * would otherwise silently stamp every table `dba`. Engines supply their own
+   * via `ENGINE_PROFILES[engine].defaultOwner`.
+   */
+  defaultOwner?: string;
 }
 
 /**
@@ -155,12 +163,14 @@ export class EaglesoftConnector implements Connector {
    * every engine band Eaglesoft 16+ ships on.
    */
   private readonly catalog: CatalogQuerySet;
+  private readonly defaultOwner: string;
 
   constructor(
     private readonly config: ConnectorConfig,
     deps: EaglesoftConnectorDeps = {},
   ) {
     this.catalog = deps.catalog ?? catalogQueriesFor(deps.dialect ?? "modern");
+    this.defaultOwner = deps.defaultOwner ?? "dba";
     // A bridge is wired when one is injected, or when a URL is configured.
     // Absent both, every I/O method blocks — see the class docstring.
     this.bridge =
@@ -254,7 +264,7 @@ export class EaglesoftConnector implements Connector {
       const named = tableRows
         .map((t) => ({
           name: String(t.table_name ?? t.TABLE_NAME ?? ""),
-          owner: String(t.owner ?? t.OWNER ?? "dba"),
+          owner: String(t.owner ?? t.OWNER ?? this.defaultOwner),
         }))
         .filter((t) => t.name !== "");
 

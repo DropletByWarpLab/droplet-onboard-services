@@ -15,9 +15,17 @@
  *      taken from user/LLM input. An unknown identifier throws rather than
  *      being string-concatenated into SQL.
  *
- * Identifiers are normalized to lower-case (SQL Anywhere identifiers are
+ * Identifiers are LOOKED UP case-insensitively (SQL Anywhere identifiers are
  * case-insensitive) so an introspection pass that reports a different case
- * does not spuriously trip the drift lock.
+ * does not spuriously trip the drift lock. What is EMITTED is a separate
+ * question, governed by `identifierCase` (WARP-2011): the lookup key is always
+ * normalized, but the physical identifier written to the wire is preserved
+ * verbatim when the engine is case-SENSITIVE. On PostgreSQL, on SQL Server
+ * with a case-sensitive collation, and on MySQL/MariaDB on Linux, a column
+ * created quoted-and-mixed-case (`"FirstName"`) does not answer to
+ * `"firstname"` — folding the physical name there emits an identifier that
+ * does not exist. The default stays `fold-lower`, so SQL Anywhere behaviour
+ * and every existing caller are byte-identical.
  */
 import { createHash } from "node:crypto";
 
@@ -49,6 +57,27 @@ export class SchemaResolutionError extends Error {
 const norm = (s: string): string => s.trim().toLowerCase();
 
 /**
+ * How an engine delimits identifiers (WARP-2011). ANSI double quotes are NOT
+ * universal: on MySQL/MariaDB in the default `sql_mode`, `"x"` is a string
+ * LITERAL, not an identifier, so a map built for MySQL must emit backticks.
+ */
+export type QuoteStyle = "ansi" | "backtick" | "bracket";
+
+/**
+ * Whether the PHYSICAL identifier keeps the case introspection reported
+ * (`preserve`, required by every case-sensitive engine) or is folded to
+ * lower-case (`fold-lower`, the SQL Anywhere default). Lookup is always
+ * case-insensitive regardless — this governs only what reaches the wire.
+ */
+export type IdentifierCase = "fold-lower" | "preserve";
+
+/** Per-engine emission traits. Both default to the SQL Anywhere behaviour. */
+export interface SchemaMapOptions {
+  quoteStyle?: QuoteStyle;
+  identifierCase?: IdentifierCase;
+}
+
+/**
  * Stable fingerprint over (owner + table names + column names + types).
  *
  * Order-independent: tables and columns are sorted before hashing so an
@@ -73,34 +102,73 @@ export function computeSchemaFingerprint(tables: IntrospectedTable[]): string {
 
 /** Resolved, ready-to-bind physical identifiers for one table. */
 interface MappedTable {
+  /** Physical owner/schema identifier, exactly as it must reach the wire. */
   owner: string;
+  /** Physical table identifier, exactly as it must reach the wire. */
   name: string;
-  /** normalized column name → physical column name (both lower-cased). */
+  /** normalized column name → PHYSICAL column identifier. The key is the
+   *  case-insensitive lookup handle; the value is what gets quoted. */
   columns: Map<string, string>;
 }
 
 /** The server-side identifier dictionary (invariant 3). */
 export interface SchemaMap {
   tables: Map<string, MappedTable>;
+  /** How {@link resolveTable}/{@link resolveColumn} delimit what they emit. */
+  quoteStyle: QuoteStyle;
+  /** Whether the stored physical identifiers kept their introspected case. */
+  identifierCase: IdentifierCase;
 }
 
-/** Build the resolution map from an introspected schema. */
-export function buildSchemaMap(tables: IntrospectedTable[]): SchemaMap {
-  const map: SchemaMap = { tables: new Map() };
+/**
+ * Build the resolution map from an introspected schema.
+ *
+ * `opts` defaults to `{ quoteStyle: "ansi", identifierCase: "fold-lower" }` —
+ * exactly the pre-WARP-2011 behaviour — so every existing caller and every
+ * existing test is byte-identical without change.
+ */
+export function buildSchemaMap(
+  tables: IntrospectedTable[],
+  opts: SchemaMapOptions = {},
+): SchemaMap {
+  const quoteStyle = opts.quoteStyle ?? "ansi";
+  const identifierCase = opts.identifierCase ?? "fold-lower";
+  // The ONLY difference between the two modes: what we store as physical.
+  const physical = identifierCase === "preserve" ? (s: string) => s.trim() : norm;
+
+  const map: SchemaMap = { tables: new Map(), quoteStyle, identifierCase };
   for (const t of tables) {
     const columns = new Map<string, string>();
     for (const c of t.columns) {
-      columns.set(norm(c.name), norm(c.name));
+      columns.set(norm(c.name), physical(c.name));
     }
-    map.tables.set(norm(t.name), { owner: norm(t.owner), name: norm(t.name), columns });
+    map.tables.set(norm(t.name), {
+      owner: physical(t.owner),
+      name: physical(t.name),
+      columns,
+    });
   }
   return map;
 }
 
-/** Double-quote a SQL Anywhere identifier, escaping embedded quotes.
- *  Input is already validated against the map, so this is belt-and-suspenders. */
-function quote(ident: string): string {
-  return `"${ident.replace(/"/g, '""')}"`;
+/**
+ * Delimit an identifier for the target engine, escaping the delimiter by
+ * DOUBLING it — never by stripping, which would silently change which object
+ * the statement names. Input is already validated against the map, so this is
+ * belt-and-suspenders.
+ *
+ * The switch is exhaustive with no `default:` arm: adding a `QuoteStyle`
+ * member is a compile error here rather than a silent fall-through to ANSI.
+ */
+function quote(ident: string, style: QuoteStyle): string {
+  switch (style) {
+    case "ansi":
+      return `"${ident.replace(/"/g, '""')}"`;
+    case "backtick":
+      return `\`${ident.replace(/`/g, "``")}\``;
+    case "bracket":
+      return `[${ident.replace(/]/g, "]]")}]`;
+  }
 }
 
 /** Resolve a logical table name to a quoted `"owner"."table"`. Throws on
@@ -110,7 +178,11 @@ export function resolveTable(map: SchemaMap, table: string): string {
   if (!t) {
     throw new SchemaResolutionError(`unknown table "${table}" — not in the schema map`);
   }
-  return `${quote(t.owner)}.${quote(t.name)}`;
+  // MySQL/MariaDB have no owner distinct from the database, so a catalog that
+  // reports none yields "". Emitting `""."tbl"` would name an object that
+  // cannot exist; an unqualified name is the correct rendering.
+  if (t.owner === "") return quote(t.name, map.quoteStyle);
+  return `${quote(t.owner, map.quoteStyle)}.${quote(t.name, map.quoteStyle)}`;
 }
 
 /** Resolve a logical column on a known table to a quoted `"column"`. Throws
@@ -126,5 +198,5 @@ export function resolveColumn(map: SchemaMap, table: string, column: string): st
       `unknown column "${column}" on table "${table}" — not in the schema map`,
     );
   }
-  return quote(physical);
+  return quote(physical, map.quoteStyle);
 }

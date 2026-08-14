@@ -26,6 +26,9 @@ export {
   type IntrospectedTable,
   type IntrospectedColumn,
   type SchemaMap,
+  type SchemaMapOptions,
+  type QuoteStyle,
+  type IdentifierCase,
 } from "./schema-map.js";
 
 export {
@@ -137,6 +140,45 @@ export {
   type ResolvedCredentials,
   type ApiTransport,
 } from "./api-auth.js";
+
+// WARP-2011 — the generic ("bring your own on-prem database") SQL-source
+// track. Read-only by construction: the operator authors a declarative
+// descriptor, never SQL, and the compiler binds every value as `?`.
+export {
+  ENGINE_PROFILES,
+  SQL_ENGINES,
+  engineProfile,
+  isSqlEngine,
+  PG_LIST_TABLES_SQL,
+  PG_LIST_COLUMNS_SQL,
+  MYSQL_LIST_TABLES_SQL,
+  MYSQL_LIST_COLUMNS_SQL,
+  MSSQL_LIST_TABLES_SQL,
+  MSSQL_LIST_COLUMNS_SQL,
+  type SqlEngine,
+  type EngineProfile,
+  type LimitStyle,
+} from "./sql-source/engines.js";
+
+export {
+  assertValidQuerySpec,
+  compileQuerySpec,
+  QuerySpecError,
+  QueryParamError,
+  SQL_OPS,
+  SQL_PARAM_TYPES,
+  MIN_LIMIT,
+  MAX_LIMIT,
+  MAX_COLUMNS,
+  MAX_IN_ARITY,
+  type SqlOp,
+  type SqlParamType,
+  type SqlQueryParam,
+  type SqlWhereClause,
+  type SqlOrderBy,
+  type SqlQuerySpec,
+  type CompileOptions,
+} from "./sql-source/spec.js";
 
 // WARP-1964 — vendor-agnostic export-drop track: read the report files a
 // practice exports from its own PMS, off a read-only share on the practice LAN.
