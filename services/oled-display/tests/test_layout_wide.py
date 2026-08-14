@@ -10,6 +10,7 @@ the rack.
 
 from __future__ import annotations
 
+import datetime as _dt
 import time
 
 import pytest
@@ -588,8 +589,23 @@ def test_long_host_shrinks_but_never_spills(populated):
 # Vertical safe area — the whole-panel guard
 # ---------------------------------------------------------------------------
 
-def _all_boxes(disp, monkeypatch):
-    """Every glyph box drawn by a full LIVE render, panel coordinates."""
+# Frozen wall clock for every glyph capture. The top rail draws the live time
+# as a single glyph string ("16:25"), and tests that render TWICE and compare
+# glyph text — test_top_chrome_moves_with_the_inset keys its dict on the text —
+# break when the minute rolls over between the two renders. That failure was
+# observed in a full-suite run and is unrelated to anything the test guards:
+# a ~0.3s window per minute, so it passes in isolation and surfaces in CI.
+# render_status() already takes `now`; use it rather than leaving a real clock
+# in the assertion path.
+_FIXED_NOW = _dt.datetime(2026, 8, 14, 16, 25, 30)
+
+
+def _all_boxes(disp, monkeypatch, now=_FIXED_NOW):
+    """Every glyph box drawn by a full render, panel coordinates.
+
+    `now` is frozen by default — see _FIXED_NOW. Pass an explicit value to
+    exercise clock-dependent rendering.
+    """
     drawn = []
     real = ImageDraw.ImageDraw.text
 
@@ -600,7 +616,7 @@ def _all_boxes(disp, monkeypatch):
         return real(self, xy, text, *a, **kw)
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
-    lw.render_status(disp)
+    lw.render_status(disp, now=now)
     assert drawn, "spy never fired — the render path changed"
     return drawn
 
