@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Activity as ActivityIcon,
@@ -741,7 +742,8 @@ const ACTIVITY: [string, "ok" | "warn" | "err", LucideIcon, string][] = [
   ["11:14", "ok", Lightbulb, "Living-room lights dimmed to 30% by you"],
   ["12:30", "ok", Network, "New device joined LAN · 192.168.4.51"],
 ];
-function ActivityWidget() {
+// Exported for the WARP-1992 deep-link test, the same reason CalendarWidget is.
+export function ActivityWidget() {
   return (
     <div className="timeline">
       {ACTIVITY.map(([t, tone, Ic, tx]) => (
@@ -751,6 +753,12 @@ function ActivityWidget() {
           <div className="timeline-text"><div className="h">{tx}</div></div>
         </div>
       ))}
+      {/* WARP-1992: the only way out of this widget. Overview answers
+          "what's happening now"; Reports answers "how did it go" — and it
+          reads the real signed activity chain, which this widget does not. */}
+      <Link href="/reports" className="timeline-more">
+        Full report →
+      </Link>
     </div>
   );
 }
