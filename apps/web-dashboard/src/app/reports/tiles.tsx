@@ -16,11 +16,13 @@ import {
   Activity as ActivityIcon,
   AlertTriangle,
   Blocks,
+  CheckCircle2,
   Cpu,
   FolderOpen,
   HardDrive,
   Lock,
   Network,
+  Plug,
   RefreshCw,
   ShieldCheck,
   Video,
@@ -33,9 +35,12 @@ import {
   ForbiddenError,
   fetchActivityRange,
   fetchChainVerify,
+  fetchIntegrations,
   type HomeTile,
+  type IntegrationSummary,
   type VerifySummary,
 } from "./api";
+import { PILL, providerMark, providerName, statusLine, statusWeight } from "./connectors";
 import type { DateRange } from "./date-scope";
 import { UNREADABLE, formatBigint, formatBytes, quotaTone, sumBytes, usedPercent } from "./bytes";
 
@@ -321,6 +326,81 @@ export function ActivityBody({ range, canRead }: { range: DateRange | null; canR
         </a>
       ) : null}
     </>
+  );
+}
+
+// ── C2 · Integrations ────────────────────────────────────────────────────
+
+const PILL_ICON = {
+  check: CheckCircle2,
+  warn: AlertTriangle,
+  lock: Lock,
+  refresh: RefreshCw,
+  plug: Plug,
+} as const;
+
+export function IntegrationsBody({ now }: { now: Date | null }) {
+  const [rows, setRows] = useState<IntegrationSummary[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    setFailed(false);
+    fetchIntegrations()
+      .then((r) => live && setRows(r))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [nonce]);
+
+  if (failed) {
+    return <ErrorBody what="Couldn't read connectors" onRetry={() => setNonce((n) => n + 1)} />;
+  }
+  if (rows === null) return <SkeletonRows n={4} />;
+  if (rows.length === 0) {
+    return (
+      <EmptyBody icon={<Blocks size={28} aria-hidden="true" />} text="Nothing connected yet">
+        <a href="/integrations" className="rp-state-link">
+          Connect a system →
+        </a>
+      </EmptyBody>
+    );
+  }
+
+  // Problems first. Stable within a weight so the list doesn't reshuffle
+  // between polls for connectors in the same state.
+  const sorted = [...rows].sort((a, b) => {
+    const d = statusWeight(a.status) - statusWeight(b.status);
+    return d !== 0 ? d : a.provider.localeCompare(b.provider);
+  });
+
+  return (
+    <div className="rp-rows rp-conns">
+      {sorted.map((c) => {
+        const pill = PILL[c.status] ?? PILL.NOT_CONFIGURED;
+        const PillIcon = PILL_ICON[pill.icon];
+        return (
+          <div className="rp-conn" key={c.provider}>
+            <span className="rp-conn-mark">{providerMark(c.provider)}</span>
+            <div className="rp-conn-tx">
+              <div className="rp-conn-name">
+                {providerName(c.provider)}
+                {/* Read-only is the norm and gets no chip — absence is the
+                    quiet default; only the riskier posture is announced. */}
+                {c.writeEnabled ? <span className="rp-chip is-writes">Writes on</span> : null}
+              </div>
+              <div className="rp-conn-sub">{now ? statusLine(c, now) : " "}</div>
+            </div>
+            <span className={`rp-pill is-${pill.tone}`}>
+              <PillIcon size={11} aria-hidden="true" />
+              {pill.label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

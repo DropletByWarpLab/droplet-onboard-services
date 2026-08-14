@@ -44,7 +44,7 @@ import {
   type ScopeId,
 } from "./date-scope";
 import { fetchHome, type HomePayload } from "./api";
-import { ActivityBody, ChainChip, FoldersBody, NumberBody } from "./tiles";
+import { ActivityBody, ChainChip, FoldersBody, IntegrationsBody, NumberBody } from "./tiles";
 
 import "./reports.css";
 
@@ -176,6 +176,7 @@ export default function ReportsPage() {
                 homeLoading: home === null && !homeFailed,
                 isAdminTier,
                 range,
+                now: refreshedAt,
               })}
               trail={t.id === "d1" ? <ChainChip canRead={isAdminTier} /> : trailLink(t.id)}
             />
@@ -282,6 +283,10 @@ interface BodyDeps {
   homeLoading: boolean;
   isAdminTier: boolean;
   range: DateRange | null;
+  /** The page's client clock. Relative times ("2 min ago") are rendered
+   *  against it rather than each row calling `new Date()`, so every row on
+   *  one paint agrees — and so SSR never renders a time at all. */
+  now: Date | null;
 }
 
 /**
@@ -301,6 +306,7 @@ function tileBody(id: string, d: BodyDeps): ReactNode {
     );
   }
   if (id === "c1") return <FoldersBody canRead={d.isAdminTier} />;
+  if (id === "c2") return <IntegrationsBody now={d.now} />;
   if (id === "d1") return <ActivityBody range={d.range} canRead={d.isAdminTier} />;
   return null;
 }

@@ -433,6 +433,105 @@
   color: var(--text-muted);
 }
 
+/* ── Connector rows ─────────────────────────────────────────
+   Two columns on desktop so six connectors fit without scrolling; one on
+   anything narrower, where two would crush the pill. */
+.rp-conns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+  align-content: start;
+}
+
+@media (max-width: 1279px) {
+  .rp-conns { grid-template-columns: 1fr; }
+}
+
+.rp-conn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 0;
+}
+
+.rp-conn-mark {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rp-conn-tx { min-width: 0; flex: 1; }
+
+.rp-conn-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-conn-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Reserve the line height so a row doesn't jump when the clock arrives. */
+  min-height: 16px;
+}
+
+/* ── Status pills ───────────────────────────────────────────
+   Every pill carries an icon AND a label — status is never colour alone
+   (brief §8). Red and orange as TEXT use the darker ramps; the vivid
+   values are ~3.1:1 and fail WCAG AA at 11px (WARP-633). */
+.rp-pill {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.rp-pill.is-ok { color: var(--success); }
+.rp-pill.is-warn { color: #9a5b00; }
+.rp-pill.is-bad { color: var(--color-system-red-text); }
+.rp-pill.is-accent { color: var(--brand); }
+.rp-pill.is-muted { color: var(--text-muted); }
+
+/* On dark the vivid ramps clear AA against the dark surface, and the
+   darkened light-mode values would not. */
+.dark .rp-pill.is-warn { color: var(--color-system-orange); }
+.dark .rp-pill.is-bad { color: var(--color-system-red); }
+
+.rp-chip.is-writes {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #9a5b00;
+}
+
+.dark .rp-chip.is-writes { color: var(--color-system-orange); }
+
 /* ── Chain-verify chip ──────────────────────────────────────
    Renders a server-side fact, not a control — styled as a static pill
    with no hover or press affordance. */

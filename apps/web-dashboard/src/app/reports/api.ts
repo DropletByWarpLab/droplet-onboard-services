@@ -110,6 +110,42 @@ export async function fetchActivityRange(
   return res.json();
 }
 
+// ── GET /api/integrations ────────────────────────────────────────────────
+//
+// Returns a BARE ARRAY, not an envelope. `lastSyncedAt` is new in WARP-1998 —
+// before that the hub list carried no timestamp at all and the only way to
+// get one was the provider-specific /api/integrations/eaglesoft route.
+
+/** The seven explicit lifecycle states. A provider with no row reports
+ *  NOT_CONFIGURED — it is never absent-meaning-off. */
+export type IntegrationStatusName =
+  | "NOT_CONFIGURED"
+  | "PROVISIONING"
+  | "CONNECTED"
+  | "DEGRADED"
+  | "DRIFT_LOCKED"
+  | "ERROR"
+  | "DISABLED";
+
+export interface IntegrationSummary {
+  provider: string;
+  status: IntegrationStatusName;
+  configured: boolean;
+  writeEnabled: boolean;
+  /** ISO, or null when the provider has never synced (WARP-1998). */
+  lastSyncedAt: string | null;
+}
+
+export async function fetchIntegrations(): Promise<IntegrationSummary[]> {
+  const res = await authFetch("/api/integrations");
+  if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch integrations: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── GET /api/activity/verify ─────────────────────────────────────────────
 //
 // Server-side by necessity: the chain is HMAC-signed with a key that never

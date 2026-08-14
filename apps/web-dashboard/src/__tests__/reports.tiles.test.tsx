@@ -12,6 +12,7 @@ import React from "react";
 const fetchAdminFilesUsageMock = vi.fn();
 const fetchActivityRangeMock = vi.fn();
 const fetchChainVerifyMock = vi.fn();
+const fetchIntegrationsMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   fetchAdminFilesUsage: (...a: unknown[]) => fetchAdminFilesUsageMock(...a),
@@ -21,9 +22,16 @@ vi.mock("@/app/reports/api", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   fetchActivityRange: (...a: unknown[]) => fetchActivityRangeMock(...a),
   fetchChainVerify: (...a: unknown[]) => fetchChainVerifyMock(...a),
+  fetchIntegrations: (...a: unknown[]) => fetchIntegrationsMock(...a),
 }));
 
-import { ActivityBody, ChainChip, FoldersBody, NumberBody } from "@/app/reports/tiles";
+import {
+  ActivityBody,
+  ChainChip,
+  FoldersBody,
+  IntegrationsBody,
+  NumberBody,
+} from "@/app/reports/tiles";
 import type { HomeTile } from "@/app/reports/api";
 
 const RANGE = { from: "2026-08-14T00:00:00.000Z", to: "2026-08-15T00:00:00.000Z" };
@@ -308,6 +316,113 @@ describe("ActivityBody (WARP-1993)", () => {
     });
     render(<ActivityBody range={RANGE} canRead />);
     expect(await screen.findByText("9 files added to Operations")).toBeTruthy();
+  });
+});
+
+// ── Integrations ─────────────────────────────────────────────────────────
+
+describe("IntegrationsBody (WARP-1994)", () => {
+  const NOW = new Date("2026-08-14T09:41:00.000Z");
+  const conn = (over: Partial<Record<string, unknown>> = {}) => ({
+    provider: "eaglesoft-api",
+    status: "CONNECTED",
+    configured: true,
+    writeEnabled: false,
+    lastSyncedAt: "2026-08-14T09:39:00.000Z",
+    ...over,
+  });
+
+  it("sorts problems first — the broken one is never buried", async () => {
+    fetchIntegrationsMock.mockResolvedValue([
+      conn({ provider: "a-connected", status: "CONNECTED" }),
+      conn({ provider: "b-disabled", status: "DISABLED" }),
+      conn({ provider: "c-error", status: "ERROR" }),
+      conn({ provider: "d-degraded", status: "DEGRADED" }),
+    ]);
+    const { container } = render(<IntegrationsBody now={NOW} />);
+    await screen.findByText("Can't connect");
+    const marks = Array.from(container.querySelectorAll(".rp-conn")).map((r) =>
+      r.querySelector(".rp-pill")?.textContent,
+    );
+    expect(marks[0]).toBe("Can't connect");
+    expect(marks[1]).toBe("Needs attention");
+  });
+
+  it("renders all seven statuses without collapsing any", async () => {
+    const all = [
+      "CONNECTED",
+      "DEGRADED",
+      "DRIFT_LOCKED",
+      "ERROR",
+      "PROVISIONING",
+      "DISABLED",
+      "NOT_CONFIGURED",
+    ];
+    fetchIntegrationsMock.mockResolvedValue(
+      all.map((s, i) => conn({ provider: `p${i}`, status: s })),
+    );
+    const { container } = render(<IntegrationsBody now={NOW} />);
+    await screen.findByText("Connected");
+    const labels = Array.from(container.querySelectorAll(".rp-pill")).map((p) => p.textContent);
+    expect(new Set(labels).size).toBe(7);
+  });
+
+  it("shows the writes chip ONLY when writes are enabled", async () => {
+    fetchIntegrationsMock.mockResolvedValue([
+      conn({ provider: "reader", writeEnabled: false }),
+      conn({ provider: "writer", writeEnabled: true }),
+    ]);
+    render(<IntegrationsBody now={NOW} />);
+    // Read-only is the norm and gets no chip — absence is the quiet default.
+    expect(await screen.findAllByText("Writes on")).toHaveLength(1);
+  });
+
+  it("renders the three connector tracks distinguishably", async () => {
+    fetchIntegrationsMock.mockResolvedValue([
+      conn({ provider: "eaglesoft" }),
+      conn({ provider: "eaglesoft-api" }),
+      conn({ provider: "eaglesoft-export" }),
+    ]);
+    render(<IntegrationsBody now={NOW} />);
+    expect(await screen.findByText("Eaglesoft (direct SQL)")).toBeTruthy();
+    expect(screen.getByText("Eaglesoft API")).toBeTruthy();
+    expect(screen.getByText("Eaglesoft (export)")).toBeTruthy();
+  });
+
+  it("never claims a sync for a connector that has none", async () => {
+    fetchIntegrationsMock.mockResolvedValue([
+      conn({ provider: "eaglesoft", status: "NOT_CONFIGURED", lastSyncedAt: null }),
+    ]);
+    const { container } = render(<IntegrationsBody now={NOW} />);
+    await screen.findByText("Not connected");
+    expect(container.textContent).toMatch(/Never connected/);
+    expect(container.textContent).not.toMatch(/Synced/);
+  });
+
+  it("holds the sub-line blank until the client clock exists", async () => {
+    // SSR has no clock; rendering a relative time there would hydrate
+    // against a different value.
+    fetchIntegrationsMock.mockResolvedValue([conn()]);
+    const { container } = render(<IntegrationsBody now={null} />);
+    await screen.findByText("Eaglesoft API");
+    expect(container.querySelector(".rp-conn-sub")?.textContent?.trim()).toBe("");
+  });
+
+  it("offers an empty state with a way to act", async () => {
+    fetchIntegrationsMock.mockResolvedValue([]);
+    render(<IntegrationsBody now={NOW} />);
+    expect(await screen.findByText("Nothing connected yet")).toBeTruthy();
+    expect(screen.getByText(/Connect a system/)).toBeTruthy();
+  });
+
+  it("offers retry on failure and re-fetches when pressed", async () => {
+    fetchIntegrationsMock.mockRejectedValueOnce(new Error("boom"));
+    render(<IntegrationsBody now={NOW} />);
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    fetchIntegrationsMock.mockResolvedValue([conn()]);
+    fireEvent.click(retry);
+    await waitFor(() => expect(fetchIntegrationsMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Eaglesoft API")).toBeTruthy();
   });
 });
 
