@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import memoryForget from "../../../src/handlers/memory/forget.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
@@ -36,7 +37,7 @@ describe("memory_forget", () => {
   it("rejects a missing id", async () => {
     const findUnique = vi.fn();
     const update = vi.fn();
-    const res = await memoryForget.handler({}, ctxWith(findUnique, update, "owner"));
+    const res = await runApproved(memoryForget, {}, ctxWith(findUnique, update, "owner"));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("INVALID_ARGS");
     expect(findUnique).not.toHaveBeenCalled();
@@ -46,7 +47,7 @@ describe("memory_forget", () => {
   it("rejects an empty id", async () => {
     const findUnique = vi.fn();
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "   " },
       ctxWith(findUnique, update, "owner"),
     );
@@ -59,7 +60,7 @@ describe("memory_forget", () => {
   it("rejects a non-string id", async () => {
     const findUnique = vi.fn();
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: 42 },
       ctxWith(findUnique, update, "owner"),
     );
@@ -71,7 +72,7 @@ describe("memory_forget", () => {
   it("returns NOT_FOUND when no fact has that id", async () => {
     const findUnique = vi.fn().mockResolvedValue(null);
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "missing", confirmed: true },
       ctxWith(findUnique, update, "owner"),
     );
@@ -87,7 +88,7 @@ describe("memory_forget", () => {
   it("returns NOT_FOUND for an already-inactive fact", async () => {
     const findUnique = vi.fn().mockResolvedValue(factRow({ active: false }));
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1", confirmed: true },
       ctxWith(findUnique, update, "owner"),
     );
@@ -110,7 +111,7 @@ describe("memory_forget", () => {
       .fn()
       .mockResolvedValue(factRow({ audience: "owner", fact: "The safe code is 4711" }));
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1", confirmed: true },
       ctxWith(findUnique, update, "guest"),
     );
@@ -130,7 +131,7 @@ describe("memory_forget", () => {
       .fn()
       .mockResolvedValue(factRow({ audience: "family", fact: "Household dinner at 7pm" }));
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1", confirmed: true },
       ctxWith(findUnique, update),
     );
@@ -148,7 +149,7 @@ describe("memory_forget", () => {
       .fn()
       .mockResolvedValue(factRow({ audience: "guest", fact: "Wifi guest password rotates monthly" }));
     const update = vi.fn().mockResolvedValue(factRow({ audience: "guest", active: false }));
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1", confirmed: true },
       ctxWith(findUnique, update, "owner"),
     );
@@ -169,7 +170,7 @@ describe("memory_forget", () => {
   it("does NOT write on the first call — returns confirmation_required echoing the fact", async () => {
     const findUnique = vi.fn().mockResolvedValue(factRow());
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1" },
       ctxWith(findUnique, update, "owner"),
     );
@@ -193,7 +194,7 @@ describe("memory_forget", () => {
   it("explicit confirmed:false also returns confirmation_required", async () => {
     const findUnique = vi.fn().mockResolvedValue(factRow());
     const update = vi.fn();
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1", confirmed: false },
       ctxWith(findUnique, update, "owner"),
     );
@@ -205,7 +206,7 @@ describe("memory_forget", () => {
   it("soft-disables on a confirmed re-issue — exactly { active: false }", async () => {
     const findUnique = vi.fn().mockResolvedValue(factRow());
     const update = vi.fn().mockResolvedValue(factRow({ active: false }));
-    const res = await memoryForget.handler(
+    const res = await runApproved(memoryForget, 
       { id: "f1", confirmed: true },
       ctxWith(findUnique, update, "owner"),
     );
@@ -242,6 +243,6 @@ describe("memory_forget", () => {
     };
     expect(schema.required).toContain("id");
     expect(schema.additionalProperties).toBe(false);
-    expect(Object.keys(schema.properties).sort()).toEqual(["confirmed", "id"]);
+    expect(Object.keys(schema.properties).sort()).toEqual(["confirmation_token", "id"]);
   });
 });

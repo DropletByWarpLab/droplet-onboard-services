@@ -15,7 +15,13 @@
  * acting human and flows through the exact participant/module checks a
  * direct dashboard call gets (handlers/email/send.ts posture).
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "team_chat_send_message";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
@@ -47,10 +53,10 @@ const inputSchema = {
       type: "string",
       description: "The message text (1-4000 characters).",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved sending this exact message in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with a preview to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["body"],
@@ -122,7 +128,15 @@ async function handler(
   // roster is read best-effort so the approval copy shows DISPLAY NAMES
   // ("Bob B", not "bob" — UX review); any roster hiccup falls back to
   // the typed usernames, and phase 2 still validates them loudly.
-  if (args.confirmed !== true) {
+  // Bound to the recipients AND the body: approving one message must not
+  // authorise sending different text, or the same text to someone else.
+  const fingerprint = confirmationFingerprint([
+    TOOL_NAME,
+    recipients,
+    threadIdArg,
+    body,
+  ]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     let names = recipients;
     if (hasRecipients) {
       try {
@@ -148,13 +162,14 @@ async function handler(
     const preview = truncateForPreview(body);
     return confirmationRequired(
       `I'd like to send a Messages chat to ${target}: "${preview}". ` +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       {
         type: "team_chat_send_message",
         ...(hasRecipients ? { recipients } : { threadId: threadIdArg }),
         preview,
       },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -226,7 +241,7 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_message",
   description:
-    "Send a Messages (team chat) text to other members on the user's behalf. recipients = member USERNAMES (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Send a Messages (team chat) text to other members on the user's behalf. recipients = member USERNAMES (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

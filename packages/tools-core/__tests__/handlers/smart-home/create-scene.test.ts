@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import createScene from "../../../src/handlers/smart-home/create-scene.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 /** Grouped shape returned by GET /api/matter/devices (MatterGrouped). */
@@ -90,7 +91,7 @@ describe("create_scene", () => {
   ])("rejects %s with INVALID_ARGS before any lookup or write", async (_label, args) => {
     const post = vi.fn();
     const listDevices = vi.fn();
-    const r = await createScene.handler(args as Record<string, unknown>, ctxWith(post, listDevices));
+    const r = await runApproved(createScene, args as Record<string, unknown>, ctxWith(post, listDevices));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
     expect(listDevices).not.toHaveBeenCalled();
@@ -101,7 +102,7 @@ describe("create_scene", () => {
 
   it("unconfirmed call returns confirmation_required echoing the RESOLVED devices, without POSTing", async () => {
     const post = vi.fn();
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       {
         name: "Movie night",
         actions: [
@@ -149,7 +150,7 @@ describe("create_scene", () => {
         201,
       ),
     );
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       {
         name: "Movie night",
         icon: "film",
@@ -187,7 +188,7 @@ describe("create_scene", () => {
     const post = vi.fn().mockResolvedValue(
       jsonResponse({ id: "scene-2", name: "Goodnight", actions: [{}] }, 201),
     );
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       { name: "Goodnight", actions: [{ device: "201", command: "lock" }], confirmed: true },
       ctxWith(post),
     );
@@ -202,7 +203,7 @@ describe("create_scene", () => {
 
   it("returns DEVICE_NOT_FOUND for an unknown device name", async () => {
     const post = vi.fn();
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       { name: "Movie night", actions: [{ device: "garage heater", command: "turn_on" }] },
       ctxWith(post),
     );
@@ -213,7 +214,7 @@ describe("create_scene", () => {
 
   it("returns AMBIGUOUS_DEVICE with candidates when a name matches several devices", async () => {
     const post = vi.fn();
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       { name: "Movie night", actions: [{ device: "Hue Bulb", command: "turn_off" }] },
       ctxWith(post),
     );
@@ -234,7 +235,7 @@ describe("create_scene", () => {
   it("returns DEVICE_RESOLUTION_FAILED when the device list is unavailable", async () => {
     const post = vi.fn();
     const listDevices = vi.fn().mockRejectedValue(new Error("sidecar down"));
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       { name: "Movie night", actions: [{ device: "living-room lamp", command: "turn_off" }] },
       ctxWith(post, listDevices),
     );
@@ -252,7 +253,7 @@ describe("create_scene", () => {
     const post = vi.fn().mockResolvedValue(
       jsonResponse({ error: "Invalid scene", details: { fieldErrors: {} } }, 400),
     );
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       { name: "Movie night", actions: [{ device: "101", command: "turn_off" }], confirmed: true },
       ctxWith(post),
     );
@@ -265,7 +266,7 @@ describe("create_scene", () => {
 
   it("maps any other non-2xx to CREATE_FAILED", async () => {
     const post = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
-    const r = await createScene.handler(
+    const r = await runApproved(createScene, 
       { name: "Movie night", actions: [{ device: "101", command: "turn_off" }], confirmed: true },
       ctxWith(post),
     );

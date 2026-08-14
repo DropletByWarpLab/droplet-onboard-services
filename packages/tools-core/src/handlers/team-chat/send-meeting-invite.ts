@@ -14,7 +14,13 @@
  * returns `confirmation_required` with ZERO HTTP; only `confirmed: true`
  * after an explicit yes dispatches, as X-Droplet-User = ctx.userId.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "team_chat_send_meeting_invite";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
@@ -63,10 +69,10 @@ const inputSchema = {
       type: "string",
       description: "Optional note for the invite (1-2000 characters).",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved this exact meeting invite in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the details to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["recipients", "title", "starts_at"],
@@ -159,7 +165,8 @@ async function handler(
   // The roster is read best-effort so the approval copy shows DISPLAY
   // NAMES; the timestamp renders in the readable local form (UX review —
   // raw ISO-UTC is machine copy). The ISO original stays in `details`.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, recipients, startsAt]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     let names = recipients;
     try {
       const rosterRes = await ctx.http.orchestrator.get(
@@ -206,8 +213,8 @@ async function handler(
       `I'd like to invite ${names.join(", ")} to "${title}" starting ${whenReadable}${extras.length > 0 ? ` (${extras})` : ""}. ` +
         (notePreview !== undefined ? `Note on the invite: "${notePreview}". ` : "") +
         "A meeting invite card will be posted in Messages and the meeting will land on the organizer's calendar. " +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       {
         type: "team_chat_send_meeting_invite",
         recipients,
@@ -217,6 +224,7 @@ async function handler(
         ...(location !== undefined ? { location } : {}),
         ...(notePreview !== undefined ? { notePreview } : {}),
       },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -293,7 +301,7 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_meeting_invite",
   description:
-    "Invite members to a meeting through Messages (team chat) on the user's behalf. recipients = member USERNAMES; the meeting card is posted in the (deduped 1:1 or new group) thread, recipients RSVP from it, and the meeting lands on the organizer's local calendar with a reminder before start. Two-step: the first call returns confirmation_required with the meeting details — relay them to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Invite members to a meeting through Messages (team chat) on the user's behalf. recipients = member USERNAMES; the meeting card is posted in the (deduped 1:1 or new group) thread, recipients RSVP from it, and the meeting lands on the organizer's local calendar with a reminder before start. Two-step: the first call returns confirmation_required with the meeting details — relay them to the user, and only after they explicitly approve, approval is handled outside this conversation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

@@ -24,7 +24,13 @@
  * confirmation message/details, not in success data, not in errors
  * (test-pinned via JSON.stringify, like set_wifi_password).
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "share_file";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
 
@@ -63,10 +69,10 @@ const inputSchema = {
       type: "boolean",
       description: "Allow anyone with the link to EDIT the file (default false: view-only).",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved creating this exact public link in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the details to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["path"],
@@ -144,12 +150,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // Confirmation gate — AFTER validation (a malformed call should fail
   // loudly, not ask the user to approve it) and BEFORE any HTTP. The
   // details block never carries the password itself.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, path, expireDate, passwordProtected, allowEdit]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to create a PUBLIC share link for "${path}" — anyone with the link can ${allowEdit ? "view AND EDIT" : "view"} the file. The link expires on ${expireDate} and is ${passwordProtected ? "password-protected" : "NOT password-protected"}. ` +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       { type: "share_file", path, expiresAt: expireDate, passwordProtected, allowEdit },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -201,7 +209,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "share_file",
   description:
-    "Create a PUBLIC link to a file on the Droplet's Nextcloud — anyone with the link can open it (view-only unless allow_edit). The link always expires (expires_days 1-90, default 7) and can be password-protected (password 8-64 chars). Two-step: the first call returns confirmation_required stating the link is public, its expiry, and whether it has a password — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Create a PUBLIC link to a file on the Droplet's Nextcloud — anyone with the link can open it (view-only unless allow_edit). The link always expires (expires_days 1-90, default 7) and can be password-protected (password 8-64 chars). Two-step: the first call returns confirmation_required stating the link is public, its expiry, and whether it has a password — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

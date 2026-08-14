@@ -13,7 +13,13 @@
  * the user explicitly approves — same handler-enforced two-phase
  * contract as `memory_forget`.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "delete_clip";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -24,10 +30,10 @@ const inputSchema = {
       description:
         "Frigate event id of the clip to delete. Find event ids via list_clips or list_camera_events.",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved deleting this exact clip in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the event id to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["event_id"],
@@ -49,13 +55,15 @@ async function handler(
 
   // Confirmation gate — BEFORE any HTTP call. Deleting a clip removes
   // the recording permanently; the agent must never do it unattended.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, eventId]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to permanently delete the recording clip for camera event "${eventId}". ` +
         "This cannot be undone — the clip and its snapshot are removed from disk. " +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       { type: "delete_clip", event_id: eventId },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -90,7 +98,7 @@ async function handler(
 const tool: Tool = {
   name: "delete_clip",
   description:
-    "Permanently delete a camera event's recording clip (and its snapshot) from disk. Irreversible. Two-step: the first call returns confirmation_required with the event id — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Find event ids via list_clips or list_camera_events.",
+    "Permanently delete a camera event's recording clip (and its snapshot) from disk. Irreversible. Two-step: the first call returns confirmation_required with the event id — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation. Find event ids via list_clips or list_camera_events.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

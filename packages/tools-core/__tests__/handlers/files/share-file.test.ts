@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import shareFile from "../../../src/handlers/files/share-file.js";
+import { runApproved } from "../../helpers/approve.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
@@ -59,10 +61,100 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// WARP-2002 — the confirmation token is bound to the SHARE PARAMETERS, not
+// just the path. Approving a view-only, password-protected, 7-day link must
+// not authorise a public editable one for the same file. Mutation that proves
+// these bite: drop `allowEdit` (or `passwordProtected`, or `expireDate`) from
+// the fingerprint in share-file.ts — each case below turns red.
+describe("share_file — token is bound to the link's blast radius", () => {
+  async function tokenFor(
+    args: Record<string, unknown>,
+    ctx: Parameters<typeof shareFile.handler>[1],
+  ): Promise<string> {
+    const first = await runApproved(shareFile, args, ctx);
+    if (first.ok) throw new Error("expected confirmation_required");
+    const details = first.error.details as { confirmationToken?: string };
+    if (typeof details?.confirmationToken !== "string") {
+      throw new Error("no token minted");
+    }
+    return details.confirmationToken;
+  }
+
+  it("a token approved for a VIEW-ONLY link cannot mint an EDITABLE one", async () => {
+    const post = vi.fn();
+    const ctx = ctxWith(post);
+    const token = await tokenFor({ path: "/Docs/report.md" }, ctx);
+    const r = await runApproved(shareFile, 
+      { path: "/Docs/report.md", allow_edit: true, confirmation_token: token },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("a token approved for a PASSWORD-PROTECTED link cannot mint an open one", async () => {
+    const post = vi.fn();
+    const ctx = ctxWith(post);
+    const token = await tokenFor(
+      { path: "/Docs/report.md", password: "correct-horse" },
+      ctx,
+    );
+    const r = await runApproved(shareFile, 
+      { path: "/Docs/report.md", confirmation_token: token },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("a token approved for one expiry cannot mint a longer-lived link", async () => {
+    const post = vi.fn();
+    const ctx = ctxWith(post);
+    const token = await tokenFor(
+      { path: "/Docs/report.md", expires_days: 1 },
+      ctx,
+    );
+    const r = await runApproved(shareFile, 
+      { path: "/Docs/report.md", expires_days: 90, confirmation_token: token },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("a token approved for one PATH cannot share a different file", async () => {
+    const post = vi.fn();
+    const ctx = ctxWith(post);
+    const token = await tokenFor({ path: "/Docs/report.md" }, ctx);
+    const r = await runApproved(shareFile, 
+      { path: "/Docs/salaries.xlsx", confirmation_token: token },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("the matching parameters DO execute, so the above are not vacuous", async () => {
+    const post = vi.fn().mockResolvedValue(shareResponse());
+    const ctx = ctxWith(post);
+    const token = await tokenFor({ path: "/Docs/report.md" }, ctx);
+    const r = await runApproved(shareFile, 
+      { path: "/Docs/report.md", confirmation_token: token },
+      ctx,
+    );
+    expect(r.ok).toBe(true);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("share_file", () => {
   it("returns AUTH_REQUIRED without ncToken", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", confirmed: true },
       ctxWith(post, { ncToken: "" }),
     );
@@ -74,7 +166,7 @@ describe("share_file", () => {
 
   it("returns AUTH_REQUIRED without userId", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", confirmed: true },
       ctxWith(post, { userId: "" }),
     );
@@ -85,7 +177,7 @@ describe("share_file", () => {
 
   it("rejects traversal paths with INVALID_PATH before any HTTP", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/../etc/passwd", confirmed: true },
       ctxWith(post),
     );
@@ -97,7 +189,7 @@ describe("share_file", () => {
   for (const bad of [0, 91, 1.5, "7"]) {
     it(`rejects expires_days ${JSON.stringify(bad)} with INVALID_ARGS`, async () => {
       const post = vi.fn();
-      const r = await shareFile.handler(
+      const r = await runApproved(shareFile, 
         { path: "/Docs/report.md", expires_days: bad, confirmed: true },
         ctxWith(post),
       );
@@ -109,7 +201,7 @@ describe("share_file", () => {
 
   it("rejects a too-short password WITHOUT echoing it", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", password: "short7!", confirmed: true },
       ctxWith(post),
     );
@@ -122,7 +214,7 @@ describe("share_file", () => {
   it("rejects a too-long password WITHOUT echoing it", async () => {
     const post = vi.fn();
     const tooLong = "p".repeat(65);
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", password: tooLong, confirmed: true },
       ctxWith(post),
     );
@@ -134,7 +226,7 @@ describe("share_file", () => {
 
   it("rejects non-boolean allow_edit with INVALID_ARGS", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", allow_edit: "yes", confirmed: true },
       ctxWith(post),
     );
@@ -148,7 +240,7 @@ describe("share_file", () => {
   // state, and explicitly approved.
   it("confirmation-first: states PUBLIC + expiry + no password, zero HTTP", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler({ path: "/Docs/report.md" }, ctxWith(post));
+    const r = await runApproved(shareFile, { path: "/Docs/report.md" }, ctxWith(post));
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.status).toBe("confirmation_required");
@@ -158,7 +250,7 @@ describe("share_file", () => {
       // Default 7-day expiry from the pinned clock.
       expect(r.error.message).toContain("2026-07-27");
       expect(r.error.message).toContain("NOT password-protected");
-      expect(r.error.details).toEqual({
+      expect(r.error.details).toMatchObject({
         type: "share_file",
         path: "/Docs/report.md",
         expiresAt: "2026-07-27",
@@ -171,7 +263,7 @@ describe("share_file", () => {
 
   it("confirmation echo flags password protection without echoing the password", async () => {
     const post = vi.fn();
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", password: SECRET, expires_days: 30 },
       ctxWith(post),
     );
@@ -187,7 +279,7 @@ describe("share_file", () => {
 
   it("confirmed: creates the share with the exact route, body, and NC identity headers", async () => {
     const post = vi.fn().mockResolvedValue(shareResponse());
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", confirmed: true },
       ctxWith(post),
     );
@@ -221,7 +313,7 @@ describe("share_file", () => {
 
   it("allow_edit maps to the file-safe edit bitmask (read|update = 3)", async () => {
     const post = vi.fn().mockResolvedValue(shareResponse({ permissions: 3 }));
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", allow_edit: true, confirmed: true },
       ctxWith(post),
     );
@@ -236,7 +328,7 @@ describe("share_file", () => {
 
   it("confirmed with password: sends it to the route but NEVER echoes it back", async () => {
     const post = vi.fn().mockResolvedValue(shareResponse({ hasPassword: true }));
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", password: SECRET, confirmed: true },
       ctxWith(post),
     );
@@ -256,7 +348,7 @@ describe("share_file", () => {
 
   it("omits the password key entirely when none was given", async () => {
     const post = vi.fn().mockResolvedValue(shareResponse());
-    await shareFile.handler({ path: "/Docs/report.md", confirmed: true }, ctxWith(post));
+    await runApproved(shareFile, { path: "/Docs/report.md", confirmed: true }, ctxWith(post));
     const body = post.mock.calls[0][1] as Record<string, unknown>;
     expect("password" in body).toBe(false);
   });
@@ -265,7 +357,7 @@ describe("share_file", () => {
     const post = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "File not found" }), { status: 404 }),
     );
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/gone.txt", password: SECRET, confirmed: true },
       ctxWith(post),
     );
@@ -281,7 +373,7 @@ describe("share_file", () => {
     const post = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "Invalid share request" }), { status: 400 }),
     );
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", password: SECRET, confirmed: true },
       ctxWith(post),
     );
@@ -295,7 +387,7 @@ describe("share_file", () => {
 
   it("maps other failures to SHARE_FAILED", async () => {
     const post = vi.fn().mockResolvedValue(new Response("", { status: 502 }));
-    const r = await shareFile.handler(
+    const r = await runApproved(shareFile, 
       { path: "/Docs/report.md", password: SECRET, confirmed: true },
       ctxWith(post),
     );

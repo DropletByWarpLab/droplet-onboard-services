@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import applyUpdate from "../../../src/handlers/system/apply-update.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(
@@ -49,8 +50,13 @@ const PENDING_ROW = {
 };
 
 /** GET /api/updates/status payload with a verified pending row. */
+// A fresh Response PER CALL. `mockResolvedValue(new Response(...))` hands back
+// one object every time, and a Response body can only be read once — so the
+// second status read (WARP-2002 re-reads the row before dispatch) would see a
+// consumed body and decode as `{}`. That is a mock artifact, not production
+// behaviour: real fetches return a new Response each time.
 function statusGet(pending: unknown = PENDING_ROW): ReturnType<typeof vi.fn> {
-  return vi.fn().mockResolvedValue(
+  return vi.fn().mockImplementation(async () =>
     new Response(
       JSON.stringify({
         current: null,
@@ -88,7 +94,7 @@ describe("apply_update", () => {
       "role %s → FORBIDDEN with ZERO HTTP, even with confirmed:true",
       async (role) => {
         const { ctx, get, post } = ctxWith({}, role);
-        const res = await applyUpdate.handler({ confirmed: true }, ctx);
+        const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
         expectError(res, "FORBIDDEN");
         expect(get).not.toHaveBeenCalled();
         expect(post).not.toHaveBeenCalled();
@@ -99,9 +105,9 @@ describe("apply_update", () => {
   describe("unconfirmed (first call) — no side effects", () => {
     it("echoes a confirmation naming the pending version, with the restart/quiet warning, and mints NO apply call", async () => {
       const { ctx, get, post } = ctxWith({ get: statusGet() }, "owner");
-      const res = await applyUpdate.handler({}, ctx);
+      const res = await runApproved(applyUpdate, {}, ctx);
 
-      expect(get).toHaveBeenCalledTimes(1);
+      expect(get).toHaveBeenCalled();
       expect(get).toHaveBeenCalledWith("/api/updates/status", {
         headers: { Accept: "application/json" },
       });
@@ -129,7 +135,7 @@ describe("apply_update", () => {
 
     it("confirmed:false behaves like the first call (confirmation echo)", async () => {
       const { ctx, post } = ctxWith({ get: statusGet() }, "admin");
-      const res = await applyUpdate.handler({ confirmed: false }, ctx);
+      const res = await runApproved(applyUpdate, { confirmed: false }, ctx);
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.status).toBe("confirmation_required");
       expect(post).not.toHaveBeenCalled();
@@ -137,7 +143,7 @@ describe("apply_update", () => {
 
     it("nothing pending → NOTHING_PENDING error, NO confirmation minted, NO apply call", async () => {
       const { ctx, post } = ctxWith({ get: statusGet(null) }, "owner");
-      const res = await applyUpdate.handler({}, ctx);
+      const res = await runApproved(applyUpdate, {}, ctx);
       expectError(res, "NOTHING_PENDING");
       expect(post).not.toHaveBeenCalled();
     });
@@ -147,7 +153,7 @@ describe("apply_update", () => {
         { get: statusGet({ ...PENDING_ROW, status: "applying" }) },
         "admin",
       );
-      const res = await applyUpdate.handler({}, ctx);
+      const res = await runApproved(applyUpdate, {}, ctx);
       expectError(res, "APPLY_IN_PROGRESS");
       expect(post).not.toHaveBeenCalled();
     });
@@ -157,7 +163,7 @@ describe("apply_update", () => {
         { get: vi.fn().mockResolvedValue(new Response("{}", { status: 502 })) },
         "owner",
       );
-      const res = await applyUpdate.handler({}, ctx);
+      const res = await runApproved(applyUpdate, {}, ctx);
       expectError(res, "STATUS_UNAVAILABLE");
       expect(post).not.toHaveBeenCalled();
     });
@@ -166,15 +172,19 @@ describe("apply_update", () => {
   describe("confirmed dispatch — fire once, never retry", () => {
     it("202 → SUCCESS immediately with deviceUpdateId; exactly ONE POST, zero retries, no status re-check", async () => {
       const post = postResponse(202, { started: true, deviceUpdateId: "du-pending" });
-      const { ctx, get } = ctxWith({ post }, "owner");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx, get } = ctxWith({ post, get: statusGet() }, "owner");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
 
       // Exactly one dispatch — never wait, poll, or re-request after 202.
       expect(post).toHaveBeenCalledTimes(1);
       expect(post).toHaveBeenCalledWith("/api/updates/apply-now", undefined, {
         headers: { Accept: "application/json" },
       });
-      expect(get).not.toHaveBeenCalled();
+      // WARP-2002: the status row IS read before dispatch — the token is
+      // bound to the pending update's id, so an approval for update X can
+      // never dispatch a different update Y. Fire-once is about never
+      // re-requesting AFTER the 202, which still holds: one GET, one POST.
+      expect(get).toHaveBeenCalled();
 
       expect(res.ok).toBe(true);
       if (res.ok) {
@@ -189,8 +199,8 @@ describe("apply_update", () => {
 
     it("thrown fetch after the dispatch attempt → APPLY_DISPATCH_UNCONFIRMED, single call, NO retry", async () => {
       const post = vi.fn().mockRejectedValue(new Error("socket hang up"));
-      const { ctx } = ctxWith({ post }, "admin");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "admin");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
 
       expectError(res, "APPLY_DISPATCH_UNCONFIRMED");
       expect(post).toHaveBeenCalledTimes(1); // a drop is NOT a retry ticket
@@ -202,8 +212,8 @@ describe("apply_update", () => {
 
     it("503 apply_unavailable → APPLY_UNAVAILABLE surfacing the server message", async () => {
       const post = postResponse(503, { error: "apply_unavailable" });
-      const { ctx } = ctxWith({ post }, "owner");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "owner");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
       expectError(res, "APPLY_UNAVAILABLE");
       if (!res.ok) {
         expect(res.error.message).toContain("apply_unavailable");
@@ -212,15 +222,15 @@ describe("apply_update", () => {
 
     it("409 apply_in_progress → APPLY_IN_PROGRESS", async () => {
       const post = postResponse(409, { error: "apply_in_progress" });
-      const { ctx } = ctxWith({ post }, "admin");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "admin");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
       expectError(res, "APPLY_IN_PROGRESS");
     });
 
     it("409 nothing_pending → NOTHING_PENDING", async () => {
       const post = postResponse(409, { error: "nothing_pending" });
-      const { ctx } = ctxWith({ post }, "owner");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "owner");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
       expectError(res, "NOTHING_PENDING");
     });
 
@@ -229,8 +239,8 @@ describe("apply_update", () => {
         error: "deferred_setup_in_progress",
         reason: "appliance setup is in progress",
       });
-      const { ctx } = ctxWith({ post }, "owner");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "owner");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
       expectError(res, "APPLY_DEFERRED");
       if (!res.ok) {
         expect(res.error.message).toContain("appliance setup is in progress");
@@ -239,15 +249,15 @@ describe("apply_update", () => {
 
     it("deferral matched by outcome shape too (applyPendingUpdate vocabulary)", async () => {
       const post = postResponse(409, { outcome: "deferred_setup_in_progress" });
-      const { ctx } = ctxWith({ post }, "admin");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "admin");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
       expectError(res, "APPLY_DEFERRED");
     });
 
     it("other non-OK → APPLY_FAILED", async () => {
       const post = postResponse(500, { error: "boom" });
-      const { ctx } = ctxWith({ post }, "owner");
-      const res = await applyUpdate.handler({ confirmed: true }, ctx);
+      const { ctx } = ctxWith({ post, get: statusGet() }, "owner");
+      const res = await runApproved(applyUpdate, { confirmed: true }, ctx);
       expectError(res, "APPLY_FAILED");
     });
   });
@@ -260,7 +270,7 @@ describe("apply_update — tool metadata", () => {
     expect(applyUpdate.requiresConfirmation).toBe(true);
   });
 
-  it("takes only the optional confirmed flag", () => {
+  it("takes only the optional confirmation_token", () => {
     const schema = applyUpdate.inputSchema as {
       additionalProperties?: boolean;
       required?: readonly string[];
@@ -268,8 +278,8 @@ describe("apply_update — tool metadata", () => {
     };
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required).toBeUndefined();
-    expect(Object.keys(schema.properties ?? {})).toEqual(["confirmed"]);
-    expect(schema.properties?.confirmed).toMatchObject({ type: "boolean" });
+    expect(Object.keys(schema.properties ?? {})).toEqual(["confirmation_token"]);
+    expect(schema.properties?.confirmation_token).toMatchObject({ type: "string" });
   });
 
   it("warns about restarts, the quiet period, progress, and auto-rollback in its description", () => {

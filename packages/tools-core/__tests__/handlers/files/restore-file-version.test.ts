@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import restoreFileVersion from "../../../src/handlers/files/restore-file-version.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
@@ -28,7 +29,7 @@ const ARGS = { path: "/Docs/report.md", version: "1752800000" };
 describe("restore_file_version", () => {
   it("returns AUTH_REQUIRED without ncToken", async () => {
     const post = vi.fn();
-    const r = await restoreFileVersion.handler(
+    const r = await runApproved(restoreFileVersion, 
       { ...ARGS, confirmed: true },
       ctxWith(post, { ncToken: "" }),
     );
@@ -40,7 +41,7 @@ describe("restore_file_version", () => {
 
   it("returns AUTH_REQUIRED without userId", async () => {
     const post = vi.fn();
-    const r = await restoreFileVersion.handler(
+    const r = await runApproved(restoreFileVersion, 
       { ...ARGS, confirmed: true },
       ctxWith(post, { userId: "" }),
     );
@@ -51,7 +52,7 @@ describe("restore_file_version", () => {
 
   it("rejects traversal paths with INVALID_PATH before any HTTP", async () => {
     const post = vi.fn();
-    const r = await restoreFileVersion.handler(
+    const r = await runApproved(restoreFileVersion, 
       { path: "/../etc/passwd", version: "1", confirmed: true },
       ctxWith(post),
     );
@@ -63,7 +64,7 @@ describe("restore_file_version", () => {
   for (const bad of [undefined, "", "   ", 1752800000]) {
     it(`rejects version ${JSON.stringify(bad)} with INVALID_ARGS`, async () => {
       const post = vi.fn();
-      const r = await restoreFileVersion.handler(
+      const r = await runApproved(restoreFileVersion, 
         { path: "/Docs/report.md", version: bad, confirmed: true },
         ctxWith(post),
       );
@@ -79,7 +80,7 @@ describe("restore_file_version", () => {
   for (const confirmed of [undefined, false] as const) {
     it(`confirmation-first: confirmed=${String(confirmed)} → confirmation_required, zero HTTP`, async () => {
       const post = vi.fn();
-      const r = await restoreFileVersion.handler(
+      const r = await runApproved(restoreFileVersion, 
         confirmed === undefined ? { ...ARGS } : { ...ARGS, confirmed },
         ctxWith(post),
       );
@@ -94,7 +95,7 @@ describe("restore_file_version", () => {
         expect(r.error.message).toContain("1752800000");
         expect(r.error.message).toContain("replace the file's current content");
         expect(r.error.message).toContain("keeps the current content as the newest version");
-        expect(r.error.details).toEqual({
+        expect(r.error.details).toMatchObject({
           type: "restore_file_version",
           path: "/Docs/report.md",
           version: "1752800000",
@@ -111,7 +112,7 @@ describe("restore_file_version", () => {
         { status: 200 },
       ),
     );
-    const r = await restoreFileVersion.handler({ ...ARGS, confirmed: true }, ctxWith(post));
+    const r = await runApproved(restoreFileVersion, { ...ARGS, confirmed: true }, ctxWith(post));
     expect(post).toHaveBeenCalledWith(
       "/versions/restore",
       { path: "/Docs/report.md", versionId: "1752800000" },
@@ -137,7 +138,7 @@ describe("restore_file_version", () => {
     const post = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "File not found" }), { status: 404 }),
     );
-    const r = await restoreFileVersion.handler({ ...ARGS, confirmed: true }, ctxWith(post));
+    const r = await runApproved(restoreFileVersion, { ...ARGS, confirmed: true }, ctxWith(post));
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error.code).toBe("NOT_FOUND");
@@ -147,7 +148,7 @@ describe("restore_file_version", () => {
 
   it("maps other failures to RESTORE_FAILED", async () => {
     const post = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
-    const r = await restoreFileVersion.handler({ ...ARGS, confirmed: true }, ctxWith(post));
+    const r = await runApproved(restoreFileVersion, { ...ARGS, confirmed: true }, ctxWith(post));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("RESTORE_FAILED");
   });

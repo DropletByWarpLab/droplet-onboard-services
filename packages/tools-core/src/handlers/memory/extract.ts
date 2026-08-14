@@ -16,7 +16,13 @@
  * tool. `evidenceChatId` is recommended so the fact's row carries a
  * back-link to the source conversation (FEATURES.md §5 spec field).
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "memory_extract_fact";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -39,10 +45,10 @@ const inputSchema = {
       description:
         "UUID of the ChatSession this fact was extracted from. Optional but recommended for traceability.",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved saving this exact fact in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the fact to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["category", "fact"],
@@ -80,12 +86,14 @@ async function handler(
   // The details block mirrors the WARP-640 confirmation shape (`type`
   // discriminator) so the dashboard chip renders a meaningful "needs
   // approval" state and a future one-click approve can extend it.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, category, fact]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to remember this ${category.toLowerCase()} fact: "${fact}". ` +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       { type: "memory_fact_save", category, fact, evidenceChatId },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -123,7 +131,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_extract_fact",
   description:
-    "Persist a durable memory fact about the user or workspace. Use when the conversation reveals a preference, recurring workflow, scope assumption, or schedule the user has stated. Two-step: the first call returns confirmation_required with the proposed fact — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Pair with memory_recall to check if the fact already exists before extracting.",
+    "Persist a durable memory fact about the user or workspace. Use when the conversation reveals a preference, recurring workflow, scope assumption, or schedule the user has stated. Two-step: the first call returns confirmation_required with the proposed fact — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation. Pair with memory_recall to check if the fact already exists before extracting.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

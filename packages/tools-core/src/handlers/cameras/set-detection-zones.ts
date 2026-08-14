@@ -24,7 +24,13 @@
  * sending. `inertia` is intentionally not exposed — the route defaults
  * it to 3.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "set_detection_zones";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 /** Mirror of the orchestrator route's CAMERA_NAME_RE. */
@@ -96,10 +102,10 @@ const inputSchema = {
         additionalProperties: false,
       },
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved this exact zone change (including the brief NVR restart) in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with a summary to relay to the user.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["camera", "zones"],
@@ -202,7 +208,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
   // Confirmation gate — AFTER validation, BEFORE any HTTP. The restart
   // is the whole reason this is Tier-2, so the echo must carry it.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, camera, zones, motionMasks ?? null]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     const names = zones.map((z) => z.name);
     const summary =
       zones.length === 0
@@ -213,9 +220,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return confirmationRequired(
       `I'd like to ${summary}${maskNote}. Saving RESTARTS the NVR (Frigate) — ` +
         "ALL cameras briefly stop recording and detecting for about 5-15 seconds. " +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       { type: "set_detection_zones", camera, zones: names },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -270,7 +278,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_detection_zones",
   description:
-    "Define or replace a camera's motion-detection zones (and optionally its motion masks). Zones are polygons in normalized [0,1] coordinates that scope detection and alerts to areas like a driveway or porch; the list you pass wholesale-replaces the camera's existing zones. WARNING: saving restarts the NVR (Frigate) — ALL cameras briefly stop recording and detecting for about 5-15 seconds. Two-step: the first call returns confirmation_required summarizing the zones and the restart — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Define or replace a camera's motion-detection zones (and optionally its motion masks). Zones are polygons in normalized [0,1] coordinates that scope detection and alerts to areas like a driveway or porch; the list you pass wholesale-replaces the camera's existing zones. WARNING: saving restarts the NVR (Frigate) — ALL cameras briefly stop recording and detecting for about 5-15 seconds. Two-step: the first call returns confirmation_required summarizing the zones and the restart — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

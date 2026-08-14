@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import memoryExtractFact from "../../../src/handlers/memory/extract.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
@@ -20,7 +21,7 @@ function ctxWith(
 describe("memory_extract_fact", () => {
   it("rejects unknown category", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "BogusBucket", fact: "x" },
       ctxWith(create),
     );
@@ -31,7 +32,7 @@ describe("memory_extract_fact", () => {
 
   it("accepts the WARP-1120 Business category (D-9)", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "Business", fact: "We invoice clients on the 1st.", confirmed: false },
       ctxWith(create),
     );
@@ -44,7 +45,7 @@ describe("memory_extract_fact", () => {
 
   it("rejects empty fact", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "Tone", fact: "  " },
       ctxWith(create),
     );
@@ -54,7 +55,7 @@ describe("memory_extract_fact", () => {
 
   it("rejects oversized fact (>2000 chars)", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "Tone", fact: "x".repeat(2001) },
       ctxWith(create),
     );
@@ -72,7 +73,7 @@ describe("memory_extract_fact", () => {
 
   it("does NOT write on the first call — returns confirmation_required", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "Workflow", fact: "Recap under 200 words" },
       ctxWith(create, "alice"),
     );
@@ -94,7 +95,7 @@ describe("memory_extract_fact", () => {
 
   it("explicit confirmed:false also returns confirmation_required", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "Tone", fact: "Be concise", confirmed: false },
       ctxWith(create, "alice"),
     );
@@ -105,7 +106,7 @@ describe("memory_extract_fact", () => {
 
   it("validation still runs before the confirmation gate", async () => {
     const create = vi.fn();
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       { category: "BogusBucket", fact: "x", confirmed: true },
       ctxWith(create),
     );
@@ -122,7 +123,7 @@ describe("memory_extract_fact", () => {
       fact: "Recap under 200 words",
       addedAt: at,
     });
-    const res = await memoryExtractFact.handler(
+    const res = await runApproved(memoryExtractFact, 
       {
         category: "Workflow",
         fact: "Recap under 200 words",
@@ -160,7 +161,7 @@ describe("memory_extract_fact", () => {
       fact: "Be concise",
       addedAt: new Date(),
     });
-    await memoryExtractFact.handler(
+    await runApproved(memoryExtractFact, 
       { category: "Tone", fact: "Be concise", confirmed: true },
       ctxWith(create, undefined),
     );

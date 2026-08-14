@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import sendMeetingInvite from "../../../src/handlers/team-chat/send-meeting-invite.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 interface FakeResponse {
@@ -56,7 +57,7 @@ describe("team_chat_send_meeting_invite", () => {
 
   it("fails closed without an acting user", async () => {
     const { ctx, get } = ctxWith({ userId: undefined });
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: futureIso() },
       ctx,
     );
@@ -67,14 +68,14 @@ describe("team_chat_send_meeting_invite", () => {
 
   it("rejects a garbage or past starts_at BEFORE asking for confirmation", async () => {
     const { ctx, get } = ctxWith({});
-    const garbage = await sendMeetingInvite.handler(
+    const garbage = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: "whenever" },
       ctx,
     );
     expect(garbage.ok).toBe(false);
     expect(garbage.error?.code).toBe("INVALID_ARGS");
 
-    const past = await sendMeetingInvite.handler(
+    const past = await runApproved(sendMeetingInvite, 
       {
         recipients: ["bob"],
         title: "Sync",
@@ -90,13 +91,13 @@ describe("team_chat_send_meeting_invite", () => {
 
   it("requires recipients and a 1-200 char title", async () => {
     const { ctx } = ctxWith({});
-    const none = await sendMeetingInvite.handler(
+    const none = await runApproved(sendMeetingInvite, 
       { recipients: [], title: "Sync", starts_at: futureIso() },
       ctx,
     );
     expect(none.ok).toBe(false);
 
-    const longTitle = await sendMeetingInvite.handler(
+    const longTitle = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "x".repeat(201), starts_at: futureIso() },
       ctx,
     );
@@ -107,7 +108,7 @@ describe("team_chat_send_meeting_invite", () => {
   it("phase 1: confirmation_required carries title + DISPLAY NAME + readable local time — roster read only, NO writes", async () => {
     const { ctx, get, post } = ctxWith({});
     const startsAt = futureIso();
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       {
         recipients: ["bob"],
         title: "Budget review",
@@ -147,7 +148,7 @@ describe("team_chat_send_meeting_invite", () => {
   it("phase 1 falls back to usernames when the roster read fails — still no writes", async () => {
     const get = vi.fn(async () => res(500, {}));
     const { ctx, post } = ctxWith({ get });
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: futureIso() },
       ctx,
     );
@@ -161,7 +162,7 @@ describe("team_chat_send_meeting_invite", () => {
     // it before approving, parity with send-message's body preview.
     const { ctx } = ctxWith({});
     const note = "n".repeat(300);
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: futureIso(), note },
       ctx,
     );
@@ -187,7 +188,7 @@ describe("team_chat_send_meeting_invite", () => {
       );
     const { ctx } = ctxWith({ post });
 
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       {
         recipients: ["bob"],
         title: "Budget review",
@@ -233,7 +234,7 @@ describe("team_chat_send_meeting_invite", () => {
   it("phase 2: unknown recipients fail loudly before any write", async () => {
     const post = vi.fn();
     const { ctx } = ctxWith({ post });
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["ghost"], title: "Sync", starts_at: futureIso(), confirmed: true },
       ctx,
     );
@@ -248,7 +249,7 @@ describe("team_chat_send_meeting_invite", () => {
       .mockResolvedValueOnce(res(200, { thread: { id: "thread-dm" } }))
       .mockResolvedValueOnce(res(400, { error: "starts_at_must_be_future" }));
     const { ctx } = ctxWith({ post });
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: futureIso(), confirmed: true },
       ctx,
     );
@@ -263,7 +264,7 @@ describe("team_chat_send_meeting_invite", () => {
       .mockResolvedValueOnce(res(200, { thread: { id: "thread-dm" } }))
       .mockResolvedValueOnce(res(404, { error: "thread_not_found" }));
     const { ctx } = ctxWith({ post });
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: futureIso(), confirmed: true },
       ctx,
     );
@@ -283,7 +284,7 @@ describe("team_chat_send_meeting_invite", () => {
         },
       });
     const { ctx } = ctxWith({ post });
-    const r = await sendMeetingInvite.handler(
+    const r = await runApproved(sendMeetingInvite, 
       { recipients: ["bob"], title: "Sync", starts_at: futureIso(), confirmed: true },
       ctx,
     );

@@ -30,7 +30,13 @@
  * (no HTTP); re-issue with `confirmed: true` only after an explicit user
  * yes. `list` is a read and never asks for confirmation.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "set_device_schedule";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 /** Sun=1..Sat=64 — mirror of lib/schedule-window.ts DAY_BIT. */
@@ -118,10 +124,10 @@ const inputSchema = {
         additionalProperties: false,
       },
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "For 'set' and 'clear' only: set true ONLY after the user has explicitly approved this exact schedule change in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with a summary to relay to the user.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["operation", "device_mac"],
@@ -327,24 +333,27 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   }
 
   // ── confirmation gate (set/clear) — AFTER validation, BEFORE HTTP ──
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, mac, operation, wireWindows]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     const message =
       operation === "set"
         ? `I'd like to set an internet schedule for device ${mac}: its internet access will be ` +
           `blocked during ${wireWindows.map(describeWindow).join("; ")} and allowed at all other times. ` +
           "This replaces any existing schedule for the device. " +
-          "Ask the user to approve, then re-issue this call with confirmed: true. " +
-          "Do NOT set confirmed: true without an explicit yes from the user."
+          "Ask the user to approve. " +
+          "You cannot approve on their behalf."
         : `I'd like to remove the internet schedule for device ${mac} — it will no longer be ` +
           "blocked on a timer (manual blocks and overrides are untouched). " +
-          "Ask the user to approve, then re-issue this call with confirmed: true. " +
-          "Do NOT set confirmed: true without an explicit yes from the user.";
+          "Ask the user to approve. " +
+          "You cannot approve on their behalf.";
     return confirmationRequired(message, {
       type: "set_device_schedule",
       operation,
       device_mac: mac,
       ...(operation === "set" ? { windows: wireWindows.map(decodeWindow) } : {}),
-    });
+    },
+      { toolName: TOOL_NAME, fingerprint },
+    );
   }
 
   const existing = await findDeviceSchedules(ctx, mac);
@@ -440,7 +449,7 @@ const tool: Tool = {
     "windows; 'clear' removes it. Windows take day names (monday..sunday) plus 24-hour HH:MM start/end; " +
     "an end at or before the start wraps past midnight (e.g. 21:00-07:00). For set/clear this is " +
     "two-step: the first call returns confirmation_required summarizing the change — relay it to the " +
-    "user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "user, and only after they explicitly approve, approval is handled outside this conversation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

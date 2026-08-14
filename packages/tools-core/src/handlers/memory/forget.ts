@@ -16,7 +16,13 @@
  * handler returns the SAME `NOT_FOUND` error (identical message, never
  * echoing the fact text) so existence never leaks across the ladder.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "memory_forget";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 /** WARP-845 — audience ladder (mirror of the orchestrator's
@@ -60,10 +66,10 @@ const inputSchema = {
       description:
         "UUID of the MemoryFact to forget. Find fact ids via memory_recall.",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved forgetting this exact fact in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the fact to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["id"],
@@ -100,12 +106,14 @@ async function handler(
   // and BEFORE the write. The details block mirrors the WARP-640
   // confirmation shape (`type` discriminator) so the dashboard chip
   // renders a meaningful "needs approval" state.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, fact.id]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to forget this ${String(fact.category).toLowerCase()} fact: "${fact.fact}". ` +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       { type: "memory_forget", id: fact.id, category: fact.category, fact: fact.fact },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -129,7 +137,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_forget",
   description:
-    "Permanently stop a remembered fact from influencing the model — soft-disables it (active=false; the row is retained for the evidence chain). Use when the user asks to forget, retract, or stop applying a remembered fact. Two-step: the first call returns confirmation_required with the fact — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Find fact ids via memory_recall.",
+    "Permanently stop a remembered fact from influencing the model — soft-disables it (active=false; the row is retained for the evidence chain). Use when the user asks to forget, retract, or stop applying a remembered fact. Two-step: the first call returns confirmation_required with the fact — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation. Find fact ids via memory_recall.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

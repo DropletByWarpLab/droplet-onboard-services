@@ -17,7 +17,13 @@
  * nextcloud.client.ts): the pre-restore current content automatically
  * becomes the most-recent version, so a restore is itself reversible.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "restore_file_version";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
 
@@ -33,10 +39,10 @@ const inputSchema = {
       description:
         "The versionId to restore, as returned by list_file_versions for this path.",
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved restoring this exact version in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the details to relay to the user for approval.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["path", "version"],
@@ -74,12 +80,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
   // Confirmation gate — AFTER validation (a malformed call should fail
   // loudly, not ask the user to approve it) and BEFORE any HTTP.
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, path, version]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to restore "${path}" to version ${version}. This will replace the file's current content with that version — Nextcloud keeps the current content as the newest version, so it stays recoverable. ` +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       { type: "restore_file_version", path, version },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -106,7 +114,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "restore_file_version",
   description:
-    "Roll a file on the Droplet's Nextcloud back to a previous version (versionId from list_file_versions). The current content is replaced but Nextcloud keeps it as the newest version, so the restore is reversible. Two-step: the first call returns confirmation_required naming the file and version — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Roll a file on the Droplet's Nextcloud back to a previous version (versionId from list_file_versions). The current content is replaced but Nextcloud keeps it as the newest version, so the restore is reversible. Two-step: the first call returns confirmation_required naming the file and version — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

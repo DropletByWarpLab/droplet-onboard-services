@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import sendMessage from "../../../src/handlers/team-chat/send-message.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 interface FakeResponse {
@@ -57,7 +58,7 @@ describe("team_chat_send_message", () => {
 
   it("fails closed without an acting user — zero HTTP", async () => {
     const { ctx, get, post } = ctxWith({ userId: undefined });
-    const r = await sendMessage.handler({ recipients: ["bob"], body: "hi" }, ctx);
+    const r = await runApproved(sendMessage, { recipients: ["bob"], body: "hi" }, ctx);
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe("AUTH_REQUIRED");
     expect(get).not.toHaveBeenCalled();
@@ -66,25 +67,25 @@ describe("team_chat_send_message", () => {
 
   it("requires exactly ONE of recipients / thread_id", async () => {
     const { ctx } = ctxWith({});
-    const both = await sendMessage.handler(
+    const both = await runApproved(sendMessage, 
       { recipients: ["bob"], thread_id: "t1", body: "hi" },
       ctx,
     );
     expect(both.ok).toBe(false);
     expect(both.error?.code).toBe("INVALID_ARGS");
 
-    const neither = await sendMessage.handler({ body: "hi" }, ctx);
+    const neither = await runApproved(sendMessage, { body: "hi" }, ctx);
     expect(neither.ok).toBe(false);
     expect(neither.error?.code).toBe("INVALID_ARGS");
   });
 
   it("validates the body (1-4000 chars after trim) before anything else", async () => {
     const { ctx, get } = ctxWith({});
-    const empty = await sendMessage.handler({ recipients: ["bob"], body: "   " }, ctx);
+    const empty = await runApproved(sendMessage, { recipients: ["bob"], body: "   " }, ctx);
     expect(empty.ok).toBe(false);
     expect(empty.error?.code).toBe("INVALID_ARGS");
 
-    const long = await sendMessage.handler(
+    const long = await runApproved(sendMessage, 
       { recipients: ["bob"], body: "x".repeat(4001) },
       ctx,
     );
@@ -94,7 +95,7 @@ describe("team_chat_send_message", () => {
 
   it("refuses a recipients list that names only the sender", async () => {
     const { ctx } = ctxWith({});
-    const r = await sendMessage.handler({ recipients: ["alice"], body: "hi me" }, ctx);
+    const r = await runApproved(sendMessage, { recipients: ["alice"], body: "hi me" }, ctx);
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe("INVALID_ARGS");
   });
@@ -102,7 +103,7 @@ describe("team_chat_send_message", () => {
   it("phase 1: confirmation_required with DISPLAY NAMES + truncated body — roster read only, NO writes", async () => {
     const { ctx, get, post } = ctxWith({});
     const body = "a".repeat(200);
-    const r = await sendMessage.handler({ recipients: ["bob", "carol"], body }, ctx);
+    const r = await runApproved(sendMessage, { recipients: ["bob", "carol"], body }, ctx);
     expect(r.ok).toBe(false);
     expect(r.status).toBe("confirmation_required");
     // UX review: the approval copy names people, not login handles.
@@ -116,7 +117,7 @@ describe("team_chat_send_message", () => {
   it("phase 1 falls back to usernames when the roster read fails — still no writes", async () => {
     const get = vi.fn(async () => res(500, {}));
     const { ctx, post } = ctxWith({ get });
-    const r = await sendMessage.handler({ recipients: ["bob"], body: "hi" }, ctx);
+    const r = await runApproved(sendMessage, { recipients: ["bob"], body: "hi" }, ctx);
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("bob");
     expect(post).not.toHaveBeenCalled();
@@ -131,7 +132,7 @@ describe("team_chat_send_message", () => {
       );
     const { ctx, get } = ctxWith({ post });
 
-    const r = await sendMessage.handler(
+    const r = await runApproved(sendMessage, 
       { recipients: ["bob"], body: "lunch?", confirmed: true },
       ctx,
     );
@@ -174,7 +175,7 @@ describe("team_chat_send_message", () => {
       .mockResolvedValueOnce(res(201, { message: { id: "msg-2", threadId: "thread-g" } }));
     const { ctx } = ctxWith({ post });
 
-    const r = await sendMessage.handler(
+    const r = await runApproved(sendMessage, 
       { recipients: ["bob", "carol"], body: "standup?", confirmed: true },
       ctx,
     );
@@ -190,7 +191,7 @@ describe("team_chat_send_message", () => {
   it("phase 2: an unknown recipient fails loudly BEFORE any thread is created", async () => {
     const post = vi.fn();
     const { ctx } = ctxWith({ post });
-    const r = await sendMessage.handler(
+    const r = await runApproved(sendMessage, 
       { recipients: ["nobody"], body: "hi", confirmed: true },
       ctx,
     );
@@ -206,7 +207,7 @@ describe("team_chat_send_message", () => {
       .mockResolvedValueOnce(res(201, { message: { id: "msg-3", threadId: "t-77" } }));
     const { ctx, get } = ctxWith({ post });
 
-    const r = await sendMessage.handler(
+    const r = await runApproved(sendMessage, 
       { thread_id: "t-77", body: "on my way", confirmed: true },
       ctx,
     );
@@ -222,7 +223,7 @@ describe("team_chat_send_message", () => {
   it("surfaces the orchestrator's 404 (foreign thread / module off) as NOT_FOUND", async () => {
     const post = vi.fn().mockResolvedValueOnce(res(404, { error: "thread_not_found" }));
     const { ctx } = ctxWith({ post });
-    const r = await sendMessage.handler(
+    const r = await runApproved(sendMessage, 
       { thread_id: "not-mine", body: "hi", confirmed: true },
       ctx,
     );
@@ -233,7 +234,7 @@ describe("team_chat_send_message", () => {
   it("surfaces other HTTP failures with the status", async () => {
     const post = vi.fn().mockResolvedValueOnce(res(500, {}));
     const { ctx } = ctxWith({ post });
-    const r = await sendMessage.handler(
+    const r = await runApproved(sendMessage, 
       { thread_id: "t-77", body: "hi", confirmed: true },
       ctx,
     );
@@ -252,7 +253,7 @@ describe("team_chat_send_message", () => {
       },
     });
     const { ctx: ctx1 } = ctxWith({ post: badJson });
-    const r1 = await sendMessage.handler(
+    const r1 = await runApproved(sendMessage, 
       { thread_id: "t-77", body: "hi", confirmed: true },
       ctx1,
     );
@@ -262,7 +263,7 @@ describe("team_chat_send_message", () => {
     // …and a parseable body missing the message envelope.
     const emptyBody = vi.fn().mockResolvedValueOnce(res(201, {}));
     const { ctx: ctx2 } = ctxWith({ post: emptyBody });
-    const r2 = await sendMessage.handler(
+    const r2 = await runApproved(sendMessage, 
       { thread_id: "t-77", body: "hi", confirmed: true },
       ctx2,
     );

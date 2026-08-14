@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import setDetectionZones from "../../../src/handlers/cameras/set-detection-zones.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(orchestratorPatch: ReturnType<typeof vi.fn>): ToolContext {
@@ -67,7 +68,7 @@ describe("set_detection_zones — tool metadata", () => {
 describe("set_detection_zones — client-side validation (no HTTP)", () => {
   it("rejects a missing camera", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       { zones: [{ name: "driveway", coordinates: TRIANGLE }] },
       ctxWith(patch),
     );
@@ -78,7 +79,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects a non-array zones", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       { camera: "front_door", zones: "driveway" },
       ctxWith(patch),
     );
@@ -89,7 +90,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects a bad zone name (service regex parity)", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       { camera: "front_door", zones: [{ name: "drive way!", coordinates: TRIANGLE }] },
       ctxWith(patch),
     );
@@ -103,7 +104,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects duplicate zone names", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [
@@ -123,7 +124,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects coordinates outside [0, 1]", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: [[0, 0], [1.5, 0], [0.5, 0.5]] }],
@@ -140,7 +141,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects a polygon with fewer than 3 points", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: [[0, 0], [0.5, 0.5]] }],
@@ -157,7 +158,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects coordinates that are not [x, y] pairs", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: [0, 0, 0.5, 0, 0.5, 0.5] }],
@@ -171,7 +172,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects an invalid object label", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: TRIANGLE, objects: ["per son"] }],
@@ -188,7 +189,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 
   it("rejects a motion mask with fewer than 3 points", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: TRIANGLE }],
@@ -208,7 +209,7 @@ describe("set_detection_zones — client-side validation (no HTTP)", () => {
 describe("set_detection_zones — handler-enforced confirmation", () => {
   it("first call returns confirmation_required with zone names + restart warning, NO HTTP", async () => {
     const patch = vi.fn();
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [
@@ -243,7 +244,7 @@ describe("set_detection_zones — confirmed execution", () => {
     const patch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ settings: {} }), { status: 200 }),
     );
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [
@@ -276,7 +277,7 @@ describe("set_detection_zones — confirmed execution", () => {
     const patch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ settings: {} }), { status: 200 }),
     );
-    await setDetectionZones.handler(
+    await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: TRIANGLE }],
@@ -297,7 +298,7 @@ describe("set_detection_zones — error mapping", () => {
         status: 400,
       }),
     );
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: TRIANGLE }],
@@ -316,7 +317,7 @@ describe("set_detection_zones — error mapping", () => {
     const patch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "camera front_door not found" }), { status: 404 }),
     );
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: TRIANGLE }],
@@ -330,7 +331,7 @@ describe("set_detection_zones — error mapping", () => {
 
   it("maps a generic non-OK to ZONES_UPDATE_FAILED", async () => {
     const patch = vi.fn().mockResolvedValue(new Response("boom", { status: 502 }));
-    const res = await setDetectionZones.handler(
+    const res = await runApproved(setDetectionZones, 
       {
         camera: "front_door",
         zones: [{ name: "driveway", coordinates: TRIANGLE }],

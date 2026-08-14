@@ -18,8 +18,14 @@
  * Two-phase confirmation, enforced BY THE HANDLER (remove_device /
  * memory_forget idiom): the first call fetches `/api/updates/status`
  * and returns `confirmation_required` naming the pending version plus
- * the restart/quiet-period warning — zero side effects. Only a re-issue
- * with `confirmed: true` dispatches.
+ * the restart/quiet-period warning — zero side effects.
+ *
+ * WARP-2002: the second call must carry a SERVER-MINTED single-use token
+ * bound to THIS pending update's id. That binding matters here more than
+ * anywhere else in the catalog — note directly below that this route's 202
+ * is terminal success, not a confirmation, so there is NO server-side gate
+ * behind this tool. The token is the only thing between the model and a
+ * whole-appliance update.
  *
  * FIRE-ONCE SEMANTICS (do not weaken):
  *   - The route answers 202 the moment the apply is DISPATCHED — the
@@ -35,8 +41,14 @@
  *     be in motion, and a second POST could double-fire into the 409
  *     guard or worse. The user is told to check get_update_status.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+
+const TOOL_NAME = "apply_update";
 
 /** WARP-845 — audience ladder (same table as handlers/network/list-threat-events.ts). */
 const ROLE_RANK: Record<string, number> = {
@@ -60,10 +72,10 @@ interface UpdateRowView {
 const inputSchema = {
   type: "object",
   properties: {
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved applying the update in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required naming the pending version for the user to approve.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required naming the pending version, and the user approves from that prompt.",
     },
   },
   additionalProperties: false,
@@ -106,54 +118,65 @@ async function handler(
     );
   }
 
-  // ── phase 1: unconfirmed — echo a confirmation, zero side effects ──
-  if (args.confirmed !== true) {
-    let res: Response;
-    try {
-      res = await ctx.http.orchestrator.get("/api/updates/status", {
-        headers: { Accept: "application/json" },
-      });
-    } catch {
-      return toolError(
-        "STATUS_UNAVAILABLE",
-        "could not check for a pending update — orchestrator not reachable",
-      );
-    }
-    if (!res.ok) {
-      return toolError(
-        "STATUS_UNAVAILABLE",
-        `could not check for a pending update — orchestrator returned ${res.status}`,
-      );
-    }
-    const payload = (await res.json().catch(() => ({}))) as {
-      pending?: UpdateRowView | null;
-    };
-    const pending = payload.pending ?? null;
-    // Nothing on deck → short-circuit; never mint a doomed confirmation.
-    if (!pending) return NOTHING_PENDING;
-    // An apply already owns the row → confirming would only 409.
-    if (pending.status === "applying") {
-      return toolError(
-        "APPLY_IN_PROGRESS",
-        "an update apply is already in progress — follow it with get_update_status",
-      );
-    }
+  // ── resolve the pending update, on BOTH phases ──
+  //
+  // WARP-2002: this used to run only on the unconfirmed phase, because the
+  // gate was a boolean and needed nothing from the server. The token is bound
+  // to the specific pending update, so the row has to be re-read before the
+  // apply too. That is a strict improvement: an approval for update X can no
+  // longer dispatch a different update Y that landed in between.
+  let statusRes: Response;
+  try {
+    statusRes = await ctx.http.orchestrator.get("/api/updates/status", {
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    return toolError(
+      "STATUS_UNAVAILABLE",
+      "could not check for a pending update — orchestrator not reachable",
+    );
+  }
+  if (!statusRes.ok) {
+    return toolError(
+      "STATUS_UNAVAILABLE",
+      `could not check for a pending update — orchestrator returned ${statusRes.status}`,
+    );
+  }
+  const payload = (await statusRes.json().catch(() => ({}))) as {
+    pending?: UpdateRowView | null;
+  };
+  const pending = payload.pending ?? null;
+  // Nothing on deck → short-circuit; never mint a doomed confirmation.
+  if (!pending) return NOTHING_PENDING;
+  // An apply already owns the row → confirming would only 409.
+  if (pending.status === "applying") {
+    return toolError(
+      "APPLY_IN_PROGRESS",
+      "an update apply is already in progress — follow it with get_update_status",
+    );
+  }
 
-    const version = versionLabel(pending);
+  const version = versionLabel(pending);
+
+  // Confirmation gate. This route's 202 means "dispatched" — terminal success,
+  // NOT confirmation_required (see the header note) — so unlike the wifi tools
+  // there is no server-side gate behind this one. The token IS the gate.
+  const fingerprint = confirmationFingerprint([TOOL_NAME, pending.id]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     return confirmationRequired(
       `I'd like to apply the pending verified update ${version}. ` +
         "Droplet services will restart during the apply, and the assistant may go quiet for several minutes — that is expected; " +
         "progress can be followed with get_update_status afterwards. " +
         "The update system verifies release signatures and automatically rolls back if the new version fails its health checks. " +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. You cannot approve on their behalf.",
       {
-        type: "apply_update",
+        type: TOOL_NAME,
         version,
         deviceUpdateId: pending.id,
         releaseTag: pending.releaseTag,
         gitSha: pending.gitSha,
       },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -229,7 +252,7 @@ async function handler(
 const tool: Tool = {
   name: "apply_update",
   description:
-    "Apply the pending verified software update to the Droplet appliance (the server applies the single pending update — no version argument). HIGH IMPACT: services restart during the apply, and the assistant may go quiet for several minutes mid-apply — that is expected; follow progress with get_update_status. The update system verifies release signatures before applying and automatically rolls back to the previous version if the update fails its health checks. Two-step: the first call returns confirmation_required naming the pending version — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Owner/admin only.",
+    "Apply the pending verified software update to the Droplet appliance (the server applies the single pending update — no version argument). HIGH IMPACT: services restart during the apply, and the assistant may go quiet for several minutes mid-apply — that is expected; follow progress with get_update_status. The update system verifies release signatures before applying and automatically rolls back to the previous version if the update fails its health checks. Two-step: the first call returns confirmation_required naming the pending version — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation. Owner/admin only.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import deleteClip from "../../../src/handlers/cameras/delete-clip.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 /**
@@ -34,7 +35,7 @@ function ctxWith(orchestratorDelete: ReturnType<typeof vi.fn>): ToolContext {
 describe("delete_clip", () => {
   it("first (unconfirmed) call → confirmation_required echoing the event id, NO HTTP call", async () => {
     const del = vi.fn();
-    const r = await deleteClip.handler({ event_id: "ev-1" }, ctxWith(del));
+    const r = await runApproved(deleteClip, { event_id: "ev-1" }, ctxWith(del));
 
     expect(r.ok).toBe(false);
     if (!r.ok) {
@@ -49,7 +50,7 @@ describe("delete_clip", () => {
 
   it("confirmed: false is the same as unconfirmed — no HTTP call", async () => {
     const del = vi.fn();
-    const r = await deleteClip.handler(
+    const r = await runApproved(deleteClip, 
       { event_id: "ev-1", confirmed: false },
       ctxWith(del),
     );
@@ -60,7 +61,7 @@ describe("delete_clip", () => {
 
   it("confirmed happy path: DELETEs the orchestrator event route and reports deleted", async () => {
     const del = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
-    const r = await deleteClip.handler(
+    const r = await runApproved(deleteClip, 
       { event_id: "ev-1", confirmed: true },
       ctxWith(del),
     );
@@ -77,7 +78,7 @@ describe("delete_clip", () => {
     const del = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "Event not found" }), { status: 404 }),
     );
-    const r = await deleteClip.handler(
+    const r = await runApproved(deleteClip, 
       { event_id: "missing", confirmed: true },
       ctxWith(del),
     );
@@ -90,7 +91,7 @@ describe("delete_clip", () => {
 
   it.each([403, 451])("maps orchestrator %i to FORBIDDEN", async (status) => {
     const del = vi.fn().mockResolvedValue(new Response("nope", { status }));
-    const r = await deleteClip.handler(
+    const r = await runApproved(deleteClip, 
       { event_id: "ev-1", confirmed: true },
       ctxWith(del),
     );
@@ -100,7 +101,7 @@ describe("delete_clip", () => {
 
   it("maps any other orchestrator failure to DELETE_FAILED", async () => {
     const del = vi.fn().mockResolvedValue(new Response("boom", { status: 502 }));
-    const r = await deleteClip.handler(
+    const r = await runApproved(deleteClip, 
       { event_id: "ev-1", confirmed: true },
       ctxWith(del),
     );
@@ -114,7 +115,7 @@ describe("delete_clip", () => {
   it("rejects a missing/empty event_id with INVALID_ARGS, no HTTP call", async () => {
     const del = vi.fn();
     for (const args of [{}, { event_id: "" }, { event_id: "   " }, { event_id: 42 }]) {
-      const r = await deleteClip.handler(args as Record<string, unknown>, ctxWith(del));
+      const r = await runApproved(deleteClip, args as Record<string, unknown>, ctxWith(del));
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
     }
@@ -136,7 +137,7 @@ describe("delete_clip", () => {
       };
       expect(schema.required).toEqual(["event_id"]);
       expect(schema.additionalProperties).toBe(false);
-      expect(Object.keys(schema.properties).sort()).toEqual(["confirmed", "event_id"]);
+      expect(Object.keys(schema.properties).sort()).toEqual(["confirmation_token", "event_id"]);
     });
   });
 });

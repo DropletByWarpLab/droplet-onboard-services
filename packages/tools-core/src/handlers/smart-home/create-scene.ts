@@ -23,7 +23,13 @@
  * limits validated client-side so the model gets a precise error
  * without a round-trip.
  */
-import { confirmationRequired } from "../../confirmation.js";
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
+
+const TOOL_NAME = "create_scene";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 // Mirror of the route's createSceneSchema limits (scenes.ts:43-47).
@@ -74,10 +80,10 @@ const inputSchema = {
         additionalProperties: false,
       },
     },
-    confirmed: {
-      type: "boolean",
+    confirmation_token: {
+      type: "string",
       description:
-        "Set true ONLY after the user has explicitly approved creating this exact scene in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with a summary to relay to the user.",
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required describing the action, and the user approves from that prompt.",
     },
   },
   required: ["name", "actions"],
@@ -270,15 +276,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
   // ── Confirmation gate — AFTER validation + resolution, BEFORE any
   // HTTP write. The echo carries the resolved device list. ──
-  if (args.confirmed !== true) {
+  const fingerprint = confirmationFingerprint([TOOL_NAME, name, resolved]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
     const summary = resolved
       .map((a) => `${humanizeCommand(a.command)} ${a.label}`)
       .join(", ");
     return confirmationRequired(
       `I'd like to create the scene "${name}" with ${resolved.length} action(s): ${summary}. ` +
         "Creating it does NOT run any device action now — it can be run later with run_scene or scheduled from the dashboard. " +
-        "Ask the user to approve, then re-issue this call with confirmed: true. " +
-        "Do NOT set confirmed: true without an explicit yes from the user.",
+        "Ask the user to approve. " +
+        "You cannot approve on their behalf.",
       {
         type: "create_scene",
         name,
@@ -288,6 +295,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           command: a.command,
         })),
       },
+      { toolName: TOOL_NAME, fingerprint },
     );
   }
 
@@ -351,7 +359,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_scene",
   description:
-    'Create a named smart-home scene (e.g. "movie night") from a list of device actions so it can be run later with run_scene or scheduled from the dashboard. Creating a scene does NOT run any device action. Each action\'s device may be a nodeId or a household name from list_smart_home_devices. Two-step: the first call returns confirmation_required echoing the scene name and the resolved device actions — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.',
+    'Create a named smart-home scene (e.g. "movie night") from a list of device actions so it can be run later with run_scene or scheduled from the dashboard. Creating a scene does NOT run any device action. Each action\'s device may be a nodeId or a household name from list_smart_home_devices. Two-step: the first call returns confirmation_required echoing the scene name and the resolved device actions — relay it to the user, and only after they explicitly approve, approval is handled outside this conversation.',
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

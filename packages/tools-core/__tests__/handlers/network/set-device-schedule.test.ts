@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import setDeviceSchedule from "../../../src/handlers/network/set-device-schedule.js";
+import { runApproved } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 type Mocks = {
@@ -94,7 +95,7 @@ describe("set_device_schedule — tool metadata", () => {
 describe("set_device_schedule — argument validation (no HTTP)", () => {
   it("rejects an unknown operation", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "toggle", device_mac: MAC },
       ctx,
     );
@@ -105,7 +106,7 @@ describe("set_device_schedule — argument validation (no HTTP)", () => {
 
   it("rejects an invalid MAC", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: "not-a-mac", windows: [WINDOW] },
       ctx,
     );
@@ -119,7 +120,7 @@ describe("set_device_schedule — argument validation (no HTTP)", () => {
 
   it("rejects set without at least one window", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler({ operation: "set", device_mac: MAC }, ctx);
+    const r = await runApproved(setDeviceSchedule, { operation: "set", device_mac: MAC }, ctx);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("INVALID_SCHEDULE");
     expectNoHttp(mocks);
@@ -132,7 +133,7 @@ describe("set_device_schedule — argument validation (no HTTP)", () => {
       start: `0${i}:00`.slice(-5),
       end: `0${i}:30`.slice(-5),
     }));
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: MAC, windows },
       ctx,
     );
@@ -146,7 +147,7 @@ describe("set_device_schedule — argument validation (no HTTP)", () => {
 
   it("rejects an unknown day name", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       {
         operation: "set",
         device_mac: MAC,
@@ -164,7 +165,7 @@ describe("set_device_schedule — argument validation (no HTTP)", () => {
 
   it("rejects a malformed time", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       {
         operation: "set",
         device_mac: MAC,
@@ -182,7 +183,7 @@ describe("set_device_schedule — argument validation (no HTTP)", () => {
 
   it("rejects a zero-length window (start === end, service parity)", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       {
         operation: "set",
         device_mac: MAC,
@@ -202,7 +203,7 @@ describe("set_device_schedule — list (read, no confirmation)", () => {
     const { ctx, mocks } = ctxWith({
       get: vi.fn().mockResolvedValue(json({ schedules: [EXISTING, other] })),
     });
-    const r = await setDeviceSchedule.handler({ operation: "list", device_mac: MAC }, ctx);
+    const r = await runApproved(setDeviceSchedule, { operation: "list", device_mac: MAC }, ctx);
     expect(mocks.get).toHaveBeenCalledWith("/api/network/schedules");
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -226,7 +227,7 @@ describe("set_device_schedule — list (read, no confirmation)", () => {
     const { ctx } = ctxWith({
       get: vi.fn().mockResolvedValue(new Response("boom", { status: 500 })),
     });
-    const r = await setDeviceSchedule.handler({ operation: "list", device_mac: MAC }, ctx);
+    const r = await runApproved(setDeviceSchedule, { operation: "list", device_mac: MAC }, ctx);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("SCHEDULE_FAILED");
   });
@@ -235,7 +236,7 @@ describe("set_device_schedule — list (read, no confirmation)", () => {
 describe("set_device_schedule — handler-enforced confirmation", () => {
   it("set: first call returns confirmation_required summarizing the windows with the BLOCK-DURING direction, NO HTTP", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: MAC, windows: [WINDOW] },
       ctx,
     );
@@ -262,7 +263,7 @@ describe("set_device_schedule — handler-enforced confirmation", () => {
 
   it("clear: first call returns confirmation_required naming the device, NO HTTP", async () => {
     const { ctx, mocks } = ctxWith();
-    const r = await setDeviceSchedule.handler({ operation: "clear", device_mac: MAC }, ctx);
+    const r = await runApproved(setDeviceSchedule, { operation: "clear", device_mac: MAC }, ctx);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.status).toBe("confirmation_required");
@@ -284,7 +285,7 @@ describe("set_device_schedule — confirmed set", () => {
       post: vi.fn().mockResolvedValue(json({ schedule: { ...EXISTING, id: "s9" } }, 201)),
     });
     // Lowercase dashed input pins the MAC canonicalization too.
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       {
         operation: "set",
         device_mac: "aa-bb-cc-dd-ee-ff",
@@ -319,7 +320,7 @@ describe("set_device_schedule — confirmed set", () => {
       get: vi.fn().mockResolvedValue(json({ schedules: [EXISTING] })),
       patch: vi.fn().mockResolvedValue(json({ schedule: EXISTING })),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       {
         operation: "set",
         device_mac: MAC,
@@ -354,7 +355,7 @@ describe("set_device_schedule — confirmed clear", () => {
       get: vi.fn().mockResolvedValue(json({ schedules: [EXISTING] })),
       del: vi.fn().mockResolvedValue(new Response(null, { status: 204 })),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "clear", device_mac: MAC, confirmed: true },
       ctx,
     );
@@ -375,7 +376,7 @@ describe("set_device_schedule — confirmed clear", () => {
     const { ctx, mocks } = ctxWith({
       get: vi.fn().mockResolvedValue(json({ schedules: [] })),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "clear", device_mac: MAC, confirmed: true },
       ctx,
     );
@@ -402,7 +403,7 @@ describe("set_device_schedule — error mapping", () => {
         ),
       ),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: MAC, windows: [WINDOW], confirmed: true },
       ctx,
     );
@@ -423,7 +424,7 @@ describe("set_device_schedule — error mapping", () => {
         ),
       ),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: MAC, windows: [WINDOW], confirmed: true },
       ctx,
     );
@@ -441,7 +442,7 @@ describe("set_device_schedule — error mapping", () => {
         ),
       ),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: MAC, windows: [WINDOW], confirmed: true },
       ctx,
     );
@@ -454,7 +455,7 @@ describe("set_device_schedule — error mapping", () => {
       get: vi.fn().mockResolvedValue(json({ schedules: [] })),
       post: vi.fn().mockResolvedValue(new Response("boom", { status: 502 })),
     });
-    const r = await setDeviceSchedule.handler(
+    const r = await runApproved(setDeviceSchedule, 
       { operation: "set", device_mac: MAC, windows: [WINDOW], confirmed: true },
       ctx,
     );
