@@ -20,6 +20,7 @@ import pmCreateWorkItem from "../../../src/handlers/pm/create-work-item.js";
 import pmUpdateWorkItem from "../../../src/handlers/pm/update-work-item.js";
 import pmAddWorkItemComment from "../../../src/handlers/pm/add-work-item-comment.js";
 import pmTransitionWorkItem from "../../../src/handlers/pm/transition-work-item.js";
+import { runConfirmed } from "../../helpers/approve.js";
 
 const get = vi.fn();
 const post = vi.fn();
@@ -197,7 +198,7 @@ describe("pm_create_work_item", () => {
 
   it("posts to the project work-items route, mapping labels → label_ids", async () => {
     post.mockResolvedValueOnce(res(true, 201, { work_item: apiItem({ id: "new1" }) }));
-    const r = await pmCreateWorkItem.handler(
+    const r = await runConfirmed(pmCreateWorkItem, 
       {
         workspace_slug: "home",
         project_id: "p1",
@@ -221,7 +222,7 @@ describe("pm_create_work_item", () => {
 describe("pm_update_work_item", () => {
   it("patches the work item and maps a 404", async () => {
     patch.mockResolvedValueOnce(res(false, 404, { error: "work_item_not_found" }));
-    const r = await pmUpdateWorkItem.handler(
+    const r = await runConfirmed(pmUpdateWorkItem, 
       { workspace_slug: "home", project_id: "p1", work_item_id: "nope", name: "x", labels: ["l2"] },
       ctx,
     );
@@ -238,7 +239,7 @@ describe("pm_update_work_item", () => {
 describe("pm_add_work_item_comment", () => {
   it("posts the comment body", async () => {
     post.mockResolvedValueOnce(res(true, 201, { comment: { id: "c1" } }));
-    const r = await pmAddWorkItemComment.handler(
+    const r = await runConfirmed(pmAddWorkItemComment, 
       { workspace_slug: "home", project_id: "p1", work_item_id: "i1", comment_html: "<p>note</p>" },
       ctx,
     );
@@ -260,7 +261,7 @@ describe("pm_transition_work_item", () => {
 
   it("posts the target state_id and maps a 404", async () => {
     post.mockResolvedValueOnce(res(false, 404, { error: "work_item_not_found" }));
-    const r = await pmTransitionWorkItem.handler(
+    const r = await runConfirmed(pmTransitionWorkItem, 
       { workspace_slug: "home", project_id: "p1", work_item_id: "nope", state_id: "done" },
       ctx,
     );

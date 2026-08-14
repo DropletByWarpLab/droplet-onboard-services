@@ -28,7 +28,24 @@ export async function runApproved(
   // model would actually make, and so a handler that still honoured the flag
   // would fail these tests rather than sail through them.
   const { confirmed: _ignored, ...rest } = args;
+  return runConfirmed(tool, rest, ctx);
+}
 
+/**
+ * WARP-2008 — the same two-phase drive for tools that never had a `confirmed`
+ * flag to mark the call with. Their suites called the handler directly, because
+ * before WARP-2008 nothing stood in the way.
+ *
+ * Pass-through semantics are identical: if the first call does not produce a
+ * token — it succeeded, or failed validation, or was refused by a role gate —
+ * that result is returned as-is, which is what those assertions are about.
+ */
+export async function runConfirmed(
+  tool: Tool,
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const rest = args;
   const first = await tool.handler(rest, ctx);
 
   // Reached no gate — either it succeeded outright or it failed validation

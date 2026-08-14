@@ -73,6 +73,44 @@ function globSync(dir: string): string[] {
   return out;
 }
 
+/** Tool-layer gate: a server-minted token consumed before the side effect. */
+function hasTokenGate(src: string): boolean {
+  // The CALL, not the identifier — a bare `includes("consumeToolConfirmation")`
+  // is satisfied by the import statement alone. (Caught by mutation.)
+  return src.includes("consumeToolConfirmation(");
+}
+
+/**
+ * Route-layer gate: something downstream refuses, and the handler surfaces the
+ * refusal. Three shapes ship today:
+ *
+ *   - `passThroughConfirmation(res)` — the wifi and network tools, on a 202.
+ *   - an explicit 202 branch re-wrapping the route's token (`run_scene`).
+ *   - the Matter service itself answering `status: "confirmation_required"`,
+ *     which `control_device` passes through (it also hard-refuses lock-like
+ *     commands outright).
+ */
+function hasRouteGate(src: string): boolean {
+  if (src.includes("passThroughConfirmation(")) return true;
+  if (src.includes("202") && src.includes("confirmationRequired(")) return true;
+  return src.includes('"confirmation_required"') && src.includes("confirmationRequired(");
+}
+
+/**
+ * Declared Tier-2 but with no live side effect to gate. `erp_schedule_appointment`
+ * returns `erpNotConnected()` unconditionally — there is nothing to confirm
+ * until the ERP write path is built, and WARP-2008 excludes it explicitly:
+ * it must be gated as part of whichever change makes it live (WARP-1095+).
+ *
+ * Verified below to still have no side effect, so it cannot quietly go live
+ * while sitting on this list.
+ */
+const NO_SIDE_EFFECT = new Set(["erp_schedule_appointment"]);
+
+function isGated(src: string): boolean {
+  return hasTokenGate(src) || hasRouteGate(src);
+}
+
 function confirmationTools() {
   return [...TOOLS.values()].filter((t) => t.requiresConfirmation === true);
 }
@@ -114,25 +152,55 @@ describe("confirmation contract", () => {
       .filter((t) => "confirmation_token" in schemaProps(t))
       .filter((t) => {
         const src = handlerSourceFor(t.name);
-        // Match the CALL, not the identifier: `includes("consumeToolConfirmation")`
-        // is satisfied by the import statement alone, so it stays green even
-        // when the gate itself is deleted. (Caught by mutation.)
-        return src === null || !src.includes("consumeToolConfirmation(");
+        return src === null || !hasTokenGate(src);
       })
       .map((t) => t.name);
     expect(missing).toEqual([]);
   });
 
+  it("every Tier-2 tool has SOME gate — declared-and-unenforced is the worst case", () => {
+    // WARP-2008's defect class: six tools declared `requiresConfirmation: true`
+    // with no gate at ANY layer — no `confirmed` read, no token, no route 202.
+    // The other checks all passed them, because each only inspects tools that
+    // already opted into one mechanism. A tool with NOTHING is strictly worse
+    // than self-attestation: self-attestation at least forces a second model
+    // turn and surfaces a chip the human can see.
+    //
+    // Gating is detected from the SOURCE rather than a hand-kept list, so a new
+    // tool is judged on what it does, not on whether someone remembered to add
+    // it here.
+    const ungated = confirmationTools()
+      .filter((t) => !SELF_ATTESTING_DEBT.has(t.name) && !NO_SIDE_EFFECT.has(t.name))
+      .filter((t) => {
+        const src = handlerSourceFor(t.name);
+        return src === null || !isGated(src);
+      })
+      .map((t) => t.name);
+    expect(ungated).toEqual([]);
+  });
+
+  it("the NO_SIDE_EFFECT exemption still describes a tool with no side effect", () => {
+    // The exemption is only defensible while the handler cannot do anything.
+    // If the ERP write path goes live and this stays green, the tool would be
+    // an ungated Tier-2 write — so pin the thing that makes it safe.
+    for (const name of NO_SIDE_EFFECT) {
+      const src = handlerSourceFor(name);
+      expect(src, `${name} handler not found`).not.toBeNull();
+      expect(src, `${name} no longer looks like an unconditional stub`).toContain(
+        "erpNotConnected()",
+      );
+    }
+  });
+
   it("every ROUTE_GATED tool really does forward a route-side 202", () => {
-    // Keeps the allowlist honest: if one of these stops using
-    // passThroughConfirmation, it becomes self-attesting and must fail here
-    // rather than sitting on an allowlist that no longer describes it.
+    // Keeps the allowlist honest: these are the only tools still permitted to
+    // expose a `confirmed` flag, and that permission is only defensible while
+    // a real server-side gate stands behind them. If one stops forwarding its
+    // 202 it becomes purely self-attesting, and must fail here rather than sit
+    // on an allowlist that no longer describes it.
     const notActuallyGated = [...ROUTE_GATED].filter((name) => {
       const src = handlerSourceFor(name);
-      // Again the CALL form: a bare identifier check is also satisfied by any
-      // longer name containing it (`passThroughConfirmationX`). (Caught by
-      // mutation.)
-      return src === null || !src.includes("passThroughConfirmation(");
+      return src === null || !hasRouteGate(src);
     });
     expect(notActuallyGated).toEqual([]);
   });

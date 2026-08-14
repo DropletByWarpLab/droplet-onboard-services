@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import emailSend from "../../../src/handlers/email/send.js";
+import { runConfirmed } from "../../helpers/approve.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(opts: {
@@ -24,7 +25,23 @@ function ctxWith(opts: {
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
       orchestrator: {
-        get: vi.fn(),
+        // WARP-2008 — the handler now reads the draft first so the approval
+        // prompt can name the real recipients. A fresh Response per call: a
+        // Response body can only be read once.
+        get: vi.fn().mockImplementation(
+          async () =>
+            new Response(
+              JSON.stringify({
+                id: "d1",
+                status: "draft",
+                subject: "Hello",
+                toAddrs: ["ana@example.com"],
+                ccAddrs: [],
+                bccAddrs: [],
+              }),
+              { status: 200 },
+            ),
+        ),
         post: opts.post ?? vi.fn(),
         patch: vi.fn(),
         delete: vi.fn(),
@@ -72,7 +89,7 @@ describe("email_send", () => {
       "role %s → FORBIDDEN with NO HTTP call",
       async (role) => {
         const post = vi.fn();
-        const res = await emailSend.handler(
+        const res = await runConfirmed(emailSend, 
           { draftId: "d1" },
           ctxWith({ post, role, userId: "romain" }),
         );
@@ -87,7 +104,7 @@ describe("email_send", () => {
     );
 
     it.each(["owner", "admin"] as const)("role %s passes", async (role) => {
-      const res = await emailSend.handler(
+      const res = await runConfirmed(emailSend, 
         { draftId: "d1" },
         ctxWith({ post: okPost(), role, userId: "romain" }),
       );
@@ -97,7 +114,7 @@ describe("email_send", () => {
 
   it("missing ctx.userId → AUTH_REQUIRED with NO HTTP call", async () => {
     const post = vi.fn();
-    const res = await emailSend.handler(
+    const res = await runConfirmed(emailSend, 
       { draftId: "d1" },
       ctxWith({ post, role: "owner" }),
     );
@@ -107,7 +124,7 @@ describe("email_send", () => {
 
   it("forwards X-Droplet-User on the send call (WARP-1453)", async () => {
     const post = okPost();
-    const res = await emailSend.handler(
+    const res = await runConfirmed(emailSend, 
       { draftId: "d1" },
       ctxWith({ post, role: "admin", userId: "romain" }),
     );
@@ -131,7 +148,7 @@ describe("email_send", () => {
 
   it("missing draftId → INVALID_ARGS with NO HTTP call", async () => {
     const post = vi.fn();
-    const res = await emailSend.handler(
+    const res = await runConfirmed(emailSend, 
       {},
       ctxWith({ post, role: "owner", userId: "romain" }),
     );
@@ -145,7 +162,7 @@ describe("email_send", () => {
     [409, "ALREADY_DISPATCHED"],
     [500, "EMAIL_SEND_FAILED"],
   ] as const)("maps %s to %s", async (status, code) => {
-    const res = await emailSend.handler(
+    const res = await runConfirmed(emailSend, 
       { draftId: "d1" },
       ctxWith({ post: postWithStatus(status), role: "owner", userId: "romain" }),
     );

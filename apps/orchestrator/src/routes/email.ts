@@ -391,6 +391,44 @@ export function createEmailRouter(
     },
   );
 
+  // GET /api/email/drafts/:id
+  //
+  // WARP-2008 — added so `email_send` can name the actual recipients in its
+  // confirmation prompt. A prompt that says "send draft cl9x…" is not a
+  // confirmation: the human has to see who the mail is going to before they
+  // approve it, and the draft was the only thing with no way to read it back.
+  //
+  // Same guard and the same IDOR scoping as PATCH below: family-and-below can
+  // only read drafts on accounts they own, and an inaccessible draft 404s
+  // rather than 403ing (which would confirm the id exists).
+  router.get(
+    "/email/drafts/:id",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const draft = (await prisma.emailDraft.findUnique({
+          where: { id: req.params.id },
+        })) as unknown as DraftRow | null;
+        if (!draft) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          draft.accountId,
+        );
+        if (!account) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
+        res.json(draft);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   router.patch(
     "/email/drafts/:id",
     requireRole("owner", "admin", "family"),

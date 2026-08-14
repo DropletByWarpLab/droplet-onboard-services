@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import commissionDevice from "../../../src/handlers/smart-home/commission-device.js";
+import { runConfirmed } from "../../helpers/approve.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(commission: ReturnType<typeof vi.fn>): ToolContext {
@@ -28,20 +29,20 @@ describe("commission_device", () => {
   });
 
   it("rejects missing pairing_code", async () => {
-    const r = await commissionDevice.handler({}, ctxWith(vi.fn()));
+    const r = await runConfirmed(commissionDevice, {}, ctxWith(vi.fn()));
     expect(r.ok).toBe(false);
   });
 
   it("delegates to matter.commission", async () => {
     const commission = vi.fn().mockResolvedValue({ nodeId: "5" });
-    const r = await commissionDevice.handler({ pairing_code: "MT:Y.K9" }, ctxWith(commission));
+    const r = await runConfirmed(commissionDevice, { pairing_code: "MT:Y.K9" }, ctxWith(commission));
     expect(commission).toHaveBeenCalledWith("MT:Y.K9");
     expect(r.ok).toBe(true);
   });
 
   it("propagates errors as COMMISSION_FAILED", async () => {
     const commission = vi.fn().mockRejectedValue(new Error("invalid code"));
-    const r = await commissionDevice.handler(
+    const r = await runConfirmed(commissionDevice, 
       { pairing_code: "12345" },
       ctxWith(commission),
     );

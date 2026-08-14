@@ -15,7 +15,14 @@
  * X-Droplet-User = ctx.userId so the orchestrator scopes the draft's
  * account by the acting human, not `_service:mcp`.
  */
+import {
+  confirmationFingerprint,
+  confirmationRequired,
+  consumeToolConfirmation,
+} from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+
+const TOOL_NAME = "email_send";
 
 /** WARP-845 — audience ladder (same table as handlers/memory/recall.ts). */
 const ROLE_RANK: Record<string, number> = {
@@ -27,12 +34,31 @@ const ROLE_RANK: Record<string, number> = {
 };
 const ADMIN_RANK = 2;
 
+/**
+ * Draft address columns are `unknown` on the wire (Prisma Json). Accept the
+ * array form and the single-string form, drop anything else, and never throw —
+ * a malformed column must degrade to "no recipients named", which the prompt
+ * states plainly, rather than blocking the confirmation entirely.
+ */
+function addressList(value: unknown): string[] {
+  if (typeof value === "string") return value.trim() === "" ? [] : [value.trim()];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter((v) => v !== "");
+}
+
 const inputSchema = {
   type: "object",
   properties: {
     draftId: {
       type: "string",
       description: "EmailDraft.id to send. Must currently have status=draft.",
+    },
+    confirmation_token: {
+      type: "string",
+      description:
+        "Omit this. It is issued to the user for approval, not to you — you cannot read it, and a guessed or fabricated value is refused. Call without it; the tool replies confirmation_required naming the recipients and subject, and the user approves from that prompt.",
     },
   },
   required: ["draftId"],
@@ -71,6 +97,72 @@ async function handler(
       error: { code: "INVALID_ARGS", message: "draftId is required" },
     };
   }
+  // WARP-2008 — confirmation gate. `requiresConfirmation: true` was declared
+  // and the description promised a dashboard confirmation, but nothing
+  // enforced it at either layer: one model-emitted tool call sent real
+  // outbound mail. The route's 202 is not a gate — it is emitted AFTER the
+  // draft has already been flipped to queued and the Activity row written.
+  //
+  // The draft is read first so the prompt can name the actual recipients. A
+  // prompt that says "send draft cl9x…" is not a confirmation.
+  const draftRes = await ctx.http.orchestrator.get(
+    `/api/email/drafts/${encodeURIComponent(draftId)}`,
+    { headers: { Accept: "application/json", "X-Droplet-User": ctx.userId } },
+  );
+  if (draftRes.status === 404) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "NOT_FOUND", message: "Draft not found" },
+    };
+  }
+  if (!draftRes.ok) {
+    return {
+      ok: false,
+      status: "error",
+      error: {
+        code: "EMAIL_SEND_FAILED",
+        message: `could not read the draft to confirm it — orchestrator returned ${draftRes.status}`,
+      },
+    };
+  }
+  const draft = (await draftRes.json().catch(() => ({}))) as {
+    subject?: string;
+    status?: string;
+    toAddrs?: unknown;
+    ccAddrs?: unknown;
+    bccAddrs?: unknown;
+  };
+  if (draft.status !== undefined && draft.status !== "draft") {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "ALREADY_DISPATCHED", message: "Draft already dispatched" },
+    };
+  }
+
+  const recipients = [
+    ...addressList(draft.toAddrs),
+    ...addressList(draft.ccAddrs),
+    ...addressList(draft.bccAddrs),
+  ];
+  const subject = typeof draft.subject === "string" ? draft.subject : "(no subject)";
+
+  // Bound to the recipient set and subject, not just the draft id: a draft can
+  // be edited between approval and send, and an approval to mail one person
+  // must not become an approval to mail someone else.
+  const fingerprint = confirmationFingerprint([TOOL_NAME, draftId, recipients, subject]);
+  if (!consumeToolConfirmation(args.confirmation_token, TOOL_NAME, fingerprint)) {
+    const who = recipients.length > 0 ? recipients.join(", ") : "(no recipients set)";
+    return confirmationRequired(
+      `I'd like to send the email "${subject}" to ${who}. ` +
+        "This leaves the Droplet as real outbound mail and cannot be recalled. " +
+        "Ask the user to approve. You cannot approve on their behalf.",
+      { type: TOOL_NAME, draftId, subject, recipients },
+      { toolName: TOOL_NAME, fingerprint },
+    );
+  }
+
   const res = await ctx.http.orchestrator.post(
     `/api/email/drafts/${encodeURIComponent(draftId)}/send`,
     {},
@@ -133,7 +225,7 @@ async function handler(
 const tool: Tool = {
   name: "email_send",
   description:
-    "Send a drafted email. Write tier — requires user confirmation in the dashboard. Refuses with off_lan_blocked when Settings → Off-LAN allowlist has `outbound_email` disabled.",
+    "Send a drafted email. Write tier. Two-step: the first call returns confirmation_required naming the subject and every recipient — relay that to the user. Approval is handled outside this conversation; you cannot approve on their behalf. Refuses with off_lan_blocked when Settings → Off-LAN allowlist has `outbound_email` disabled.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

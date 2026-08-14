@@ -7,7 +7,20 @@
  * to any authenticated role; writes are gated with `requireRole`. Work-item +
  * comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
- * through here (the tool layer owns the human-facing confirmation gate).
+ * through here.
+ *
+ * The human-facing confirmation gate lives in the TOOL layer, enforced by
+ * `consumeToolConfirmation` (packages/tools-core/src/confirmation.ts): the
+ * first call returns `confirmation_required` with a server-minted, single-use,
+ * target-bound token and performs no write. These routes do NOT gate — they
+ * trust the tool layer, and `confirmation-contract.test.ts` is what keeps that
+ * trust honest by failing if a `pm_*` tool stops consuming a token.
+ *
+ * That sentence used to read "the tool layer owns the human-facing
+ * confirmation gate" as a statement of fact. It was not: until WARP-2008 no
+ * gate existed at either layer and the four `pm_*` write tools executed on the
+ * first model-emitted call. Do not restate an ownership claim here without a
+ * test that enforces it.
  *
  * Errors: the service throws Error(code); we map codes → HTTP status here,
  * mirroring routes/calendar.ts.

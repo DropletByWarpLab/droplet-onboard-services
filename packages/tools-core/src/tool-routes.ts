@@ -280,7 +280,17 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "email_read", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads/:threadId")] },
   { tool: "email_summarize_thread", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads/:threadId/analysis")] },
   { tool: "email_draft_reply", client: "orchestrator", hops: [admit("post", "/api/email/:accountId/drafts")] },
-  { tool: "email_send", client: "orchestrator", hops: [admit("post", "/api/email/drafts/:id/send")] },
+  // WARP-2008 — the GET is the confirmation read: the draft is fetched so the
+  // approval prompt can name the real recipients and subject before any mail
+  // leaves the box.
+  {
+    tool: "email_send",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/email/drafts/:id"),
+      admit("post", "/api/email/drafts/:id/send"),
+    ],
+  },
   none("search_contacts"), // ctx.prisma (derived from indexed senders)
 
   // ── memory ──────────────────────────────────────────────────────────────
