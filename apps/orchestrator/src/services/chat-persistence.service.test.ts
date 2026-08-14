@@ -14,6 +14,10 @@ interface MockSession {
   model: string | null;
   provider: string | null;
   systemPrompt?: string | null;
+  /** WARP-1917 — pin state. Optional so pre-existing fixtures stay valid
+   *  (the schema default is false / null). */
+  pinned?: boolean;
+  pinnedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -69,6 +73,7 @@ function makePrismaMock() {
             };
           }>;
         };
+        orderBy?: Array<Record<string, "asc" | "desc">>;
         take: number;
         skip: number;
       }) => {
@@ -88,10 +93,32 @@ function makePrismaMock() {
               m.sessionId === s.id && m.content.toLowerCase().includes(t),
           );
         };
+        // WARP-1917 — honor the CALLER's orderBy rather than hardcoding
+        // updatedAt desc, so a regression in the service's ordering (e.g.
+        // dropping the pinned-first leg) actually fails these tests.
+        const orderBy: Array<Record<string, "asc" | "desc">> = Array.isArray(
+          args.orderBy,
+        )
+          ? args.orderBy
+          : [{ updatedAt: "desc" }];
+        const keyValue = (s: MockSession, field: string): number => {
+          if (field === "pinned") return s.pinned ? 1 : 0;
+          if (field === "updatedAt") return s.updatedAt.getTime();
+          if (field === "createdAt") return s.createdAt.getTime();
+          throw new Error(`mock findMany: unsupported orderBy field ${field}`);
+        };
+        const compare = (a: MockSession, b: MockSession): number => {
+          for (const leg of orderBy) {
+            const [field, dir] = Object.entries(leg)[0]!;
+            const d = keyValue(a, field) - keyValue(b, field);
+            if (d !== 0) return dir === "desc" ? -d : d;
+          }
+          return 0;
+        };
         return sessions
           .filter((s) => s.userId === args.where.userId)
           .filter(matchesSearch)
-          .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+          .sort(compare)
           .slice(args.skip, args.skip + args.take);
       },
     ),
@@ -223,8 +250,25 @@ function makePrismaMock() {
       fn: (tx: { chatSession: typeof chatSession; chatMessage: typeof chatMessage }) => Promise<void>,
     ) => fn({ chatSession, chatMessage }),
     $executeRaw: vi.fn(
-      async (_strings: TemplateStringsArray, ...values: unknown[]) => {
-        // Mock only the rename UPDATE shape: (title, id, userId).
+      async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sql = strings.join("?");
+        // WARP-1917 — pin UPDATE shape: (pinned, pinned, id, userId).
+        if (sql.includes('"pinnedAt"')) {
+          const [pinned, , id, userId] = values as [
+            boolean,
+            boolean,
+            string,
+            string,
+          ];
+          const row = sessions.find(
+            (s) => s.id === id && s.userId === userId,
+          );
+          if (!row) return 0;
+          row.pinned = pinned;
+          row.pinnedAt = pinned ? new Date() : null;
+          return 1;
+        }
+        // Rename UPDATE shape: (title, id, userId).
         const [title, id, userId] = values as [string, string, string];
         const row = sessions.find((s) => s.id === id && s.userId === userId);
         if (!row) return 0;
@@ -1258,5 +1302,136 @@ describe("ChatPersistenceService (WARP-304)", () => {
     await svc.renameConversationForUser("s1", "alice", "New");
     expect(prisma.chatSession.update).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).toHaveBeenCalled();
+  });
+
+  // ── WARP-1917: pin / unpin conversation ──
+
+  it("setConversationPinned pins a row owned by the user (pinned + pinnedAt set)", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "Frigate ports",
+      model: null,
+      provider: null,
+      createdAt: new Date(2026, 0, 1),
+      updatedAt: new Date(2026, 0, 1),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    const ok = await svc.setConversationPinned("s1", "alice", true);
+    expect(ok).toBe(true);
+    expect(sessions[0].pinned).toBe(true);
+    expect(sessions[0].pinnedAt).toBeInstanceOf(Date);
+    // Pinning is a metadata edit — updatedAt MUST NOT be bumped, or the
+    // chat would jump to "Today" once unpinned instead of returning to
+    // its chronological position (the WARP-1917 AC).
+    expect(sessions[0].updatedAt.getTime()).toBe(new Date(2026, 0, 1).getTime());
+  });
+
+  it("setConversationPinned(false) clears pinned AND pinnedAt", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "Frigate ports",
+      model: null,
+      provider: null,
+      pinned: true,
+      pinnedAt: new Date(2026, 0, 2),
+      createdAt: new Date(2026, 0, 1),
+      updatedAt: new Date(2026, 0, 1),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    const ok = await svc.setConversationPinned("s1", "alice", false);
+    expect(ok).toBe(true);
+    expect(sessions[0].pinned).toBe(false);
+    expect(sessions[0].pinnedAt).toBeNull();
+    expect(sessions[0].updatedAt.getTime()).toBe(new Date(2026, 0, 1).getTime());
+  });
+
+  it("setConversationPinned returns false for another user's row (no cross-user pin)", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s-bob",
+      userId: "bob",
+      title: "Bob's chat",
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    const ok = await svc.setConversationPinned("s-bob", "alice", true);
+    expect(ok).toBe(false);
+    expect(sessions[0].pinned).toBeUndefined();
+  });
+
+  it("setConversationPinned never calls chatSession.update (avoids @updatedAt bump)", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "Chat",
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    await svc.setConversationPinned("s1", "alice", true);
+    expect(prisma.chatSession.update).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).toHaveBeenCalled();
+  });
+
+  it("listConversationsForUser returns pinned rows first and maps pinned/pinnedAt", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    const day = (n: number) => new Date(2026, 0, n);
+    sessions.push(
+      // Oldest activity, but pinned — must surface FIRST despite the
+      // paginated list otherwise being updatedAt desc.
+      {
+        id: "s-pinned-old",
+        userId: "alice",
+        title: "Pinned oldie",
+        model: null,
+        provider: null,
+        pinned: true,
+        pinnedAt: day(5),
+        createdAt: day(1),
+        updatedAt: day(1),
+      },
+      // pinned/pinnedAt mirror the schema's NOT NULL DEFAULT false / NULL —
+      // Postgres never hands the service `undefined` here.
+      {
+        id: "s-new",
+        userId: "alice",
+        title: "Newest",
+        model: null,
+        provider: null,
+        pinned: false,
+        pinnedAt: null,
+        createdAt: day(10),
+        updatedAt: day(10),
+      },
+      {
+        id: "s-mid",
+        userId: "alice",
+        title: "Middle",
+        model: null,
+        provider: null,
+        pinned: false,
+        pinnedAt: null,
+        createdAt: day(7),
+        updatedAt: day(7),
+      },
+    );
+    const svc = new ChatPersistenceService(prisma as never);
+    const rows = await svc.listConversationsForUser("alice", 20, 0);
+    expect(rows.map((r) => r.id)).toEqual(["s-pinned-old", "s-new", "s-mid"]);
+    expect(rows[0]).toMatchObject({
+      pinned: true,
+      pinnedAt: day(5).toISOString(),
+    });
+    expect(rows[1]).toMatchObject({ pinned: false, pinnedAt: null });
   });
 });

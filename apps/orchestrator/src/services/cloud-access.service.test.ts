@@ -39,6 +39,7 @@ import {
   LOCAL_MODEL_PREFIXES,
   CLOUD_MODEL_PREFIXES,
   LOCAL_PROVIDERS,
+  LOCAL_PROVIDER,
 } from "./cloud-access.service.js";
 import {
   computeEffectiveAccess,
@@ -145,7 +146,10 @@ describe("parity with services/ai-gateway (drift gate)", () => {
     expect(parsed.length).toBeGreaterThan(0);
 
     const mirrored = new Map<string, readonly string[]>([
-      ["ollama", LOCAL_MODEL_PREFIXES],
+      // WARP-1926 — the local key is `local`, not `ollama`. It names WHERE
+      // inference runs, not which daemon serves it; both DMR and Ollama
+      // answer here. This assertion is what fails if router.py drifts.
+      [LOCAL_PROVIDER, LOCAL_MODEL_PREFIXES],
       ...CLOUD_MODEL_PREFIXES,
     ]);
     // Same providers, and — because resolve_provider returns the FIRST match
@@ -175,9 +179,27 @@ describe("providerForModelName — mirrors router.py::resolve_provider", () => {
   });
 
   it("gives the local families precedence, gpt-oss over gpt included", () => {
-    expect(providerForModelName("gpt-oss:20b")).toBe("ollama");
-    expect(providerForModelName("llama3:8b")).toBe("ollama");
-    expect(providerForModelName("deepseek-r1:7b")).toBe("ollama");
+    expect(providerForModelName("gpt-oss:20b")).toBe(LOCAL_PROVIDER);
+    expect(providerForModelName("llama3:8b")).toBe(LOCAL_PROVIDER);
+    expect(providerForModelName("deepseek-r1:7b")).toBe(LOCAL_PROVIDER);
+  });
+
+  it("returns the CANONICAL local name, never the legacy `ollama` spelling", () => {
+    // WARP-1926 regression guard: this value is written to
+    // ChatMessage.provider on every on-box turn. Emitting `ollama` from a
+    // Docker-Model-Runner box is the lie this ticket removed.
+    expect(LOCAL_PROVIDER).toBe("local");
+    expect(providerForModelName("llama3:8b")).not.toBe("ollama");
+  });
+
+  it("still ACCEPTS the legacy spellings — persisted rows predate the rename", () => {
+    // ChatSession.provider / ChatMessage.provider are persisted columns, so
+    // history written before WARP-1926 carries `ollama`. If these stop being
+    // local, replaying that history 451s.
+    expect(isLocalProvider("ollama")).toBe(true);
+    expect(isLocalProvider("ollama_local")).toBe(true);
+    expect(isLocalProvider("local")).toBe(true);
+    expect(isLocalProvider("openai")).toBe(false);
   });
 
   it("is case-insensitive and returns undefined when nothing matches", () => {

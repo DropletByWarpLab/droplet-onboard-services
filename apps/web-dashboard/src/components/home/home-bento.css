@@ -454,6 +454,22 @@ body:has(.droplet-home) {
   z-index: 25;
 }
 
+/* WARP-1875 — every widget shell is a named query container, so a widget's
+   internals size to the box the user just dragged them into rather than to
+   the viewport. The board hands each tile an explicit pixel width, so a
+   viewport media query is the wrong instrument here: two tiles at the same
+   viewport can be 820px and 240px wide. `inline-size` containment only
+   (no paint containment), so `.bento--hero`'s `overflow: visible` and the
+   aurora's negative inset still bleed exactly as before.
+
+   The cost to keep in mind when adding a widget: inline-size containment
+   implies `contain: layout`, which makes the tile a containing block for
+   `position: fixed` descendants — and since `.bento` also clips, a fixed
+   surface rendered INSIDE a widget is sized to the tile and then cut off by
+   it. Home's own fixed chrome (.dh-modal-overlay, .dh-ambient, .dh-drop) all
+   renders at page level, outside `.bento`, so it is unaffected; anything
+   full-screen opened FROM a widget must portal to document.body the way
+   <Dialog> and <EmailCitation> do. `ask-ai-reflow.test.tsx` guards that. */
 .droplet-home .bento {
   position: relative;
   width: 100%;
@@ -464,6 +480,8 @@ body:has(.droplet-home) {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  container-type: inline-size;
+  container-name: bento;
   transition: border-color 200ms var(--ease), box-shadow 240ms var(--ease),
     transform 240ms var(--ease);
 }
@@ -827,6 +845,11 @@ body:has(.droplet-home) {
 .dh-opt-txt {
   flex: 1;
   min-width: 0;
+  /* WARP-1899: stack the title over the description. As a plain inline
+     wrapper the two spans rendered flush on one line
+     ("BalancedComfortable spacing…") and the .d margin-top below was inert. */
+  display: flex;
+  flex-direction: column;
 }
 .dh-opt-txt .t {
   font-size: 14px;
@@ -1141,8 +1164,12 @@ body:has(.droplet-home) {
 .dh-m-board .w-stat-cell {
   min-height: 76px;
 }
+/* The mobile card has no fixed height, so the cams grid used to need one or
+   it collapsed. It no longer does: the tiles carry their own aspect and size
+   themselves from the column width. Pinning 188px here would only re-impose a
+   shape the frame has to fit into — the thing this widget is done doing. */
 .dh-m-board .w-cams {
-  height: 188px !important;
+  height: auto !important;
 }
 .dh-m-board .w-cal {
   height: 296px !important;

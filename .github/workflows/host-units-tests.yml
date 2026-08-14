@@ -1,0 +1,65 @@
+name: host-units-tests
+
+# WARP-1829 — host units run their source out of the git working tree, and the
+# box's refresh restarts containers only. Pure shell tests drive the detector +
+# refresher against a PATH-stubbed systemctl and a fixture tree with controlled
+# mtimes (no root, no systemd, no box), plus a shellcheck pass over the script.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/host/droplet-host-units.sh"
+      - "scripts/host/etc-systemd-system/droplet-host-units.service"
+      - "scripts/lib/single-box.sh"
+      - "scripts/setup.sh"
+      - "tests/droplet-host-units.test.sh"
+      - ".github/workflows/host-units-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/droplet-host-units.sh"
+      - "scripts/host/etc-systemd-system/droplet-host-units.service"
+      - "scripts/lib/single-box.sh"
+      - "scripts/setup.sh"
+      - "tests/droplet-host-units.test.sh"
+      - ".github/workflows/host-units-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: host-units-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-units:
+    runs-on: ubuntu-latest
+    # Everything is local stubs + tmpdirs; a hung test must fail fast.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck the host-unit refresher
+        # warning severity to match ship-check's bar; no global excludes —
+        # waivers live inline per scripts/test/ship-check.sh convention.
+        run: shellcheck --severity=warning scripts/host/droplet-host-units.sh
+      - name: Validate the on-demand unit file
+        # systemd-analyze verify parses the unit exactly the way systemd will,
+        # so a bad directive fails here instead of on a box. Two outputs are
+        # expected and only those two: the ExecStart binary is installed by
+        # setup.sh and never exists on a runner, and the "Proceeding anyway"
+        # permission advisories fire on filesystems that do not carry POSIX
+        # modes. ANY other line fails the job — a filter wide enough to hide a
+        # real error would make this step decorative.
+        run: |
+          out="$(systemd-analyze verify \
+            scripts/host/etc-systemd-system/droplet-host-units.service 2>&1 || true)"
+          printf '%s\n' "$out"
+          unexpected="$(printf '%s\n' "$out" \
+            | grep -v 'is not executable: No such file or directory' \
+            | grep -v 'Proceeding anyway' \
+            | grep -v '^$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::systemd-analyze verify reported a unit-file problem:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+      - name: Run droplet-host-units shell tests
+        run: bash tests/droplet-host-units.test.sh

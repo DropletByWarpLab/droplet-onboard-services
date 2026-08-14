@@ -291,32 +291,32 @@ else
   fail "DROPLET_AP_MODE duplicated/changed on second call (found ${AP_MODE_COUNT2})"
 fi
 
-# --- Shape-aware CAMERA_SUBNET (ADR-018 Decision 4 / T5) ------------------
+# --- Shape-aware CAMERA_SUBNET (ADR-018 Decision 4 / T5, WARP-1805) -------
 # The compose default CAMERA_SUBNET is 192.168.100.0/24 — the multi-box
 # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). On the
-# single-box shape the cameras live on the box's own LAN (br-lan,
-# 192.168.20.0/24 per scripts/host/etc-droplet-host-net/lan-dhcp.conf),
-# NOT on a separate VLAN — so the multi-box default would scan an empty
-# subnet and find nothing (the live "camera scan finds nothing" symptom).
-# configure_single_box_env must pin CAMERA_SUBNET to the single-box camera
-# network so camera-discovery scans where the cameras actually are.
+# single-box shape cameras attach to whatever LAN the edge router serves,
+# and every provision-time CIDR pinned here has gone stale when the fabric
+# moved (192.168.20.0/24 br-lan, then the Pi edge router's LAN) — the live
+# "camera scan finds nothing" symptom, twice. configure_single_box_env now
+# writes CAMERA_SUBNET=auto so camera-discovery resolves the network from
+# the routing service at scan time (WARP-1805).
 # Two calls already ran above, so this also asserts idempotency.
-CAM_SUBNET_COUNT=$(grep -cE '^CAMERA_SUBNET=192\.168\.20\.0/24$' "$TMP_ROOT/.env" || true)
+CAM_SUBNET_COUNT=$(grep -cE '^CAMERA_SUBNET=auto$' "$TMP_ROOT/.env" || true)
 if [ "$CAM_SUBNET_COUNT" = "1" ]; then
-  pass "configure_single_box_env sets CAMERA_SUBNET=192.168.20.0/24 (single occurrence, idempotent)"
+  pass "configure_single_box_env sets CAMERA_SUBNET=auto (single occurrence, idempotent)"
 else
-  fail "expected exactly one 'CAMERA_SUBNET=192.168.20.0/24' in .env, found ${CAM_SUBNET_COUNT}"
+  fail "expected exactly one 'CAMERA_SUBNET=auto' in .env, found ${CAM_SUBNET_COUNT}"
 fi
 
 # The last-wins CAMERA_SUBNET (what docker-compose env_file actually uses)
-# must be the single-box network, not the inherited multi-box default. This
-# guards against an append-without-strip regression that would leave the
-# 192.168.100.0/24 default as the effective value.
+# must be auto, not the inherited multi-box default. This guards against an
+# append-without-strip regression that would leave the 192.168.100.0/24
+# default as the effective value.
 CAM_SUBNET_EFFECTIVE=$( { grep -E '^CAMERA_SUBNET=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
-if [ "$CAM_SUBNET_EFFECTIVE" = "192.168.20.0/24" ]; then
-  pass "effective (last-wins) CAMERA_SUBNET is the single-box network 192.168.20.0/24"
+if [ "$CAM_SUBNET_EFFECTIVE" = "auto" ]; then
+  pass "effective (last-wins) CAMERA_SUBNET is auto (edge-router derived)"
 else
-  fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected 192.168.20.0/24)"
+  fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected auto)"
 fi
 
 # --- Shape-aware WireGuard LAN CIDR/DNS (WARP-839) ------------------------
@@ -838,12 +838,13 @@ fi
 # Phase 8: Nextcloud post-install hook reconcile on bring-up (WARP-990)
 # =============================================================================
 # docker/nextcloud-init.sh (household group + "Household" group folder +
-# OnlyOffice connector) is mounted as the official image's post-installation
-# hook, which fires ONLY on the single boot that auto-installs into an EMPTY
-# nextcloud-data volume. A volume-preserving reset/reflash never re-enters
-# that window, so a reflashed box came up with a bare Nextcloud (occ
-# group:list → only "admin") and the setup wizard's account creation 500'd
-# (WARP-989). start_stack must therefore wait for `php occ status` to report
+# document-engine connector) is mounted as the official image's before-starting
+# hook (WARP-1694). It used to be the post-installation hook, which fires ONLY
+# on the single boot that auto-installs into an EMPTY nextcloud-data volume: a
+# volume-preserving reset/reflash never re-enters that window, so a reflashed
+# box came up with a bare Nextcloud (occ group:list → only "admin") and the
+# setup wizard's account creation 500'd (WARP-989); and a no-wipe deploy never
+# reconciled at all. start_stack must additionally wait for `php occ status` to report
 # installed (bounded retry) and re-exec the SAME mounted hook — idempotent,
 # single source of truth — on every bring-up, loudly surfacing but never
 # fataling on a hook failure. Static wiring asserts + behavioural runs of the
@@ -851,7 +852,7 @@ fi
 # tests/single-box-openwrt-readiness.test.sh).
 echo "--- Phase 8: Nextcloud post-install hook reconcile (WARP-990) ---"
 
-NC_HOOK_PATH="/docker-entrypoint-hooks.d/post-installation/init-droplet.sh"
+NC_HOOK_PATH="/docker-entrypoint-hooks.d/before-starting/init-droplet.sh"
 
 # (1) Both reconcile functions are present and sentinel-delimited (the markers
 # are the extraction contract for the behavioural asserts below).
@@ -895,10 +896,22 @@ else
 fi
 
 # …which docker-compose.yml actually mounts docker/nextcloud-init.sh at…
-if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/post-installation/init-droplet\.sh' "$COMPOSE_FILE_REAL"; then
+if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/before-starting/init-droplet\.sh' "$COMPOSE_FILE_REAL"; then
   pass "docker-compose.yml mounts nextcloud-init.sh at the exec'd hook path (paths agree)"
 else
   fail "docker-compose.yml no longer mounts nextcloud-init.sh at $NC_HOOK_PATH — the reconcile exec would 404"
+fi
+
+# WARP-1694 — and specifically NOT back in post-installation. That slot fires
+# only on the boot that auto-installs, so a box that is already installed never
+# re-runs the hook: a no-wipe deploy (`docker compose up -d`, no setup.sh, so no
+# start_stack reconcile) silently does not converge. Found live on .250 when a
+# DOCS_ENGINE change did not take. This assertion is the regression guard —
+# `before-starting` runs on EVERY container start.
+if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/post-installation/' "$COMPOSE_FILE_REAL"; then
+  fail "docker-compose.yml mounts nextcloud-init.sh at post-installation — that fires only on the install boot, so an installed box never reconciles (WARP-1694)"
+else
+  pass "nextcloud-init.sh is not mounted at post-installation (every-boot reconcile preserved — WARP-1694)"
 fi
 
 # …and compose.sh never reimplements the hook's occ steps (the script stays
@@ -1829,7 +1842,7 @@ echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml 
 # when their profile (eval / web) is active; openwrt (single-box), ops-console
 # (ops) and fleet-agent (telemetry) are profile-gated services no default
 # provision pre-builds.
-BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,openwrt,ops-console,fleet-agent"
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).

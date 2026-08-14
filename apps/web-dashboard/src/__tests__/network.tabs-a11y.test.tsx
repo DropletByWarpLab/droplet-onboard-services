@@ -65,6 +65,19 @@ describe("Network tabs URL integration (WARP-100)", () => {
     expect(src).toMatch(/router\.push\(/);
   });
 
+  // WARP-1723 review finding 2 (third pass): the switcher and networkTabHref
+  // built the same URL two different ways. The helper's whole reason to exist
+  // is that a cross-surface guarantee shouldn't rest on two literals staying
+  // in sync — if they drift, a cross-tab link's href (the middle-click /
+  // open-in-new-tab / no-JS path) points somewhere the switcher never
+  // produces. One builder, both callers.
+  it("builds its own tab URLs with networkTabHref, not an inline ?tab= literal", () => {
+    expect(src).toMatch(/router\.push\(networkTabHref\(next\)\)/);
+    expect(src).toMatch(/networkTabHref/);
+    // No hand-rolled `?tab=${…}` template anywhere in the page.
+    expect(src).not.toMatch(/`\/network\?tab=\$\{/);
+  });
+
   it("wraps the page in a Suspense boundary for useSearchParams", () => {
     expect(src).toMatch(/<Suspense/);
   });
@@ -111,5 +124,22 @@ describe("Network tabs reactive-hash + a11y fixes (WARP-100 PR #720)", () => {
     // clearTimeout now lives in the helper's returned cleanup; the page calls
     // that cleanup on unmount and on each hashchange before re-arming.
     expect(src).not.toMatch(/setTimeout\(tryScroll, 100\)/);
+  });
+});
+
+// WARP-1723 (second pass) — a cross-tab link inside a tabpanel is a focus trap
+// in reverse: the panels conditionally unmount (`activeTab === "devices" &&
+// <DevicesTab />`), so activating the Coverage Extenders panel's "Change in
+// Wi-Fi settings" link destroys the focused <a> and focus falls to <body>. A
+// keyboard/SR user lands nowhere and has to re-Tab through the whole shell.
+// The page already owns the fix — record the arrival tab and let the
+// post-activation effect focus it once aria-selected reflects the change.
+describe("Network cross-tab link focus (WARP-1723)", () => {
+  it("routes the Devices→Wi-Fi link through the page's focus machinery", () => {
+    expect(src).toMatch(/onOpenWifiSettings=\{/);
+    // Same ref the arrow-key nav uses, so the arrival tab is focused only
+    // AFTER it reads aria-selected={true} / tabIndex={0}.
+    expect(src).toMatch(/keyboardFocusTarget\.current = "wifi"/);
+    expect(src).toMatch(/setActiveTab\("wifi"\)/);
   });
 });

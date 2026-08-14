@@ -1,15 +1,26 @@
 fastapi>=0.141.1
-uvicorn>=0.51.0
-litellm>=1.94.0
-cryptography>=49.0.0
+uvicorn>=0.52.1
+litellm>=1.95.0
+cryptography>=50.0.0
 pydantic>=2.13.4
 httpx>=0.28.1
-sse-starlette>=3.4.6
-redis>=8.0.1
+sse-starlette>=3.4.8
+redis>=8.1.0
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
-sentence-transformers>=5.6.1
+sentence-transformers>=5.7.0
+# NOTE (WARP-1948): keep this torch line EXACTLY as-is. Appending a version
+# spec ("torch>=X --index-url …") makes osv-scanner treat the whole remainder
+# as the version string and match every torch advisory ever published. The
+# unpinned form resolves to the scanner's 2.9.1 floor; the four advisories
+# that floor trips are triaged in osv-scanner.toml (real installs pull the
+# latest CPU wheel, ≥2.13).
 torch --index-url https://download.pytorch.org/whl/cpu
+# WARP-1948 — OSV floors. The osv-nightly resolver scores unpinned/transitive
+# deps at their MINIMUM resolvable version, so it flags ancient releases no
+# image actually installs. These floors state the already-true minimum instead
+# of suppressing the advisory (same class as the cryptography>=50 pin above).
+idna>=3.15
 
 # WARP-286 / WARP-644: BGE-reranker-base via optimum + onnxruntime.
 # Used by the Rerank gRPC handler for hybrid retrieval.

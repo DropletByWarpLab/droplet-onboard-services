@@ -44,6 +44,54 @@ function throwIfNotOk(resp: Response, label: string): void {
 }
 
 /**
+ * A switch write's response. `dry_run:true` (with `status:"planned"`) means the
+ * service STAGED the change but did NOT apply it — SWITCH_LIVE_WRITES=0. Carrying
+ * it up to the route is what stops the dashboard reporting a success that never
+ * happened (audit 2026-08-06).
+ */
+export interface SwitchWriteResult {
+  status?: string;
+  dry_run?: boolean;
+  plan?: unknown;
+  [k: string]: unknown;
+}
+
+/**
+ * POST/DELETE a switch write and return its parsed body. On a non-ok response,
+ * throw an Error carrying the switch service's OWN message — the PoE guard's 409
+ * names the device that would go dark, and a bare "Disable PoE: 409" throws that
+ * away. A 403 stays the distinct SwitchAuthError, as throwIfNotOk classifies it.
+ */
+async function switchWrite(
+  path: string,
+  label: string,
+  init: RequestInit = {},
+): Promise<SwitchWriteResult> {
+  const resp = await internalFetch(`${SWITCH_URL}${path}`, {
+    method: "POST",
+    ...init,
+    headers: { ...authHeaders(), ...(init.headers ?? {}) },
+    signal: init.signal ?? timeout(),
+  });
+  const body = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!resp.ok) {
+    if (resp.status === 403) {
+      throw new SwitchAuthError(`${label}: 403 (switch auth not configured)`, {
+        status: 403,
+        label,
+      });
+    }
+    const detail = body?.detail ?? body?.error;
+    const message =
+      typeof detail === "string" && detail ? detail : `${label}: ${resp.status}`;
+    const err = new Error(message) as Error & { status?: number };
+    err.status = resp.status;
+    throw err;
+  }
+  return body as SwitchWriteResult;
+}
+
+/**
  * Service-to-service auth headers. SERVICE_TOKEN_SWITCH is the dedicated
  * bearer (compose wires the switch container's SERVICE_SECRET to the same
  * value); SERVICE_SECRET is the legacy shared-secret fallback for installs
@@ -128,22 +176,12 @@ export async function fetchPortStatus(): Promise<SwitchRawPortStatus[]> {
   return data.ports ?? [];
 }
 
-export async function enablePort(port: number): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/ports/${port}/enable`, {
-    method: "POST",
-    headers: authHeaders(),
-    signal: timeout(),
-  });
-  if (!resp.ok) throw new Error(`Enable port: ${resp.status}`);
+export async function enablePort(port: number): Promise<SwitchWriteResult> {
+  return switchWrite(`/ports/${port}/enable`, "Enable port");
 }
 
-export async function disablePort(port: number): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/ports/${port}/disable`, {
-    method: "POST",
-    headers: authHeaders(),
-    signal: timeout(),
-  });
-  if (!resp.ok) throw new Error(`Disable port: ${resp.status}`);
+export async function disablePort(port: number): Promise<SwitchWriteResult> {
+  return switchWrite(`/ports/${port}/disable`, "Disable port");
 }
 
 // --- VLANs ---
@@ -158,23 +196,15 @@ export async function fetchVlans(): Promise<unknown[]> {
 export async function createVlan(
   vlanId: number,
   name: string
-): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/vlans`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+): Promise<SwitchWriteResult> {
+  return switchWrite(`/vlans`, "Create VLAN", {
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ vlan_id: vlanId, name }),
-    signal: timeout(),
   });
-  if (!resp.ok) throw new Error(`Create VLAN: ${resp.status}`);
 }
 
-export async function deleteVlan(vlanId: number): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/vlans/${vlanId}`, {
-    method: "DELETE",
-    headers: authHeaders(),
-    signal: timeout(),
-  });
-  if (!resp.ok) throw new Error(`Delete VLAN: ${resp.status}`);
+export async function deleteVlan(vlanId: number): Promise<SwitchWriteResult> {
+  return switchWrite(`/vlans/${vlanId}`, "Delete VLAN", { method: "DELETE" });
 }
 
 export async function fetchVlanMembership(vlanId: number): Promise<unknown> {
@@ -186,17 +216,33 @@ export async function fetchVlanMembership(vlanId: number): Promise<unknown> {
   return resp.json();
 }
 
+/**
+ * How a membership write treats the VLAN's EXISTING members.
+ *
+ * - `merge`   — each entry is an access move: the port becomes the VLAN's
+ *               untagged member and every other member is preserved. This is
+ *               what "move port 4 to the camera VLAN" means, and the switch
+ *               service refuses entries it can't express that way (tagged /
+ *               removals) rather than guessing.
+ * - `replace` — write the VLAN's whole member list; anything absent is
+ *               DROPPED. Only for callers that genuinely computed the full
+ *               list.
+ *
+ * Required, not defaulted: a single-port `replace` on VLAN 1 drops the uplink,
+ * the AP and the appliance, so the compiler makes every call site say which it
+ * means (audit 2026-08-06).
+ */
+export type VlanMembershipMode = "merge" | "replace";
+
 export async function setVlanMembership(
   vlanId: number,
-  ports: { port: number; tagged: boolean; member: boolean }[]
-): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ ports }),
-    signal: timeout(),
+  ports: { port: number; tagged: boolean; member: boolean }[],
+  mode: VlanMembershipMode
+): Promise<SwitchWriteResult> {
+  return switchWrite(`/vlans/${vlanId}/membership`, "Set VLAN membership", {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ports, mode }),
   });
-  if (!resp.ok) throw new Error(`Set VLAN membership: ${resp.status}`);
 }
 
 // --- PoE ---
@@ -214,22 +260,15 @@ export async function fetchPortPoe(port: number): Promise<unknown> {
   return resp.json();
 }
 
-export async function enablePortPoe(port: number): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/poe/${port}/enable`, {
-    method: "POST",
-    headers: authHeaders(),
-    signal: timeout(),
-  });
-  if (!resp.ok) throw new Error(`Enable PoE: ${resp.status}`);
+export async function enablePortPoe(port: number): Promise<SwitchWriteResult> {
+  return switchWrite(`/poe/${port}/enable`, "Enable PoE");
 }
 
-export async function disablePortPoe(port: number): Promise<void> {
-  const resp = await internalFetch(`${SWITCH_URL}/poe/${port}/disable`, {
-    method: "POST",
-    headers: authHeaders(),
-    signal: timeout(),
-  });
-  if (!resp.ok) throw new Error(`Disable PoE: ${resp.status}`);
+export async function disablePortPoe(port: number): Promise<SwitchWriteResult> {
+  // No `force` — the switch service's guard (409 PORT_POWERS_MEMBER) must stay
+  // active for a dashboard/agent-initiated cut. switchWrite surfaces that 409's
+  // message verbatim instead of a bare status code.
+  return switchWrite(`/poe/${port}/disable`, "Disable PoE");
 }
 
 // --- System ---
@@ -253,7 +292,7 @@ export async function fetchProvisionConfig(): Promise<SwitchProvisionConfig> {
 }
 
 /** Re-run the bring-up provisioner (re-apply the managed layout). */
-export async function provisionSwitch(): Promise<unknown> {
+export async function provisionSwitch(): Promise<SwitchWriteResult> {
   const resp = await internalFetch(`${SWITCH_URL}/provision`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -281,7 +320,7 @@ export async function setupCameraPorts(
   vlanId = 100,
   cameraPorts = [1, 2, 3, 4, 5, 6, 7, 8],
   uplinkPorts = [9, 10]
-): Promise<unknown> {
+): Promise<SwitchWriteResult> {
   const resp = await internalFetch(`${SWITCH_URL}/setup/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },

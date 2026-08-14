@@ -5,7 +5,7 @@
  * in-memory Prisma stub covering Department / DepartmentMembership /
  * User, mirroring the guest-expiry-sweep.test.ts pattern.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const {
   ncEnsureGroupMock,
@@ -105,6 +105,8 @@ interface FakeDepartment {
   ncGroupfolderId: number | null;
   quotaBytes: bigint | null;
   archivedAt: Date | null;
+  /** WARP-1651 — the durable escalation clock; null while converging. */
+  nonConvergedSince: Date | null;
 }
 
 interface FakeMembership {
@@ -140,6 +142,7 @@ function dept(overrides: Partial<FakeDepartment>): FakeDepartment {
     ncGroupfolderId: null,
     quotaBytes: null,
     archivedAt: null,
+    nonConvergedSince: null,
     ...overrides,
   };
 }
@@ -689,36 +692,65 @@ describe("WARP-1557 — a 5xx on a write that SUCCEEDED upstream must not latch 
   });
 });
 
+/**
+ * WARP-1557's escalation, re-based on a DURABLE clock by WARP-1651.
+ *
+ * The budget is unchanged — 6 ticks × the 5-minute cron interval — but it is
+ * now measured in wall-clock against `Department.nonConvergedSince` instead of
+ * counted in a module-level in-memory Map. These tests therefore drive the
+ * clock rather than the tick count; the restart property the change exists for
+ * is pinned in the WARP-1651 block below.
+ */
 describe("WARP-1557 — stuck rows get a louder signal than a debug log line", () => {
-  it("counts a row as stuck only after it has failed every tick for the threshold, then demotes the re-verify state", async () => {
+  const TICK_MS = 5 * 60 * 1000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("counts a row as stuck only once the budget is spent, then demotes the re-verify state", async () => {
     // Ambiguous failures forever: NC is genuinely down, nothing converges.
     isAmbiguousWriteFailureMock.mockReturnValue(true);
     gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
     const d = dept({ state: "pending" });
     const prisma = buildPrisma([d]);
 
-    // Ticks 1-5: unconfirmed, parked in the non-terminal re-verify state.
+    // Ticks 1-5 (0-20 min elapsed): unconfirmed, parked in the non-terminal
+    // re-verify state.
     for (let i = 0; i < 5; i += 1) {
       const r = await reconcileDepartments(prisma as any);
       expect(r.departmentsStuck).toBe(0);
       expect(prisma.deptRows.get(d.id)!.state).toBe("provisioning");
+      vi.setSystemTime(new Date(Date.now() + TICK_MS));
     }
 
-    // Tick 6 crosses STUCK_TICK_THRESHOLD: the row is reported stuck AND the
-    // re-verify budget is spent, so it is demoted to its terminal failure
-    // state rather than implying work is still in progress forever.
+    // At 25 min the budget is still unspent — the boundary is 30, and a test
+    // that passed at 25 would not be testing the threshold.
+    const fifth = await reconcileDepartments(prisma as any);
+    expect(fifth.departmentsStuck).toBe(0);
+    expect(prisma.deptRows.get(d.id)!.state).toBe("provisioning");
+
+    // 30 min: budget spent. The row is reported stuck AND demoted to its
+    // terminal failure state rather than implying work is still in progress.
+    vi.setSystemTime(new Date(Date.now() + TICK_MS));
     const sixth = await reconcileDepartments(prisma as any);
     expect(sixth.departmentsStuck).toBe(1);
     expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
   });
 
-  it("a row that converges clears its stuck counter", async () => {
+  it("a row that converges stops its clock", async () => {
     isAmbiguousWriteFailureMock.mockReturnValue(true);
     gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
     const d = dept({ state: "pending" });
     const prisma = buildPrisma([d]);
 
     await reconcileDepartments(prisma as any);
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince).not.toBeNull();
+    vi.setSystemTime(new Date(Date.now() + TICK_MS));
     await reconcileDepartments(prisma as any);
 
     // NC recovers.
@@ -726,9 +758,11 @@ describe("WARP-1557 — stuck rows get a louder signal than a debug log line", (
     const recovered = await reconcileDepartments(prisma as any);
     expect(prisma.deptRows.get(d.id)!.state).toBe("active");
     expect(recovered.departmentsStuck).toBe(0);
+    // The clock is cleared, so the NEXT failure episode gets a full budget
+    // rather than inheriting a spent one.
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince).toBeNull();
 
-    // Break it again — the counter restarted from zero, so one bad tick is
-    // not immediately "stuck".
+    // Break it again — one bad tick is not immediately "stuck".
     gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
     prisma.deptRows.get(d.id)!.state = "pending";
     prisma.deptRows.get(d.id)!.ncGroupfolderId = null;
@@ -736,21 +770,93 @@ describe("WARP-1557 — stuck rows get a louder signal than a debug log line", (
     expect(again.departmentsStuck).toBe(0);
   });
 
-  it("the stuck ActivityRow carries how many consecutive ticks the row has failed", async () => {
+  it("the stuck ActivityRow carries how long the row has been failing", async () => {
     gfCreateFolderMock.mockRejectedValue(new Error("nc unreachable"));
     const d = dept({ state: "failed", provisionError: "previous failure" });
     const prisma = buildPrisma([d]);
 
     await reconcileDepartments(prisma as any);
+    vi.setSystemTime(new Date(Date.now() + 12 * 60 * 1000));
     await reconcileDepartments(prisma as any);
 
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         what: "Department stuck in failed state",
         severity: "err",
-        refs: expect.objectContaining({ consecutiveTicks: 2 }),
+        refs: expect.objectContaining({ minutesStuck: 12 }),
       }),
     );
+  });
+});
+
+/**
+ * WARP-1651 — the escalation survives an orchestrator restart.
+ *
+ * WARP-1557 counted consecutive ticks in a module-level in-memory Map, and
+ * its comment claimed a restart "at worst delays an escalation by
+ * STUCK_TICK_THRESHOLD ticks". On a box restarting more often than the
+ * threshold — a deploy, a reboot, an OOM, or the very infra instability that
+ * produced the 5xx — the counter never reached the threshold, the demotion
+ * NEVER fired, and the owner saw "Setting up…" with no error text forever.
+ *
+ * A restart is modelled the only way it can be: the process keeps no memory
+ * of previous ticks, so a row whose clock says 40 minutes must escalate on
+ * the very first sweep it is seen in.
+ */
+describe("WARP-1651 — the re-verify budget is durable across restarts", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T01:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("escalates on the FIRST tick after a restart when the row is already past budget", async () => {
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    // The row as a restarted process finds it: parked in the re-verify state
+    // with a clock that started 40 minutes ago.
+    const d = dept({
+      state: "provisioning",
+      provisionError: "Groupfolder create: 503",
+      nonConvergedSince: new Date(Date.now() - 40 * 60 * 1000),
+    });
+    const prisma = buildPrisma([d]);
+
+    const first = await reconcileDepartments(prisma as any);
+
+    expect(first.departmentsStuck).toBe(1);
+    expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
+  });
+
+  it("does not restart the clock on a row that is already counting", async () => {
+    // The bug in counter form: every fresh process began at zero. The stamp
+    // has to be written once per failure EPISODE and read back afterwards.
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const started = new Date(Date.now() - 10 * 60 * 1000);
+    const d = dept({ state: "provisioning", nonConvergedSince: started });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince?.getTime()).toBe(
+      started.getTime(),
+    );
+  });
+
+  it("keeps the clock when it demotes, so the row cannot re-arm its own budget", async () => {
+    isAmbiguousWriteFailureMock.mockReturnValue(true);
+    gfCreateFolderMock.mockRejectedValue(new Error("Groupfolder create: 503"));
+    const started = new Date(Date.now() - 40 * 60 * 1000);
+    const d = dept({ state: "provisioning", nonConvergedSince: started });
+    const prisma = buildPrisma([d]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(prisma.deptRows.get(d.id)!.state).toBe("failed");
+    expect(prisma.deptRows.get(d.id)!.nonConvergedSince).not.toBeNull();
   });
 });
 
@@ -1157,6 +1263,163 @@ describe("WARP-1526 B4 — admin-group sweep containment", () => {
     expect(ncRemoveUserFromGroupMock).not.toHaveBeenCalled();
     expect(result.adminGroupAdded).toBe(0);
     expect(result.adminGroupRemoved).toBe(0);
+  });
+});
+
+/**
+ * WARP-1558 — the sweep above IS the backfill, once it can create the group.
+ *
+ * ADR-029 §2.5 Tier-1 admin see-all is exactly `droplet-admins` membership,
+ * and ADR-032 §7 / O-5 (2026-07-27) confirms that tier is unconditional and
+ * not narrowable by a custom role.
+ *
+ * THE DEFECT IS A FRESH-INSTALL ONE. `droplet-admins` is created LAZILY by
+ * provisionDepartment, so an install with **no departments** has no group at
+ * all — and every add against a non-existent group dies on OCS 102, forever.
+ * The create-path fix (routes/auth-groups.ts) stops NEW admin-tier accounts
+ * from landing in that state; these specs cover the sweep that has to create
+ * the group before it can converge membership into it.
+ *
+ * A NOTE ON PROVENANCE, because the original framing was different. This work
+ * was motivated by the .87 box, where the group was attached at MASK_ADMIN to
+ * every groupfolder with ZERO members. **That state no longer reproduces**:
+ * re-probed 2026-07-28 on the box at 192.168.1.250, `droplet-admins` holds
+ * exactly the three admin-tier users and the reconciler reports
+ * adminGroupAdded/Removed/Failed = 0 every tick. Why it differs is NOT
+ * established — the box changed address and hostname, and re-provisioned vs
+ * rebuilt vs different appliance cannot be distinguished from here, so no
+ * causal claim is made. The already-broken-install justification is therefore
+ * withdrawn; the zero-department case above is the one these specs defend, and
+ * it is unaffected by whatever happened to that box.
+ *
+ * The answer is deliberately not a migration or a one-shot script: the sweep
+ * is stateless, so "an install that never had a member" and "an install whose
+ * members an outage dropped" are the same input to it, and the boot tick plus
+ * the 5-minute cron converge both.
+ *
+ * That diagnosis originally rested on `ncListGroupMembers` returning `[]` for
+ * "no such group" exactly as it does for "empty", leaving the sweep unable to
+ * tell the two apart. WARP-1565 has since landed on main and removed that
+ * half: the sweep now reads through `ncListGroupMembersStrict`, which throws
+ * on everything except a real 404, so "no group" IS distinguishable. The fix
+ * here is unchanged and still required — knowing the group is absent does not
+ * create it — but these specs seed the STRICT mock accordingly, and the
+ * lenient one is wired to throw (see the mock factory at the top of the file).
+ */
+describe("WARP-1558 — droplet-admins membership backfill", () => {
+  const OPERATORS: FakeUser[] = [
+    { id: "u-1", nextcloudUsername: "rjouffret", role: "owner" },
+    { id: "u-2", nextcloudUsername: "scruceru", role: "admin" },
+    { id: "u-3", nextcloudUsername: "srubinchik", role: "admin" },
+  ];
+
+  it("backfills every admin-tier user into an EMPTY group, creating the group first", async () => {
+    // A fresh install: three admin-tier users, and no group for them to be in.
+    const prisma = buildPrisma([], [], [...OPERATORS, {
+      id: "u-4",
+      nextcloudUsername: "kid",
+      role: "family",
+    }]);
+    ncListGroupMembersStrictMock.mockResolvedValue([]);
+
+    const order: string[] = [];
+    ncEnsureGroupMock.mockImplementation(async (group: string) => {
+      order.push(`ensure:${group}`);
+    });
+    ncAddUserToGroupMock.mockImplementation(async (_t: string, uid: string) => {
+      order.push(`add:${uid}`);
+    });
+
+    const result = await reconcileDepartments(prisma as any);
+
+    // The group is created BEFORE anyone is added to it — the whole point.
+    expect(order[0]).toBe(`ensure:${DROPLET_ADMINS_GROUP}`);
+    expect(order.slice(1).sort()).toEqual([
+      "add:rjouffret",
+      "add:scruceru",
+      "add:srubinchik",
+    ]);
+    // The family user is NOT admin-tier and must not be swept in.
+    expect(order).not.toContain("add:kid");
+    expect(result.adminGroupAdded).toBe(3);
+    expect(result.adminGroupFailed).toBe(0);
+  });
+
+  it("is idempotent — the tick after a backfill is a silent no-op with no ensure write", async () => {
+    const prisma = buildPrisma([], [], OPERATORS);
+    ncListGroupMembersStrictMock.mockResolvedValue([]);
+
+    const first = await reconcileDepartments(prisma as any);
+    expect(first.adminGroupAdded).toBe(3);
+
+    // Second tick: NC now reports the members the first tick added.
+    vi.clearAllMocks();
+    ncEnsureGroupMock.mockResolvedValue(undefined);
+    ncListGroupMembersStrictMock.mockResolvedValue(
+      OPERATORS.map((u) => ({ id: u.nextcloudUsername! })),
+    );
+
+    const second = await reconcileDepartments(prisma as any);
+
+    expect(second.adminGroupAdded).toBe(0);
+    expect(second.adminGroupRemoved).toBe(0);
+    expect(second.adminGroupFailed).toBe(0);
+    expect(ncAddUserToGroupMock).not.toHaveBeenCalled();
+    // A converged box pays NO ensure round-trip: the ensure is gated on there
+    // being someone to add, so this costs nothing every 5 minutes forever.
+    expect(ncEnsureGroupMock).not.toHaveBeenCalledWith(DROPLET_ADMINS_GROUP);
+  });
+
+  it("a failed ensure is contained — the sweep still reports the adds as failed and the tick completes", async () => {
+    const prisma = buildPrisma([], [], OPERATORS);
+    ncListGroupMembersStrictMock.mockResolvedValue([]);
+    ncEnsureGroupMock.mockRejectedValue(new Error("OCS 503"));
+    // With no group, OCS answers 102 for every add.
+    ncAddUserToGroupMock.mockRejectedValue(new Error("group does not exist"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    // Not a throw, not a silent zero: the failure is visible and the next
+    // tick retries, exactly like the sibling sweeps.
+    expect(result.adminGroupAdded).toBe(0);
+    expect(result.adminGroupFailed).toBe(3);
+  });
+
+  it("an ensure failure never starves the revocation direction", async () => {
+    // Removals run first and do not depend on the ensure at all — a demoted
+    // ex-admin must come OUT of the group even on a box where the adds are
+    // all failing.
+    const prisma = buildPrisma([], [], [OPERATORS[0]]);
+    ncListGroupMembersStrictMock.mockResolvedValue([{ id: "eve" }]);
+    ncEnsureGroupMock.mockRejectedValue(new Error("OCS 503"));
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(ncRemoveUserFromGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      "eve",
+      DROPLET_ADMINS_GROUP,
+    );
+    expect(result.adminGroupRemoved).toBe(1);
+  });
+
+  it("backfilling is loud — each restored operator emits an ActivityRow", async () => {
+    const prisma = buildPrisma([], [], [OPERATORS[0]]);
+    ncListGroupMembersStrictMock.mockResolvedValue([]);
+
+    await reconcileDepartments(prisma as any);
+
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system",
+        severity: "warn",
+        what: "Restored drifted admin-group member (role tier is truth)",
+        refs: expect.objectContaining({
+          ncUsername: "rjouffret",
+          group: DROPLET_ADMINS_GROUP,
+        }),
+      }),
+    );
   });
 });
 

@@ -25,20 +25,40 @@ import {
   vpnStatus,
   createVpnPeer,
   deleteVpnPeer,
+  isRevokeApplied,
+  installOverlayVpnPeer,
+  listVpnPeers,
   fetchNetworkSummary,
   RouterError,
 } from "../services/openwrt.client.js";
 import {
   allocateMintAndPersistPeer,
+  allocatePeerIp,
   parseVpnSubnet,
   renderPeerConf,
   VpnConfigError,
   VpnIpExhaustedError,
+  type VpnPeerMode,
 } from "../services/vpn.service.js";
-import { pickHomeEndpoint, fetchBridgeUplinkIp } from "../lib/vpn-home-endpoint.js";
+import {
+  buildOverlayProfile,
+  provisionOverlayPeer,
+  OVERLAY_PEER_MODE,
+  type OverlayEndpointCandidate,
+  type OverlayProvisionRouter,
+  type ProvisionedOverlayPeer,
+} from "../services/overlay-profile.service.js";
+import {
+  pickHomeEndpoint,
+  fetchBridgeUplinkIp,
+  fetchBridgeStunProbe,
+} from "../lib/vpn-home-endpoint.js";
+import { observePlacement } from "../services/overlay-placement.service.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
+import { readLivePeerState } from "../lib/vpn-live-peers.js";
+import { overlayRequiresApproval } from "../services/overlay-enroll-policy.service.js";
 import { createLogger } from "../lib/logger.js";
 import {
   enrollOverlayDevice,
@@ -57,6 +77,7 @@ import {
   overlayLabelSchema,
   parseP256Spki,
   signKeyFingerprint,
+  verifyProfilePop,
   verifyStatusPop,
 } from "../services/overlay-link.service.js";
 
@@ -138,6 +159,126 @@ async function resolveEndpointHost(): Promise<string> {
 // state keep a stable import. There is no longer any in-process cache to
 // clear now that resolveEndpointHost() reads the env var directly.
 export function _resetEndpointCacheForTests(): void {}
+
+/** WARP-1757 — keepalive for overlay peers, in seconds. Matches the value the
+ *  connect agent installs (overlay-connect.service.ts) so a peer's keepalive
+ *  doesn't change depending on which path last touched it. */
+const OVERLAY_KEEPALIVE_SECONDS = 25;
+
+/** WARP-1757 — the routing sidecar, behind the structural surface
+ *  provisionOverlayPeer takes, so the service unit-tests without it. */
+const overlayRouter: OverlayProvisionRouter = {
+  setup: (opts) => vpnSetup(opts),
+  installPeer: (opts) => installOverlayVpnPeer(opts),
+};
+
+/**
+ * WARP-1758 — the endpoint candidates a client should try, best first.
+ *
+ * Re-observed on every call. There is no cached placement to invalidate, so a
+ * DHCP renewal, a WAN failover, or the box being physically moved between an
+ * edge WAN and someone else's subnet is picked up by the next profile fetch
+ * with no redeploy and no owner action. That IS the auto-reconcile.
+ *
+ * Every candidate is an IP-literal transport address. The per-device
+ * `<name>.droplet-us.com` is deliberately NOT among them: it is public-NXDOMAIN
+ * under ADR-023's split-horizon, so off the home LAN it has no handshake target
+ * — advertising it is the WARP-1391 dead-endpoint bug, and it is the box's
+ * HTTPS/API address, not a WireGuard transport address.
+ */
+async function resolveOverlayEndpointCandidates(): Promise<
+  OverlayEndpointCandidate[]
+> {
+  const snapshot = await observePlacement(
+    {
+      wanAddress: () => fetchBridgeUplinkIp(),
+      stun: () => fetchBridgeStunProbe(),
+      lanAddress: () => resolveHomeEndpointHost(),
+      // No second STUN destination is available from the host bridge yet, so
+      // NAT class stays `unknown` and `srflx` is still offered — we withhold it
+      // only on a POSITIVE address-dependent finding, never on absence of
+      // evidence. Wiring a second server is the remaining half of WARP-1758.
+    },
+    { listenPort: config.WIREGUARD_LISTEN_PORT },
+  );
+  if (snapshot.relayRequired) {
+    logger.warn(
+      { placement: snapshot.placement.placement, reason: snapshot.placement.reason },
+      "overlay: no remotely dial-able endpoint candidate — this box needs a relay to be reachable off-LAN",
+    );
+  }
+  return snapshot.candidates;
+}
+
+/**
+ * WARP-1593 — resolve the host a QR-enrolling client should call the **HTTPS
+ * enrollment API** on.
+ *
+ * This is deliberately NOT `resolveEndpointHost()`. That function answers a
+ * different question — "where does WireGuard send UDP?" — and its second
+ * priority, `WIREGUARD_ENDPOINT_HOST`, is a *transport* address that in
+ * practice carries the WG port (`box.example:51820`). Minting an enroll QR
+ * from it told the phone to POST an HTTPS request at the WireGuard UDP port,
+ * which can never complete; the failure surfaced on the phone as a generic
+ * connection error with nothing pointing at the real cause (an unconfigured
+ * box). Clients must not have to know port policy to undo that — so the split
+ * lives here.
+ *
+ * Priority — each source is honoured **only when it is a bare host**, because
+ * a value carrying a port is a transport address and that is exactly the input
+ * this function exists to reject. A set-but-unusable source refuses outright
+ * rather than falling through: the box would otherwise silently mint a QR for
+ * a DIFFERENT host than the one the operator configured.
+ *   1. `DROPLET_PUBLIC_FQDN` — the per-device `<name>.droplet-us.com` name the
+ *      box learns from HQ (ADR-023). Split-horizon: it resolves on the home
+ *      LAN, which is where enrollment happens, and over the tunnel afterwards.
+ *   2. `WIREGUARD_ENDPOINT_HOST` — an operator who set a plain hostname meant
+ *      "this is the box's name".
+ *   3. Empty — the caller refuses to mint and says so honestly.
+ *
+ * Returns a bare host (no scheme, no port); clients build `https://<host>`.
+ */
+export function resolveEnrollApiHost(): string {
+  const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
+  if (fqdn) return bareHostOrEmpty(stripSchemeAndSlash(fqdn));
+  return bareHostOrEmpty(
+    stripSchemeAndSlash((config.WIREGUARD_ENDPOINT_HOST ?? "").trim()),
+  );
+}
+
+/**
+ * Return `value` only if it is a BARE host, else empty so the caller refuses.
+ *
+ * WARP-1593 send-back: this guard was originally inline in the
+ * `WIREGUARD_ENDPOINT_HOST` branch above, which meant the higher-priority
+ * `DROPLET_PUBLIC_FQDN` returned BEFORE it ever ran — `box.example:51820` was
+ * minted into a QR verbatim, exactly the transport address this function
+ * exists to reject. `DROPLET_PUBLIC_FQDN` is not the closed HQ-only channel it
+ * looks like either: config.ts declares it `z.string().default("")` with no
+ * shape validation, and scripts/lib/secrets.sh seeds it into .env as an empty
+ * key for an operator to fill in. Both branches now share ONE guard so they
+ * cannot drift apart again.
+ *
+ *   - A port means a transport address, never an API host. Bracketed IPv6
+ *     literals ("[::1]") are checked AFTER the brackets, so the colons in the
+ *     address aren't mistaken for a port.
+ *   - Anything past the host — path, query, fragment, userinfo — is not a host,
+ *     and interior whitespace/newlines are the injection shape the shell side
+ *     already hardened against for this very variable (WARP-988, WARP-994).
+ */
+function bareHostOrEmpty(value: string): string {
+  const afterBracket = value.startsWith("[")
+    ? value.slice(value.indexOf("]") + 1)
+    : value;
+  if (afterBracket.includes(":")) return "";
+  if (/[\/?#@\s]/.test(value)) return "";
+  return value;
+}
+
+/** Drop an accidental scheme prefix and any trailing slash from a host value. */
+function stripSchemeAndSlash(value: string): string {
+  return value.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "").replace(/\/+$/, "");
+}
 
 /**
  * WARP-1283: RouterError codes that mean "the routing sidecar is unavailable
@@ -332,14 +473,109 @@ export function createVpnRouter(
       next();
     };
 
+  // Declared here rather than at its route because provisionApprovedPeer below
+  // audits against it and both approve paths share that helper.
+  const ROUTE_APPROVE = "/vpn/overlay/pending-enrollments/:id/approve";
+
+  /**
+   * WARP-1757 — make the box ready to accept an approved device's handshake.
+   *
+   * Shared by BOTH approve paths so they cannot drift: the first approval (just
+   * after the HQ vouch) and a re-approval of an already-'approved' row, which
+   * is a pure retry that never touches the vouch. Returns `null` on failure —
+   * the caller reports `tunnel_ready:false` rather than throwing, because a
+   * failed provision must never roll a vouched enrollment back.
+   *
+   * The routing sidecar is the only fallible collaborator here; every failure
+   * mode is transient-ish (wg0 setup, IP allocation, peer install), which is
+   * what makes a retry the right recovery instead of a rollback.
+   */
+  const provisionApprovedPeer = async (
+    req: Request,
+    pending: {
+      id: string;
+      wgPublicKey: string;
+      label: string;
+      linkTokenId: string;
+    },
+    provenance: {
+      linkTokenEnrolledBy: string | null;
+      /** Original approval time; omitted on a first provision. */
+      enrolledAt?: Date;
+      /** HQ device ref, for the failure audit. Absent on a retry. */
+      deviceId?: string | null;
+    },
+  ): Promise<ProvisionedOverlayPeer | null> => {
+    try {
+      return await provisionOverlayPeer(
+        {
+          prisma,
+          router: overlayRouter,
+          allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
+          config: {
+            listenPort: config.WIREGUARD_LISTEN_PORT,
+            serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+            vpnInterface: "wg0",
+            keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+          },
+          now,
+        },
+        {
+          wgPublicKey: pending.wgPublicKey,
+          label: pending.label,
+          linkTokenId: pending.linkTokenId,
+          linkTokenEnrolledBy: provenance.linkTokenEnrolledBy,
+          enrolledAt: provenance.enrolledAt,
+        },
+      );
+    } catch (provisionErr) {
+      logger.error(
+        { err: provisionErr, pendingId: pending.id },
+        "overlay approve: peer provisioning failed — device is approved but cannot connect yet",
+      );
+      audit({
+        event: "overlay_enroll_provision_failed",
+        method: req.method,
+        route: ROUTE_APPROVE,
+        status: 200,
+        clientId: req.user?.id ?? "unknown",
+        refs: { pending_id: pending.id, device_id: provenance.deviceId ?? null },
+      });
+      return null;
+    }
+  };
+
   // ── POST /api/vpn/overlay/devices ──
   // WARP-1385 (ADR-030) — enroll an owner device into the direct-punch overlay.
   // Owner/admin only: the box signs a grant over the client's key material and
   // vouches for it to HQ (the box→HQ bridge the Android client — WARP-1386 —
   // calls). HQ never owns user accounts; the box signature IS the vouch.
+  // WARP-1882 — SIGNING IN IS THE ENROLLMENT.
+  //
+  // Remote access is not a feature you configure. A device whose user has just
+  // proved who they are by signing in should not then be asked to mint a code,
+  // scan it, and have a fingerprint approved — that is three deliberate acts
+  // to authorise something already authorised.
+  //
+  // So this one authenticated call does the whole job: vouch to HQ, provision
+  // the wg0 peer, and return the profile the client needs to bring a tunnel
+  // up. Before this it did only the first of those and returned HQ's raw
+  // result, which meant a bearer-enrolled device was registered and then had
+  // no way to learn its own address, the box's key, its routes or its
+  // resolvers. That is the "two halves never joined" shape the epic already
+  // hit once, sitting in the path that should have been the primary one.
+  //
+  // Not owner/admin-gated. A family member enrolling THEIR OWN device is the
+  // ordinary case, and the peer is scoped to them — which is what makes it
+  // show up in their own device list and be revocable without an admin.
+  //
+  // Idempotent on the device's WireGuard public key: calling it again refreshes
+  // and returns the same profile. That is deliberate and it is why there is no
+  // separate re-fetch endpoint — a client that has lost its profile, or wants
+  // freshly-observed endpoint candidates after moving networks, simply calls
+  // this again on next launch.
   router.post(
     "/vpn/overlay/devices",
-    requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = overlayEnrollSchema.safeParse(req.body);
@@ -355,13 +591,172 @@ export function createVpnRouter(
               "The box hasn't linked to its fleet directory yet — remote-access enrollment turns on automatically once it does.",
           });
         }
-        const result = await overlayEnroll({
+
+        const user = getUser(req);
+        // Provenance and audit keep the ACCOUNT ID, matching every other
+        // `clientId:`/`actor:`/`linkTokenEnrolledBy` in this file.
+        const actorId = req.user?.id ?? user.username;
+        // Ownership on the peer row is keyed by USERNAME, and it has to be:
+        // `GET /api/vpn/peers` narrows a non-admin with `{ userId:
+        // user.username }`, and the revoke route's non-admin escape hatch is
+        // `peer.userId !== user.username`. `AuthUser.id` is the local row id
+        // (or the JWT `sub`) and is never the username, so stamping it here
+        // would leave a family member's own device invisible in their device
+        // list and unrevocable without an admin — the exact two things this
+        // route exists to deliver.
+        const owner = user.username;
+
+        // The device's key may already belong to somebody else's peer. Refuse
+        // rather than silently re-home it — a key collision is either a bug or
+        // an attempt to hijack another member's tunnel address, and neither
+        // should be resolved by whoever called last.
+        const clash = await prisma.vpnPeer.findFirst({
+          where: { publicKey: parsed.data.wg_public_key, status: "active" },
+        });
+        if (clash && clash.userId !== owner && clash.userId !== "overlay") {
+          return res.status(409).json({
+            error: "wg_key_conflict",
+            message:
+              "That device is already set up under a different account on this Droplet.",
+          });
+        }
+
+        // WARP-1882 — the stricter posture, off by default.
+        //
+        // When an owner has asked for it, a signed-in device is STAGED rather
+        // than set up, and lands in the same review queue QR-linked devices
+        // use. Deliberately not a second queue and not a second approve route:
+        // the owner already has one place where devices wait, and two would be
+        // two things to remember to check.
+        //
+        // Staged BEFORE the HQ vouch, matching the QR flow — the vouch is not
+        // idempotent, so it must not fire until an owner has actually said
+        // yes. Approving the row runs the identical vouch-then-provision path.
+        if (await overlayRequiresApproval(prisma)) {
+          const fp = signKeyFingerprint(parsed.data.sign_public_key_pem);
+          const existingPending = await prisma.pendingOverlayEnrollment.findFirst({
+            where: { wgPublicKey: parsed.data.wg_public_key, state: "pending" },
+          });
+          // Re-launching the app must not queue the same device twice — the
+          // owner would see two identical rows and have to guess.
+          const pending =
+            existingPending ??
+            (await prisma.pendingOverlayEnrollment.create({
+              data: {
+                // No link token was involved; the column is non-nullable and
+                // the QR path already writes "" when the token row is gone.
+                linkTokenId: "",
+                signKeyFingerprint: fp,
+                signPublicKeyPem: parsed.data.sign_public_key_pem,
+                wgPublicKey: parsed.data.wg_public_key,
+                label: parsed.data.label,
+                presentedAt: now(),
+                state: "pending",
+              },
+            }));
+          audit({
+            event: "overlay_signin_enroll_pending",
+            method: req.method,
+            route: "/vpn/overlay/devices",
+            status: 202,
+            clientId: actorId,
+            refs: { pending_id: pending.id, fingerprint: fp },
+          });
+          // Same shape the QR redeem returns, so a client polls the existing
+          // status route and needs no second code path for this mode.
+          return res
+            .status(202)
+            .json({ state: "pending", pending_id: pending.id });
+        }
+
+        // The HQ vouch, byte-identical to the approve path's.
+        const vouch = await overlayEnroll({
           wgPublicKey: parsed.data.wg_public_key,
           signPublicKeyPem: parsed.data.sign_public_key_pem,
           label: parsed.data.label,
         });
-        return res.status(200).json(result);
+
+        // Provisioning failure does NOT roll the vouch back — it is not
+        // idempotent and HQ already knows this device. The client is told the
+        // tunnel isn't ready and retries by calling this again, which re-runs
+        // provisioning against the same key and reuses the same address.
+        let provisioned: ProvisionedOverlayPeer;
+        try {
+          provisioned = await provisionOverlayPeer(
+            {
+              prisma,
+              router: overlayRouter,
+              allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
+              config: {
+                listenPort: config.WIREGUARD_LISTEN_PORT,
+                serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+                vpnInterface: "wg0",
+                keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+              },
+              now,
+            },
+            {
+              wgPublicKey: parsed.data.wg_public_key,
+              label: parsed.data.label,
+              userId: owner,
+              // No token was involved. `linkTokenEnrolledBy` still records who
+              // brought the device in — here, themselves — so the owner's
+              // device list can attribute it (WARP-1763) instead of showing a
+              // bare synthetic id.
+              linkTokenId: null,
+              linkTokenEnrolledBy: actorId,
+            },
+          );
+        } catch (provisionErr) {
+          logger.error(
+            { err: provisionErr, clientId: actorId },
+            "overlay sign-in enroll: peer provisioning failed — device is registered but cannot connect yet",
+          );
+          return res.status(503).json({
+            error: "tunnel_not_ready",
+            message:
+              "Your Droplet registered this device but couldn't finish setting up its connection. Try again in a moment.",
+          });
+        }
+
+        const profile = buildOverlayProfile({
+          assignedIp: provisioned.assignedIp,
+          serverPublicKey: provisioned.serverPublicKey,
+          mode: OVERLAY_PEER_MODE,
+          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
+          awayDns: config.WIREGUARD_DNS,
+          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
+          homeDns: config.WIREGUARD_HOME_DNS,
+          vpnSubnet: config.WIREGUARD_VPN_SUBNET,
+          keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+          endpointCandidates: await resolveOverlayEndpointCandidates(),
+        });
+
+        // The owner should be able to see, after the fact, that a device
+        // gained remote access — precisely BECAUSE nobody had to approve it.
+        // Removing the approval step without leaving a trace would make the
+        // flow silent in both directions.
+        void recordActivity({
+          kind: "network",
+          severity: "ok",
+          sourceIcon: "shield",
+          what: `${parsed.data.label} set up remote access`,
+          sub: `${owner} signed in on this device`,
+          actor: { type: "user", id: actorId },
+          refs: { assigned_ip: provisioned.assignedIp },
+        });
+
+        // `device` carries HQ's response so an existing caller that only read
+        // that keeps working; `profile` is the half that was missing.
+        return res.status(200).json({ device: vouch, profile });
       } catch (err) {
+        if (err instanceof RouterError && ROUTING_UNAVAILABLE_CODES.has(err.code)) {
+          return res.status(503).json({
+            error: "tunnel_not_ready",
+            message:
+              "The Droplet's network service isn't responding right now. Try again in a moment.",
+          });
+        }
         logger.warn({ err }, "overlay device enroll failed");
         return next(err);
       }
@@ -400,6 +795,26 @@ export function createVpnRouter(
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const createdBy = req.user?.id ?? "unknown";
+        // WARP-1593: resolve the API host BEFORE minting anything. A QR whose
+        // `server` we can't fill honestly is worse than no QR — and the mint
+        // transaction below expires the owner's current token, so failing
+        // after it would cost them a working code to hand back an error.
+        const server = resolveEnrollApiHost();
+        if (!server) {
+          audit({
+            event: "overlay_link_mint_refused",
+            method: req.method,
+            route: ROUTE_MINT,
+            status: 503,
+            clientId: createdBy,
+            refs: { reason: "remote_access_not_configured" },
+          });
+          return res.status(503).json({
+            error: "remote_access_not_configured",
+            message:
+              "This Droplet doesn't have its internet address yet, so a linking code can't be created. Finish setting up remote access, then try again.",
+          });
+        }
         const { token, tokenHash } = generateLinkToken();
         const parsedLabel = overlayLabelSchema.safeParse(req.body?.label);
         const expiresAt = new Date(now().getTime() + OVERLAY_LINK_TOKEN_TTL_MS);
@@ -423,7 +838,6 @@ export function createVpnRouter(
             },
           }),
         ]);
-        const server = await resolveEndpointHost();
         const boxName =
           config.DROPLET_BOX_NAME || config.DROPLET_PUBLIC_FQDN || "Droplet";
         audit({
@@ -643,6 +1057,127 @@ export function createVpnRouter(
     },
   );
 
+  // ── GET /api/vpn/overlay/devices/by-token/:pending_id/profile ── (NO bearer).
+  // WARP-1757 — the missing link. An APPROVED device fetches everything it
+  // needs to assemble a wg-quick conf around the key it already holds.
+  //
+  // Same PoP shape as /status but over a DIFFERENT domain-prefixed message, so
+  // a captured status signature can't be replayed to read the box's server key
+  // and endpoint candidates. Unknown id and bad PoP both 401, identically to
+  // /status — no existence leak.
+  //
+  // No private key is ever involved: the device generated its own keypair at
+  // enrollment and kept the private half, which is exactly why this returns a
+  // profile rather than a rendered .conf.
+  const ROUTE_PROFILE = "/vpn/overlay/devices/by-token/:pending_id/profile";
+  router.get(
+    ROUTE_PROFILE,
+    auditEvery4xx(ROUTE_PROFILE),
+    (req: Request, res: Response, next: NextFunction) => {
+      // Same unauthenticated-endpoint DoS backstop as redeem/status, sharing
+      // their budget: an ECDSA verify per hit on an always-on box.
+      if (
+        !rl.check("bytoken:global", limits.byTokenGlobal, limits.windowMs) ||
+        !rl.check(
+          `bytoken:ip:${req.ip ?? "unknown"}`,
+          limits.byTokenPerIp,
+          limits.windowMs,
+        )
+      ) {
+        return res.status(429).json({ error: "rate_limited" });
+      }
+      return next();
+    },
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const pop = req.header("X-Overlay-PoP");
+        if (!pop) {
+          return res.status(401).json({ error: "pop_required" });
+        }
+        const pending = await prisma.pendingOverlayEnrollment.findUnique({
+          where: { id: req.params.pending_id },
+        });
+        if (
+          !pending ||
+          !verifyProfilePop(pending.signPublicKeyPem, pending.id, pop)
+        ) {
+          return res.status(401).json({ error: "unauthorized" });
+        }
+        // Authenticated but not yet approved: say so plainly. The device polls
+        // /status for this; answering 409 here keeps "not approved" and
+        // "approved but not provisioned" distinguishable.
+        if (pending.state !== "approved") {
+          return res
+            .status(409)
+            .json({ error: "not_approved", state: pending.state });
+        }
+        // The peer row is the record of provisioning. Its absence means the
+        // approve-time provisioning failed (or predates WARP-1757) — honest
+        // 503 rather than a profile whose address nothing on wg0 would accept.
+        const peer = await prisma.vpnPeer.findFirst({
+          where: { publicKey: pending.wgPublicKey, status: "active" },
+        });
+        if (!peer) {
+          // NOT a "wait and it'll sort itself out" state. Nothing retries this
+          // on the device's behalf: approve-time provisioning already failed,
+          // and the connect tick that could self-heal the peer is behind
+          // OVERLAY_CONNECT_ENABLED — default false, and set in no deployment
+          // artifact. The one thing that DOES fix it is the owner approving the
+          // device again, which re-runs provisioning (and only provisioning).
+          // Say that, rather than promising a retry that will never happen.
+          return res.status(503).json({
+            error: "tunnel_not_ready",
+            message:
+              "This device is approved, but the Droplet couldn't finish setting up its tunnel. Ask the Droplet's owner to approve this device again — that retries the setup.",
+          });
+        }
+        // The server public key comes from the interface itself. vpnSetup is a
+        // no-op when wg0 exists, so this both reads the key and repairs an
+        // interface that vanished under us.
+        const setup = await vpnSetup({
+          listenPort: config.WIREGUARD_LISTEN_PORT,
+          address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+        });
+        // AllowedIPs and DNS come as a PAIR, selected by the peer row's own
+        // mode — never one mode's subnet with the other's resolver. A resolver
+        // outside every AllowedIPs entry leaves the tunnel up but sends DNS out
+        // the client's default route, so the split-horizon FQDN (ADR-023 §3.4)
+        // resolves to public NXDOMAIN. buildOverlayProfile owns the selection;
+        // the route only supplies both pairs.
+        const profile = buildOverlayProfile({
+          assignedIp: peer.assignedIp,
+          serverPublicKey: setup.public_key,
+          mode: (peer.mode as VpnPeerMode | undefined) ?? OVERLAY_PEER_MODE,
+          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
+          awayDns: config.WIREGUARD_DNS,
+          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
+          homeDns: config.WIREGUARD_HOME_DNS,
+          vpnSubnet: config.WIREGUARD_VPN_SUBNET,
+          keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+          endpointCandidates: await resolveOverlayEndpointCandidates(),
+        });
+        audit({
+          event: "overlay_profile_issued",
+          method: req.method,
+          route: ROUTE_PROFILE,
+          status: 200,
+          clientId: pending.id,
+          refs: { pending_id: pending.id },
+        });
+        return res.status(200).json(profile);
+      } catch (err) {
+        if (err instanceof RouterError && ROUTING_UNAVAILABLE_CODES.has(err.code)) {
+          return res.status(503).json({
+            error: "tunnel_not_ready",
+            message:
+              "The Droplet's network service isn't responding right now. Try again in a moment.",
+          });
+        }
+        return next(err);
+      }
+    },
+  );
+
   // ── GET /api/vpn/overlay/pending-enrollments ── (owner) review queue.
   router.get(
     "/vpn/overlay/pending-enrollments",
@@ -670,7 +1205,7 @@ export function createVpnRouter(
   );
 
   // ── POST /api/vpn/overlay/pending-enrollments/:id/approve ── (owner).
-  const ROUTE_APPROVE = "/vpn/overlay/pending-enrollments/:id/approve";
+  // ROUTE_APPROVE is declared above, next to provisionApprovedPeer.
   router.post(
     ROUTE_APPROVE,
     requireRole("owner", "admin"),
@@ -685,9 +1220,32 @@ export function createVpnRouter(
         }
         if (pending.state === "approved") {
           // Idempotent re-approve — return the recorded HQ device ref.
-          return res
-            .status(200)
-            .json({ state: "approved", device_id: pending.hqDeviceRef ?? null });
+          //
+          // The vouch is NOT re-fired: it is not idempotent, HQ already knows
+          // this device, and preventing a second one is the entire reason this
+          // branch short-circuits ahead of the claim. Provisioning is a
+          // different matter — it is idempotent by construction (setup() is a
+          // no-op on an existing wg0, an existing row's address is reused, and
+          // the router-side install is a refresh), and re-approval is the ONLY
+          // recovery a shipping box has when the first attempt failed: the row
+          // stays 'approved' with no usable peer, /profile 503s, and the
+          // connect tick that could self-heal is behind
+          // OVERLAY_CONNECT_ENABLED (default false, in no deployment
+          // artifact). So retry the provisioning half only.
+          //
+          // The original approver + enrolment time are passed back in so a
+          // retry repairs the tunnel without rewriting the audit trail.
+          const retried = await provisionApprovedPeer(req, pending, {
+            linkTokenEnrolledBy: pending.approvedBy ?? req.user?.id ?? null,
+            enrolledAt: pending.enrolledAt ?? undefined,
+          });
+          return res.status(200).json({
+            state: "approved",
+            device_id: pending.hqDeviceRef ?? null,
+            // Same field the first approve returns — a client polling this must
+            // not see `undefined` on the retry that actually fixed things.
+            tunnel_ready: retried !== null,
+          });
         }
         if (pending.state !== "pending") {
           // 'approving' (a concurrent approver already holds the claim),
@@ -816,6 +1374,31 @@ export function createVpnRouter(
 
         const deviceId = extractDeviceId(result);
         const nowDate = now();
+
+        // WARP-1757 — approval is the moment the box becomes ready to accept
+        // this device's handshake. Ensure wg0 exists, allocate the device's
+        // tunnel address, persist the peer row, and install the router-side
+        // peer keyed on the key the device ENROLLED with.
+        //
+        // Before this, approval installed nothing: the router-side peer was
+        // created lazily by the connect tick, which ships disabled, so the
+        // enrolled key was registered with HQ and then never used by any
+        // tunnel. This is the seam that made "approved" mean "connectable".
+        //
+        // Provisioning failure does NOT roll the enrollment back. The HQ vouch
+        // already succeeded and is not idempotent — compensating to 'pending'
+        // would invite a second vouch for a device HQ already knows. The row
+        // stays 'approved', the response says tunnel_ready:false, and /profile
+        // reports honestly that the tunnel isn't ready. Recovery is an explicit
+        // owner action: re-approving an already-'approved' row re-runs THIS
+        // provisioning and nothing else (see the idempotent branch above), so
+        // the retry never reaches the vouch. Do not assume the connect tick
+        // will self-heal it — that tick is behind OVERLAY_CONNECT_ENABLED,
+        // which defaults false and is set in no deployment artifact.
+        const provisioned = await provisionApprovedPeer(req, pending, {
+          linkTokenEnrolledBy: req.user?.id ?? null,
+          deviceId,
+        });
         // Finalize approving → approved. Guarded on 'approving' so a compensating
         // path (or a manual state change) can't be silently clobbered.
         await prisma.pendingOverlayEnrollment.updateMany({
@@ -827,26 +1410,29 @@ export function createVpnRouter(
             hqDeviceRef: deviceId,
           },
         });
-        // Stamp provenance on the resulting overlay peer if it already exists
-        // (the connect agent also backfills it when it first installs the peer).
-        await prisma.vpnPeer.updateMany({
-          where: { publicKey: pending.wgPublicKey },
-          data: {
-            linkTokenEnrolledBy: req.user?.id ?? null,
-            linkTokenId: pending.linkTokenId,
-            linkTokenLabel: pending.label,
-            enrolledAt: nowDate,
-          },
-        });
+        // WARP-1757: provisionOverlayPeer now owns the peer row and stamps the
+        // same provenance, so the previous best-effort updateMany here would be
+        // a second writer for the same fields — removed rather than left to
+        // race with it. When provisioning failed there is no row to stamp.
         audit({
           event: "overlay_enroll_approved",
           method: req.method,
           route: ROUTE_APPROVE,
           status: 200,
           clientId,
-          refs: { device_id: deviceId, pending_id: pending.id },
+          refs: {
+            device_id: deviceId,
+            pending_id: pending.id,
+            tunnel_ready: provisioned !== null,
+          },
         });
-        return res.status(200).json({ state: "approved", device_id: deviceId });
+        return res.status(200).json({
+          state: "approved",
+          device_id: deviceId,
+          // Honest signal for the owner's UI: approved does not always mean the
+          // wg0 peer landed. The device can retry its profile fetch.
+          tunnel_ready: provisioned !== null,
+        });
       } catch (err) {
         logger.warn({ err }, "overlay pending-enrollment approve failed");
         return next(err);
@@ -976,6 +1562,28 @@ export function createVpnRouter(
   // Lists peers visible to the caller. Family users see their own; admins
   // see all. Includes status (active/revoked) so the dashboard can render
   // a tombstoned row briefly after revoke for context.
+  //
+  // WARP-1763 — this DTO also carries what an owner needs to MANAGE a device
+  // they linked by QR, which until now it did not:
+  //
+  //   * `kind` + the link-token provenance, so a QR-linked phone is
+  //     distinguishable from a legacy static peer. Overlay peers are written
+  //     with the synthetic `userId: "overlay"`, which matches no real
+  //     username — so without `kind` the dashboard had nothing to key on.
+  //   * `provisioned` and `lastHandshakeAt`, read from the ROUTER rather than
+  //     from our own rows, so the UI can separate *enrolled* from
+  //     *provisioned* from *actually connected*.
+  //
+  // On that last point, deliberately NOT `lastSessionAt`: the ticket suggested
+  // it, but `provisionOverlayPeer` stamps it at APPROVAL time (it is the
+  // idle-expiry clock — a NULL there would make the sweep skip the row
+  // forever). Handing it to the UI as liveness would render every
+  // just-approved device "connected" before it has ever handshaken, which is
+  // the exact lie this ticket exists to remove. The only honest source of
+  // handshake recency is the running interface, so that is what we read —
+  // `latest_handshake` comes from a ubus `network.interface.wg0 status` read.
+  // `provisioned` does NOT: it comes from the interface's UCI configuration.
+  // See the `vpn-live-peers.ts` header before treating the two as one fact.
   router.get("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
@@ -1001,11 +1609,30 @@ export function createVpnRouter(
           assignedIp: true,
           status: true,
           mode: true,
+          kind: true,
           createdAt: true,
           revokedAt: true,
+          linkTokenLabel: true,
+          linkTokenEnrolledBy: true,
+          enrolledAt: true,
         },
       });
-      res.json({ peers });
+
+      const live = await readLivePeerState(
+        () => listVpnPeers(),
+        (err) =>
+          logger.warn(
+            { err },
+            "vpn: routing unavailable while listing peers — reporting live state as unknown",
+          ),
+      );
+      res.json({
+        peers: peers.map((p) => ({ ...p, ...live.forPeer(p.publicKey) })),
+        // Explicit, because "no handshake" and "we couldn't ask" must not
+        // render the same. False → the UI says the network service isn't
+        // answering instead of showing every device as never-connected.
+        liveStateAvailable: live.available,
+      });
     } catch (err) {
       next(err);
     }
@@ -1222,7 +1849,26 @@ export function createVpnRouter(
       // intact so the user can retry. If it returns 404 (peer already gone
       // on the router side) we still mark our row revoked.
       try {
-        await deleteVpnPeer({ publicKey: peer.publicKey });
+        const removal = await deleteVpnPeer({ publicKey: peer.publicKey });
+        // A 200 from routing is not proof the tunnel is down. On `uci.apply`
+        // failure it answers `status: "staged" / applied: false` — the peer is
+        // out of the config but STILL LIVE on wg0 until a reload. Marking the
+        // row revoked here would tell an owner revoking a stolen phone that
+        // the device is cut off while it still holds a route into the LAN, and
+        // would then HIDE the retry (the row renders "· revoked" and the trash
+        // button disappears). So: leave the row active, and say so.
+        if (!isRevokeApplied(removal)) {
+          logger.error(
+            { peerId: id, publicKey: peer.publicKey, removed: removal.removed },
+            "vpn: router staged the peer removal but never applied it — peer is still live on the interface; row left active",
+          );
+          return res.status(502).json({
+            code: "REVOKE_STAGED",
+            error:
+              "We removed this device from the router's configuration, but the change didn't take effect — the device is still connected. Try revoking it again in a moment.",
+            id,
+          });
+        }
       } catch (err) {
         if (!(err instanceof RouterError && err.status === 404)) {
           throw err;
@@ -1233,10 +1879,23 @@ export function createVpnRouter(
         );
       }
 
-      await prisma.vpnPeer.update({
-        where: { id },
+      // Conditional write, not a blind `update` keyed on id alone. The read
+      // above, this check and this write are three statements, and the router
+      // call between them is the long pole — plenty of room for a concurrent
+      // writer to flip the row. Re-asserting `status: "active"` in the WHERE
+      // makes the transition atomic; `count === 0` means somebody else already
+      // revoked it, which is the same terminal state the caller asked for, so
+      // it stays a success and we do NOT re-stamp their `revokedAt`.
+      const { count } = await prisma.vpnPeer.updateMany({
+        where: { id, status: "active" },
         data: { status: "revoked", revokedAt: new Date() },
       });
+      if (count === 0) {
+        logger.warn(
+          { peerId: id },
+          "vpn: peer left active status concurrently during revoke — treating as already revoked",
+        );
+      }
 
       res.json({ status: "revoked", id });
     } catch (err) {

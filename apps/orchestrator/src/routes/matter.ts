@@ -149,7 +149,24 @@ export function translateCommissionError(err: unknown): {
   // copy says to factory-reset the device. On a box that can't hear the
   // device (no BLE, no LAN mDNS — see WARP-850), that advice is harmful:
   // resetting the customer's device can never fix the box's reachability.
-  if (/no device discovered|check that the relevant device is online/i.test(raw)) {
+  //
+  // matter.js 0.17 REWORDED this. ControllerDiscovery is gone; @matter/node's
+  // ParallelPaseDiscovery now throws DiscoveryError reading
+  // "discovery of <what> failed: No commissionable device was discovered".
+  // That string contains neither "no device discovered" nor, on its own, any
+  // deliberate marker — it reached this honest copy only because /ble/ below
+  // happens to match the substring inside "commissiona-BLE" and /discovery/
+  // matches the toString() prefix. Both are accidents of wording that an
+  // upstream rename would silently undo, dropping the customer back onto the
+  // harmful factory-reset 500. Match the 0.17 detail EXPLICITLY, and keep it
+  // ABOVE the timeout branch: the scan is timeout-bounded, so a real failure
+  // can carry both, and "we never heard the device at all" is the more
+  // specific and more actionable truth.
+  if (
+    /no device discovered|check that the relevant device is online|no commissionable device was discovered/i.test(
+      raw,
+    )
+  ) {
     return {
       status: 502,
       message: NETWORK_DISCOVERY_COPY,

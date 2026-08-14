@@ -108,6 +108,19 @@ export const MODULES: readonly ModuleDef[] = [
     available: (c) => isSet(c.AI_GATEWAY_URL),
   },
   {
+    id: "team_chat", label: "Messages",
+    description: "Direct and small-group messages between members, with file and AI-chat forwarding.",
+    category: "workspace", routePrefixes: ["/api/team-chat"], navHrefs: ["/messages"],
+    // WARP-1685: the assistant can now SEND (message + meeting invite) on
+    // the acting human's behalf — the `team_chat` tool domain is claimed
+    // here so the module toggle gates the tools. It still never READS
+    // member-to-member messages.
+    toolDomains: ["team_chat"], core: false, defaultEnabled: true,
+    // On-box Postgres only — no external service to probe, so the module is
+    // always AVAILABLE; ENABLEMENT (the operator toggle) is the real gate.
+    available: () => true,
+  },
+  {
     id: "knowledge", label: "Knowledge",
     description: "Retrieval over your indexed files and notes (RAG).",
     category: "workspace", routePrefixes: ["/api/files/knowledge"], navHrefs: ["/knowledge"],

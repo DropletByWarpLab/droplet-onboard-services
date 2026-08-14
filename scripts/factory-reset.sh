@@ -512,6 +512,12 @@ VOLUMES=(
   # wipe it so factory-reset truly returns to §6.4 "Not calibrated yet".
   "voice-calibration"
   "ollama-data"
+  # WARP-1772: DMR's OCI model store (dark `dmr` profile today, the serving
+  # store after the WARP-1749 flip). Same classification as ollama-data —
+  # model blobs are re-pulled, never customer data — and it must be in this
+  # list BEFORE the flip ships, or a factory reset on a flipped box would
+  # wipe the standby store and keep the serving one.
+  "dmr-models"
   "openwrt-config"
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*

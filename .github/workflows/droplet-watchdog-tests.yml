@@ -12,6 +12,8 @@ on:
       - "scripts/host/etc-systemd-system/droplet-watchdog.*"
       - "scripts/host/etc-default/droplet-watchdog"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      # WARP-1829: the host_unit_staleness check delegates to this detector.
+      - "scripts/host/droplet-host-units.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
@@ -23,6 +25,7 @@ on:
       - "scripts/host/etc-systemd-system/droplet-watchdog.*"
       - "scripts/host/etc-default/droplet-watchdog"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      - "scripts/host/droplet-host-units.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"

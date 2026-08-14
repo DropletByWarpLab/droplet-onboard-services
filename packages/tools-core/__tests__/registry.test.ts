@@ -107,6 +107,9 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // WARP-1685 — Messages sends (Tier-2: write + two-phase confirmation)
+  "team_chat_send_message",
+  "team_chat_send_meeting_invite",
   // WARP-899/WARP-900 — data-utility domain (all Tier-1 read/pure-computation)
   "encode_text",
   "decode_text",
@@ -134,9 +137,12 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1440 — camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
   "search_camera_events",
   "get_camera_health",
+  "get_camera_storage",
   "set_camera_detection",
   "set_detection_zones",
   "delete_clip",
+  // WARP-1893 — cameras: rename to a household-facing label
+  "rename_camera",
   // WARP-1443 — network depth (reads Tier-1; password/schedule Tier-2)
   "get_bandwidth_usage",
   "list_vpn_peers",
@@ -156,6 +162,8 @@ const EXPECTED_TOOL_NAMES = [
   "restore_file_version",
   "share_file",
   "create_document",
+  // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
+  "get_gpu_status",
 ];
 
 describe("TOOLS registry", () => {
@@ -249,12 +257,20 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("search_camera_events")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("get_camera_health")?.requiresWrite).toBe(false);
     expect(TOOLS.get("get_camera_health")?.requiresConfirmation).toBe(false);
+    // WARP-1850 — read-only storage reporting; never mutates retention.
+    expect(TOOLS.get("get_camera_storage")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("get_camera_storage")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("set_camera_detection")?.requiresWrite).toBe(true);
     expect(TOOLS.get("set_camera_detection")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("set_detection_zones")?.requiresWrite).toBe(true);
     expect(TOOLS.get("set_detection_zones")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("delete_clip")?.requiresWrite).toBe(true);
     expect(TOOLS.get("delete_clip")?.requiresConfirmation).toBe(true);
+    // WARP-1893 — a write (so non-privileged roles never see it) but
+    // deliberately NOT confirmation-gated: a display name destroys nothing
+    // and is instantly reversible, unlike delete_clip above.
+    expect(TOOLS.get("rename_camera")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("rename_camera")?.requiresConfirmation).toBe(false);
     // WARP-1443 — network reads are Tier-1 (list_threat_events additionally
     // role-gates INSIDE the handler, WARP-845); password/schedule are Tier-2.
     expect(TOOLS.get("get_bandwidth_usage")?.requiresWrite).toBe(false);

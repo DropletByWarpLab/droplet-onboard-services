@@ -56,7 +56,7 @@ device-identity-svc issuance. Rationale:
 3. Emergency revocation = re-mint the CA + reissue all bundles + rolling restart
    (no CRL/OCSP distribution in a single-box CA).
 4. mTLS scope = first-party service plane. Third-party containers keep their
-   posture: nextcloud/docserver (nginx-fronted user plane), ollama
+   posture: nextcloud/docserver (nginx-fronted user plane), the inference runtime (dmr :12434 by default, ollama :11434 when opted in)
    (bridge-internal, ai-gateway-only caller), wyoming whisper/piper (raw Wyoming
    TCP, no TLS support), frigate HTTP :5000 (loopback-published). frigate DOES
    get an MQTT client cert (its MQTT config supports client certs). mcp-server's
@@ -114,7 +114,7 @@ flag is off.
 | nginx → web-dashboard :3001 / nextcloud / docserver | user plane; holds no service secrets — the browser is the real client and the gateway terminates the public TLS. |
 | device-bridge inbound :9090 (host) | loopback-bound host listener (BRIDGE_BIND=127.0.0.1) with its own bearer; a host python stdlib server with no TLS listener support worth adding. Orchestrator → bridge calls stay plain http on the host-gateway leg. Loopback-only ⇒ acceptable per the WARP-1061 host-caller policy. |
 | orchestrator → frigate :5000, device-bridge :9090, nextcloud WebDAV, HQ issuance | third-party / host / WAN surfaces outside the compose mesh (frigate is loopback-published; HQ is public TLS). |
-| ai-gateway → ollama, ollama-manager; voice-io → wyoming STT/TTS | third-party engines: bridge-internal or raw-TCP protocols with no/immaterial TLS support. |
+| ai-gateway → the inference runtime (dmr :12434 default / ollama :11434 opt-in), ollama-manager; voice-io → wyoming STT/TTS | third-party engines: bridge-internal or raw-TCP protocols with no/immaterial TLS support. |
 | orchestrator → device-identity-svc | Unix socket, filesystem-scoped — no network hop to encrypt. |
 | db :5432 / cache :6380 / broker :8883 | already TLS under their own workstreams (WARP-233/234/235); not keyed on this flag (MQTT is scheme-gated). |
 

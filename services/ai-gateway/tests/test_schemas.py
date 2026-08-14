@@ -139,7 +139,7 @@ class TestModelInfo:
         assert m.context_window == 128000
 
     def test_without_context_window(self):
-        m = ModelInfo(id="llama3:8b", provider="ollama", name="llama3:8b")
+        m = ModelInfo(id="llama3:8b", provider="local", name="llama3:8b")
         assert m.context_window is None
 
 
@@ -151,7 +151,7 @@ class TestModelsResponse:
     def test_multiple_models(self):
         resp = ModelsResponse(
             models=[
-                ModelInfo(id="a", provider="ollama", name="A"),
+                ModelInfo(id="a", provider="local", name="A"),
                 ModelInfo(id="b", provider="anthropic", name="B"),
             ]
         )

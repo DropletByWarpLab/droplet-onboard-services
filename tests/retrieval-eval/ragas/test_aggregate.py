@@ -23,7 +23,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from ragas_runner import (
     FLOOR_MARGIN,
+    JudgeUnavailable,
+    SearchUnavailable,
     _build_search_request,
+    _check_judge_failure_streak,
+    _check_search_failure_streak,
     _render_markdown,
     _sanitize_nonfinite,
     aggregate_runs,
@@ -368,6 +372,162 @@ def test_build_search_request_empty_env_treated_as_unset(monkeypatch) -> None:
     assert req.headers == {}
     qs = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
     assert "user" not in qs
+
+
+# ─── bearer resolution across the two env-file sources (WARP-1860) ─────────
+#
+# Compose delivers the same secret to the rag-eval container under two names:
+# SERVICE_TOKEN_RAG_EVAL straight from `env_file: ../.env`, and
+# ORCHESTRATOR_SERVICE_TOKEN via an `environment:` substitution that resolves
+# against docker/.env instead. When the latter file lacks the key the
+# substitution yields "" and — because `environment:` outranks `env_file:` —
+# shadows the good value. Falling back to the unshadowed name keeps the run
+# alive through that split.
+
+def test_bearer_falls_back_to_service_token_rag_eval(monkeypatch) -> None:
+    """ORCHESTRATOR_SERVICE_TOKEN blanked by substitution: use the env_file name."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "")
+    monkeypatch.setenv("SERVICE_TOKEN_RAG_EVAL", "from-env-file")
+    req = _build_search_request("http://orchestrator:3000", "hybrid", "q", 5)
+    assert req.get_header("Authorization") == "Bearer from-env-file"
+
+
+def test_bearer_prefers_orchestrator_service_token(monkeypatch) -> None:
+    """Both present: the explicit per-consumer name still wins."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "explicit")
+    monkeypatch.setenv("SERVICE_TOKEN_RAG_EVAL", "fallback")
+    req = _build_search_request("http://orchestrator:3000", "hybrid", "q", 5)
+    assert req.get_header("Authorization") == "Bearer explicit"
+
+
+def test_bearer_absent_when_both_empty(monkeypatch) -> None:
+    """Neither set: no header — the offline AUTH_ENABLED=false lane."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "")
+    monkeypatch.setenv("SERVICE_TOKEN_RAG_EVAL", "")
+    req = _build_search_request("http://localhost:3000", "hybrid", "q", 10)
+    assert req.headers == {}
+
+
+def test_bearer_ignores_whitespace_only_token(monkeypatch) -> None:
+    """A whitespace-only value is not a credential — treat it as absent."""
+    monkeypatch.setenv("ORCHESTRATOR_SERVICE_TOKEN", "   ")
+    monkeypatch.setenv("SERVICE_TOKEN_RAG_EVAL", "real-token")
+    req = _build_search_request("http://orchestrator:3000", "hybrid", "q", 5)
+    assert req.get_header("Authorization") == "Bearer real-token"
+
+
+# ─── retrieval circuit breaker (WARP-1860) ─────────────────────────────────
+#
+# A blanked service token made every search 401. The runner counted the
+# failures, synthesized answers over empty context anyway, scored them all
+# 0.0, and exited 0 — so 15 consecutive nightly runs each pinned the GPU for
+# ~10 minutes and wrote an all-zero baseline indistinguishable from a genuine
+# zero score. The breaker aborts the run instead.
+
+def test_search_streak_below_threshold_does_not_abort() -> None:
+    """A few isolated retrieval failures are normal — don't abort on them."""
+    for consecutive in range(1, 3):
+        _check_search_failure_streak(consecutive, "boom", threshold=3)
+
+
+def test_search_streak_at_threshold_aborts() -> None:
+    """Hitting the threshold raises, so main() can exit non-zero."""
+    with pytest.raises(SearchUnavailable):
+        _check_search_failure_streak(3, "HTTP Error 401: Unauthorized", threshold=3)
+
+
+def test_search_streak_past_threshold_aborts() -> None:
+    """Overshooting the threshold must abort too (>=, not ==)."""
+    with pytest.raises(SearchUnavailable):
+        _check_search_failure_streak(9, "HTTP Error 401: Unauthorized", threshold=3)
+
+
+def test_search_streak_threshold_zero_disables_breaker() -> None:
+    """threshold=0 opts out — for lanes that expect systematic failures."""
+    _check_search_failure_streak(999, "boom", threshold=0)
+
+
+def test_search_abort_message_names_the_cause() -> None:
+    """The message must carry the underlying error and the streak length.
+
+    run_once() surfaces this text through CalledProcessError.output into the
+    durable failed record, so it has to answer "why" without docker-logs
+    archaeology.
+    """
+    with pytest.raises(SearchUnavailable) as excinfo:
+        _check_search_failure_streak(
+            3, "retrieval-eval call failed for 'q': HTTP Error 401: Unauthorized",
+            threshold=3,
+        )
+    msg = str(excinfo.value)
+    assert "3" in msg, "message must state how many consecutive failures"
+    assert "401" in msg, "message must carry the underlying error"
+
+
+def test_search_streak_threshold_defaults_to_module_constant(monkeypatch) -> None:
+    """Omitting `threshold` reads the module constant at call time.
+
+    Resolved inside the function rather than as a default argument, which
+    Python would freeze at import and make untunable.
+    """
+    import ragas_runner
+
+    monkeypatch.setattr(ragas_runner, "SEARCH_ABORT_AFTER", 2)
+    with pytest.raises(SearchUnavailable):
+        _check_search_failure_streak(2, "boom")
+    monkeypatch.setattr(ragas_runner, "SEARCH_ABORT_AFTER", 0)
+    _check_search_failure_streak(50, "boom")
+
+
+# ─── judge circuit breaker (WARP-1870) ─────────────────────────────────────
+#
+# The WARP-1860 breaker counts RETRIEVAL failures only. A broken judge is the
+# mirror failure and was still silent: synthesize_answer() swallows every
+# exception into a "[synthesis_error: ...]" string, the run scores that text,
+# and the metrics land as 0.0/NaN in a file marked successful. That matters
+# more under DMR, where the judge URL (RAGAS_OLLAMA_URL) is repointed at a
+# different container — one typo and every score is meaningless.
+
+def test_judge_streak_below_threshold_does_not_abort() -> None:
+    """The odd judge blip is normal — a single failure must not abort."""
+    for consecutive in range(1, 3):
+        _check_judge_failure_streak(consecutive, "boom", threshold=3)
+
+
+def test_judge_streak_at_threshold_aborts() -> None:
+    with pytest.raises(JudgeUnavailable):
+        _check_judge_failure_streak(3, "ConnectionError: [Errno 111]", threshold=3)
+
+
+def test_judge_streak_threshold_zero_disables_breaker() -> None:
+    _check_judge_failure_streak(999, "boom", threshold=0)
+
+
+def test_judge_abort_message_names_the_cause() -> None:
+    """The message must reach the durable failed record, like the search one."""
+    with pytest.raises(JudgeUnavailable) as excinfo:
+        _check_judge_failure_streak(
+            4, "[synthesis_error: ConnectionError: refused]", threshold=3)
+    msg = str(excinfo.value)
+    assert "4" in msg
+    assert "ConnectionError" in msg
+
+
+def test_judge_breaker_is_not_a_search_breaker() -> None:
+    """Distinct types: a dead judge and dead retrieval are different faults
+    with different fixes, and the durable record must say which."""
+    assert not issubclass(JudgeUnavailable, SearchUnavailable)
+    assert not issubclass(SearchUnavailable, JudgeUnavailable)
+
+
+def test_judge_streak_defaults_to_module_constant(monkeypatch) -> None:
+    import ragas_runner
+
+    monkeypatch.setattr(ragas_runner, "JUDGE_ABORT_AFTER", 2)
+    with pytest.raises(JudgeUnavailable):
+        _check_judge_failure_streak(2, "boom")
+    monkeypatch.setattr(ragas_runner, "JUDGE_ABORT_AFTER", 0)
+    _check_judge_failure_streak(50, "boom")
 
 
 # ─── NaN → null write sanitizer ─────────────────────────────────────────────

@@ -23,7 +23,7 @@ import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
 import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
 import { CameraEvents } from "@/components/cameras/CameraEvents";
-import { CameraDiscoveryBanner } from "@/components/cameras/CameraDiscoveryBanner";
+import { NetworkCameraList } from "@/components/cameras/NetworkCameraList";
 import { CameraNotificationToast } from "@/components/cameras/CameraNotificationToast";
 import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
 import { AddCameraModal } from "@/components/cameras/AddCameraModal";
@@ -33,18 +33,20 @@ import { authFetch } from "@/lib/auth";
 import { triggerCameraScan } from "@/lib/api";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
-import type { CameraGroupInfo, CameraInfo } from "@/lib/types";
+import type { CameraGroupInfo, CameraInfo, DiscoveredCamera } from "@/lib/types";
 
 export default function CamerasPage() {
   const {
     cameras,
     discovered,
+    discoveryOnline,
     recentEvents,
     totalCameras,
     isLoading,
     isRefreshing,
     error,
     refresh,
+    setDiscovered,
     acceptCamera,
     rejectCamera,
   } = useCameras();
@@ -64,6 +66,12 @@ export default function CamerasPage() {
   const router = useRouter();
   const [showAddModal, setShowAddModal] = useState(false);
   const [scanning, setScanning] = useState(false);
+  // WARP-1847: the scan used to be fire-and-forget with an empty catch, so a
+  // failed sweep and a clean sweep that found nothing looked identical (both:
+  // nothing happened). Track the outcome and show it.
+  const [lastScan, setLastScan] = useState<{ at: number; found: number } | null>(null);
+  // Camera we found but can't stream — hands off to the manual form prefilled.
+  const [credentialTarget, setCredentialTarget] = useState<DiscoveredCamera | null>(null);
 
   // Camera-group state. Selected pill drives the grid filter; null = "All
   // cameras" pseudo-group. Editor modal opens with either the group being
@@ -109,6 +117,81 @@ export default function CamerasPage() {
     } catch (e) {
       toast(e instanceof Error ? e.message : "Failed to update pin", "error");
     }
+  };
+
+  // WARP-1847 — one scan handler for every entry point (sub-nav chip, empty
+  // state, list header, modal). The result is applied straight to the candidate
+  // cache: the sweep is synchronous server-side, so the list it returns is
+  // already current and there is nothing to poll for.
+  const handleScan = async () => {
+    if (scanning) return;
+    setScanning(true);
+    try {
+      const result = await triggerCameraScan();
+      setDiscovered({ cameras: result.cameras, discoveryOnline: result.discoveryOnline });
+      setLastScan({ at: Date.now(), found: result.cameras.length });
+      refresh();
+
+      if (result.status === "scan_unavailable") {
+        toast(
+          result.message ??
+            "Camera discovery isn't running, so we couldn't scan your network.",
+          "error",
+        );
+      } else if (result.cameras.length === 0) {
+        toast("Scan finished — no cameras found on your network.", "info");
+      } else {
+        const n = result.cameras.length;
+        toast(`Found ${n} camera${n === 1 ? "" : "s"} on your network.`, "success");
+      }
+    } catch (e) {
+      // Previously swallowed: an unreachable orchestrator looked exactly like a
+      // clean scan that found nothing.
+      toast(
+        e instanceof Error && e.message
+          ? `Couldn't scan your network: ${e.message}`
+          : "Couldn't scan your network. Try again in a moment.",
+        "error",
+      );
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const handleAcceptCandidate = async (cam: DiscoveredCamera) => {
+    try {
+      await acceptCamera(cam.id);
+      toast(`Added ${cam.displayName || cam.name.replace(/_/g, " ")}.`, "success");
+    } catch (e) {
+      // The 422 body carries camera-discovery's own explanation (the stream
+      // didn't verify — wrong path or credentials), which is the actionable bit.
+      toast(
+        e instanceof Error && e.message ? e.message : "Couldn't add that camera.",
+        "error",
+      );
+      throw e;
+    }
+  };
+
+  const handleRejectCandidate = async (cam: DiscoveredCamera) => {
+    try {
+      await rejectCamera(cam.id);
+    } catch (e) {
+      toast(
+        e instanceof Error && e.message ? e.message : "Couldn't ignore that device.",
+        "error",
+      );
+    }
+  };
+
+  const openCredentialsForm = (cam: DiscoveredCamera) => {
+    setCredentialTarget(cam);
+    setShowAddModal(true);
+  };
+
+  const closeAddModal = () => {
+    setShowAddModal(false);
+    setCredentialTarget(null);
   };
 
   // Click on a card → navigate to the dedicated fullscreen page at
@@ -229,17 +312,7 @@ export default function CamerasPage() {
       {/* Secondary sub-nav (chip row) for the camera-related sub-routes —
           People / Plates / Notifications / System / Birdseye — plus the
           "Scan network" discovery action. */}
-      <CamerasSubNav
-        scanning={scanning}
-        onScan={async () => {
-          setScanning(true);
-          try {
-            await triggerCameraScan();
-            refresh();
-          } catch { /* scan service may not be running */ }
-          setScanning(false);
-        }}
-      />
+      <CamerasSubNav scanning={scanning} onScan={handleScan} />
 
       {/* Network isolation */}
       <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />
@@ -261,43 +334,38 @@ export default function CamerasPage() {
         </div>
       )}
 
-      {/* Discovery banner */}
-      <CameraDiscoveryBanner
-        cameras={discovered}
-        onAccept={acceptCamera}
-        onReject={rejectCamera}
-        onAcceptAll={() => {
-          discovered.forEach((cam) => acceptCamera(cam.id));
-        }}
-      />
+      {/* What's on the network. WARP-1847: shown whenever there are candidates,
+          and — when no cameras are set up at all — as the page's primary empty
+          state, since "what can I add?" is the only question that matters then.
+          It carries its own scanning / found-nothing / discovery-offline copy. */}
+      {(discovered.length > 0 || totalCameras === 0) && (
+        <NetworkCameraList
+          cameras={discovered}
+          discoveryOnline={discoveryOnline}
+          scanning={scanning}
+          lastScan={lastScan}
+          onScan={handleScan}
+          onAccept={handleAcceptCandidate}
+          onReject={handleRejectCandidate}
+          onEnterCredentials={openCredentialsForm}
+        />
+      )}
 
-      {/* Empty state */}
+      {/* No cameras AND nothing found — offer the manual path alongside the
+          list's own scan affordance. */}
       {totalCameras === 0 && discovered.length === 0 && (
         <div className="card">
-          <div className="empty">
+          <div className="empty" style={{ padding: "34px 20px" }}>
             <span className="ei"><Video size={24} /></span>
-            <span className="eh">No cameras yet</span>
+            <span className="eh">Know your camera's details?</span>
             <span style={{ maxWidth: "44ch" }}>
-              The camera service is running and ready. Add a camera manually with
-              its RTSP URL, or scan your network to auto-discover ONVIF cameras.
+              If your camera isn't on this Droplet's network — or you already have
+              its stream address — you can add it by hand.
             </span>
             <div className="flex items-center justify-center gap-3" style={{ marginTop: 8 }}>
               <button onClick={() => setShowAddModal(true)} className="btn primary" type="button">
                 <Plus size={16} />
                 Add camera
-              </button>
-              <button
-                onClick={async () => {
-                  setScanning(true);
-                  try { await triggerCameraScan(); refresh(); } catch {}
-                  setScanning(false);
-                }}
-                disabled={scanning}
-                className="btn"
-                type="button"
-              >
-                <Radar size={16} className={scanning ? "animate-pulse" : ""} />
-                Scan network
               </button>
             </div>
           </div>
@@ -356,11 +424,18 @@ export default function CamerasPage() {
         </div>
       )}
 
-      {/* Add Camera Modal */}
+      {/* Add Camera Modal — opens on the discovered list when there is one, so
+          "Add camera" answers "which camera?" before asking for an RTSP URL. */}
       {showAddModal && (
         <AddCameraModal
-          onClose={() => setShowAddModal(false)}
+          onClose={closeAddModal}
           onAdded={refresh}
+          cameras={discovered}
+          discoveryOnline={discoveryOnline}
+          scanning={scanning}
+          onScan={handleScan}
+          onAccept={handleAcceptCandidate}
+          prefill={credentialTarget}
         />
       )}
 

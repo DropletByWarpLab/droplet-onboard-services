@@ -14,6 +14,16 @@
  * box — it does NOT pull, delete, or otherwise mutate the model set (that
  * remains the catalog work). Appliance stays stateless about model choice
  * (ADR-003): the choice is a control-plane preference, resolved per request.
+ *
+ * WARP-1827 — the catalog work, part one (install-only):
+ * GET /api/models/catalog        (READ, any authenticated principal) — the
+ *                    inference-manager's ELIGIBLE catalog (VRAM-gated,
+ *                    decided appliance-side) with per-model `pulled` flags.
+ * POST /api/models/:name/pull    (WRITE, owner/admin) — start a catalog
+ *                    download and stream the sidecar's NDJSON progress
+ *                    through to the client. Pulls only INSTALL — the active
+ *                    model is untouched (ADR-003 still holds: no model
+ *                    choice moves to the appliance).
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -23,6 +33,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
+import { isLocalProvider } from "../services/cloud-access.service.js";
 import {
   getModelsPagePayload,
   type ModelsPagePayload,
@@ -38,6 +49,11 @@ import {
   benchCacheKey,
   BENCH_CACHE_TTL,
 } from "../services/model-benchmark.service.js";
+import {
+  fetchEligibleCatalog,
+  openPullStream,
+  type EligibleCatalog,
+} from "../services/model-catalog.service.js";
 
 const logger = createLogger("models-route");
 
@@ -79,13 +95,14 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         // degraded), pass `null` so the resolver treats the installed set as
         // unknown and returns the stored value unresolved rather than
         // nulling it out — or fabricating a fallback — against an
-        // incomplete list. Ollama-only, same "local never points off-box"
+        // incomplete list. On-box providers only, same "local never
+        // points off-box"
         // invariant as localModelIdentifiers.
         const installed = payload.degraded
           ? null
           : new Set(
               payload.local
-                .filter((m) => m.provider === "ollama")
+                .filter((m) => isLocalProvider(m.provider))
                 .map((m) => m.name),
             );
         const activeModel = resolveActiveChatModel(
@@ -242,6 +259,236 @@ export function createModelsRouter(prisma: PrismaClient): Router {
         res.json(result);
       } catch (err) {
         logger.warn({ err }, "POST /models/benchmark failed");
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/models/catalog ──────────────────────────────────────
+  // The inference-manager's ELIGIBLE catalog (VRAM-gated appliance-side)
+  // with per-model `pulled` flags. No requireRole — per ADR-004 §3, GET
+  // endpoints stay open to any authenticated principal, same as GET /models.
+  // Deliberately UNCACHED: the `pulled` flags must be fresh so a completed
+  // download drops out of "Available to install" on the next read.
+  router.get(
+    "/models/catalog",
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        let catalog: EligibleCatalog;
+        try {
+          catalog = await fetchEligibleCatalog();
+        } catch (err) {
+          logger.warn({ err }, "GET /models/catalog: inference-manager unreachable");
+          return res.status(503).json({
+            error: "ai_service_unreachable",
+            detail:
+              "Couldn't reach the AI service to read the model catalog. Try again in a moment.",
+          });
+        }
+        res.json(catalog);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── POST /api/models/:name/pull ──────────────────────────────────
+  // Start a catalog download and stream the sidecar's NDJSON progress
+  // through to the client. owner/admin only. Install-only by design
+  // (ADR-003): a pull never changes the active model — that stays the
+  // separate PATCH above. Validation happens against the LIVE eligible
+  // catalog (never a cache): unreachable sidecar → 503, unknown model →
+  // 400 not_eligible, already installed → 409 already_pulled. The
+  // sidecar's own 409 (disk preflight, `insufficient_disk`) passes
+  // through verbatim so the dashboard can show its detail message.
+  router.post(
+    "/models/:name/pull",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const name = (req.params.name ?? "").trim();
+        if (!name) {
+          return res.status(400).json({ error: "model name is required" });
+        }
+
+        let catalog: EligibleCatalog;
+        try {
+          catalog = await fetchEligibleCatalog();
+        } catch (err) {
+          logger.warn({ err }, "POST /models/pull: inference-manager unreachable");
+          return res.status(503).json({
+            error: "ai_service_unreachable",
+            detail:
+              "Couldn't reach the AI service to confirm the model is available. Try again in a moment.",
+          });
+        }
+        const entry = catalog.models.find((m) => m.name === name);
+        if (!entry) {
+          return res.status(400).json({
+            error: "not_eligible",
+            detail: `Model "${name}" isn't in the catalog of models this Droplet can run.`,
+          });
+        }
+        if (entry.pulled) {
+          return res.status(409).json({
+            error: "already_pulled",
+            detail: `Model "${name}" is already installed on this Droplet.`,
+          });
+        }
+
+        // The identifier that goes ON THE WIRE is the catalog's `pull_tag`,
+        // not the `:name` the user clicked. inference-manager's POST
+        // /models/pull hands `body.model` straight to the runtime
+        // (`runtime.pull(...)`) — it does NOT resolve name → pull_tag for us;
+        // its own manifest lookup only feeds the disk preflight, which is why
+        // either identifier appears to work right up until the registry.
+        // droplet-local-LLM's docs/model-management.md is explicit: pull_tag
+        // is "what POST /api/pull is called with". An entry with no pull_tag
+        // is only addressable by its catalog name, so fall back to that.
+        // `name` stays the user-facing identity everywhere else — audit rows,
+        // progress events, error copy — so the tag never leaks into the UI.
+        const pullTag = entry.pull_tag ?? name;
+
+        // Audit the ATTEMPT before opening the stream — mirrors the PATCH
+        // handler. A later failure gets its own row; silence never means
+        // "nothing happened".
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "cpu",
+          what: "Model download started",
+          sub: name,
+          actor: actorFromRequest(req),
+          refs: { actor: req.user?.username ?? null, model: name },
+        });
+
+        // The upstream is aborted if OUR client goes away mid-stream, so a
+        // closed dashboard tab doesn't leave the proxy leg running headless.
+        const upstreamAbort = new AbortController();
+        let upstream: Awaited<ReturnType<typeof openPullStream>>;
+        try {
+          upstream = await openPullStream(pullTag, upstreamAbort.signal);
+        } catch (err) {
+          logger.warn({ err, model: name }, "POST /models/pull: open stream failed");
+          return res.status(502).json({
+            error: "pull_failed",
+            detail: "The download couldn't be started. Try again in a moment.",
+          });
+        }
+
+        if (upstream.status === 409) {
+          // Disk preflight (`insufficient_disk`) — status + body verbatim.
+          const body = await upstream
+            .json()
+            .catch(() => ({ error: "insufficient_disk" }));
+          return res.status(409).json(body);
+        }
+        if (!upstream.ok || !upstream.body) {
+          const detail = await upstream.text?.().catch(() => "");
+          logger.warn(
+            { status: upstream.status, detail, model: name },
+            "POST /models/pull: upstream refused",
+          );
+          return res.status(502).json({
+            error: "pull_failed",
+            detail: "The download couldn't be started. Try again in a moment.",
+          });
+        }
+
+        res.status(200);
+        res.setHeader("Content-Type", "application/x-ndjson");
+        res.setHeader("Cache-Control", "no-cache");
+        res.flushHeaders?.();
+
+        let clientGone = false;
+        // Disconnect detection listens on the RESPONSE, not the request:
+        // since Node 16, an IncomingMessage's "close" fires when the request
+        // MESSAGE completes (measured here: +5ms into a still-streaming
+        // response), so `req.on("close")` would abort every pull the moment
+        // the body was parsed. `res`'s "close" fires exactly once at the true
+        // end — writableEnded=true after a normal end, false when the client
+        // walked away mid-stream. Only the latter aborts the upstream leg.
+        res.on("close", () => {
+          if (!res.writableEnded) {
+            clientGone = true;
+            upstreamAbort.abort();
+          }
+        });
+
+        // Watch the NDJSON lines for the terminal shapes while piping them
+        // through untouched. Tolerant per line: an unparseable line is
+        // forwarded and otherwise ignored — the watcher must never be the
+        // reason a pull "fails".
+        let lineBuffer = "";
+        let sawSuccess = false;
+        let sawError = false;
+        const watchLine = (line: string): void => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          try {
+            const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+            if (parsed.status === "success") sawSuccess = true;
+            if (parsed.error != null) sawError = true;
+          } catch {
+            /* not JSON — forwarded anyway, nothing to watch */
+          }
+        };
+
+        try {
+          for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
+            const buf = Buffer.from(chunk);
+            // A chunk can already be in flight when the client disconnects —
+            // don't write into a destroyed response in that race window.
+            if (!clientGone) {
+              res.write(buf);
+              // Express doesn't add flush(); compression middleware does. Call
+              // it when present so each progress line leaves immediately.
+              (res as unknown as { flush?: () => void }).flush?.();
+            }
+            lineBuffer += buf.toString("utf8");
+            let newline: number;
+            while ((newline = lineBuffer.indexOf("\n")) >= 0) {
+              watchLine(lineBuffer.slice(0, newline));
+              lineBuffer = lineBuffer.slice(newline + 1);
+            }
+          }
+          if (lineBuffer) watchLine(lineBuffer);
+        } catch (err) {
+          // Client disconnect aborts the upstream (expected); anything else
+          // is a mid-stream drop. Either way the outcome is whatever the
+          // watcher saw — never fabricate a terminal line.
+          if (!clientGone) {
+            logger.warn({ err, model: name }, "POST /models/pull: stream interrupted");
+          }
+        }
+
+        // Terminal accounting BEFORE res.end() so a client that saw the
+        // stream finish can immediately re-read a busted cache.
+        if (sawSuccess) {
+          await cacheDel(MODELS_PAGE_CACHE_KEY);
+          await recordActivity({
+            kind: "system",
+            severity: "info",
+            sourceIcon: "cpu",
+            what: "Model download finished",
+            sub: name,
+            actor: actorFromRequest(req),
+            refs: { actor: req.user?.username ?? null, model: name },
+          });
+        } else if (sawError) {
+          await recordActivity({
+            kind: "system",
+            severity: "warn",
+            sourceIcon: "cpu",
+            what: "Model download failed",
+            sub: name,
+            actor: actorFromRequest(req),
+            refs: { actor: req.user?.username ?? null, model: name },
+          });
+        }
+        if (!clientGone) res.end();
+      } catch (err) {
+        logger.warn({ err }, "POST /models/pull failed");
         next(err);
       }
     },

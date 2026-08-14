@@ -22,6 +22,7 @@ import {
   markReviewViewed,
   searchEventsSemantic,
   setEventRetain,
+  syncCamerasFromDb,
   type FrigateEventFilter,
   type FrigateReviewFilter,
   type FrigateSearchFilter,
@@ -44,6 +45,7 @@ import type {
   TimelineEntry,
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
+import { retainsFootage } from "./camera-retention-defaults.js";
 
 const logger = createLogger("camera-service");
 
@@ -263,6 +265,32 @@ function handleMqttMessage(
   }
 }
 
+function toDisplayName(name: string): string {
+  return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * The camera's hardware address, or null when camera-discovery only had a
+ * placeholder.
+ *
+ * `_synthetic_lease_records` / the ONVIF branch in
+ * `services/camera-discovery/main.py` key a camera by `ip:<addr>` or
+ * `onvif_<addr>` when DHCP hasn't produced a real MAC yet. Those tokens are
+ * per-IP, not per-device: the same camera carries `ip:192.168.9.219` on one
+ * sweep and `e4:30:22:50:2a:fd` on the next. Storing them in `macAddress`
+ * made them look like two different cameras to every reader.
+ */
+function realMac(mac: unknown): string | null {
+  const m = typeof mac === "string" ? mac.trim().toLowerCase() : "";
+  if (!m || m.startsWith("ip:") || m.startsWith("onvif_")) return null;
+  return m;
+}
+
+/** `camera_<ip>` is `_sanitize_camera_name`'s no-hostname fallback, not a name. */
+function isPlaceholderName(name: string): boolean {
+  return /^camera_\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3}$/.test(name);
+}
+
 async function upsertCameraRecord(
   prisma: PrismaClient,
   camera: Record<string, unknown>
@@ -270,25 +298,120 @@ async function upsertCameraRecord(
   const name = String(camera.name || "");
   if (!name) return;
 
-  await prisma.camera.upsert({
-    where: { name },
-    create: {
-      name,
-      displayName: name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-      manufacturer: (camera.manufacturer as string) || null,
-      model: (camera.model as string) || null,
-      ipAddress: String(camera.ip || ""),
-      macAddress: (camera.mac as string) || null,
-      autoDiscovered: true,
-      lastSeen: new Date(),
+  // WARP-1847: a discovery event covers two very different things, and the row
+  // has to say which. `status: "active"` means camera-discovery verified the
+  // stream and committed it to Frigate — a real camera. Anything else
+  // (`needs_setup`, `pending`) is a candidate still being re-probed every 30 s,
+  // and creating it as `enabled: true` (the schema default this code used to
+  // inherit) both put an un-streamable camera in the operator's grid and made
+  // the `enabled: false` filter behind GET /cameras/discovered unmatchable.
+  //
+  // `enabled` is set on CREATE only. On update it is deliberately left alone:
+  // POST /cameras/:name/disable writes `enabled: false` for a working camera,
+  // and discovery re-publishes that same camera as active every sweep — echoing
+  // status into `enabled` here would silently undo the operator's disable.
+  // Promotion from candidate to camera is the accept path's job.
+  const isAdopted = camera.status === "active";
+  const ip = String(camera.ip || "");
+  const mac = realMac(camera.mac);
+
+  // A camera's identity is its hardware, not the name discovery derived for it
+  // this sweep. `_sanitize_camera_name(hostname, ip)` returns `camera_<ip>`
+  // until DHCP knows the hostname and the hostname afterwards, so a single
+  // camera legitimately arrives under two names over its life — and a
+  // `where: { name }` upsert answered that by minting a second row. That is
+  // the "one camera, two tiles, neither with a feed" the operator sees:
+  // 192.168.9.219 as both `xnv_c8083r_e43022502afd` and `camera_192_168_9_219`.
+  //
+  // Match on MAC first, then on IP for the window where one side of the pair
+  // is still a placeholder. `name` stays in the OR so a row this name already
+  // owns is found even when its IP moved — without it the create below would
+  // hit the unique constraint on `name`.
+  const matches = await prisma.camera.findMany({
+    where: {
+      OR: [
+        ...(mac ? [{ macAddress: { equals: mac, mode: "insensitive" as const } }] : []),
+        ...(ip ? [{ ipAddress: ip }] : []),
+        { name },
+      ],
     },
-    update: {
-      ipAddress: String(camera.ip || ""),
+    orderBy: { createdAt: "asc" },
+  });
+
+  // An IP match alone is not proof: DHCP recycles addresses. When both sides
+  // carry a real MAC, the MAC is the only thing that decides.
+  const sameDevice = matches.filter((row) => {
+    if (row.name === name) return true;
+    const rowMac = realMac(row.macAddress);
+    if (mac && rowMac) return rowMac === mac;
+    return true;
+  });
+
+  if (sameDevice.length === 0) {
+    await prisma.camera.create({
+      data: {
+        name,
+        displayName: toDisplayName(name),
+        manufacturer: (camera.manufacturer as string) || null,
+        model: (camera.model as string) || null,
+        ipAddress: ip,
+        macAddress: mac,
+        enabled: isAdopted,
+        autoDiscovered: true,
+        lastSeen: new Date(),
+      },
+    });
+    cacheDel(CACHE_KEY_CAMERAS);
+    return;
+  }
+
+  // Oldest row wins: it is the one carrying the operator's history — group
+  // membership, retention budget, and the Frigate recordings filed under its
+  // name. Everything newer for the same hardware is a duplicate this function
+  // used to mint.
+  const [survivor, ...duplicates] = sameDevice;
+
+  // Frigate is keyed by the camera's exact name and reconcileFrigateCameras()
+  // prunes any Frigate entry missing from this table, so renaming an adopted
+  // row would delete the live camera out from under the operator. Only a row
+  // that was never adopted may take the new name, and only when that name is
+  // an actual hostname rather than the `camera_<ip>` fallback.
+  const rename =
+    !survivor.enabled && survivor.name !== name && !isPlaceholderName(name);
+
+  await prisma.camera.update({
+    where: { id: survivor.id },
+    data: {
+      ...(rename ? { name, displayName: toDisplayName(name) } : {}),
+      ipAddress: ip || survivor.ipAddress,
+      // Only ever upgrade toward a real MAC — a sweep that lost the DHCP lease
+      // must not wipe the hardware address we already learned.
+      ...(mac ? { macAddress: mac } : {}),
       manufacturer: (camera.manufacturer as string) || undefined,
       model: (camera.model as string) || undefined,
       lastSeen: new Date(),
     },
   });
+
+  if (duplicates.length > 0) {
+    await prisma.camera.deleteMany({
+      where: { id: { in: duplicates.map((d) => d.id) } },
+    });
+    logger.info(
+      { kept: survivor.name, removed: duplicates.map((d) => d.name), mac, ip },
+      "Merged duplicate camera rows for one physical camera"
+    );
+    // getCameras() re-adds any Frigate camera absent from the DB, so a merge
+    // that only touched the DB would see the duplicate reappear as a phantom
+    // tile on the next poll. Best-effort: a Frigate that is down just means
+    // the next add/accept/reject/delete reconcile picks this up.
+    try {
+      const all = await prisma.camera.findMany({ select: { name: true } });
+      await syncCamerasFromDb(all.map((c) => c.name));
+    } catch (err) {
+      logger.warn({ err }, "Frigate prune after duplicate merge failed (non-fatal)");
+    }
+  }
 
   cacheDel(CACHE_KEY_CAMERAS);
 }
@@ -314,6 +437,43 @@ export function subscribeCameraEvents(callback: SSECallback): () => void {
 
 // --- Camera listing ---
 
+/**
+ * Map a camera's RESOLVED Frigate config into the shape `retainsFootage`
+ * expects.
+ *
+ * Reads the resolved tree deliberately: it is what Frigate will actually
+ * enforce, inherited defaults included. The authored config is the right
+ * source for WRITES (it round-trips; the resolved tree does not), but the
+ * wrong one for asking "what is this camera really doing right now".
+ *
+ * Note the asymmetry in Frigate 0.17's schema — `continuous` and `motion`
+ * carry `days` directly, while `alerts` and `detections` nest theirs under
+ * `retain`. Reading the wrong depth yields `undefined`, which coerces to
+ * "nothing retained" and would put every healthy camera in the warning
+ * state. Hence the explicit reads rather than a generic walk.
+ */
+export function retentionFromFrigateConfig(configEntry: unknown): {
+  enabled?: boolean;
+  continuousDays: number;
+  motionDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
+} {
+  const record = ((configEntry as Record<string, unknown> | undefined)?.record ??
+    {}) as Record<string, Record<string, Record<string, unknown>>>;
+  const num = (v: unknown): number => {
+    const n = Number(v ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return {
+    enabled: (record as unknown as { enabled?: boolean }).enabled,
+    continuousDays: num(record.continuous?.days),
+    motionDays: num(record.motion?.days),
+    alertsRetainDays: num(record.alerts?.retain?.days),
+    detectionsRetainDays: num(record.detections?.retain?.days),
+  };
+}
+
 export async function getCameras(
   prisma: PrismaClient
 ): Promise<CameraInfo[]> {
@@ -335,9 +495,24 @@ export async function getCameras(
     const frigateStatus = (frigateCameras as any)?.[dbCam.name];
     const configEntry = configCameras[dbCam.name];
 
+    // 🔴 Frame rate says the camera is ALIVE. It says nothing about whether
+    // anything is being KEPT — and this used to report "recording" on the
+    // strength of `camera_fps > 0` alone. A camera with every retention
+    // window at zero decodes, detects, and stores nothing, while the badge
+    // told the household their footage was safe (WARP-1974).
+    //
+    // `configEntry` was declared here and never read. It is exactly what
+    // answers the question, so it is now the thing that does.
+    const retaining = retainsFootage(retentionFromFrigateConfig(configEntry));
+
     let status: CameraInfo["status"] = "offline";
     if (frigateStatus) {
-      if (frigateStatus.detection_fps > 0) status = "detecting";
+      if (frigateStatus.camera_fps > 0 && !retaining) {
+        // Healthy stream, nothing retained. Deliberately NOT "recording",
+        // and deliberately not "idle" either — the camera is working; it
+        // just has nowhere to put anything.
+        status = "live";
+      } else if (frigateStatus.detection_fps > 0) status = "detecting";
       else if (frigateStatus.camera_fps > 0) status = "recording";
       else status = "idle";
     }
@@ -369,7 +544,13 @@ export async function getCameras(
         macAddress: null,
         enabled: true,
         autoDiscovered: false,
-        status: (stats as any)?.camera_fps > 0 ? "recording" : "idle",
+        // Same rule as above: a live stream with nothing retained is
+        // "live", never "recording".
+        status: !((stats as any)?.camera_fps > 0)
+          ? "idle"
+          : retainsFootage(retentionFromFrigateConfig(configCameras[name]))
+            ? "recording"
+            : "live",
         lastSeen: new Date().toISOString(),
         lastDetection: null,
       });
@@ -657,44 +838,108 @@ export async function searchEventsSemanticTyped(
 // --- Recordings + timeline ---
 
 /**
+ * Coerce Frigate's loose per-hour `motion` into a flat non-negative
+ * number. Some versions emit a number, some `{ value, ... }`, some omit
+ * it entirely.
+ *
+ * 🔴 This deliberately does NOT clamp to 0–100. Frigate 0.17's `motion`
+ * is an unbounded activity count, not a percentage — one real day on the
+ * box reported 11, 3, 954, 160, 0 and 774 across consecutive hours. The
+ * previous 0–100 clamp collapsed 954, 774 and 160 to the same value, so
+ * every busy hour rendered in the same heat-map tier and the graphic had
+ * no dynamic range where it mattered most. Consumers scale against the
+ * range they actually receive.
+ */
+function normaliseMotion(raw: unknown): number {
+  let motion = 0;
+  if (typeof raw === "number") motion = raw;
+  else if (raw && typeof raw === "object" && "value" in raw) {
+    const v = (raw as { value: unknown }).value;
+    motion = typeof v === "number" ? v : 0;
+  }
+  if (!Number.isFinite(motion) || motion < 0) return 0;
+  return motion;
+}
+
+/**
+ * Pull the hour-of-day out of one summary entry.
+ *
+ * 🔴 Frigate 0.17 returns `hours` as an ARRAY, newest-first, each element
+ * carrying its own `hour` field as a STRING ("15", "04"). The previous
+ * implementation ran `Object.entries()` over it and used the resulting
+ * key as the hour — i.e. the ARRAY INDEX. With <= 24 entries every index
+ * passes a 0..23 range check, so nothing was dropped and nothing warned:
+ * the whole timeline was silently reversed and mislabelled, and the
+ * page then turned those bogus hours into playback ranges that Frigate
+ * 404s. Measured on the box 2026-08-13 (WARP-1958).
+ *
+ * `fallbackKey` is the object-shaped path — older Frigate keyed `hours`
+ * as a dict of hour -> stats, and that key IS the hour. It is only
+ * consulted when the entry has no usable `hour` of its own.
+ */
+function parseSummaryHour(
+  entry: Record<string, unknown>,
+  fallbackKey: string | null,
+): number | null {
+  const own = entry.hour;
+  const candidates: unknown[] = fallbackKey === null ? [own] : [own, fallbackKey];
+  for (const c of candidates) {
+    if (c === undefined || c === null || c === "") continue;
+    const n = Number(c);
+    if (Number.isInteger(n) && n >= 0 && n <= 23) return n;
+  }
+  return null;
+}
+
+/**
  * Per-day + per-hour recording summary. The dashboard's date picker
  * uses this to grey out days with no recordings, and the timeline
- * scrubber paints hour bands using the motion + event counts.
+ * scrubber paints hour bands from the retained duration, with motion +
+ * event counts layered on top.
  *
- * Frigate's wire shape is loose — `motion` may be a number, an
- * object, or absent depending on version. We normalise to a flat
- * RecordingHour shape so the frontend doesn't need to know.
+ * `timezone` is an IANA zone name (e.g. "America/Los_Angeles"). Frigate
+ * buckets days and hours in UTC unless told otherwise, while the browser
+ * builds playback ranges in its own local time — passing the caller's
+ * zone through is what keeps those two on ONE clock. Omitting it is how
+ * a PDT operator ended up requesting 22:00 UTC for 15:00 local.
  */
 export async function getRecordingsSummary(
   cameraName: string,
+  timezone?: string,
 ): Promise<RecordingDay[]> {
-  const raw = (await fetchRecordingsSummary(cameraName)) as Array<Record<string, unknown>>;
+  const raw = (await fetchRecordingsSummary(cameraName, timezone)) as Array<
+    Record<string, unknown>
+  >;
   return raw.map((d) => {
     const day = String(d.day ?? "");
     const events = Number(d.events ?? 0);
     const duration = Number(d.duration ?? 0);
-    const hoursSrc = (d.hours as Record<string, Record<string, unknown>> | undefined) ?? {};
-    const hours: RecordingHour[] = [];
-    for (const [hourKey, h] of Object.entries(hoursSrc)) {
-      const hour = Number(hourKey);
-      if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
-      // Some Frigate versions emit `motion: { value, ... }`; some emit
-      // a flat number; some omit it. Coerce to a flat 0-100.
-      let motion = 0;
-      const m = h.motion;
-      if (typeof m === "number") motion = m;
-      else if (m && typeof m === "object" && "value" in m) {
-        const v = (m as { value: unknown }).value;
-        motion = typeof v === "number" ? v : 0;
-      }
-      hours.push({
+
+    // 0.17 ships an array; older builds shipped a dict keyed by hour.
+    // Object.entries() handles both, but ONLY the dict's key is a real
+    // hour — for an array it is the index, which is why the entry's own
+    // `hour` field wins whenever it is present.
+    const rawHours = d.hours;
+    const entries: Array<[string | null, Record<string, unknown>]> = Array.isArray(rawHours)
+      ? rawHours.map((h) => [null, (h ?? {}) as Record<string, unknown>])
+      : Object.entries((rawHours as Record<string, Record<string, unknown>>) ?? {}).map(
+          ([k, v]) => [k, (v ?? {}) as Record<string, unknown>],
+        );
+
+    const byHour = new Map<number, RecordingHour>();
+    for (const [key, h] of entries) {
+      const hour = parseSummaryHour(h, key);
+      if (hour === null) continue;
+      byHour.set(hour, {
         hour,
         events: Number(h.events ?? 0),
         duration: Number(h.duration ?? 0),
-        motion: Math.max(0, Math.min(100, motion)),
+        motion: normaliseMotion(h.motion),
+        objects: Number(h.objects ?? 0),
       });
     }
-    hours.sort((a, b) => a.hour - b.hour);
+
+    const hours = [...byHour.values()].sort((a, b) => a.hour - b.hour);
     return { day, events, duration, hours };
   });
 }

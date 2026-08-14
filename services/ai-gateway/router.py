@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 from typing import NamedTuple
 
 from auth.byok import get_api_key
-from middleware.off_lan_gating import check_off_lan_gate
+from middleware.off_lan_gating import check_off_lan_gate, is_local_provider
 from providers.anthropic_cloud import AnthropicCloudProvider
 from providers.ollama_local import OllamaLocalProvider
 from providers.openai_cloud import OpenAICloudProvider
@@ -29,16 +29,23 @@ logger = logging.getLogger(__name__)
 # Model name prefix → provider mapping.
 #
 # Order matters: dicts iterate in insertion order, and `resolve_provider`
-# returns the first provider whose prefix matches. `ollama` is listed
+# returns the first provider whose prefix matches. `local` is listed
 # FIRST so a local family whose name collides with a cloud prefix wins.
 # The canonical collision is `gpt-oss` — OpenAI's OPEN-WEIGHTS model,
-# served locally by Ollama, whose name starts with the openai cloud
-# prefix `gpt`. It must route to ollama (the off-LAN gate blocks the
-# nonexistent cloud call with HTTP 451). `gpt-oss` is more specific than
-# `gpt`, and matched first, so genuine cloud models (`gpt-4o`, `o1`)
-# still resolve to openai.
+# served on-box, whose name starts with the openai cloud prefix `gpt`.
+# It must route to `local` (the off-LAN gate blocks the nonexistent
+# cloud call with HTTP 451). `gpt-oss` is more specific than `gpt`, and
+# matched first, so genuine cloud models (`gpt-4o`, `o1`) still resolve
+# to openai.
+#
+# WARP-1926: this key was `ollama` until the appliance's default runtime
+# became Docker Model Runner. It names WHERE inference happens (on the
+# box), never WHICH daemon serves it — both DMR and Ollama answer here,
+# selected by INFERENCE_RUNTIME. Mirrored by LOCAL_MODEL_PREFIXES in
+# apps/orchestrator/src/services/cloud-access.service.ts, pinned by a
+# parity test that parses THIS dict — names and order both.
 PROVIDER_PREFIXES = {
-    "ollama": [
+    "local": [
         "llama",
         "mistral",
         "phi",
@@ -72,17 +79,22 @@ class ProviderRouter:
     """Resolves model names to providers and delegates inference."""
 
     def __init__(self):
-        self.ollama = OllamaLocalProvider()
+        # `local` is the on-box provider whichever daemon backs it — DMR by
+        # default since WARP-1870, Ollama when INFERENCE_RUNTIME=ollama. The
+        # class is still named OllamaLocalProvider because it speaks the
+        # Ollama-compatible wire protocol that BOTH runtimes serve; that is a
+        # protocol name, not a deployment claim.
+        self.local = OllamaLocalProvider()
         self.anthropic = AnthropicCloudProvider()
         self.openai = OpenAICloudProvider()
         self._providers: dict[str, BaseProvider] = {
-            "ollama": self.ollama,
+            "local": self.local,
             "anthropic": self.anthropic,
             "openai": self.openai,
         }
         # The one configured local model (the "one-model rule"). When the
         # chat request targets exactly this model it ALWAYS routes to the
-        # local Ollama provider, regardless of any cloud-looking name —
+        # on-box provider, regardless of any cloud-looking name —
         # we know it's local because it's what this deployment runs, so we
         # never have to guess from the model string. Empty when unset
         # (e.g. tests / cloud-only deploys), in which case routing falls
@@ -109,6 +121,19 @@ class ProviderRouter:
 
     def resolve_provider(self, model: str, explicit_provider: str | None = None) -> BaseProvider:
         """Resolve which provider handles the given model."""
+        # WARP-1933: `provider` is a PERSISTED column, so a replayed turn can
+        # arrive spelled `ollama`/`ollama_local` — the legacy names for the
+        # on-box provider before WARP-1926 renamed the key to `local`. Those
+        # spellings are not in `_providers` (deliberately: aliasing them in
+        # would double-query the local provider in `list_all_models`'s fan-out
+        # and skew the reverse lookup), so without this they missed the lookup
+        # below and fell through to prefix matching — resolving a CLOUD
+        # provider whenever the persisted model name matched a cloud prefix.
+        # Same allowlist the off-LAN gate uses, so the two cannot disagree
+        # about whether a given request is local.
+        if explicit_provider and is_local_provider(explicit_provider):
+            return self.local
+
         if explicit_provider and explicit_provider in self._providers:
             return self._providers[explicit_provider]
 
@@ -118,14 +143,14 @@ class ProviderRouter:
         # collides with a cloud prefix (the gpt-oss / cloud-finetune case).
         # This is the explicit one-model rule, not a name heuristic.
         if self._local_model and model_lower == self._local_model:
-            return self.ollama
+            return self.local
 
         for provider_name, prefixes in PROVIDER_PREFIXES.items():
             if any(model_lower.startswith(p) for p in prefixes):
                 return self._providers[provider_name]
 
-        # Default to Ollama (local-first)
-        return self.ollama
+        # Default to the on-box provider (local-first)
+        return self.local
 
     async def list_all_models(self, user_id: str | None = None) -> ModelListResult:
         """Query all providers for available models concurrently.
@@ -173,7 +198,7 @@ class ProviderRouter:
         # WARP-468: off-LAN gate. Refuses any non-local provider with
         # HTTP 451 when `cloud_model_escape` is disabled. The provider
         # name is the canonical key in `_providers`; we reverse-lookup
-        # here so the gate sees `"ollama"` / `"anthropic"` / `"openai"`
+        # here so the gate sees `"local"` / `"anthropic"` / `"openai"`
         # rather than the BaseProvider instance.
         provider_name = next(
             (n for n, p in self._providers.items() if p is provider),
@@ -203,4 +228,4 @@ class ProviderRouter:
         )
 
     async def close(self):
-        await self.ollama.close()
+        await self.local.close()

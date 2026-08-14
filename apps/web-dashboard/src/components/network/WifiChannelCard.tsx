@@ -196,9 +196,9 @@ export function WifiChannelCard() {
   const dirty = !!radio && selected !== radio.channel;
 
   return (
-    <div className="dp-card">
-      <h3 className="type-headline text-label-primary mb-1">WiFi channel</h3>
-      <p className="type-subheadline text-label-tertiary mb-4">
+    <div className="card">
+      <h3 className="type-headline text-[color:var(--text)] mb-1">WiFi channel</h3>
+      <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
         Pick the channel your Droplet broadcasts on. Switch channels if a
         neighbouring network is crowding yours. Automatic lets the router choose
         the clearest one. Changing this restarts the radio and briefly drops
@@ -206,7 +206,7 @@ export function WifiChannelCard() {
       </p>
 
       {status.kind === "loading" ? (
-        <div className="flex items-center gap-2 type-subheadline text-label-tertiary">
+        <div className="flex items-center gap-2 type-subheadline text-[color:var(--text-muted)]">
           <Loader2 size={16} className="animate-spin" />
           Reading current channel…
         </div>
@@ -216,24 +216,30 @@ export function WifiChannelCard() {
             <div>
               <label
                 htmlFor="wifi-channel"
-                className="type-subheadline text-label-secondary block mb-1.5"
+                className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
               >
                 Channel{" "}
-                <span className="text-label-tertiary">
+                <span className="text-[color:var(--text-muted)]">
                   ({radio.band === "2g" ? "2.4 GHz" : "5 GHz"})
                 </span>
               </label>
               <div className="relative">
                 <RadioTower
                   size={16}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]"
                   aria-hidden="true"
                 />
                 <select
                   id="wifi-channel"
                   value={selected}
                   onChange={(e) => setSelected(e.target.value)}
-                  className="dp-input pl-10"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors pl-10"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   disabled={saving}
                 >
                   <option value="auto">Automatic</option>
@@ -250,7 +256,7 @@ export function WifiChannelCard() {
               type="button"
               onClick={handleSave}
               disabled={saving || !dirty}
-              className="dp-btn-primary flex items-center gap-2"
+              className="btn primary"
             >
               {saving && <Loader2 size={16} className="animate-spin" />}
               {saving ? "Applying…" : "Save channel"}
@@ -262,7 +268,7 @@ export function WifiChannelCard() {
       {status.kind === "applied" && (
         <div
           role="status"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-green/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-green/10 rounded-sm px-3 py-2"
         >
           <CheckCircle2
             size={14}
@@ -277,7 +283,7 @@ export function WifiChannelCard() {
         <div
           role="status"
           aria-live="polite"
-          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+          className="mt-4 flex items-start gap-2 type-footnote text-[color:var(--text)] bg-system-orange/10 rounded-sm px-3 py-2"
         >
           <AlertCircle
             size={14}

@@ -143,7 +143,14 @@ async def _verify_pvid(driver: SwitchDriver, port: int, expected_vlan: int) -> b
 
 
 async def _move_port_to_vlan(driver: SwitchDriver, port: int, vlan_id: int) -> None:
-    """Set ``port`` as an untagged member of ``vlan_id`` (its access VLAN)."""
+    """Make ``port`` the untagged (access) member of ``vlan_id``.
+
+    Uses set_port_access_vlan, which MERGES — it preserves the VLAN's other
+    members and only strips this port from other VLANs' untagged membership. The
+    previous set_vlan_membership([one port]) call REPLACED the whole member list,
+    so moving one port wiped the rest — on VLAN 1 that is the uplink, the AP and
+    the appliance (audit 2026-08-06).
+    """
     if vlan_id != LAN_VLAN:
         # Ensure the target VLAN exists before assigning membership. create_vlan
         # is tolerant of "already exists" at the driver layer.
@@ -153,9 +160,7 @@ async def _move_port_to_vlan(driver: SwitchDriver, port: int, vlan_id: int) -> N
             existing = set()
         if vlan_id not in existing:
             await driver.create_vlan(vlan_id, _vlan_name(vlan_id))
-    await driver.set_vlan_membership(
-        vlan_id, [{"port": port, "tagged": False, "member": True}]
-    )
+    await driver.set_port_access_vlan(port, vlan_id)
 
 
 def _vlan_name(vlan_id: int) -> str:

@@ -6,11 +6,13 @@ const baseProps = {
   id: "abc",
   title: "Frigate ports",
   active: false,
+  pinned: false,
   onSelect: vi.fn(),
   onRenameSubmit: vi.fn().mockResolvedValue(undefined),
   onDeleteRequest: vi.fn(),
   onExport: vi.fn(),
   onMoveRequest: vi.fn(),
+  onTogglePin: vi.fn(),
 };
 
 describe("ChatHistoryRow", () => {
@@ -46,6 +48,27 @@ describe("ChatHistoryRow", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /export/i }));
     expect(onExport).toHaveBeenCalled();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  // ── WARP-1917: pin / unpin from the overflow menu ──
+
+  it("offers Pin for an unpinned chat and fires onTogglePin (closing the menu)", () => {
+    const onTogglePin = vi.fn();
+    render(<ChatHistoryRow {...baseProps} onTogglePin={onTogglePin} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    expect(screen.queryByRole("menuitem", { name: /unpin/i })).toBeNull();
+    fireEvent.click(screen.getByRole("menuitem", { name: /^pin$/i }));
+    expect(onTogglePin).toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("offers Unpin for a pinned chat", () => {
+    const onTogglePin = vi.fn();
+    render(<ChatHistoryRow {...baseProps} pinned onTogglePin={onTogglePin} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    expect(screen.queryByRole("menuitem", { name: /^pin$/i })).toBeNull();
+    fireEvent.click(screen.getByRole("menuitem", { name: /unpin/i }));
+    expect(onTogglePin).toHaveBeenCalled();
   });
 
   it("opens inline rename when the Rename menu item is chosen", () => {

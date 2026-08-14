@@ -54,4 +54,18 @@ describe("WelcomeStep — Learn more (WARP-914)", () => {
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
   });
+
+  // WARP-1810 — the "What is Droplet?" expander speaks the business register,
+  // aligned with the rewritten headline claim: the subjects are "connected
+  // devices" (not "smart-home control") and the locative is "your premises"
+  // (never "home").
+  it("describes Droplet in the business register — premises, never 'home'", () => {
+    render(<WelcomeStep onContinue={vi.fn()} />);
+    expect(
+      screen.getByText(/never leaves your premises/i),
+    ).toBeInTheDocument();
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/leaves home/i);
+    expect(text).not.toMatch(/smart-home control/i);
+  });
 });

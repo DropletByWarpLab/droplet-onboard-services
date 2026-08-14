@@ -18,13 +18,21 @@
  * even a teaser or a lock icon. Do not add a placeholder here.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Building2, FolderLock, ShieldOff, Users as UsersIcon } from "lucide-react";
+import { Building2, FolderLock, FolderPlus, ShieldOff, Users as UsersIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { fetchAdminFilesUsage, listDepartments } from "@/lib/api";
 import type { AdminFilesUsageResponse, Department } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { UploadButton } from "@/components/UploadZone";
+import { CreateLibraryDialog } from "@/components/Departments/CreateLibraryDialog";
+import type { DroppedSelection } from "@/components/FileManager/dropped-entries";
+import { requiredDirectories } from "@/components/FileManager/dropped-entries";
+import { runUpload } from "@/lib/run-upload";
+import { uploadOutcomeMessage, uploadProgressLabel } from "@/lib/upload-feedback";
+import { useSpaces } from "@/lib/hooks/useSpaces";
+import { useToast } from "@/components/Toast";
 
 /** Bytes-decimal-string ("—" on read failure, passed straight through) →
  *  a short human size. Never fabricates a value on bad/unknown input. */
@@ -72,6 +80,16 @@ export default function AdminFilesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const reload = useCallback(async () => {
+    const [usageData, deptData] = await Promise.all([
+      fetchAdminFilesUsage(),
+      listDepartments(),
+    ]);
+    setUsage(usageData);
+    setDepartments(deptData.departments || []);
+    setError(null);
+  }, []);
+
   useEffect(() => {
     if (!isAdminTier) return;
     let alive = true;
@@ -95,11 +113,83 @@ export default function AdminFilesPage() {
     };
   }, [isAdminTier]);
 
+  // ── WARP-1506: adding a file, and creating a library ──
+  //
+  // Company storage is SHARED, multi-user storage: this is a different write
+  // from a personal upload, and the enforcement is the server's, not this
+  // page's. `POST /api/files/upload?space=shared` is already gated by
+  // `requireRoleOrMcpService("owner","admin","family")` +
+  // `requireSpaceAccess(prisma, "contributor")`, which resolves `shared` to
+  // the seeded HOUSEHOLD department. `POST /api/departments` is already
+  // `requireRole("owner","admin")`. No endpoint was added for this ticket —
+  // everything below is the courtesy layer on top of gates that exist.
+  const { toast } = useToast();
+  const { spaces } = useSpaces();
+  const companySpace = useMemo(
+    () => spaces.find((s) => s.id === "shared") ?? null,
+    [spaces],
+  );
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [newLibraryOpen, setNewLibraryOpen] = useState(false);
+  const newLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const handleUpload = useCallback(
+    async (selection: DroppedSelection) => {
+      const { uploads, directories } = selection;
+      // This surface only has the header pickers — a `<input type="file">`
+      // never yields an empty folder or an unreadable file, so there is no
+      // zero-file drop to give a voice to here (unlike /files).
+      if (uploads.length === 0 || !companySpace) return;
+      setUploadPercent(0);
+      setUploadStatus(
+        uploadProgressLabel(
+          uploads.length,
+          requiredDirectories(uploads, directories).length,
+        ),
+      );
+      try {
+        const { uploaded, total, skipped, cause, directoriesFailed } = await runUpload(selection, {
+          // The company space's own root — `rootForSpace` applies the mount
+          // prefix server-side, so "/" here is the top of the shared library.
+          basePath: "/",
+          space: companySpace.id,
+          onProgress: setUploadPercent,
+        });
+        if (uploaded > 0) await reload().catch(() => undefined);
+        // The folder picker can carry an empty subfolder here too, and its
+        // mkdir is just as invisible to the file counts (WARP-1876 review
+        // round 2) — so this surface reads the same clause /files does.
+        const failure = uploadOutcomeMessage(uploaded, total, cause, skipped, directoriesFailed);
+        toast(
+          failure ??
+            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"} to ${companySpace.name}.`,
+        );
+      } finally {
+        setUploadStatus(null);
+        setUploadPercent(0);
+      }
+    },
+    [companySpace, reload, toast],
+  );
+
+  const handleLibraryCreated = useCallback(
+    async (created: Department) => {
+      // The server returns state=pending and a reconciler provisions the
+      // groupfolder — re-read rather than fabricating an active row.
+      await reload().catch(() => undefined);
+      toast(`${created.name} is setting up…`);
+    },
+    [reload, toast],
+  );
+
   const memberCountById = useMemo(() => {
     const map = new Map<string, number>();
     for (const d of departments) map.set(d.id, d.memberCount);
     return map;
   }, [departments]);
+
+  const librariesExist = (usage?.departments ?? []).length > 0;
 
   const kindById = useMemo(() => {
     const map = new Map<string, Department["kind"]>();
@@ -160,6 +250,17 @@ export default function AdminFilesPage() {
       label="Company files"
       title="Company files"
       sub="Storage usage across every person and library on this Droplet."
+      actions={
+        <UploadButton
+          onUpload={handleUpload}
+          disabled={!companySpace}
+          title={
+            companySpace
+              ? `Adds to ${companySpace.name} — everyone with access can see it.`
+              : "Company storage isn't set up on this Droplet yet."
+          }
+        />
+      }
     >
       {error && (
         <div
@@ -177,6 +278,33 @@ export default function AdminFilesPage() {
           }}
         >
           {error}
+        </div>
+      )}
+
+      {/* WARP-1506 — upload progress. Same shape as the Files page's bar so
+          the two upload surfaces read as one behaviour. */}
+      {uploadStatus && (
+        <div
+          role="status"
+          className="mb-4 p-3 rounded type-footnote"
+          style={{
+            background: "var(--brand-subtle)",
+            border: "1px solid color-mix(in srgb, var(--brand) 20%, transparent)",
+            color: "var(--brand)",
+          }}
+        >
+          <div className="mb-2">
+            {uploadStatus} {uploadPercent > 0 && `${uploadPercent}%`}
+          </div>
+          <div
+            className="h-1.5 rounded-full overflow-hidden"
+            style={{ background: "var(--inset)" }}
+          >
+            <div
+              className="h-full rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${uploadPercent}%`, background: "var(--brand)" }}
+            />
+          </div>
         </div>
       )}
 
@@ -224,13 +352,48 @@ export default function AdminFilesPage() {
             )}
           </div>
 
-          {/* Libraries table */}
-          <div className="sect">
+          {/* Libraries table.
+              WARP-1506 — the section had no way to create one, and its empty
+              state was a dead sentence. Exactly ONE "New library" control is
+              on screen at a time: the empty state owns it while there is
+              nothing to list (that's where a first-time admin is looking),
+              and it moves up to the section header once there is a list to
+              sit above. */}
+          <div className="sect" style={{ alignItems: "center" }}>
             <h2>Libraries</h2>
+            {librariesExist && (
+              <button
+                ref={newLibraryTriggerRef}
+                type="button"
+                className="btn ghost sm"
+                style={{ marginLeft: "auto" }}
+                onClick={() => setNewLibraryOpen(true)}
+              >
+                <FolderPlus size={13} aria-hidden="true" /> New library
+              </button>
+            )}
           </div>
           <div className="card">
-            {(usage?.departments ?? []).length === 0 ? (
-              <div className="empty">No department libraries yet.</div>
+            {!librariesExist ? (
+              <div className="empty">
+                <span className="ei">
+                  <Building2 size={24} aria-hidden="true" />
+                </span>
+                <span className="eh">No department libraries yet</span>
+                <span style={{ maxWidth: "38ch" }}>
+                  A library is shared storage for one department — Finance,
+                  Operations, whoever needs a space of their own.
+                </span>
+                <button
+                  ref={newLibraryTriggerRef}
+                  type="button"
+                  className="btn primary"
+                  style={{ marginTop: 4 }}
+                  onClick={() => setNewLibraryOpen(true)}
+                >
+                  <FolderPlus size={14} aria-hidden="true" /> New library
+                </button>
+              </div>
             ) : (
               <div className="rows">
                 {(usage?.departments ?? []).map((lib) => {
@@ -274,6 +437,17 @@ export default function AdminFilesPage() {
           </div>
         </>
       )}
+
+      {/* WARP-1506 — the same dialog the departments admin uses; "library"
+          is this page's noun for the same thing. */}
+      <CreateLibraryDialog
+        open={newLibraryOpen}
+        onClose={() => setNewLibraryOpen(false)}
+        onCreated={handleLibraryCreated}
+        triggerRef={newLibraryTriggerRef}
+        heading="New library"
+        submitLabel="Create library"
+      />
     </ShellPage>
   );
 }

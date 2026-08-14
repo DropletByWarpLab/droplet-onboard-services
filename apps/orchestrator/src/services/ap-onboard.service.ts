@@ -38,7 +38,12 @@ import { normalizeMac } from "../lib/mac.js";
 import {
   approveAp as routingApproveAp,
   decommissionAp as routingDecommissionAp,
+  getApBandSteering as routingGetApBandSteering,
+  setApBandSteering as routingSetApBandSteering,
+  getApWireless as routingGetApWireless,
+  setApWireless as routingSetApWireless,
   RouterError,
+  type ApWireless,
 } from "./openwrt.client.js";
 import {
   createUniFiNetworkClient,
@@ -48,6 +53,9 @@ import {
   createEasyMeshControllerClient,
   type EasyMeshControllerClient,
 } from "./easymesh-controller.client.js";
+// WARP-1761 — WRITE-path only. `getApWifi` below deliberately does NOT import
+// anything from here: ADR-035 §1 keeps reads dialing the device.
+import { recordWifiPrimaryIntent } from "./network-intent.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("ap-onboard");
@@ -97,6 +105,14 @@ export type ApOnboardErrorCode =
   | "PROVISIONING_TIMEOUT"
   | "ROUTER_UNREACHABLE"
   | "WIRELESS_CONFIG_REJECTED"
+  // WARP-1703: band steering can't be toggled on this shape — no ONLINE
+  // Droplet-image AP, no AP credential, or the AP's image predates the
+  // droplet.wifi substrate. Mirrors the routing service's 422 code verbatim.
+  | "AP_BAND_STEERING_UNAVAILABLE"
+  // WARP-1712: the AP's network name can't be read/changed on this shape —
+  // no ONLINE Droplet-image AP, no AP credential, or the AP reports no
+  // wireless interfaces. Mirrors the routing service's 422 code verbatim.
+  | "AP_WIRELESS_UNAVAILABLE"
   | "UNKNOWN";
 
 export class ApOnboardError extends Error {
@@ -935,6 +951,374 @@ export async function decommissionAp(
 ): Promise<ApMutationResult> {
   const handler = await resolveBackendForMac(prisma, rawMac);
   return handler.decommission(prisma, rawMac);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// WARP-1703 — AP band steering (the droplet.wifi.band_steering master
+// switch on the Droplet-image AP, shipped in droplet-edge-router PR #5).
+//
+// Household-level surface: the dashboard toggles "band steering" for the
+// home, not per-AP, so these fan across every ONLINE DROPLET_IMAGE row.
+// Only the Droplet image carries the substrate — UNIFI / EASYMESH APs
+// manage their own steering on their controllers, so their rows are
+// excluded by the explicit `backend` filter (never inferred).
+// ─────────────────────────────────────────────────────────────────────
+
+export interface ApBandSteeringState {
+  /** False = no ONLINE Droplet-image AP (or none of them carry the substrate). */
+  supported: boolean;
+  enabled: boolean;
+}
+
+function toApOnboardError(err: unknown): ApOnboardError {
+  if (err instanceof ApOnboardError) return err;
+  if (err instanceof RouterError) return ApOnboardError.routerError(err);
+  const message = err instanceof Error ? err.message : String(err);
+  return new ApOnboardError(message, 502, "UNKNOWN");
+}
+
+async function onlineDropletImageAps(prisma: PrismaClient): Promise<{ mac: string }[]> {
+  return prisma.apDevice.findMany({
+    where: { status: "ONLINE", backend: "DROPLET_IMAGE" },
+    select: { mac: true },
+  });
+}
+
+/**
+ * Read the household band-steering state. Honesty contract: zero ONLINE
+ * Droplet-image APs → `{ supported: false, enabled: false }` — never an
+ * error. With APs present, `supported` is true when at least one reports
+ * the substrate, and `enabled` AND-reduces across the supported ones (the
+ * household toggle only reads ON when every steerable AP steers).
+ */
+export async function getBandSteering(
+  prisma: PrismaClient,
+): Promise<ApBandSteeringState> {
+  const rows = await onlineDropletImageAps(prisma);
+  if (rows.length === 0) return { supported: false, enabled: false };
+  try {
+    const states = await Promise.all(
+      rows.map((row) => routingGetApBandSteering({ mac: row.mac })),
+    );
+    const supported = states.filter((s) => s.supported);
+    if (supported.length === 0) return { supported: false, enabled: false };
+    return { supported: true, enabled: supported.every((s) => s.enabled) };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
+}
+
+/**
+ * Toggle band steering on every ONLINE Droplet-image AP. Reads first so an
+ * unsupported shape gets the honest 422 (AP_BAND_STEERING_UNAVAILABLE)
+ * instead of a confusing write failure; the write then fans across the
+ * supported rows only. Returns the last routing operation id (when any) so
+ * the dashboard can poll the apply-vs-rollback outcome.
+ */
+export async function setBandSteering(
+  prisma: PrismaClient,
+  enabled: boolean,
+): Promise<{ operationId: string | null }> {
+  const rows = await onlineDropletImageAps(prisma);
+  if (rows.length === 0) {
+    throw new ApOnboardError(
+      "Band steering isn't available — no approved Droplet access point is online.",
+      422,
+      "AP_BAND_STEERING_UNAVAILABLE",
+    );
+  }
+  try {
+    const states = await Promise.all(
+      rows.map(async (row) => ({
+        mac: row.mac,
+        state: await routingGetApBandSteering({ mac: row.mac }),
+      })),
+    );
+    const supported = states.filter((s) => s.state.supported);
+    if (supported.length === 0) {
+      throw new ApOnboardError(
+        "Band steering isn't available — the access point's software doesn't support it yet.",
+        422,
+        "AP_BAND_STEERING_UNAVAILABLE",
+      );
+    }
+    let operationId: string | null = null;
+    // Sequential fan-out: one AP at a time so a failure surfaces before the
+    // next write starts (typical deployments have a single external AP).
+    for (const target of supported) {
+      const result = await routingSetApBandSteering({ mac: target.mac, enabled });
+      operationId = result.operationId ?? operationId;
+    }
+    return { operationId };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// WARP-1712 — the AP's own network name + passphrase.
+//
+// ONE SOURCE OF TRUTH. The AP is authoritative for its own radios. These
+// functions hold no cached SSID: every read fans out to the AP(s) and
+// reports what their uci actually says, so the Network tab's Wi-Fi form and
+// the Coverage Extenders card can never disagree with each other or with the
+// hardware. `ApDevice.approvedSsid` stays what it has always been — an
+// approval-time AUDIT column — and is deliberately not read here.
+//
+// Household-level, like band steering: the operator names their Wi-Fi once,
+// not once per AP, so the write fans across every ONLINE DROPLET_IMAGE row.
+// UNIFI / EASYMESH APs manage their own SSIDs on their controllers and are
+// excluded by the explicit `backend` filter (never inferred).
+// ─────────────────────────────────────────────────────────────────────
+
+export interface ApWifiState {
+  /** False = no ONLINE Droplet-image AP, or none of them can report wireless. */
+  supported: boolean;
+  /** The household network name. Null when the reporting APs disagree. */
+  ssid: string | null;
+  /** What the APs' band-steer applier calls the 5 GHz network. Display only. */
+  fiveGhzSsid: string | null;
+  /** The live per-unit passphrase. Null when the APs disagree. */
+  key: string | null;
+  encryption: string | null;
+  bandSteering: boolean | null;
+  /** How many ONLINE Droplet-image APs answered with a usable state. */
+  apCount: number;
+  /**
+   * False when the reporting APs are NOT all broadcasting the same name.
+   * Surfaced rather than silently picking one — a split household is a real
+   * condition an operator needs to see, not something to paper over.
+   */
+  inSync: boolean;
+}
+
+/** Per-AP detail behind an extender card. */
+export interface ApWirelessDetail extends ApWireless {
+  mac: string;
+}
+
+function apWirelessUnavailable(message: string): ApOnboardError {
+  return new ApOnboardError(message, 422, "AP_WIRELESS_UNAVAILABLE");
+}
+
+/**
+ * Read the household's AP Wi-Fi state. Honesty contract: zero ONLINE
+ * Droplet-image APs → `{ supported: false, ... }` — never an error.
+ *
+ * The reduce is deliberately strict about disagreement. With several APs
+ * reporting different names we return `inSync: false` and a null ssid instead
+ * of picking a winner, because a form pre-filled with one AP's name would
+ * silently overwrite the other's on the next save.
+ */
+export async function getApWifi(prisma: PrismaClient): Promise<ApWifiState> {
+  const empty: ApWifiState = {
+    supported: false,
+    ssid: null,
+    fiveGhzSsid: null,
+    key: null,
+    encryption: null,
+    bandSteering: null,
+    apCount: 0,
+    inSync: true,
+  };
+  const rows = await onlineDropletImageAps(prisma);
+  if (rows.length === 0) return empty;
+  try {
+    const states = await Promise.all(
+      rows.map((row) => routingGetApWireless({ mac: row.mac })),
+    );
+    const usable = states.filter((s) => s.supported);
+    if (usable.length === 0) return empty;
+
+    const first = usable[0];
+    const inSync = usable.every((s) => s.ssid === first.ssid);
+    return {
+      supported: true,
+      ssid: inSync ? first.ssid ?? null : null,
+      fiveGhzSsid: inSync ? first.five_ghz_ssid ?? null : null,
+      key: inSync ? first.key ?? null : null,
+      encryption: inSync ? first.encryption ?? null : null,
+      // Null when any AP predates the substrate — the household answer is
+      // only meaningful when every AP can steer.
+      bandSteering: usable.every((s) => s.band_steering === true)
+        ? true
+        : usable.some((s) => s.band_steering === null)
+          ? null
+          : false,
+      apCount: usable.length,
+      inSync,
+    };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
+}
+
+/**
+ * Radio COUNTS off the household's access points — no SSID, no passphrase.
+ *
+ * `getApWifi` above already fans out to the same APs, but its body carries the
+ * live PSK, which is why `GET /network/wifi/ap` is owner/admin. The network
+ * overview is readable by every authenticated principal, so it needs a
+ * count-only projection rather than an RBAC hole: this returns numbers and
+ * nothing else, and deliberately does not reach for `ssid`/`key` at all.
+ *
+ * Never throws. The overview is a summary that must still render when an AP is
+ * mid-reboot, so an unreachable AP degrades to "didn't report" rather than
+ * taking the whole read down. That is NOT the same as "no radios", which is
+ * why `apsNotReporting` is surfaced instead of being folded into a zero — a
+ * caller that can't tell those apart would draw "no Wi-Fi" over a household
+ * whose AP is simply busy.
+ */
+export interface ApRadioSummary {
+  /** ONLINE Droplet-image AP rows we asked. */
+  apCount: number;
+  /** Of those, how many answered with a usable wireless state. */
+  reporting: number;
+  /** Radios those reporting APs configure, on the air or not. */
+  radioCount: number;
+  /** Of `radioCount`, how many are actually broadcasting. */
+  activeRadioCount: number;
+}
+
+const EMPTY_AP_RADIOS: ApRadioSummary = {
+  apCount: 0,
+  reporting: 0,
+  radioCount: 0,
+  activeRadioCount: 0,
+};
+
+export async function getApRadioSummary(
+  prisma: PrismaClient,
+): Promise<ApRadioSummary> {
+  let rows: { mac: string }[];
+  try {
+    rows = await onlineDropletImageAps(prisma);
+  } catch (err) {
+    logger.warn({ err }, "AP radio summary: could not list access points");
+    return EMPTY_AP_RADIOS;
+  }
+  if (rows.length === 0) return EMPTY_AP_RADIOS;
+
+  // Settled, not `all`: one unreachable AP must not blank the radios of the
+  // others. Each rejection lands as its own not-reporting row.
+  const states = await Promise.allSettled(
+    rows.map((row) => routingGetApWireless({ mac: row.mac })),
+  );
+
+  const summary: ApRadioSummary = { ...EMPTY_AP_RADIOS, apCount: rows.length };
+  for (const settled of states) {
+    if (settled.status !== "fulfilled" || !settled.value.supported) continue;
+    const radios = settled.value.radios ?? [];
+    summary.reporting += 1;
+    summary.radioCount += radios.length;
+    // `up` is null on an AP image that doesn't report link state. Treat that
+    // as on-air when uci hasn't disabled it — the alternative reads a missing
+    // field as "off", which is the guessing the no-IS-NULL-state rule bans.
+    summary.activeRadioCount += radios.filter(
+      (radio) => !radio.disabled && radio.up !== false,
+    ).length;
+  }
+  return summary;
+}
+
+/**
+ * Set the household network name / passphrase on every ONLINE Droplet-image
+ * AP. Reads first so an unsupported shape gets the honest 422 instead of a
+ * confusing write failure, then fans out sequentially — one AP at a time so a
+ * failure surfaces before the next write starts (typical deployments have a
+ * single external AP).
+ *
+ * Returns the last routing operation id plus the name the APs will broadcast,
+ * including the DERIVED 5 GHz name, so the dashboard can tell the operator
+ * exactly what to reconnect to without re-reading an AP that is mid-reload.
+ */
+export async function setApWifi(
+  prisma: PrismaClient,
+  opts: { ssid?: string; key?: string },
+  writtenBy?: string,
+): Promise<{ operationId: string | null; ssid: string | null; fiveGhzSsid: string | null }> {
+  if (opts.ssid === undefined && opts.key === undefined) {
+    throw new ApOnboardError(
+      "Provide a network name and/or password — nothing to change.",
+      400,
+      "AP_INVALID",
+    );
+  }
+  // WARP-1761 (ADR-035 §7) — record the operator's INTENT before anything
+  // touches a device, then push exactly as before. This is the one seam, so
+  // it covers both callers: the Tier-1 `PUT /network/wifi/ap` and the Tier-2
+  // confirm dispatcher in network-status.routes.ts, which replays the params
+  // in a separate request. A future third caller cannot bypass it either.
+  //
+  // Deliberately ABOVE the online-AP lookup: "no approved AP is online" is
+  // the lost-write case itself (the lab AP was unreachable for ~20 minutes
+  // during a firmware experiment), so the 422 below must not be able to
+  // discard what the operator asked for. The intent survives every failure
+  // path from here down, and the converger applies it when the AP returns.
+  //
+  // Best-effort by construction: `recordWifiPrimaryIntent` never throws, so
+  // this line cannot change the status, body, or timing contract of any
+  // response below it. It records the SSID only — never the passphrase (see
+  // network-intent.service.ts).
+  await recordWifiPrimaryIntent(prisma, opts, writtenBy);
+
+  const rows = await onlineDropletImageAps(prisma);
+  if (rows.length === 0) {
+    throw apWirelessUnavailable(
+      "Wi-Fi settings aren't available — no approved Droplet access point is online.",
+    );
+  }
+  try {
+    const states = await Promise.all(
+      rows.map(async (row) => ({
+        mac: row.mac,
+        state: await routingGetApWireless({ mac: row.mac }),
+      })),
+    );
+    const supported = states.filter((s) => s.state.supported);
+    if (supported.length === 0) {
+      throw apWirelessUnavailable(
+        "Wi-Fi settings aren't available — the access point isn't reporting its wireless configuration.",
+      );
+    }
+    let operationId: string | null = null;
+    let ssid: string | null = null;
+    let fiveGhzSsid: string | null = null;
+    for (const target of supported) {
+      const result = await routingSetApWireless({ mac: target.mac, ...opts });
+      operationId = result.operationId ?? operationId;
+      ssid = result.ssid ?? ssid;
+      fiveGhzSsid = result.five_ghz_ssid ?? fiveGhzSsid;
+    }
+    return { operationId, ssid, fiveGhzSsid };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
+}
+
+/**
+ * Per-AP wireless detail for a Coverage Extenders card. Scoped to
+ * Droplet-image rows: a UNIFI / EASYMESH AP's radios are its controller's to
+ * report, and pretending we can read them over rpcd would be a lie.
+ */
+export async function getApWirelessForMac(
+  prisma: PrismaClient,
+  rawMac: string,
+): Promise<ApWirelessDetail> {
+  const mac = normalizeMac(rawMac);
+  const row = await prisma.apDevice.findUnique({ where: { mac } });
+  if (!row) throw ApOnboardError.notFound(mac);
+  if ((row as { backend?: string }).backend !== "DROPLET_IMAGE") {
+    throw apWirelessUnavailable(
+      "This access point is managed by its own vendor controller, so Droplet can't read its Wi-Fi settings.",
+    );
+  }
+  try {
+    const state = await routingGetApWireless({ mac });
+    return { ...state, mac };
+  } catch (err) {
+    throw toApOnboardError(err);
+  }
 }
 
 /**

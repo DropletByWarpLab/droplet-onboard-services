@@ -42,6 +42,14 @@ export const MAX_ACTIVE_QR_OVERLAY_DEVICES = 20;
 
 /** Domain-prefixed, versioned PoP message the status endpoint verifies. */
 export const STATUS_POP_PREFIX = "droplet-overlay-enroll-status:v1:";
+/**
+ * WARP-1757 — the profile fetch signs a DIFFERENT domain-prefixed message than
+ * the status poll. Domain separation is the point: a status signature is a
+ * coarse read primitive, a profile signature returns the box's server key,
+ * tunnel address and endpoint candidates. One must never be replayable as the
+ * other, so they can never share a prefix.
+ */
+export const PROFILE_POP_PREFIX = "droplet-overlay-enroll-profile:v1:";
 
 // --- Link-token minting -----------------------------------------------------
 
@@ -160,6 +168,37 @@ export function verifyStatusPop(
   pendingId: string,
   sigBase64: string,
 ): boolean {
+  return verifyPopOverMessage(pem, buildStatusPopMessage(pendingId), sigBase64);
+}
+
+/** `droplet-overlay-enroll-profile:v1:<pending_id>` — WARP-1757. The bytes a
+ *  client signs to fetch its tunnel profile. Distinct prefix from the status
+ *  poll so neither signature can be replayed as the other. */
+export function buildProfilePopMessage(pendingId: string): string {
+  return `${PROFILE_POP_PREFIX}${pendingId}`;
+}
+
+/** WARP-1757 — the profile-fetch counterpart of {@link verifyStatusPop}. */
+export function verifyProfilePop(
+  pem: string,
+  pendingId: string,
+  sigBase64: string,
+): boolean {
+  return verifyPopOverMessage(pem, buildProfilePopMessage(pendingId), sigBase64);
+}
+
+/**
+ * Shared ECDSA-P256 verification over an arbitrary domain-prefixed message.
+ * Accepts BOTH raw r||s (WebCrypto / most mobile crypto libs) and DER for
+ * client interop. Never throws — any malformed input returns false
+ * (fail-closed). Callers supply the message so the domain prefix, and thus what
+ * a given signature authorizes, stays explicit at every call site.
+ */
+function verifyPopOverMessage(
+  pem: string,
+  message: string,
+  sigBase64: string,
+): boolean {
   if (!sigBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(sigBase64.trim())) {
     return false;
   }
@@ -169,7 +208,7 @@ export function verifyStatusPop(
   } catch {
     return false;
   }
-  const data = Buffer.from(buildStatusPopMessage(pendingId), "ascii");
+  const data = Buffer.from(message, "ascii");
   const sig = Buffer.from(sigBase64, "base64");
   if (sig.length === 0) return false;
   for (const dsaEncoding of ["ieee-p1363", "der"] as const) {

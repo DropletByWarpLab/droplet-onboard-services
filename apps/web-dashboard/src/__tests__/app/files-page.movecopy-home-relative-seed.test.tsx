@@ -140,7 +140,9 @@ import FilesPage from "@/app/files/page";
 import { bulkMoveFiles } from "@/lib/api";
 
 function switchToHousehold() {
-  fireEvent.click(screen.getByRole("tab", { name: /household/i }));
+  // WARP-1808 — the shared tab renders "Workspace" (the raw server name
+  // "Household" stays in the fixture/data layer).
+  fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
 }
 
 describe("Files page — Move/Copy dialog seeds the home-relative target (WARP-1247)", () => {

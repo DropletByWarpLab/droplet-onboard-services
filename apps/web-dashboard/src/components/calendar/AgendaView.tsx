@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
-import { Calendar as CalendarIcon, MapPin, Globe } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Calendar as CalendarIcon, Check, Copy, Globe, MapPin, Video } from "lucide-react";
+import { parseMeetingLink } from "@droplet/shared-types";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { dayKey } from "@/lib/calendar";
+import { meetingPasscode } from "@/lib/meeting-passcode";
 import { eventsByDay } from "./MonthView";
 
 /** Stable DOM id for a day section so the page can scroll the agenda to a
@@ -46,6 +48,72 @@ function formatTime(iso: string, allDay: boolean): string {
   if (allDay) return "All day";
   const d = new Date(iso);
   return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * WARP-1905 — the URL-embedded passcode, as a one-click copy chip under the
+ * Join pill. Quiet by design: caption type, muted color, and the confirm is
+ * an in-place icon/word swap (no toast, no relayout) that reverts on its
+ * own — the row stays calm. Renders nothing when the link carries no
+ * passcode, which is most links.
+ */
+function PasscodeChip({ link }: { link: NonNullable<ReturnType<typeof parseMeetingLink>> }) {
+  const passcode = useMemo(() => meetingPasscode(link), [link]);
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(timerRef.current), []);
+
+  if (!passcode) return null;
+
+  const copy = async () => {
+    // clipboard is absent outside secure contexts (http-by-LAN-IP) and in
+    // jsdom. No optional chain here: `clipboard?.writeText` would resolve
+    // to undefined and fall through to a FALSE "Copied" — announced to
+    // screen readers too. Missing clipboard must throw into the catch so
+    // the chip fails quiet; the passcode stays visible to read and retype.
+    try {
+      await navigator.clipboard.writeText(passcode);
+    } catch {
+      return;
+    }
+    setCopied(true);
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={`Copy passcode ${passcode}`}
+        title="Copy passcode"
+        // min-h-[24px] — WCAG 2.5.8 target floor at every width;
+        // max-lg:min-h-[44px] — the handbook's phone-width touch minimum
+        // (04-coding-standards/mobile-web-layout.md §3b), same token as
+        // MiniMonth's day cells.
+        className="inline-flex items-center gap-1 type-caption-1 transition-colors hover:text-[var(--text)] max-w-full min-h-[24px] max-lg:min-h-[44px]"
+        style={{ color: "var(--text-muted)" }}
+      >
+        {copied ? (
+          <Check size={10} aria-hidden="true" />
+        ) : (
+          <Copy size={10} aria-hidden="true" />
+        )}
+        {copied ? "Copied" : "Passcode"}
+        <span className="font-mono truncate">{passcode}</span>
+      </button>
+      {/* WCAG 4.1.3 — the visible word-flip above never reaches the
+          accessible name (aria-label is static), so the confirmation is
+          announced here. Permanently mounted (WARP-1528: SRs only announce
+          mutations of a region they were already observing) and a SIBLING of
+          the button, since button descendants are presentational per ARIA.
+          sr-only is position:absolute, so the empty span adds no flex gap. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copied ? "Copied" : ""}
+      </span>
+    </>
+  );
 }
 
 interface Props {
@@ -127,39 +195,72 @@ export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
               {g.label}
             </h3>
             <ul className="flex flex-col gap-1">
-              {g.events.map((ev) => (
-                <li key={ev.id}>
-                  <button
-                    type="button"
-                    onClick={() => onSelect?.(ev)}
+              {g.events.map((ev) => {
+                // WARP-1905 — re-parsed at render, like MeetingCard: an
+                // agenda row can arrive from an external ICS feed that no
+                // zod schema ever inspected, and this is the last thing
+                // between a stored string and an href. Unparseable → the
+                // row renders exactly as before, nothing extra.
+                const link = parseMeetingLink(ev.meetingUrl);
+                return (
+                  <li
+                    key={ev.id}
                     style={{
                       padding: "12px",
                       ...(colorOf?.(ev) ? { borderLeft: `3px solid ${colorOf(ev)}` } : {}),
                     }}
-                    className="w-full text-left card hover:bg-[var(--hover)] transition flex items-start gap-3"
+                    className="card hover:bg-[var(--hover)] transition flex items-start gap-3"
                   >
-                    <div className="w-20 shrink-0 type-subheadline tabular-nums" style={{ color: "var(--text-muted)" }}>
-                      {formatTime(ev.startsAt, ev.allDay)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="type-body truncate" style={{ color: "var(--text)" }}>{ev.title}</span>
-                        {ev.source === "external" && (
-                          <span title="From an external calendar">
-                            <Globe size={12} style={{ color: "var(--text-muted)" }} />
-                          </span>
+                    {/* The join anchor must stay a SIBLING of this button —
+                        an <a> nested inside a <button> is invalid HTML and
+                        makes the whole row "the link" to assistive tech. */}
+                    <button
+                      type="button"
+                      onClick={() => onSelect?.(ev)}
+                      className="flex-1 min-w-0 text-left flex items-start gap-3"
+                    >
+                      <div className="w-20 shrink-0 type-subheadline tabular-nums" style={{ color: "var(--text-muted)" }}>
+                        {formatTime(ev.startsAt, ev.allDay)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="type-body truncate" style={{ color: "var(--text)" }}>{ev.title}</span>
+                          {ev.source === "external" && (
+                            <span title="From an external calendar">
+                              <Globe size={12} style={{ color: "var(--text-muted)" }} />
+                            </span>
+                          )}
+                        </div>
+                        {ev.location && (
+                          <div className="flex items-center gap-1 mt-0.5 type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>
+                            <MapPin size={10} />
+                            {ev.location}
+                          </div>
                         )}
                       </div>
-                      {ev.location && (
-                        <div className="flex items-center gap-1 mt-0.5 type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>
-                          <MapPin size={10} />
-                          {ev.location}
-                        </div>
-                      )}
-                    </div>
-                  </button>
-                </li>
-              ))}
+                    </button>
+                    {link && (
+                      <div className="shrink-0 flex flex-col items-end gap-1 max-w-[45%]">
+                        <a
+                          href={link.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={link.url}
+                          // max-lg:min-h-[44px] — ~26px tall on a phone
+                          // otherwise, under the 44px touch minimum
+                          // (04-coding-standards/mobile-web-layout.md §3b).
+                          className="inline-flex items-center gap-1.5 type-caption-1 rounded-full border px-2.5 py-1 transition-colors hover:bg-[var(--hover)] max-lg:min-h-[44px]"
+                          style={{ borderColor: "var(--border)", color: "var(--text)" }}
+                        >
+                          <Video size={12} strokeWidth={1.5} aria-hidden="true" />
+                          {link.label}
+                        </a>
+                        <PasscodeChip link={link} />
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </section>
         );

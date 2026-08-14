@@ -83,6 +83,21 @@ vi.mock("../services/ap-onboard.service.js", () => {
     decommissionAp: vi
       .fn()
       .mockResolvedValue({ ap: { mac: "AA:BB:CC:DD:EE:FF", status: "DECOMMISSIONED" }, operationId: "op-decom" }),
+    // WARP-1703: imported by network-wifi.routes.ts.
+    getBandSteering: vi.fn().mockResolvedValue({ supported: false, enabled: false }),
+    setBandSteering: vi.fn().mockResolvedValue({ operationId: null }),
+    // WARP-1712: imported by network-wifi.routes.ts (getApWifi/setApWifi),
+    // network-status.routes.ts (setApWifi) and aps.ts (getApWirelessForMac).
+    getApWifi: vi.fn().mockResolvedValue({
+      supported: false, ssid: null, fiveGhzSsid: null, key: null,
+      encryption: null, bandSteering: null, apCount: 0, inSync: true,
+    }),
+    setApWifi: vi
+      .fn()
+      .mockResolvedValue({ operationId: null, ssid: null, fiveGhzSsid: null }),
+    getApWirelessForMac: vi.fn().mockResolvedValue({
+      mac: "AA:BB:CC:DD:EE:FF", supported: false, radios: [],
+    }),
   };
 });
 

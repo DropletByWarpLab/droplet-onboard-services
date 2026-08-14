@@ -5,7 +5,7 @@
 // the default page (+ reserved fields like `metadata`); a non-page named export
 // such as DevicesTab fails `next build`, so this component lives in its own module.
 import { useState } from "react";
-import { Loader2, Monitor } from "lucide-react";
+import { AlertCircle, Loader2, Monitor } from "lucide-react";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
@@ -16,7 +16,18 @@ import type { EnrichedNetworkDevice } from "@/lib/types";
 
 type DeviceSort = "name" | "lastSeen" | "vendor";
 
-export function DevicesTab() {
+export type DevicesTabProps = {
+  /**
+   * WARP-1723 (second pass, a11y): activation handler for the Coverage
+   * Extenders panel's "Change in Wi-Fi settings" link. Threaded from the page
+   * because the page owns the tab state AND the post-activation focus
+   * machinery — this panel unmounts the moment the tab changes, so it can't
+   * move focus itself. Optional: standalone renders keep plain <a> navigation.
+   */
+  onOpenWifiSettings?: () => void;
+};
+
+export function DevicesTab({ onOpenWifiSettings }: DevicesTabProps = {}) {
   const [search, setSearch] = useState("");
   const [onlineOnly, setOnlineOnly] = useState(false);
   const [sort, setSort] = useState<DeviceSort>("name");
@@ -60,9 +71,19 @@ export function DevicesTab() {
   }
   const sorted = filtered.slice().sort(sortFn);
 
+  // WARP-1715: the household's own access points ARE part of the network and
+  // belong in this list — but they're infrastructure, not client devices, so
+  // they get their own section instead of sorting between two phones. (#1401
+  // hid them outright to avoid the same hardware appearing in two places; the
+  // founder's call on 2026-08-04 was to show them, separated. The Coverage
+  // Extenders panel is still where you manage them.) An AP the operator has
+  // deliberately put in a group is honoured there instead.
+  const infrastructure = sorted.filter((d) => d.isAccessPoint && d.groups.length === 0);
+  const clients = sorted.filter((d) => !(d.isAccessPoint && d.groups.length === 0));
+
   // Bucket by group; a device may belong to multiple groups and appear in each.
   const byGroup = new Map<string, EnrichedNetworkDevice[]>();
-  for (const d of sorted) {
+  for (const d of clients) {
     if (d.groups.length === 0) {
       byGroup.set("__ungrouped", [...(byGroup.get("__ungrouped") ?? []), d]);
     } else {
@@ -80,9 +101,33 @@ export function DevicesTab() {
   // active search that matched nothing (onlineOnly filters server-side, so it
   // empties `devices` instead). Distinguish that from the raw zero-devices case
   // so the search miss gets its own empty state rather than a blank area.
-  const hasMatches = groupsWithMembers.length > 0 || ungrouped.length > 0;
+  const hasMatches =
+    groupsWithMembers.length > 0 || ungrouped.length > 0 || infrastructure.length > 0;
 
-  const isLoading = !devicesSwr.data && devicesSwr.isLoading;
+  // WARP-1726: "still loading" has to cover the whole window before the first
+  // response lands, not just SWR's `isLoading` — which is true for the FIRST
+  // request of a key only. A cold load that failed (a 401 while the access
+  // token was being rotated) and is now retrying reports isLoading:false with
+  // no data, which read as "loaded, and there are zero devices" and put the
+  // "your router hasn't seen any devices yet" card in front of a household
+  // full of devices. A failed load that has SETTLED still falls through to
+  // that card, which carries the Retry affordance for exactly this case.
+  const isLoading =
+    devicesSwr.data === undefined && (devicesSwr.isLoading || devicesSwr.isValidating);
+
+  // WARP-1726 (second pass): tell a FAILED load apart from a load that really
+  // returned nothing. Without this the tab settled, between poll ticks, on
+  // "your router hasn't seen any devices yet" — a confident claim about the
+  // router made while we had in fact never heard back from the orchestrator at
+  // all (an expired access token, a box mid-reboot). That sentence is the
+  // reported symptom, "shows no devices", in the app's own voice.
+  //
+  // Gated on `data === undefined` so it only ever describes a COLD load. Once a
+  // good response has landed, SWR keeps serving it and a later poll failure
+  // must not replace a screen full of devices with an error card — the next
+  // tick usually repairs it silently. A definitive zero (data present, no
+  // devices) likewise stays the router's story to tell.
+  const loadFailed = devicesSwr.data === undefined && Boolean(devicesSwr.error);
 
   return (
     <div>
@@ -90,7 +135,7 @@ export function DevicesTab() {
           AP listing. Renders above the devices grid so the operator sees
           AWAITING_APPROVAL action-items before scanning the device list. */}
       <div className="mb-6">
-        <CoverageExtendersPanel />
+        <CoverageExtendersPanel onOpenWifiSettings={onOpenWifiSettings} />
       </div>
 
       {/* Header controls */}
@@ -101,24 +146,36 @@ export function DevicesTab() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search devices…"
           aria-label="Search devices"
-          className="dp-input flex-1 min-w-[200px]"
+          className="flex-1 min-w-[200px] px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+          style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-input)",
+            color: "var(--text)",
+          }}
         />
-        <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+        <label className="flex items-center gap-2 type-subheadline text-[color:var(--text-muted)]">
           <input
             type="checkbox"
             checked={onlineOnly}
             onChange={(e) => setOnlineOnly(e.target.checked)}
-            className="accent-accent"
+            className="accent-[var(--brand)]"
           />
           Online only
         </label>
-        <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+        <label className="flex items-center gap-2 type-subheadline text-[color:var(--text-muted)]">
           Sort by
           <select
             value={sort}
             onChange={(e) => setSort(e.target.value as DeviceSort)}
             aria-label="Sort devices"
-            className="dp-input"
+            className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+            }}
           >
             <option value="name">Name</option>
             <option value="lastSeen">Last seen</option>
@@ -128,26 +185,63 @@ export function DevicesTab() {
         <button
           type="button"
           onClick={() => setGroupManagerOpen(true)}
-          className="dp-btn-secondary text-sm"
+          className="btn sm"
         >
           Manage groups
         </button>
       </div>
 
       {isLoading && (
-        <div className="flex items-center justify-center py-12 text-label-tertiary">
-          <Loader2 size={20} className="animate-spin mr-2" />
+        // WARP-1726: reserve the height instead of letting the tab shrink to a
+        // spinner. A cold load left the page a few hundred pixels tall, so the
+        // browser clamped the restored scroll offset to the bottom of it and
+        // the user landed at the end of a list that had not arrived yet.
+        // Fixed-height loading states are the house convention here (see
+        // app/network/page.tsx NetworkPageSkeleton).
+        <div
+          role="status"
+          aria-label="Loading devices"
+          className="flex items-center justify-center text-[color:var(--text-muted)]"
+          style={{ minHeight: 300 }}
+        >
+          <Loader2 size={20} className="animate-spin mr-2" aria-hidden="true" />
           <span className="type-subheadline">Loading devices…</span>
         </div>
       )}
 
-      {!isLoading && devices.length === 0 && (
+      {/* The load never landed. Same card, same retry — only the claim
+          changes, from one about the router to one about the connection.
+          `role="status"` (polite) rather than "alert": this is a state the
+          user navigated to, not an interruption, and it self-heals on the next
+          successful poll. AlertCircle in system-orange, the warning token — a
+          transient failure is not destructive-red. */}
+      {!isLoading && loadFailed && (
+        <div role="status" className="card text-center" style={{ padding: "48px 20px" }}>
+          <AlertCircle size={32} className="mx-auto text-system-orange mb-3" aria-hidden="true" />
+          <h3 className="type-title-3 text-[color:var(--text)] mb-1">
+            Couldn&apos;t load your devices
+          </h3>
+          <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
+            Something interrupted the connection. Your devices are still there
+            &mdash; try again in a moment.
+          </p>
+          <button
+            type="button"
+            onClick={() => devicesSwr.mutate()}
+            className="btn ghost sm"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!isLoading && !loadFailed && devices.length === 0 && (
         <div className="card text-center" style={{ padding: "48px 20px" }}>
-          <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h3 className="type-title-3 text-label-primary mb-1">
+          <Monitor size={32} className="mx-auto text-[color:var(--text-faint)] mb-3" />
+          <h3 className="type-title-3 text-[color:var(--text)] mb-1">
             Your router hasn&apos;t seen any devices yet
           </h3>
-          <p className="type-subheadline text-label-tertiary mb-4">
+          <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
             Devices will appear as soon as the router reports them.
           </p>
           <button
@@ -162,11 +256,11 @@ export function DevicesTab() {
 
       {!isLoading && devices.length > 0 && !hasMatches && search.trim() !== "" && (
         <div className="card text-center" style={{ padding: "48px 20px" }}>
-          <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h3 className="type-title-3 text-label-primary mb-1">
+          <Monitor size={32} className="mx-auto text-[color:var(--text-faint)] mb-3" />
+          <h3 className="type-title-3 text-[color:var(--text)] mb-1">
             No devices match &ldquo;{search}&rdquo;
           </h3>
-          <p className="type-subheadline text-label-tertiary mb-4">
+          <p className="type-subheadline text-[color:var(--text-muted)] mb-4">
             Try a different name, IP, or vendor.
           </p>
           <button
@@ -190,6 +284,14 @@ export function DevicesTab() {
               onError={setToast}
             />
           ))}
+          {infrastructure.length > 0 && (
+            <DeviceGridSection
+              group={{ id: "__infrastructure", name: "Network infrastructure" }}
+              devices={infrastructure}
+              onOpen={(d) => setOpenMac(d.mac)}
+              onError={setToast}
+            />
+          )}
           {ungrouped.length > 0 && (
             <DeviceGridSection
               group={{ id: "__ungrouped", name: "Ungrouped" }}
@@ -208,7 +310,7 @@ export function DevicesTab() {
       {toast && (
         <div
           role="alert"
-          className="fixed bottom-4 right-4 bg-system-red text-white px-3 py-2 rounded shadow flex items-center gap-2 z-50"
+          className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 lg:bottom-4 z-50 bg-system-red text-white px-3 py-2 rounded shadow flex items-center gap-2"
         >
           <span className="type-subheadline">{toast}</span>
           <button

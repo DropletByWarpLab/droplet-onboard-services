@@ -123,12 +123,16 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     await screen.findByText(/scan to connect/i);
     expect(screen.getByText(/the private key is shown once/i)).toBeInTheDocument();
     // WARP-993 honesty gate: no offLanReachable on the create response ⇒
-    // never promise "from anywhere".
-    expect(screen.getByText(/on your home network/i)).toBeInTheDocument();
+    // never promise "from anywhere". WARP-1810: business build says "local
+    // network", not "home network".
+    expect(screen.getByText(/on your local network/i)).toBeInTheDocument();
     expect(screen.queryByText(/from anywhere/i)).not.toBeInTheDocument();
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
+    // WARP-1763: "1 device set up", not "1 connected device". The count is of
+    // active peer ROWS, which exist from the moment a config is minted — this
+    // very test mints one and has not connected anything.
     expect(
-      screen.getByText(/on · 1 connected device$/i),
+      screen.getByText(/on · 1 device set up$/i),
     ).toBeInTheDocument();
   });
 
@@ -157,9 +161,33 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
-    expect(screen.getByText(/on · 2 connected devices/i)).toBeInTheDocument();
+    // WARP-1763: no `liveStateAvailable` on this response, so nothing about
+    // connectedness was observed and the widget must not append a live count.
+    expect(screen.getByText(/on · 2 devices set up$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/connected now/i)).not.toBeInTheDocument();
     expect(
       screen.getByText("https://warp-lab.droplet-us.com"),
+    ).toBeInTheDocument();
+  });
+
+  it("counts handshakes, not rows, when the interface was actually read (WARP-1763)", async () => {
+    // Two devices set up; only one has handshaken recently. The old copy
+    // called both "connected" because it counted peer rows.
+    mockFetchVpnStatus.mockResolvedValue({ ...READY, peerCount: 2 });
+    mockFetchVpnPeers.mockResolvedValue({
+      peers: [
+        { ...MY_PEER, provisioned: true, lastHandshakeAt: new Date().toISOString() },
+        { ...OTHERS_PEER, provisioned: true, lastHandshakeAt: null },
+      ],
+      liveStateAvailable: true,
+    });
+
+    render(<RemoteAccessWidget {...SIZE} />);
+
+    const sw = await screen.findByRole("switch", { name: /^remote access$/i });
+    await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
+    expect(
+      screen.getByText(/on · 2 devices set up · 1 connected now$/i),
     ).toBeInTheDocument();
   });
 
@@ -247,7 +275,7 @@ describe("RemoteAccessWidget — home-mode gate (WARP-1391)", () => {
 
     const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
-      expect(screen.getByText(/home address not ready yet/i)).toBeInTheDocument(),
+      expect(screen.getByText(/local address not ready yet/i)).toBeInTheDocument(),
     );
     expect(sw).toHaveAttribute("aria-disabled", "true");
     // aria-describedby already points at the sub text, so SR users hear WHY.
@@ -264,7 +292,7 @@ describe("RemoteAccessWidget — home-mode gate (WARP-1391)", () => {
 
     const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
-      expect(screen.getByText(/home address not ready yet/i)).toBeInTheDocument(),
+      expect(screen.getByText(/local address not ready yet/i)).toBeInTheDocument(),
     );
     expect(sw).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(sw);

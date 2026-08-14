@@ -113,7 +113,25 @@ prepare_and_build() {
   # repo root. Without this symlink, invocations that don't pass
   # `--env-file .env` (e.g. ad-hoc `docker compose -f docker/docker-compose.yml
   # logs`) silently default secrets to empty strings and break auth services.
-  ln -sfn ../.env "$REPO_ROOT/docker/.env"
+  #
+  # WARP-1908: a REGULAR file here means the link was destroyed and the two
+  # files have been drifting — `ln -sfn` would silently delete whatever that
+  # file holds. Say so and keep a copy first. Root .env stays the source of
+  # truth (it is what `env_file:` loads), so any key living only in the stale
+  # copy is named rather than quietly dropped.
+  _compose_env_link="$REPO_ROOT/docker/.env"
+  if [ -f "$_compose_env_link" ] && [ ! -L "$_compose_env_link" ]; then
+    _stale_only="$(comm -13 \
+      <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$REPO_ROOT/.env" 2>/dev/null | sort -u) \
+      <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$_compose_env_link" | sort -u) \
+      | tr '\n' ' ')"
+    cp -p "$_compose_env_link" "${_compose_env_link}.forked-$(date -u +%Y%m%dT%H%M%SZ)"
+    log_warn "docker/.env was a regular file, not the ../.env symlink — Compose has been interpolating from a drifted copy (WARP-1908). Backed it up and restored the link."
+    [ -z "$_stale_only" ] \
+      || log_warn "  keys that existed ONLY in that copy and are now gone: ${_stale_only}"
+  fi
+  ln -sfn ../.env "$_compose_env_link"
+  unset _compose_env_link _stale_only
 
   # --- Pin the repo's absolute host path for the OTA apply path (WARP-1669) ---
   # The orchestrator runs `docker compose -f "$DROPLET_OTA_COMPOSE_FILE"` from
@@ -232,12 +250,22 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,web,*) build_services+=(web-fetch) ;;
   esac
+  # erp profile: erp-sql-bridge (WARP-1106 direct-SQL ERP bridge) is
+  # `["erp"]`-profiled and has a `build:` section, so the same "No such image"
+  # failure at `up` applies. Same build-only-when-active idiom: the profile is
+  # off on every box without an Eaglesoft install, and building an ODBC image
+  # there would be pure waste.
+  case ",${active_profiles}," in
+    *,erp,*) build_services+=(erp-sql-bridge) ;;
+  esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
   # Deliberately NOT in build_services (accounted for here, not built):
   #   rag-eval    — appended above only when the eval profile is active
   #   web-fetch   — appended above only when the web profile is active
   #                 (WARP-1436 screened ambient-data fetcher)
+  #   erp-sql-bridge — appended above only when the erp profile is active
+  #                 (WARP-1106 direct-SQL ERP bridge)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned
@@ -259,7 +287,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,openwrt,ops-console,fleet-agent" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then
@@ -278,6 +306,12 @@ prepare_and_build() {
   # only in build_services when its profile is enabled, so the extra --profile
   # flag is harmless otherwise.) Default-profile services are visible
   # regardless of --profile.
+  #
+  # WARP-1106 added --profile erp for erp-sql-bridge, and --profile web at the
+  # same time: web-fetch has been conditionally appended to build_services
+  # since WARP-1436 without its profile ever being listed here, so a box with
+  # the web profile active would have failed this loop with "no such service".
+  # Same one-word omission, caught while adding the adjacent one.
   # CI hook: when DROPLET_COMPOSE_BUILD_EXTRA_FILE is set (setup-e2e.yml),
   # merge that compose file on top of the main one so builds import the GHCR
   # BuildKit layer cache that docker-build.yml refreshes on every push to
@@ -288,7 +322,8 @@ prepare_and_build() {
   # devices → argv identical to before, production behavior untouched.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux --profile eval --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --profile eval \
+        --profile web --profile erp --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         ${DROPLET_COMPOSE_BUILD_EXTRA_FILE:+-f "$DROPLET_COMPOSE_BUILD_EXTRA_FILE"} \
         build "$svc"; then
@@ -306,9 +341,10 @@ prepare_and_build() {
 # Nextcloud Droplet provisioning reconcile (WARP-990)
 # =============================================================================
 # docker/nextcloud-init.sh (household group + "Household" group folder +
-# OnlyOffice connector — WARP-883/882) is mounted into the nextcloud container
-# as the official image's post-installation hook:
-#   /docker-entrypoint-hooks.d/post-installation/init-droplet.sh
+# document-engine connector + viewer apps/previews — WARP-883/882/1686) is
+# mounted into the nextcloud container as the official image's
+# before-starting hook (WARP-1694; it was post-installation until then):
+#   /docker-entrypoint-hooks.d/before-starting/init-droplet.sh
 # The image fires post-installation hooks ONLY on the single boot that performs
 # the initial auto-install into an EMPTY nextcloud-data volume. On a reflashed
 # box that window is easy to miss entirely (WARP-990, live on .87 2026-07-01):
@@ -318,6 +354,17 @@ prepare_and_build() {
 #   * even on a genuinely fresh volume the hook races first-boot bring-up
 #     (db/appstore/DNS settling — the #691 fragility) and the image never
 #     re-fires a hook that erred.
+#
+# WARP-1694 moved the mount to `before-starting`, which the entrypoint runs on
+# EVERY start (outside the install branch, after any upgrade). That makes
+# convergence a property of the CONTAINER rather than of whichever script
+# brought the stack up — which is the hole this reconcile could not cover: a
+# no-wipe deploy (`docker compose up -d` straight onto a new main, no setup.sh)
+# never calls start_stack, so before WARP-1694 nothing re-ran the hook at all
+# and a changed DOCS_ENGINE silently did not converge (found live on .250,
+# 2026-08-04). The re-exec below is now belt-and-braces on top: it still earns
+# its keep because it runs AFTER `occ status` reports installed, so it also
+# covers the boot where before-starting fired too early and erred.
 # Either way the box serves a bare Nextcloud (`occ group:list` → only "admin"):
 # no household group, no shared folder, no OnlyOffice connector — which broke
 # the setup wizard's account creation with a 500 (WARP-989).
@@ -534,7 +581,7 @@ run_nextcloud_post_install_hook() {
   # The mounted hook — the single source of truth (docker/nextcloud-init.sh,
   # see the nextcloud volumes in docker/docker-compose.yml). Exec THIS path;
   # never reimplement its steps here.
-  local hook_path="/docker-entrypoint-hooks.d/post-installation/init-droplet.sh"
+  local hook_path="/docker-entrypoint-hooks.d/before-starting/init-droplet.sh"
   local recover_cmd="docker compose -f docker/docker-compose.yml exec -u 33 nextcloud bash $hook_path"
 
   log_info "Reconciling Nextcloud Droplet provisioning (household group + shared folder + OnlyOffice connector — WARP-990)..."

@@ -18,6 +18,19 @@ on:
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
       - "tests/nginx-canonical-host.test.sh"
+      # WARP-1688: the every-boot trusted_domains reconcile + the gateway's
+      # Nextcloud asset legs the embedded editor loads from.
+      - "tests/nextcloud-trusted-domains.test.sh"
+      - "tests/nginx-nextcloud-assets.test.sh"
+      # WARP-1973: overwriteprotocol reconcile, connector exclusivity, and the
+      # RFC1918 coverage that keeps the editor reachable after a DHCP change.
+      - "tests/nextcloud-docs-config-converges.test.sh"
+      # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
+      - "tests/dmr-profile-survives-setup.test.sh"
+      - "tests/dmr-default-provisioning.test.sh"
+      # WARP-1947: single-box derives the overlay home endpoint IP
+      - "tests/wireguard-home-endpoint.test.sh"
+      - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
@@ -39,6 +52,19 @@ on:
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
       - "tests/nginx-canonical-host.test.sh"
+      # WARP-1688: the every-boot trusted_domains reconcile + the gateway's
+      # Nextcloud asset legs the embedded editor loads from.
+      - "tests/nextcloud-trusted-domains.test.sh"
+      - "tests/nginx-nextcloud-assets.test.sh"
+      # WARP-1973: overwriteprotocol reconcile, connector exclusivity, and the
+      # RFC1918 coverage that keeps the editor reachable after a DHCP change.
+      - "tests/nextcloud-docs-config-converges.test.sh"
+      # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
+      - "tests/dmr-profile-survives-setup.test.sh"
+      - "tests/dmr-default-provisioning.test.sh"
+      # WARP-1947: single-box derives the overlay home endpoint IP
+      - "tests/wireguard-home-endpoint.test.sh"
+      - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
@@ -78,11 +104,54 @@ jobs:
         # entrypoint selector, and nginx.conf's first-party-only
         # $internal_scheme legs. Pure bash, no Docker.
         run: bash tests/nginx-internal-scheme.test.sh
+      - name: Run Nextcloud trusted-domains reconcile tests
+        # WARP-1688: the stock image applies NEXTCLOUD_TRUSTED_DOMAINS only on
+        # the install boot, so a box renamed afterwards answers 400 "untrusted
+        # domain" on its own FQDN. Runs the extracted reconcile against a stub
+        # occ: add-on-rename, zero writes when converged, no empty domain, and
+        # errexit survival when the key is unset. Pure bash, no Docker.
+        run: bash tests/nextcloud-trusted-domains.test.sh
+      - name: Run Nextcloud docs-config convergence tests
+        # WARP-1973: overwriteprotocol is the SECOND key the stock image applies
+        # only on the install boot (an already-installed box freezes with it
+        # empty, so Nextcloud emits http:// redirects to an https page and the
+        # editor iframe is blocked as mixed content); the DOCS_ENGINE choice must
+        # disable the other connector, or both register providers for the same
+        # Office MIME types; and trusted domains must cover all of RFC1918 so a
+        # new DHCP lease cannot 400 the editor. Pure bash, no Docker.
+        run: bash tests/nextcloud-docs-config-converges.test.sh
+      - name: Run nginx Nextcloud asset-routing unit tests
+        # WARP-1688: the editor page emits root-absolute /apps/, /core/, /dist/
+        # and /index.php/apps/{richdocuments,theming}/ URLs. Asserts those legs
+        # exist, forward the prefix unstripped, sit before the catch-all, and
+        # that the whole /index.php/ leg stays UNrouted. Pure bash, no Docker.
+        run: bash tests/nginx-nextcloud-assets.test.sh
       - name: Run nginx canonical-host unit tests
         # Warning-free droplet.local: render decisions (authority knob +
         # cert-artifact gates), variant contents, nginx.conf/Dockerfile/
         # compose wiring, tls-reload render hook. Pure bash, no Docker.
         run: bash tests/nginx-canonical-host.test.sh
+      - name: Run DMR profile-preservation unit tests
+        # WARP-1865: on a box with INFERENCE_RUNTIME=dmr, a setup re-run must
+        # keep `dmr` in COMPOSE_PROFILES. The WARP-1772 guard preserved the DMR
+        # URLs but not the profile, so a re-run kept OLLAMA_URL=http://dmr:12434
+        # while starting ollama and never starting dmr — inference pointed at a
+        # container that wasn't running, and setup logged success. Pure bash.
+        run: bash tests/dmr-profile-survives-setup.test.sh
+      - name: Run DMR default-provisioning unit tests
+        # WARP-1870: a freshly provisioned box must come up on DMR WITH a model
+        # id that matches DMR's /api/tags byte-for-byte. An empty LLM_MODEL is a
+        # dead appliance out of the crate; a mis-spelled one re-pulls ~13.79 GB
+        # on every orchestrator boot. Also pins that a setup re-run can never
+        # flip or un-flip an existing box. Pure bash.
+        run: bash tests/dmr-default-provisioning.test.sh
+      - name: Run single-box overlay home-endpoint derivation tests
+        # WARP-1947: single-box must DERIVE WIREGUARD_HOME_ENDPOINT_HOST from the
+        # box's default route so an approved overlay device's profile carries a
+        # reachable `lan` candidate. The live box shipped a dead 192.168.1.87 that
+        # shadowed request-time discovery; deriving + overwriting every run keeps
+        # it correct across DHCP changes and a factory reset. Pure bash, no Docker.
+        run: bash tests/wireguard-home-endpoint.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean

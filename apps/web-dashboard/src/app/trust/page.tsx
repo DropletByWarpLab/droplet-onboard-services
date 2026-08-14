@@ -78,7 +78,7 @@ const SECTIONS: TrustSection[] = [
       {
         name: "HIPAA readiness",
         detail:
-          "Architecture review, Business Associate Agreement template, and processes for households and practices handling health data.",
+          "Architecture review, Business Associate Agreement template, and processes for businesses and practices handling health data.",
         status: "planned",
       },
     ],

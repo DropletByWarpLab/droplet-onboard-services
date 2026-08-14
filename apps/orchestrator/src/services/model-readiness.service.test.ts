@@ -218,10 +218,11 @@ describe("model-readiness ensureDefaultModelPulled — vision model", () => {
 // 30-90 s cold load behind a frozen "Thinking…" button.
 // ──────────────────────────────────────────────────────────────────
 
-/** URLs of every POST /api/generate (warm) request, as model names. */
+/** Model names of every warm request (POST /v1/chat/completions — the
+ *  runtime-agnostic warm path, WARP-1772). */
 function warmRequests(fetchMock: { mock: { calls: unknown[][] } }): string[] {
   return fetchMock.mock.calls
-    .filter((c) => String(c[0]).endsWith("/api/generate"))
+    .filter((c) => String(c[0]).endsWith("/v1/chat/completions"))
     .map((c) => JSON.parse((c[1] as RequestInit).body as string).model);
 }
 
@@ -249,7 +250,7 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
     vi.useRealTimers();
   });
 
-  it("POSTs /api/generate with ONLY the model key — no prompt, no keep_alive", async () => {
+  it("POSTs the OpenAI chat path with max_tokens=1 and NO keep_alive (runtime-agnostic warm, WARP-1772)", async () => {
     vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue(okJsonResponse());
@@ -258,13 +259,20 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(String(url)).toMatch(/\/api\/generate$/);
+    // /v1/chat/completions is the only load-triggering request BOTH runtimes
+    // serve — Ollama's empty-prompt /v1/chat/completions no-op 404s on DMR, which
+    // silently killed pre-warm on a flipped box (found in the flip audit).
+    expect(String(url)).toMatch(/\/v1\/chat\/completions$/);
     expect(init.method).toBe("POST");
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
-    // Empty-prompt /api/generate is Ollama's documented "load into memory"
-    // no-op; a keep_alive key would OVERRIDE the container's
-    // OLLAMA_KEEP_ALIVE=24h, so the body must be exactly {model}.
-    expect(body).toEqual({ model: "gpt-oss:20b" });
+    // A keep_alive key would override the runtime's residency policy, so the
+    // body carries exactly: the model, a one-word prompt, a 1-token budget.
+    expect(body).toEqual({
+      model: "gpt-oss:20b",
+      messages: [{ role: "user", content: "ping" }],
+      max_tokens: 1,
+      stream: false,
+    });
   });
 
   it("is a no-op when LLM_MODEL is unset", async () => {
@@ -372,7 +380,7 @@ describe("model-readiness warm hooks (WARP-1041)", () => {
             Promise.resolve({ models: presentModels.map((name) => ({ name })) }),
         } as unknown as Response);
       }
-      if (u.endsWith("/api/generate")) {
+      if (u.endsWith("/v1/chat/completions")) {
         return Promise.resolve(okJsonResponse());
       }
       return Promise.resolve(streamingResponse([{ status: "success" }]));
@@ -406,7 +414,7 @@ describe("model-readiness warm hooks (WARP-1041)", () => {
           json: () => Promise.resolve({ models: [{ name: "llava:7b" }] }),
         } as unknown as Response);
       }
-      if (u.endsWith("/api/generate")) {
+      if (u.endsWith("/v1/chat/completions")) {
         return Promise.resolve(okJsonResponse());
       }
       return Promise.resolve(

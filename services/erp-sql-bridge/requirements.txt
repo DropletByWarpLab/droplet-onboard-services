@@ -1,0 +1,13 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.0
+pydantic==2.13.4
+# unixODBC + the SAP SQL Anywhere client (libdbodbc17_r.so) are INSTALLED IN THE
+# IMAGE, not here — the SAP client is license-governed and operator-supplied.
+# See the Dockerfile. pyodbc is the only Python-side piece.
+pyodbc==5.3.0
+
+# WARP-1948 — OSV floors: the osv-nightly resolver scores transitive deps at
+# their minimum resolvable version; state the real minimum instead of
+# suppressing the advisory. h11 backs uvicorn's HTTP/1.1 parser.
+idna>=3.15
+h11>=0.16.0

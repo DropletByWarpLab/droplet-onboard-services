@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  BookOpen,
   ChevronRight,
   DownloadCloud,
   Mic,
   Plus,
   Settings as SettingsIcon,
+  Sparkles,
   Trash2,
   Users,
   X,
@@ -20,11 +22,13 @@ import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
+import { LocationsCard } from "@/components/settings/LocationsCard";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
+import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { boxDisplayHost } from "@/lib/box-identity";
 import { useAuth } from "@/lib/auth";
 import {
@@ -36,10 +40,14 @@ import {
 import type { AuthUser } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect, Badge } from "@/components/shell/primitives";
+import { inferenceRuntimeLabel } from "@/lib/provider";
 
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
+  // WARP-1807: the tucked Knowledge row below mirrors the nav's module gate
+  // (fail-open — hidden only on a positive "off").
+  const isModuleOn = useModuleGate();
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
@@ -161,6 +169,51 @@ export default function SettingsPage() {
             modules (registry: orchestrator module-registry.ts). Self-gates to
             owner/admin like the cards below. */}
         <FeaturesCard />
+
+        {/* Advanced (WARP-1807) — the way in to the tucked Knowledge + Context
+            surfaces. Not daily operation, so they left the primary nav
+            (hidden: true in nav-config), but they must stay reachable.
+            Knowledge mirrors the nav's fail-open module gate; Context carries
+            no module and always renders. */}
+        <Sect title="Advanced" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            {isModuleOn("knowledge") && (
+              <Link
+                href="/knowledge"
+                className="lrow"
+                style={{ padding: "12px 16px", alignItems: "center" }}
+              >
+                <span className="ri">
+                  <BookOpen size={16} />
+                </span>
+                <span className="rt">
+                  <span className="nm">Knowledge</span>
+                  <span className="sub">
+                    What&apos;s indexed for retrieval
+                  </span>
+                </span>
+                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+              </Link>
+            )}
+            <Link
+              href="/context"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <Sparkles size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Context</span>
+                <span className="sub">
+                  Indexing coverage and pipeline health
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
+          </div>
+        </div>
 
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to
@@ -443,12 +496,17 @@ export default function SettingsPage() {
         {/* AI Providers */}
         <Sect title="AI providers" />
 
-        {/* Ollama / Local */}
+        {/* On-device inference. WARP-1926 — this row used to hardcode
+            "Ollama (on-device)", so a Docker-Model-Runner box (the shipped
+            default since WARP-1870) told its owner it was running a daemon
+            that isn't installed. The runtime now comes from /api/health. */}
         <div className="card" style={{ padding: 0, marginBottom: 12 }}>
           <div className="rows">
             <div className="lrow" style={{ padding: "12px 16px" }}>
               <span className="rt">
-                <span className="nm">Ollama (on-device)</span>
+                <span className="nm">
+                  {inferenceRuntimeLabel(health?.inferenceRuntime)} (on-device)
+                </span>
                 <span className="sub">Local LLM inference, never leaves your network</span>
               </span>
               <Badge kind={health?.services.aiGateway ? "ok" : "muted"}>
@@ -487,6 +545,11 @@ export default function SettingsPage() {
             (Run business setup / Re-run onboarding). Renders nothing for
             roles whose GET view carries no onboardingState. */}
         <BusinessProfileCard />
+
+        {/* WARP-1906 — premade buildings + conference rooms offered as
+            suggestions in the event form's Location field. Self-gates to
+            owner/admin internally and renders nothing for lesser roles. */}
+        <LocationsCard />
 
         {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
             device actions (reformat/remake storage AND factory reset). The

@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import secrets
 import socket
 from urllib.parse import quote, unquote, urlsplit
 
@@ -22,6 +23,26 @@ logger = logging.getLogger(__name__)
 
 # Common RTSP ports used by IP cameras
 RTSP_PORTS = [554, 8554, 8080]
+
+# Characters that must survive un-escaped in the credential half of an RTSP URL.
+#
+# RFC 3986 defines userinfo as `*( unreserved / pct-encoded / sub-delims / ":" )`,
+# so every sub-delim below is already legal there and never needed escaping. That
+# matters because the consumer of this URL is Frigate's bundled ffmpeg, and ffmpeg
+# does NOT percent-decode userinfo before authenticating — whatever we write goes
+# on the wire literally. Encoding a legal character (quote(pw, safe="") turning
+# `Droplet123!` into `Droplet123%21`) therefore sends the wrong password: the
+# camera answers 401, ffmpeg retries, and a Hanwha locks the account after ~5
+# attempts. docker/frigate/config.yml carries the same warning for hand-written
+# camera entries. (WARP-1873)
+#
+# Anything outside this set stays encoded. `@` and `/` would otherwise terminate
+# the userinfo, and `%` or whitespace would corrupt the parse — a password using
+# those cannot be expressed in an ffmpeg RTSP URL at all, so escaping them is
+# both correct per spec and the best available answer for any consumer that does
+# decode. `:` is deliberately excluded: a literal one would split user from
+# password on the wrong boundary.
+RTSP_USERINFO_SAFE = "!$&'()*+,;="
 
 # Common RTSP stream paths by manufacturer/convention.
 # Paths are ordered by observed hit rate; Hanwha Wisenet lives near the
@@ -67,6 +88,77 @@ async def scan_ports(ip: str, ports: list[int] | None = None, timeout: float = 2
     return open_ports
 
 
+# Number of leading STREAM_PATHS the anonymous-DESCRIBE fallback in
+# is_rtsp_server probes. The first entries are the Hanwha Wisenet paths (the
+# firmware family known to reject a bare-path OPTIONS) plus /live as a broad
+# third — enough to classify without turning the fallback into a path scan.
+_DESCRIBE_FALLBACK_PATHS = 3
+
+
+def _rtsp_status_code(resp: str) -> int | None:
+    """Parse a well-formed RTSP status line; None for HTTP/garbage."""
+    status_line = resp.split("\r\n", 1)[0]
+    if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return None
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+async def _describe_speaks_rtsp(ip: str, port: int, timeout: float) -> bool:
+    """Anonymous-DESCRIBE fallback for cameras that reject a bare-path OPTIONS.
+
+    WARP-1806: Hanwha Wisenet answers ``OPTIONS rtsp://ip:port/`` with the
+    same ``400 Bad Request`` + un-echoed ``CSeq: 0`` shape as the TP-Link-AP
+    guard's not-a-camera fingerprint, but a DESCRIBE on a real stream path
+    returns a well-formed ``401 Unauthorized`` with a ``WWW-Authenticate``
+    challenge — proof of an RTSP camera that merely needs credentials.
+
+    Requests here are anonymous (no ``Authorization`` header), so they never
+    consume vendor failed-login lockout budgets (Hanwha blocks the admin
+    account after ~5 bad passwords and answers ``490 Account Blocked``).
+
+    Accepts: ``200`` (open stream), ``401`` WITH a challenge header, ``403``
+    (auth-walled), and Hanwha's non-standard ``490`` (only an auth-gated
+    camera mid-lockout emits it). A 401 without a challenge, plain 400/404s,
+    HTTP responses, and resets keep the device classified as not-a-camera.
+    """
+    for path in STREAM_PATHS[:_DESCRIBE_FALLBACK_PATHS]:
+        try:
+            reader, writer = await _open_rtsp(ip, port, timeout)
+        except (asyncio.TimeoutError, OSError):
+            return False
+        raw = b""
+        try:
+            # Named probe_request (not `request`): the payload is built purely
+            # from the constant STREAM_PATHS and the caller-validated ip/port —
+            # semgrep's Django request-data-write taint rule keys on the bare
+            # `request` identifier and false-positives on it.
+            probe_request = (
+                f"DESCRIBE rtsp://{ip}:{port}{path} RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"Accept: application/sdp\r\n"
+                f"User-Agent: Droplet-CameraDiscovery/1.0\r\n"
+                f"\r\n"
+            )
+            writer.write(probe_request.encode())
+            await writer.drain()
+            raw = await asyncio.wait_for(reader.read(1024), timeout=timeout)
+        except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
+            continue  # a reset/timeout on one path isn't conclusive
+        finally:
+            _close_rtsp(writer)
+
+        resp = raw.decode("utf-8", errors="ignore")
+        code = _rtsp_status_code(resp)
+        if code in (200, 403, 490):
+            return True
+        if code == 401 and "www-authenticate" in resp.lower():
+            return True
+    return False
+
+
 async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool:
     """Return True iff ``ip:port`` actually speaks RTSP at the protocol level.
 
@@ -77,15 +169,25 @@ async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool
     typically ``CSeq: 0`` — our CSeq not echoed), or a connection reset.
 
     A genuine RTSP server — even one that's auth-gated or exposes no stream on
-    the paths we guess — answers ``OPTIONS`` with a well-formed RTSP status:
-    ``200 OK`` (usually with a ``Public:`` method list), or ``401/403`` when it
-    demands credentials. We accept exactly those and reject everything else, so
-    a port-open-only guess is never emitted for a device that isn't a camera.
+    the paths we guess — usually answers ``OPTIONS`` with a well-formed RTSP
+    status: ``200 OK`` (usually with a ``Public:`` method list), or ``401/403``
+    when it demands credentials. We accept exactly those on the fast path.
+
+    WARP-1806: some real cameras (Hanwha Wisenet) reject the bare-path OPTIONS
+    with the very 400-shape the guard above filters, while answering a
+    DESCRIBE on a real stream path with a clean 401 + ``WWW-Authenticate``
+    challenge. Before ruling a device out, fall back to anonymous DESCRIBEs on
+    the first few known stream paths (see ``_describe_speaks_rtsp``) — the
+    fallback only ever runs for devices the fast path would have dropped, so
+    the TP-Link-AP rejection cost is a few extra round-trips, not a
+    reclassification.
     """
     try:
         reader, writer = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
+        # Connect refused/timed out — nothing is listening; no fallback.
         return False
+    raw = b""
     try:
         request = (
             f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
@@ -97,23 +199,24 @@ async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool
         await writer.drain()
         raw = await asyncio.wait_for(reader.read(1024), timeout=timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
-        return False
+        # Accepted the TCP connect but went silent/reset on OPTIONS — some
+        # firmwares only process path-specific requests; let the DESCRIBE
+        # fallback decide.
+        return await _describe_speaks_rtsp(ip, port, timeout)
     finally:
         _close_rtsp(writer)
 
     resp = raw.decode("utf-8", errors="ignore")
-    status_line = resp.split("\r\n", 1)[0]
     # Must be an RTSP status line (reject HTTP responders on 554) with a code
-    # that proves a working RTSP control channel. 400/5xx ⇒ not a camera.
+    # that proves a working RTSP control channel. 400/5xx ⇒ not a camera on
+    # the fast path (subject to the DESCRIBE fallback below).
     # 404 is accepted: some Hikvision/Dahua firmware returns 404 on a root
     # OPTIONS because they only process path-specific requests, but are real
     # RTSP servers — silently dropping them would hide valid cameras.
-    if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
-        return False
-    parts = status_line.split(" ", 2)
-    if len(parts) < 2 or not parts[1].isdigit():
-        return False
-    return int(parts[1]) in (200, 401, 403, 404)
+    code = _rtsp_status_code(resp)
+    if code in (200, 401, 403, 404):
+        return True
+    return await _describe_speaks_rtsp(ip, port, timeout)
 
 
 async def probe_rtsp_stream(ip: str, port: int = 554, timeout: float = 3.0) -> str | None:
@@ -174,27 +277,46 @@ def _parse_www_authenticate(header_value: str) -> dict:
     return result
 
 
+def _digest_md5(data: str) -> str:
+    """MD5 hex digest for RTSP Digest auth (the ONLY MD5 use in this module).
+
+    RFC 2617 Digest auth mandates MD5; every RTSP camera firmware we support
+    accepts only the MD5 form on the RTSP control port. Registered FIPS
+    exception — see docs/security/fips-exceptions.md → rtsp-digest-rfc2617.
+    """
+    # fips:allowed: rtsp-digest-rfc2617
+    return hashlib.md5(data.encode()).hexdigest()  # nosemgrep: droplet.banned-hash-python, python.lang.security.insecure-hash-algorithms-md5.insecure-hash-algorithm-md5
+
+
 def _digest_header(user: str, pw: str, method: str, uri: str,
                    auth_info: dict) -> str:
-    """Build an RFC 2069 Digest Authorization header value.
+    """Build a Digest Authorization header value.
 
-    We implement the legacy (qop-less) form because every camera we test
-    against accepts it; full RFC 2617 with cnonce+nc is unnecessary.
+    WARP-1812: cameras that advertise ``qop`` (e.g. Hanwha Wisenet:
+    ``Digest realm="iPOLiS", qop="auth"``) REJECT the legacy qop-less
+    RFC 2069 form and require the full RFC 2617 computation with a client
+    nonce (cnonce) and nonce-count (nc):
+    ``response = MD5(HA1:nonce:nc:cnonce:qop:HA2)``. We emit that form when
+    the challenge carries ``qop=auth`` and fall back to the RFC 2069 form
+    (``response = MD5(HA1:nonce:HA2)``) when it does not, so the cameras
+    that were already working keep working.
     """
     realm = auth_info.get("realm", "")
     nonce = auth_info.get("nonce", "")
-    # RFC 2617 Digest auth mandates MD5 (legacy form). The three MD5
-    # call sites below — HA1, HA2, response — are the protocol's
-    # required digest nesting; every RTSP camera firmware we support
-    # accepts only the MD5 form on the RTSP control port. See
-    # docs/security/fips-exceptions.md → rtsp-digest-rfc2617 for the
-    # full risk acceptance + annual-review owner.
-    # fips:allowed: rtsp-digest-rfc2617
-    ha1 = hashlib.md5(f"{user}:{realm}:{pw}".encode()).hexdigest()
-    # fips:allowed: rtsp-digest-rfc2617
-    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
-    # fips:allowed: rtsp-digest-rfc2617
-    response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+    qop_values = [q.strip().lower() for q in auth_info.get("qop", "").split(",") if q.strip()]
+    ha1 = _digest_md5(f"{user}:{realm}:{pw}")
+    ha2 = _digest_md5(f"{method}:{uri}")
+
+    if "auth" in qop_values:
+        cnonce = secrets.token_hex(8)
+        nc = "00000001"
+        response = _digest_md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}")
+        return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
+                f'uri="{uri}", algorithm=MD5, qop=auth, nc={nc}, '
+                f'cnonce="{cnonce}", response="{response}"')
+
+    # RFC 2069 (qop-less) fallback.
+    response = _digest_md5(f"{ha1}:{nonce}:{ha2}")
     return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
             f'uri="{uri}", response="{response}"')
 
@@ -235,16 +357,23 @@ def _close_rtsp(writer) -> None:
     # paths where swallowing is fine.
 
 
+def _is_rtsp_200(resp: str) -> bool:
+    return "RTSP/1.0 200" in resp or "RTSP/2.0 200" in resp
+
+
 async def _try_credentials_once(ip: str, port: int, path: str,
                                 user: str, pw: str,
                                 timeout: float = 3.0) -> bool:
     """Open RTSP, send DESCRIBE, retry with auth on 401.
 
-    Many cameras close the TCP socket after responding 401, so the
-    authenticated retry runs on a freshly opened connection. Reusing
-    the original stream here caused "probe succeeded at CLI, failed
-    from the service" inconsistencies on Hanwha Wisenet firmwares
-    that hard-close on challenge.
+    WARP-1812: the authenticated retry runs on the SAME connection as the
+    challenge. This Hanwha Wisenet firmware binds the digest nonce to the
+    TCP connection — a fresh-socket retry (with a new *or* the old nonce)
+    401s, while reusing the challenge socket lands 200 (proven live on
+    XNV-C8083R). If the socket dies between the 401 and the retry (older
+    Wisenet firmwares that hard-close after a 401), we fall back to a fresh
+    connection reusing the same challenge, which is what the previous
+    always-new-connection code was compensating for.
     """
     url = f"rtsp://{ip}:{port}{path}"
     try:
@@ -258,7 +387,7 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return False
 
-    if "RTSP/1.0 200" in resp1 or "RTSP/2.0 200" in resp1:
+    if _is_rtsp_200(resp1):
         _close_rtsp(writer)
         return True
     if "RTSP/1.0 401" not in resp1 and "RTSP/2.0 401" not in resp1:
@@ -281,23 +410,33 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return False
 
-    # Drop the challenge socket before the authenticated retry — Hanwha
-    # hangs up on 401, so reusing it silently 0-read's every probe.
+    # Retry on the SAME connection (CSeq 2) — connection-bound-nonce firmwares
+    # require it. A well-formed RTSP reply here is authoritative: 200 →
+    # success, 401 → wrong credentials, stop either way. An empty read or a
+    # raise means the socket died between the 401 and the retry (hard-close-
+    # after-401 firmwares) → fall back to a fresh connection reusing the same
+    # challenge/header (a hard-closed socket EOFs rather than raising, so we
+    # must check for that explicitly, not just catch exceptions).
+    try:
+        resp2 = await _rtsp_describe(reader, writer, url, 2, auth_header, timeout)
+    except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
+        resp2 = ""
     _close_rtsp(writer)
+    if resp2.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return _is_rtsp_200(resp2)
+
     try:
         reader2, writer2 = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
         return False
     try:
-        resp2 = await _rtsp_describe(
-            reader2, writer2, url, 1, auth_header, timeout,
-        )
+        resp2 = await _rtsp_describe(reader2, writer2, url, 1, auth_header, timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
         return False
     finally:
         _close_rtsp(writer2)
 
-    return "RTSP/1.0 200" in resp2 or "RTSP/2.0 200" in resp2
+    return _is_rtsp_200(resp2)
 
 
 async def probe_rtsp_with_credentials(ip: str, port: int
@@ -349,7 +488,8 @@ async def probe_camera(ip: str) -> dict | None:
         creds = await probe_rtsp_with_credentials(ip, port)
         if creds:
             path, user, pw = creds
-            url = (f"rtsp://{quote(user, safe='')}:{quote(pw, safe='')}"
+            url = (f"rtsp://{quote(user, safe=RTSP_USERINFO_SAFE)}"
+                   f":{quote(pw, safe=RTSP_USERINFO_SAFE)}"
                    f"@{ip}:{port}{path}")
             return {
                 "ip": ip,

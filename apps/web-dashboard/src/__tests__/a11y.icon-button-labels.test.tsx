@@ -38,7 +38,9 @@ describe("WARP-298 icon-only button aria-labels", () => {
 
   it("BreadcrumbNav root button has aria-label and icon is hidden", () => {
     const src = read("components/BreadcrumbNav.tsx");
-    expect(src).toMatch(/aria-label="My files"/);
+    // WARP-1944 — the root crumb's label became dynamic (the active space's
+    // display label, "My files" default); the aria-label tracks it.
+    expect(src).toMatch(/aria-label=\{rootLabel\}/);
     expect(src).toMatch(/FolderOpen size=\{14\} aria-hidden="true"/);
   });
 

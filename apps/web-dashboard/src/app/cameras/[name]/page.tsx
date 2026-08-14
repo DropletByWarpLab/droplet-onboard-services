@@ -29,8 +29,22 @@ import { useToast } from "@/components/Toast";
 const STATUS_COLORS: Record<CameraInfo["status"], string> = {
   recording: "text-system-green",
   detecting: "text-system-orange",
+  // WARP-1974: healthy stream, nothing retained. Not green — green here
+  // told the household their footage was safe when none was being kept.
+  live: "text-system-orange",
   idle: "text-label-quaternary",
   offline: "text-system-red",
+};
+
+/**
+ * What each state means in words a household member can act on.
+ *
+ * `live` in particular has to say what to DO. "Live · not saving" states
+ * the fact; someone who does not know what a retention window is still
+ * needs telling where to fix it.
+ */
+const STATUS_HELP: Partial<Record<CameraInfo["status"], string>> = {
+  live: "This camera is working, but nothing is being saved — there'll be nothing to look back at. Set how long to keep footage in Settings.",
 };
 
 /**
@@ -166,6 +180,7 @@ export default function CameraFullscreenPage() {
   }
 
   const offline = camera.status === "offline";
+  const statusHelp = STATUS_HELP[camera.status];
 
   return (
     <div className="fixed inset-0 z-40 bg-black flex flex-col">
@@ -188,7 +203,9 @@ export default function CameraFullscreenPage() {
                   camera.status === "detecting" ? "animate-pulse" : ""
                 }`}
               />
-              <span className="type-caption-1 text-white/70 capitalize">{camera.status}</span>
+              <span className="type-caption-1 text-white/70 capitalize">
+                {camera.status === "live" ? "Live · not saving" : camera.status}
+              </span>
               {camera.manufacturer && (
                 <>
                   <span className="text-white/40">·</span>
@@ -298,6 +315,19 @@ export default function CameraFullscreenPage() {
           </button>
         </div>
       </header>
+
+      {/* WARP-1974 — the state that used to read as a green "Recording".
+          Saying "not saving" is the fact; a household member also needs
+          telling what to do about it. */}
+      {statusHelp && (
+        <div
+          data-testid="status-help"
+          className="flex items-start gap-2 px-4 sm:px-6 py-2 bg-system-orange/15 border-b border-system-orange/30"
+        >
+          <Circle size={8} className="text-system-orange fill-current mt-1.5 shrink-0" />
+          <p className="type-caption-1 text-white/80">{statusHelp}</p>
+        </div>
+      )}
 
       <ConfirmDialog
         open={removeOpen}

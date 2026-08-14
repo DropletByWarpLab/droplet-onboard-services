@@ -31,7 +31,7 @@ vi.mock("../config.js", () => ({
     // build RESERVED_NAMES; the real config zod-defaults it, so the mock must
     // carry it too or module load throws on undefined.toLowerCase(). (WARP-1292)
     DROPLET_SHARED_FOLDER_NAME: "Household",
-    // camera-retention-purge.service.ts derefs this at module scope;
+    // camera-settings.service.ts derefs this at module scope;
     // the real config defaults it, so the mock must carry it too.
     FRIGATE_URL: "http://frigate:5000",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
@@ -269,6 +269,11 @@ vi.mock("@prisma/client", () => {
     },
     networkDevice,
     deviceGroup,
+    // WARP-1712: `listDevices` reads this to hide Droplet's own access points
+    // from the client-devices list (the Coverage Extenders panel owns them).
+    apDevice: {
+      findMany: vi.fn(async () => [] as { mac: string }[]),
+    },
   };
   // WARP-1583: the T3 effective-access resolver composes its reads inside ONE
   // RepeatableRead transaction, and app.ts mounts requireFeatureAccess on this

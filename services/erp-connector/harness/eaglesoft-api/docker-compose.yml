@@ -1,0 +1,47 @@
+# =============================================================================
+# Dummy Eaglesoft REST API box (Patterson "Innovation Connection" shape)
+# =============================================================================
+#
+#   docker compose -f services/erp-connector/harness/eaglesoft-api/docker-compose.yml up -d --build
+#
+# Then discover the contract exactly as an installer would against a real box:
+#   curl -sk https://localhost:9888/help | jq .Routes
+#
+# ...and read out the CA the connector must trust:
+#   docker compose -f .../docker-compose.yml exec eaglesoft-mock-api cat /harness/.certs/harness-ca.crt
+#
+# ⚠ TEST HARNESS ONLY — a deliberately fake Eaglesoft box with dev credentials
+# and an endpoint that makes it fail on demand. It is a separate compose project
+# from the product stack and must never be merged into
+# docker/docker-compose.yml.
+#
+# The in-process vitest suite does NOT need this container: it starts the same
+# server module directly (see __tests__/api-connector.live.test.ts). Use this
+# when you want a long-lived box to point the orchestrator, a dashboard, or a
+# hand-driven curl at.
+name: eaglesoft-mock-api
+
+services:
+  eaglesoft-mock-api:
+    build:
+      context: .
+    container_name: eaglesoft-mock-api
+    ports:
+      # Bound to loopback ON PURPOSE: a fake Eaglesoft box answering on every
+      # interface is not something to expose by accident. Change the bind
+      # address deliberately if another host genuinely needs to reach it.
+      - "127.0.0.1:9888:9888"
+    environment:
+      # Dev-only credentials for a mock that never sees a real network. The real
+      # CLIENTID/SERIALKEY bundle and Provider login live behind a secret_ref.
+      MOCK_ES_INTEGRATION_KEY: mock-vendor-integration-key
+      MOCK_ES_USER_ID: droplet_api
+      MOCK_ES_PASSWORD: mock_dev_password
+    volumes:
+      # Throwaway TLS material, regenerated when it expires. On a named volume
+      # so restarts don't re-key, and so the CA cert can be read out.
+      - mock-api-certs:/harness/.certs
+    restart: unless-stopped
+
+volumes:
+  mock-api-certs:

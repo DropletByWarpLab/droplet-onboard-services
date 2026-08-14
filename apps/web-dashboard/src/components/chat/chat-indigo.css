@@ -181,11 +181,22 @@
 
 /* ── Conversation rail ──────────────────────────────────────────────── */
 
+/* WARP-1792: this rule must NOT declare `display`.
+   The element is authored as `className="conv-rail hidden lg:flex"`
+   (app/chat/page.tsx:618) — desktop rail, hidden on phones, with the mobile
+   drawer from WARP-331 taking over below `lg`. But `.droplet-shell .conv-rail`
+   is specificity (0,2,0) and Tailwind's `.hidden` is (0,1,0), so a `display`
+   here silently BEAT the utility and the rail rendered on phones anyway:
+   measured at 375px it took 277px and left the conversation 98px — 26% of the
+   viewport — which is what clipped message bubbles mid-word, wrapped
+   "Droplet is thinking" one word per line, and squashed the Ask input into a
+   corner square. Both the rail and the drawer were live at once.
+   `display` is therefore owned entirely by the utilities, which specify it at
+   both breakpoints (`hidden` below lg, `lg:flex` at and above). */
 .droplet-shell .conv-rail {
   width: 276px;
   flex-shrink: 0;
   height: 100%;
-  display: flex;
   flex-direction: column;
   background: var(--glass-2);
   border-right: 1px solid var(--border);
@@ -372,9 +383,17 @@
   max-width: 560px;
   padding: 0 20px;
 }
+/* These carry whole prompts ("Summarize the files I uploaded today"), which
+   don't fit on one line on a phone. A fixed `height` made the text wrap out
+   of the pill; `min-height` + symmetric padding lets the chip grow to hold
+   its own text instead. */
 .droplet-shell .chat-sugg {
-  height: 34px;
-  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  text-align: left;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 14px;
   border-radius: 9999px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -425,11 +444,27 @@
 }
 .droplet-shell .msg.is-user .msg-col { align-items: flex-end; }
 
+/* WARP-1875 — `max-width: 100%` here is load-bearing, not decorative.
+   `.msg-col` is a COLUMN flex container and ChatMessage aligns the bubble
+   with `items-start` / `items-end`, so the bubble is sized *fit-content* in
+   the inline axis rather than stretched. fit-content is floored by the box's
+   MIN-CONTENT width, and min-content is set by the unbreakable markdown a
+   long answer carries — a fenced code line, a GFM table. `overflow-x: auto`
+   on those boxes makes them scrollable but does NOT lower their min-content
+   contribution, so without this cap the bubble reserved the whole code line
+   (measured: a 445px line → a 477px bubble floor) and stopped shrinking. On
+   /chat the column is ~768px so it never showed; inside the Home "Ask AI"
+   tile any resize below that floor pushed text past the card edge and turned
+   `.w-chat-thread`'s `overflow-y: auto` into a horizontal scrollbar.
+   `min-width: 0` does NOT help — `min-width: auto` only means "automatic
+   minimum size" on a flex item's MAIN axis, and the axis constrained here is
+   the cross axis. */
 .droplet-shell .msg-bubble {
   padding: 12px 16px;
   font-size: 15px;
   line-height: 1.55;
   border-radius: 14px;
+  max-width: 100%;
   word-wrap: break-word;
 }
 .droplet-shell .msg-bubble.is-assistant {
@@ -464,6 +499,8 @@
   gap: 5px;
   height: 26px;
   padding: 0 9px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: 7px;
   border: 0;
   background: transparent;
@@ -606,7 +643,28 @@
   }
   .droplet-shell .chat-hint { display: none; }
   .droplet-shell .chat-new span { display: none; }
-  .droplet-shell .chat-new { width: 34px; padding: 0; justify-content: center; }
+  /* 34 -> 44: this collapses to an icon-only square here, and 34px is under
+     the touch minimum (04-coding-standards/mobile-web-layout.md). */
+  .droplet-shell .chat-new { width: 44px; height: 44px; padding: 0; justify-content: center; }
+
+  /* Header tools and the composer's attach/mic were 30x30 — measured under
+     the 44px Apple HIG / WCAG 2.5.5 target on /chat at 375px. The send button
+     and the empty-state suggestion chips were both 34px. */
+  .droplet-shell .chat-iconbtn { width: 44px; height: 44px; }
+  .droplet-shell .chat-send { height: 44px; }
+  /* min-height, not height — a chip whose prompt needs two lines has to grow
+     rather than spill its text out of the pill. */
+  .droplet-shell .chat-sugg { min-height: 44px; }
+
+  /* The model picker's <select> rendered 21px tall — it is a real control, not
+     a label, so it owes the same 44px. The wrapper grows with it. */
+  .droplet-shell .chat-model { height: 44px; }
+  .droplet-shell .chat-model select { min-height: 44px; }
+
+  /* The composer textarea is one line tall until it grows, so the tappable
+     area of the product's main input was 24px. Give it the target height; it
+     still auto-grows from there. */
+  .droplet-shell .chat-composer-inner textarea { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -318,6 +318,26 @@ EOF
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
 
+  # --- WARP-1829 host-unit refresh ----------------------------------------
+  # Host units execute their source out of the git working tree
+  # (droplet-device-bridge.service runs `/usr/bin/python3
+  # <repo>/services/oled-display/device-bridge.py`), and the box's refresh
+  # restarts CONTAINERS only — so a merged fix could sit inert in a running
+  # process indefinitely while the repo, the file on disk and `systemctl
+  # status` all looked correct. This ships BOTH halves:
+  #   * /usr/local/sbin/droplet-host-units — `check` is the standalone
+  #     detector (ExecMainStartTimestamp vs the mtime of the sources the
+  #     unit executes); `refresh` restarts exactly what is stale.
+  #   * droplet-host-units.service — the on-demand hook the refresh flow
+  #     starts. Deliberately NOT enabled and given NO timer: the standing
+  #     detection rides the existing droplet-watchdog.timer pass as the
+  #     `host_unit_staleness` check, so there is one scheduler, not two.
+  sudo install -m 0755 "$host_src/droplet-host-units.sh" \
+    /usr/local/sbin/droplet-host-units
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-units.service" \
+    /etc/systemd/system/droplet-host-units.service
+  log_success "Installed /usr/local/sbin/droplet-host-units (+ on-demand unit)"
+
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
   # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged
@@ -378,8 +398,9 @@ EOF
 
   # --- Migrate from the pre-rename service name if present (WARP-445) -----
   # This block is the only code in scripts/ that still OPERATES on the
-  # legacy `droplet-poc-host-net` name (the de-poc rename itself landed in
-  # PR #676): a box provisioned BEFORE the rename still runs the old unit,
+  # legacy `droplet-poc-host-net` name (the rename to `droplet-host-net`
+  # itself landed in PR #676): a box provisioned BEFORE the rename still
+  # runs the old unit,
   # and the only way to retire it is to name it here. ship-check's
   # lifecycle-naming check grandfathers exactly this token for that reason
   # (its allowlist + hint text are the only other mentions). Delete this
@@ -507,6 +528,96 @@ provision_single_box_openwrt() {
 }
 
 # ============================================================================
+# WARP-1947 — the box's home-facing WireGuard endpoint IP
+# ============================================================================
+#
+# Derive the box's default-route egress source IPv4 — the LAN address a
+# same-network client dials the overlay WireGuard endpoint at. This is the
+# value `WIREGUARD_HOME_ENDPOINT_HOST` pins so the issued overlay profile
+# carries a REACHABLE `lan` candidate.
+#
+# Why derive it here rather than leave the env empty and let the orchestrator
+# discover it at request time (the vpn-home-endpoint.ts design):
+#   - On the single-box shape the host owns the uplink, so the routing summary
+#     has NO WAN address — tier 1 of the request-time precedence yields nothing.
+#   - The env fallback (tier 2) is consulted BEFORE the device-bridge
+#     /host/uplink-ip probe (tier 3), so a STALE pin silently shadows discovery
+#     (this box shipped 192.168.1.87, a dead former IP, and every issued profile
+#     pointed its only endpoint at a corpse — no_usable_endpoint).
+#   - /host/uplink-ip returns null on this shape today, and the orchestrator
+#     often has no BRIDGE_AUTH_TOKEN, so leaving the env empty yields NO lan
+#     candidate at all.
+# The module doc explicitly allows an operator to pin the host's DHCP IP here;
+# doing it at provision time (re-derived on every setup run, overwriting any
+# stale value) keeps it correct across DHCP changes and a factory reset.
+#
+# `ip route get 1.1.1.1` reports the source address the kernel would use for
+# off-box traffic — the box's real uplink IP. Parsed with awk (portable; no
+# grep -P dependency). Prints the IP on success, exit 1 when there is no usable
+# address so the caller can leave any existing value alone rather than blank it.
+derive_single_box_home_endpoint() {
+  local line ip
+  line="$(ip route get 1.1.1.1 2>/dev/null)" || return 1
+  ip="$(printf '%s\n' "$line" \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+  case "$ip" in
+    # Mirror vpn-home-endpoint.ts isUsableHostIp(): reject placeholders/self.
+    '' | 0.0.0.0 | 127.* | 169.254.*) return 1 ;;
+  esac
+  # A crude IPv4 shape guard — never emit anything that isn't dotted-quad, so a
+  # surprising `ip` output can't land junk in a minted conf.
+  case "$ip" in
+    *[!0-9.]*) return 1 ;;
+  esac
+  printf '%s' "$ip"
+}
+
+# ----------------------------------------------------------------------------
+# WARP-1982 — the box's own LAN IPv4 addresses, for Nextcloud's trusted_domains.
+#
+# Browsing the appliance BY IP is a first-class path, not an edge case: the
+# setup wizard hands out an address before any name resolves, droplet.local /
+# .lan answer only on the appliance's own LAN, and the per-device FQDN is
+# split-horizon. A browser on a neighbouring segment has no name at all. If the
+# address it uses is not in Nextcloud's trusted_domains, the dashboard loads
+# (Next.js does not check Host) while every Nextcloud leg — the embedded
+# document editor above all — answers HTTP 400.
+#
+# WHY NOT WILDCARDS, which is what WARP-1973 tried and WARP-1982 removed:
+# Nextcloud expands a `*` in a trusted-domain entry to `[-\.a-zA-Z0-9]*`, a
+# class that includes LETTERS AND DOTS. So `192.168.*` compiles to
+# /^192\.168\.[-\.a-zA-Z0-9]*$/i and matches `192.168.evil.com` — measured, not
+# theorised. Any attacker controlling a DNS name of that shape pointed at the
+# box passes the allowlist, which is the Host-header poisoning the list exists
+# to prevent. No wildcard can express "IPv4 in this range only"; narrowing the
+# prefix does not help, since `192.168.5.*` still matches `192.168.5.evil`.
+#
+# So: enumerate the box's ACTUAL addresses as EXACT tokens. Re-derived on every
+# provision, which is what keeps it correct across a DHCP change and a factory
+# reset — the same reasoning as the home endpoint above.
+#
+# Loopback, link-local and the Docker bridge ranges are excluded: the first two
+# are never a browser's address for this box, and the in-compose services reach
+# Nextcloud by service NAME (already trusted), so a bridge address would widen
+# the list for nothing.
+derive_single_box_lan_ips() {
+  local ips
+  ips="$(ip -4 -o addr show scope global 2>/dev/null \
+    | awk '{ split($4, a, "/"); print a[1] }' \
+    | awk '
+        /^127\./      { next }   # loopback
+        /^169\.254\./ { next }   # link-local
+        /^172\.1[7-9]\./ { next }  # docker default bridge pool
+        /^172\.2[0-9]\./ { next }
+        /^172\.3[01]\./  { next }
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print }
+      ' \
+    | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+  [ -n "$ips" ] || return 1
+  printf '%s' "$ips"
+}
+
+# ============================================================================
 # .env knobs
 # ============================================================================
 #
@@ -580,8 +691,39 @@ configure_single_box_env() {
     # Stage next to and rename onto the REAL target (encrypted /data when
     # relocated), never the symlink itself — see the $env_target note above.
     local stage="${env_target}.upsert.$$"
+    # A value containing whitespace MUST be quoted. .env is `.`-sourced as a
+    # shell script in four places (setup.sh:605, verify.sh:33,
+    # lib/compose.sh:659, lib/secrets.sh:1103) and bash reads a bare
+    # `KEY=a b` as "assign KEY=a for the duration of the command `b`" — so the
+    # variable reads back EMPTY and the shell exits 127 trying to run the
+    # second field.
+    #
+    # That 127 fails the ENCLOSING step, which is the damaging part. It is how
+    # a space-separated DROPLET_TRUSTED_LAN_IPS aborted
+    # install-device-bridge.sh before its `systemctl enable --now
+    # droplet-panel-claim.service`, leaving the claim code undrawn and the
+    # customer hard-stopped at wizard step 2 — with no symptom beyond
+    # "front-panel host integration had issues (continuing)".
+    #
+    # Only whitespace values change shape; every other value stays byte-for-
+    # byte as before, so the other 49 call sites cannot regress. Compose's own
+    # .env parser strips the quotes, so the container side is unchanged.
+    local rendered
+    case "$val" in
+      *[[:space:]]*)
+        # Escape what survives inside double quotes, so a value can never
+        # execute or expand when sourced.
+        local esc="$val"
+        esc="${esc//\\/\\\\}"
+        esc="${esc//\"/\\\"}"
+        esc="${esc//\$/\\\$}"
+        esc="${esc//\`/\\\`}"
+        rendered="${key}=\"${esc}\""
+        ;;
+      *) rendered="${key}=${val}" ;;
+    esac
     ( umask 077; { grep -vE "^${key}=" "$env_target" 2>/dev/null || true; \
-                   printf '%s=%s\n' "$key" "$val"; } > "$stage" )
+                   printf '%s\n' "$rendered"; } > "$stage" )
     chmod 600 "$stage"
     mv "$stage" "$env_target"
   }
@@ -601,6 +743,67 @@ configure_single_box_env() {
     ,,)             merged_profiles="single-box" ;;
     *)              merged_profiles="${existing_profiles},single-box" ;;
   esac
+
+  # WARP-1865: keep the `dmr` profile when the box is flipped to DMR.
+  #
+  # The WARP-1772 guard below preserves the DMR *URLs* on a re-run, but the
+  # *profile* was left to the flip runbook — and flip-single-box.sh writes
+  # COMPOSE_PROFILES into docker/.env while setup.sh runs compose with
+  # --env-file $REPO_ROOT/.env. The two disagreed, so a re-run kept
+  # OLLAMA_URL=http://dmr:12434 while never starting the dmr service, and
+  # started ollama instead (its profile is `single-box`). Chat, the RAGAS
+  # judge and LLM_MODEL all ended up pointing at a container that wasn't
+  # running — the same un-flip failure the URL guard was written to stop,
+  # arriving through the other half of the flip.
+  #
+  # Read from $env_target (what this run is writing) rather than $env_file:
+  # INFERENCE_RUNTIME is a durable operator-set property and is what decides
+  # this, exactly as it decides the URLs below. Never ADDS dmr on a box that
+  # isn't flipped — an accidental flip is as bad as an accidental un-flip.
+  #
+  # The `ollama` arm is the mirror image, added when the ollama service moved
+  # off the `single-box` profile onto its own. `single-box` is a four-service
+  # bundle (openwrt, switch, camera-discovery, and formerly ollama), so while
+  # ollama rode that token there was no way to stop serving Ollama without
+  # dropping the router and camera discovery too — which is why a flipped box
+  # kept a model-less daemon holding /dev/kfd and renderD128 open beside DMR.
+  # Now exactly one runtime token is appended, so a box can never start both
+  # runtimes (the SINGLE GPU OWNER violation, WARP-1826) nor neither (no
+  # inference at all). Un-flipped boxes keep today's behaviour verbatim.
+  local _profiles_runtime
+  _profiles_runtime="$(grep -E '^INFERENCE_RUNTIME=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
+  if [ "$_profiles_runtime" = "dmr" ]; then
+    case ",${merged_profiles}," in
+      *,dmr,*) : ;;
+      *)       merged_profiles="${merged_profiles},dmr"
+               log_info "single-box env: INFERENCE_RUNTIME=dmr — kept the dmr profile in COMPOSE_PROFILES (WARP-1865)" ;;
+    esac
+    # Belt and braces: if a half-finished flip left `ollama` in the list, drop
+    # it. Leaving both is the one outcome worse than either alone.
+    case ",${merged_profiles}," in
+      *,ollama,*)
+        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'ollama' | paste -sd, -)"
+        log_info "single-box env: INFERENCE_RUNTIME=dmr — dropped the stale ollama profile (single GPU owner, WARP-1826)" ;;
+    esac
+  else
+    # The mirror strip. Without it the exclusion is one-directional: the dmr
+    # arm above drops a stale `ollama`, but a box carrying `dmr` whose runtime
+    # is ollama (or unset) would keep `dmr` AND gain `ollama` — both runtimes
+    # on one card, the very WARP-1826 violation this block exists to prevent,
+    # arriving from the rollback direction instead of the flip direction.
+    # Strip BEFORE the add so the add sees an already-cleaned list.
+    case ",${merged_profiles}," in
+      *,dmr,*)
+        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'dmr' | paste -sd, -)"
+        log_info "single-box env: INFERENCE_RUNTIME is not dmr — dropped the stale dmr profile (single GPU owner, WARP-1826)" ;;
+    esac
+    case ",${merged_profiles}," in
+      *,ollama,*) : ;;
+      ,,)         merged_profiles="ollama" ;;
+      *)          merged_profiles="${merged_profiles},ollama"
+                  log_info "single-box env: INFERENCE_RUNTIME is not dmr — added the ollama profile so the box has an inference runtime" ;;
+    esac
+  fi
 
   # RAG eval (RAGAS retrieval-quality scoring) — enabled by DEFAULT on the
   # single-box shape (bug #15). The `rag-eval` service is `["eval"]`-profiled,
@@ -632,9 +835,10 @@ configure_single_box_env() {
     esac
   fi
 
-  # OnlyOffice Document Server (`docs` profile, WARP-882 / ADR-027 WS-4) — RAM
-  # GATED. The engine is OnlyOffice CE (~2 GB always-on image), so it is
-  # DEFAULT-ON on a roomy box and DROPPED on a small one:
+  # Document engine (`docs` profile, WARP-882 / WARP-1686 / ADR-027 WS-4) —
+  # RAM GATED. The engine (Collabora CODE by default per ADR-034 — no
+  # licensing fee; OnlyOffice CE via DOCS_ENGINE=onlyoffice) is a ~2 GB
+  # always-on image, so it is DEFAULT-ON on a roomy box, DROPPED on a small one:
   #   * total RAM > SINGLE_BOX_DOCS_MIN_GIB (default 8 GiB) → the 32 GB / 16 GB
   #     single-box ABSORBS the engine comfortably: merge `docs` into
   #     COMPOSE_PROFILES (idempotent, no duplicate) and set DOCS_ENABLED=1.
@@ -643,10 +847,11 @@ configure_single_box_env() {
   # RAM is read the same way as scripts/lib/preflight.sh (MemTotal kB / 1048576).
   # If /proc/meminfo is unreadable (non-Linux dev), we DROP docs (conservative —
   # don't bring up a 2 GB engine on an unsized host). The ONLYOFFICE_JWT_SECRET
-  # the connector + engine need is generated unconditionally by
-  # scripts/lib/secrets.sh::generate_env (openssl rand -hex 32), which runs
-  # BEFORE this on every setup — so the docs path always has a strong secret.
-  local docs_min_gib mem_kb mem_gb docs_enabled_val
+  # (used by the onlyoffice engine + the orchestrator's editor session tokens)
+  # is generated unconditionally by scripts/lib/secrets.sh::generate_env
+  # (openssl rand -hex 32), which runs BEFORE this on every setup — so the
+  # docs path always has a strong secret regardless of engine.
+  local docs_min_gib mem_kb mem_gb docs_enabled_val docs_engine
   docs_min_gib="${SINGLE_BOX_DOCS_MIN_GIB:-8}"
   mem_gb=0
   if [ -r /proc/meminfo ]; then
@@ -663,7 +868,7 @@ configure_single_box_env() {
       *)        merged_profiles="${merged_profiles},docs" ;;
     esac
     docs_enabled_val=1
-    log_info "OnlyOffice doc-server: ON (${mem_gb} GiB > ${docs_min_gib} GiB threshold) — \`docs\` profile + DOCS_ENABLED=1"
+    log_info "Document engine: ON (${mem_gb} GiB > ${docs_min_gib} GiB threshold) — \`docs\` profile + DOCS_ENABLED=1"
   else
     # Drop `docs` if a previous run / lib/compose.sh added it; reclaim the engine.
     local stripped_profiles="" p
@@ -676,7 +881,7 @@ configure_single_box_env() {
     IFS="$IFS_SAVE"
     merged_profiles="$stripped_profiles"
     docs_enabled_val=0
-    log_info "OnlyOffice doc-server: OFF (${mem_gb} GiB ≤ ${docs_min_gib} GiB threshold) — dropped \`docs\`, DOCS_ENABLED=0"
+    log_info "Document engine: OFF (${mem_gb} GiB ≤ ${docs_min_gib} GiB threshold) — dropped \`docs\`, DOCS_ENABLED=0"
   fi
 
   # --- Descriptive header block: surgical replace (WARP-444) ---------------
@@ -734,17 +939,24 @@ configure_single_box_env() {
 #                        `eval` by DEFAULT so the rag-eval (RAGAS) service runs
 #                        and /api/admin/rag-eval/* works out-of-the-box
 #                        (bug #15); set RAG_EVAL_DISABLED=1 to pause runs.
-#                        `docs` (OnlyOffice doc-server, WARP-882) is RAM-GATED:
-#                        merged in + DOCS_ENABLED=1 when total RAM > 8 GiB (the
-#                        32 GB / 16 GB box), dropped + DOCS_ENABLED=0 on a ≤8 GB
-#                        box. Override the threshold with SINGLE_BOX_DOCS_MIN_GIB.
-#   DOCS_ENABLED         OnlyOffice doc-server master switch (RAM-gated above).
-#   DOCS_INTERNAL_URL    compose-network engine URL the orchestrator health-probes.
+#                        `docs` (document engine, WARP-882/WARP-1686) is
+#                        RAM-GATED: merged in + DOCS_ENABLED=1 when total RAM >
+#                        8 GiB (the 32 GB / 16 GB box), dropped + DOCS_ENABLED=0
+#                        on a ≤8 GB box. Threshold: SINGLE_BOX_DOCS_MIN_GIB.
+#   DOCS_ENABLED         document-engine master switch (RAM-gated above).
+#   DOCS_ENGINE          which engine: collabora (default — Collabora CODE,
+#                        LibreOffice, no licensing fee, ADR-034) or onlyoffice
+#                        (kept for a future OEM-licensed SKU).
+#   DOCS_ENGINE_IMAGE    engine image; written together with DOCS_ENGINE.
+#   DOCS_INTERNAL_URL    compose-network engine URL the orchestrator
+#                        health-probes (engine-dependent: coolwsd
+#                        :9980/docs vs OnlyOffice :80).
 #   FRIGATE_RENDER_NODE  DETECTED from /dev/dri (WARP-1680): the second render
 #                        node when the host has two (leaving the dGPU for
 #                        Ollama), otherwise the only one. Never assumed —
 #                        a hardcoded renderD129 broke every single-GPU box.
-#   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
+#   CAMERA_SUBNET        "auto" — camera-discovery resolves the camera network
+#                        from the edge router at scan time (WARP-1805);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
 #   WIREGUARD_LAN_CIDR/  VPN peer .conf AllowedIPs + DNS, pinned to the single-
 #   WIREGUARD_DNS        box LAN (br-lan 192.168.20.0/24, gateway/dnsmasq at
@@ -752,6 +964,14 @@ configure_single_box_env() {
 #                        LAN defaults (192.168.50.x in
 #                        apps/orchestrator/src/config.ts) so a remote VPN client
 #                        can reach the dashboard + resolve *.lan (WARP-839).
+#   WIREGUARD_HOME_ENDPOINT_HOST DERIVED (WARP-1947) — the box's default-route
+#                        egress IPv4, the LAN address a same-network overlay
+#                        client dials the WireGuard endpoint at. Request-time
+#                        discovery can't find it on this shape (host owns WAN,
+#                        /host/uplink-ip null), and a stale pin shadows it (this
+#                        box shipped a dead 192.168.1.87), so it is derived +
+#                        pinned here, overwriting any stale value on every run.
+#                        Skipped (prior value left) when there's no default route.
 #   OLLAMA_URL           compose-internal `ollama` service
 #   RAGAS_OLLAMA_URL     rag-eval judge → the same in-network ollama (/v1);
 #                        the compose host.docker.internal default is
@@ -787,12 +1007,36 @@ EOF
   fi
 
   upsert_env COMPOSE_PROFILES    "$merged_profiles"
-  # OnlyOffice doc-server master switch + internal URL, RAM-gated above. The
+  # Document-engine master switch + internal URL, RAM-gated above. The
   # orchestrator reads DOCS_ENABLED (explicit, never inferred from absence) and
   # probes DOCS_INTERNAL_URL for the engine's health; on a small box DOCS_ENABLED=0
   # makes /files/docs/status report "unavailable" and the editor degrade cleanly.
   upsert_env DOCS_ENABLED        "$docs_enabled_val"
-  upsert_env DOCS_INTERNAL_URL   http://docserver
+  # WARP-1686 (ADR-034): engine-selectable document server. DOCS_ENGINE picks
+  # the engine; the compose image + the orchestrator's internal probe URL MUST
+  # track it (coolwsd listens on :9980 under net.service_root=/docs; OnlyOffice
+  # listens on :80 at its root), so all three are written together and never
+  # diverge. An existing .env's DOCS_ENGINE (operator choice) is respected —
+  # a shell-env override wins for a supervised one-off run.
+  docs_engine="${DOCS_ENGINE:-}"
+  if [ -z "$docs_engine" ] && [ -f "$env_target" ]; then
+    docs_engine="$({ grep -E '^DOCS_ENGINE=' "$env_target" || true; } | tail -1 | cut -d= -f2-)"
+  fi
+  docs_engine="${docs_engine:-collabora}"
+  case "$docs_engine" in
+    onlyoffice)
+      upsert_env DOCS_ENGINE        onlyoffice
+      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2"
+      upsert_env DOCS_INTERNAL_URL  http://docserver
+      log_info "Document engine: onlyoffice (OEM-licensed SKU posture — AGPLv3 CE otherwise)"
+      ;;
+    *)
+      upsert_env DOCS_ENGINE        collabora
+      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1"
+      upsert_env DOCS_INTERNAL_URL  "http://docserver:9980/docs"
+      log_info "Document engine: collabora (Collabora CODE — LibreOffice, no licensing fee)"
+      ;;
+  esac
   # WARP-1680: DETECT the render node — never assume a two-GPU layout.
   # This was hardcoded to renderD129 on the theory that the dGPU (renderD128)
   # is reserved for Ollama. On a box whose GPU is a single AMD Raphael iGPU
@@ -817,14 +1061,16 @@ EOF
   # CAMERA_SUBNET: the compose default (192.168.100.0/24) is the multi-box
   # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
   # single-box shape has no separate camera VLAN today — cameras attach to
-  # the box's own LAN (br-lan, 192.168.20.0/24; see
-  # scripts/host/etc-droplet-host-net/lan-dhcp.conf). Pinning the subnet
-  # to the actual single-box camera network is what makes camera discovery
-  # scan where the cameras are instead of an empty multi-box VLAN (ADR-018
-  # Decision 4). When the OpenWrt single-box unification (ADR-018 T3) lands a
-  # real isolated camera VLAN on this shape, this value moves to that VLAN's
-  # network in lockstep.
-  upsert_env CAMERA_SUBNET       192.168.20.0/24
+  # whatever LAN the edge router serves, and a provision-time constant here
+  # has now gone stale TWICE (192.168.100.0/24 when ADR-018 pinned br-lan
+  # 192.168.20.0/24; then 192.168.20.0/24 when networking moved to the Pi
+  # edge router and cameras landed on its LAN — WARP-1805, camera discovery
+  # ran healthy but blind both times). "auto" makes camera-discovery resolve
+  # the network from the routing service's /network/interfaces at scan time,
+  # so the filter follows the same router that hands cameras their leases.
+  # When the OpenWrt single-box unification (ADR-018 T3) lands a real
+  # isolated camera VLAN on this shape, pin this to that VLAN's network.
+  upsert_env CAMERA_SUBNET       auto
   # WARP-839: pin the WireGuard peer LAN CIDR + DNS to the single-box LAN. The
   # orchestrator's defaults (WIREGUARD_LAN_CIDR=192.168.50.0/24,
   # WIREGUARD_DNS=192.168.50.1 in apps/orchestrator/src/config.ts) are the
@@ -836,21 +1082,111 @@ EOF
   # on the single-box path.
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
-  upsert_env OLLAMA_URL          http://ollama:11434
-  # RAGAS judge → the same in-network `ollama` service. The compose default
-  # (http://host.docker.internal:11434/v1) targets a HOST-installed Ollama,
-  # but the bundled single-box container publishes only 127.0.0.1:11434 on
-  # the host — a loopback bind is unreachable from the bridge-gateway IP on
-  # Linux, so every judge call ECONNREFUSEDs. Point rag-eval straight at the
-  # compose service (OpenAI-compat /v1 path), same target as OLLAMA_URL above.
-  upsert_env RAGAS_OLLAMA_URL    http://ollama:11434/v1
+  # WARP-1947: pin the box's home-facing endpoint IP so a same-network client's
+  # overlay profile carries a REACHABLE `lan` candidate. See the
+  # derive_single_box_home_endpoint() banner above for the full why — in short,
+  # request-time discovery cannot find it on this shape, and a stale hardcode
+  # (this box shipped a dead 192.168.1.87) is worse than none. Derived + upserted
+  # here, so it re-derives on every provision and survives a factory reset. If the
+  # box has no default route yet (headless first boot), leave any prior value
+  # rather than blanking an operator pin — the client just falls back to whatever
+  # runtime discovery can find, and the next setup run fixes it.
+  local _home_endpoint
+  if _home_endpoint="$(derive_single_box_home_endpoint)"; then
+    upsert_env WIREGUARD_HOME_ENDPOINT_HOST "$_home_endpoint"
+    log_info "WIREGUARD_HOME_ENDPOINT_HOST derived from default route: $_home_endpoint"
+  else
+    log_warn "could not derive the box egress IP (no default route?) — leaving WIREGUARD_HOME_ENDPOINT_HOST unchanged; the overlay home candidate may be unavailable until the next setup run"
+  fi
+  # WARP-1982: the box's own addresses, so a browser that reaches the appliance
+  # BY IP gets a working document editor instead of HTTP 400 from every
+  # Nextcloud leg. Re-derived every provision so a new DHCP lease converges.
+  # Leave any prior value alone if enumeration fails — blanking it would strip
+  # working entries from the trust list on a box that is merely mid-reconfigure.
+  local _lan_ips
+  if _lan_ips="$(derive_single_box_lan_ips)"; then
+    upsert_env DROPLET_TRUSTED_LAN_IPS "$_lan_ips"
+    log_info "DROPLET_TRUSTED_LAN_IPS derived from the box's interfaces: $_lan_ips"
+  else
+    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on Nextcloud legs (the embedded editor included) until the next setup run"
+  fi
+  # WARP-1772: the inference runtime is a durable, operator-set property, and
+  # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a
+  # DMR-flipped box silently pointed chat, the RAGAS judge, and the model id
+  # back at Ollama and logged success (the flip audit's nastiest finding: a
+  # factory re-provision that un-flips the box). INFERENCE_RUNTIME itself is
+  # never WRITTEN here — the flip runbook owns it (scripts/dmr/flip-single-box.sh);
+  # it is only READ so the three runtime-coupled values stay coherent with it.
+  _inference_runtime="$(grep -E '^INFERENCE_RUNTIME=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
+  if [ "$_inference_runtime" = "dmr" ]; then
+    log_info "single-box env: INFERENCE_RUNTIME=dmr detected — preserving the DMR wiring (WARP-1772)"
+    upsert_env OLLAMA_URL        http://dmr:12434
+    upsert_env RAGAS_OLLAMA_URL  http://dmr:12434/v1
+    # LLM_MODEL under DMR is the EXACT id the store reports (registry-
+    # qualified, derived live at flip time) — re-deriving it here would
+    # reintroduce the id-vocabulary gap, so preserve what the flip set.
+    _current_llm="$(grep -E '^LLM_MODEL=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+    if [ -n "$_current_llm" ]; then
+      upsert_env LLM_MODEL "$_current_llm"
+    else
+      # WARP-1870: never leave it unset. That branch predates DMR being a
+      # provisioning target — it assumed a human had flipped the box and set
+      # the id by hand, so "leave it alone" was the safe move. Now that a FRESH
+      # box provisions to DMR, an unset LLM_MODEL means the orchestrator has
+      # nothing to acquire on first boot: a dead appliance out of the crate,
+      # which is strictly worse than a default that can be corrected.
+      #
+      # Falls back to the same constant secrets.sh writes. The `:-` literal is
+      # the sourcing-order belt-and-braces; tests/dmr-default-provisioning.test.sh
+      # asserts the two files agree so this copy cannot drift.
+      _default_dmr_model="${DROPLET_DEFAULT_DMR_MODEL:-docker.io/ai/gpt-oss:20B-F16}"
+      upsert_env LLM_MODEL "$_default_dmr_model"
+      log_info "single-box env: INFERENCE_RUNTIME=dmr and LLM_MODEL was unset — defaulted to $_default_dmr_model (must match DMR's /api/tags exactly, or first boot re-pulls ~13.79 GB every time)"
+    fi
+  else
+    upsert_env OLLAMA_URL          http://ollama:11434
+    # RAGAS judge → the same in-network `ollama` service. The compose default
+    # (http://host.docker.internal:11434/v1) targets a HOST-installed Ollama,
+    # but the bundled single-box container publishes only 127.0.0.1:11434 on
+    # the host — a loopback bind is unreachable from the bridge-gateway IP on
+    # Linux, so every judge call ECONNREFUSEDs. Point rag-eval straight at the
+    # compose service (OpenAI-compat /v1 path), same target as OLLAMA_URL above.
+    upsert_env RAGAS_OLLAMA_URL    http://ollama:11434/v1
+    upsert_env LLM_MODEL           gpt-oss:20b
+  fi
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
   upsert_env DROPLET_TPM_BACKEND mock
-  upsert_env LLM_MODEL           gpt-oss:20b
-  upsert_env OPENWRT_HOST        127.0.0.1
-  upsert_env OPENWRT_PORT        8181
-  upsert_env OPENWRT_USERNAME    root
+  # WARP-1980: an EXTERNAL edge router must survive a setup re-run.
+  #
+  # `single-box` is a statement about the INFERENCE topology, not about routing:
+  # detect_single_box_mode() decides it from the DRM render-node count and an
+  # Ollama probe, and never looks at the router. These three knobs conflated it
+  # with "this box IS the router" and pointed the routing service at the BUNDLED
+  # droplet-openwrt container.
+  #
+  # A single-box appliance behind a real edge router is the shipping customer
+  # shape (RB5009 + managed switch + AP), and on that box the clobber is silent
+  # and total: the bundled container answers, so nothing errors — the Network
+  # tab simply describes a router nobody is on. Recovering it means re-writing
+  # both .env files AND re-enrolling the droplet-ai credential by hand.
+  #
+  # Preserve an operator-configured external host, exactly as the LLM_MODEL
+  # guard above preserves a flipped runtime. Loopback (or unset — a fresh
+  # provision) means the bundled container, the right default for a flat
+  # single-box. This preserves intent; it does not auto-detect a router.
+  local _current_openwrt_host
+  _current_openwrt_host="$(grep -E '^OPENWRT_HOST=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  case "$_current_openwrt_host" in
+    ''|127.0.0.1|localhost|::1)
+      upsert_env OPENWRT_HOST        127.0.0.1
+      upsert_env OPENWRT_PORT        8181
+      upsert_env OPENWRT_USERNAME    root
+      ;;
+    *)
+      log_info "single-box env: external edge router configured (OPENWRT_HOST=$_current_openwrt_host) — preserving OPENWRT_HOST/PORT/USERNAME instead of re-pointing at the bundled container"
+      ;;
+  esac
   upsert_env ROUTING_MODE        real
   # Warning-free droplet.local: on the single-box shape this box IS the
   # router — its dnsmasq answers the split-horizon FQDN for every DHCP
@@ -939,6 +1275,64 @@ EOF
   upsert_env ROUTING_SERVICE_URL "http://${bridge_gw}:8080"
   upsert_env SWITCH_SERVICE_URL  "http://${bridge_gw}:8081"
   upsert_env DISPLAY_SERVICE_URL "http://${bridge_gw}:8082"
+  # WARP-1981: a framebuffer rack panel must survive a factory reset.
+  #
+  # display.py keeps "fb" EXPLICIT-ONLY on purpose: the 5 s promotion loop
+  # re-probes USB every tick, so an auto-selected fb backend would silently
+  # lose the panel to a PyPortal plugged in later. That intent is right at
+  # RUNTIME — but nothing ever made the value explicit at PROVISION time. No
+  # script writes DISPLAY_BACKEND (`git grep DISPLAY_BACKEND -- scripts/` was
+  # empty), .env.example ships `auto`, and factory-reset.sh deletes .env.
+  #
+  # So a rack-panel box came back from a wipe on the `sim` backend, which
+  # renders to a PNG inside the container. The setup wizard's claim code lives
+  # on that panel and ClaimStep is NOT skippable — the install stops dead at
+  # step two with a working box nobody can claim.
+  #
+  # Detect the panel and write the explicit value setup should always have
+  # left behind. Gated on a framebuffer existing AND no PyPortal on USB, so a
+  # real PyPortal box still auto-probes exactly as before.
+  # Test/dev hooks (so the detection is unit-testable without a real panel):
+  #   DROPLET_FB_DEV   override the framebuffer device probed  (default /dev/fb0)
+  #   DROPLET_FB_SIZE  override the virtual_size sysfs file
+  #   DROPLET_USB_TTY  override the PyPortal USB glob prefix
+  local _fb_dev _fb_sizefile _usb_glob
+  _fb_dev="${DROPLET_FB_DEV:-/dev/fb0}"
+  _fb_sizefile="${DROPLET_FB_SIZE:-/sys/class/graphics/fb0/virtual_size}"
+  _usb_glob="${DROPLET_USB_TTY:-/dev/tty}"
+  local _current_display_backend
+  _current_display_backend="$( { grep -E '^DISPLAY_BACKEND=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
+  # Probe each glob separately. `ls a* b*` exits non-zero when EITHER pattern
+  # is unmatched, so a single `! ls` reports "no PyPortal" on a box that has
+  # /dev/ttyACM1 but no /dev/ttyUSB* — failing OPEN into fb and stealing the
+  # panel from a real USB display. Unmatched globs stay literal and
+  # `[ -e <literal> ]` is false, so this needs no nullglob.
+  local _usb_present=0 _tty
+  for _tty in "${_usb_glob}"ACM* "${_usb_glob}"USB*; do
+    if [ -e "$_tty" ]; then _usb_present=1; break; fi
+  done
+  if [ -n "$_current_display_backend" ] && [ "$_current_display_backend" != "auto" ]; then
+    log_info "single-box env: DISPLAY_BACKEND=$_current_display_backend already set — leaving the operator's choice alone"
+  elif [ -e "$_fb_dev" ] && [ "$_usb_present" = 0 ]; then
+    upsert_env DISPLAY_BACKEND fb
+    upsert_env FB_DEVICE       "$_fb_dev"
+    # virtual_size is "<width>,<height>" (e.g. `1424,280`). Never trust it
+    # blind: a bad parse here writes a garbage geometry that the panel then
+    # renders at, which reads as "the screen is broken" rather than as a
+    # config error.
+    local _fb_size _fb_w _fb_h
+    _fb_size="$(cat "$_fb_sizefile" 2>/dev/null || true)"
+    _fb_w="${_fb_size%%,*}"
+    _fb_h="${_fb_size##*,}"
+    case "${_fb_w}|${_fb_h}" in
+      *[!0-9]*\|*|*\|*[!0-9]*|\|*|*\|)
+        log_warn "single-box env: /dev/fb0 present but virtual_size was unreadable ('${_fb_size}') — DISPLAY_BACKEND=fb written WITHOUT dimensions. Set LCD_WIDTH/LCD_HEIGHT by hand or the claim screen may render at the wrong geometry." ;;
+      *)
+        upsert_env LCD_WIDTH  "$_fb_w"
+        upsert_env LCD_HEIGHT "$_fb_h"
+        log_info "single-box env: framebuffer rack panel detected — DISPLAY_BACKEND=fb, ${_fb_w}x${_fb_h} (from /sys/class/graphics/fb0/virtual_size)" ;;
+    esac
+  fi
   # WARP-850: matter-controller is the 4th host-net service on the ladder
   # (:8083) — same WARP-806 reasoning as the three above.
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
@@ -977,5 +1371,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

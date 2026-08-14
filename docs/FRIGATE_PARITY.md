@@ -107,13 +107,14 @@ Each phase ships as its own milestone. Each PR within a phase has a single coher
 - [ ] **Timeline scrubber** with motion + event markers overlaid, snap-to-event.
 - [ ] **HLS playback** for VOD via the orchestrator (`/api/cameras/:name/recordings/hls/master.m3u8`).
 - [ ] **Custom-range clip export** — promote the existing `export_clip` LLM tool flow (#74) to a first-class UI button on the timeline.
-- [ ] **Storage breakdown** — bytes per camera, days retained, oldest recording, by camera + total. Drives the "near-full" warning.
+- [x] **Storage breakdown** (WARP-1850) — bytes per camera, measured MiB/hr, each camera's share of the volume, and a combined "days of free space left" figure, from `GET /api/recordings/storage`. Drives an edge-triggered near-full warning (one ActivityRow per crossing) and the `get_camera_storage` tool. Oldest-recording-per-camera is still open.
 
 ### Phase 4 — Per-camera settings
 *The config surface; biggest UI-design lift.*
 
 - [ ] **Detection settings** form per camera — object filter list (multi-select w/ Frigate's known classes), min/max area, threshold, hysteresis, FPS.
-- [ ] **Recording settings** — retention days for alerts vs detections, audio recording on/off, pre/post-roll seconds.
+- [x] **Recording settings — retention** (WARP-1849). All four windows are per-camera editable: `record.continuous.days`, `record.motion.days`, `record.alerts.retain.days`, `record.detections.retain.days`, plus `snapshots.retain.default`. Frigate enforces them natively; the orchestrator no longer attempts its own deletion. See "Retention — who deletes what" in `camera-system.md`.
+- [ ] **Recording settings — remainder** — audio recording on/off, pre/post-roll seconds.
 - [ ] **Zone editor** — polygon drawing on the live snapshot canvas; per-zone required-objects + inertia.
 - [ ] **Mask editor** — same canvas, multi-polygon for motion masks + per-object-class masks.
 - [ ] **Audio rules** — toggle audio detection + per-class thresholds (cry, dog bark, etc.).

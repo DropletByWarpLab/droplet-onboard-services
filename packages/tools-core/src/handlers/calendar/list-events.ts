@@ -18,6 +18,7 @@ interface CalendarEventRow {
   endsAt: Date;
   allDay: boolean;
   location: string | null;
+  meetingUrl: string | null;
   source: string | null;
 }
 
@@ -54,6 +55,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         ends_at: e.endsAt.toISOString(),
         all_day: e.allDay,
         location: e.location,
+        // WARP-1874 — create_event/update_event can set the link, so the
+        // read tier has to hand it back or the model can only ever write a
+        // field it cannot answer questions about.
+        meeting_url: e.meetingUrl,
         source: e.source,
       })),
     },

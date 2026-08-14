@@ -37,7 +37,10 @@ function timeAgo(iso: string): string {
 }
 
 export function DeviceCard({ device, onOpen, onError }: Props) {
-  const IconComp = iconFor(device.icon);
+  // WARP-1715: an approved coverage AP is a device on the household network,
+  // not a separate silo — but it IS infrastructure, so give it the router icon
+  // rather than the generic HelpCircle an un-iconed row would otherwise get.
+  const IconComp = device.isAccessPoint && !device.icon ? Icons.Router : iconFor(device.icon);
   const displayName = device.displayName ?? device.hostname ?? device.vendor ?? "Device";
 
   function handleKey(e: React.KeyboardEvent<HTMLDivElement>) {
@@ -61,23 +64,32 @@ export function DeviceCard({ device, onOpen, onError }: Props) {
       tabIndex={0}
       onClick={() => onOpen(device)}
       onKeyDown={handleKey}
-      className={`dp-card p-4 text-left transition hover:border-accent/50 w-full group ${device.online ? "" : "opacity-70"}`}
+      className={`card text-left transition hover:border-[color-mix(in_srgb,var(--brand)_50%,var(--card-bd))] w-full group ${device.online ? "" : "opacity-70"}`}
       aria-label={`Open ${displayName} details`}
     >
       <div className="flex items-center gap-3">
-        <IconComp className="w-12 h-12 text-accent shrink-0" aria-hidden="true" />
+        <IconComp className="w-12 h-12 text-[color:var(--brand)] shrink-0" aria-hidden="true" />
         <div className="flex-1 min-w-0">
-          <p className="type-headline text-label-primary truncate">{displayName}</p>
-          <p className="type-footnote text-label-secondary truncate">
-            {device.vendor ?? "Unknown vendor"}
+          <p className="type-headline text-[color:var(--text)] truncate">{displayName}</p>
+          <p className="type-footnote text-[color:var(--text-muted)] truncate">
+            {/* An AP describes itself by what it IS — "Unknown vendor" on the
+                household's own access point reads as a fault. */}
+            {device.isAccessPoint
+              ? (device.apModel ?? "Access point")
+              : (device.vendor ?? "Unknown vendor")}
             {device.lastIp ? ` · ${device.lastIp}` : ""}
           </p>
+          {device.viaAp && (
+            <p className="type-caption-1 text-[color:var(--text-muted)] mt-0.5 truncate">
+              via {device.viaAp}
+            </p>
+          )}
           {!device.online && (
-            <p className="type-caption-1 text-label-tertiary mt-0.5">last seen {timeAgo(device.lastSeen)}</p>
+            <p className="type-caption-1 text-[color:var(--text-muted)] mt-0.5">last seen {timeAgo(device.lastSeen)}</p>
           )}
         </div>
         <span
-          className={`w-2 h-2 rounded-full shrink-0 ${device.online ? "bg-system-green" : "bg-label-quaternary"}`}
+          className={`w-2 h-2 rounded-full shrink-0 ${device.online ? "bg-system-green" : "bg-[var(--text-faint)]"}`}
           aria-label={device.online ? "online" : "offline"}
         />
       </div>
@@ -86,7 +98,7 @@ export function DeviceCard({ device, onOpen, onError }: Props) {
           {device.groups.map((g) => (
             <span
               key={g.id}
-              className="type-caption-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary inline-flex items-center gap-1.5"
+              className="type-caption-1 px-2 py-0.5 rounded-full bg-[var(--card-inner)] text-[color:var(--text-muted)] inline-flex items-center gap-1.5"
             >
               {g.color && (
                 <span
@@ -140,7 +152,7 @@ function QuickScheduleActionButton({
           setOpen((o) => !o);
         }}
         onKeyDown={(e) => e.stopPropagation()}
-        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="type-caption-1 px-2 py-1 rounded bg-[var(--card-inner)] text-[color:var(--text-muted)] hover:text-[color:var(--text)] inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
         aria-label={`Quick schedule for ${displayName}`}
       >
         <Icons.CalendarClock className="w-3.5 h-3.5" />
@@ -203,7 +215,7 @@ function BlockActionButton({
         type="button"
         onClick={openConfirm}
         onKeyDown={(e) => e.stopPropagation()}
-        className={`type-caption-1 px-2 py-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
+        className={`type-caption-1 px-2 py-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
         aria-label={
           isUnblocking
             ? `Unblock device ${displayName}`

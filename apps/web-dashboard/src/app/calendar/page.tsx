@@ -12,8 +12,10 @@ import {
   FileText,
   Clock,
   MapPin,
+  Video,
   X,
 } from "lucide-react";
+import { parseMeetingLink } from "@droplet/shared-types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import {
   useCalendarEvents,
@@ -41,6 +43,14 @@ import { useToast } from "@/components/Toast";
 
 type View = "month" | "agenda";
 type ReportScope = "day" | "week" | "month";
+
+// WARP-1902 — the "Up next" rail card is a disclosure: collapsible from its
+// header and capped at 6 events when expanded, so a busy calendar can't grow
+// the rail unbounded. The collapsed/expanded choice persists per browser via
+// the same localStorage idiom as the network page's sections
+// (DeviceGridSection); "0" = collapsed, anything else (incl. absent) = expanded.
+const UP_NEXT_MAX = 6;
+const UP_NEXT_LS_KEY = "droplet.calendar.upnext";
 
 function whenLabel(ev: CalendarEvent): string {
   const d = new Date(ev.startsAt);
@@ -202,9 +212,33 @@ export default function CalendarPage() {
     const now = Date.now();
     return visibleEvents
       .filter((e) => new Date(e.endsAt || e.startsAt).getTime() >= now)
-      .sort(compareByStart)
-      .slice(0, 5);
+      .sort(compareByStart);
   }, [visibleEvents]);
+  const upNext = upcoming.slice(0, UP_NEXT_MAX);
+  const upNextOverflow = upcoming.length - upNext.length;
+
+  // "Up next" disclosure state. Default expanded; the stored preference is
+  // read in an effect (not the useState initializer) so server and first
+  // client render agree — same SSR-safe pattern as DeviceGridSection.
+  const [upNextExpanded, setUpNextExpanded] = useState(true);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(UP_NEXT_LS_KEY) === "0") setUpNextExpanded(false);
+    } catch {
+      // Storage unavailable (private mode) — stay expanded.
+    }
+  }, []);
+  const toggleUpNext = useCallback(() => {
+    setUpNextExpanded((cur) => {
+      const next = !cur;
+      try {
+        window.localStorage.setItem(UP_NEXT_LS_KEY, next ? "1" : "0");
+      } catch {
+        // Storage unavailable — the toggle still works for this page load.
+      }
+      return next;
+    });
+  }, []);
 
   // Schedule report: filter the loaded, visible events to the report window
   // (overlap test) and group them by local day. Derived entirely client-side
@@ -300,19 +334,17 @@ export default function CalendarPage() {
     setSelectedKey(undefined);
   };
 
-  // Mini-month day click: move the cursor (drives the month grid + the agenda
-  // fetch window) and, ONLY in Agenda view, mark the picked day so the agenda
-  // scrolls to + highlights it. `selectedKey` is agenda-only context: setting it
-  // from Month view (where the agenda isn't rendered) would make a later switch
-  // to Agenda auto-scroll to a stale date the user never selected there.
-  // The previous build set neither — picking a date did nothing (WARP-944).
-  const pickDay = useCallback(
-    (d: Date) => {
-      setCursor(d);
-      setSelectedKey(view === "agenda" ? dayKey(d) : undefined);
-    },
-    [view],
-  );
+  // Mini-month day pick — wired ONLY in Agenda view, where it has a visible
+  // effect: move the cursor (drives the fetch window) and mark the picked day
+  // so the agenda scrolls to + highlights it (WARP-944). In Month view the
+  // pick had no visible effect (the cursor only moved inside the displayed
+  // month), so the mini-month renders its day grid display-only there instead
+  // of offering a dead click target (WARP-1904 — product decision: no date
+  // navigation).
+  const pickDay = useCallback((d: Date) => {
+    setCursor(d);
+    setSelectedKey(dayKey(d));
+  }, []);
 
   const eventCount = events.length;
   const sub =
@@ -403,7 +435,10 @@ export default function CalendarPage() {
           <MiniMonth
             cursor={cursor}
             eventDays={eventDays}
-            onCursor={pickDay}
+            // Day cells are a pick target only in Agenda view (scroll-to-day,
+            // WARP-944). In Month view a day click had no visible effect, so
+            // the grid renders display-only (WARP-1904).
+            onCursor={view === "agenda" ? pickDay : undefined}
             onMonthNav={(d) => { setCursor(d); setSelectedKey(undefined); }}
           />
 
@@ -417,7 +452,7 @@ export default function CalendarPage() {
                     <button
                       onClick={() => toggleCal(c.key)}
                       aria-pressed={on}
-                      className="w-full flex items-center gap-2.5 px-1 py-1.5 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      className="w-full flex items-center gap-2.5 px-1 py-1.5 max-lg:min-h-[44px] rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                       style={{ background: "transparent" }}
                       type="button"
                     >
@@ -440,31 +475,53 @@ export default function CalendarPage() {
           </div>
 
           <div className="card">
-            <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: "0 0 8px" }}>Up next</h2>
-            {upcoming.length === 0 ? (
+            <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: upNextExpanded ? "0 0 8px" : 0 }}>
+              <button
+                onClick={toggleUpNext}
+                aria-expanded={upNextExpanded}
+                className="w-full flex items-center gap-1.5 max-lg:min-h-[44px] text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                type="button"
+              >
+                <span className="flex-1 truncate">Up next</span>
+                <ChevronRight
+                  size={16}
+                  className={`flex-none transition-transform ${upNextExpanded ? "rotate-90" : ""}`}
+                  style={{ color: "var(--text-muted)" }}
+                  aria-hidden="true"
+                />
+              </button>
+            </h2>
+            {upNextExpanded && (upcoming.length === 0 ? (
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", padding: "4px 0" }}>Nothing scheduled.</p>
             ) : (
-              <ul className="flex flex-col gap-1">
-                {upcoming.map((ev) => (
-                  <li key={ev.id}>
-                    <button
-                      onClick={() => openDetail(ev)}
-                      className="w-full flex items-start gap-2.5 text-left p-1 -mx-1 rounded hover:bg-[var(--hover)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
-                      type="button"
-                    >
-                      <span
-                        className="mt-1.5 h-2 w-2 rounded-full flex-none"
-                        style={{ background: colorOf(ev) }}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate" style={{ fontSize: 13, color: "var(--text)" }}>{ev.title}</span>
-                        <span className="block" style={{ fontSize: 12, color: "var(--text-muted)" }}>{whenLabel(ev)}</span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+              <>
+                <ul className="flex flex-col gap-1">
+                  {upNext.map((ev) => (
+                    <li key={ev.id}>
+                      <button
+                        onClick={() => openDetail(ev)}
+                        className="w-full flex items-start gap-2.5 text-left p-1 -mx-1 rounded hover:bg-[var(--hover)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                        type="button"
+                      >
+                        <span
+                          className="mt-1.5 h-2 w-2 rounded-full flex-none"
+                          style={{ background: colorOf(ev) }}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate" style={{ fontSize: 13, color: "var(--text)" }}>{ev.title}</span>
+                          <span className="block" style={{ fontSize: 12, color: "var(--text-muted)" }}>{whenLabel(ev)}</span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {upNextOverflow > 0 && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "6px 0 0", paddingLeft: 18 }}>
+                    {upNextOverflow} more on the calendar
+                  </p>
+                )}
+              </>
+            ))}
           </div>
 
           <RemindersPanel />
@@ -573,6 +630,34 @@ export default function CalendarPage() {
                   <span className="il-v">{detail.location}</span>
                 </div>
               )}
+              {/* WARP-1874 — the video-call link, as a real anchor and as
+                  its own row, so a remote event reads as joinable rather
+                  than as a place. Re-parsed HERE even though the write
+                  path already refused non-https: this row can come from
+                  an external ICS feed, which no zod schema ever saw. An
+                  unparseable value renders nothing at all. */}
+              {(() => {
+                const link = parseMeetingLink(detail.meetingUrl);
+                if (!link) return null;
+                return (
+                  <div className="ds-ios-line">
+                    <span className="il-ic"><Video size={19} /></span>
+                    <span className="il-l">Video call</span>
+                    <span className="il-v">
+                      <a
+                        href={link.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={link.url}
+                        className="underline underline-offset-2"
+                        style={{ color: "var(--text)" }}
+                      >
+                        {link.label}
+                      </a>
+                    </span>
+                  </div>
+                );
+              })()}
               <div className="ds-ios-line">
                 <span className="il-ic"><CalendarIcon size={19} /></span>
                 <span className="il-l">Calendar</span>

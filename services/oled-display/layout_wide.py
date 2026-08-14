@@ -319,16 +319,47 @@ def render_qr(payload: str, card: int = QR_CARD,
     return img, module_px
 
 
+def _render_rail_pager(draw, cx: int, y: int, faces: int, active: int) -> None:
+    """Two dots in the rail's empty top strip: the rail has another face.
+
+    The debug entry point is deliberately unlabelled because operators are
+    told where it is. This one is the opposite — it is for a visitor holding a
+    phone, who has no reason to suspect a status panel is tappable — so it
+    needs a visible affordance. Dots, because they are the one "there is more
+    here" signal that needs no words and no room.
+
+    It goes ABOVE the card, in the 24px of rail that was already empty. The
+    text block below is anchored to the safe area's bottom and the card fills
+    every pixel between the two, so anything added down there comes straight
+    out of the QR's edge — and the QR's scan distance is the tightest budget
+    on this panel.
+    """
+    d = _d()
+    r, gap = 3, 14
+    x0 = cx - ((faces - 1) * gap) // 2
+    for i in range(faces):
+        x = x0 + i * gap
+        draw.ellipse([x - r, y - r, x + r, y + r],
+                     fill=d.V3_ACCENT if i == active else d.V3_LABEL4)
+
+
 def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
                 payload: str, caption: str, headline: str,
-                fallback: str, ecc: str = "M") -> None:
-    """The fixed right-hand action rail: QR card + caption + typed fallback."""
+                fallback: str, ecc: str = "M",
+                faces: int = 0, face_index: int = 0) -> None:
+    """The fixed right-hand action rail: QR card + caption + typed fallback.
+
+    `faces` > 1 draws the pager dots; 0 or 1 leaves the top strip empty, which
+    is what the screens with a single, non-tappable rail want.
+    """
     d = _d()
     g = geom()
     draw.rectangle([g.rail_x, 0, d.WIDTH, d.HEIGHT], fill=d.V3_PANEL)
     draw.rectangle([g.rail_x, 0, g.rail_x, d.HEIGHT], fill=d.V3_SEP)
 
     cx = g.rail_x + g.rail_w // 2
+    if faces > 1:
+        _render_rail_pager(draw, cx, g.top + 12, faces, face_index)
     # Everything in the rail is centred, so an over-wide string spills out
     # BOTH sides of it. The fallback is a hostname, and hostnames vary in
     # length by 3x — clip all three to the rail rather than trusting them.
@@ -397,6 +428,34 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
 # ---------------------------------------------------------------------------
 # Chrome + foot rails
 # ---------------------------------------------------------------------------
+# WARP-1784 / WARP-1801 — the top-left brand lockup, as a hit box.
+#
+# It is the way INTO the debug screen (from LIVE) and the way OUT of it, and
+# those two have to be the SAME span. WARP-1784 widened the way in to the whole
+# lockup, because the droplet mark is the element up here that reads as a
+# button and is what people actually aim at. The way out was left as the 74px
+# "‹ BACK" chip alone — so 170 of the 256px a user had just been taught to tap
+# did nothing on the debug screen, and a miss is not even a visible no-op:
+# there is no auto-cycle off DEBUG and the touchscreen cannot type, so that
+# chip was the only exit from a screen people reach precisely when something
+# is already wrong.
+#
+# Sharing one definition is the fix, not a tidy-up: two hardcoded spans is
+# exactly how the gap opened, twice (WARP-1641's x=124, then WARP-1644's
+# g.left + 96). Anchoring to g.left keeps a future inset change from
+# reopening it.
+LOCKUP_W, LOCKUP_H = 256, 46
+
+
+def _lockup_region(disp, name: str, action) -> None:
+    """Register the brand-lockup hit box under `name`, firing `action`."""
+    d = _d()
+    g = geom()
+    with disp._touch_regions_lock:
+        disp._touch_regions.append(
+            d.TouchRegion(name, g.left, g.top, LOCKUP_W, LOCKUP_H, action))
+
+
 def _render_chrome(disp, draw, now, state: str) -> None:
     d = _d()
     g = geom()
@@ -405,15 +464,21 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     d._v3_text(draw, "DROPLET", g.left + 30, g.top + 16,
                font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL3, tracking=2)
-    # The device label doubles as the way into the DEBUG/recovery screen.
-    # Deliberately a small, unlabelled target rather than a visible button:
-    # the LIVE screen is what belongs on a rack front, and the people who need
-    # the recovery path are the people who have been told where it is.
+    # The top-left brand lockup doubles as the way into the DEBUG/recovery
+    # screen. Deliberately unlabelled rather than a visible button: the LIVE
+    # screen is what belongs on a rack front, and the people who need the
+    # recovery path are the people who have been told where it is.
     d._v3_text(draw, "WARP LAB · MINI-RACK", g.left + 104, g.top + 16,
                font=d._get_font(9), fill=d.V3_LABEL4, tracking=1.2)
-    with disp._touch_regions_lock:
-        disp._touch_regions.append(
-            d.TouchRegion("debug_enter", g.left + 96, g.top, 160, 46, disp._go_debug))
+    # WARP-1784 — the target is the WHOLE lockup: mark, wordmark and device
+    # label. It used to start 96px in, at the label alone, which left the
+    # droplet mark in a dead zone — and the mark is the one element up here
+    # that reads as a button, so it is what people actually aim at.
+    #
+    # Unlabelled is the design intent. Smaller than the thing you aim at is
+    # not. WARP-1801 moved the span into _lockup_region so the way out of the
+    # debug screen is the same physical place as the way in.
+    _lockup_region(disp, "debug_enter", disp._go_debug)
 
     label, fill, ink = _pill_style(state)
     pf = d._get_font(10, weight="bold")
@@ -700,15 +765,38 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
     _cell_netstore(disp, draw, v)
     _render_foot(disp, draw, v)
 
-    host = str(v.get("public_host") or v.get("hostname") or "droplet")
-    render_rail(disp, draw, img,
-                payload=f"https://{host}/dashboard",
-                caption="SCAN TO OPEN",
-                headline="Dashboard",
-                fallback=host)
+    render_rail(disp, draw, img, **_rail_content(disp, v))
 
     _bind_cell_regions(disp)
     return img
+
+
+def _rail_content(disp, v: dict) -> dict:
+    """Which QR the rail is showing, and the three lines under it (WARP-1782).
+
+    The Wi-Fi face deliberately does NOT put the passphrase in the fallback
+    slot, even though that slot exists precisely so the typed path never
+    disappears. The passphrase is the one string on this panel where the typed
+    path is the threat: a QR has to be scanned from ~25cm, text can be read
+    across the room. So the slot carries the way back instead, and the SSID —
+    the fact a visitor actually needs to confirm — takes the headline.
+
+    A box with no scannable Wi-Fi payload reports ONE face, so the pager does
+    not advertise a flip that would go nowhere.
+    """
+    d = _d()
+    host = str(v.get("public_host") or v.get("hostname") or "droplet")
+    wifi_payload = disp.wifi_qr_payload()
+    faces = 2 if (d.RAIL_WIFI_QR and wifi_payload) else 1
+
+    if faces == 1 or disp.rail_face() != "wifi":
+        return dict(payload=f"https://{host}/dashboard",
+                    caption="SCAN TO OPEN", headline="Dashboard",
+                    fallback=host, faces=faces, face_index=0)
+
+    ssid = str((v.get("wifi") or {}).get("ssid") or "Wi-Fi")
+    return dict(payload=wifi_payload, caption="JOIN WI-FI", headline=ssid,
+                fallback="TAP FOR DASHBOARD", faces=faces, face_index=1)
 
 
 def _bind_cell_regions(disp) -> None:
@@ -726,8 +814,11 @@ def _bind_cell_regions(disp) -> None:
             disp._touch_regions.append(d.TouchRegion(
                 name, x, g.band_b_top, w, g.band_b_bot - g.band_b_top,
                 lambda: None))
+        # WARP-1782: the whole rail is the target, not just the card — you aim
+        # at a QR by putting a finger on it, and the card is the part you are
+        # least likely to want a fingerprint on.
         disp._touch_regions.append(d.TouchRegion(
-            "rail_qr", g.rail_x, 0, g.rail_w, d.HEIGHT, lambda: None))
+            "rail_qr", g.rail_x, 0, g.rail_w, d.HEIGHT, disp._tap_rail_qr))
 
 
 # ---------------------------------------------------------------------------
@@ -858,10 +949,10 @@ def _back_button(disp, draw) -> None:
     d._v3_text(draw, "‹ BACK", x + w // 2, y + 5,
                font=d._get_font(10, weight="bold"), fill=d.V3_LABEL2,
                anchor="ma", tracking=1)
-    with disp._touch_regions_lock:
-        disp._touch_regions.append(
-            d.TouchRegion("debug_back", x - 6, y - 6, w + 12, h + 24,
-                          disp._go_home))
+    # WARP-1801 — the hit box is the whole lockup, not just this chip. The chip
+    # stays as the affordance; what changes is how much of the corner accepts
+    # the tap. See _lockup_region for why the two must be the same span.
+    _lockup_region(disp, "debug_back", disp._go_home)
 
 
 def render_claim(disp, code: str, setup_url: str,

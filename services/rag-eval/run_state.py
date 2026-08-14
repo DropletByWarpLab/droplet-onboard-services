@@ -55,6 +55,12 @@ class RunStatus(str, Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    # WARP-1868: the scheduled slot fired, the corpus gate found nothing had
+    # changed, and no GPU work happened. Deliberately its own state rather
+    # than a SUCCEEDED with zero metrics (which would poison the baselines)
+    # or an absence (which reads as a missed slot or a crashed container).
+    # A skip is a decision, and an operator should be able to see it taken.
+    SKIPPED = "skipped"
     UNKNOWN = "unknown"
 
 

@@ -17,7 +17,7 @@
  * data via SWRConfig + a mocked fetchApDevices).
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { CoverageExtendersPanel } from "../CoverageExtendersPanel";
 import type { ApDeviceInfo } from "@/lib/types";
@@ -26,6 +26,19 @@ vi.mock("@/lib/api", () => ({
   fetchApDevices: vi.fn(),
   approveApDevice: vi.fn(),
   decommissionApDevice: vi.fn(),
+  // WARP-1712: the panel also renders live AP radio detail + the shared AP
+  // Wi-Fi / band-steering controls. Honest "nothing to show" defaults keep
+  // these vendor-label assertions focused on the card itself.
+  fetchApWirelessDetail: vi.fn().mockResolvedValue({ supported: false, radios: [] }),
+  fetchApWifi: vi.fn().mockResolvedValue({
+    supported: false, ssid: null, fiveGhzSsid: null, key: null,
+    encryption: null, bandSteering: null, apCount: 0, inSync: true,
+  }),
+  setApWifi: vi.fn(),
+  fetchBandSteering: vi.fn().mockResolvedValue({ supported: false, enabled: false }),
+  setBandSteering: vi.fn(),
+  fetchNetworkOperation: vi.fn(),
+  confirmNetworkCommand: vi.fn(),
 }));
 
 import { fetchApDevices } from "@/lib/api";
@@ -113,8 +126,14 @@ describe("CoverageExtendersPanel — vendor labelling (ADR-024 Phase 5)", () => 
     expect(screen.getByText("TP-Link")).toBeInTheDocument();
     expect(screen.getByText("Ubiquiti")).toBeInTheDocument();
     // Single-list IA (ADR-024 §4): no per-vendor section headings split
-    // the list. Only the panel's own h2 exists.
-    expect(screen.getAllByRole("heading")).toHaveLength(1);
+    // the list. Asserted INSIDE the list region — WARP-1712 added the shared
+    // AP Wi-Fi / band-steering control cards after it, and each of those
+    // carries its own h3. Those sit below the list rather than partitioning
+    // it, which is exactly what this invariant permits.
+    const list = screen.getByLabelText("Coverage extenders");
+    expect(within(list).queryAllByRole("heading")).toHaveLength(0);
+    // And the panel still has exactly one h2 of its own.
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
   });
 
   it("derives the label from backend when vendor is null (DROPLET_IMAGE → Droplet)", async () => {

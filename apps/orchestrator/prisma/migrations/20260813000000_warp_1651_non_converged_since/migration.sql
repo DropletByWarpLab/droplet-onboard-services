@@ -1,0 +1,17 @@
+-- WARP-1651: bound the department re-verify state with a DURABLE clock.
+--
+-- WARP-1557 escalated a non-converging department after N consecutive
+-- reconciler ticks, counted in a module-level in-memory Map. Every
+-- orchestrator restart cleared it, so on a box restarting more often than the
+-- threshold — a deploy, a reboot, an OOM, or the very infra instability that
+-- produced the 5xx in the first place — the demotion never fired and the
+-- dashboard showed "Setting up…" with no error, indefinitely.
+--
+-- `updatedAt` cannot substitute for this: `provisionDepartment` writes
+-- `state = 'provisioning'` at entry on EVERY retry, so the row's `updatedAt`
+-- is refreshed each tick and never ages.
+--
+-- `nonConvergedSince` is stamped on the FIRST non-converged tick (not once
+-- per tick) and cleared the moment the row converges, so it costs one write
+-- per failure episode rather than one per row per tick.
+ALTER TABLE "Department" ADD COLUMN "nonConvergedSince" TIMESTAMP(3);

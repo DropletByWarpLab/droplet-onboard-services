@@ -6,8 +6,9 @@
  * dialog built on the WARP-289 `<Dialog>` primitive. The dialog hosts
  * every nav destination NOT in the bottom 5 plus the theme toggle and
  * sign-out — so on phone/tablet Settings / Users / Cameras / Network /
- * Events / Remote Access / Knowledge / Context / Calendar are all
- * reachable through a single tap target.
+ * Events / Remote Access / Calendar are all reachable through a single
+ * tap target. (Knowledge + Context are tucked since WARP-1807 — reachable
+ * from Settings, rendered by no nav surface.)
  *
  * WARP-1554 folded in the Files sub-views: a bottom-tab primary's children
  * must survive into the drawer even though the primary's own row does not,
@@ -189,8 +190,9 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     // Displaced primary items (not in the 5-tab bar):
     expect(within(dialog).getByRole("link", { name: /calendar/i })).toHaveAttribute("href", "/calendar");
     expect(within(dialog).getByRole("link", { name: /projects/i })).toHaveAttribute("href", "/projects");
-    expect(within(dialog).getByRole("link", { name: /knowledge/i })).toHaveAttribute("href", "/knowledge");
-    expect(within(dialog).getByRole("link", { name: /context/i })).toHaveAttribute("href", "/context");
+    // WARP-1807: tucked — reachable from Settings, not nav.
+    expect(within(dialog).queryByRole("link", { name: /knowledge/i })).toBeNull();
+    expect(within(dialog).queryByRole("link", { name: /context/i })).toBeNull();
 
     // Every secondary nav destination:
     expect(within(dialog).getByRole("link", { name: /cameras/i })).toHaveAttribute("href", "/cameras");
@@ -320,6 +322,27 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
       }),
     ];
     expect(themeControls.length).toBeGreaterThan(0);
+  });
+
+  // ── WARP-1787 ────────────────────────────────────────────────────────
+  // Below 720px the drawer is a full-width sheet, so the backdrop strip it
+  // used to be dismissed by is gone — and a phone has no Escape key. The
+  // header Close button is the only way out of a drawer that opens from the
+  // bottom tab bar on EVERY route.
+  it("dismisses the drawer via the header Close button (WARP-1787)", async () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    const close = within(dialog).getByRole("button", { name: /^close$/i });
+    // Same 44px floor the drawer's own rows are held to above.
+    expect(close.className).toMatch(/h-11|h-\[44px\]|min-h-\[44px\]/);
+
+    fireEvent.click(close);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
   });
 
   it("dismisses the drawer via Escape (WARP-289 primitive behaviour)", async () => {

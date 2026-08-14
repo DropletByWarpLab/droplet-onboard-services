@@ -83,6 +83,12 @@ jobs:
       # `services/mcp-server/dist/index.js` as a stdio child against
       # the live Compose DB+ai-gateway. Without these builds the file
       # is missing.
+      # WARP-1874: tools-core imports @droplet/shared-types, whose emitted
+      # require() resolves to ./dist/index.js. The spawned mcp-server child
+      # would start and then die on MODULE_NOT_FOUND without this.
+      - name: Build @droplet/shared-types
+        run: npm run -w @droplet/shared-types build
+
       - name: Build @droplet/tools-core
         run: npm run -w @droplet/tools-core build
 

@@ -40,12 +40,15 @@ export function MaintenanceCards() {
     <>
       <div className="card">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-surface-secondary text-label-tertiary">
+          <div
+            className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+            style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+          >
             <HardDrive size={18} aria-hidden="true" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="type-headline text-label-primary">Firmware</h3>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <h3 className="type-headline" style={{ color: "var(--text)" }}>Firmware</h3>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               Router firmware isn&apos;t managed from this page. On the
               all-in-one model it ships with appliance updates; a dedicated
               edge router is updated by your installer&apos;s router tooling.
@@ -56,12 +59,15 @@ export function MaintenanceCards() {
 
       <div className="card">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-surface-secondary text-label-tertiary">
+          <div
+            className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+            style={{ background: "var(--card-inner)", color: "var(--text-muted)" }}
+          >
             <RotateCcw size={18} aria-hidden="true" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="type-headline text-label-primary">Factory reset</h3>
-            <p className="type-caption-1 text-label-tertiary mt-0.5">
+            <h3 className="type-headline" style={{ color: "var(--text)" }}>Factory reset</h3>
+            <p className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
               Resetting network config is done from Settings → factory reset for
               the whole appliance.
             </p>

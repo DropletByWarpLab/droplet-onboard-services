@@ -9,6 +9,10 @@ import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import {
+  buildRecordBlock,
+  buildSnapshotsBlock,
+} from "./camera-retention-defaults.js";
 
 const logger = createLogger("frigate-client");
 
@@ -162,6 +166,40 @@ export async function fetchStats(): Promise<Record<string, unknown>> {
   const resp = await fetch(`${FRIGATE_URL}/api/stats`, { signal: timeout() });
   if (!resp.ok) throw new Error(`Frigate stats: ${resp.status}`);
   return resp.json();
+}
+
+/**
+ * WARP-1850 — per-camera recording usage from `GET /api/recordings/storage`.
+ *
+ * Frigate computes this in `storage.py` (`calculate_camera_usages` +
+ * `calculate_camera_bandwidth`) and returns a map:
+ *
+ *   { "<key>": { usage: <MiB|null>, bandwidth: <MiB/hr>, usage_percent?: <%> } }
+ *
+ * Two shape traps, both from the Frigate source rather than the docs:
+ *
+ * 1. **The key is `friendly_name` when a camera defines one**, otherwise the
+ *    camera name (`camera_key = getattr(cam, "friendly_name", None) or camera`).
+ *    Joining these keys to camera names directly will silently drop any
+ *    camera with a friendly name — resolve through the config, don't assume.
+ *
+ * 2. **`usage` is `null`, not 0, for a camera with no segments** — it's a
+ *    SQL `SUM` over zero rows. `0` and "not yet recorded anything" are
+ *    different facts and the UI must not conflate them.
+ *
+ * Returns `{}` when Frigate has no recording stats yet (fresh boot, no
+ * cameras). Throws on transport/HTTP failure so callers can degrade
+ * honestly rather than render zeros.
+ */
+export async function fetchRecordingsStorage(): Promise<
+  Record<string, { usage: number | null; bandwidth: number; usage_percent?: number }>
+> {
+  const resp = await fetch(`${FRIGATE_URL}/api/recordings/storage`, {
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new Error(`Frigate recordings storage: ${resp.status}`);
+  const body = await resp.json();
+  return body && typeof body === "object" ? body : {};
 }
 
 /** Trigger a full Frigate restart. Use sparingly — every camera goes
@@ -338,8 +376,14 @@ export async function setEventRetain(
 /**
  * WARP-1440 — permanently delete a single Frigate event (the event row
  * plus its saved clip + snapshot on disk). Frigate 0.17 exposes
- * DELETE /api/events/<id> for exactly this; it's the per-event sibling
- * of the delete-by-window purge in camera-retention-purge.service.ts.
+ * DELETE /api/events/<id> for exactly this.
+ *
+ * This is the ONLY event-delete route Frigate 0.17 offers besides
+ * `DELETE /api/events/` (bulk, by a body of ids). There is no
+ * delete-by-window form: `DELETE /api/events?before=` returns 405, as
+ * does `DELETE /api/recordings?before=`. WARP-1849 removed the purge
+ * cron that assumed otherwise — age-based expiry is Frigate's own job,
+ * driven by the retention keys in its config.
  *
  * NOT idempotent: a second delete of the same id is a Frigate 404,
  * surfaced as the `event_not_found` sentinel (same sentinel-message
@@ -427,11 +471,37 @@ export async function markReviewViewed(reviewId: string): Promise<void> {
  * summaries (motion %, event count). Useful to colour the timeline
  * scrubber without paying for the full segment list.
  */
+/**
+ * Frigate accepts an IANA zone on the summary endpoint and buckets days
+ * and hours in it. Without one it buckets in UTC, which silently
+ * disagrees with a browser that builds its playback ranges in local time
+ * (WARP-1958). We validate before forwarding: an unknown zone makes
+ * Frigate fall back to UTC, which is precisely the mismatch we are
+ * closing, so a bad value must be rejected here rather than quietly
+ * producing buckets on a different clock than the caller assumes.
+ */
+export function isValidIanaTimezone(tz: unknown): tz is string {
+  if (typeof tz !== "string" || tz.length === 0 || tz.length > 64) return false;
+  // Reject anything that isn't zone-shaped before handing it to Intl —
+  // keeps the failure cheap and the value safe to put in a query string.
+  if (!/^[A-Za-z][A-Za-z0-9+_\-]*(\/[A-Za-z0-9+_\-]+)*$/.test(tz)) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchRecordingsSummary(
   cameraName: string,
+  timezone?: string,
 ): Promise<unknown[]> {
+  const qs = isValidIanaTimezone(timezone)
+    ? `?${new URLSearchParams({ timezone }).toString()}`
+    : "";
   const resp = await fetch(
-    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings/summary`,
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings/summary${qs}`,
     { signal: timeout() },
   );
   if (!resp.ok) throw new Error(`Frigate recordings summary: ${resp.status}`);
@@ -735,8 +805,25 @@ export function buildVodSegmentUrl(
 }
 
 /** Fetch and return the body of an HLS playlist (master or media). */
+/**
+ * Thrown when Frigate has no recordings covering the requested window.
+ *
+ * Frigate answers a VOD request for an empty range with a 404, which is
+ * not an upstream failure — it is the honest answer "nothing was kept
+ * for that time". Collapsing it into a 502 is what made an empty hour
+ * render as a broken camera (WARP-1958), so it gets its own type and the
+ * route maps it to 404.
+ */
+export class NoRecordingsInRangeError extends Error {
+  constructor(message = "No recordings in the requested range") {
+    super(message);
+    this.name = "NoRecordingsInRangeError";
+  }
+}
+
 export async function fetchHlsPlaylist(url: string): Promise<string> {
   const resp = await fetch(url, { signal: timeout(15_000) });
+  if (resp.status === 404) throw new NoRecordingsInRangeError();
   if (!resp.ok) throw new Error(`HLS playlist: ${resp.status}`);
   return resp.text();
 }
@@ -785,7 +872,7 @@ export async function disableRecording(cameraName: string): Promise<void> {
  * that saves a whole config must start from the authored YAML, which
  * round-trips cleanly.
  */
-async function fetchRawConfigYaml(): Promise<string> {
+export async function fetchRawConfigYaml(): Promise<string> {
   const resp = await fetch(`${FRIGATE_URL}/api/config/raw`, { signal: timeout() });
   if (!resp.ok) throw new Error(`Fetch raw config: ${resp.status}`);
   const text = await resp.text();
@@ -799,7 +886,7 @@ async function fetchRawConfigYaml(): Promise<string> {
 }
 
 /** Persist authored YAML and reload Frigate. text/plain so safe_load parses it. */
-async function saveRawConfig(yamlText: string): Promise<Response> {
+export async function saveRawConfig(yamlText: string): Promise<Response> {
   return fetch(`${FRIGATE_URL}/api/config/save?save_option=restart`, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
@@ -838,6 +925,13 @@ export async function addCamera(
   // cameras are preserved. This is the same call the camera-discovery service
   // uses to auto-adopt. requires_restart=1 persists to disk and reloads so the
   // camera actually starts capturing.
+  //
+  // 🔴 `record` MUST carry the retention windows explicitly. This block used
+  // to be `{ enabled: true }`, which inherits `continuous: 0` / `motion: 0`
+  // from Frigate's own schema — the camera then keeps ONLY segments that
+  // overlap an alert or detection, while every surface reports "Recording"
+  // (WARP-1957). See camera-retention-defaults.ts for why the fix is here
+  // and not in docker/frigate/config.yml.
   const resp = await fetch(`${FRIGATE_URL}/api/config/set`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -847,8 +941,8 @@ export async function addCamera(
           [safeName]: {
             ffmpeg: { inputs: [{ path: rtspUrl, roles: ["detect", "record"] }] },
             detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
-            record: { enabled: true },
-            snapshots: { enabled: true },
+            record: buildRecordBlock(),
+            snapshots: buildSnapshotsBlock(),
           },
         },
       },

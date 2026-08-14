@@ -26,6 +26,7 @@ import type {
   InterfaceStatus,
   RouterBoardInfo,
   RouterResources,
+  WirelessRadioSummary,
 } from "../types/network.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -53,10 +54,16 @@ const logger = createLogger("network-service");
 const CACHE_KEYS = {
   overview: "network:overview",
   interfaces: "network:interfaces",
+  ports: "network:ports",
   wireless: "network:wireless",
   leases: "network:leases",
   firewall: "network:firewall",
   system: "network:system",
+  // Radio counts off the access points. Its own key so it can outlive the
+  // overview's 10s TTL — see `cachedApRadios`. Being in this object also
+  // means `invalidateNetworkCache()` already clears it after any network
+  // write, so a Wi-Fi change shows up immediately rather than 30s later.
+  apRadios: "network:ap-radios",
 } as const;
 
 const CACHE_TTL_SHORT = 10; // seconds — status data
@@ -90,10 +97,90 @@ export async function isRouterHealthy(): Promise<boolean> {
 // --- Network overview ---
 
 /**
+ * Supplies the access-point half of the radio rollup (`wirelessRadios`).
+ *
+ * Injected rather than imported so this router-facing service keeps its
+ * current dependency set — the AP fan-out needs a `PrismaClient`, and the one
+ * caller (`registerStatusRoutes`) already holds one. Omit it and the overview
+ * simply carries no `wirelessRadios`, which consumers must read as "unknown",
+ * not "zero".
+ */
+export type ApRadioSource = () => Promise<{
+  apCount: number;
+  reporting: number;
+  radioCount: number;
+  activeRadioCount: number;
+}>;
+
+/**
+ * Read the AP rollup through its own LONG-TTL cache.
+ *
+ * The overview's own 10s TTL matches the dashboard's 10s poll of
+ * `/api/network/status`, so almost every poll is a cache miss — putting the
+ * AP fan-out on that path unguarded would dial each access point's rpcd every
+ * ten seconds for as long as anyone has the Network page open. Radio counts
+ * change only when someone reconfigures a radio or one drops, and a write
+ * flushes this key via `invalidateNetworkCache()` anyway, so the slower TTL
+ * costs no freshness that matters and cuts the standing load on a small
+ * embedded AP by two thirds.
+ *
+ * Returns `undefined` — "unknown" — on any failure, never a zero count.
+ */
+async function cachedApRadios(
+  apRadios: ApRadioSource | undefined,
+): Promise<Awaited<ReturnType<ApRadioSource>> | undefined> {
+  if (!apRadios) return undefined;
+  try {
+    const cached = await cacheGet<Awaited<ReturnType<ApRadioSource>>>(
+      CACHE_KEYS.apRadios,
+    );
+    if (cached) return cached;
+    const fresh = await apRadios();
+    await cacheSet(CACHE_KEYS.apRadios, fresh, CACHE_TTL_LONG);
+    return fresh;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fold the router's own radios together with the access points' into the
+ * whole-fabric count the Network summary shows.
+ *
+ * The router side reads netifd's wireless status, where each key is a radio.
+ * A radio counts as on the air when netifd says `up` — `disabled` alone isn't
+ * enough, because a radio can be enabled in uci and still be down.
+ *
+ * Exported for its own unit tests: this is the arithmetic that used to be an
+ * inline `Object.keys(...).length` in the dashboard, and that inline version
+ * is precisely what shipped "0 radios" over a live network.
+ */
+export function summariseRadios(
+  wireless: WirelessStatus | undefined,
+  ap: Awaited<ReturnType<ApRadioSource>> | undefined,
+): WirelessRadioSummary {
+  const radios = Object.values(wireless ?? {});
+  const router = radios.length;
+  const routerActive = radios.filter((r) => r?.up === true).length;
+  return {
+    router,
+    ap: ap?.radioCount ?? 0,
+    total: router + (ap?.radioCount ?? 0),
+    active: routerActive + (ap?.activeRadioCount ?? 0),
+    // No AP data at all (the read failed) is reported as nothing outstanding
+    // rather than a guessed count — `apCount - reporting` is only meaningful
+    // when we actually got an answer about how many APs there are.
+    apsNotReporting: ap ? Math.max(0, ap.apCount - ap.reporting) : 0,
+  };
+}
+
+/**
  * WARP-39: returns a typed Result. Callers MUST handle both arms — no more
  * silent empty defaults masking real failures.
  */
-export async function getNetworkOverview(): Promise<Result<NetworkOverview, RouterError>> {
+export async function getNetworkOverview(
+  apRadios?: ApRadioSource,
+): Promise<Result<NetworkOverview, RouterError>> {
   const cached = await cacheGet<NetworkOverview>(CACHE_KEYS.overview);
   if (cached) return ok(cached);
 
@@ -111,13 +198,20 @@ export async function getNetworkOverview(): Promise<Result<NetworkOverview, Rout
     // the derivation regardless: a probe hiccup degrades to "not connected", it
     // never throws the whole overview into the 503 arm (a genuine *fetch* failure
     // still does, below — reachability derivation must not mask real summary faults).
-    const [interfaces, wireless, systemInfo, leases, routerConnected] =
+    // The AP rollup rides along in the same fan-out so it costs no extra
+    // round-trip latency, and `cachedApRadios` swallows its own errors for the
+    // same reason the reachability probe above is guarded: the access points
+    // are a DIFFERENT subsystem, and their trouble must not throw the router's
+    // summary into the 503 arm. A failure degrades to `undefined` = "unknown",
+    // never to a zero count that would read as "this household has no Wi-Fi".
+    const [interfaces, wireless, systemInfo, leases, routerConnected, apSummary] =
       await Promise.all([
         openwrt.fetchInterfaces(),
         openwrt.fetchWirelessStatus(),
         openwrt.fetchSystemInfo(),
         openwrt.fetchDhcpLeases(),
         openwrt.healthCheck().catch(() => false),
+        cachedApRadios(apRadios),
       ]);
 
     const overview: NetworkOverview = {
@@ -126,6 +220,7 @@ export async function getNetworkOverview(): Promise<Result<NetworkOverview, Rout
       system: systemInfo,
       connectedDeviceCount: leases.length,
       routerConnected,
+      wirelessRadios: summariseRadios(wireless, apSummary),
     };
 
     await cacheSet(CACHE_KEYS.overview, overview, CACHE_TTL_SHORT);
@@ -151,6 +246,39 @@ export async function getAllInterfaces(): Promise<openwrt.NetworkInterfaceRow[]>
   const rows = await openwrt.fetchAllInterfaces();
   await cacheSet(CACHE_KEYS.interfaces, rows, CACHE_TTL_SHORT);
   return rows;
+}
+
+/**
+ * The router's physical port map (WARP-1866) — the jacks behind the logical
+ * interfaces above. Cached on the SHORT TTL: a cable being plugged in is the
+ * one thing this panel exists to show, and it must not lag behind the switch
+ * port map (10s) that sits directly under it on the page.
+ */
+export async function getRouterPorts(): Promise<openwrt.RouterPortMap> {
+  const cached = await cacheGet<openwrt.RouterPortMap>(CACHE_KEYS.ports);
+  if (cached) return cached;
+
+  const map = await openwrt.fetchRouterPorts();
+  await cacheSet(CACHE_KEYS.ports, map, CACHE_TTL_SHORT);
+  return map;
+}
+
+/**
+ * WARP-1907 — enable/disable a physical router jack.
+ *
+ * Invalidates the whole network cache, not just the port key: a jack going down
+ * changes the interface table (its network loses a member) and the connected-
+ * device list right along with the port map, and leaving those warm would show
+ * the user a port that just went dark still carrying devices.
+ */
+export async function setRouterPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setRouterPortEnabled(port, enabled, force);
+  await invalidateNetworkCache();
+  return result;
 }
 
 // --- Interface write path (KAN-10) ---

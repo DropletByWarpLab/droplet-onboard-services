@@ -56,6 +56,13 @@ jobs:
       - name: Build @droplet/fips-selftest
         run: npm run -w @droplet/fips-selftest build
 
+      # WARP-1874: tools-core imports @droplet/shared-types. Its package.json
+      # points `types` at ./src/index.ts (so a typecheck resolves from source)
+      # but `exports["."].require` at ./dist/index.js — so tools-core's emitted
+      # output needs the built dist. Must run before the tools-core build.
+      - name: Build @droplet/shared-types
+        run: npm run -w @droplet/shared-types build
+
       - name: Build @droplet/tools-core
         run: npm run -w @droplet/tools-core build
 

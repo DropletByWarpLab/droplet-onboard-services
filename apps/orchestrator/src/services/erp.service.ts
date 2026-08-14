@@ -2,15 +2,24 @@
  * erp.service — the ERP read + write-request control plane (WARP-1137,
  * EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF §11, §13, §14).
  *
- * The orchestrator half of the walking skeleton: the dashboard's `/api/erp/*`
- * calls land here, this calls the `erp-connector`, the connector (in this
- * DB-independent slice) rejects every live SQL path with `ConnectorBlockedError`.
+ * The orchestrator half: the dashboard's `/api/erp/*` calls land here and this
+ * calls the `erp-connector`. The two tracks are in different states, and the
+ * difference is worth knowing before reading further:
  *
- * HONEST DEGRADATION (WARP-1137 scope boundary): a blocked connector NEVER
- * fabricates PHI. Reads return `{ connected: false, reason: "ERP_NOT_CONNECTED",
- * <empty> }`; a write that can't apply is recorded `FAILED`, never a fake
- * `APPLIED`. The live SQL Anywhere path is a later, copy-DB-gated ticket
- * (WARP-1095+); wiring it only replaces the connector's stubbed methods.
+ *  • "eaglesoft-api" (Patterson REST) — LIVE. Given a configured row (encrypted
+ *    credentials, a discovered route map, a CA to trust), reads reach a real
+ *    box and return real rows. Proven end to end in erp-api-live.test.ts.
+ *  • "eaglesoft" (direct SAP SQL Anywhere) — still entirely stubbed. Every
+ *    method throws `ConnectorBlockedError` because no driver exists yet
+ *    (WARP-1095+, gated on the SAP client + a copy DB).
+ *
+ * HONEST DEGRADATION: a blocked connector NEVER fabricates PHI. Reads return
+ * `{ connected: false, reason: "ERP_NOT_CONNECTED", <empty> }`; a write that
+ * can't apply is recorded `FAILED`, never a fake `APPLIED`. That path now
+ * covers the REST track's real failure modes too — missing or undecryptable
+ * credentials, an undiscovered route map, a certificate that doesn't verify,
+ * an unreachable box — each of which lands in exactly the same honest state
+ * rather than a half-working connection.
  *
  * HARD RULES honored here:
  *  • Explicit-enum write-request lifecycle — every transition is an explicit
@@ -26,12 +35,19 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   ConnectorBlockedError,
   WRITE_COMMANDS,
+  exportProviders,
   scheduleDayBounds,
   type Connector,
 } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
 import { ErpError } from "./erp-error.js";
-import { connectorForProvider, EAGLESOFT_PROVIDER } from "./erp-provider.js";
+import {
+  apiMaterialFromRow,
+  connectorForProvider,
+  loadOperatorExportProfiles,
+  EAGLESOFT_API_PROVIDER,
+  EAGLESOFT_PROVIDER,
+} from "./erp-provider.js";
 
 const logger = createLogger("erp-service");
 
@@ -134,17 +150,20 @@ export interface ErpServiceDeps {
 
 function defaultConnectorFor(conn: ConnRow): Connector {
   // Dual-track: build the connector for the row's persisted provider
-  // ("eaglesoft" → SQL Anywhere, "eaglesoft-api" → Patterson REST API). NOTE:
-  // eaglesoftRow() below currently resolves only the SQL "eaglesoft" row, so the
-  // "eaglesoft-api" branch is exercised by the factory tests today and reached
-  // from this call site once row-resolution is generalized to the API provider
-  // (a follow-up, with the live API read path). The pointer-only secretRef is
-  // dereferenced inside the connector (brief §7.4).
+  // ("eaglesoft" → SQL Anywhere, "eaglesoft-api" → Patterson REST API).
+  //
+  // `apiMaterialFromRow` decrypts the stored credentials, validates the stored
+  // route map, and hands over the CA to trust. Any of those being absent or
+  // undecryptable resolves to undefined, which leaves the connector blocked and
+  // routes to the honest ERP_NOT_CONNECTED path — never a half-configured
+  // connection that authenticates with empty strings.
   return connectorForProvider({
     provider: conn.provider,
     host: conn.host ?? "",
+    port: conn.port ?? undefined,
     databaseName: conn.databaseName ?? undefined,
     secretRef: conn.secretRef ?? undefined,
+    ...apiMaterialFromRow(conn),
   });
 }
 
@@ -174,10 +193,51 @@ export function createErpService(
 ): ErpService {
   const connectorFor = deps.connectorFor ?? defaultConnectorFor;
 
-  async function eaglesoftRow(): Promise<ConnRow | null> {
+  function rowForProvider(provider: string): Promise<ConnRow | null> {
     return prisma.integrationConnection.findFirst({
-      where: { provider: EAGLESOFT_PROVIDER },
+      where: { provider },
     }) as Promise<ConnRow | null>;
+  }
+
+  /**
+   * The ERP connection this service acts on, across BOTH tracks.
+   *
+   * Two single-provider lookups rather than one `provider: { in: [...] }`
+   * query, because the shape stays a plain string — which keeps this readable
+   * and keeps the query trivially indexable on `@@index([provider, status])`.
+   *
+   * Precedence: a CONNECTED row wins. Otherwise SQL first, then API. That
+   * ordering means a deployment with only one row resolves exactly as it did
+   * before this existed, while a box that has since been wired up on the REST
+   * track is no longer shadowed by a stale, permanently-blocked SQL row.
+   */
+  async function eaglesoftRow(): Promise<ConnRow | null> {
+    const sql = await rowForProvider(EAGLESOFT_PROVIDER);
+    if (sql?.status === "CONNECTED") return sql;
+    const api = await rowForProvider(EAGLESOFT_API_PROVIDER);
+    if (api?.status === "CONNECTED") return api;
+    // WARP-1964 — the export-drop track. Its provider keys are `<vendor>-export`
+    // and the vendor set is open (an operator profile can add one), so this is
+    // the one lookup that cannot be a single-provider equality: it is scoped to
+    // the enumerated key list, which keeps `@@index([provider, status])` usable.
+    const drop = await rowForExportProviders();
+    if (drop?.status === "CONNECTED") return drop;
+    // No connected row anywhere: fall back to whichever exists, preserving the
+    // historical API-before-SQL ordering and appending export-drop after it.
+    return api ?? drop ?? sql;
+  }
+
+  /** The export-drop connection row, preferring a CONNECTED one. */
+  async function rowForExportProviders(): Promise<ConnRow | null> {
+    const providers = exportProviders(loadOperatorExportProfiles().profiles);
+    if (providers.length === 0) return null;
+    const connected = (await prisma.integrationConnection.findFirst({
+      where: { provider: { in: providers }, status: "CONNECTED" },
+    })) as ConnRow | null;
+    if (connected) return connected;
+    return (await prisma.integrationConnection.findFirst({
+      where: { provider: { in: providers } },
+    })) as ConnRow | null;
   }
 
   function assertCanReadPhi(user: ErpUser): void {
@@ -243,6 +303,17 @@ export function createErpService(
     if (!conn) return { connected: false, reason: "NOT_CONFIGURED", rows: [] };
     const connector = connectorFor(conn);
     try {
+      // Establish the session BEFORE reading. The REST track runs the
+      // Authenticate handshake here and pins the route-map fingerprint; the SQL
+      // track opens its pooled connection. Omitting this was invisible while
+      // every track was stubbed — the read threw "blocked" either way — but a
+      // box that is actually reachable needs a session first.
+      //
+      // One handshake per read, because the connector is built and closed per
+      // call. Correct, and honest about cost: if that round-trip shows up under
+      // real load, the fix is a pooled/cached session in the connector, not a
+      // token cached out here where nothing would notice it expiring.
+      await connector.connect();
       const rows = await connector.runRead(name, params);
       return { connected: true, rows };
     } catch (err) {
@@ -377,6 +448,9 @@ export function createErpService(
       let status: "APPLIED" | "FAILED" = "FAILED";
       let discrepancy: Prisma.InputJsonValue | null = null;
       try {
+        // Same reason as the read path: the connector needs a live session
+        // before it can apply anything.
+        await connector.connect();
         await connector.applyWrite(
           existing.command,
           existing.params as Record<string, unknown>,

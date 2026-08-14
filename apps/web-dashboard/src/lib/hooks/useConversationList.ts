@@ -11,6 +11,7 @@ import {
   renameConversation,
   deleteConversation,
   fetchConversation,
+  setConversationPinned,
   setConversationProject,
   type ConversationSummary,
 } from "@/lib/api";
@@ -45,6 +46,9 @@ export function useConversationList(): {
   /** WARP-845 — move a chat into (or out of, with null) a project.
    *  Optimistic; reverts on server failure. */
   moveToProject: (id: string, projectId: string | null) => Promise<void>;
+  /** WARP-1917 — pin (true) / unpin (false) a chat. Optimistic; reverts
+   *  on server failure. */
+  togglePin: (id: string, pinned: boolean) => Promise<void>;
   /** WARP-845 — local-only mirror of the FK SET NULL after a project is
    *  deleted server-side: its chats fall back to the date groups without
    *  a refetch. */
@@ -181,6 +185,39 @@ export function useConversationList(): {
     [],
   );
 
+  const togglePin = useCallback(async (id: string, pinned: boolean) => {
+    const prev = flatRef.current.find((c) => c.id === id);
+    const prevPinned = prev?.pinned ?? false;
+    const prevPinnedAt = prev?.pinnedAt ?? null;
+    // Optimistic: stamp pinnedAt locally so the Pinned section orders the
+    // fresh pin first immediately; the server's own stamp replaces it on
+    // the next list fetch.
+    setFlat((cur) =>
+      cur.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              pinned,
+              pinnedAt: pinned ? new Date().toISOString() : null,
+            }
+          : c,
+      ),
+    );
+    try {
+      await setConversationPinned(id, pinned);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setFlat((cur) =>
+        cur.map((c) =>
+          c.id === id
+            ? { ...c, pinned: prevPinned, pinnedAt: prevPinnedAt }
+            : c,
+        ),
+      );
+      setError(translateError(err, "chat"));
+    }
+  }, []);
+
   const clearProjectLocally = useCallback((projectId: string) => {
     setFlat((cur) =>
       cur.map((c) => (c.projectId === projectId ? { ...c, projectId: null } : c)),
@@ -237,6 +274,7 @@ export function useConversationList(): {
     rename,
     remove,
     moveToProject,
+    togglePin,
     clearProjectLocally,
   };
 }

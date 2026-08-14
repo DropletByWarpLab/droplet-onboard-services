@@ -31,14 +31,39 @@ export interface GpuStat {
   tempC: number | null;
 }
 
+/**
+ * How a reported volume relates to camera footage. The operator's question
+ * is "how much room do my recordings have", and only ONE of Frigate's
+ * mounts answers it — summing them all answers nothing.
+ */
+export type StorageRole = "recordings" | "cache" | "shm" | "other";
+
 export interface StorageStat {
   /** Mount point on Frigate's filesystem (e.g. /media/frigate/recordings). */
   path: string;
+  /** All three are BYTES. Frigate reports MiB; we convert once, here. */
   totalBytes: number;
   usedBytes: number;
   freeBytes: number;
-  /** "recordings" | "events" | "cache" | "tmpfs" — Frigate's tag for the volume. */
+  /** Filesystem type as Frigate reports it (ext4, overlay, tmpfs…). */
   mountType: string;
+  /**
+   * What this volume is FOR.
+   *
+   * Frigate reports `/media/frigate/recordings` and `/media/frigate/clips`
+   * separately even though they are the SAME filesystem, plus `/tmp/cache`
+   * (which on a normal box is the boot SSD) and `/dev/shm`. Summing them
+   * double-counts the recordings drive and folds in two volumes that have
+   * nothing to do with footage.
+   */
+  role: StorageRole;
+  /**
+   * True when another entry reports the same underlying filesystem and was
+   * chosen as the representative one. Kept rather than dropped so the
+   * diagnostics page can still show every mount Frigate knows about, while
+   * anything that aggregates can skip these.
+   */
+  duplicateOf: string | null;
 }
 
 export interface CameraSystemStatus {
@@ -64,6 +89,129 @@ export interface CameraSystemStatus {
   /** Aggregate CPU usage % of all Frigate processes. Sum across the
    *  cpu_usages map. */
   cpuPct: number;
+}
+
+/** Frigate reports every storage figure in MiB. Convert once, here. */
+const MIB = 1024 * 1024;
+
+/** Frigate's own tag for the volume holding recordings. */
+const RECORDINGS_HINT = "recordings";
+
+function classifyRole(path: string): StorageRole {
+  if (path.includes(RECORDINGS_HINT) || path.includes("clips")) return "recordings";
+  if (path.includes("/dev/shm")) return "shm";
+  if (path.includes("cache")) return "cache";
+  return "other";
+}
+
+/**
+ * Normalise `service.storage` into typed, byte-denominated volumes.
+ *
+ * Two shape facts drive this, both measured rather than assumed:
+ *
+ *  - Values are **MiB**. The old code passed them through as bytes, so a
+ *    1.8 TB array would have rendered as "1.8 MB" the moment the key bug
+ *    above was fixed.
+ *  - `/media/frigate/recordings` and `/media/frigate/clips` are the SAME
+ *    filesystem and report identical totals. They are marked as duplicates
+ *    of one representative entry so nothing sums them twice.
+ */
+export function extractStorage(service: Record<string, unknown>): StorageStat[] {
+  const storageMap = (service.storage ?? {}) as Record<string, Record<string, unknown>>;
+
+  const rows = Object.entries(storageMap).map(([path, s]) => {
+    const totalMib = Number(s.total ?? 0);
+    const usedMib = Number(s.used ?? 0);
+    const freeMib = Number(s.free ?? Math.max(0, totalMib - usedMib));
+    return {
+      path,
+      totalBytes: Math.round((Number.isFinite(totalMib) ? totalMib : 0) * MIB),
+      usedBytes: Math.round((Number.isFinite(usedMib) ? usedMib : 0) * MIB),
+      freeBytes: Math.round((Number.isFinite(freeMib) ? freeMib : 0) * MIB),
+      mountType: String(s.mount_type ?? "unknown"),
+      role: classifyRole(path),
+      duplicateOf: null as string | null,
+    };
+  });
+
+  // Same filesystem == same (mountType, total, free). Frigate gives us no
+  // device id, and those three together are a solid proxy: two genuinely
+  // distinct volumes agreeing on all of them would be indistinguishable
+  // for our purposes anyway.
+  //
+  // Which one becomes the representative matters, because it is the entry
+  // the KPI reads. `/media/frigate/recordings` and `/media/frigate/clips`
+  // BOTH classify as role "recordings", so role alone doesn't break the
+  // tie — rank by how well the path answers "where is the footage".
+  const rank = (r: (typeof rows)[number]): number => {
+    if (r.path.includes(RECORDINGS_HINT)) return 0;
+    if (r.role === "recordings") return 1;
+    if (r.role === "cache") return 2;
+    return 3;
+  };
+  const byFs = new Map<string, string>();
+  for (const r of [...rows].sort((a, b) => rank(a) - rank(b))) {
+    const key = `${r.mountType}|${r.totalBytes}|${r.freeBytes}`;
+    const seen = byFs.get(key);
+    if (seen === undefined) byFs.set(key, r.path);
+    else r.duplicateOf = seen;
+  }
+
+  return rows;
+}
+
+/**
+ * WARP-1963 — is the recordings volume actually a separate drive?
+ *
+ * `docker-compose.yml` mounts `${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate`.
+ * Nothing validates the target: if the variable is unset, empty, or points
+ * at a path whose filesystem failed to mount, Docker silently falls back to
+ * the `nvrdata` NAMED VOLUME — which lives on the boot disk — and Frigate
+ * keeps recording there quite happily.
+ *
+ * **That is exactly how this box's 2×2 TB RAID1 sat empty and unmounted for
+ * a month** while `/` climbed to 94%: three `/etc/fstab` entries referenced
+ * UUIDs that no longer existed, every one carrying `nofail`, so boot
+ * succeeded silently and `df` simply never showed them.
+ *
+ * The orchestrator does NOT mount the NVR volume (by design — Frigate owns
+ * the recordings index), so it cannot stat the path. But it doesn't need
+ * to: Frigate reports every mount it can see, and a fallback is visible in
+ * the numbers. `/tmp/cache` is always on the container's own filesystem,
+ * i.e. the boot disk. If the recordings mount reports the SAME total and
+ * free bytes as the cache mount, they are one filesystem — recordings are
+ * on the boot disk.
+ *
+ * Measured on a healthy box: recordings 1 876 558 MiB vs cache 236 716 MiB.
+ * On a fallen-back box those two figures are identical.
+ *
+ * Returns `null` when there is nothing to compare against — "unknown" is
+ * reported as unknown rather than guessed either way.
+ */
+export function recordingsOnBootDisk(storage: StorageStat[]): boolean | null {
+  const rec = storage.find((s) => s.role === "recordings" && !s.duplicateOf);
+  const cache = storage.find((s) => s.role === "cache");
+  if (!rec || !cache) return null;
+  if (rec.totalBytes <= 0 || cache.totalBytes <= 0) return null;
+  return rec.totalBytes === cache.totalBytes && rec.freeBytes === cache.freeBytes;
+}
+
+/**
+ * The one volume the operator actually asked about.
+ *
+ * Returns null rather than guessing when Frigate reports no recordings
+ * mount — a fabricated denominator is worse than an honest "unknown",
+ * because it would make a full drive look roomy.
+ */
+export function recordingsVolume(storage: StorageStat[]): StorageStat | null {
+  const candidates = storage.filter((s) => s.role === "recordings" && !s.duplicateOf);
+  if (candidates.length > 0) {
+    // Prefer the mount literally named "recordings" over "clips".
+    return candidates.find((s) => s.path.includes(RECORDINGS_HINT)) ?? candidates[0];
+  }
+  // Unusual layout: if there is exactly one real volume, it is the one.
+  const real = storage.filter((s) => !s.duplicateOf && s.role !== "shm");
+  return real.length === 1 ? real[0] : null;
 }
 
 export async function getCameraSystemStatus(): Promise<CameraSystemStatus> {
@@ -124,16 +272,15 @@ export async function getCameraSystemStatus(): Promise<CameraSystemStatus> {
   }));
 
   // --- storage ---
-  const storageMap = (stats.storage ?? {}) as Record<string, Record<string, unknown>>;
-  const storage: StorageStat[] = Object.entries(storageMap).map(
-    ([path, s]) => ({
-      path,
-      totalBytes: Number(s.total ?? 0),
-      usedBytes: Number(s.used ?? 0),
-      freeBytes: Number(s.free ?? Math.max(0, Number(s.total ?? 0) - Number(s.used ?? 0))),
-      mountType: String(s.mount_type ?? "unknown"),
-    }),
-  );
+  //
+  // 🔴 Frigate nests this under `service`, NOT at the top level. Reading
+  // `stats.storage` yielded an empty array on every single request, which
+  // is why the Storage KPI read "—" / "No volumes reported" and the
+  // per-mount table never rendered at all (WARP-1960). Confirmed against
+  // the live box: `'storage' in stats` is False, `'storage' in
+  // stats['service']` is True. This file already reads `stats.service`
+  // correctly a few lines up for uptime.
+  const storage = extractStorage(service);
 
   // --- aggregate cpu ---
   // cpu_usages is keyed by process name → { cpu, mem, ... }. Sum the

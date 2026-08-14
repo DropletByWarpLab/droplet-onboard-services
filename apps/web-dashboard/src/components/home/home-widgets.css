@@ -102,7 +102,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
+.droplet-home .w-chat-cap-row .w-chat-iconbtn,
+.droplet-home .w-chat-cap-row .w-chat-send {
+  flex-shrink: 0;
+}
+/* The model name is arbitrary length (e.g. "docker.io/ai/gpt-oss 20B F16") and
+   the row is tight on a phone, so the pill shrinks and the name ellipsises
+   inside it — never wraps out of the capsule. */
 .droplet-home .w-chat-model {
   display: inline-flex;
   align-items: center;
@@ -115,6 +123,19 @@
   font-size: 12px;
   color: var(--text-muted);
   font-family: var(--font-mono);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.droplet-home .w-chat-model .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-chat-model .dot,
+.droplet-home .w-chat-model svg {
+  flex-shrink: 0;
 }
 .droplet-home .w-chat-model .dot {
   width: 6px;
@@ -193,6 +214,134 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- Chat: inline conversation mode (WARP-1803) ----------
+   After the first submit the hero tile becomes a mini chat: header row
+   (Open full chat / New chat), a scrolling thread, and the capsule as the
+   follow-up composer. The thread div carries `.droplet-shell` purely as the
+   chat surface's token/skin scope for ChatMessage. */
+.droplet-home .w-chat--conv {
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 0;
+}
+.droplet-home .w-chat-conv-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.droplet-home .w-chat-conv-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-right: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-chat-conv-title svg {
+  color: var(--brand);
+  flex-shrink: 0;
+}
+.droplet-home .w-chat-conv-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: var(--card-inner);
+  border: 1px solid var(--card-bd);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  transition: border-color 200ms var(--ease), color 200ms var(--ease);
+}
+.droplet-home .w-chat-conv-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  color: var(--text);
+}
+.droplet-home .w-chat-conv-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Neutralize the shell's page-level box styles (droplet-shell.css may be
+   loaded from a visited /chat route in the same session) so the token scope
+   behaves as a plain scroll region inside the tile. */
+.droplet-home .w-chat-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: transparent;
+  border-radius: 12px;
+  scrollbar-width: thin;
+}
+.droplet-home .w-chat-thread-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 2px 6px;
+}
+.droplet-home .w-chat--conv .w-chat-capsule {
+  margin-top: 0;
+}
+/* Mobile single-column board: the tile grows with content there, so bound
+   the thread's viewport instead of flex-sizing it. */
+.droplet-home.dh-mobile .w-chat-thread {
+  flex: none;
+  max-height: min(52vh, 420px);
+}
+
+/* ---------- Chat: compact conversation (WARP-1875) ----------
+   Keyed to the TILE's own inline size (`.bento` is the `bento` query
+   container, home-bento.css), never the viewport: after a layout rearrange
+   two tiles on the same screen can be 820px and 240px wide, and Samantha's
+   report was precisely that the widget kept behaving as if it were still its
+   old size. Below ~460px the desktop chrome — an 80% column cap plus 16px
+   bubble gutters plus a 30px avatar — eats more of the tile than the answer
+   text gets, so the same content reads as "flush against the edges".
+
+   Every selector here is three classes deep on purpose. It overrides
+   `.droplet-shell`-scoped rules that live in chat-indigo.css, a different
+   stylesheet; winning by source order would depend on CSS chunk ordering we
+   don't control, so these win on specificity instead. `ask-ai-reflow.test.tsx`
+   guards that. */
+@container bento (max-width: 460px) {
+  /* An 80% cap reserves ~48px of dead gutter on a 240px tile — space the
+     answer needs more than the layout does. */
+  .droplet-home .w-chat-thread .msg-col {
+    max-width: 100%;
+  }
+  .droplet-home .w-chat-thread .msg {
+    gap: 8px;
+  }
+  .droplet-home .w-chat-thread .msg-ava {
+    width: 24px;
+    height: 24px;
+  }
+  .droplet-home .w-chat-thread .msg-bubble {
+    padding: 10px 12px;
+  }
+  .droplet-home .w-chat--conv .w-chat-thread-inner {
+    gap: 10px;
+  }
+  .droplet-home .w-chat--conv .w-chat-capsule {
+    padding: 8px 8px 8px 12px;
+  }
+  /* Three controls at 12.5px do not fit one row on a narrow tile; wrapping
+     keeps the labels readable instead of hyphenating them inside the pills. */
+  .droplet-home .w-chat--conv .w-chat-conv-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
 }
 
 /* ---------- Calendar ---------- */
@@ -357,6 +506,8 @@
   gap: 10px;
   height: 100%;
 }
+/* Each cell is a <button> that opens the surface it summarises, so it needs
+   the button reset (font/text-align/width) on top of the card styling. */
 .droplet-home .w-stat-cell {
   background: color-mix(in srgb, var(--text) 2.2%, transparent);
   border: 1px solid var(--card-bd);
@@ -366,8 +517,26 @@
   flex-direction: column;
   justify-content: center;
   gap: 1px;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 200ms var(--ease), background 200ms var(--ease);
+}
+.droplet-home .w-stat-cell:hover {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  background: color-mix(in srgb, var(--text) 4.5%, transparent);
+}
+.droplet-home .w-stat-cell:active {
+  transform: scale(0.985);
+}
+@media (prefers-reduced-motion: reduce) {
+  .droplet-home .w-stat-cell:active {
+    transform: none;
+  }
 }
 .droplet-home .w-stat-cell .e {
   display: flex;
@@ -422,6 +591,16 @@
   gap: 10px;
   padding: 7px 2px;
   min-height: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.droplet-home .w-stat-row:hover .lbl,
+.droplet-home .w-stat-row:hover .val {
+  color: var(--text);
 }
 .droplet-home .w-stat-row .ico {
   width: 26px;
@@ -472,17 +651,59 @@
 }
 
 /* ---------- Cameras ---------- */
+/* `align-items: center` is load-bearing, not cosmetic: stretch alignment
+   would hand each tile the row's full height, which overrides the tile's
+   aspect-ratio and hands a 16:9 frame a portrait box to fill. Centring lets
+   the tile size itself from its width and sit in the middle of whatever
+   height the widget happens to have. */
 .droplet-home .w-cams {
   display: grid;
   gap: 8px;
   height: 100%;
-  grid-auto-rows: 1fr;
+  grid-auto-rows: minmax(0, 1fr);
+  align-items: center;
 }
+/* A <button> that opens the Cameras page — needs the button reset alongside
+   the tile styling. */
 .droplet-home .w-cam {
   position: relative;
   border-radius: 12px;
   overflow: hidden;
   min-height: 0;
+  padding: 0;
+  border: none;
+  font: inherit;
+  display: block;
+  width: 100%;
+  /* The tile is a viewport onto a camera, so it keeps a camera's shape. The
+     component overrides this inline with the decoded frame's real aspect once
+     one lands; 16/9 is the placeholder shape until then. `max-height` keeps a
+     wide, short widget from pushing the tile past the card and getting it
+     clipped — the frame letterboxes inside the tint instead. */
+  aspect-ratio: 16 / 9;
+  height: auto;
+  max-height: 100%;
+  cursor: pointer;
+}
+.droplet-home .w-cam:hover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 55%, transparent);
+}
+/* The live frame. Sits under the chrome spans and under `::after` (the
+   generated scanline sits last in paint order), so the feed reads through
+   the same tile treatment as the placeholder tint it replaces.
+
+   `contain`, never `cover`: this is a security feed, so the half of the scene
+   `cover` would crop away is the half that matters. The tile already carries
+   the frame's own aspect, so in the normal case contain and cover agree and
+   nothing letterboxes — contain is what keeps the picture whole in the cases
+   where they don't (a height-clamped tile, or a frame that changes shape). */
+.droplet-home .w-cam img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .droplet-home .w-cam::after {
   content: "";
@@ -950,6 +1171,26 @@
 .dark .droplet-home .w-notes-status[data-state="saved"] {
   color: #4ade80;
 }
+.droplet-home .w-notes-status[data-state="error"] {
+  /* Same red-TEXT ramp as .w-remote-err, and NOT var(--danger): the home
+     scope's --danger is a background-fill token (#b91c1c light, #7f1d1d
+     dark — see home-bento.css and .dh-tile-x:hover), and #7f1d1d as 12px
+     text on the dark card is unreadable. Same reasoning that put the
+     green-TEXT ramp on [data-state="saved"] above. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-status[data-state="error"] {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-status[data-state="conflict"] {
+  /* Same red-TEXT ramp, same reason as [data-state="error"] above: a save the
+     box refused because the note changed elsewhere is still a save that did
+     not happen, and reads as one. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-status[data-state="conflict"] {
+  color: #fca5a5;
+}
 .droplet-home .w-notes-new {
   display: inline-flex;
   align-items: center;
@@ -970,6 +1211,152 @@
 }
 .droplet-home .w-notes-new svg {
   color: var(--brand);
+}
+
+/* ---------- Notes: "changed on another device" (WARP-1885) ---------- */
+/* Shown when the box refuses a save because the note moved under us. Both
+   versions are the customer's own writing, so this offers the choice instead
+   of picking one — it sits above the textarea because the text in that
+   textarea is one of the two things being chosen between. */
+.droplet-home .w-notes-conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+}
+.droplet-home .w-notes-conflict-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  /* Red-TEXT ramp, not var(--danger) — see [data-state="error"] above. */
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-conflict-msg {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-conflict-msg svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.droplet-home .w-notes-conflict-acts {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+.droplet-home .w-notes-conflict-acts button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--card-inner);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  /* These sit in a wrapping row; let the row wrap, not the label. */
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.18s var(--ease),
+    border-color 0.18s var(--ease),
+    background 0.18s var(--ease);
+}
+.droplet-home .w-notes-conflict-acts button:hover {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: var(--brand-subtle);
+}
+
+/* ---------- Notes: the list view ---------- */
+.droplet-home .w-note-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: thin;
+}
+.droplet-home .w-note {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-input);
+}
+.droplet-home .w-note:hover {
+  background: var(--card-inner);
+}
+.droplet-home .w-note-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.droplet-home .w-note-open .pin {
+  color: var(--brand);
+  flex-shrink: 0;
+}
+.droplet-home .w-note-open .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-note-act {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-input);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.droplet-home .w-note-act:hover {
+  color: var(--brand);
+  background: var(--brand-subtle);
+}
+.droplet-home .w-note.pinned .w-note-act[aria-pressed="true"] {
+  color: var(--brand);
+}
+/* Notes we couldn't load. Same red-TEXT ramp as .w-remote-err (#b91c1c light
+   / #fca5a5 dark) so a failed read never gets mistaken for the muted
+   "No notes yet" empty state sitting in the same slot. Not var(--danger) —
+   that's a fill token and its dark value (#7f1d1d) is unreadable as text. */
+.droplet-home .w-notes-err {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  text-align: left;
+  color: #b91c1c;
+}
+.dark .droplet-home .w-notes-err {
+  color: #fca5a5;
+}
+.droplet-home .w-notes-err svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 /* ---------- Remote access (Connect toggle, WARP-1351) ---------- */
@@ -1035,4 +1422,62 @@
 .droplet-home .w-remote-err svg {
   flex-shrink: 0;
   margin-top: 1px;
+}
+
+/* ── Phone touch targets ──────────────────────────────────────────────────
+   Measured on Home at 375px: 41 controls under the 44px Apple HIG / WCAG
+   2.5.5 minimum, the bulk of them the calendar widget's day cells (33px) plus
+   the chat capsule's attach/mic (32x29), send (36), suggestion chips (32) and
+   the month arrows (26x26). See 04-coding-standards/mobile-web-layout.md in
+   the engineering handbook.
+
+   Breakpoint matches `.dh-m-board` in home-bento.css — below 1024px the bento
+   is already in its single-column mobile board, so these controls are being
+   driven by touch from exactly that width down.
+
+   WARP-1875 — the original census walked Home in the Ask AI widget's EMPTY
+   state, where the conversation head does not render, so `.w-chat-conv-btn`
+   ("Open full chat" / "New chat") was never counted and stayed at 28px. The
+   derived census in __tests__/shell/mobile-layout-contract.test.ts now keys
+   off hover/disabled states instead of a hand-maintained list, so the next
+   widget control cannot go missing the same way. */
+@media (max-width: 1023px) {
+  /* Cells are ~44px wide in the 7-column grid; a square makes them 44 tall
+     without changing the grid's column maths. */
+  /* The square lands a fraction under 44 when the grid's column width is
+     fractional (43.98px), so pin the floor explicitly too. */
+  .droplet-home .w-cal-cell { aspect-ratio: 1; min-height: 44px; }
+  .droplet-home .w-cal-nav { width: 44px; height: 44px; }
+  .droplet-home .w-chat-iconbtn { width: 44px; height: 44px; }
+  .droplet-home .w-chat-send { height: 44px; }
+  .droplet-home .w-sug { height: 44px; }
+  /* The conversation head wraps to two rows on a phone (see the `@container
+     bento` layer above), so these pills sit on a row of their own — all the
+     more reason they cannot stay 28px. */
+  .droplet-home .w-chat-conv-btn { height: 44px; }
+  .droplet-home .w-notes-new { min-height: 44px; }
+  .droplet-home .w-stat-row { min-height: 44px; }
+  .droplet-home .w-chat-conv-btn { height: 44px; }
+  .droplet-home .w-note-act { width: 44px; height: 44px; }
+  .droplet-home .w-notes-conflict-acts button { min-height: 44px; }
+  .droplet-home .w-note-open { min-height: 44px; }
+  /* The base rule already supplies inline-flex + centring; only the height
+     is missing, so don't restate display here. */
+  .droplet-home .w-remote-link { min-height: 44px; }
+  /* Each camera tile became a <button> opening that camera in this ticket, so
+     it is now a touch target and owes the 44px floor like any other. The base
+     rule sets `min-height: 0` and `.w-cams` uses `grid-auto-rows: 1fr`, so a
+     short widget (or a four-camera grid on a phone) divides the height down
+     past 44 with nothing stopping it. Raising the floor only — the tiles keep
+     filling the row when there is room. */
+  .droplet-home .w-cam { min-height: 44px; }
+  /* The status cell became tappable here (it deep-links to the surface it
+     reports on), so it owes the floor too — its base rule is `min-height: 0`
+     and the copy inside it can be a single short line. */
+  .droplet-home .w-stat-cell { min-height: 44px; }
+  /* The whole note row is the target, not just the two controls inside it.
+     `.w-note-open` and `.w-note-act` already carry 44px, so in practice the
+     row clears it — state that explicitly rather than leave it depending on a
+     child, which is what the contract is checking for. */
+  .droplet-home .w-note { min-height: 44px; }
 }

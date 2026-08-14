@@ -1,3 +1,12 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# WARP-1918: tests/test_birdseye_convergence.py parses the shipped
+# docker/frigate/config.yml baseline. PyYAML already arrives transitively
+# via uvicorn[standard]; pinned explicitly so the guard doesn't hinge on
+# an extra's dependency set.
+PyYAML==6.0.2
+
+# WARP-1948 — OSV floor for pytest's transitive pygments (see the matching
+# floor block in requirements.txt for rationale).
+pygments>=2.20.0

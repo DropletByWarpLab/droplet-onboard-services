@@ -27,6 +27,10 @@ import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { SourceChannelBadge } from "@/components/SourceChannelBadge";
 import { translateError } from "@/lib/friendly-errors";
 import { trimDisplayPath } from "./displayPath";
+import {
+  dedupeByDocument,
+  type KnowledgeDocumentItem,
+} from "./dedupeByDocument";
 
 const PAGE_SIZE = 50;
 
@@ -112,12 +116,17 @@ export function RecentlyIndexedTab({ source }: Props) {
 
   const grouped = useMemo(() => {
     if (items.length === 0) return [];
+    // WARP-1790: the endpoint is chunk-level, so one file that chunked into N
+    // pieces used to render as N near-identical cards. Collapse to documents
+    // BEFORE bucketing, otherwise a document whose chunks straddle a day
+    // boundary would still appear twice — once per bucket.
+    const docs = dedupeByDocument(items);
     const now = new Date();
-    const map = new Map<Bucket, KnowledgeChunkItem[]>();
-    for (const item of items) {
-      const key = bucketFor(item, now);
+    const map = new Map<Bucket, KnowledgeDocumentItem[]>();
+    for (const doc of docs) {
+      const key = bucketFor(doc.item, now);
       const arr = map.get(key) ?? [];
-      arr.push(item);
+      arr.push(doc);
       map.set(key, arr);
     }
     return BUCKET_ORDER.filter((k) => map.has(k)).map((k) => ({
@@ -162,7 +171,7 @@ export function RecentlyIndexedTab({ source }: Props) {
             {group.label}
           </h2>
           <ul className="space-y-2">
-            {group.items.map((item) => {
+            {group.items.map(({ item, chunkCount, duplicateChunkIdx }) => {
               // WARP-214: object-icon set keyed off MIME (Headphones for
               // audio, Film for video, Mail for email, FileArchive for
               // archives, etc.). Falls back to FileText for unknown types.
@@ -215,6 +224,23 @@ export function RecentlyIndexedTab({ source }: Props) {
                     {item.snippet && (
                       <p className="type-caption-1 text-label-secondary mt-1 line-clamp-2">
                         {item.snippet}
+                      </p>
+                    )}
+                    {/* WARP-1790: the chunk count is the information the
+                        collapse would otherwise throw away — and it reframes
+                        the repeats honestly, as one document the Droplet split
+                        for search rather than one it indexed over and over.
+                        `duplicateChunkIdx` means the same chunk index arrived
+                        twice, which a single indexing pass cannot produce, so
+                        that IS real duplicate ingestion and says so. */}
+                    {chunkCount > 1 && (
+                      <p
+                        className="type-caption-2 text-label-tertiary mt-1"
+                        data-testid="knowledge-recent-sections"
+                      >
+                        {duplicateChunkIdx
+                          ? `${chunkCount} entries · indexed more than once`
+                          : `${chunkCount} sections indexed`}
                       </p>
                     )}
                     {/* WARP-214: source-channel pill — only shows when

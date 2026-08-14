@@ -89,14 +89,18 @@ COPY --from=builder /app/services/matter-controller/node_modules ./services/matt
 
 WORKDIR /app/services/matter-controller
 
-# Fail the BUILD if the BLE package can't resolve from the service's
-# runtime location — this class of packaging gap must never again
-# surface only as a runtime degrade log on a customer box.
-# Also assert the exact pinned version: if the lockfile ever drifts
-# (e.g. caret ranges regenerate @matter/nodejs-ble@0.16.11), this gate
-# fails loudly here rather than silently splitting the Environment.default
-# singleton again and disabling BLE on a shipped box (WARP-850).
-RUN node -e "const v=require('@matter/nodejs-ble/package.json').version; if(v!=='0.16.10') throw new Error('version-skew: expected 0.16.10, got '+v)"
+# Fail the BUILD if the @matter/* set can't resolve from the service's
+# runtime location, drifts off its exact pin, or splits into more than one
+# instance — this class of packaging gap must never again surface only as a
+# runtime degrade log on a customer box (WARP-850).
+#
+# The check moved out of an inline `node -e` and into a script so it can also
+# assert the invariant that actually breaks BLE: that @matter/general and
+# @matter/protocol resolve to ONE copy for every consumer. Two nested copies
+# at the SAME version are still two Environment.default singletons and two Ble
+# symbols, and a version-string comparison cannot see that.
+COPY --from=builder /app/services/matter-controller/scripts ./scripts
+RUN node scripts/verify-matter-singleton.cjs
 
 # Port follows the host-service ladder: routing 8080, switch 8081,
 # display 8082, matter-controller 8083. The container runs with

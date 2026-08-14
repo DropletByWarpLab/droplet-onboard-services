@@ -137,13 +137,21 @@ def test_plan_only_delete_vlan_reports_planned_and_not_deleted(plan_client):
 
 
 def test_plan_only_membership_propagates_driver_plan(plan_client):
-    """The endpoint must not discard the driver's {**plan, dry_run:true}."""
+    """The endpoint must not discard the driver's {**plan, dry_run:true}.
+
+    mode="replace" is explicit here: this list mixes an untagged member with a
+    tagged trunk, which is a whole-member-list write, not a set of access
+    moves. The default (merge) path is covered in
+    test_vlan_membership_endpoint.py.
+    """
     client, driver = plan_client
     ports = [
         {"port": 1, "tagged": False, "member": True},
         {"port": 9, "tagged": True, "member": True},
     ]
-    body = client.post("/vlans/100/membership", json={"ports": ports}).json()
+    body = client.post(
+        "/vlans/100/membership", json={"ports": ports, "mode": "replace"}
+    ).json()
     assert body["status"] == "planned"
     assert body["dry_run"] is True
     assert body["vlan_id"] == 100
@@ -216,11 +224,14 @@ def test_live_delete_vlan_reports_ok_deleted(live_client):
 def test_live_membership_reports_ok_without_plan(live_client):
     client, driver = live_client
     ports = [{"port": 1, "tagged": False, "member": True}]
-    body = client.post("/vlans/100/membership", json={"ports": ports}).json()
+    body = client.post(
+        "/vlans/100/membership", json={"ports": ports, "mode": "replace"}
+    ).json()
     assert body == {
         "status": "ok",
         "vlan_id": 100,
         "ports_updated": 1,
+        "mode": "replace",
         "dry_run": False,
     }
     assert "plan" not in body

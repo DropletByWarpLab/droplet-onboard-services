@@ -327,10 +327,10 @@ export function OverrideModal({
       flush
     >
       <div data-testid="override-modal-backdrop">
-        <div className="p-4 border-b border-separator flex items-center justify-between">
+        <div className="p-4 border-b border-[var(--card-bd)] flex items-center justify-between">
           <h2
             id={headingId}
-            className="type-title-3 text-label-primary"
+            className="type-title-3 text-[color:var(--text)]"
           >
             Override for {subjectLabel}
           </h2>
@@ -338,7 +338,7 @@ export function OverrideModal({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
+            className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-sm"
           >
             <Icons.X className="w-5 h-5" />
           </button>
@@ -351,11 +351,11 @@ export function OverrideModal({
               data-testid="subject-picker"
               aria-label="Subject"
             >
-              <legend className="type-caption-1 text-label-secondary">
+              <legend className="type-caption-1 text-[color:var(--text-muted)]">
                 Subject
               </legend>
               <div className="flex gap-4">
-                <label className="type-subheadline text-label-primary flex items-center gap-2">
+                <label className="type-subheadline text-[color:var(--text)] flex items-center gap-2">
                   <input
                     type="radio"
                     name="override-subject-type"
@@ -365,7 +365,7 @@ export function OverrideModal({
                   />
                   Device
                 </label>
-                <label className="type-subheadline text-label-primary flex items-center gap-2">
+                <label className="type-subheadline text-[color:var(--text)] flex items-center gap-2">
                   <input
                     type="radio"
                     name="override-subject-type"
@@ -382,7 +382,13 @@ export function OverrideModal({
                   value={pickerDeviceMac}
                   onChange={(e) => setPickerDeviceMac(e.target.value)}
                   aria-label="Device"
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                 >
                   <option value="">Select a device…</option>
                   {devices.map((d) => (
@@ -396,7 +402,13 @@ export function OverrideModal({
                   value={pickerGroupId}
                   onChange={(e) => setPickerGroupId(e.target.value)}
                   aria-label="Group"
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                 >
                   <option value="">Select a group…</option>
                   {groups.map((g) => (
@@ -413,9 +425,9 @@ export function OverrideModal({
             <div
               role="status"
               data-testid="active-override-banner"
-              className="flex items-center justify-between gap-2 rounded-sm border border-separator bg-surface-secondary px-3 py-2"
+              className="flex items-center justify-between gap-2 rounded-sm border border-[var(--card-bd)] bg-[var(--card-inner)] px-3 py-2"
             >
-              <span className="type-footnote text-label-primary">
+              <span className="type-footnote text-[color:var(--text)]">
                 Current override: {currentOverride.action} until{" "}
                 {formatHHMM(new Date(currentOverride.endAt))}
               </span>
@@ -431,11 +443,11 @@ export function OverrideModal({
 
           {/* Action */}
           <fieldset className="space-y-2">
-            <legend className="type-caption-1 text-label-secondary">
+            <legend className="type-caption-1 text-[color:var(--text-muted)]">
               Action
             </legend>
             <div className="flex gap-4">
-              <label className="type-subheadline text-label-primary flex items-center gap-2">
+              <label className="type-subheadline text-[color:var(--text)] flex items-center gap-2">
                 <input
                   type="radio"
                   name="override-action"
@@ -445,7 +457,7 @@ export function OverrideModal({
                 />
                 Allow
               </label>
-              <label className="type-subheadline text-label-primary flex items-center gap-2">
+              <label className="type-subheadline text-[color:var(--text)] flex items-center gap-2">
                 <input
                   type="radio"
                   name="override-action"
@@ -460,7 +472,7 @@ export function OverrideModal({
 
           {/* Duration chips */}
           <fieldset className="space-y-2">
-            <legend className="type-caption-1 text-label-secondary">
+            <legend className="type-caption-1 text-[color:var(--text-muted)]">
               Duration
             </legend>
             <div className="flex flex-wrap gap-2">
@@ -477,11 +489,7 @@ export function OverrideModal({
                   type="button"
                   onClick={() => setChip(c.id)}
                   aria-pressed={chip === c.id}
-                  className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
-                    chip === c.id
-                      ? "bg-accent text-white border-accent"
-                      : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
-                  }`}
+                  className={`chip type-footnote${chip === c.id ? " on" : ""}`}
                 >
                   {c.label}
                 </button>
@@ -493,11 +501,7 @@ export function OverrideModal({
                   data-testid="chip-transition"
                   onClick={() => setChip("transition")}
                   aria-pressed={chip === "transition"}
-                  className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
-                    chip === "transition"
-                      ? "bg-accent text-white border-accent"
-                      : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
-                  }`}
+                  className={`chip type-footnote${chip === "transition" ? " on" : ""}`}
                 >
                   {transitionInfo.label}
                 </button>
@@ -507,11 +511,7 @@ export function OverrideModal({
                   data-testid="chip-fallback"
                   onClick={() => setChip("fallback30")}
                   aria-pressed={chip === "fallback30"}
-                  className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
-                    chip === "fallback30"
-                      ? "bg-accent text-white border-accent"
-                      : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
-                  }`}
+                  className={`chip type-footnote${chip === "fallback30" ? " on" : ""}`}
                 >
                   +30m
                 </button>
@@ -521,11 +521,7 @@ export function OverrideModal({
                 type="button"
                 onClick={() => setChip("custom")}
                 aria-pressed={chip === "custom"}
-                className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
-                  chip === "custom"
-                    ? "bg-accent text-white border-accent"
-                    : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
-                }`}
+                className={`chip type-footnote${chip === "custom" ? " on" : ""}`}
               >
                 Custom
               </button>
@@ -535,7 +531,7 @@ export function OverrideModal({
               <div className="pt-2 space-y-1">
                 <label
                   htmlFor="override-end-at"
-                  className="type-caption-1 text-label-secondary block"
+                  className="type-caption-1 text-[color:var(--text-muted)] block"
                 >
                   End at
                 </label>
@@ -544,7 +540,13 @@ export function OverrideModal({
                   type="datetime-local"
                   value={customEndAt}
                   onChange={(e) => setCustomEndAt(e.target.value)}
-                  className="dp-input"
+                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                  style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-input)",
+                    color: "var(--text)",
+                  }}
                   aria-label="End at"
                   aria-describedby={
                     customExceedsMax ? "override-end-at-hint" : undefined
@@ -566,7 +568,7 @@ export function OverrideModal({
           <div className="space-y-1">
             <label
               htmlFor="override-note"
-              className="type-caption-1 text-label-secondary"
+              className="type-caption-1 text-[color:var(--text-muted)]"
             >
               Note (optional)
             </label>
@@ -576,7 +578,13 @@ export function OverrideModal({
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="e.g. Guest access"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
           </div>
 
@@ -591,11 +599,11 @@ export function OverrideModal({
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-separator flex justify-end gap-2">
+        <div className="p-4 border-t border-[var(--card-bd)] flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="dp-btn-secondary"
+            className="btn"
           >
             Cancel
           </button>
@@ -603,7 +611,7 @@ export function OverrideModal({
             type="button"
             onClick={handleApply}
             disabled={applyDisabled}
-            className="dp-btn-primary disabled:opacity-50"
+            className="btn primary"
           >
             {saving ? "Applying…" : "Apply"}
           </button>
@@ -612,7 +620,7 @@ export function OverrideModal({
         {toast && (
           <div
             role="alert"
-            className="fixed bottom-4 right-4 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
+            className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 lg:bottom-4 z-50 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
           >
             <span>{toast}</span>
             <button

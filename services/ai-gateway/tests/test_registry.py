@@ -22,7 +22,7 @@ class TestModelRegistry:
         registry = ModelRegistry()
         mock_router = AsyncMock()
         mock_router.list_all_models.return_value = _healthy([
-            ModelInfo(id="llama3:8b", provider="ollama", name="llama3:8b"),
+            ModelInfo(id="llama3:8b", provider="local", name="llama3:8b"),
         ])
 
         result = await registry.get_models(mock_router)
@@ -34,7 +34,7 @@ class TestModelRegistry:
         registry = ModelRegistry()
         mock_router = AsyncMock()
         mock_router.list_all_models.return_value = _healthy([
-            ModelInfo(id="llama3:8b", provider="ollama", name="llama3:8b"),
+            ModelInfo(id="llama3:8b", provider="local", name="llama3:8b"),
         ])
 
         await registry.get_models(mock_router)
@@ -46,7 +46,7 @@ class TestModelRegistry:
         registry = ModelRegistry()
         mock_router = AsyncMock()
         mock_router.list_all_models.return_value = _healthy([
-            ModelInfo(id="llama3:8b", provider="ollama", name="llama3:8b"),
+            ModelInfo(id="llama3:8b", provider="local", name="llama3:8b"),
         ])
 
         await registry.get_models(mock_router)
@@ -55,7 +55,7 @@ class TestModelRegistry:
         registry._last_fetched = time.time() - CACHE_TTL_SECONDS - 1
 
         mock_router.list_all_models.return_value = _healthy([
-            ModelInfo(id="llama3:8b", provider="ollama", name="llama3:8b"),
+            ModelInfo(id="llama3:8b", provider="local", name="llama3:8b"),
             ModelInfo(id="gpt-4o", provider="openai", name="GPT-4o"),
         ])
 
@@ -76,7 +76,7 @@ class TestModelRegistry:
         registry = ModelRegistry()
         mock_router = AsyncMock()
         mock_router.list_all_models.return_value = _healthy([
-            ModelInfo(id="llama3:8b", provider="ollama", name="llama3:8b"),
+            ModelInfo(id="llama3:8b", provider="local", name="llama3:8b"),
         ])
 
         await registry.get_models(mock_router)
@@ -100,11 +100,11 @@ class TestModelRegistryDegradedSignal:
         registry = ModelRegistry()
         mock_router = AsyncMock()
         mock_router.list_all_models.return_value = ModelListResult(
-            models=[], degraded_providers=["ollama"]
+            models=[], degraded_providers=["local"]
         )
 
         first = await registry.get_models(mock_router)
-        assert first.degraded_providers == ["ollama"]
+        assert first.degraded_providers == ["local"]
         assert first.models == []
 
         # Degraded → the TTL cache is NOT armed; the next call re-queries.
@@ -113,7 +113,7 @@ class TestModelRegistryDegradedSignal:
 
         # Recovery: a healthy fetch caches again.
         mock_router.list_all_models.return_value = ModelListResult(
-            models=[ModelInfo(id="gpt-oss:20b", provider="ollama", name="gpt-oss:20b")],
+            models=[ModelInfo(id="gpt-oss:20b", provider="local", name="gpt-oss:20b")],
             degraded_providers=[],
         )
         third = await registry.get_models(mock_router)
@@ -138,7 +138,7 @@ class TestModelRegistrySingleFlight:
 
         async def slow_fanout():
             await asyncio.sleep(0.05)
-            return ModelListResult(models=[], degraded_providers=["ollama"])
+            return ModelListResult(models=[], degraded_providers=["local"])
 
         mock_router.list_all_models.side_effect = slow_fanout
 
@@ -147,7 +147,7 @@ class TestModelRegistrySingleFlight:
         )
         # One fan-out, shared by all five concurrent callers.
         assert mock_router.list_all_models.call_count == 1
-        assert all(r.degraded_providers == ["ollama"] for r in results)
+        assert all(r.degraded_providers == ["local"] for r in results)
 
         # A LATER (sequential) call still refetches — degraded never arms
         # the TTL, and self-healing depends on the re-query.
@@ -161,7 +161,7 @@ class TestModelRegistrySingleFlight:
         async def slow_fanout():
             await asyncio.sleep(0.05)
             return ModelListResult(
-                models=[ModelInfo(id="gpt-oss:20b", provider="ollama", name="gpt-oss:20b")],
+                models=[ModelInfo(id="gpt-oss:20b", provider="local", name="gpt-oss:20b")],
                 degraded_providers=[],
             )
 
@@ -185,7 +185,7 @@ class TestModelRegistrySingleFlight:
         registry = ModelRegistry()
         mock_router = AsyncMock()
         mock_router.list_all_models.return_value = ModelListResult(
-            models=[], degraded_providers=["ollama"]
+            models=[], degraded_providers=["local"]
         )
 
         with caplog.at_level(logging.WARNING, logger="models.registry"):

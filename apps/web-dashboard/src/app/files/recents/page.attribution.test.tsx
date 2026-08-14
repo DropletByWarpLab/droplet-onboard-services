@@ -123,7 +123,9 @@ describe("<RecentsPage /> — library attribution (WARP-1549)", () => {
       file({ name: "italy.pdf", path: "/Household/Trips/italy.pdf" }),
     ];
     render(<RecentsPage />);
-    await screen.findByText("Household");
+    // WARP-1808 — the chip renders the business-facing "Workspace" label while
+    // the fixture keeps the raw server name "Household" (data contract).
+    await screen.findByText("Workspace");
 
     fireEvent.click(screen.getByText("italy.pdf"));
 

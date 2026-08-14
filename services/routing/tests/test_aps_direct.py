@@ -89,6 +89,18 @@ class TestRadioGating:
         router.ap.push_wireless_config.assert_not_called()
 
     def test_router_with_radios_keeps_staging(self, client, router):
+        # WARP-1721: a radio must actually SERVE something to count — the
+        # fixture's bare `{"radio0": {"up": True}}` is exactly the real Pi's
+        # up-with-nothing-on-it shape and no longer stages. (Before the fix
+        # this test passed vacuously: no return_value was set, so the gate
+        # saw a truthy MagicMock rather than any radio envelope.)
+        router.wireless.status.return_value = {
+            "radio0": {
+                "up": True,
+                "interfaces": [{"section": "default_radio0",
+                                "config": {"mode": "ap", "ssid": "Droplet"}}],
+            },
+        }
         resp = client.post(f"/aps/{MAC}/approve", json=APPROVE_BODY, headers=AUTH)
         assert resp.status_code == 200, resp.text
         assert resp.json()["router_staged"] is True

@@ -38,6 +38,16 @@ from typing import Any, Optional
 from urllib.request import Request, urlopen
 
 from request_context import get_request_id
+# WARP-1907: `config device` section resolution for the jack enable/disable
+# write. These are pure functions over a `uci get network` payload, which is
+# `router_ports`' charter — and it imports nothing from here, so there is no
+# cycle. Keeping them there means the read side and the write side agree on
+# what "the section that configures this netdev" means, by construction.
+from router_ports import (
+    device_section_enabled,
+    device_section_name,
+    new_device_section_name,
+)
 
 logger = logging.getLogger("droplet.openwrt")
 
@@ -197,6 +207,25 @@ class ConnectionLost(Exception):
     pass
 
 
+class DeviceWriteNotApplied(Exception):
+    """Raised when a device write returned cleanly but changed nothing (WARP-1907).
+
+    Every uci call in the sequence can succeed while the router still ends up
+    exactly as it started — a section written under the wrong name, an ACL that
+    silently drops the option, a rollback that beat the confirm. That failure
+    mode reports as a 200 and is the worst outcome this feature has: the
+    operator is told a jack is off, walks away, and it is still passing traffic.
+
+    So :meth:`NetworkApi.set_device_enabled` reads uci back from disk after the
+    apply and raises this when the value it asked for is not there. The route
+    turns it into a 502 with `code: PORT_WRITE_NOT_APPLIED` — an honest "we
+    couldn't make that stick", never a success.
+    """
+
+    #: Stable, wire-facing classification.
+    code = "PORT_WRITE_NOT_APPLIED"
+
+
 class LoginDenied(ConnectionLost):
     """Raised when the OpenWrt device is REACHABLE but rejects our rpcd
     credentials (`session login` → PERMISSION_DENIED).
@@ -304,6 +333,34 @@ def _section_or(call, fallback):
 # ---------------------------------------------------------------------------
 # Core JSON-RPC client
 # ---------------------------------------------------------------------------
+def _pairs_keep_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """object_pairs_hook that turns repeated keys into a list (WARP-1720).
+
+    ubus serialises blobmsg straight to JSON, and blobmsg allows the same
+    field name to repeat — `umdns browse` emits every TXT record (and every
+    ipv6 address) as its own `"txt":` / `"ipv6":` key in ONE object.
+    Python's default decoder silently keeps only the LAST duplicate, which
+    threw away the `mac=` TXT record and made every Droplet AP invisible to
+    discovery, with no error anywhere (verified live 2026-08-04: the
+    ApDevice table had zero rows on a fabric with a healthy announcing AP).
+
+    Objects without duplicate keys — the overwhelmingly common case — come
+    out shape-identical to the default decoder, so this is safe to apply to
+    every response at the one place the bytes are decoded. It must live
+    here: after `json.loads` the loss is unrecoverable.
+    """
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            if isinstance(out[key], list):
+                out[key].append(value)
+            else:
+                out[key] = [out[key], value]
+        else:
+            out[key] = value
+    return out
+
+
 class UbusClient:
     """Low-level JSON-RPC 2.0 client for OpenWrt ubus over HTTP."""
 
@@ -341,7 +398,10 @@ class UbusClient:
         for attempt in (1, 2):
             try:
                 with urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    return json.loads(
+                        resp.read().decode("utf-8"),
+                        object_pairs_hook=_pairs_keep_duplicates,
+                    )
             except (OSError, HTTPException, ValueError) as exc:
                 # OSError covers URLError, ConnectionResetError, timeouts;
                 # http.client.HTTPException covers IncompleteRead /
@@ -814,6 +874,66 @@ class NetworkApi:
             self._r.uci.set("network", name, values)
             self._r.uci.commit("network")
 
+    def set_device_enabled(self, device: str, enabled: bool) -> dict:
+        """Administratively bring a physical jack up or down (WARP-1907).
+
+        netifd has no "shut this jack" ubus call. The mechanism is a uci
+        ``config device`` section carrying ``option enabled '0'``, keyed by
+        ``option name '<netdev>'`` — verified against netifd's source at the
+        revision the shipped router runs (see ``router_ports`` module docstring
+        for the citation and the code path from the option to the link going
+        down).
+
+        Two things make this more than a one-line ``uci.set``:
+
+        1. **Most jacks have no section at all.** On the live RB5009 only
+           ``br_lan``, ``guest_dev`` and ``wan_dev`` exist; p2–p8 are realised
+           from bridge membership. When there is no section we ADD one, named by
+           :func:`new_device_section_name` and carrying ``option name`` so netifd
+           knows which jack it is about. When there IS one we edit it in place —
+           adding a second ``config device`` for the same jack leaves two
+           sections fighting over it.
+        2. **A clean return is not evidence of a change.** After the apply we
+           read uci back off the disk and raise :class:`DeviceWriteNotApplied` if
+           the value we asked for is not there. This is a uci read, not a netifd
+           runtime read, so it is deterministic: it proves the CONFIG landed
+           without racing netifd's teardown of the link.
+
+        Wrapped in ``safe_apply(timeout=60)`` like every other write here, so a
+        change that severs the routing service's own path to the router
+        auto-reverts. 🔴 That arm does NOT cover the WAN jack — the router stays
+        reachable on the LAN, so the probe succeeds and the change is confirmed.
+        The caller is responsible for the blast-radius guard
+        (``router_ports.disable_guard``); this method applies what it is told.
+        """
+        section = device_section_name(self._r.uci.get("network"), device)
+        created = section is None
+        if created:
+            section = new_device_section_name(device, self._r.uci.get("network"))
+        value = "1" if enabled else "0"
+
+        with self._r.safe_apply(timeout=60):
+            if created:
+                self._r.uci.add(
+                    "network", "device", {"name": device, "enabled": value}, name=section,
+                )
+            else:
+                self._r.uci.set("network", section, {"enabled": value})
+            self._r.uci.commit("network")
+
+        applied = device_section_enabled(self._r.uci.get("network"), device)
+        if applied != enabled:
+            raise DeviceWriteNotApplied(
+                f"uci still reports {device} as "
+                f"{'enabled' if applied else 'disabled'} after the apply"
+            )
+        return {
+            "device": device,
+            "section": section,
+            "enabled": enabled,
+            "created_section": created,
+        }
+
     def edit_interface(
         self,
         name: str,
@@ -857,6 +977,10 @@ class WirelessApi:
 
     def __init__(self, router: "DropletRouter"):
         self._r = router
+        # WARP-1681: warn-once latch for the strict-netifd fallback below.
+        # Monotonic boolean — a threadpool race here costs at most a duplicate
+        # log line, never a wrong value (contrast the WARP-816 side-channel).
+        self._strict_netifd_warned = False
 
     def status(self) -> dict:
         """Get status of all wireless radios and interfaces.
@@ -869,13 +993,62 @@ class WirelessApi:
         same wireless section (ADR-011, shape-agnostic — a missing optional
         surface is data, not a crash). Genuine faults (PERMISSION_DENIED,
         transport ``ConnectionLost``, unrelated ubus errors) still propagate.
+
+        WARP-1681 (edge-router): OpenWrt 25.12's netifd strict-validates
+        message attributes, and the uhttpd ``/ubus`` session bridge injects
+        ``ubus_rpc_session`` into every authenticated call — so a sessioned
+        ``network.wireless status`` fails ``INVALID_ARGUMENT`` even though the
+        object exists and the ACL grants it (verified live on ``droplet-edge``:
+        the same call succeeds over the local socket, and even a valid
+        ``{"device": "radio0"}`` fails remotely). ``status()`` sends no caller
+        arguments, so ``INVALID_ARGUMENT`` here can only be that strict-reject
+        — fall back to rpcd's ``luci-rpc getWirelessDevices``, which rpcd
+        serves session-natively and which returns the identical netifd status
+        shape (plus an ``iwinfo`` block that is stripped for shape parity).
         """
         try:
             return self._r._call("network.wireless", "status")
         except UbusError as exc:
             if _ubus_object_absent(exc):
                 return {}
+            if exc.code == UBUS_STATUS_INVALID_ARGUMENT:
+                return self._status_via_luci_rpc()
             raise
+
+    def _status_via_luci_rpc(self) -> dict:
+        """Wireless status via ``luci-rpc getWirelessDevices`` (WARP-1681).
+
+        Same payload netifd's ``network.wireless status`` returns, enriched by
+        rpcd with a per-radio ``iwinfo`` block — stripped here so both paths
+        hand callers one shape. When ``luci-rpc`` itself isn't on this build
+        (no rpcd-mod-luci), a radio-less report is the honest answer (ADR-011)
+        — with ``status()`` argless, no genuine caller bug can be masked by
+        degrading. Any other ``luci-rpc`` fault (auth, unrelated codes) still
+        propagates.
+        """
+        if not self._strict_netifd_warned:
+            self._strict_netifd_warned = True
+            logger.warning(
+                "network.wireless rejects sessioned calls on this build "
+                "(strict netifd + injected ubus_rpc_session, WARP-1681); "
+                "serving wireless status via luci-rpc getWirelessDevices"
+            )
+        try:
+            devices = self._r._call("luci-rpc", "getWirelessDevices")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return {}
+            raise
+        if not isinstance(devices, dict):
+            return {}
+        return {
+            name: (
+                {k: v for k, v in radio.items() if k != "iwinfo"}
+                if isinstance(radio, dict)
+                else radio
+            )
+            for name, radio in devices.items()
+        }
 
     def up(self) -> dict:
         """Enable all wireless interfaces."""
@@ -1656,6 +1829,21 @@ class SystemApi:
         """Get hardware and OS info (kernel, hostname, model, release)."""
         return self._r._call("system", "board")
 
+    def board_json(self) -> dict:
+        """The board's factory hardware description (`/etc/board.json`).
+
+        WARP-1866: the only source that knows a physical jack exists when the
+        running config does not use it — the RB5009's SFP cage is in this
+        roster and appears nowhere in uci. Served over `luci-rpc getBoardJSON`,
+        which the droplet-ai ACL already grants; a build without luci-rpc
+        raises, and the caller degrades to the uci-derived roster.
+
+        Distinct from :meth:`board_info` (ubus `system board`), which reports
+        the RUNNING kernel/release and carries no port layout at all.
+        """
+        result = self._r._call("luci-rpc", "getBoardJSON")
+        return result if isinstance(result, dict) else {}
+
     def firmware_version_check(self, pinned_image: str) -> dict:
         """Read the running firmware version and compare it to the pinned image.
 
@@ -2280,6 +2468,9 @@ class ApApi:
         ubus call shape changes. This is read-only — never raises on
         empty data; only network / auth failures bubble.
         """
+        # Ask before reading (WARP-1760) — `browse` alone returns a cache that
+        # nothing ever refreshes, so a rebooted AP would never come back.
+        _umdns_query(self._r)
         try:
             raw = self._r._call("umdns", "browse")
         except UbusError as exc:
@@ -2304,8 +2495,13 @@ class ApApi:
             if parsed is None:
                 continue
             # `ipv4` shape on umdns is just the address string; older
-            # builds sometimes nest it under `ipv4` -> "address". Tolerate.
+            # builds sometimes nest it under `ipv4` -> "address", and a
+            # dual-stack host announces it as a repeated blobmsg field,
+            # which the WARP-1720 pairs hook surfaces as a list. Tolerate
+            # all three; first address wins.
             ipv4 = entry.get("ipv4")
+            if isinstance(ipv4, list):
+                ipv4 = ipv4[0] if ipv4 else None
             if isinstance(ipv4, dict):
                 ipv4 = ipv4.get("address") or ipv4.get("ip")
             if isinstance(ipv4, str) and "last_ip" not in parsed:
@@ -2326,6 +2522,11 @@ class ApApi:
         """
         txt = entry.get("txt")
         kv: dict[str, str] = {}
+        if isinstance(txt, str):
+            # A service with exactly ONE TXT record decodes to a bare
+            # string even with the WARP-1720 duplicate-key hook (the hook
+            # only lists keys that actually repeat).
+            txt = [txt]
         if isinstance(txt, list):
             for item in txt:
                 if not isinstance(item, str) or "=" not in item:
@@ -2346,6 +2547,163 @@ class ApApi:
             if v := kv.get(k):
                 record[k] = v
         return record
+
+
+def _umdns_query(router) -> None:
+    """Ask the network who is there, best-effort (WARP-1760).
+
+    `umdns browse` returns umdns's CACHE. Nothing else in the control plane
+    ever sends a query, so the box only learned about a device whose
+    unsolicited announcement happened to land while umdns was listening. A
+    device that reboots — or one announcement lost to multicast — then stays
+    invisible INDEFINITELY: the records carry a 4500 s TTL and nobody re-asks.
+    Observed live 2026-08-05: the AP was advertising correctly (its own
+    `umdns announcements` proved it) and the router's browse simply did not
+    have it; a single `umdns update` brought it straight back.
+
+    Deliberately fire-and-forget. Query responses arrive asynchronously over
+    multicast, so blocking here would add latency for results that are not
+    ready yet. We refresh the cache for the NEXT tick and read the current one
+    now — with the poller on a 10 s cadence the inventory self-corrects within
+    one interval instead of never. Any failure is ignored: a stale-but-present
+    cache is strictly better than no discovery at all.
+    """
+    try:
+        router._call("umdns", "update")
+    except (UbusError, ConnectionLost) as exc:
+        logger.debug("umdns update (query) skipped: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# High-level API: Fabric member inventory (ADR-035 §5, WARP-1731)
+# ---------------------------------------------------------------------------
+
+# Per-role service types (ADR-035 §5): `_droplet-ap._tcp`,
+# `_droplet-switch._tcp`, `_droplet-router._tcp` today; the pattern keeps
+# future roles discoverable without an SDK change. The captured group is the
+# role fallback when a (mis-flashed) advert omits the `role=` TXT key.
+_FABRIC_SERVICE_RE = re.compile(r"^_droplet-([a-z0-9-]+)\._tcp$")
+
+# TXT keys promoted to top-level member fields; everything else the advert
+# carries (poe_ports/poe_budget on the switch, serial when non-blank, future
+# role-specific keys) lands verbatim in `extra`.
+_FABRIC_KNOWN_TXT_KEYS = frozenset({"role", "mac", "model", "version"})
+
+
+class FabricApi:
+    """Read-only inventory of every `_droplet-*._tcp` announcer on the LAN.
+
+    ADR-035 §5: one consumer browses ALL Droplet service types — the
+    switch's rich advertisement stops announcing into a void. Pure
+    observation: no writes, no lifecycle state machine. The AP onboarding
+    state machine keeps its own dedicated `ApApi.browse_discovered()` path
+    untouched.
+    """
+
+    def __init__(self, router: "DropletRouter"):
+        self._r = router
+
+    def browse_members(self) -> list[dict[str, Any]]:
+        """Parse `umdns browse` into fabric-member records.
+
+        Returns one dict per `_droplet-*._tcp` announcement:
+            {
+                "role": "switch",                 # TXT role= (or the
+                                                  #  service-type fallback)
+                "mac": "70:49:a2:77:64:1a",       # anchor MAC — mandatory;
+                                                  #  mac-less records dropped
+                "model": "...", "version": "...", # when announced
+                "last_ip": "192.168.9.2",
+                "hostname": "droplet-switch",
+                "extra": {"poe_ports": "8", ...}, # role-specific TXT, verbatim
+            }
+
+        Same tolerance contract as `ApApi.browse_discovered`: the WARP-1720
+        duplicate-key hook delivers repeated `txt` as a list and a single
+        TXT record as a bare string — both parse; umdns absent (NOT_FOUND /
+        NO_DATA) degrades to []; only network / auth failures bubble.
+        """
+        # Ask before reading (WARP-1760) — see `_umdns_query`. Without this a
+        # member that reboots never returns to the inventory.
+        _umdns_query(self._r)
+        try:
+            raw = self._r._call("umdns", "browse")
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
+
+        members: list[dict[str, Any]] = []
+        services = raw if isinstance(raw, dict) else {}
+        for service_type, entries in services.items():
+            match = _FABRIC_SERVICE_RE.match(str(service_type))
+            if match is None or not isinstance(entries, dict):
+                continue
+            for host_key, entry in entries.items():
+                if not isinstance(entry, dict):
+                    continue
+                member = self._parse_member_txt(entry, default_role=match.group(1))
+                if member is None:
+                    continue
+                # Same three-shape ipv4 tolerance as browse_discovered:
+                # plain string, {address}/{ip} dict, or the WARP-1720
+                # repeated-field list (first address wins).
+                ipv4 = entry.get("ipv4")
+                if isinstance(ipv4, list):
+                    ipv4 = ipv4[0] if ipv4 else None
+                if isinstance(ipv4, dict):
+                    ipv4 = ipv4.get("address") or ipv4.get("ip")
+                if isinstance(ipv4, str) and "last_ip" not in member:
+                    member["last_ip"] = ipv4
+                member.setdefault("hostname", host_key)
+                members.append(member)
+        return members
+
+    @staticmethod
+    def _parse_member_txt(
+        entry: dict[str, Any], default_role: str
+    ) -> Optional[dict[str, Any]]:
+        """Tolerant TXT → member parse (mirrors `_parse_droplet_ap_txt`).
+
+        Drops any record without the mandatory `mac=` anchor — the MAC is
+        the orchestrator's primary key (ADR-035 §2) and a record without
+        one cannot be reconciled. Blank TXT values are omitted, never
+        recorded as "".
+        """
+        txt = entry.get("txt")
+        kv: dict[str, str] = {}
+        if isinstance(txt, str):
+            # A single TXT record decodes to a bare string even with the
+            # WARP-1720 hook (the hook only lists keys that repeat).
+            txt = [txt]
+        if isinstance(txt, list):
+            for item in txt:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, _, value = item.partition("=")
+                if key:
+                    kv[key.strip()] = value.strip()
+        elif isinstance(txt, dict):
+            kv = {str(k): str(v) for k, v in txt.items()}
+        else:
+            return None
+
+        mac = kv.get("mac")
+        if not mac:
+            return None
+        member: dict[str, Any] = {
+            "role": kv.get("role") or default_role,
+            "mac": mac,
+        }
+        for k in ("model", "version"):
+            if v := kv.get(k):
+                member[k] = v
+        member["extra"] = {
+            k: v
+            for k, v in kv.items()
+            if k not in _FABRIC_KNOWN_TXT_KEYS and v
+        }
+        return member
 
 
 # ---------------------------------------------------------------------------
@@ -2410,6 +2768,7 @@ class DropletRouter:
         self.system = SystemApi(self)
         self.vpn = VPNApi(self)
         self.ap = ApApi(self)  # WARP-446: coverage extender onboarding
+        self.fabric = FabricApi(self)  # WARP-1731: fabric member inventory
         self.file = FileApi(self)
 
         if auto_login:

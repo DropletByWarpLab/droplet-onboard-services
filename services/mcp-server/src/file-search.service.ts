@@ -464,7 +464,12 @@ export async function rerankPassages(
         return hits
           .map((h, i) => ({
             ...h,
-            score: normalizeRerankScore(scores[i] ?? 0),
+            // WARP-1637: `?? -Infinity`, not `?? 0`. The branch is
+            // unreachable while the length check above holds, but a MISSING
+            // score normalized from 0 would read as a confident 50%.
+            // -Infinity normalizes to 0, so a gap fails quietly-low rather
+            // than quietly-plausible.
+            score: normalizeRerankScore(scores[i] ?? -Infinity),
             scoreKind: "similarity" as const,
           }))
           .sort((a, b) => b.score - a.score);
@@ -503,7 +508,8 @@ export async function rerankPassages(
       ...h,
       // WARP-1603: raw logit → 0-1 relevance. Monotonic, so the sort
       // below yields the same order the raw logits would have.
-      score: normalizeRerankScore(scores[i] ?? 0),
+      // WARP-1637: `-Infinity` for a gap — see the cached branch above.
+      score: normalizeRerankScore(scores[i] ?? -Infinity),
       scoreKind: "similarity" as const,
     }))
     .sort((a, b) => b.score - a.score);

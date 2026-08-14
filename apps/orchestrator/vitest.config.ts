@@ -5,7 +5,19 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["src/**/*.test.ts"],
-    setupFiles: ["src/__tests__/setup.ts"],
+    // WARP-1872 — one warning per RUN when the Node major doesn't match
+    // engines.node. In setupFiles this printed once per test file and
+    // buried everything; globalSetup runs once, in the main process.
+    globalSetup: ["src/__tests__/env-preflight.globalSetup.ts"],
+    setupFiles: [
+      // WARP-1872 — FIRST on purpose: turns a missing cosign binary into a
+      // named failure instead of 14 fake trust-chain breaks. Must precede
+      // setup.ts so the cause aborts the file before anything else runs.
+      "src/__tests__/env-preflight.setup.ts",
+      "src/__tests__/setup.ts",
+      // WARP-1690 — makes supertest bind the loopback address it dials.
+      "src/__tests__/supertest-loopback.setup.ts",
+    ],
     testTimeout: 10000,
     // WARP-1584 — child processes, not worker threads.
     //

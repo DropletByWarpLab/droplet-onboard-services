@@ -127,6 +127,7 @@ export function errorHandler(
     message: string;
     code?: string;
     details?: unknown;
+    detail?: unknown;
   } = {
     // WARP-807: distinguish 503 (an upstream dependency — the router/routing
     // service — is unavailable) from a genuine 500. The wizard keys off `code`
@@ -177,6 +178,16 @@ export function errorHandler(
     const code = (err as { code?: unknown }).code;
     if (typeof code === "string") {
       body.code = code;
+    }
+    // WARP-1907: a trusted typed error may also carry a structured `detail` the
+    // client has to act on rather than merely display — the router-jack write's
+    // `PORT_WRITE_REFUSED` carries the guard the dashboard raises its second
+    // confirm from. Gated on `trusted` for exactly the reason `code` is: only
+    // our own factories set it, so it is leak-free by construction, and an
+    // untrusted error's arbitrary property must never reach a client.
+    const detail = (err as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object") {
+      body.detail = detail;
     }
   }
 

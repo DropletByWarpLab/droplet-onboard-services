@@ -161,9 +161,11 @@ describe("ScheduleEditorModal", () => {
       target: { value: "Bedtime v2" },
     });
     // WARP-288: confirm the Save button uses the canonical primary-button
-    // utility class (was `dp-button-primary`, which Tailwind silently dropped).
+    // class (was `dp-button-primary`, which Tailwind silently dropped).
+    // WARP-1084 moved this surface onto the indigo shell, so the canonical
+    // class is now the shell's `.btn primary`.
     const saveBtn = screen.getByRole("button", { name: /^save$/i });
-    expect(saveBtn).toHaveClass("dp-btn-primary");
+    expect(saveBtn).toHaveClass("btn", "primary");
     fireEvent.click(saveBtn);
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(

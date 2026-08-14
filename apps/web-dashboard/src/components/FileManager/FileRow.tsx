@@ -12,6 +12,7 @@ import {
   Download,
   Trash2,
   Check,
+  MoreVertical,
 } from "lucide-react";
 import { StarButton } from "./StarButton";
 import type { FileEntryInfo } from "@/lib/types";
@@ -312,13 +313,12 @@ export function FileRow({
               if (e.key === "Escape") onCancelRename();
             }}
             onBlur={commitRename}
-            className="flex-1 py-1 px-2 outline-none focus:border-[var(--brand)]"
+            className="flex-1 py-1 px-2 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-input)",
               color: "var(--text)",
-              fontSize: "13.5px",
               fontWeight: 500,
             }}
           />
@@ -399,6 +399,28 @@ export function FileRow({
           aria-label={`Delete ${file.name}`}
         >
           <Trash2 size={14} />
+        </button>
+        {/*
+          Touch parity for the row context menu. The menu (Preview, Rename,
+          Cut/Copy, Move to…, Copy to…, Share link, Delete) was reachable
+          only via right-click or the keyboard's Shift+F10 / ContextMenu key
+          — neither of which exists on a phone, so seven of its nine actions
+          were unreachable on touch. This button opens the same menu from
+          the same anchor the keyboard path uses. Desktop keeps right-click
+          and is left visually unchanged (lg:hidden).
+        */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            const rect = e.currentTarget.getBoundingClientRect();
+            onContextMenu(rect.left, rect.bottom);
+          }}
+          className="lg:hidden p-2.5 rounded-[var(--radius-input)] text-[color:var(--text-muted)] hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] transition-colors"
+          aria-haspopup="menu"
+          aria-label={`More actions for ${file.name}`}
+        >
+          <MoreVertical size={14} />
         </button>
       </div>
     </div>

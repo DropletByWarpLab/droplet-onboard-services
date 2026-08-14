@@ -176,7 +176,19 @@ const envSchema = z.object({
   // advertises the full effective pool exactly as before; "domains" narrows
   // per-turn via tool-selection.service.ts. The shipped default flips only
   // after the spec §6 phase-3 eval says so.
-  TOOL_SELECTION_MODE: z.enum(["off", "domains"]).default("off"),
+  // WARP-1921 — agent-budgets §3 relevance-based tool advertisement.
+  // "domains" narrows each turn to the core set + keyword-matched domains
+  // (+ domains already used in the conversation); "off" advertises the whole
+  // chat scope and is the rollback.
+  //
+  // Shipped default flipped off → domains. The §6 phase-3 cell already scored
+  // 24/36 — best of the 2026-07-21 sweep, zero self-heals, zero degradation
+  // drops — and was held only by the cross-turn continuity gap, which
+  // WARP-1921 closes (ChatPersistenceService.getConversationToolNames).
+  // Measured effect: ~12.7K tokens of tools[] on EVERY turn drops to ~2.6K on
+  // a camera turn, returning ~10K tokens to history and cutting prompt
+  // prefill 3-5x on the box's local GPU.
+  TOOL_SELECTION_MODE: z.enum(["off", "domains"]).default("domains"),
   // WARP-1122 (§8.2/§5-11) — the business-profile refresh nudge. Enabled-ness
   // is an EXPLICIT boolean, never derived from the days var's emptiness.
   BUSINESS_PROFILE_REVIEW_ENABLED: z
@@ -214,6 +226,12 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
+  // NEXTCLOUD_PUBLIC_PATH — browser-facing path the gateway fronts Nextcloud
+  //   on (nginx `location /nextcloud/`). Used for URLs the dashboard's
+  //   browser actually loads (the doc-editor iframe) — NEXTCLOUD_URL above is
+  //   the compose-internal address (http://nextcloud:80), which a browser can
+  //   never resolve (WARP-1686 fix to the WARP-882 editorUrl host).
+  NEXTCLOUD_PUBLIC_PATH: z.string().default("/nextcloud"),
 
   // WARP-883 (ADR-027 WS-5) — name of the shared "Household" group folder
   // (Nextcloud `groupfolders` app). The groupfolders app mounts this folder
@@ -705,9 +723,10 @@ const envSchema = z.object({
 
   // --- Document server (WARP-882 / WS-4 — in-browser editing + co-authoring) ---
   // The Droplet integrates an OnlyOffice Document Server (the ENGINE) via the
-  // Nextcloud `onlyoffice` connector over a WOPI-style handshake. The engine is
-  // a CONFIG choice, not a code dependency (docserver.client.ts stays
-  // engine-agnostic), so swapping it needs only these vars.
+  // Nextcloud connector app (`richdocuments` for collabora, `onlyoffice` for
+  // onlyoffice) over a WOPI-style handshake. The engine is a CONFIG choice,
+  // not a code dependency (docserver.client.ts stays engine-agnostic), so
+  // swapping it needs only these vars (WARP-1686 / ADR-034).
   //
   // DOCS_INTERNAL_URL — internal (compose-network) base URL of the Document
   //   Server, e.g. http://docserver. EMPTY default = the engine is UNAVAILABLE:
@@ -729,6 +748,17 @@ const envSchema = z.object({
     .string()
     .default("1")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  // DOCS_ENGINE — WHICH document engine runs behind the `docs` profile
+  //   (WARP-1686 / ADR-034). Drives the engine-specific health-probe shape +
+  //   the connector editor URL in docserver.client.ts; compose runs the
+  //   matching image via DOCS_ENGINE_IMAGE and the gateway selects the /docs/
+  //   proxy variant from the same knob (docker/nginx/docs-engine.*.conf) —
+  //   scripts/lib/single-box.sh writes the trio together.
+  //     collabora  (default) — Collabora CODE (LibreOffice technology, no
+  //                licensing fee; connector app `richdocuments`).
+  //     onlyoffice — OnlyOffice DS CE (connector app `onlyoffice`; kept for
+  //                a future OEM-licensed SKU).
+  DOCS_ENGINE: z.enum(["collabora", "onlyoffice"]).default("collabora"),
   // DOCS_EDITOR_PUBLIC_PATH — public path the gateway fronts the Document
   //   Server on (nginx `location /docs/`). Used to build browser-facing URLs;
   //   the WebSocket co-authoring channel rides this path.
@@ -747,6 +777,45 @@ const envSchema = z.object({
 
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
+
+  // --- ERP direct-SQL bridge (WARP-1106) ---
+  // Compose-internal base URL of services/erp-sql-bridge, the unixODBC +
+  // pyodbc sidecar that reaches a practice's SAP SQL Anywhere database (there
+  // is no viable modern Node driver for it). Consumed by erp-provider.ts when
+  // building the `eaglesoft` (direct-SQL) connector.
+  //
+  // The default is EMPTY, not the internal URL, and that is load-bearing: the
+  // bridge is only useful once an operator has vendored the license-gated SAP
+  // client into the image (services/erp-sql-bridge/vendor/README.md). With no
+  // URL the connector blocks with the accurate "needs the SAP SQL Anywhere
+  // client" remediation; pointing it at a bridge that exists but has no driver
+  // would instead report a connection failure and send an installer looking
+  // for a network problem that isn't there. The REST track (`eaglesoft-api`)
+  // ignores this entirely.
+  ERP_SQL_BRIDGE_URL: z.string().default(""),
+
+  // --- ERP export-drop track (WARP-1964) ---
+  // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports
+  // land in, typically a read-only CIFS mount of a share on the practice LAN.
+  //
+  // This is OPERATOR configuration and never request input, deliberately: a
+  // caller-supplied filesystem path on a connect call would hand anyone who can
+  // edit a connection an arbitrary-file read inside the orchestrator. A
+  // per-practice subdirectory can come off the connection row, and is validated
+  // for containment against this root.
+  //
+  // Empty by default, mirroring ERP_SQL_BRIDGE_URL: with nothing configured the
+  // export-drop connector blocks with its own remediation ("point me at a
+  // folder") rather than reporting a failure about a track the box is not
+  // running.
+  ERP_EXPORT_DROP_ROOT: z.string().default(""),
+
+  // ERP_EXPORT_DROP_PROFILES — path to a JSON file of operator-authored export
+  // profiles (header signature -> canonical columns). This is what lets an
+  // install map a practice-management system we ship no built-in profile for,
+  // or correct a built-in whose columns do not match that site's report layout,
+  // without waiting for a release. See docs/integrations/export-drop.md.
+  ERP_EXPORT_DROP_PROFILES: z.string().default(""),
 
   // --- Ambient web data (WARP-1436) ---
   // WEB_FETCH_URL — compose-internal base URL of the services/web-fetch
@@ -896,6 +965,17 @@ const envSchema = z.object({
   // change here AND in the rag-eval container's compose env
   // (ORCHESTRATOR_SERVICE_TOKEN).
   SERVICE_TOKEN_RAG_EVAL: z.string().default(""),
+
+  // SERVICE_TOKEN_DISPLAY — WARP-165 wired this orchestrator → oled-display.
+  // WARP-1800 uses the SAME token for the reverse leg: device-bridge presents
+  // it on GET /api/network/wifi/join-code so the rack panel can resolve the
+  // household join code from the one canonical source (WARP-1723) instead of
+  // the box's own hostapd, which on the edge-router shape does not host the
+  // household SSID at all. No new secret — compose already hands this value
+  // to the orchestrator (line 274) and to the bridge as BRIDGE_AUTH_TOKEN.
+  // authMiddleware's matchServiceToken sets `_service:display`. Empty default
+  // = principal disabled, so a box without a panel still boots.
+  SERVICE_TOKEN_DISPLAY: z.string().default(""),
 
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push

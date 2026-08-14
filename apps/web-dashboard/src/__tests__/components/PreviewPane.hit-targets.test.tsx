@@ -27,6 +27,9 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/api", () => ({
   getDownloadUrl: (p: string) => `/api/files/download?path=${p}`,
+  // The embedded tags load this one (WARP-1919) — the download URL sends
+  // `Content-Disposition: attachment`, which <object> honours by downloading.
+  getPreviewUrl: (p: string) => `/api/files/download?path=${p}&disposition=inline`,
   getThumbnailUrl: (p: string) =>
     `/api/files/thumbnail?path=${p}`,
 }));

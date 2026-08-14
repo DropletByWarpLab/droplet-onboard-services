@@ -46,7 +46,7 @@ import {
   localModelIdentifiers,
 } from "../services/active-model.service.js";
 import { requireRole } from "../middleware/auth.js";
-import { decideCloudTurn } from "../services/cloud-access.service.js";
+import { decideCloudTurn, isLocalProvider } from "../services/cloud-access.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
@@ -175,6 +175,37 @@ function logBlankAnswer(
       stop_reason: result.stop_reason,
       iterations: result.iterations,
       ...result.blankDiagnostics,
+    }),
+  );
+}
+
+/**
+ * WARP-1602 — the inverse of `logBlankAnswer`: record a turn whose visible
+ * answer still reads like the model's chain-of-thought.
+ *
+ * WARP-1479 gave blank turns an attribution line so the eval suite's largest
+ * failure class stopped being a guess. Analysis-polluted turns had no such
+ * line at all — they scored as healthy because the bubble was non-empty, which
+ * is exactly how this leak survived from WARP-495 to the .87 walkthrough. Same
+ * discipline: labels + counts always, the excerpt only under
+ * AGENT_BLANK_TURN_DEBUG (a polluted answer quotes the customer's documents
+ * just as readily as a clean one).
+ */
+function logPollutedAnswer(
+  result: AgentResult,
+  conversationId: string | null,
+  assistantMessageId: string | null,
+): void {
+  if (!result.pollutedDiagnostics) return;
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[llm/chat] polluted_final_answer",
+    JSON.stringify({
+      conversationId,
+      assistantMessageId,
+      stop_reason: result.stop_reason,
+      iterations: result.iterations,
+      ...result.pollutedDiagnostics,
     }),
   );
 }
@@ -774,10 +805,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // additive since this ticket). The models list can't be trusted as
       // complete, so stamp `degraded: true` on the forwarded response and —
       // like the unreachable fallback above — never cache it: the next
-      // request re-queries so the signal clears the moment Ollama recovers.
-      // A cloud-only provider failure keeps today's behavior (cached,
-      // unflagged): only ollama drives the wizard's local-AI state.
-      if (models.degraded_providers?.includes("ollama")) {
+      // request re-queries so the signal clears the moment the runtime
+      // recovers. A cloud-only provider failure keeps today's behavior
+      // (cached, unflagged): only the on-box provider drives the wizard's
+      // local-AI state. WARP-1926 — match the accept-set, not a literal.
+      if (models.degraded_providers?.some(isLocalProvider)) {
         console.warn(
           "[llm/models] ai-gateway reports degraded providers; serving uncached:",
           models.degraded_providers,
@@ -1170,6 +1202,42 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               messageId: assistantMessageId,
             }
           : undefined;
+
+      // WARP-1921 — the §3 continuity input, read from the persisted trace.
+      //
+      // The replayed `chatReq.messages` cannot carry it: chatRequestSchema
+      // declares only `{role, content, tool_call_id}`, so zod strips
+      // `tool_calls` off every replayed assistant turn. Without this, a
+      // follow-up naming no domain keyword ("rename it to Blue Spruce")
+      // falls back to core-only advertisement and burns a self-heal
+      // iteration — the gap the spec's §6 outcome named as the prerequisite
+      // to shipping TOOL_SELECTION_MODE.
+      //
+      // Skipped entirely when selection is off (nothing consumes it) or the
+      // turn is ephemeral/unauthenticated (no conversation to read).
+      //
+      // try/catch, NOT `.catch()`: a `.catch()` only handles a REJECTED
+      // promise. If `getConversationToolNames` is missing from the object
+      // entirely (an injected double, a partially-migrated deployment) the
+      // call throws TypeError synchronously, before any promise exists — and
+      // a 500 on every chat turn is a spectacular way for an optimisation to
+      // fail. Continuity must never cost the user their answer; try/catch is
+      // what enforces that rather than merely asserting it.
+      let priorToolNames: string[] = [];
+      if (config.TOOL_SELECTION_MODE !== "off" && conversationId && userId) {
+        try {
+          priorToolNames = await persistence.getConversationToolNames(
+            conversationId,
+            userId,
+          );
+        } catch (err: unknown) {
+          // eslint-disable-next-line no-console
+          console.error(
+            "[llm/chat] continuity lookup failed; advertising without prior domains:",
+            err,
+          );
+        }
+      }
 
       // Track tool calls observed during streaming so we can include
       // them in the persisted assistant message at the end of the turn.
@@ -1705,7 +1773,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         let terminal: "completed" | "failed" | "aborted" = "completed";
         // WARP-854 — set by the onEvent done-rewrite above.
         let emptyCompletion = false;
-        // WARP-329: detect client-side abort. req.on("close") fires when
+        // WARP-329: detect client-side abort — "close" fires when
         // the client disconnects mid-stream; we still finalize but flag
         // the turn as aborted so the row reflects reality. The
         // AbortController additionally tears down the in-flight work:
@@ -1716,12 +1784,25 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // the background.
         let clientAborted = false;
         const abortController = new AbortController();
-        req.on("close", () => {
+        const onClientGone = () => {
           if (!res.writableEnded) {
             clientAborted = true;
             abortController.abort();
           }
-        });
+        };
+        // `req` alone is NOT enough on this route. Since Node 16 an
+        // IncomingMessage emits "close" once its own stream completes — and
+        // `express.json()` has already drained this POST's body by the time
+        // the handler runs (`req.destroyed === true` here), so the listener
+        // below is registered after the event it waits for and can never
+        // fire. The GET/SSE routes that use the same idiom are unaffected:
+        // no body, nothing drains, the stream stays open for the connection's
+        // lifetime. `res` closes when the connection does, whether or not the
+        // response ended, so it is the one that actually reports a Stop press
+        // — and `writableEnded` (set synchronously by `res.end()`) keeps a
+        // NORMAL completion from being mislabelled "aborted".
+        req.on("close", onClientGone);
+        res.on("close", onClientGone);
 
         // ── WARP-903 — cold-model loading signal ─────────────────────
         // One budgeted lifecycle probe (Ollama /api/ps + /api/tags via
@@ -1764,6 +1845,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             max_iter: chatReq.max_iter,
             context_window: config.OLLAMA_CONTEXT_LENGTH,
             tool_selection_mode: config.TOOL_SELECTION_MODE,
+            // WARP-1921 — cross-turn continuity for §3 selection.
+            prior_tool_names: priorToolNames,
             allowed_tools: allowedForUser,
             // WARP-1529 — the same §3 scope, re-checked fail-closed before
             // every tool dispatch inside the loop.
@@ -1781,7 +1864,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // persists, enabling lazy-load reasoning on rehydrate
           // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
+          // WARP-1602 — persist the TERMINAL answer, not the delta
+          // accumulator. `liveAssistantContent` sums every `content_delta`
+          // the turn emitted; on a multi-iteration turn that used to include
+          // every intermediate iteration's analysis, so the stored `content`
+          // was the model's chain-of-thought welded to its answer while the
+          // blocking path (below) stored `result.message.content` clean. The
+          // agent loop now quarantines intermediate content, so the two agree
+          // by construction — this assignment makes the DB row depend on the
+          // loop's own contract rather than on nothing having been mis-emitted
+          // upstream, which is what let the divergence go unnoticed.
+          //
+          // Only on a real terminal. An `error` stop_reason (client abort,
+          // mid-stream death) keeps the ACCUMULATOR instead: the agent loop
+          // now settles its emitter on both teardown paths (WARP-1602 review
+          // B1/B2), so the salvaged partial has already arrived here as
+          // `content_delta` — and on a turn that mixed deferred and
+          // non-deferred iterations the accumulator is the SUPERSET, while
+          // `streamResult.message.content` carries only the torn-down
+          // iteration's share. Overwriting would truncate the answer.
+          if (streamResult.stop_reason !== "error") {
+            liveAssistantContent = contentToText(streamResult.message.content);
+          }
           logBlankAnswer(streamResult, conversationId, assistantMessageId);
+          logPollutedAnswer(streamResult, conversationId, assistantMessageId);
         } catch (err) {
           // Use the name-based check rather than instanceof DOMException:
           // aligns with the codebase pattern and stays robust against
@@ -1826,6 +1932,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           max_iter: chatReq.max_iter,
           context_window: config.OLLAMA_CONTEXT_LENGTH,
           tool_selection_mode: config.TOOL_SELECTION_MODE,
+          // WARP-1921 — cross-turn continuity for §3 selection.
+          prior_tool_names: priorToolNames,
           allowed_tools: allowedForUser,
           // WARP-1529 — the same §3 scope, re-checked fail-closed before
           // every tool dispatch inside the loop.
@@ -1836,6 +1944,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           citationContext,
         });
         logBlankAnswer(result, conversationId, assistantMessageId);
+        logPollutedAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
         // WARP-458 — agent loop populates message.reasoning regardless
         // of captureReasoning; persist whenever present so the
@@ -2163,7 +2272,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const body = req.body as { title?: unknown; projectId?: unknown };
+      const body = req.body as {
+        title?: unknown;
+        projectId?: unknown;
+        pinned?: unknown;
+      };
       const hasTitle = typeof body?.title === "string";
       // WARP-845 — move into / out of a project. `null` = ungroup. An
       // empty string is rejected outright (it would skip the ownership
@@ -2171,6 +2284,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       const hasProject =
         (typeof body?.projectId === "string" && body.projectId.length > 0) ||
         body?.projectId === null;
+      // WARP-1917 — pin/unpin. Strictly boolean; a present-but-non-boolean
+      // value 400s the whole PATCH before anything mutates (same posture
+      // as the malformed-title rule below).
+      const hasPinned = typeof body?.pinned === "boolean";
+      if (body?.pinned !== undefined && !hasPinned) {
+        res.status(400).json({ error: "invalid_pinned" });
+        return;
+      }
       if (
         body?.projectId !== undefined &&
         body?.projectId !== null &&
@@ -2186,7 +2307,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "title_or_project_required" });
         return;
       }
-      if (!hasTitle && !hasProject) {
+      if (!hasTitle && !hasProject && !hasPinned) {
         res.status(400).json({ error: "title_or_project_required" });
         return;
       }
@@ -2238,10 +2359,25 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           return;
         }
       }
+      // WARP-1917 — pin leg. Ownership enforced in the service's single
+      // UPDATE; a miss is indistinguishable between other-user and
+      // nonexistent (same no-existence-leak posture as the legs above).
+      if (hasPinned) {
+        const ok = await persistence.setConversationPinned(
+          req.params.id,
+          userId,
+          body.pinned as boolean,
+        );
+        if (!ok) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+      }
       res.json({
         id: req.params.id,
         ...(hasTitle ? { title: finalTitle } : {}),
         ...(hasProject ? { projectId: body.projectId ?? null } : {}),
+        ...(hasPinned ? { pinned: body.pinned as boolean } : {}),
       });
     } catch (err) {
       next(err);

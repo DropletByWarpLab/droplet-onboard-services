@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
-from capabilities import ollama_capabilities_from_show
+from capabilities import ollama_capabilities_from_show, static_capabilities
 from providers.base import BaseProvider
 from request_context import get_request_id
 from schemas import ChatMessage, ModelCapabilities, ModelInfo
@@ -43,30 +43,122 @@ logger = logging.getLogger(__name__)
 # See ADR-004 in the droplet-local-LLM repo for the original rationale.
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 
-# XR-05: /health (the appliance limits + readiness contract) lives on
-# ollama-manager (:8002), NOT on Ollama (:11434). On the canonical DIRECT chat
-# path OLLAMA_URL points at :11434, so probing "{OLLAMA_URL}/health" 404s — the
-# limits never size (outbound concurrency stuck at 1) and /ai/readiness is
-# perpetually "degraded". OLLAMA_MANAGER_URL decouples the lifecycle/health
-# endpoint from the chat endpoint. When it's unset AND OLLAMA_URL isn't the
-# opt-in /proxy path (i.e. the manager isn't deployed — single-box today), we
-# skip the probe entirely and run with sane default limits rather than spamming
-# 404s. See droplet-local-LLM/services/ollama-manager (the /health owner).
-OLLAMA_MANAGER_URL = os.getenv("OLLAMA_MANAGER_URL") or None
+# XR-05: /health (the appliance limits + readiness contract) lives on the
+# model-lifecycle manager (:8002), NOT on Ollama (:11434). On the canonical
+# DIRECT chat path OLLAMA_URL points at :11434, so probing "{OLLAMA_URL}/health"
+# 404s — the limits never size (outbound concurrency stuck at 1) and
+# /ai/readiness is perpetually "degraded". INFERENCE_MANAGER_URL decouples the
+# lifecycle/health endpoint from the chat endpoint. When it's unset AND
+# OLLAMA_URL isn't the opt-in /proxy path (i.e. the manager isn't deployed —
+# single-box today), we skip the probe entirely and run with sane default limits
+# rather than spamming 404s. See droplet-local-LLM/services/ollama-manager (the
+# /health owner).
+#
+# WARP-1748 — the variable was `OLLAMA_MANAGER_URL`. WARP-1743 turned that
+# service into a runtime-AGNOSTIC model-lifecycle manager (runtime/{base,ollama,
+# dmr,factory}.py, selected by INFERENCE_RUNTIME which defaults to `ollama`), so
+# the `OLLAMA_` prefix now names an implementation detail instead of the
+# contract — the same class of debt as a "poc"/"test" prefix on a shipping
+# surface. INFERENCE_MANAGER_URL is the canonical name; the old one still works.
+#
+# 🔴 Why the old name MUST keep working: `OLLAMA_MANAGER_URL` is set in the .env
+# of deployed boxes, and docker/docker-compose.yml wires the ai-gateway service
+# with `env_file: ../.env` (see the ai-gateway block, docker-compose.yml:979-981)
+# — so that key reaches this process verbatim on every appliance in the field. A
+# rename that simply dropped it would break the appliance-limits probe
+# everywhere, and it would fail SOFT (limits never size, outbound concurrency
+# pinned at 1, /ai/readiness stuck "degraded") — strictly worse than failing
+# loud, because nobody notices for weeks.
+#
+# The migration shape is copied verbatim from ADR-011's `JETSON_OLLAMA_URL` →
+# `OLLAMA_URL` rename (docs/ADR-011-hardware-agnostic-codebase.md §"Decision"):
+# read the new name, fall back to the old one with a logged deprecation warning,
+# and delete the fallback in a follow-up once every provisioned box has
+# migrated. Do NOT invent a different idiom for the next one.
+_MANAGER_URL_ENV = "INFERENCE_MANAGER_URL"
+_LEGACY_MANAGER_URL_ENV = "OLLAMA_MANAGER_URL"
+
+
+def _resolve_manager_url() -> str | None:
+    """Resolve the model-lifecycle manager root from the environment.
+
+    Precedence (WARP-1748):
+      1. ``INFERENCE_MANAGER_URL`` — the canonical name, wins outright.
+      2. ``OLLAMA_MANAGER_URL`` — deprecated; honored with a WARNING so a
+         field box that has not migrated its .env keeps sizing its limits.
+      3. ``None`` — no manager wired. Unchanged from today; the caller falls
+         through to the ``/proxy`` derivation and then to "skip the probe".
+
+    An explicitly-EMPTY value counts as UNSET at every step. docker-compose
+    passes optional settings through as ``${VAR:-}``, which delivers ``""``
+    (not "unset") into the container — so a blank ``INFERENCE_MANAGER_URL``
+    must not shadow a real legacy ``OLLAMA_MANAGER_URL``, and a blank legacy
+    value must not defeat the default. Same defensive idiom as
+    ``_resolve_chat_path`` below and router.py's LLM_MODEL read.
+
+    No default is introduced and no default changes: "nothing configured"
+    still resolves to ``None``.
+    """
+    canonical = (os.getenv(_MANAGER_URL_ENV) or "").strip()
+    legacy = (os.getenv(_LEGACY_MANAGER_URL_ENV) or "").strip()
+
+    if canonical:
+        if legacy:
+            # Both names present. The new one wins, but say so loudly: two
+            # names for one endpoint is exactly how a box ends up probing a
+            # stale manager after someone edits only the line they remember.
+            # Values are deliberately NOT logged (an operator could embed
+            # credentials in a URL) — the var names and the file are what
+            # make this actionable.
+            logger.warning(
+                "%s and the deprecated %s are BOTH set — using %s and ignoring "
+                "%s. Delete the %s line from the repo-root .env (the file "
+                "docker/docker-compose.yml passes to ai-gateway via env_file) "
+                "so the two cannot drift.",
+                _MANAGER_URL_ENV,
+                _LEGACY_MANAGER_URL_ENV,
+                _MANAGER_URL_ENV,
+                _LEGACY_MANAGER_URL_ENV,
+                _LEGACY_MANAGER_URL_ENV,
+            )
+        return canonical
+
+    if legacy:
+        logger.warning(
+            "%s is DEPRECATED — rename it to %s in the repo-root .env (the file "
+            "docker/docker-compose.yml passes to ai-gateway via env_file), then "
+            "restart the ai-gateway container. The service it points at became a "
+            "runtime-agnostic model-lifecycle manager in WARP-1743 (INFERENCE_RUNTIME "
+            "selects the backend), so the OLLAMA_ prefix names an implementation "
+            "detail rather than the contract. Honoring the deprecated name for now; "
+            "a future ticket removes this fallback once every deployed box has "
+            "migrated.",
+            _LEGACY_MANAGER_URL_ENV,
+            _MANAGER_URL_ENV,
+        )
+        return legacy
+
+    return None
+
+
+# Resolved ONCE at import so the deprecation warning is emitted once per
+# process, not once per health probe (mirrors ADR-011's import-time warn).
+INFERENCE_MANAGER_URL = _resolve_manager_url()
 
 
 def _resolve_manager_health_url(base_url: str) -> str | None:
-    """Return the ollama-manager /health URL, or None if no manager is wired.
+    """Return the manager's /health URL, or None if no manager is wired.
 
     Precedence:
-      1. explicit OLLAMA_MANAGER_URL → ``{manager}/health``
+      1. explicit INFERENCE_MANAGER_URL (or the deprecated OLLAMA_MANAGER_URL
+         — see `_resolve_manager_url`) → ``{manager}/health``
       2. OLLAMA_URL ending in ``/proxy`` (the opt-in manager chat path) →
          strip ``/proxy`` and use that root's ``/health`` (preserves the prior
          behavior for that specific deploy)
       3. otherwise None — the manager isn't deployed; skip the probe.
     """
-    if OLLAMA_MANAGER_URL:
-        return f"{OLLAMA_MANAGER_URL.rstrip('/')}/health"
+    if INFERENCE_MANAGER_URL:
+        return f"{INFERENCE_MANAGER_URL.rstrip('/')}/health"
     if base_url.endswith("/proxy"):
         return f"{base_url[: -len('/proxy')].rstrip('/')}/health"
     return None
@@ -105,12 +197,197 @@ _MAX_CONNECTIONS = int(os.getenv("OLLAMA_MAX_CONNECTIONS", "64"))
 # answers /api/tags in milliseconds.
 _TAGS_TIMEOUT_S = 5.0
 
-# We ALWAYS talk to Ollama's OpenAI-compatible chat endpoint, never the native
-# `/api/chat`. This keeps the request/response shape identical to the cloud
-# providers (one code path in router.py) and is the canonical direct-to-:11434
-# contract. The body therefore uses OpenAI field names (top-level
-# `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
-_CHAT_PATH = "/v1/chat/completions"
+# We ALWAYS talk to the daemon's OpenAI-compatible chat endpoint, never a
+# native `/api/chat`. This keeps the request/response shape identical to the
+# cloud providers (one code path in router.py) and is the canonical
+# direct-to-:11434 contract. The body therefore uses OpenAI field names
+# (top-level `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
+#
+# WARP-1744: the PATH is configurable, the SHAPE is not. Ollama serves the
+# OpenAI-compatible surface under `/v1/…`; Docker Model Runner (DMR — the
+# alternative local runtime evaluated in WARP-1740..1748) serves the identical
+# OpenAI surface under `/engines/v1/…`, i.e.
+# `POST /engines/v1/chat/completions` (docker/model-runner v1.2.6). Same body,
+# same response, different prefix — so a one-line path override is the whole
+# delta, and nothing downstream of this constant has to know which daemon is
+# on the other end.
+#
+# The default is the exact literal this provider has always used, so an unset
+# OLLAMA_CHAT_PATH leaves every request byte-identical to pre-WARP-1744
+# behavior.
+#
+# NOTE (verified live 2026-08-05 against docker/model-runner:v1.2.6): DMR
+# serves the OpenAI surface at BOTH `/engines/v1/chat/completions` and the bare
+# `/v1/chat/completions` — the bare path returns 200. So a DMR deployment does
+# NOT have to set this at all; the default already works against it. This knob
+# is kept for explicitness and for a future DMR that mounts only the prefixed
+# form, not because the migration needs it. The desk analysis originally
+# assumed the `/engines` prefix was mandatory; measurement said otherwise.
+#
+# The path is resolved RELATIVE to OLLAMA_URL, so it composes with the opt-in
+# `/proxy` base the same way the hardcoded literal did.
+_DEFAULT_CHAT_PATH = "/v1/chat/completions"
+
+
+def _resolve_chat_path(raw: str | None) -> str:
+    """Chat path from the raw env value, falling back to the Ollama default.
+
+    An explicitly-EMPTY value falls back rather than posting to the daemon
+    root: docker-compose.yml passes optional settings through as
+    `${VAR:-}`, which delivers "" (not "unset") to the container, and an
+    empty path would silently retarget every chat request. Same defensive
+    idiom as `_resolve_manager_url` / router.py's LLM_MODEL read.
+    """
+    return (raw or "").strip() or _DEFAULT_CHAT_PATH
+
+
+_CHAT_PATH = _resolve_chat_path(os.getenv("OLLAMA_CHAT_PATH"))
+
+# WARP-1744 — is the static capability table allowed to answer?
+#
+# OFF by default, which makes the default path provably byte-identical: with
+# the table disabled `_capabilities` is exactly the pre-WARP-1744 probe. It is
+# switched on by the same `INFERENCE_RUNTIME=dmr` that selects the Docker Model
+# Runner backend in droplet-local-LLM's ollama-manager (WARP-1743) — one word
+# for the whole epic rather than a knob per service, so a box cannot end up
+# half-migrated.
+#
+# Even when enabled the table never overrides a daemon that answered: see the
+# gap-filler condition in `_capabilities`. The switch exists because three
+# independent reviewers flagged an earlier table-first draft as a ships-dark
+# violation, and "provably off" beats "argued to be equivalent".
+def _resolve_inference_runtime(runtime: str | None = None, url: str | None = None) -> str:
+    """The selected runtime, shouting when the configuration is incoherent.
+
+    WARP-1870. `INFERENCE_RUNTIME` is read ONCE, at module import, by both
+    module constants below, and it defaults to "ollama". On a DMR box that
+    default is a silent trap: lose the variable — a compose `${VAR:-}` that
+    resolves against the wrong env file, or a `docker restart`, which re-reads
+    nothing at all (only `--force-recreate` does) — and both flags quietly flip
+    off. Every DMR model then reports `tools=false` with no error anywhere, and
+    the WARP-1839 grammar outage returns.
+
+    The contradiction is cheap to spot: `OLLAMA_URL` still points at DMR.
+    Runtime "ollama" plus a DMR chat URL cannot both be true, and the only way
+    to reach it is a lost variable. Log it at ERROR rather than degrade in
+    silence — a box serving without tools looks "up" from every angle except
+    the one that matters.
+
+    Returns the runtime string. Deliberately does NOT auto-correct: inferring
+    the runtime from a URL would be its own guessing game, and an operator who
+    genuinely wants Ollama against a DMR-shaped URL deserves to be obeyed and
+    warned, not overridden.
+    """
+    resolved = (runtime if runtime is not None else os.getenv("INFERENCE_RUNTIME", "ollama"))
+    resolved = (resolved or "").strip().lower() or "ollama"
+    chat_url = (url if url is not None else OLLAMA_URL) or ""
+    looks_like_dmr = "dmr" in chat_url.lower() or ":12434" in chat_url
+    if resolved != "dmr" and looks_like_dmr:
+        logger.error(
+            "INFERENCE_RUNTIME=%r but OLLAMA_URL=%r points at the Docker Model "
+            "Runner. The runtime variable was almost certainly lost (a compose "
+            "${VAR:-} resolving against the wrong env file, or a `docker "
+            "restart`, which re-reads nothing — use --force-recreate). Serving "
+            "with DMR support OFF: every model will report tools=false and "
+            "tool schemas will not be grammar-stripped (WARP-1839).",
+            resolved,
+            chat_url,
+        )
+    return resolved
+
+
+_STATIC_CAPABILITY_TABLE = _resolve_inference_runtime() == "dmr"
+
+# WARP-1839 — grammar-safe tool schemas for the DMR runtime.
+#
+# llama.cpp (DMR's inference backend) compiles the request's `tools` JSON
+# schemas into a GBNF grammar for constrained tool-call decoding, and bounded
+# schema keywords (`minLength`/`maxLength`, `minItems`/`maxItems`, `pattern`,
+# `format`) expand into repeated rule copies at grammar-build time. One real
+# tool — `memory_extract_fact`, whose `fact` field carries `maxLength: 2000` —
+# multiplies past llama.cpp's "sane defaults" repetition guard, the sampler
+# fails to initialize, and the whole request 400s ("Failed to initialize
+# samplers: failed to parse grammar"). With the full catalog attached that
+# meant EVERY tools-bearing chat on the box failed. Ollama does not
+# grammar-constrain tool calls, so the identical catalog worked before the
+# flip; the WARP-1839 bisect on the live box pins all of this.
+#
+# Same gate word as the capability table above, for the same reason: with the
+# flag off the ollama wire shape stays provably byte-identical (rollback stays
+# honest), and one env word migrates the whole box.
+#
+# Nothing is lost by stripping: tools-core handlers re-validate these bounds
+# at execution time (memory/extract.ts rejects >2000-char facts with
+# INVALID_ARGS), which is exactly where they were enforced under Ollama too —
+# the model never saw grammar-enforced bounds before the flip either.
+_GRAMMAR_SAFE_TOOL_SCHEMAS = _resolve_inference_runtime() == "dmr"
+
+# JSON Schema keywords that generate bounded repetitions in llama.cpp's
+# json-schema→GBNF conversion. `format` is included because llama.cpp expands
+# known formats (date-time, uuid, …) into pattern-like bounded grammars.
+_GRAMMAR_UNSAFE_KEYWORDS = frozenset(
+    {"pattern", "format", "minLength", "maxLength", "minItems", "maxItems"}
+)
+
+# Keys whose values are maps of NAMES to subschemas — a child key here is a
+# property/definition name, never a schema keyword. The catalog really does
+# ship a tool (`regex_test`) with a property literally named `pattern`; it
+# must survive sanitization.
+_SCHEMA_NAME_MAPS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions"}
+)
+
+# Keys whose values are DATA, not schema — never recursed into (an enum
+# member or default object could legitimately contain a key named
+# `maxLength`) and never stripped.
+_SCHEMA_DATA_KEYS = frozenset({"enum", "const", "default", "examples"})
+
+
+def _strip_grammar_unsafe(schema: object) -> object:
+    """Return ``schema`` minus grammar-unsafe keywords, recursively."""
+    if isinstance(schema, list):
+        return [_strip_grammar_unsafe(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for key, value in schema.items():
+        if key in _GRAMMAR_UNSAFE_KEYWORDS:
+            continue
+        if key in _SCHEMA_DATA_KEYS:
+            out[key] = value
+        elif key in _SCHEMA_NAME_MAPS and isinstance(value, dict):
+            out[key] = {
+                name: _strip_grammar_unsafe(sub) for name, sub in value.items()
+            }
+        else:
+            out[key] = _strip_grammar_unsafe(value)
+    return out
+
+
+def grammar_safe_tools(tools: list) -> list:
+    """Sanitize OpenAI-format tool definitions for a grammar-compiling runtime.
+
+    Only ``function.parameters`` is rewritten — that is the sole input to
+    llama.cpp's grammar builder. Names and descriptions pass through, and the
+    caller's dicts are never mutated in place.
+    """
+    safe: list = []
+    for tool in tools:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(fn, dict) and "parameters" in fn:
+            safe.append(
+                {
+                    **tool,
+                    "function": {
+                        **fn,
+                        "parameters": _strip_grammar_unsafe(fn["parameters"]),
+                    },
+                }
+            )
+        else:
+            safe.append(tool)
+    return safe
+
 
 # WARP-1333: gpt-oss's harmony parser intermittently 500s when the model
 # emits a tool call whose function name carries channel tokens
@@ -168,10 +445,13 @@ class _LimitsCache:
     """
 
     # Version of the /health schema this code knows. Bump in lockstep with
-    # ``services/ollama-manager/main.py::_HEALTH_SCHEMA_VERSION`` in the
+    # ``services/inference-manager/main.py::_HEALTH_SCHEMA_VERSION`` in the
     # appliance repo. See ``droplet-local-LLM/docs/model-management.md``
     # for the canonical schema-history table.
-    _KNOWN_SCHEMA_VERSION = 1
+    # v2 (WARP-1825/1826): appliance added the `placement` GPU-residency
+    # block. This cache still only consumes `limits`; the placement block
+    # is read by the orchestrator's model metrics path, not here.
+    _KNOWN_SCHEMA_VERSION = 2
 
     # Sentinel for "we haven't observed a schema_version yet" — distinct
     # from None ("appliance returned no schema_version key"). Without this,
@@ -264,11 +544,15 @@ class _LimitsCache:
         if health_url is None:
             if not self._logged_no_manager:
                 self._logged_no_manager = True
+                # WARP-1748: names the CANONICAL var. An operator who still has
+                # the deprecated OLLAMA_MANAGER_URL set never reaches this line
+                # (health_url is non-None), so pointing them at the new name
+                # here can't strand anyone.
                 logger.info(
-                    "appliance_limits_probe_skipped: no OLLAMA_MANAGER_URL and "
+                    "appliance_limits_probe_skipped: no INFERENCE_MANAGER_URL and "
                     "OLLAMA_URL is the direct path — using default limits "
                     "(num_parallel=%d, max_queue=%d, max_loaded_models=%d). "
-                    "Set OLLAMA_MANAGER_URL to size outbound concurrency.",
+                    "Set INFERENCE_MANAGER_URL to size outbound concurrency.",
                     self.num_parallel,
                     self.max_queue,
                     self.max_loaded_models,
@@ -295,12 +579,29 @@ class _LimitsCache:
             logger.warning("appliance_limits_refresh_failed: %s", e)
 
 
-def prettify_ollama_name(raw: str) -> str:
-    """Turn an Ollama tag like 'llama3.1:8b' into a display name 'Llama 3.1 8B'.
+def prettify_model_name(raw: str) -> str:
+    """Turn a local model id into a display name.
+
+    'llama3.1:8b'                   -> 'Llama 3.1 8B'
+    'docker.io/ai/gpt-oss:20B-F16'  -> 'Gpt-oss 20B F16'
 
     Other providers already return curated display names (e.g. 'Claude Sonnet 4');
-    Ollama returns the raw tag, so match the convention at the provider edge.
+    the local runtimes return raw ids, so match the convention at the provider
+    edge.
+
+    WARP-1926 — the registry path must be stripped FIRST. Ollama ids are bare
+    tags (`llama3.1:8b`), but Docker Model Runner reports FULLY QUALIFIED OCI
+    references, and this function used to title-case the whole thing: the box's
+    own model rendered as **'Docker.io/ai/gpt-oss 20B F16'** in the chat picker,
+    the models page and the setup wizard. Only the last path segment is a model
+    name; everything before the final `/` is registry host + namespace, which
+    carries no display information (the unique id is kept separately in
+    `ModelInfo.id`, so nothing is lost).
     """
+    # Registry host / namespace -> drop. `rsplit` is safe for a bare Ollama tag
+    # (no slash -> unchanged) and for a port-bearing host (`localhost:5000/ai/x`
+    # -> `x`), because the split is on `/` and the tag is parsed AFTER it.
+    raw = raw.rsplit("/", 1)[-1]
     base, _, tag = raw.partition(":")
     base_spaced = re.sub(r"([A-Za-z])(\d)", r"\1 \2", base)
     base_pretty = " ".join(
@@ -368,8 +669,9 @@ class OllamaLocalProvider(BaseProvider):
             limits=httpx.Limits(max_connections=_MAX_CONNECTIONS),
         )
         # Per-model capability cache (vision/tools). Model capabilities are
-        # immutable for a given tag, so we probe `/api/show` once per id and
-        # reuse the result across list_models calls.
+        # immutable for a given tag, so we resolve once per id (static table,
+        # else an `/api/show` probe — see _capabilities) and reuse the result
+        # across list_models calls.
         self._caps_cache: dict[str, ModelCapabilities | None] = {}
 
     def _build_sema(self, num_parallel: int) -> None:
@@ -410,20 +712,54 @@ class OllamaLocalProvider(BaseProvider):
             self._build_sema(self._limits.num_parallel)
 
     async def _capabilities(self, model: str) -> ModelCapabilities | None:
-        """Best-effort capability probe via Ollama `/api/show`, cached per id.
+        """Capabilities for a local model id, cached per id.
 
-        Returns None when the daemon is unreachable or errors — callers treat
-        unknown capabilities conservatively (non-vision → OCR fallback).
+        WARP-1744 — resolution order is `/api/show` probe FIRST, then the
+        static table strictly as a GAP-FILLER:
+
+        1. The best-effort ``/api/show`` probe, exactly as before. When the
+           daemon returns a ``capabilities`` array its answer wins outright.
+           Ollama reports that array, so on a stock appliance this method is
+           byte-identical to pre-WARP-1744 behavior: same POST, same parse,
+           same result, and step 2 is never reached.
+        2. ``capabilities.static_capabilities``, consulted ONLY when the probe
+           came back without a ``capabilities`` array (or failed outright) AND
+           the table is enabled. That is the Docker Model Runner case: verified
+           live on 2026-08-05 against ``docker/model-runner:v1.2.6``, DMR's
+           Ollama-compatible ``/api/show`` returns ``details`` and nothing else,
+           so ``ollama_capabilities_from_show`` degrades to ``tools=False`` for
+           every model and ``vision`` to the ``details.families`` heuristic.
+
+        The probe-first order matters. An earlier draft consulted the table
+        first, which skipped the ``/api/show`` POST entirely for known ids and
+        changed the reported value for any sparse-``/api/show`` daemon — a live
+        behavior change on the default path, i.e. not dark. Capability really
+        is a property of the model rather than of the daemon, but acting on
+        that belief has to wait for the runtime it was written for.
+
+        Returns None when the daemon is unreachable AND the table is disabled
+        or has no row — callers treat unknown capabilities conservatively
+        (non-vision → OCR fallback).
         """
         if model in self._caps_cache:
             return self._caps_cache[model]
         caps: ModelCapabilities | None = None
+        show: dict | None = None
         try:
             resp = await self.client.post("/api/show", json={"model": model})
             resp.raise_for_status()
-            caps = ollama_capabilities_from_show(resp.json())
+            show = resp.json()
+            caps = ollama_capabilities_from_show(show)
         except Exception as e:  # noqa: BLE001 — probe is best-effort
             logger.debug("ollama /api/show failed for %s: %s", model, e)
+        # Gap-filler only. `show is None` = probe failed; a show without
+        # `capabilities` = a daemon that cannot answer the question (DMR).
+        # Both are cases where today's answer is a guess, never cases where
+        # we are overriding a daemon that DID answer.
+        if _STATIC_CAPABILITY_TABLE and (show is None or "capabilities" not in show):
+            tabled = static_capabilities(model)
+            if tabled is not None:
+                caps = tabled
         self._caps_cache[model] = caps
         return caps
 
@@ -453,8 +789,13 @@ class OllamaLocalProvider(BaseProvider):
             out.append(
                 ModelInfo(
                     id=name,
-                    provider="ollama",
-                    name=prettify_ollama_name(name),
+                    # WARP-1926: `local` names WHERE inference runs, not which
+                    # daemon serves it. Was `ollama`, which became a lie the
+                    # day DMR shipped as the default runtime (WARP-1870) —
+                    # this endpoint reported `ollama` while Docker Model
+                    # Runner served every token.
+                    provider="local",
+                    name=prettify_model_name(name),
                     context_window=None,
                     capabilities=await self._capabilities(name),
                 )
@@ -502,10 +843,16 @@ class OllamaLocalProvider(BaseProvider):
         if reasoning_effort is not None and model_supports_reasoning_effort(model):
             body["reasoning_effort"] = reasoning_effort
         if has_tools:
-            body["tools"] = [
+            tools_payload = [
                 t.model_dump() if hasattr(t, "model_dump") else t
                 for t in kwargs["tools"]
             ]
+            # WARP-1839: DMR's llama.cpp compiles these schemas into a GBNF
+            # grammar and bounded keywords blow its complexity guard — see
+            # _GRAMMAR_SAFE_TOOL_SCHEMAS above.
+            if _GRAMMAR_SAFE_TOOL_SCHEMAS:
+                tools_payload = grammar_safe_tools(tools_payload)
+            body["tools"] = tools_payload
 
         if not stream:
             rid = get_request_id()

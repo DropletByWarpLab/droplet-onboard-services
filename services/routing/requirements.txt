@@ -1,9 +1,9 @@
 fastapi==0.141.1
-uvicorn[standard]==0.52.0
+uvicorn[standard]==0.52.1
 pydantic==2.13.4
 # WireGuard X25519 keypair generation lives in VPNApi (droplet_openwrt_sdk.py).
 # Doing keygen in Python avoids needing `file.exec` in the rpcd ACL.
-cryptography==49.0.0
+cryptography==50.0.0
 # WARP-470 (throughput sampler) + WARP-468 (egress meter): 60s
 # apscheduler ticks live in scheduler.py and egress_meter.py. APScheduler
 # is the canonical pattern per droplet-architecture-guard rule 9 (no
@@ -13,3 +13,8 @@ APScheduler==3.11.3
 # off-lan-sample-batch). httpx is the canonical Python HTTP
 # client across services (already used by camera-discovery, ops-console).
 httpx==0.28.1
+
+# WARP-1948 — OSV floor: the osv-nightly resolver scores transitive deps at
+# their minimum resolvable version; state the real minimum instead of
+# suppressing the advisory.
+idna>=3.15

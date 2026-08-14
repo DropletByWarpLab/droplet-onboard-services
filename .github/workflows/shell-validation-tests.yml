@@ -26,6 +26,13 @@ on:
       # past the tests that guard it.
       - "services/oled-display/device-bridge.py"
       - "services/oled-display/50-droplet-device-bridge.rules"
+      # WARP-1908: test_compose_env_shadowing.py guards the compose file's
+      # env_file-only contract for RAGAS_EVAL_USER and the _resolve_env_target
+      # symlink seam in the DMR flip/rollback scripts — so without these two
+      # paths a change that re-adds a shadowing `environment:` line or reverts
+      # the resolver would sail past the tests that guard it.
+      - "docker/docker-compose.yml"
+      - "scripts/dmr/**"
       - ".github/workflows/shell-validation-tests.yml"
   push:
     branches: [main]
@@ -40,6 +47,13 @@ on:
       # past the tests that guard it.
       - "services/oled-display/device-bridge.py"
       - "services/oled-display/50-droplet-device-bridge.rules"
+      # WARP-1908: test_compose_env_shadowing.py guards the compose file's
+      # env_file-only contract for RAGAS_EVAL_USER and the _resolve_env_target
+      # symlink seam in the DMR flip/rollback scripts — so without these two
+      # paths a change that re-adds a shadowing `environment:` line or reverts
+      # the resolver would sail past the tests that guard it.
+      - "docker/docker-compose.yml"
+      - "scripts/dmr/**"
       - ".github/workflows/shell-validation-tests.yml"
   workflow_dispatch:
 

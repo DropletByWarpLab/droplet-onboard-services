@@ -414,6 +414,27 @@ class EditInterfaceRequest(BaseModel):
         return self
 
 
+class SetPortEnabledRequest(BaseModel):
+    """Administratively enable/disable a physical router jack (WARP-1907).
+
+    `enabled` is required and has no default: "which way?" is the entire
+    request, and a defaulted direction is how a mis-serialised body silently
+    turns a jack off.
+
+    `force` is the explicit extra-confirm, carrying the same semantics as the
+    interface writes'. The route refuses a DISABLE of the WAN jack, or of a
+    live management jack, with 409 unless it is set — see
+    `router_ports.disable_guard` for why those two refusals are worded
+    differently.
+    """
+
+    enabled: bool = Field(..., description="True brings the jack up, False shuts it")
+    force: bool = Field(
+        default=False,
+        description="Explicit extra-confirm for a WAN or live-management jack",
+    )
+
+
 # ---------------------------------------------------------------------------
 # VPN (WireGuard)
 # ---------------------------------------------------------------------------
@@ -502,10 +523,20 @@ class VpnOverlayPeerRequest(BaseModel):
     )
     # The phone's observed public mapping (STUN reflexive) as IPv4:port. IPv6 is
     # tracked as a follow-up caveat in ADR-030's client stories.
-    endpoint: str = Field(
-        ...,
+    # WARP-1757: OPTIONAL. WireGuard learns a peer's endpoint from its first
+    # authenticated handshake, so the box needs one configured only when the BOX
+    # must initiate — i.e. the NAT hole-punch. A peer installed at approval time
+    # (before any punch, and for a box that is its own edge router, behind a
+    # successful port map, or reached over the LAN) is client-initiated and must
+    # be installable WITHOUT one. The SDK's add_peer has always treated it as
+    # optional (`if endpoint:`); only this schema forced it.
+    endpoint: str | None = Field(
+        default=None,
         pattern=r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d):(?:[1-9]\d{0,4})$",
-        description="Peer's observed endpoint host:port, e.g. '203.0.113.7:51820'.",
+        description=(
+            "Peer's observed endpoint host:port, e.g. '203.0.113.7:51820'. "
+            "Omit for a client-initiated peer — WireGuard learns it from the handshake."
+        ),
     )
     allowed_ips: list[str] = Field(
         ..., min_length=1, max_length=8,
@@ -587,6 +618,44 @@ class ApTestSeedRequest(BaseModel):
     version: Optional[str] = None
     last_ip: Optional[str] = None
     hostname: Optional[str] = None
+    # WARP-1715: assoclist rows for GET /aps/{mac}/clients. Test-only, same as
+    # the rest of this payload — production learns stations from the AP itself.
+    clients: Optional[list[dict]] = None
+
+
+class ApBandSteeringRequest(BaseModel):
+    """Toggle the external AP's band-steering master switch (WARP-1703).
+
+    Maps 1:1 onto the AP image's `droplet.wifi.band_steering` uci option
+    (droplet-edge-router PR #5): '1' unifies the SSIDs + runs dawn (802.11k/v
+    steering), '0' splits them and stops dawn. The AP's own procd reload
+    trigger re-applies on commit — the routing service only sets + commits.
+    """
+
+    enabled: bool = Field(..., description="Enable 802.11k/v band steering on the AP")
+
+
+class ApWirelessRequest(BaseModel):
+    """Set the external AP's network name / passphrase (WARP-1712).
+
+    Deliberately UNCONSTRAINED at the pydantic layer: both fields are plain
+    optional strings so an out-of-range SSID/key reaches the handler and is
+    refused with a **400** carrying an operator-readable message, rather than
+    pydantic's generic 422 validation envelope. The handler is also where the
+    "at least one field" rule lives — an empty body is a no-op the caller
+    should be told about, not a silent success.
+
+    `key` is the WPA2 passphrase. It is never logged and never echoed in an
+    error message; the GET surfaces it only to owner/admin principals (same
+    posture as the guest-network PSK).
+    """
+
+    ssid: Optional[str] = Field(
+        default=None, description="Network name to broadcast (1-32 bytes UTF-8)"
+    )
+    key: Optional[str] = Field(
+        default=None, description="WPA2 passphrase (8-63 characters)"
+    )
 
 
 # --- Response models ---

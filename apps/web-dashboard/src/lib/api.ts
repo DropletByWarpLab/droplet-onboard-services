@@ -1,4 +1,7 @@
-import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
+import {
+  MAX_FILES_PER_UPLOAD,
+  MAX_UPLOAD_BATCH_BYTES,
+} from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -6,6 +9,8 @@ import type {
   CameraSettings,
   CameraSettingsPatch,
   CameraSystemStatus,
+  CameraStorageSummary,
+  CameraBudget,
   EventDetail,
   EventFilter,
   FilteredEventsResult,
@@ -21,9 +26,12 @@ import type {
   TimelineEntry,
   ChatRequest,
   ConnectedDevice,
+  CurrentWifi,
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
+  CameraCandidateList,
+  CameraScanResult,
   MatterCapabilities,
   MatterDevice,
   MatterDiscoveredDevice,
@@ -41,6 +49,7 @@ import type {
   HealthResponse,
   ModelsResponse,
   ModelsPagePayload,
+  ModelsCatalogPayload,
   NetworkCommandResult,
   NetworkOverview,
   StorageStats,
@@ -112,6 +121,7 @@ import type {
   AccessExceptionInput,
   EffectiveAccess,
 } from "./types";
+import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
   EmailAccount,
   EmailAccountsResponse,
@@ -126,6 +136,8 @@ import type {
   SendDraftResult,
 } from "./types-email";
 import { authFetch } from "./auth";
+// WARP-1637 — the scale tag the orchestrator now stamps on /knowledge hits.
+import type { ScoreKind } from "./relevance";
 
 const BASE = "";
 
@@ -1622,6 +1634,19 @@ export interface GuestWifiStatus {
   supported: boolean;
 }
 
+/**
+ * WARP-1714: the Wi-Fi this household is broadcasting, so the Wi-Fi card opens
+ * showing the network it's about to edit. `source` names where the answer came
+ * from (the router's own radio, or a coverage AP); `source: null` with a
+ * populated `detail` means we couldn't read it and why — which is NOT the same
+ * as "no Wi-Fi is set", and the card must not render the two identically.
+ */
+export async function fetchCurrentWifi(): Promise<CurrentWifi> {
+  const res = await authFetch(`${BASE}/api/network/wifi/current`);
+  if (!res.ok) throw new Error(`Failed to fetch current Wi-Fi: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchGuestWifi(): Promise<GuestWifiStatus> {
   const res = await authFetch(`${BASE}/api/network/wifi/guest`);
   if (!res.ok) throw new Error(`Failed to fetch guest Wi-Fi status: ${res.status}`);
@@ -1658,6 +1683,129 @@ export async function setUpnp(enabled: boolean): Promise<NetworkCommandResult> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update UPnP");
   return data;
+}
+
+/** Band-steering state of the external Droplet AP (WARP-1703). `supported`
+ *  false = no approved Droplet access point is online (or its software
+ *  predates the feature) — the card then shows an honest unavailable state. */
+export interface BandSteeringStatus {
+  supported: boolean;
+  enabled: boolean;
+}
+
+export async function fetchBandSteering(): Promise<BandSteeringStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/band-steering`);
+  if (!res.ok) throw new Error(`Failed to fetch band steering status: ${res.status}`);
+  return res.json();
+}
+
+/** Toggle band steering on the Droplet AP. Tier 1 — applies immediately;
+ *  poll the returned operationId for the apply-vs-rollback outcome. */
+export async function setBandSteering(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/band-steering`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update band steering");
+  return data;
+}
+
+// ── WARP-1712: the access point's own Wi-Fi ──
+//
+// Read live off the AP every time — there is no cached copy anywhere, so the
+// Network tab's form and the Coverage Extenders card can never disagree.
+
+/** One radio on the AP, config joined with live iwinfo state. */
+export interface ApRadioInfo {
+  section: string;
+  radio: string | null;
+  /** '2g' / '5g' / '6g' as the AP reports it. */
+  band: string | null;
+  ssid: string | null;
+  encryption: string | null;
+  /** Configured channel — 'auto' is a legal value. */
+  channel: string | null;
+  htmode: string | null;
+  disabled: boolean;
+  /** The interface that owns the household name (the one writes target). */
+  primary: boolean;
+  ifname: string | null;
+  up: boolean | null;
+  live_channel: number | null;
+  live_htmode: string | null;
+  clients: number | null;
+}
+
+export interface ApDeviceHardwareInfo {
+  model: string | null;
+  firmware: string | null;
+  hostname: string | null;
+  uptime_seconds: number | null;
+}
+
+/** Household AP Wi-Fi. `supported: false` = no approved Droplet AP online. */
+export interface ApWifiStatus {
+  supported: boolean;
+  ssid: string | null;
+  /** What the AP names the 5 GHz network (`<ssid>-5g` when steering is off). */
+  fiveGhzSsid: string | null;
+  /** The live per-unit passphrase, revealable rather than ssh-only. */
+  key: string | null;
+  encryption: string | null;
+  bandSteering: boolean | null;
+  apCount: number;
+  /** False = the online APs aren't all broadcasting the same name. */
+  inSync: boolean;
+}
+
+/** Per-AP live detail behind a Coverage Extenders card. */
+export interface ApWirelessDetail {
+  mac: string;
+  supported: boolean;
+  ap_detail?: string;
+  band_steering?: boolean | null;
+  ssid?: string | null;
+  key?: string | null;
+  encryption?: string | null;
+  five_ghz_ssid?: string | null;
+  radios: ApRadioInfo[];
+  device?: ApDeviceHardwareInfo;
+}
+
+export async function fetchApWifi(): Promise<ApWifiStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/ap`);
+  if (!res.ok) throw new Error(`Failed to fetch access point Wi-Fi: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Set the AP's network name and/or passphrase. A name-only save is Tier 1 and
+ * applies immediately; a save carrying a passphrase is Tier 2 and answers 202
+ * `confirmation_required` — the caller confirms, then polls the operation.
+ */
+export async function setApWifi(body: {
+  ssid?: string;
+  key?: string;
+}): Promise<NetworkCommandResult & { ssid?: string | null; fiveGhzSsid?: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/wifi/ap`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throwNetworkWriteError(data, res.status, "Failed to update access point Wi-Fi");
+  }
+  return data;
+}
+
+export async function fetchApWirelessDetail(mac: string): Promise<ApWirelessDetail> {
+  // Colons in a MAC are legal unencoded in a path segment (RFC 3986 §3.3).
+  const res = await authFetch(`${BASE}/api/aps/${mac}/wireless`);
+  if (!res.ok) throw new Error(`Failed to fetch access point radios: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
@@ -1997,6 +2145,72 @@ export async function switchSetPortPoe(
   return data;
 }
 
+/**
+ * WARP-1907 — the server refused a jack write that needs the extra
+ * acknowledgement, and told us which guard and why.
+ *
+ * Thrown for the race the cached read cannot cover: a jack published with
+ * `disable_guard: null` that gains a cable between the poll and the click. The
+ * panel catches this and raises its second, destructive confirm from
+ * `guard.reason` — the same escalation it would have shown had the read been
+ * current. Without it the user meets a bare "409" and retrying fails until the
+ * next poll.
+ */
+export class RouterPortRefusedError extends Error {
+  readonly code = "PORT_WRITE_REFUSED" as const;
+  readonly guard: RouterPortDisableGuard;
+  constructor(guard: RouterPortDisableGuard) {
+    super(guard.reason);
+    this.name = "RouterPortRefusedError";
+    this.guard = guard;
+  }
+}
+
+/** Narrow the orchestrator's `detail` without trusting it into the union. */
+function asPortGuard(value: unknown): RouterPortDisableGuard | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { code?: unknown; reason?: unknown };
+  if (v.code !== "WAN_PORT" && v.code !== "MANAGEMENT_PORT") return null;
+  if (typeof v.reason !== "string" || !v.reason) return null;
+  return { code: v.code, reason: v.reason };
+}
+
+/**
+ * WARP-1907 — turn a physical ROUTER jack on or off.
+ *
+ * `force` is the user's second acknowledgement, and only ever set by the
+ * escalated confirm dialog. The routing service refuses a disable of the WAN
+ * jack or of a live management jack with 409 without it, so sending it
+ * speculatively would quietly delete that guard for every write.
+ */
+export async function routerSetPortEnabled(
+  port: string,
+  enabled: boolean,
+  force = false,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(
+    `${BASE}/api/network/ports/${encodeURIComponent(port)}/enable`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, force }),
+    },
+  );
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) {
+    // A guard refusal is not a dead end — it is a question the panel can ask.
+    const guard = data?.code === "PORT_WRITE_REFUSED" ? asPortGuard(data.detail) : null;
+    if (guard) throw new RouterPortRefusedError(guard);
+    // Everything else keeps `message`/`code`/`status` so `translateError` can
+    // do its job instead of meeting a bare Error.
+    throw Object.assign(
+      new Error(data.message || data.error || `Failed to set port state: ${res.status}`),
+      { code: data.code, status: res.status },
+    );
+  }
+  return data;
+}
+
 export async function switchSetPortEnabled(
   port: number,
   enabled: boolean,
@@ -2021,6 +2235,33 @@ export async function switchProvision(): Promise<NetworkCommandResult> {
   if (!res.ok && !data.requiresConfirmation)
     throw new Error(data.error || `Failed to re-apply switch config: ${res.status}`);
   return data;
+}
+
+/**
+ * WARP-1982 — complete a Tier-2 switch write.
+ *
+ * The switch has its OWN confirm endpoint, and it is the only one that can run
+ * a switch operation: `/api/network/command/confirm`'s dispatcher has no
+ * `switch_*` case at all, so every confirm the panel sent there resolved the
+ * token and then executed nothing. `/api/switch/command/confirm` is where the
+ * real executor lives (it resolves the operation from the token server-side,
+ * which is why no `operation` argument is needed here).
+ *
+ * Unlike the router's safe-apply writes there is no operation to poll: §7
+ * per-port writes apply synchronously on confirm, so the response IS the
+ * outcome. It is returned so callers can surface a plan-only result rather
+ * than reporting a dry run as a change that landed.
+ */
+export async function confirmSwitchCommand(
+  token: string,
+): Promise<{ status?: string; dry_run?: boolean }> {
+  const res = await authFetch(`${BASE}/api/switch/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken: token }),
+  });
+  if (!res.ok) throw await confirmFailure(res);
+  return (await res.json().catch(() => ({}))) as { status?: string; dry_run?: boolean };
 }
 
 export type NetworkOperation = {
@@ -2051,9 +2292,39 @@ export async function confirmNetworkCommand(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirmationToken: token, operation, entityId }),
   });
-  if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
+  if (!res.ok) throw await confirmFailure(res);
   const body = await res.json();
   return { operationId: body?.operationId ?? null };
+}
+
+/**
+ * WARP-1907 — build the error for a refused confirm WITHOUT discarding the body.
+ *
+ * This layer used to read only `res.status`, which made the guard escalation
+ * unreachable on the path that actually runs. A jack write is always classified
+ * Tier 2, so the mint POST returns 202 and the 409 `PORT_WRITE_REFUSED` — the
+ * race where a jack gains a cable between the cached read and the click — can
+ * only ever arrive HERE, on the confirm. `routerSetPortEnabled` translates that
+ * code, but it only ever sees the mint response, so the panel met a bare
+ * `Error`, `err instanceof RouterPortRefusedError` never matched, and the
+ * documented second confirm never opened.
+ *
+ * Shared with the switch, Wi-Fi, DHCP and firewall confirms, so it stays
+ * generic: preserve `code`/`status` for `translateError` the way
+ * `routerSetPortEnabled` already does, and keep the old string as the fallback
+ * for a body that carries no message of its own.
+ */
+async function confirmFailure(res: Response): Promise<Error> {
+  // A refused confirm is not guaranteed to be JSON — a proxy 502 is HTML — so
+  // the error path must degrade to the generic error rather than throw a
+  // parse failure over the top of the real one.
+  const data = await res.json().catch(() => null);
+  const guard = data?.code === "PORT_WRITE_REFUSED" ? asPortGuard(data.detail) : null;
+  if (guard) return new RouterPortRefusedError(guard);
+  return Object.assign(
+    new Error(data?.message || data?.error || `Failed to confirm command: ${res.status}`),
+    { code: data?.code, status: res.status },
+  );
 }
 
 /**
@@ -2124,6 +2395,46 @@ export async function fetchCameras(): Promise<CameraInfo[]> {
   return data.cameras ?? [];
 }
 
+// --- Per-camera access (WARP-1962 model, WARP-1976 UI) ---
+
+export interface CameraAccessGrants {
+  /** Camera NAMES this person has been granted. */
+  cameras: string[];
+}
+
+export interface CameraAccessSaveResult {
+  granted: string[];
+  /** Names the server did not recognise. Surfaced, never dropped — a typo
+   *  that silently grants nothing looks exactly like success. */
+  unknown: string[];
+}
+
+export async function fetchCameraAccess(userId: string): Promise<string[]> {
+  const res = await authFetch(`${BASE}/api/cameras/access/${encodeURIComponent(userId)}`);
+  if (!res.ok) throw new Error(`Failed to fetch camera access: ${res.status}`);
+  const body = (await res.json()) as CameraAccessGrants;
+  return body.cameras ?? [];
+}
+
+/**
+ * Replace this person's camera grants wholesale.
+ *
+ * Set semantics, matching the endpoint: we send what the screen shows. A
+ * client-computed delta would race a second admin editing the same person.
+ */
+export async function setCameraAccess(
+  userId: string,
+  cameras: string[],
+): Promise<CameraAccessSaveResult> {
+  const res = await authFetch(`${BASE}/api/cameras/access/${encodeURIComponent(userId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cameras }),
+  });
+  if (!res.ok) throw new Error(`Failed to save camera access: ${res.status}`);
+  return (await res.json()) as CameraAccessSaveResult;
+}
+
 export async function fetchCameraDetail(name: string): Promise<CameraInfo & { recentEvents: DetectionEvent[] }> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Failed to fetch camera: ${res.status}`);
@@ -2191,11 +2502,30 @@ export async function markReviewViewed(reviewId: string): Promise<void> {
 
 // --- Recordings + timeline (Phase 3.1) ---
 
+/**
+ * The browser's IANA zone, e.g. "America/Los_Angeles".
+ *
+ * Frigate buckets the summary's days and hours in UTC unless it is told
+ * otherwise, while this page turns an hour into an epoch with
+ * `new Date(y, m, d, hour)` — browser-local. Sending the zone is what
+ * puts both on one clock; without it a UTC-7 operator asks for 22:00 UTC
+ * when they clicked 15:00 and gets an empty range back (WARP-1958).
+ */
+export function browserTimezone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchRecordingsSummary(
   cameraName: string,
+  timezone: string | null = browserTimezone(),
 ): Promise<RecordingDay[]> {
+  const qs = timezone ? `?${new URLSearchParams({ timezone })}` : "";
   const res = await authFetch(
-    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/recordings/summary`,
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/recordings/summary${qs}`,
   );
   if (!res.ok) throw new Error(`Failed to fetch recording summary: ${res.status}`);
   const body = (await res.json()) as { days: RecordingDay[] };
@@ -2273,6 +2603,76 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
+}
+
+/**
+ * WARP-1893 — rename a camera to a household-facing label.
+ *
+ * Writes `displayName` only. The camera's `name` is the Frigate config key
+ * that owns its recording paths and event history, so it is never changed —
+ * this is a label, and existing footage is unaffected. Takes effect
+ * immediately with no NVR restart, which is why it saves through its own
+ * endpoint rather than the settings patch.
+ */
+export async function renameCamera(
+  name: string,
+  displayName: string,
+): Promise<{ status: string; camera: string; displayName: string }> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ displayName }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error || `Failed to rename camera: ${res.status}`);
+  }
+  return (await res.json()) as { status: string; camera: string; displayName: string };
+}
+
+/** WARP-1851 — read a camera's current storage allocation. */
+export async function fetchCameraBudget(name: string): Promise<CameraBudget> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/budget`);
+  if (!res.ok) throw new Error(`Failed to fetch camera budget: ${res.status}`);
+  return (await res.json()) as CameraBudget;
+}
+
+/**
+ * WARP-1851 — set or clear a camera's storage budget.
+ *
+ * `budgetBytes: null` clears it and returns the camera to manual
+ * retention. Clearing never deletes footage; the response says so.
+ */
+export async function setCameraBudget(
+  name: string,
+  budgetBytes: number | null,
+): Promise<CameraBudget> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/budget`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ budgetBytes }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error || `Failed to set budget: ${res.status}`);
+  }
+  return (await res.json()) as CameraBudget;
+}
+
+/**
+ * WARP-1850 — per-camera storage breakdown.
+ *
+ * Unlike the system status, this deliberately throws when the orchestrator
+ * answers 503: an empty breakdown would read as "no camera is using disk",
+ * and the caller must show a degraded state instead of a reassuring zero.
+ */
+export async function fetchCameraStorage(): Promise<CameraStorageSummary> {
+  const res = await authFetch(`${BASE}/api/cameras/storage`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(body.message || `Failed to fetch camera storage: ${res.status}`);
+  }
+  return (await res.json()) as CameraStorageSummary;
 }
 
 // --- Face recognition + LPR (Phase 7.5 / 7.6) ---
@@ -2578,20 +2978,50 @@ export async function fetchEventsFiltered(
   return res.json();
 }
 
-export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {
+/**
+ * Cameras found on the network but not yet added, plus whether the scanner is
+ * even running (WARP-1847). Use this over fetchDiscoveredCameras() anywhere the
+ * "discovery isn't running" case has to read differently from "found nothing".
+ */
+export async function fetchCameraCandidates(): Promise<CameraCandidateList> {
   const res = await authFetch(`${BASE}/api/cameras/discovered`);
   if (!res.ok) throw new Error(`Failed to fetch discovered cameras: ${res.status}`);
-  return res.json();
+  const body = await res.json();
+  // Tolerate the pre-WARP-1847 bare-array shape so a dashboard newer than the
+  // orchestrator it's talking to still renders (mixed-version box mid-deploy).
+  if (Array.isArray(body)) return { cameras: body, discoveryOnline: true };
+  return {
+    cameras: Array.isArray(body?.cameras) ? body.cameras : [],
+    discoveryOnline: body?.discoveryOnline !== false,
+  };
+}
+
+/** Candidate list only. Kept for callers that don't need the online flag. */
+export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {
+  return (await fetchCameraCandidates()).cameras;
 }
 
 export async function acceptDiscoveredCamera(id: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/accept`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to accept camera: ${res.status}`);
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/accept`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    // The orchestrator mirrors camera-discovery's 422 prose ("stream did not
+    // verify — the RTSP path or credentials are likely wrong"), which is the
+    // whole answer for the operator. Surface it instead of a status code.
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to accept camera: ${res.status}`);
+  }
 }
 
 export async function rejectDiscoveredCamera(id: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/reject`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to reject camera: ${res.status}`);
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to ignore camera: ${res.status}`);
+  }
 }
 
 export async function enableCamera(name: string): Promise<void> {
@@ -2815,10 +3245,25 @@ export async function addCameraManual(
   }
 }
 
-export async function triggerCameraScan(): Promise<{ status: string; known?: number; pending?: number; message?: string }> {
+/**
+ * Run a discovery sweep and return what it found. The scan is synchronous
+ * upstream, so `cameras` is already the post-scan list — no polling needed
+ * (WARP-1847; this used to return counts the caller couldn't act on).
+ */
+export async function triggerCameraScan(): Promise<CameraScanResult> {
   const res = await authFetch(`${BASE}/api/cameras/scan`, { method: "POST" });
   if (!res.ok) throw new Error(`Scan failed: ${res.status}`);
-  return res.json();
+  const body = await res.json();
+  return {
+    status: typeof body?.status === "string" ? body.status : "scan_complete",
+    known: body?.known,
+    pending: body?.pending,
+    message: body?.message,
+    cameras: Array.isArray(body?.cameras) ? body.cameras : [],
+    // A scan that reached camera-discovery proves it's running; the explicit
+    // scan_unavailable envelope is the one case where it isn't.
+    discoveryOnline: body?.status !== "scan_unavailable",
+  };
 }
 
 // --- Matter Devices ---
@@ -3116,6 +3561,34 @@ export async function benchmarkModel(
     throw new Error(detail);
   }
   return res.json();
+}
+
+/**
+ * WARP-1827 — the eligible model catalog (`GET /api/models/catalog`): what
+ * this box COULD run (VRAM-gated appliance-side by the inference-manager),
+ * with per-model `pulled` flags. Authenticated GET, open to any principal
+ * (ADR-004 §3, same as the page payload). Uncached end-to-end so `pulled`
+ * is always fresh.
+ */
+export async function fetchModelsCatalog(): Promise<ModelsCatalogPayload> {
+  const res = await authFetch(`${BASE}/api/models/catalog`);
+  if (!res.ok) throw new Error(`Failed to fetch model catalog: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-1827 — start a catalog download (`POST /api/models/:name/pull`,
+ * owner/admin) and hand back the RAW response: on 200 the body is an NDJSON
+ * progress stream the caller reads incrementally (same pattern as
+ * {@link sendChat}); non-2xx bodies carry the orchestrator's typed error
+ * (not_eligible / already_pulled / insufficient_disk / ai_service_unreachable)
+ * for the caller to word honestly.
+ */
+export async function startModelPull(name: string): Promise<Response> {
+  return authFetch(`${BASE}/api/models/${encodeURIComponent(name)}/pull`, {
+    method: "POST",
+    headers: { Accept: "application/x-ndjson" },
+  });
 }
 
 export async function sendChat(
@@ -3495,6 +3968,11 @@ export interface ConversationSummary {
   provider: string | null;
   /** WARP-845 — owning project, or null when ungrouped. */
   projectId?: string | null;
+  /** WARP-1917 — pinned to the top of the sidebar. Optional (missing on
+   *  older orchestrator builds → treated as unpinned); `pinnedAt` orders
+   *  the Pinned section, most recent pin first. */
+  pinned?: boolean;
+  pinnedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -3883,6 +4361,30 @@ export async function deleteChatProject(id: string): Promise<void> {
   }
 }
 
+/** WARP-1917 — pin (true) or unpin (false) a chat in the history sidebar.
+ *  Server-side state on the conversation row; the PATCH deliberately does
+ *  not bump updatedAt, so unpinning restores the chronological position. */
+export async function setConversationPinned(
+  conversationId: string,
+  pinned: boolean,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      body.error ||
+        `Failed to ${pinned ? "pin" : "unpin"} conversation: ${res.status}`,
+    );
+  }
+}
+
 /** Move a conversation into (or out of, with null) one of the caller's
  *  projects. Chats survive project deletion server-side (FK SET NULL). */
 export async function setConversationProject(
@@ -4242,6 +4744,24 @@ export function getDownloadUrl(path: string): string {
   return `${BASE}/api/files/download?path=${encodeURIComponent(path)}`;
 }
 
+/**
+ * Same bytes as `getDownloadUrl`, served for RENDERING rather than saving.
+ *
+ * The preview modal hands this URL to `<object>` / `<video>` / `<audio>`, and
+ * those tags obey `Content-Disposition: attachment` by downloading — so a
+ * preview built on the plain download URL pops a Save-As dialog over an empty
+ * modal instead of showing the file. `?disposition=inline` asks the orchestrator
+ * for `Content-Disposition: inline` plus a real Content-Type.
+ *
+ * The server grants inline only for a safelist of inert media types (no
+ * `text/html`, no `image/svg+xml` — both execute script on our own origin), and
+ * falls back to an attachment for anything else. So this is safe to use for any
+ * file: a non-previewable one simply behaves as it does today.
+ */
+export function getPreviewUrl(path: string): string {
+  return `${BASE}/api/files/download?path=${encodeURIComponent(path)}&disposition=inline`;
+}
+
 // --- WARP-882: in-browser editing + co-authoring ---
 
 /**
@@ -4294,13 +4814,20 @@ export async function getEditorSession(path: string): Promise<DocEditorSession> 
 // "personal" so the URL/body shape — and any test/cache assertions pinned
 // to it — stays byte-identical to before WARP-883 introduced spaces.
 /**
- * Thrown when an upload stops partway through a multi-batch selection.
+ * Thrown when part of a multi-batch selection failed to upload.
  *
  * WARP-1666: selections past `MAX_FILES_PER_UPLOAD` go out as several requests,
  * so "the upload failed" stopped being the whole truth — some files are already
  * on the box. `uploaded` is how many actually landed. Successful batches are
  * deliberately NOT rolled back: the caller surfaces the count and the user
  * retries to pick up the remainder.
+ *
+ * WARP-1843: a failed batch no longer aborts the run — the remaining batches
+ * are still attempted, so the files that didn't land can be a non-contiguous
+ * slice of the selection. `failedFiles` names them (in selection order) and
+ * `cause` carries the FIRST batch failure as the representative error. The
+ * original `uploaded` / `total` / `cause` shape is unchanged for existing
+ * callers.
  */
 export class UploadBatchError extends Error {
   readonly name = "UploadBatchError";
@@ -4308,10 +4835,45 @@ export class UploadBatchError extends Error {
   constructor(
     readonly uploaded: number,
     readonly total: number,
-    readonly cause: unknown
+    readonly cause: unknown,
+    /** Names of the files that did NOT land, in selection order (WARP-1843). */
+    readonly failedFiles: readonly string[] = []
   ) {
     super(`Uploaded ${uploaded} of ${total} files`);
   }
+}
+
+/**
+ * WARP-1912 — shape a non-2xx upload answer into a STRUCTURED error.
+ *
+ * `translateError` never surfaces `err.message` (the no-echo rule), so a
+ * plain `Error("Upload failed: <body>")` flattened every rejection into the
+ * generic files fallback — which is exactly how a too-large .dmg (nginx's
+ * 100M `client_max_body_size` answers 413 with an HTML page; the
+ * orchestrator's per-user multer cap answers 413 with JSON) read as "try
+ * again in a moment" for a file that can never fit. Same fix as WARP-1914's
+ * `FileSearchError`: the HTTP status plus the orchestrator's stable wire
+ * `code` / `limitMb` ride on the error so `uploadOutcomeMessage` can name
+ * the real reason. The raw body stays in `message` for DevTools only.
+ */
+function uploadRejectionError(status: number, body: string): Error {
+  let code: string | undefined;
+  let limitMb: number | undefined;
+  try {
+    const parsed = JSON.parse(body) as {
+      code?: unknown;
+      limitMb?: unknown;
+    };
+    if (typeof parsed.code === "string") code = parsed.code;
+    if (typeof parsed.limitMb === "number") limitMb = parsed.limitMb;
+  } catch {
+    /* non-JSON (nginx HTML error page) — the status carries the truth */
+  }
+  return Object.assign(new Error(`Upload failed: ${body}`), {
+    status,
+    code,
+    limitMb,
+  });
 }
 
 /** POST a single batch — never more files than the server accepts at once. */
@@ -4342,7 +4904,7 @@ async function uploadBatch(
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
         } else {
-          reject(new Error(`Upload failed: ${xhr.responseText}`));
+          reject(uploadRejectionError(xhr.status, xhr.responseText));
         }
       };
 
@@ -4354,8 +4916,45 @@ async function uploadBatch(
   const res = await authFetch(url, { method: "POST", body: formData });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Upload failed: ${body}`);
+    throw uploadRejectionError(res.status, body);
   }
+}
+
+/**
+ * Split a selection into request-sized batches, preserving selection order.
+ *
+ * WARP-1843: a batch must respect BOTH caps the server side enforces —
+ * `MAX_FILES_PER_UPLOAD` files (multer) and `MAX_UPLOAD_BATCH_BYTES` summed
+ * file bytes (safely under nginx's `/api/` `client_max_body_size 100M`, which
+ * 413-rejects an over-cap request wholesale). Packing is first-fit
+ * sequential: each file joins the current batch unless doing so would break a
+ * cap, in which case the current batch is sealed and a new one starts. Files
+ * are never reordered.
+ *
+ * A single file larger than the whole byte ceiling still ships, alone in its
+ * own batch: the server is the authority on per-file / per-user size caps, so
+ * the client never pre-rejects — nginx / the orchestrator answer with the
+ * honest 413 / policy error for exactly that file.
+ */
+function packUploadBatches(all: File[]): File[][] {
+  const batches: File[][] = [];
+  let current: File[] = [];
+  let currentBytes = 0;
+
+  for (const file of all) {
+    const wouldBreakCap =
+      current.length >= MAX_FILES_PER_UPLOAD ||
+      currentBytes + file.size > MAX_UPLOAD_BATCH_BYTES;
+    if (current.length > 0 && wouldBreakCap) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(file);
+    currentBytes += file.size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 /**
@@ -4365,15 +4964,21 @@ async function uploadBatch(
  * server rejects an over-cap request WHOLESALE — so posting everything at once
  * meant zero files landed. Batching is what makes large selections work at all.
  *
+ * WARP-1843: batches are packed by size as well as count (see
+ * {@link packUploadBatches}), and a failed batch no longer strands the ones
+ * behind it — the run continues, and the failure is reported at the end.
+ *
  * Batches run sequentially, not concurrently: each is buffered in the
  * orchestrator's memory before it reaches Nextcloud, so parallel batches would
  * multiply peak memory on the box for no user-visible gain.
  *
  * `onProgress` is weighted by bytes across the WHOLE selection, so the bar
- * advances monotonically to 100% instead of resetting once per batch.
+ * advances monotonically to 100% instead of resetting once per batch. A failed
+ * batch's bytes are counted as consumed, so later batches can only move the
+ * bar forward (never backwards past a batch that died mid-transfer).
  *
- * Throws {@link UploadBatchError} if a batch fails; earlier batches stay
- * uploaded.
+ * Throws {@link UploadBatchError} after all batches have been attempted if any
+ * of them failed; successful batches stay uploaded.
  */
 export async function uploadFiles(
   path: string,
@@ -4389,9 +4994,11 @@ export async function uploadFiles(
   const totalBytes = all.reduce((sum, f) => sum + f.size, 0);
   let uploaded = 0;
   let sentBytes = 0;
+  let lastPercent = 0;
+  const failedFiles: string[] = [];
+  let firstFailure: unknown;
 
-  for (let i = 0; i < all.length; i += MAX_FILES_PER_UPLOAD) {
-    const batch = all.slice(i, i + MAX_FILES_PER_UPLOAD);
+  for (const batch of packUploadBatches(all)) {
     const batchBytes = batch.reduce((sum, f) => sum + f.size, 0);
 
     try {
@@ -4401,17 +5008,29 @@ export async function uploadFiles(
         onProgress &&
           ((fraction) => {
             const done = sentBytes + fraction * batchBytes;
-            onProgress(
-              totalBytes > 0 ? Math.round((done / totalBytes) * 100) : 100
-            );
+            const percent =
+              totalBytes > 0 ? Math.round((done / totalBytes) * 100) : 100;
+            // Clamp: a batch that failed mid-transfer already advanced the
+            // bar with a partial fraction, and its bytes are counted as
+            // consumed below — never report a smaller number than before.
+            lastPercent = Math.max(lastPercent, Math.min(100, percent));
+            onProgress(lastPercent);
           })
       );
+      uploaded += batch.length;
     } catch (err) {
-      throw new UploadBatchError(uploaded, all.length, err);
+      // WARP-1843: don't strand the tail — record the failure, keep going.
+      if (failedFiles.length === 0) firstFailure = err;
+      failedFiles.push(...batch.map((f) => f.name));
     }
 
-    uploaded += batch.length;
+    // Failed or not, this batch's bytes are consumed for progress weighting;
+    // skipping them would make the next batch's progress step backwards.
     sentBytes += batchBytes;
+  }
+
+  if (failedFiles.length > 0) {
+    throw new UploadBatchError(uploaded, all.length, firstFailure, failedFiles);
   }
 }
 
@@ -4832,6 +5451,39 @@ export async function fetchRecents(limit = 50): Promise<FileEntryInfo[]> {
   return data.items ?? [];
 }
 
+/**
+ * WARP-1914 — error thrown by the Files-page search helpers on a non-2xx
+ * response. Carries the HTTP status plus the orchestrator's stable wire
+ * `code` (e.g. `semantic_unavailable`) so `translateError(err,
+ * "search-semantic")` can dispatch on structure. A plain `Error` here meant
+ * the translator — which never surfaces `err.message` — flattened every
+ * search failure into the files-domain fallback ("We couldn't load those
+ * files right now…"), the QA-reported generic banner. Mirrors
+ * `ShareRequestError` below.
+ */
+export class FileSearchError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "FileSearchError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function throwFileSearchError(res: Response, fallback: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: unknown;
+    code?: unknown;
+  };
+  throw new FileSearchError(
+    typeof body.error === "string" ? body.error : `${fallback}: ${res.status}`,
+    res.status,
+    typeof body.code === "string" ? body.code : undefined
+  );
+}
+
 export async function searchFiles(
   query: string,
   opts: { mime?: string; limit?: number } = {}
@@ -4841,8 +5493,7 @@ export async function searchFiles(
   if (opts.limit) params.set("limit", String(opts.limit));
   const res = await authFetch(`${BASE}/api/files/search?${params.toString()}`);
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Search failed: ${res.status}`);
+    await throwFileSearchError(res, "Search failed");
   }
   const data = await res.json();
   return data.items ?? [];
@@ -4947,6 +5598,11 @@ export async function fetchShareRecipients(): Promise<ShareRecipient[]> {
 // --- WARP-307: Calendar place autocomplete ---
 
 export interface PlaceSuggestion {
+  /** WARP-1906 — "room" marks a premade workspace conference room (admin-
+   *  managed in Settings → Locations). Its `displayName` carries the
+   *  server-composed canonical "Building - Room" label, which a pick stores
+   *  verbatim. Absent on Nominatim results. */
+  kind?: "room";
   /** WARP-1502 — short primary label (place's own name / first display_name
    *  segment). Optional so a stale-cache old-shape item still parses. */
   name?: string;
@@ -4977,6 +5633,73 @@ export async function fetchPlaces(
     return Array.isArray(data?.places) ? (data.places as PlaceSuggestion[]) : [];
   } catch {
     return [];
+  }
+}
+
+// --- WARP-1906: premade workspace locations (buildings + conference rooms) ---
+
+export interface WorkspaceLocation {
+  id: string;
+  building: string;
+  room: string;
+  /** Canonical location string a pick fills into the event form, composed
+   *  server-side: "HQ - Room Aurora". */
+  label: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchWorkspaceLocations(): Promise<WorkspaceLocation[]> {
+  const res = await authFetch(`${BASE}/api/workspace-locations`);
+  if (!res.ok) throw new Error(`Failed to load locations: ${res.status}`);
+  const data = await res.json();
+  return data.locations ?? [];
+}
+
+export async function createWorkspaceLocation(input: {
+  building: string;
+  room: string;
+}): Promise<WorkspaceLocation> {
+  const res = await authFetch(`${BASE}/api/workspace-locations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to add location: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.location;
+}
+
+export async function updateWorkspaceLocation(
+  id: string,
+  input: { building?: string; room?: string },
+): Promise<WorkspaceLocation> {
+  const res = await authFetch(
+    `${BASE}/api/workspace-locations/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update location: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.location;
+}
+
+export async function deleteWorkspaceLocation(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/workspace-locations/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Failed to remove location: ${res.status}`);
   }
 }
 
@@ -5011,13 +5734,10 @@ export async function searchFileContent(
     // WARP-1139: a 503 (AI gateway / pgvector down) used to return [] here,
     // which rendered as "No content matches" — a dishonest empty state that
     // masked a broken search stack. Surface it as an error instead.
-    if (res.status === 503) {
-      throw new Error(
-        "Content search is unavailable right now — the AI search stack may still be starting."
-      );
-    }
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Semantic search failed: ${res.status}`);
+    // WARP-1914: the error is STRUCTURED (status + wire code), because the
+    // friendly-copy translator discards `err.message` — a plain Error meant
+    // even this honest failure rendered as the generic files banner.
+    await throwFileSearchError(res, "Content search failed");
   }
   const data = await res.json();
   return data.results ?? [];
@@ -5462,7 +6182,20 @@ export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   return res.json();
 }
 
-export async function fetchVpnPeers(): Promise<{ peers: VpnPeerInfo[] }> {
+/**
+ * List the caller's devices.
+ *
+ * WARP-1763: `liveStateAvailable` is false when the orchestrator could not read
+ * the router's WireGuard peer list. In that case every peer's `provisioned` and
+ * `lastHandshakeAt` are absent, and the UI must say so rather than render the
+ * devices as never-connected — a routing sidecar restarting is not a fleet of
+ * dead phones. Older orchestrators omit the flag entirely; treat that as
+ * unavailable too, since they also send no live fields to interpret.
+ */
+export async function fetchVpnPeers(): Promise<{
+  peers: VpnPeerInfo[];
+  liveStateAvailable?: boolean;
+}> {
   const res = await authFetch(`${BASE}/api/vpn/peers`);
   if (!res.ok) throw new Error(`Failed to fetch peers: ${res.status}`);
   return res.json();
@@ -5498,13 +6231,28 @@ export async function createVpnPeer(
   return res.json();
 }
 
+/**
+ * Revoke a device.
+ *
+ * Carries `code` and `status` onto the thrown error, because not every failure
+ * here means "nothing happened". `REVOKE_STAGED` (502) is the one where the
+ * router accepted the config change but never applied it — the device is still
+ * on the network — and `translateError` can only tell the owner that if the
+ * code survives the throw. A bare `new Error(message)` flattened it to the
+ * generic "we couldn't update remote access right now" retry copy.
+ */
 export async function deleteVpnPeer(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/vpn/peers/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to revoke peer: ${res.status}`);
+    const err = new Error(
+      body.error || `Failed to revoke peer: ${res.status}`,
+    ) as Error & { code?: string; status?: number };
+    if (typeof body.code === "string") err.code = body.code;
+    err.status = res.status;
+    throw err;
   }
 }
 
@@ -6086,6 +6834,12 @@ export interface KnowledgeSearchHit {
   brainItemId?: string | null;
   pageNumber?: number | null;
   score: number;
+  /**
+   * WARP-1637 — the scale `score` is in, as tagged by the orchestrator's
+   * file-search service. Optional: absent means "infer" (`inferScoreKind`),
+   * which is what every hit did before the orchestrator copy was normalized.
+   */
+  scoreKind?: ScoreKind;
   snippet: string;
   // WARP-214: surfaced verbatim from the orchestrator. Null on legacy rows.
   metadata?: ChunkMetadata | null;
@@ -6920,4 +7674,339 @@ export async function putAccessExceptions(
     throw new Error(body.error || `Failed to save exceptions: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Team chat (WARP-1683, /messages) ---
+
+/**
+ * UX review (WARP-1683): the Messages surface renders `err.message`
+ * verbatim, so raw status codes / server error tokens must never ride on
+ * the thrown Error. Every team-chat helper funnels failures here — the
+ * diagnostic detail goes to the console, the user gets plain copy.
+ */
+async function teamChatFail(
+  op: string,
+  userMessage: string,
+  res: Response,
+): Promise<never> {
+  const detail = await res.text().catch(() => "");
+  console.error(`[team-chat] ${op} failed: ${res.status} ${detail}`);
+  throw new Error(userMessage);
+}
+
+export interface TeamChatContact {
+  id: string;
+  displayName: string;
+  username: string;
+  role: string;
+}
+
+export type TeamChatMessageKind =
+  | "text"
+  | "file_share"
+  | "ai_chat_share"
+  | "meeting_invite"
+  | "meeting_reminder";
+
+// --- Meetings (WARP-1685) ---
+
+export type TeamChatRsvpResponse = "accepted" | "declined";
+
+export interface TeamChatMeetingRsvp {
+  userId: string;
+  response: TeamChatRsvpResponse;
+  respondedAt: string;
+  /** Present on GET /meetings/:id; the message-list payload leaves names
+   *  to the thread's participant roster the client already holds. */
+  displayName?: string | null;
+}
+
+export interface TeamChatMeeting {
+  id: string;
+  threadId: string;
+  inviteMessageId: string | null;
+  calendarEventId: string | null;
+  title: string;
+  startsAt: string;
+  durationMinutes: number | null;
+  location: string | null;
+  /** WARP-1874 — https-only video-call link, alongside (not instead of)
+   *  `location`. Re-validated at render before it becomes an href. */
+  meetingUrl: string | null;
+  note: string | null;
+  createdById: string;
+  status: "scheduled" | "cancelled";
+  reminderMinutesBefore: number;
+  reminderStatus: "pending" | "sent" | "not_needed";
+  createdAt: string;
+  rsvps: TeamChatMeetingRsvp[];
+}
+
+export interface TeamChatMessage {
+  id: string;
+  threadId: string;
+  senderId: string;
+  senderDisplayName: string | null;
+  kind: TeamChatMessageKind;
+  /** Text body, or the forward's optional caption. */
+  body: string | null;
+  sharedNcFileId: number | null;
+  sharedFileName: string | null;
+  sharedFilePath: string | null;
+  /**
+   * WARP-1898 — the Files space `sharedFilePath` is relative to
+   * ("personal" | "shared" | "dept:<uuid>"), resolved server-side.
+   * `null` on messages sent before that ticket and means UNKNOWN — treat
+   * it as such, never as "personal": assuming personal is exactly what
+   * used to drop recipients into their own files.
+   */
+  sharedFileSpace: FileSpaceId | null;
+  sharedChatSessionId: string | null;
+  /** WARP-1685 — set on meeting_invite / meeting_reminder; the live
+   *  meeting (incl. RSVPs) rides along so cards render in one fetch. */
+  meetingId: string | null;
+  meeting: TeamChatMeeting | null;
+  createdAt: string;
+}
+
+export interface TeamChatThreadSummary {
+  id: string;
+  kind: "direct" | "group";
+  title: string | null;
+  createdById: string;
+  createdAt: string;
+  lastMessageAt: string;
+  participants: Array<{
+    userId: string;
+    displayName: string | null;
+    username: string | null;
+  }>;
+  lastMessage: TeamChatMessage | null;
+  unreadCount: number;
+}
+
+export interface TeamChatTranscript {
+  title: string | null;
+  messages: Array<{ role: string; content: string; createdAt: string }>;
+}
+
+export type TeamChatSendBody =
+  | { kind: "text"; body: string }
+  | {
+      kind: "file_share";
+      ncFileId: number;
+      fileName: string;
+      filePath: string;
+      /**
+       * WARP-1898 — the space `filePath` is relative to, as the picker knew
+       * it. Only a fallback: the server re-derives from the file registry
+       * and that wins whenever a row exists (a pick from the picker's
+       * SEARCH tab spans spaces, so the selector can be wrong).
+       */
+      space?: FileSpaceId;
+      caption?: string;
+    }
+  | { kind: "ai_chat_share"; chatSessionId: string; caption?: string };
+
+export async function fetchTeamChatContacts(): Promise<TeamChatContact[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/contacts`);
+  if (!res.ok) {
+    return teamChatFail("contacts", "Couldn't load people. Try again.", res);
+  }
+  const body = (await res.json()) as { contacts: TeamChatContact[] };
+  return body.contacts;
+}
+
+export async function fetchTeamChatThreads(): Promise<TeamChatThreadSummary[]> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`);
+  if (!res.ok) {
+    return teamChatFail("threads", "Couldn't load conversations. Try again.", res);
+  }
+  const body = (await res.json()) as { threads: TeamChatThreadSummary[] };
+  return body.threads;
+}
+
+/** Create a DM/group. The server dedupes direct pairs — a repeat create
+ *  returns the existing thread (200) instead of a new row (201). */
+export async function createTeamChatThread(args: {
+  kind: "direct" | "group";
+  participantIds: string[];
+  title?: string;
+}): Promise<{ id: string }> {
+  const res = await authFetch(`${BASE}/api/team-chat/threads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    return teamChatFail(
+      "create-thread",
+      "Couldn't start the conversation. Try again.",
+      res,
+    );
+  }
+  const body = (await res.json()) as { thread: { id: string } };
+  return body.thread;
+}
+
+export async function fetchTeamChatMessages(
+  threadId: string,
+  opts: { cursor?: string; limit?: number } = {},
+): Promise<{ messages: TeamChatMessage[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const qsStr = qs.toString();
+  const suffix = qsStr.length > 0 ? `?${qsStr}` : "";
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages${suffix}`,
+  );
+  if (!res.ok) {
+    return teamChatFail("messages", "Couldn't load messages. Try again.", res);
+  }
+  return res.json() as Promise<{
+    messages: TeamChatMessage[];
+    nextCursor: string | null;
+  }>;
+}
+
+export async function sendTeamChatMessage(
+  threadId: string,
+  body: TeamChatSendBody,
+): Promise<TeamChatMessage> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    return teamChatFail("send", "Couldn't send. Try again.", res);
+  }
+  const out = (await res.json()) as { message: TeamChatMessage };
+  return out.message;
+}
+
+export async function markTeamChatThreadRead(threadId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/read`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    return teamChatFail("mark-read", "Couldn't update read status.", res);
+  }
+}
+
+export async function fetchTeamChatTranscript(
+  messageId: string,
+): Promise<TeamChatTranscript> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/messages/${encodeURIComponent(messageId)}/transcript`,
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "transcript",
+      "Couldn't open the transcript. Try again.",
+      res,
+    );
+  }
+  return res.json() as Promise<TeamChatTranscript>;
+}
+
+export interface TeamChatMeetingCreateBody {
+  title: string;
+  /** ISO timestamp; the server refuses past starts. */
+  startsAt: string;
+  durationMinutes?: number;
+  location?: string;
+  /** https only — the server refuses anything else with 400. */
+  meetingUrl?: string;
+  note?: string;
+  reminderMinutesBefore?: number;
+}
+
+/** Schedule a meeting in a thread — the server commits the meeting + its
+ *  invite card together and mirrors a local CalendarEvent best-effort. */
+export async function createTeamChatMeeting(
+  threadId: string,
+  body: TeamChatMeetingCreateBody,
+): Promise<{ meeting: TeamChatMeeting; message: TeamChatMessage }> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/threads/${encodeURIComponent(threadId)}/meetings`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "create-meeting",
+      "Couldn't schedule the meeting. Try again.",
+      res,
+    );
+  }
+  return res.json() as Promise<{
+    meeting: TeamChatMeeting;
+    message: TeamChatMessage;
+  }>;
+}
+
+/** Accept/decline a meeting — an upsert, so flipping the answer is fine. */
+export async function rsvpTeamChatMeeting(
+  meetingId: string,
+  response: TeamChatRsvpResponse,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/meetings/${encodeURIComponent(meetingId)}/rsvp`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response }),
+    },
+  );
+  if (!res.ok) {
+    // UX review: on the cancelled race the generic "Try again" is false
+    // advice next to a Cancelled banner — say what likely happened.
+    // Same log-then-plain-copy shape as teamChatFail.
+    const detail = await res.text().catch(() => "");
+    console.error(`[team-chat] rsvp failed: ${res.status} ${detail}`);
+    throw new Error(
+      detail.includes("meeting_cancelled")
+        ? "Couldn't send your answer — the meeting may have been cancelled."
+        : "Couldn't send your answer. Try again.",
+    );
+  }
+}
+
+/** Organizer-only cancel — flips the meeting to cancelled and posts the
+ *  cancellation note in the thread. */
+export async function cancelTeamChatMeeting(meetingId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/team-chat/meetings/${encodeURIComponent(meetingId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    return teamChatFail(
+      "cancel-meeting",
+      "Couldn't cancel the meeting. Try again.",
+      res,
+    );
+  }
+}
+
+export async function fetchTeamChatUnreadCount(): Promise<number> {
+  const res = await authFetch(`${BASE}/api/team-chat/unread-count`);
+  // Review: the sidebar polls this on EVERY page every ~20s. With the
+  // team_chat module off, the gate 404s the whole surface — that's an
+  // expected steady state, not an error: a quiet zero, no console spam.
+  // (The poll keeps running, so re-enabling the module recovers alone.)
+  if (res.status === 404) return 0;
+  if (!res.ok) {
+    return teamChatFail("unread-count", "Couldn't load unread count.", res);
+  }
+  const body = (await res.json()) as { total: number };
+  return body.total;
 }

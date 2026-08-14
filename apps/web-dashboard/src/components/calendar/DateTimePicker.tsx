@@ -26,6 +26,7 @@ import {
   splitLocalInput,
   joinLocalInput,
   quarterHourOptions,
+  quarterHourOptionsForDevice,
   snapTimeToQuarter,
   type TimeOption,
 } from "@/components/calendar/datetime-picker-helpers";
@@ -39,11 +40,23 @@ interface Props {
   disabled?: boolean;
 }
 
-// Computed once: the grid never changes between renders.
+// Computed once: the grid never changes between renders. Pinned to en-GB so
+// the server pre-render and the first client render agree (see helpers).
 const TIME_OPTIONS: TimeOption[] = quarterHourOptions();
 
 export function DateTimePicker({ value, onChange, label, disabled }: Props) {
   const parts = splitLocalInput(value);
+  // WARP-1793: the dropdown used to show the pinned 24-hour labels forever, so
+  // a US phone read "09:45"/"14:30" with no AM/PM. We cannot localize during
+  // SSR — the server does not know the visitor's clock — so we render the
+  // pinned labels once (matching the server byte-for-byte, no hydration
+  // mismatch) and swap to the device's own format immediately after mount.
+  // Only `label` changes; `value` stays the machine `HH:mm`, so the selected
+  // option and every onChange payload are unaffected by the swap.
+  const [timeOptions, setTimeOptions] = useState<TimeOption[]>(TIME_OPTIONS);
+  useEffect(() => {
+    setTimeOptions(quarterHourOptionsForDevice());
+  }, []);
   const [date, setDate] = useState(parts.date);
   // Snap any carried-over off-grid time onto the dropdown grid so the <select>
   // always has a matching option (otherwise it would render blank).
@@ -115,7 +128,7 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
       >
         {/* A blank placeholder slot while no time is chosen yet. */}
         {!time && <option value="" />}
-        {TIME_OPTIONS.map((o) => (
+        {timeOptions.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>

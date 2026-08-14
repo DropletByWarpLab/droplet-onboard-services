@@ -63,6 +63,28 @@ describe("addCamera", () => {
     expect(body.config_data.cameras.front_door.snapshots.enabled).toBe(true);
   });
 
+  it("gives the new camera retention windows, not just record.enabled (WARP-1957)", async () => {
+    const fetchMock = stubSet();
+    await addCamera("Front Door", "rtsp://192.168.100.101:554/stream1");
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const record = body.config_data.cameras.front_door.record;
+
+    // `record.enabled: true` on its own is the bug, not the fix: Frigate
+    // 0.17 defaults `continuous` and `motion` to 0, so the camera kept
+    // ONLY segments overlapping an alert while the UI said "Recording".
+    expect(record.continuous.days).toBeGreaterThan(0);
+    expect(record.motion.days).toBeGreaterThan(0);
+
+    // Padding around each event, capped at Frigate's le=60 bound.
+    expect(record.alerts.pre_capture).toBeGreaterThan(0);
+    expect(record.alerts.pre_capture).toBeLessThanOrEqual(60);
+    expect(record.detections.post_capture).toBeLessThanOrEqual(60);
+
+    // Snapshots get an explicit window too, rather than inheriting one.
+    expect(body.config_data.cameras.front_door.snapshots.retain.default).toBeGreaterThan(0);
+  });
+
   it("honors detect=false", async () => {
     const fetchMock = stubSet();
     await addCamera("doorbell", "rtsp://10.0.0.9/s", false);

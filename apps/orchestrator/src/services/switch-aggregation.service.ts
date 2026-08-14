@@ -35,6 +35,7 @@ import type {
   SwitchRawPort,
   SwitchRawPortStatus,
   SwitchRawPoe,
+  SwitchRawTraffic,
 } from "../types/switch.js";
 
 /** Membership row from the switch service's per-VLAN shape. */
@@ -87,6 +88,51 @@ export function derivePortRole(port: number, config: SwitchProvisionConfig): Swi
   if (config.ap_ports.includes(port)) return "ap";
   if (config.client_ports.includes(port)) return "client";
   return "unknown";
+}
+
+/**
+ * Friendly port name (WARP-1716).
+ *
+ * This used to be a hardcoded `null`, which the dashboard's fallback rendered
+ * as the word "Open" — so every port on a switch that had never been
+ * auto-provisioned announced itself as open while carrying traffic. There is
+ * still no port→MAC source on the flashed image (the rpcd ACL grants no FDB
+ * read — WARP-1717), so we don't fabricate a device name. What we CAN say
+ * honestly is the role the provision config assigned, and the driver's own
+ * port label; a port with neither is left null for the dashboard to describe
+ * by link state.
+ */
+export function derivePortName(args: {
+  role: SwitchPortRole;
+  rawName: string | null | undefined;
+}): string | null {
+  switch (args.role) {
+    case "uplink":
+      return "Uplink";
+    case "camera":
+      return "Camera";
+    case "ap":
+      return "Access point";
+    case "client":
+      return "Client";
+    default:
+      break;
+  }
+  const raw = args.rawName?.trim();
+  // The openwrt driver labels every port "Port N", which tells the operator
+  // nothing the `1/N` label doesn't already say — treat it as no name so the
+  // dashboard falls through to describing the port by link state.
+  if (!raw || /^port\s*\d+$/i.test(raw)) return null;
+  return raw;
+}
+
+/** Byte counters, or null when the driver reported none. */
+function buildPortTraffic(raw: SwitchRawPortStatus | undefined): SwitchRawTraffic | null {
+  const t = raw?.traffic;
+  if (!t) return null;
+  if (!Number.isFinite(t.rx_bytes) || !Number.isFinite(t.tx_bytes)) return null;
+  if (t.rx_bytes < 0 || t.tx_bytes < 0) return null;
+  return { rx_bytes: t.rx_bytes, tx_bytes: t.tx_bytes };
 }
 
 /**
@@ -210,12 +256,13 @@ export function aggregatePorts(input: {
     // member in the membership read (e.g. a trunk/uplink) — never guess.
     const vlan = vlanInfo?.vlan ?? raw?.vlan ?? null;
 
+    const role = derivePortRole(port, config);
+
     out.push({
       port,
       label: `1/${port}`,
-      // v1: friendly name + device deferred (LLDP/MAC→device join).
-      name: null,
-      role: derivePortRole(port, config),
+      name: derivePortName({ role, rawName: raw?.name }),
+      role,
       link_up: linkUp,
       speed: speedRaw === "" ? null : speedRaw,
       is_sfp: isSfp,
@@ -223,7 +270,10 @@ export function aggregatePorts(input: {
       vlan_name: vlanInfo?.name ?? null,
       poe: poeBlock,
       status: derivePortStatus({ enabled, linkUp, poe: poeBlock }),
+      // Still null: the MAC→device join needs an FDB read the flashed switch
+      // image's rpcd ACL doesn't grant (WARP-1717).
       device: null,
+      traffic: buildPortTraffic(live),
     });
   }
   return out;

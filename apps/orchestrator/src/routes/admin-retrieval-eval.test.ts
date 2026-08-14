@@ -218,3 +218,117 @@ describe("production 404 gate is unchanged", () => {
     expect(res.body).toEqual({ error: "not_found" });
   });
 });
+
+/**
+ * WARP-1868 — GET /api/admin/retrieval-eval/corpus-fingerprint
+ *
+ * The nightly RAGAS run pins the discrete GPU at 98-100% for ~10 minutes and
+ * fires eight times a night on a cron, whether or not anything was indexed.
+ * This endpoint is what lets the scheduler skip an unchanged corpus.
+ *
+ * It inherits the /search posture deliberately — same guard, same production
+ * 404, same explicit ?user= for a principal that owns no corpus — so the two
+ * cannot drift into different auth stories.
+ */
+function buildAppWithPrisma(user: AuthUser, prisma: unknown) {
+  const app = express();
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as Request & { user: AuthUser }).user = user;
+    next();
+  });
+  app.use("/api", createAdminRetrievalEvalRouter(prisma as PrismaClient));
+  return app;
+}
+
+const FP_PATH = "/api/admin/retrieval-eval/corpus-fingerprint";
+
+function prismaWith(count: number, latest: Date | null) {
+  return {
+    fileContentChunk: {
+      aggregate: vi.fn().mockResolvedValue({
+        _count: { _all: count },
+        _max: { indexedAt: latest },
+      }),
+    },
+  };
+}
+
+describe("WARP-1868 — corpus fingerprint", () => {
+  it("composes the fingerprint from BOTH count and latest timestamp", async () => {
+    // Neither alone is sufficient: count misses an edit that re-indexes in
+    // place, and a timestamp alone misses a deletion.
+    const at = new Date("2026-08-11T00:00:00.000Z");
+    const res = await request(
+      buildAppWithPrisma(RAG_EVAL, prismaWith(1234, at)),
+    ).get(`${FP_PATH}?user=eval-fixtures`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.chunks).toBe(1234);
+    expect(res.body.latestIndexedAt).toBe("2026-08-11T00:00:00.000Z");
+    expect(res.body.fingerprint).toBe("v1:1234:2026-08-11T00:00:00.000Z");
+    expect(res.body.user).toBe("eval-fixtures");
+  });
+
+  it("scopes the aggregate to the named eval user", async () => {
+    // A service principal owns no corpus; an unscoped count would fingerprint
+    // every user's chunks and move whenever anyone indexed anything.
+    const prisma = prismaWith(5, new Date("2026-08-11T00:00:00.000Z"));
+    await request(buildAppWithPrisma(RAG_EVAL, prisma)).get(
+      `${FP_PATH}?user=eval-fixtures`,
+    );
+    expect(prisma.fileContentChunk.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "eval-fixtures" } }),
+    );
+  });
+
+  it("an empty corpus is a real fingerprint, not an error", async () => {
+    // A box that has indexed nothing yet must still produce a stable value —
+    // otherwise the gate can never settle and runs every night forever.
+    const res = await request(
+      buildAppWithPrisma(RAG_EVAL, prismaWith(0, null)),
+    ).get(`${FP_PATH}?user=eval-fixtures`);
+    expect(res.status).toBe(200);
+    expect(res.body.fingerprint).toBe("v1:0:none");
+  });
+
+  it("400s eval_user_required when the service principal names no user", async () => {
+    const res = await request(
+      buildAppWithPrisma(RAG_EVAL, prismaWith(1, null)),
+    ).get(FP_PATH);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "eval_user_required" });
+  });
+
+  it("a human caller is scoped to their own corpus and ?user= is ignored", async () => {
+    // Same rule as /search: this must never become a way for an admin to
+    // fingerprint someone else's files.
+    const prisma = prismaWith(3, null);
+    await request(
+      buildAppWithPrisma(mkUser("owner", "u1", "alice"), prisma),
+    ).get(`${FP_PATH}?user=bob`);
+    expect(prisma.fileContentChunk.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "alice" } }),
+    );
+  });
+
+  it("rejects a principal the guard does not admit", async () => {
+    const res = await request(
+      buildAppWithPrisma(mkUser("service", "_service:voice", "_service:voice"), prismaWith(1, null)),
+    ).get(`${FP_PATH}?user=eval-fixtures`);
+    expect(res.status).toBe(403);
+  });
+
+  it("500s rather than returning an empty fingerprint when the query fails", async () => {
+    // The caller must be able to tell "could not read" from "nothing here" —
+    // it fails OPEN on the former (runs the eval) and would wrongly skip on
+    // the latter. An empty-string fingerprint would collapse the two.
+    const prisma = {
+      fileContentChunk: { aggregate: vi.fn().mockRejectedValue(new Error("db down")) },
+    };
+    const res = await request(buildAppWithPrisma(RAG_EVAL, prisma)).get(
+      `${FP_PATH}?user=eval-fixtures`,
+    );
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "corpus_fingerprint_failed" });
+  });
+});

@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, Instrument_Serif, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthProvider } from "@/lib/auth";
@@ -55,8 +55,19 @@ export const metadata: Metadata = {
   openGraph: {
     images: [{ url: "/og-image.png", width: 1200, height: 630 }],
   },
-  // DASH-09: driven from the brand accent token (see lib/brand.ts) so this
-  // PWA chrome color can't silently drift from the design system's accent.
+};
+
+// DASH-09: driven from the brand accent token (see lib/brand.ts) so this
+// PWA chrome color can't silently drift from the design system's accent.
+//
+// Must live on the `viewport` export, not `metadata` — Next 14 dropped
+// themeColor from `metadata` and only warns at build time, so the tag was
+// silently absent from every response and mobile browsers tinted their
+// chrome with their own default. `width=device-width, initial-scale=1`
+// restates Next's default so declaring this export can't drop it.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
   themeColor: THEME_COLOR,
 };
 

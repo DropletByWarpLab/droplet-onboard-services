@@ -13,13 +13,20 @@ Data sources (all granted by the switch's droplet-ai ACL):
 - uci get network (bridge-vlan)    → VLANs, per-port PVID/tagging
 - poe info + uci get poe           → PoE status, budget, per-port admin state
 
-Writes go through uci (`uci set/add/delete/commit`) + a runtime reload
-(`poe reload` / `network reload`). The GS1900 image has NO `file exec` grant
-at all, so nothing here shells out. Writes are gated by ``plan_only``
-(default ON): the uci write shapes are built from the committed image config
-and have not yet been confirmed against flashed hardware (the lab unit still
-runs stock firmware — see droplet-edge-router/switch/docs/STATUS.md). Reads
-are exact.
+Writes go through uci with a safe-apply arm (WARP-1730, parity with
+services/routing's ``safe_apply``): stage (`uci set/add/delete`) →
+`uci apply` with a device-side rollback timer → connectivity probe
+(`system board`) → `uci confirm`. If the probe fails, confirm never fires
+and the device reverts itself when the timer expires — a bridge/VLAN write
+that strands the switch's static management address (192.168.9.2) can no
+longer be permanent. If anything fails while changes are still staged, every
+staged config is reverted (rpcd's staging area is SHARED — leftovers would
+be silently committed by the next unrelated apply from any endpoint). The
+GS1900 image has NO `file exec` grant at all, so nothing here shells out.
+Writes are gated by ``plan_only`` (default ON): the uci write shapes are
+built from the committed image config and have not yet been confirmed
+against flashed hardware (the lab unit still runs stock firmware — see
+droplet-edge-router/switch/docs/STATUS.md). Reads are exact.
 
 Port layout (GS1900-10HP): 8x GbE copper PoE (lan1-lan8, 77 W budget) +
 2x SFP (lan9-lan10, no PoE). uci names ports "lanN"; the REST/§7 contract
@@ -33,7 +40,8 @@ import json
 import logging
 import re
 import time
-from typing import Any, Awaitable, Callable, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 
@@ -43,6 +51,7 @@ from .base import (
     AuthenticationError,
     SwitchAPIError,
     InvalidPortError,
+    PoweredMemberError,
 )
 
 logger = logging.getLogger("droplet.switch.openwrt")
@@ -57,7 +66,15 @@ SFP_PORT_MAX = 10
 
 # ubus wire constants (same values as services/routing's SDK).
 NULL_SESSION = "0" * 32
+UBUS_NO_DATA = 5
 UBUS_PERMISSION_DENIED = 6
+
+# Rollback window for `uci apply` (WARP-1730). Mirrors services/routing
+# ``safe_apply``'s 60s, which matches the WARP-41 confirmation-token TTL —
+# a Tier 2 confirmation token can never outlive the apply window. The switch
+# service has no competing convention (SWITCH_PROVISION_TIMEOUT budgets the
+# whole provisioning reconcile, not a single apply).
+APPLY_ROLLBACK_TIMEOUT_S = 60
 
 # Re-login this many seconds before the rpcd session's own expiry.
 _SESSION_SLACK_S = 30.0
@@ -93,6 +110,26 @@ def _speed_fields(speed: Any) -> tuple[str, str]:
     return label, duplex
 
 
+def _traffic_fields(statistics: Any) -> Optional[dict]:
+    """netifd's per-device `statistics` block → the §7 traffic shape.
+
+    Returns ``None`` when the driver reports no counters (an SFP cage with no
+    module, a build without statistics) rather than zeros — "we don't know" and
+    "nothing has crossed this port" are different claims, and the dashboard
+    renders them differently.
+    """
+    if not isinstance(statistics, dict):
+        return None
+    try:
+        rx = int(statistics["rx_bytes"])
+        tx = int(statistics["tx_bytes"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if rx < 0 or tx < 0:
+        return None
+    return {"rx_bytes": rx, "tx_bytes": tx}
+
+
 def _format_uptime(seconds: Any) -> Optional[str]:
     try:
         total = int(seconds)
@@ -110,12 +147,28 @@ def _format_uptime(seconds: Any) -> Optional[str]:
     return f"{minutes}m"
 
 
+def _raw_vlan_port_list(entries: Any) -> list[str]:
+    """Normalise a uci bridge-vlan `ports` value to a list of raw entry strings.
+
+    🔴 uci returns a MULTI-value option as a JSON list but a SINGLE-value (or
+    whitespace-joined) option as a plain STRING. VLAN 1 as written by
+    board.d/02_network comes back as the string "lan1 lan2 ... lan10"; iterating
+    that string yields one CHARACTER at a time, so every entry failed to parse
+    and VLAN 1 rendered with ZERO ports (audit 2026-08-06). Split a string on
+    whitespace; pass a list through unchanged."""
+    if isinstance(entries, str):
+        return entries.split()
+    if isinstance(entries, list):
+        return [str(e) for e in entries]
+    return []
+
+
 def _parse_bridge_vlan_ports(entries: Any) -> list[dict]:
     """uci bridge-vlan `ports` entries ("lan1:u*", "lan9:t", bare "lan3") →
     the base-class membership shape. `u` = untagged, `*` = PVID; a bare entry
     is tagged (netifd's default)."""
     out: list[dict] = []
-    for entry in entries or []:
+    for entry in _raw_vlan_port_list(entries):
         name, _, flags = str(entry).partition(":")
         port = _port_from_name(name)
         if port is None:
@@ -350,6 +403,11 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 "duplex": duplex,
                 "is_sfp": SFP_PORT_MIN <= port <= SFP_PORT_MAX,
                 "vlan": pvids.get(port, 1),
+                # WARP-1716: netifd already hands us per-port counters on the
+                # SAME `network.device status` read (no extra call, no new ACL
+                # grant). They are the only evidence the dashboard has that a
+                # port is carrying traffic rather than merely being plugged in.
+                "traffic": _traffic_fields(st.get("statistics")),
             }
             if port in poe_by_port:
                 p = poe_by_port[port]
@@ -448,14 +506,88 @@ class OpenWrtSwitchDriver(SwitchDriver):
             entries.append(f"{name}:t" if m.get("tagged") else f"{name}:u*")
         return entries
 
-    async def _apply_network_change(self) -> None:
-        await self._ubus("uci", "commit", {"config": "network"})
+    # ------------------------------------------------------------------
+    # Safe apply (WARP-1730)
+    # ------------------------------------------------------------------
+    async def _revert_staged_changes(self) -> None:
+        """Best-effort sweep of rpcd's uci staging area (PYNET-005 parity with
+        services/routing ``safe_apply``): the staging area is SHARED across
+        endpoints, so a half-staged delta left behind by a failed write would
+        be silently committed by the NEXT unrelated apply from any caller.
+        Enumerate every config with pending deltas and revert each."""
         try:
-            await self._ubus("network", "reload")
+            pending = await self._ubus("uci", "changes")
+            changed = (
+                pending.get("changes", pending) if isinstance(pending, dict) else {}
+            )
+            if not isinstance(changed, dict):
+                changed = {}
+            for config in list(changed):
+                try:
+                    await self._ubus("uci", "revert", {"config": config})
+                except (SwitchAPIError, ConnectionLost):
+                    logger.exception("Safe apply: revert failed for config %s", config)
+        except (SwitchAPIError, ConnectionLost):
+            logger.exception(
+                "Safe apply: could not enumerate staged uci changes for revert"
+            )
+
+    async def _apply_with_rollback(self) -> None:
+        """apply(rollback-armed) → connectivity probe → confirm.
+
+        `uci apply` commits every pending change and reloads the affected
+        services with a device-side rollback timer; if we cannot reach the
+        switch afterwards (the write stranded 192.168.9.2), confirm never
+        fires and the device restores itself when the timer expires.
+        """
+        try:
+            await self._ubus("uci", "apply", {
+                "rollback": True, "timeout": APPLY_ROLLBACK_TIMEOUT_S,
+            })
         except SwitchAPIError as exc:
-            # Committed but not live — surfaced, not hidden: the operator sees
-            # the change apply on the next reload/reboot.
-            logger.warning("network reload denied/failed after uci commit: %s", exc)
+            if exc.code == UBUS_NO_DATA:
+                # Nothing pending: rpcd skips unchanged values server-side
+                # (WARP-987), so a re-post of the current config stages
+                # nothing and apply reports NO_DATA — benign, never a fault.
+                logger.info("Safe apply: no staged changes — nothing to apply.")
+                return
+            await self._revert_staged_changes()
+            raise
+        except BaseException:
+            await self._revert_staged_changes()
+            raise
+        # Probe: the driver's cheapest read that proves the management plane
+        # still answers (same call `is_connected` uses).
+        try:
+            await self._ubus("system", "board")
+        except BaseException as exc:
+            logger.warning(
+                "Safe apply: connectivity probe failed after apply — device "
+                "auto-rollback in %ds: %s", APPLY_ROLLBACK_TIMEOUT_S, exc,
+            )
+            raise
+        try:
+            await self._ubus("uci", "confirm")
+        except BaseException as exc:
+            logger.warning(
+                "Safe apply: confirm failed — device auto-rollback in %ds: %s",
+                APPLY_ROLLBACK_TIMEOUT_S, exc,
+            )
+            raise
+        logger.info("Safe apply: changes applied and confirmed.")
+
+    @asynccontextmanager
+    async def _safe_apply(self) -> AsyncIterator[None]:
+        """Stage uci writes inside this block. On clean exit they are applied
+        with a rollback timer, probed, and confirmed; on ANY exception inside
+        the block every staged config is reverted and the exception re-raised
+        so a half-write cannot linger in rpcd's shared staging area."""
+        try:
+            yield
+        except BaseException:
+            await self._revert_staged_changes()
+            raise
+        await self._apply_with_rollback()
 
     async def create_vlan(self, vlan_id: int, name: str = "") -> None:
         plan = {"op": "create_vlan", "vlan_id": vlan_id, "name": name}
@@ -465,10 +597,10 @@ class OpenWrtSwitchDriver(SwitchDriver):
         values = {"device": "switch", "vlan": str(vlan_id)}
         if name:
             values["name"] = name
-        await self._ubus("uci", "add", {
-            "config": "network", "type": "bridge-vlan", "values": values,
-        })
-        await self._apply_network_change()
+        async with self._safe_apply():
+            await self._ubus("uci", "add", {
+                "config": "network", "type": "bridge-vlan", "values": values,
+            })
         logger.info("Create VLAN %d applied: %s", vlan_id, plan)
 
     async def delete_vlan(self, vlan_id: int) -> None:
@@ -478,8 +610,8 @@ class OpenWrtSwitchDriver(SwitchDriver):
         vlan = await self._vlan_section(vlan_id)
         if vlan is None:
             raise SwitchAPIError(code=404, message=f"VLAN {vlan_id} not found")
-        await self._ubus("uci", "delete", {"config": "network", "section": vlan["_section"]})
-        await self._apply_network_change()
+        async with self._safe_apply():
+            await self._ubus("uci", "delete", {"config": "network", "section": vlan["_section"]})
 
     async def set_vlan_membership(self, vlan_id: int, membership: list[dict]) -> None:
         ports = self._membership_to_uci_ports(membership)
@@ -491,10 +623,89 @@ class OpenWrtSwitchDriver(SwitchDriver):
         vlan = await self._vlan_section(vlan_id)
         if vlan is None:
             raise SwitchAPIError(code=404, message=f"VLAN {vlan_id} not found")
-        await self._ubus("uci", "set", {
-            "config": "network", "section": vlan["_section"], "values": {"ports": ports},
-        })
-        await self._apply_network_change()
+        async with self._safe_apply():
+            await self._ubus("uci", "set", {
+                "config": "network", "section": vlan["_section"], "values": {"ports": ports},
+            })
+
+    async def set_port_access_vlan(self, port: int, vlan_id: int) -> None:
+        """Make `port` the untagged (access/PVID) member of `vlan_id` WITHOUT
+        disturbing that VLAN's other members, and remove it from any OTHER VLAN
+        where it is an untagged member (a port has exactly one access VLAN).
+
+        🔴 Why this is not `set_vlan_membership([one port])`: that writes the
+        VLAN's whole `ports` list, so a single-port call WIPED every other
+        member — on the flat-lan default VLAN 1 that is the router uplink, the
+        AP and the appliance, i.e. it strands the entire fabric on the first
+        reconcile (audit 2026-08-06). This works on the RAW uci entries so it
+        preserves each other port's exact suffix (bare / `:u*` / `:t`): a
+        read→parse→re-serialise round-trip is lossy (a bare VLAN-1 entry would
+        come back `:t`, silently re-tagging the LAN), so we never rebuild an
+        entry we did not have to.
+
+        Tagged (trunk) memberships — `lanN:t`, e.g. the guest VLAN 30 trunk —
+        are left untouched: only untagged/access membership is exclusive.
+        """
+        if self._plan_only:
+            # Same gate as every sibling write. This primitive is now reachable
+            # from the interactive membership endpoint (not just the
+            # provisioner), so without it SWITCH_LIVE_WRITES=0 would move a
+            # port on real hardware while the API answered "planned".
+            logger.info(
+                "Port %d → access VLAN %d PLANNED (plan_only) — not applied.",
+                port, vlan_id,
+            )
+            return
+        name = _port_name(port)
+
+        def _num(entry: str) -> Optional[int]:
+            return _port_from_name(str(entry).partition(":")[0])
+
+        def _is_tagged(entry: str) -> bool:
+            return str(entry).endswith(":t")
+
+        values = await self._uci_values("network")
+        sections: dict[int, tuple[str, list[str]]] = {}
+        for sid, section in values.items():
+            if section.get(".type") != "bridge-vlan":
+                continue
+            try:
+                vid = int(section.get("vlan"))
+            except (TypeError, ValueError):
+                continue
+            sections[vid] = (sid, _raw_vlan_port_list(section.get("ports")))
+
+        if vlan_id not in sections:
+            raise SwitchAPIError(
+                code=404,
+                message=f"VLAN {vlan_id} not found — create it before assigning a port",
+            )
+
+        async with self._safe_apply():
+            # Target VLAN: keep every other entry verbatim; (re)add this port
+            # as explicit untagged + PVID.
+            target_sid, target_ports = sections[vlan_id]
+            kept = [e for e in target_ports if _num(e) != port]
+            kept.append(f"{name}:u*")
+            await self._ubus("uci", "set", {
+                "config": "network", "section": target_sid,
+                "values": {"ports": kept},
+            })
+
+            # Every other VLAN: drop this port ONLY from untagged membership;
+            # never touch a tagged trunk entry.
+            for vid, (sid, raw_ports) in sections.items():
+                if vid == vlan_id:
+                    continue
+                pruned = [
+                    e for e in raw_ports
+                    if not (_num(e) == port and not _is_tagged(e))
+                ]
+                if len(pruned) != len(raw_ports):
+                    await self._ubus("uci", "set", {
+                        "config": "network", "section": sid,
+                        "values": {"ports": pruned},
+                    })
 
     # ------------------------------------------------------------------
     # PoE
@@ -543,8 +754,110 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 return entry
         raise SwitchAPIError(code=404, message=f"No PoE state reported for port {port}")
 
-    async def set_port_poe(self, port: int, enabled: bool) -> dict | None:
+    async def get_fdb(self) -> list[dict]:
+        """Learned MAC→port map from the `bridge.fdb` rpcd plugin (WARP-1734).
+
+        The plugin ships in the switch overlay (droplet-edge-router
+        switch/files/usr/share/rpcd/ucode/droplet-bridge.uc) and already
+        filters the switch's own permanent addresses and the CPU-side port,
+        so what comes back is "what is plugged into which port".
+
+        Degrades to [] on ANY fault, so read-only consumers (topology display)
+        keep working on an older image without the plugin. NOTE: [] here is
+        AMBIGUOUS — it means both "FDB read failed" and "FDB is empty". The PoE
+        guard must distinguish the two (unavailable ⇒ cannot prove safe ⇒ fail
+        closed), so it does NOT use this method; it reads the FDB itself via
+        `_powered_or_unknown`, which reports availability separately.
+        """
+        try:
+            result = await self._ubus("bridge", "fdb")
+        except (SwitchAPIError, ConnectionLost) as exc:
+            logger.info(
+                "FDB unavailable (%s) — switch image predates the bridge.fdb "
+                "plugin or its ACL grant; topology degrades to unknown", exc,
+            )
+            return []
+        entries = result.get("entries") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            return []
+        out: list[dict] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            mac, port = e.get("mac"), e.get("port")
+            if not isinstance(mac, str) or not isinstance(port, str):
+                continue
+            out.append({"mac": mac.lower(), "port": port, "vlan": e.get("vlan")})
+        return out
+
+    async def port_powers(self, port: int) -> list[str]:
+        """MACs the switch has learned on `port` — i.e. what this port feeds.
+
+        The join that makes the ADR-035 §7 PoE guard possible: `poe info`
+        knows a port draws power, the FDB knows which device is on it, and
+        only together can the control plane say "port 2 powers the AP that is
+        serving the household's Wi-Fi right now".
+        """
+        want = f"lan{port}"
+        return [e["mac"] for e in await self.get_fdb() if e.get("port") == want]
+
+    async def _powered_or_unknown(self, port: int) -> tuple[bool, list[str]]:
+        """`(topology_known, macs_on_port)` for the PoE guard.
+
+        `get_fdb()` deliberately degrades to `[]` on ANY fault, which conflates
+        two very different states: "the FDB is readable and this port feeds
+        nothing" (safe to cut) versus "we could not read the FDB at all" (we
+        CANNOT prove the port is safe to cut). The guard must fail CLOSED on the
+        latter, so read the FDB here directly and report availability, rather
+        than going through the swallowing helper."""
+        try:
+            result = await self._ubus("bridge", "fdb")
+        except (SwitchAPIError, ConnectionLost) as exc:
+            logger.warning(
+                "PoE guard: FDB unreadable (%s) — cannot verify what port %d "
+                "feeds; failing closed", exc, port,
+            )
+            return (False, [])
+        entries = result.get("entries") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            # A malformed answer is not a trustworthy "empty" — treat as unknown.
+            return (False, [])
+        want = f"lan{port}"
+        macs = [
+            e["mac"].lower()
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("mac"), str) and e.get("port") == want
+        ]
+        return (True, macs)
+
+    async def set_port_poe(
+        self, port: int, enabled: bool, force: bool = False,
+    ) -> dict | None:
         self._validate_poe_port(port)
+        # ADR-035 §7 hard refusal. De-powering a device is the one action in
+        # this rack with NO remote recovery: the device cannot roll itself
+        # back, cannot confirm, and cannot be reached to undo it. So a
+        # disable that would darken something the switch can SEE on that port
+        # is refused rather than warned about. `force` is the operator saying
+        # they know. Enables are never guarded — restoring power is safe.
+        if not enabled and not force:
+            known, powered = await self._powered_or_unknown(port)
+            if not known:
+                # Fail CLOSED: de-powering a device has no remote recovery, so
+                # if we cannot read the forwarding table we cannot prove the
+                # port is safe to cut. (Older images without the bridge.fdb
+                # plugin land here — the operator overrides with force=true.)
+                raise PoweredMemberError(
+                    f"Refusing to cut PoE on port {port}: the switch's "
+                    f"forwarding table is unreadable, so I can't verify nothing "
+                    f"critical is on it. Pass force=true to override."
+                )
+            if powered:
+                raise PoweredMemberError(
+                    f"Refusing to cut PoE on port {port}: it powers "
+                    f"{', '.join(powered)}. A de-powered device cannot be "
+                    f"reached to undo this. Pass force=true to override."
+                )
         plan = {"port": port, "enabled": enabled}
         if self._plan_only:
             logger.info("Port %d PoE %s PLANNED (plan_only) — not applied.",
@@ -557,15 +870,19 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 break
         if section_id is None:
             raise SwitchAPIError(code=404, message=f"No uci poe section for port {port}")
-        await self._ubus("uci", "set", {
-            "config": "poe", "section": section_id,
-            "values": {"enable": "1" if enabled else "0"},
-        })
-        await self._ubus("uci", "commit", {"config": "poe"})
+        async with self._safe_apply():
+            await self._ubus("uci", "set", {
+                "config": "poe", "section": section_id,
+                "values": {"enable": "1" if enabled else "0"},
+            })
+        # Belt-and-braces runtime reload: `uci apply` already fires
+        # reload_config, but realtek-poe's reload-trigger coverage is not yet
+        # confirmed against flashed hardware (WARP-1674). Safe after confirm —
+        # the poe daemon cannot strand the management plane.
         try:
             await self._ubus("poe", "reload")
         except SwitchAPIError as exc:
-            logger.warning("poe reload denied/failed after uci commit: %s", exc)
+            logger.warning("poe reload denied/failed after safe apply: %s", exc)
         # Read-back: uci is the admin ground truth (the live `poe info` status
         # lags the reload by a negotiation cycle).
         for entry in await self.get_poe_status():

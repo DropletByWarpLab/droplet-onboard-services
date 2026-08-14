@@ -92,7 +92,8 @@ From `docker/docker-compose.yml`:
 
 | Service | Image | Purpose |
 |---|---|---|
-| `ollama` (container_name `droplet-ollama`) | `ollama/ollama:rocm` | Local LLM inference on dGPU. ai-gateway reaches it via compose DNS at `http://ollama:11434`. |
+| `dmr` (container_name `droplet-dmr`) | `docker/model-runner:*-rocm` | **Default** local LLM inference on the dGPU (WARP-1870). ai-gateway reaches it via compose DNS at `http://dmr:12434`. Profile: `dmr`. |
+| `ollama` (container_name `droplet-ollama`) | `ollama/ollama:rocm` | Local LLM inference on dGPU, **opt-in** (`INFERENCE_RUNTIME=ollama`). Reached at `http://ollama:11434`. Profile: `ollama` — mutually exclusive with `dmr`: exactly one runtime may hold `/dev/kfd` and the render node (WARP-1826). |
 | `openwrt` (container_name `droplet-openwrt`) | `openwrt/rootfs:x86_64-24.10.2` | Router-in-container — Wi-Fi AP (after host-side `droplet-openwrt-attach` moves the MT7922 PHY into the container netns) + WireGuard endpoint. routing service talks to it via `127.0.0.1:8181`. |
 
 Plus 3 named volumes:
@@ -161,6 +162,26 @@ installs all three when single-box mode is active:
 | `/etc/tmpfiles.d/droplet.conf` | `scripts/host/etc-tmpfiles.d/droplet.conf` | + `systemd-tmpfiles --create` |
 | `/etc/avahi/services/droplet.service` | `scripts/host/etc-avahi/services/droplet.service` | mDNS advert (http + https) |
 | `/etc/systemd/system/droplet.service` | **Generated** by `lib/systemd.sh::install_systemd_service` | `docker compose up -d` on boot |
+| `/usr/local/sbin/droplet-host-units` | `scripts/host/droplet-host-units.sh` | `install -m 0755`. WARP-1829 — see below |
+| `/etc/systemd/system/droplet-host-units.service` | `scripts/host/etc-systemd-system/droplet-host-units.service` | On-demand oneshot; deliberately **not** enabled and given no timer |
+
+> **After anything updates the checkout, refresh the host units (WARP-1829).**
+> Host units execute their source straight out of the git working tree —
+> `droplet-device-bridge.service` runs
+> `/usr/bin/python3 <repo>/services/oled-display/device-bridge.py` — and Python
+> reads a file once, at process start. Pulling `main` and restarting
+> *containers* leaves those processes on the old code indefinitely, silently:
+> the file on disk is correct and `systemctl status` says `active (running)`.
+>
+> ```bash
+> sudo droplet-host-units check      # read-only; exit 1 if any unit runs stale code
+> sudo systemctl start droplet-host-units.service   # restart only what changed
+> ```
+>
+> `setup.sh` runs the refresh itself as its last step, so a provision needs
+> nothing extra. The standing detection rides the existing
+> `droplet-watchdog.timer` as the `host_unit_staleness` check. Full contract:
+> `scripts/host/README.md`.
 
 > **Migrating a pre-rename box (WARP-445):** a box provisioned before the
 > host-net artifacts were de-`poc` renamed (rule 17 / ADR-018) may still run

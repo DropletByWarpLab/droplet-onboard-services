@@ -41,11 +41,20 @@ function ShellStatusChip() {
   // container-id hostname and upgrades the droplet.local fallback to the
   // issued per-device FQDN (the address that also works over the VPN).
   const host = useBoxAddress();
+  // The host and its separator are their own elements so the phone layer can
+  // drop them: measured at 375px this chip is 282px of `white-space: nowrap`
+  // against a 333px content box, and with `.pt-id` beside it the row made the
+  // DOCUMENT 390-437px wide on every shell route. The status label is the
+  // actionable half and stays — the dot alone would be a colour-only signal.
+  // Their display is owned solely by `droplet-shell.css` (no Tailwind utility
+  // and no `hidden` attribute here), so the WARP-1792 display-ownership rule
+  // is not in play.
   return (
     <span className={"pt-chip is-" + status}>
       <span className="dot" />
-      <b>{host}</b>
-      <span> · {copy.label}</span>
+      <b className="pt-host">{host}</b>
+      <span className="pt-sep" aria-hidden="true"> · </span>
+      <span className="pt-status">{copy.label}</span>
     </span>
   );
 }
