@@ -8,6 +8,18 @@ pdfplumber>=0.11.10
 python-docx>=1.2.0
 openpyxl>=3.1.5
 beautifulsoup4>=4.15.0
+# WARP-2052 — legacy Office formats. Both permissive (BSD), per the
+# appliance-conveying licence rule; the usual .doc converters (antiword,
+# catdoc, wvWare) are GPL and cannot ship.
+#   xlrd 2.x reads .xls only (it dropped .xlsx, which openpyxl covers) and
+#   handles the BIFF2-era workbooks the practice-management exports produce.
+#   olefile parses the OLE2 container that Word 97-2003 .doc files use; it
+#   already arrived transitively via extract-msg, so pin it now that an
+#   extractor imports it directly.
+xlrd>=2.0.2
+olefile>=0.47
+# ODF (.odt/.ods/.odp/.odg) is handled with stdlib zipfile + ElementTree —
+# no odfpy needed, see extractors/odf.py.
 # WARP-201 RAG Phase 1 extractors
 pypdf>=6.14.2
 # WARP-862: fallback extractor for PDFs whose per-glyph positioning makes

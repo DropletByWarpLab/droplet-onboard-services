@@ -59,14 +59,19 @@ logger = logging.getLogger(__name__)
 # Dockerfile also installs Debian `media-types` as belt-and-suspenders,
 # but correctness must not hinge on an image detail).
 #
-# Kept to the WARP-1842 set: OOXML + legacy Word + ODF. Registered types
-# WITHOUT an extractor (.xlsx, all ODF) now take the honest
+# WARP-1842 registered OOXML + legacy Word + ODF; at that point .xlsx and
+# the ODF family had no extractor and took the honest
 # `skipped/unsupported_or_failed_extraction` path via dispatch() → None.
+# WARP-2052 supplies those extractors, and adds legacy .xls here — Python's
+# built-in table happens to know that one, but relying on a built-in for
+# some extensions and an explicit entry for others is the exact split that
+# made this fail silently the first time.
 OFFICE_MIME_TYPES: dict[str, str] = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".doc": "application/msword",
+    ".xls": "application/vnd.ms-excel",
     ".odt": "application/vnd.oasis.opendocument.text",
     ".ods": "application/vnd.oasis.opendocument.spreadsheet",
     ".odp": "application/vnd.oasis.opendocument.presentation",

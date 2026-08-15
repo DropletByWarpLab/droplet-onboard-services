@@ -57,12 +57,32 @@ def _route(mime: str) -> Optional[Callable[..., ExtractedDoc]]:
     if mime == "application/pdf":
         from extractors.pdf import extract as pdf_extract  # noqa: PLC0415
         return pdf_extract
-    if mime in {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    }:
+    if mime == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ):
         from extractors.docx import extract as docx_extract  # noqa: PLC0415
         return docx_extract
+    # Legacy binary Word is a different format from OOXML, not a variant of
+    # it. Routing application/msword at python-docx made every .doc fail with
+    # "is not a Word file, content type is ...themeManager+xml".
+    try:
+        from extractors import doc as doc_ext  # type: ignore  # noqa: PLC0415
+        if mime in doc_ext.SUPPORTED_MIMES:
+            return doc_ext.extract
+    except ImportError:
+        pass
+    try:
+        from extractors import spreadsheet as sheet_ext  # type: ignore  # noqa: PLC0415
+        if mime in sheet_ext.SUPPORTED_MIMES:
+            return sheet_ext.extract
+    except ImportError:
+        pass
+    try:
+        from extractors import odf as odf_ext  # type: ignore  # noqa: PLC0415
+        if mime in odf_ext.SUPPORTED_MIMES:
+            return odf_ext.extract
+    except ImportError:
+        pass
     # WARP-435 (ADR-003 Phase 1): PPTX. python-pptx is heavy (lxml at
     # import), so we lazy-import like the other extractors. Try/except
     # so the registry stays usable on branches that haven't shipped

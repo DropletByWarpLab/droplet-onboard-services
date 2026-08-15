@@ -1194,7 +1194,16 @@ services:
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
     <<: *default-logging
-    mem_limit: ${FILE_INDEXER_MEM_LIMIT:-512m}
+    # WARP-2052: raised from 512m. 512m was survivable only while the
+    # chunker was silently emitting one chunk per Span; once chunking
+    # actually split documents — and OCR started rasterizing scanned pages —
+    # a full reconcile of a ~620-file customer corpus OOM-killed the service
+    # into a restart loop (exit 137, OOMKilled=true, RestartCount climbing).
+    # Measured on that corpus: ~150 MB peak for the single worst file
+    # (an 821-page PDF), but ~1.0 GB resident across a whole reconcile pass,
+    # since CPython returns little of a churned heap to the OS. 1.5g leaves
+    # headroom above the observed peak without crowding db (1g) or docs (2g).
+    mem_limit: ${FILE_INDEXER_MEM_LIMIT:-1536m}
     cpus: ${FILE_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
