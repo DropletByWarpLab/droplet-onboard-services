@@ -530,15 +530,19 @@ const envSchema = z.object({
   DROPLET_DEVICE_ID: z.string().default("droplet"),
 
   // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
-  // OVERLAY_CONNECT_ENABLED — explicit opt-in for the box overlay connect agent.
-  //   Default FALSE: the agent long-polls HQ's /api/overlay/* endpoints, which
-  //   ship in WARP-1384; until a box's HQ deployment exposes them, polling would
-  //   just 404 each tick. Boxes flip this on once HQ signaling is live. Also
-  //   requires HQ_ISSUANCE_URL to be set (the agent shares that HQ base URL).
+  // OVERLAY_CONNECT_ENABLED — the box overlay connect agent (WARP-1767).
+  //   Default TRUE. It was FALSE because the agent long-polls HQ's
+  //   /api/overlay/* endpoints, which had not shipped yet, so polling would have
+  //   404'd every tick. WARP-1384 deployed them and they answer, so the reason
+  //   for the opt-in has expired — and while it persisted, the default silently
+  //   meant no shipping box could be reached from outside at all. Set false to
+  //   opt a box out (LAN-only); it changes nothing about home-LAN operation.
+  //   Also requires HQ_ISSUANCE_URL (the agent shares that HQ base URL) and
+  //   router supervision — index.ts gates on all three.
   OVERLAY_CONNECT_ENABLED: z
     .string()
     .transform((v) => v === "true" || v === "1")
-    .default("false"),
+    .default("true"),
   // Seconds between HQ long-poll ticks (event-driven; NOT a busy loop —
   // scheduled via cron-runtime). Bounded to keep the outbound heartbeat light.
   OVERLAY_CONNECT_POLL_SECONDS: z.coerce.number().int().min(2).max(300).default(15),

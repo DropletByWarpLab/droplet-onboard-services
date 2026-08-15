@@ -752,6 +752,16 @@ DROPLET_PUBLIC_FQDN=
 #   default is the live HQ Worker URL; flip it back in the SAME commit that
 #   creates the DNS record.
 HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}
+# OVERLAY_CONNECT_ENABLED: the box half of customer remote access (WARP-1767 /
+#   ADR-031) — outbound long-poll to HQ signaling, STUN mapping discovery, and
+#   the wg0 peer install that lands a hole-punched session. ON by default: this
+#   is the shipped remote-access path, and a box written without it cannot be
+#   reached from outside at all. Overridable from the provisioning environment
+#   for a box that must ship LAN-only. Requires HQ_ISSUANCE_URL (above) and
+#   router supervision; index.ts gates on all three.
+OVERLAY_CONNECT_ENABLED=${OVERLAY_CONNECT_ENABLED:-true}
+OVERLAY_CONNECT_POLL_SECONDS=${OVERLAY_CONNECT_POLL_SECONDS:-15}
+OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-12}
 # TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
 #   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
 #   relay OFF — single-box.sh only activates the `relay` compose profile
@@ -918,6 +928,15 @@ migrate_env() {
   # value is never clobbered on re-run.
   _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}"
   _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
+  # WARP-1767: backfill the overlay connect agent onto boxes already in the field.
+  # These installs predate the key entirely, so the orchestrator fell back to the
+  # zod default (false) and the connect tick + idle-expiry sweep never registered
+  # — every one of them is unreachable from outside. `_migrate_ensure_key` only
+  # appends when the key is ABSENT, so a box deliberately opted out (explicit
+  # `false`) keeps that value across the re-run.
+  _migrate_ensure_key OVERLAY_CONNECT_ENABLED "${OVERLAY_CONNECT_ENABLED:-true}"
+  _migrate_ensure_key OVERLAY_CONNECT_POLL_SECONDS "${OVERLAY_CONNECT_POLL_SECONDS:-15}"
+  _migrate_ensure_key OVERLAY_PEER_IDLE_EXPIRY_HOURS "${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-12}"
   # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
   # from the provisioning environment (empty = self-provision disabled). Pairs
   # with the seed-block `${DROPLET_PROVISION_TOKEN:-}` above so a fresh or
