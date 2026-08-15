@@ -72,4 +72,8 @@ scripts/image/.build/
 .claude/loop-state/
 # WARP-236 — internal CA + per-service TLS bundles (setup-generated, never tracked)
 data/secrets/
+# ADR-039 — `npm run finetune-export` output. Its default --out is a relative
+# path, so a run from the repo root lands here; with --include-user-content
+# that directory holds curated CUSTOMER CONVERSATIONS. Never tracked.
+finetune-dataset/
 docker/nginx-internal-scheme.conf
