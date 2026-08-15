@@ -85,7 +85,7 @@ def _build_splitter(capacity: int, overlap: int):
 
     tokenizer = Tokenizer.from_pretrained(_TOKENIZER_REPO)
 
-    # WARP-2052 — the splitter measures a candidate chunk by asking this
+    # WARP-2055 — the splitter measures a candidate chunk by asking this
     # tokenizer how many tokens it holds, so the tokenizer MUST report a
     # true count. `tokenizer.json` for all-MiniLM-L6-v2 ships
     # `truncation.max_length = 128`, which makes `encode()` return at most

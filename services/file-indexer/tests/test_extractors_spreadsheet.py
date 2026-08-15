@@ -1,6 +1,6 @@
 """Spreadsheet extractor — .xlsx (openpyxl) and legacy .xls (xlrd).
 
-Before WARP-2052 neither had an extractor at all: every workbook on the box
+Before WARP-2055 neither had an extractor at all: every workbook on the box
 landed `skipped/unsupported_or_failed_extraction`, including the practice's
 patient-contact and billing exports.
 """

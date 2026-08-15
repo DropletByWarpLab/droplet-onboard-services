@@ -8,7 +8,7 @@ pdfplumber>=0.11.10
 python-docx>=1.2.0
 openpyxl>=3.1.5
 beautifulsoup4>=4.15.0
-# WARP-2052 — legacy Office formats. Both permissive (BSD), per the
+# WARP-2055 — legacy Office formats. Both permissive (BSD), per the
 # appliance-conveying licence rule; the usual .doc converters (antiword,
 # catdoc, wvWare) are GPL and cannot ship.
 #   xlrd 2.x reads .xls only (it dropped .xlsx, which openpyxl covers) and

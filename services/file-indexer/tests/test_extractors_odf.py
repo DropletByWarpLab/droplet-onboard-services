@@ -1,6 +1,6 @@
 """OpenDocument extractor — .odt, .ods, .odp, .odg.
 
-All four were `skipped/unsupported_or_failed_extraction` before WARP-2052:
+All four were `skipped/unsupported_or_failed_extraction` before WARP-2055:
 registered as MIME types by WARP-1842 but with no extractor behind them.
 
 Fixtures are built here rather than committed as binaries — an ODF file is

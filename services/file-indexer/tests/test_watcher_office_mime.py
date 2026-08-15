@@ -32,6 +32,7 @@ import pytest
 
 import watcher
 from anchor_schema import NoneAnchor
+from extractors.registry import EXTRACTOR_CAPABILITY
 from extractors.spans import Span
 
 
@@ -211,10 +212,15 @@ def test_index_xlsx_lands_unsupported_not_unknown_type(nc_root, bare_mime_db):
 
 
 def test_reconcile_retries_skipped_unknown_type_but_not_other_skips(nc_root):
-    """A `skipped/unknown_type` row with UNCHANGED mtime is re-processed
-    (the MIME fix genuinely resolves it); `empty_extraction` and
-    `unsupported_or_failed_extraction` stay terminal — retrying those
-    would churn the skipped corpus on every restart."""
+    """With the CURRENT extractor generation stamped on every row, only
+    `skipped/unknown_type` is re-processed (the MIME fix genuinely resolves
+    it); `empty_extraction` and `unsupported_or_failed_extraction` stay
+    terminal — retrying those would churn the skipped corpus on every
+    restart for an outcome the same extractors cannot change.
+
+    WARP-2056 narrowed the premise to "the same extractors": see
+    `test_reconcile_retries_every_skip_from_an_older_generation`.
+    """
     files_dir = nc_root / "alice" / "files"
     files_dir.mkdir(parents=True)
     stuck_docx = files_dir / "report.docx"
@@ -227,10 +233,13 @@ def test_reconcile_retries_skipped_unknown_type_but_not_other_skips(nc_root):
     # updatedAt AFTER each file's mtime — nothing is stale on disk, so only
     # the reason-based retry can explain a re-run.
     later = os.path.getmtime(str(stuck_docx)) + 3600
+    cap = EXTRACTOR_CAPABILITY
     status_map = {
-        ("alice", "/report.docx"): ("skipped", later, "unknown_type"),
-        ("alice", "/empty-note.txt"): ("skipped", later, "empty_extraction"),
-        ("alice", "/model.blend"): ("skipped", later, "unsupported_or_failed_extraction"),
+        ("alice", "/report.docx"): ("skipped", later, "unknown_type", cap),
+        ("alice", "/empty-note.txt"): ("skipped", later, "empty_extraction", cap),
+        ("alice", "/model.blend"): (
+            "skipped", later, "unsupported_or_failed_extraction", cap,
+        ),
     }
 
     handler = MagicMock()
@@ -243,16 +252,55 @@ def test_reconcile_retries_skipped_unknown_type_but_not_other_skips(nc_root):
     assert result["processed"] == 1
 
 
-def test_reconcile_tolerates_legacy_two_tuple_status_rows(nc_root):
-    """Backward-safe: a `(status, updated_at)` 2-tuple (the pre-WARP-1842
-    map shape) behaves exactly as before — an unchanged `skipped` row is
-    left alone and the scan never crashes on the missing reason."""
+def test_reconcile_retries_every_skip_from_an_older_generation(nc_root):
+    """WARP-2056 — a skip recorded by extractors that have since changed is
+    re-examined whatever its reason.
+
+    This is the case that kept needing a manual `DELETE FROM
+    "FileIndexStatus"` on live boxes: the PDF OCR fallback turned
+    `empty_extraction` scans into indexed documents, and the spreadsheet/ODF
+    extractors turned `unsupported_or_failed_extraction` into real text —
+    but the reconcile went on treating both as permanent.
+    """
     files_dir = nc_root / "alice" / "files"
     files_dir.mkdir(parents=True)
-    f = files_dir / "old.bin"
-    f.write_bytes(b"\x00")
+    scan = files_dir / "referral.pdf"
+    scan.write_bytes(b"%PDF-1.4 scanned")
+    sheet = files_dir / "referrals.xlsx"
+    sheet.write_bytes(b"PK\x03\x04xlsx-ish")
 
-    status_map = {("alice", "/old.bin"): ("skipped", os.path.getmtime(str(f)) + 3600)}
+    later = os.path.getmtime(str(scan)) + 3600
+    status_map = {
+        # Stamped by an older generation — verdicts no longer trustworthy.
+        ("alice", "/referral.pdf"): ("skipped", later, "empty_extraction", "1"),
+        ("alice", "/referrals.xlsx"): (
+            "skipped", later, "unsupported_or_failed_extraction", "2",
+        ),
+    }
+
+    handler = MagicMock()
+    with patch.object(watcher, "fetch_index_status_map", return_value=status_map):
+        result = watcher.reconcile_index(handler)
+
+    retried = sorted(os.path.basename(c[0][0]) for c in handler._index.call_args_list)
+    assert retried == ["referral.pdf", "referrals.xlsx"]
+    assert result["processed"] == 2
+
+
+def test_reconcile_leaves_ready_rows_alone_across_a_generation_bump(nc_root):
+    """Only `skipped` verdicts expire. A generation bump must not re-index
+    the whole ready corpus — that would be a full re-embed on every
+    release."""
+    files_dir = nc_root / "alice" / "files"
+    files_dir.mkdir(parents=True)
+    done = files_dir / "notes.txt"
+    done.write_text("already indexed")
+
+    status_map = {
+        ("alice", "/notes.txt"): (
+            "ready", os.path.getmtime(str(done)) + 3600, None, "1",
+        ),
+    }
 
     handler = MagicMock()
     with patch.object(watcher, "fetch_index_status_map", return_value=status_map):
@@ -262,16 +310,48 @@ def test_reconcile_tolerates_legacy_two_tuple_status_rows(nc_root):
     assert result == {"scanned": 1, "processed": 0}
 
 
+def test_reconcile_tolerates_short_legacy_status_tuples(nc_root):
+    """Backward-safe: shorter map tuples (the pre-WARP-1842 2-tuple and the
+    pre-WARP-2056 3-tuple) must not crash the scan on the missing elements.
+
+    A row carrying no generation is treated as pre-stamp and therefore
+    stale, so it gets one pass — which is the intended heal, not a churn:
+    `_index` re-stamps it with the current generation, and the next
+    reconcile leaves it alone."""
+    files_dir = nc_root / "alice" / "files"
+    files_dir.mkdir(parents=True)
+    two = files_dir / "old.bin"
+    two.write_bytes(b"\x00")
+    three = files_dir / "older.bin"
+    three.write_bytes(b"\x00")
+
+    status_map = {
+        ("alice", "/old.bin"): ("skipped", os.path.getmtime(str(two)) + 3600),
+        ("alice", "/older.bin"): (
+            "skipped", os.path.getmtime(str(three)) + 3600, "empty_extraction",
+        ),
+    }
+
+    handler = MagicMock()
+    with patch.object(watcher, "fetch_index_status_map", return_value=status_map):
+        result = watcher.reconcile_index(handler)
+
+    assert result["scanned"] == 2
+    assert result["processed"] == 2
+
+
 # ── db.fetch_index_status_map carries the reason ─────────────────────────
 
 
-def test_fetch_index_status_map_includes_reason():
+def test_fetch_index_status_map_includes_reason_and_capability():
     fake_conn = MagicMock()
     fake_cursor = MagicMock()
     fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
     fake_cursor.fetchall.return_value = [
-        ("alice", "/a.docx", "skipped", 1000.0, "unknown_type"),
-        ("alice", "/b.txt", "ready", 2000.0, None),
+        ("alice", "/a.docx", "skipped", 1000.0, "unknown_type", "2"),
+        ("alice", "/b.txt", "ready", 2000.0, None, "3"),
+        # Written before the column existed.
+        ("alice", "/c.pdf", "skipped", 3000.0, "empty_extraction", None),
     ]
 
     with patch("db.get_conn", return_value=fake_conn):
@@ -281,5 +361,9 @@ def test_fetch_index_status_map_includes_reason():
 
     sql = fake_cursor.execute.call_args[0][0]
     assert '"reason"' in sql
-    assert status_map[("alice", "/a.docx")] == ("skipped", 1000.0, "unknown_type")
-    assert status_map[("alice", "/b.txt")] == ("ready", 2000.0, None)
+    assert '"extractorCapability"' in sql
+    assert status_map[("alice", "/a.docx")] == ("skipped", 1000.0, "unknown_type", "2")
+    assert status_map[("alice", "/b.txt")] == ("ready", 2000.0, None, "3")
+    assert status_map[("alice", "/c.pdf")] == (
+        "skipped", 3000.0, "empty_extraction", None,
+    )

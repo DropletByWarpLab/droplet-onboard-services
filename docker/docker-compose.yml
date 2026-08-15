@@ -1194,7 +1194,7 @@ services:
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
     <<: *default-logging
-    # WARP-2052: raised from 512m. 512m was survivable only while the
+    # WARP-2055: raised from 512m. 512m was survivable only while the
     # chunker was silently emitting one chunk per Span; once chunking
     # actually split documents — and OCR started rasterizing scanned pages —
     # a full reconcile of a ~620-file customer corpus OOM-killed the service
