@@ -31,6 +31,7 @@ const EXPECTED_TOOL_NAMES = [
   "move_file",
   "read_file",
   "rename_file",
+  "read_document_text",    // WARP-2057
   "search_content",
   "search_files",
   "write_file",
@@ -91,6 +92,7 @@ const EXPECTED_TOOL_NAMES = [
   "assign_device_room",
   // WARP-509 — Plane PM write tools
   "pm_add_work_item_comment",
+  "pm_create_project",     // WARP-2058
   "pm_create_work_item",
   "pm_transition_work_item",
   "pm_update_work_item",

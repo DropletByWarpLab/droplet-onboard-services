@@ -661,3 +661,190 @@ export async function searchHybrid(
   // tag them rather than leaving the consumer to infer the scale.
   return tagSimilarity(fused.slice(0, limit));
 }
+
+// ── whole-document read ────────────────────────────────────────────────
+
+/**
+ * Row cap per call. The char budget is the real limiter, but it can only
+ * be applied AFTER decrypt (ciphertext length tells you nothing about
+ * plaintext length), so SQL needs its own bound to keep a 500-page scan
+ * from being materialized in one go.
+ */
+const READ_DOC_MAX_ROWS = 200;
+/** Pessimistic chars-per-chunk used to turn a char budget into a row
+ *  limit. Deliberately low: over-fetching a few rows is cheap, while
+ *  under-fetching would silently short a caller who asked for more. */
+const READ_DOC_MIN_CHUNK_CHARS = 100;
+
+export interface ReadDocumentTextParams {
+  userId: string;
+  /** WARP-1014: extra chunk-owner keys (see SearchByVectorParams.additionalUserIds). */
+  additionalUserIds?: string[];
+  path: string;
+  /** 0-based chunk index to resume from. */
+  startChunk: number;
+  /** Approximate character budget; whole chunks are always returned. */
+  maxChars: number;
+}
+
+export interface ReadDocumentTextResult {
+  source: FileContentSource;
+  chunks: Array<{
+    chunkIdx: number;
+    pageNumber: number | null;
+    text: string;
+    warnings: string[];
+  }>;
+  /** Total chunks for this path, ignoring the window. 0 ⇒ not indexed. */
+  totalChunks: number;
+  /** Chunks dropped in this window because their DEK is gone or failed auth. */
+  unreadableChunks: number;
+}
+
+interface RawChunkRow {
+  source: FileContentSource;
+  chunkIdx: number;
+  pageNumber: number | null;
+  brainItemId: string | null;
+  text: string;
+  warnings: string[] | null;
+}
+
+/**
+ * Ordered whole-document read backing the `read_document_text` tool.
+ *
+ * Same RBAC predicate and same decrypt-on-read as the search arms — which
+ * is the point of putting it in this file rather than in the tool handler.
+ * It differs from those arms in one way that matters: it selects `text`
+ * WHOLE. `SNIPPET_SQL` truncates to 280 chars for a citation chip, which
+ * is precisely wrong when the caller's purpose is to read the document, so
+ * this path must not reuse it (nor `decryptSnippets`, which re-truncates
+ * after decrypt).
+ *
+ * `totalChunks` is counted independently of the window so the caller can
+ * tell apart three states an empty `chunks` array would otherwise blur:
+ * not indexed at all (0), a valid but exhausted window, and a window whose
+ * every row was undecryptable.
+ */
+export async function readDocumentText(
+  prisma: PrismaClient,
+  params: ReadDocumentTextParams,
+): Promise<ReadDocumentTextResult> {
+  const countArgs: unknown[] = [];
+  const { predicate: countPredicate, nextParam: countNext } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    countArgs,
+  );
+  countArgs.push(params.path);
+  const countRows = await (
+    prisma as unknown as {
+      $queryRawUnsafe: (
+        sql: string,
+        ...p: unknown[]
+      ) => Promise<Array<{ count: bigint | number }>>;
+    }
+  ).$queryRawUnsafe(
+    `SELECT COUNT(*)::bigint AS count FROM "FileContentChunk"
+     WHERE ${countPredicate} AND path = $${countNext}`,
+    ...countArgs,
+  );
+  const totalChunks = Number(countRows[0]?.count ?? 0);
+  if (totalChunks === 0) {
+    return { source: "nextcloud", chunks: [], totalChunks: 0, unreadableChunks: 0 };
+  }
+
+  const args: unknown[] = [];
+  const { predicate, nextParam } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    args,
+  );
+  let p = nextParam;
+  const pathParam = p++;
+  args.push(params.path);
+  const startParam = p++;
+  args.push(params.startChunk);
+  const limitParam = p++;
+  args.push(
+    Math.min(
+      READ_DOC_MAX_ROWS,
+      Math.ceil(params.maxChars / READ_DOC_MIN_CHUNK_CHARS) + 1,
+    ),
+  );
+
+  const sql = `
+    SELECT source,
+           "chunkIdx",
+           "pageNumber",
+           "brainItemId",
+           text,
+           warnings
+    FROM "FileContentChunk"
+    WHERE ${predicate} AND path = $${pathParam} AND "chunkIdx" >= $${startParam}
+    ORDER BY "chunkIdx" ASC
+    LIMIT $${limitParam}
+  `;
+  const rows = await (
+    prisma as unknown as {
+      $queryRawUnsafe: (sql: string, ...p: unknown[]) => Promise<RawChunkRow[]>;
+    }
+  ).$queryRawUnsafe(sql, ...args);
+
+  // WARP-242: decrypt-on-read, keeping the FULL plaintext. Rows whose DEK
+  // is missing or fails authentication are dropped and counted — handing
+  // the model base64 garbage would be worse than a reported hole.
+  const encrypted = rows.filter((r) => isEncryptedColumn(r.text));
+  const deks = encrypted.length
+    ? await getDeksByIds(prisma, [
+        ...new Set(
+          encrypted.flatMap((r) => (r.brainItemId ? [`brain:${r.brainItemId}`] : [])),
+        ),
+      ])
+    : new Map<string, Buffer>();
+
+  const chunks: ReadDocumentTextResult["chunks"] = [];
+  let unreadableChunks = 0;
+  let used = 0;
+  for (const r of rows) {
+    let text = r.text;
+    if (isEncryptedColumn(text)) {
+      const keyId = r.brainItemId ? `brain:${r.brainItemId}` : null;
+      const dek = keyId ? deks.get(keyId) : undefined;
+      if (!dek) {
+        console.warn("chunk.unreadable.dek_missing", { path: params.path, keyId });
+        unreadableChunks++;
+        continue;
+      }
+      try {
+        text = decryptColumn(dek, text, keyId!);
+      } catch (e) {
+        console.warn("chunk.unreadable.decrypt_failed", {
+          path: params.path,
+          keyId,
+          error: String(e),
+        });
+        unreadableChunks++;
+        continue;
+      }
+    }
+    // Budget check AFTER decrypt, and always admit the first chunk: a
+    // single chunk larger than the whole budget must still make progress,
+    // or a caller paging with `next_chunk` would loop on it forever.
+    if (chunks.length > 0 && used + text.length > params.maxChars) break;
+    chunks.push({
+      chunkIdx: r.chunkIdx,
+      pageNumber: r.pageNumber,
+      text,
+      warnings: r.warnings ?? [],
+    });
+    used += text.length;
+  }
+
+  return {
+    source: rows[0]?.source ?? "nextcloud",
+    chunks,
+    totalChunks,
+    unreadableChunks,
+  };
+}

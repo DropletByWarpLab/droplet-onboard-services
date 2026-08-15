@@ -116,6 +116,46 @@ export interface ToolContext {
       metadata: Record<string, unknown> | null;
     }>
   >;
+  /**
+   * Ordered whole-document read shim, bound per-call with the caller's
+   * userId — the retrieval-side counterpart to {@link searchHybrid}.
+   * Orchestrator/mcp-server binds this to `file-search.service.ts`'s
+   * `readDocumentText`.
+   *
+   * Lives here as an injected shim rather than a prisma query inside the
+   * handler for the same reason `searchHybrid` does: decrypt-on-read
+   * (WARP-242), dual-shape chunk-owner resolution (WARP-1014) and the
+   * RBAC predicate are server-side concerns, and a second copy in a
+   * handler is a second copy free to drift.
+   *
+   * `totalChunks === 0` means the path has NO extracted text at all —
+   * the handler turns that into a loud `NOT_INDEXED` rather than an empty
+   * success, because a silently-skipped extraction is indistinguishable
+   * from an empty document at every layer above this one.
+   *
+   * When absent (file index unreachable at context-build time) the
+   * handler returns `DOCUMENT_READ_UNAVAILABLE`.
+   */
+  readDocumentText?: (args: {
+    path: string;
+    /** 0-based chunk index to resume from. */
+    startChunk: number;
+    /** Approximate character budget; whole chunks are always returned. */
+    maxChars: number;
+  }) => Promise<{
+    source: "nextcloud" | "brain";
+    chunks: Array<{
+      chunkIdx: number;
+      pageNumber: number | null;
+      text: string;
+      warnings: string[];
+    }>;
+    /** Total chunks for this path, ignoring the window. 0 ⇒ not indexed. */
+    totalChunks: number;
+    /** Chunks dropped in the window because their DEK is missing or
+     *  authentication failed — surfaced, never silently swallowed. */
+    unreadableChunks: number;
+  }>;
   userId?: string;
   /** Caller's role. HTTP transport: from JWT claims. Stdio: forwarded by
    *  the orchestrator via `_meta.userRole` (WARP-845 role-scoped memory

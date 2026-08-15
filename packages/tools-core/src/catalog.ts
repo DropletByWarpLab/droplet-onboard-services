@@ -98,6 +98,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "read_file",
     "search_files",
     "search_content",
+    "read_document_text",
     "list_recent_files",
     "write_file",
     "delete_file",
@@ -173,6 +174,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
   pm: [
+    "pm_create_project",
     "pm_create_work_item",
     "pm_update_work_item",
     "pm_add_work_item_comment",
@@ -269,6 +271,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   read_file: "Open and read one of your files",
   search_files: "Find files by name",
   search_content: "Search inside your files for what you need",
+  read_document_text: "Read a whole PDF or scanned document end to end",
   list_recent_files: "See the files you changed most recently",
   write_file: "Save a new file or update an existing one",
   delete_file: "Delete a file from your Droplet",
@@ -353,6 +356,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   email_send: "Send an email you've approved",
   search_contacts: "Find people you email, with their addresses",
   // Project tracker
+  pm_create_project: "Start a new project in your project tracker",
   pm_create_work_item: "Add a new task to your project tracker",
   pm_update_work_item: "Update the details of a task",
   pm_add_work_item_comment: "Add a comment to a task",
