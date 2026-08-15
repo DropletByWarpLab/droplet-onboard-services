@@ -32,7 +32,15 @@ ExecStart=/usr/local/sbin/droplet-ssh-access
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/droplet-ssh-access
+# WARP-2048: StateDirectory=, not a bare ReadWritePaths= carve-out. A
+# ReadWritePaths= target that does not exist when the unit starts fails the
+# whole mount-namespace setup, so the service never runs at all — the failure
+# mode that kept droplet-egress-audit dead. StateDirectory= makes systemd
+# CREATE /var/lib/droplet-ssh-access (root:root 0755, matching the installer)
+# before the namespace is built, and implies the read-write carve-out.
+# tests/systemd-readwritepaths-must-exist.test.sh pins this for every shipped
+# unit.
+StateDirectory=droplet-ssh-access
 PrivateTmp=yes
 
 [Install]
