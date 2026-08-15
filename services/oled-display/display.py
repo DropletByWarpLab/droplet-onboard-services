@@ -3309,8 +3309,13 @@ class TFTDisplay:
         immediately; the next /openwrt/qr push corrects it.
         """
         self._v3["wifi"]["key_ttl_seconds"] = 60 * 60
+        # WARP-2047: name the network only if we actually know it. This string
+        # used to hard-code "Droplet-AI", which named the wrong network on any
+        # box whose household SSID isn't the factory default.
+        _name = self.household_ssid()
         self.push_alert({"type": "sys", "title": "Wi-Fi key rotated",
-                         "detail": "Droplet-AI · scan new QR", "time": "just now"})
+                         "detail": ("%s · scan new QR" % _name) if _name
+                         else "Scan the new QR", "time": "just now"})
         try:
             self.rotate_wifi_key()
         except Exception as e:                                  # noqa: BLE001

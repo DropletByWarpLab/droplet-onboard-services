@@ -497,7 +497,9 @@ state = {
         "connected_to": None,
         "state": "unknown",
         "scanned_at": None,
-        "ssid": "Droplet-AI",
+        # WARP-2047: no placeholder. An unknown SSID must read as unknown, not
+        # as a plausible network name the panel invented before any feed lands.
+        "ssid": None,
         "clients": 0,
         "channel": 0,
         "band": "",
@@ -696,6 +698,32 @@ def _v3_header(g, now=None):
     _hairline(g, 20, 32, DISPLAY_W - 40, SEPARATOR)
 
 
+def _household_ssid():
+    """The name of the household network, or "" when it isn't known.
+
+    WARP-2047. Mirrors the host renderer's `household_ssid()`. Reads
+    state["qr"] FIRST — the bridge's /openwrt/qr snapshot, which resolves the
+    household SSID across all three box shapes and, since WARP-2047, refuses
+    to vouch for hostapd config creds that no radio is actually beaconing —
+    and only then the client-scan `wifi` feed, which carries an ssid on the
+    single-box shape and nothing on the others.
+
+    Returns "" rather than a placeholder. Callers render their own "—" or draw
+    nothing; inventing a name here would put a confident wrong SSID on the
+    glass, which is the defect this exists to close. `_v3_qr_card` already
+    gates the matrix on the same `ok` flag — this keeps the label beside it
+    honest too, instead of captioning a blank card with a made-up network.
+    """
+    qr = state.get("qr") or {}
+    # `ok` false means the bridge told us it could not vouch for these creds.
+    if qr.get("ok") is not False:
+        ssid = str(qr.get("ssid") or "").strip()
+        if ssid:
+            return ssid
+    wifi = state.get("wifi") or {}
+    return str(wifi.get("ssid") or "").strip()
+
+
 def _v3_qr_card(g, x, y, size, matrix=None):
     """White QR card + the host-supplied matrix + droplet mark inset.
 
@@ -813,7 +841,7 @@ def render_system():
 
     yy = card_y + card_w + 14
     _tracked(g, "NETWORK", x=RX, y=yy, scale=1, color=LABEL_3, tracking=1)
-    g.append(_text(str(wifi.get("ssid") or "Droplet-AI")[:18], x=RX, y=yy + 18,
+    g.append(_text((_household_ssid() or "—")[:18], x=RX, y=yy + 18,
                    scale=2, color=TEXT))
     _tracked(g, "PASSWORD", x=RX, y=yy + 34, scale=1, color=LABEL_3, tracking=1)
     g.append(_text(str(wifi.get("password") or "")[:20], x=RX, y=yy + 50,
@@ -1031,13 +1059,18 @@ def render_idle():
         _tracked(g, date_str[:32], x=20, y=DISPLAY_H - 23, scale=1,
                  color=LABEL_3, anchor_y=0.5, tracking=2)
 
-    # Bottom-right green dot + SSID.
+    # Bottom-right green dot + SSID. WARP-2047: draw NOTHING when the network
+    # isn't known — the dot asserts "connected to this", so pairing it with an
+    # invented name is the exact false-confidence this ticket closes. Mirrors
+    # the host renderer's `if ssid:` gate. `connected_to` stays as a fallback
+    # because it is an observed association, not a config read.
     wifi = state.get("wifi") or {}
-    ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "Droplet-AI")
-    ssid_w = len(ssid) * 12  # scale=2 terminalio cell ~12px
-    g.append(_circle(DISPLAY_W - 20 - ssid_w - 12, DISPLAY_H - 22, 3, GREEN))
-    g.append(_text(ssid[:18], x=DISPLAY_W - 20, y=DISPLAY_H - 22, scale=2,
-                   color=ACCENT, anchor=(1.0, 0.5)))
+    ssid = _household_ssid() or str(wifi.get("connected_to") or "").strip()
+    if ssid:
+        ssid_w = len(ssid) * 12  # scale=2 terminalio cell ~12px
+        g.append(_circle(DISPLAY_W - 20 - ssid_w - 12, DISPLAY_H - 22, 3, GREEN))
+        g.append(_text(ssid[:18], x=DISPLAY_W - 20, y=DISPLAY_H - 22, scale=2,
+                       color=ACCENT, anchor=(1.0, 0.5)))
 
     # Seconds progress hairline along the bottom edge.
     sec = _local_ss()
