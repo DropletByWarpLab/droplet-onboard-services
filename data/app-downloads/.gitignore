@@ -1,0 +1,11 @@
+# Client-app installers are BINARIES baked into the appliance image at
+# build time — they are never committed to this repo (they'd bloat every
+# clone and they're built from droplet-windows / droplet-android, not
+# here). The image build stages them into this directory and runs
+# scripts/app-downloads/gen-catalog.mjs to pin their digests.
+#
+# Tracked here: only the hand-authored side of the contract and the docs.
+*
+!.gitignore
+!README.md
+!platforms.example.json

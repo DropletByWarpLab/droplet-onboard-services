@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Hand-authored half of the app-download catalog. Copy to platforms.json",
+    "in the staging root, then run scripts/app-downloads/gen-catalog.mjs.",
+    "",
+    "Only what CANNOT be derived from the staged bytes belongs here: the",
+    "version string, store URLs, minimum OS, and any human note. Sizes,",
+    "sha256 digests and which asset is the installer are all derived by the",
+    "generator, because a hand-maintained digest is one that goes stale.",
+    "",
+    "A platform with no staged artifacts and no entry here simply does not",
+    "appear in the catalog, and the page says so honestly."
+  ],
+
+  "windows": {
+    "version": "0.2.0",
+    "minOsVersion": "Windows 10 (1809) or newer"
+  },
+
+  "android": {
+    "version": "1.0.0",
+    "storeUrl": "https://play.google.com/store/apps/details?id=ai.warplab.droplet",
+    "note": "The Android app installs from Google Play, so it updates with the rest of your apps."
+  },
+
+  "ios": {
+    "version": "1.0.0",
+    "storeUrl": "https://testflight.apple.com/join/REPLACE-ME",
+    "note": "iPhone and iPad builds are distributed through TestFlight — iOS does not allow installing apps directly from a local device."
+  }
+}

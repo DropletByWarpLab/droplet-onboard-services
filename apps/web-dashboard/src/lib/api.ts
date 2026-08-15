@@ -120,6 +120,7 @@ import type {
   AccessStartingPoint,
   AccessExceptionInput,
   EffectiveAccess,
+  AppDownloadCatalog,
 } from "./types";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -8009,4 +8010,52 @@ export async function fetchTeamChatUnreadCount(): Promise<number> {
   }
   const body = (await res.json()) as { total: number };
   return body.total;
+}
+
+/* ─────────────────────── Client-app downloads ─────────────────────── */
+
+/**
+ * Fetch the client-app catalog the /downloads page renders.
+ *
+ * The orchestrator answers 200 with `available: false` when a box simply
+ * has nothing staged (every dev box), and 503 with the same shape when
+ * something is actually wrong — a catalog that won't parse, or an
+ * artifact whose bytes no longer match what shipped. Both are RETURNED,
+ * not thrown: the page renders an honest reason either way, and the
+ * distinction is carried by `reason`. A transport failure IS thrown,
+ * because that means we learned nothing at all.
+ */
+export async function fetchAppDownloads(
+  signal?: AbortSignal,
+): Promise<AppDownloadCatalog> {
+  const res = await authFetch(`${BASE}/api/app-downloads`, { signal });
+
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error("Couldn't read the app catalog from the box.");
+  }
+
+  const parsed = body as Partial<AppDownloadCatalog> | null;
+  // Only an explicit `available: true` counts. A malformed body is
+  // "unavailable with an unknown reason", never optimistically available.
+  if (!parsed || typeof parsed.available !== "boolean") {
+    return {
+      available: false,
+      reason: "malformed_response",
+      detail: "The box returned an unexpected app-catalog response.",
+      attestation: null,
+      platforms: [],
+    };
+  }
+
+  return {
+    available: parsed.available,
+    reason: parsed.reason ?? null,
+    detail: parsed.detail ?? null,
+    attestation: parsed.attestation ?? null,
+    generatedAt: parsed.generatedAt ?? null,
+    platforms: Array.isArray(parsed.platforms) ? parsed.platforms : [],
+  };
 }

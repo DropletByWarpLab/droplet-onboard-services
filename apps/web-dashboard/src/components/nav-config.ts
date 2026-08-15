@@ -18,6 +18,7 @@ import {
   Calendar as CalendarIcon,
   ChartColumn,
   Cpu,
+  Download,
   Film,
   FlaskConical,
   FolderKanban,
@@ -307,6 +308,12 @@ export const NAV_GROUPS: NavGroup[] = [
       // (ADR-004 §3), so family/guest see the same status-only view. Reuses the
       // Cpu glyph already imported for /devices. Active-state is automatic.
       { href: "/models", label: "Models", icon: Cpu },
+      // Client-app downloads. No `roles` gate and no `requiresModule` —
+      // every authenticated member needs the app for the box they were
+      // invited to, and GET /api/app-downloads makes the same call. Sits
+      // next to Settings/Help in the support/reference zone, since it is a
+      // one-time errand rather than a daily destination.
+      { href: "/downloads", label: "Get the app", icon: Download },
       { href: "/settings", label: "Settings", icon: Settings },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate; sits in the support/reference zone next to Help.

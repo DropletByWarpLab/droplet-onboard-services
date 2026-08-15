@@ -33,6 +33,7 @@ import {
   createDeviceSelfRevokeRouter,
 } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
+import { createAppDownloadsRouter } from "./routes/app-downloads.js";
 import { createSystemResetRouter } from "./routes/system-reset.routes.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createSsoRouter } from "./routes/sso.js";
@@ -317,6 +318,11 @@ export function createApp(
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
+  // Client-app downloads (installer + its signature + updater manifest),
+  // staged inside the appliance image. Sits next to device-clients on
+  // purpose: install the app, then pair it — one flow, adjacent routes.
+  // No module gate and no role gate — see the header of the route file.
+  app.use("/api", createAppDownloadsRouter());
   app.use("/api", createStorageRouter(prisma));
   // WARP-825 — Settings Danger Zone: owner-only factory reset. Dispatches the
   // wipe through the device-bridge host executor (never a web-tier exec of
