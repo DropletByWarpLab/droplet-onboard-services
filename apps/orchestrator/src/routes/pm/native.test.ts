@@ -388,19 +388,26 @@ describe("native PM routes — RBAC", () => {
     expect(res.body.project.identifier).toBe("HOMER");
   });
 
-  it("MCP service principal can create a work item but not a project", async () => {
-    const app = makeApp(prisma, OWNER);
-    const proj = await request(app).post("/api/pm/projects").send({ name: "Inbox" });
-    const pid = proj.body.project.id;
-
+  // WARP-2058 — project create USED to 403 the MCP principal ("human-only"),
+  // which made `pm_create_project` impossible and stopped the assistant at
+  // "here are the tasks, now go make a project by hand". The human gate did
+  // not disappear; it MOVED to where every other assistant write already
+  // keeps it — the tool layer's `requiresConfirmation`, which is the same
+  // split work-item create has used since WARP-509 (see the file header).
+  //
+  // The distinction that still matters is role, not principal: a guest is
+  // refused outright (asserted above), because no confirmation prompt can
+  // grant a permission the human behind it never had.
+  it("MCP service principal can create both a project and a work item", async () => {
     const mcpApp = makeApp(prisma, MCP);
-    const denied = await request(mcpApp).post("/api/pm/projects").send({ name: "X" });
-    expect(denied.status).toBe(403); // project create is human-only
+    const proj = await request(mcpApp).post("/api/pm/projects").send({ name: "Inbox" });
+    expect(proj.status).toBe(201); // tool layer owns the confirmation gate
+    const pid = proj.body.project.id;
 
     const ok = await request(mcpApp)
       .post(`/api/pm/projects/${pid}/work-items`)
       .send({ name: "From the assistant" });
-    expect(ok.status).toBe(201); // work-item create admits the MCP principal
+    expect(ok.status).toBe(201);
   });
 });
 

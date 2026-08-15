@@ -155,6 +155,11 @@ export interface ToolContext {
     /** Chunks dropped in the window because their DEK is missing or
      *  authentication failed — surfaced, never silently swallowed. */
     unreadableChunks: number;
+    /** Where to resume, or null when exhausted. Computed by the producer:
+     *  only it knows which rows the window examined, and a window whose
+     *  rows were all undecryptable returns none while still consuming
+     *  them. Deriving this from the returned chunks would spin. */
+    nextChunk: number | null;
   }>;
   userId?: string;
   /** Caller's role. HTTP transport: from JWT claims. Stdio: forwarded by

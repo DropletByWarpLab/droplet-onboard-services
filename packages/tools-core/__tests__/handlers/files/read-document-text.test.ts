@@ -10,6 +10,7 @@ import { getTool } from "../../../src/index.js";
 import type { ToolContext } from "../../../src/types.js";
 
 type ReadFn = NonNullable<ToolContext["readDocumentText"]>;
+type ReadResult = Awaited<ReturnType<ReadFn>>;
 
 // `userId` rides in an options object rather than as a defaulted
 // positional: a default parameter also fires for an EXPLICIT `undefined`,
@@ -33,6 +34,18 @@ function chunk(idx: number, text: string, pageNumber: number | null = null) {
   return { chunkIdx: idx, pageNumber, text, warnings: [] as string[] };
 }
 
+/** A shim result with the producer-computed `nextChunk` spelled out. */
+function result(over: Partial<ReadResult> = {}): ReadResult {
+  return {
+    source: "nextcloud",
+    chunks: [],
+    totalChunks: 1,
+    unreadableChunks: 0,
+    nextChunk: null,
+    ...over,
+  };
+}
+
 const tool = getTool("read_document_text")!;
 
 describe("read_document_text — contract", () => {
@@ -42,12 +55,12 @@ describe("read_document_text — contract", () => {
   });
 
   it("joins chunks in order and reports next_chunk=null when exhausted", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [chunk(0, "first"), chunk(1, "second")],
-      totalChunks: 2,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(
+      result({
+        chunks: [chunk(0, "first"), chunk(1, "second")],
+        totalChunks: 2,
+      }),
+    );
     const res = await tool.handler({ path: "/Docs/quote.pdf" }, makeCtx(read));
     expect(res.ok).toBe(true);
     const data = (res as { ok: true; data: Record<string, unknown> }).data;
@@ -64,26 +77,48 @@ describe("read_document_text — contract", () => {
   // The single most important behaviour here. A model that cannot tell
   // "that is the whole document" from "that is the first 8%" will
   // summarize the first 8% as though it were the whole thing.
-  it("reports next_chunk as a number when text remains", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [chunk(0, "page one"), chunk(1, "page two")],
-      totalChunks: 9,
-      unreadableChunks: 0,
-    });
+  it("passes through next_chunk when text remains", async () => {
+    const read = vi.fn().mockResolvedValue(
+      result({
+        chunks: [chunk(0, "page one"), chunk(1, "page two")],
+        totalChunks: 9,
+        nextChunk: 2,
+      }),
+    );
     const res = await tool.handler({ path: "/Docs/long.pdf" }, makeCtx(read));
     const data = (res as { ok: true; data: Record<string, unknown> }).data;
     expect(data.next_chunk).toBe(2);
     expect(data.total_chunks).toBe(9);
   });
 
+  // Regression: the handler used to derive next_chunk from the LAST
+  // RETURNED chunk. A window whose rows were every one undecryptable
+  // returns no chunks, so that derivation handed back the offset it was
+  // given and the model would re-request the same window forever. The
+  // producer computes it from the rows it consumed instead.
+  it("advances past a window whose every chunk was undecryptable", async () => {
+    const read = vi.fn().mockResolvedValue(
+      result({
+        chunks: [],
+        totalChunks: 10,
+        unreadableChunks: 3,
+        nextChunk: 3,
+      }),
+    );
+    const res = await tool.handler(
+      { path: "/Docs/sealed.pdf", start_chunk: 0 },
+      makeCtx(read),
+    );
+    const data = (res as { ok: true; data: Record<string, unknown> }).data;
+    expect(data.next_chunk).toBe(3);
+    expect(data.next_chunk).not.toBe(data.start_chunk);
+    expect(data.unreadable_chunks).toBe(3);
+  });
+
   it("resumes from start_chunk and still terminates at the end", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [chunk(7, "tail")],
-      totalChunks: 8,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(
+      result({ chunks: [chunk(7, "tail")], totalChunks: 8 }),
+    );
     const res = await tool.handler(
       { path: "/Docs/long.pdf", start_chunk: 7 },
       makeCtx(read),
@@ -100,12 +135,7 @@ describe("read_document_text — contract", () => {
   // 321 files on the live box have no chunks. Returning "" here would
   // have the model write a confident report about nothing.
   it("fails loudly with NOT_INDEXED rather than returning an empty document", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [],
-      totalChunks: 0,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(result({ totalChunks: 0 }));
     const res = await tool.handler({ path: "/Docs/scan.pdf" }, makeCtx(read));
     expect(res.ok).toBe(false);
     const e = res as { ok: false; error: { code: string; message: string } };
@@ -116,16 +146,18 @@ describe("read_document_text — contract", () => {
   });
 
   it("surfaces page numbers, deduped extraction warnings, and unreadable chunks", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "brain",
-      chunks: [
-        { chunkIdx: 0, pageNumber: 3, text: "a", warnings: ["low_confidence_ocr_page_3"] },
-        { chunkIdx: 1, pageNumber: 3, text: "b", warnings: ["low_confidence_ocr_page_3"] },
-        { chunkIdx: 2, pageNumber: 4, text: "c", warnings: [] },
-      ],
-      totalChunks: 3,
-      unreadableChunks: 2,
-    });
+    const read = vi.fn().mockResolvedValue(
+      result({
+        source: "brain",
+        chunks: [
+          { chunkIdx: 0, pageNumber: 3, text: "a", warnings: ["low_confidence_ocr_page_3"] },
+          { chunkIdx: 1, pageNumber: 3, text: "b", warnings: ["low_confidence_ocr_page_3"] },
+          { chunkIdx: 2, pageNumber: 4, text: "c", warnings: [] },
+        ],
+        totalChunks: 3,
+        unreadableChunks: 2,
+      }),
+    );
     const res = await tool.handler({ path: "/Docs/scan.pdf" }, makeCtx(read));
     const data = (res as { ok: true; data: Record<string, unknown> }).data;
     expect(data.source).toBe("brain");
@@ -135,12 +167,9 @@ describe("read_document_text — contract", () => {
   });
 
   it("omits the optional keys entirely when there is nothing to report", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [chunk(0, "plain")],
-      totalChunks: 1,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(
+      result({ chunks: [chunk(0, "plain")] }),
+    );
     const res = await tool.handler({ path: "/Docs/a.txt" }, makeCtx(read));
     const data = (res as { ok: true; data: Record<string, unknown> }).data;
     expect(data).not.toHaveProperty("pages");
@@ -167,13 +196,37 @@ describe("read_document_text — guards", () => {
     );
   });
 
+  // The chunk row's path is the watcher's stored_path ("/Docs/q.pdf"), and
+  // the lookup is an exact match. A model that spells the path any other
+  // legal way must not be told the document was never indexed.
+  it("normalizes path spellings to the stored shape before lookup", async () => {
+    const read = vi.fn().mockResolvedValue(result({ chunks: [chunk(0, "x")] }));
+    for (const spelling of [
+      "Docs/quote.pdf",
+      "/Docs//quote.pdf",
+      "/Docs/quote.pdf",
+      "  /Docs/quote.pdf  ",
+    ]) {
+      read.mockClear();
+      const res = await tool.handler({ path: spelling }, makeCtx(read));
+      expect(res.ok, `${spelling} should resolve`).toBe(true);
+      expect(read).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/Docs/quote.pdf" }),
+      );
+    }
+  });
+
+  it("refuses path traversal at the tool boundary", async () => {
+    const read = vi.fn();
+    const res = await tool.handler({ path: "/Docs/../../etc/passwd" }, makeCtx(read));
+    expect((res as { ok: false; error: { code: string } }).error.code).toBe(
+      "INVALID_ARGS",
+    );
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("rejects a missing path, negative start_chunk, and undersized max_chars", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [],
-      totalChunks: 1,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(result());
     for (const args of [
       {},
       { path: "   " },
@@ -190,12 +243,7 @@ describe("read_document_text — guards", () => {
   });
 
   it("clamps max_chars to the ceiling instead of honouring an oversized ask", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [chunk(0, "x")],
-      totalChunks: 1,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(result({ chunks: [chunk(0, "x")] }));
     await tool.handler({ path: "/a.pdf", max_chars: 999999 }, makeCtx(read));
     expect(read).toHaveBeenCalledWith(
       expect.objectContaining({ maxChars: 50000 }),
@@ -203,12 +251,7 @@ describe("read_document_text — guards", () => {
   });
 
   it("rejects a start_chunk past the end with a message naming the real length", async () => {
-    const read = vi.fn().mockResolvedValue({
-      source: "nextcloud",
-      chunks: [],
-      totalChunks: 4,
-      unreadableChunks: 0,
-    });
+    const read = vi.fn().mockResolvedValue(result({ totalChunks: 4 }));
     const res = await tool.handler(
       { path: "/a.pdf", start_chunk: 99 },
       makeCtx(read),

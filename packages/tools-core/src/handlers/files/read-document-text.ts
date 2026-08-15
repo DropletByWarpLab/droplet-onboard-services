@@ -37,6 +37,7 @@
  *     text remains, `null` only when the document is exhausted.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { validateNcPath } from "./_paths.js";
 
 /** Default text budget per call — comfortably inside a single tool result
  *  while still covering ~4-6 pages of a typical PDF. */
@@ -79,8 +80,16 @@ async function handler(
 ): Promise<ToolResult> {
   if (!ctx.userId) return err("AUTH_REQUIRED", "auth_required");
 
-  const path = typeof args.path === "string" ? args.path.trim() : "";
-  if (!path) return err("INVALID_ARGS", "path is required and must be a string");
+  // The chunk row's `path` is the watcher's `stored_path` — a leading-slash,
+  // separator-collapsed, user-relative path. `validateNcPath` normalizes to
+  // exactly that shape, so reusing it means every spelling that works with
+  // read_file works here too. Without it "Docs/q.pdf" or "/Docs//q.pdf"
+  // would miss an exact `path =` match and surface as a false NOT_INDEXED,
+  // which is the one error this tool must never cry wolf on.
+  const v = validateNcPath(typeof args.path === "string" ? args.path.trim() : args.path);
+  if (!v.ok) return err("INVALID_ARGS", v.error);
+  if (v.path === "/") return err("INVALID_ARGS", "path must name a file, not the root");
+  const path = v.path;
 
   if (args.start_chunk !== undefined) {
     if (
@@ -140,13 +149,6 @@ async function handler(
   }
 
   const text = res.chunks.map((c) => c.text).join("\n");
-  const lastIdx =
-    res.chunks.length > 0 ? res.chunks[res.chunks.length - 1].chunkIdx : startChunk - 1;
-  // A number while text remains, null ONLY when the document is exhausted.
-  // The model reads this to decide whether to call again; conflating "done"
-  // with "budget hit" is what turns a partial read into a confident summary
-  // of the first few pages.
-  const nextChunk = lastIdx + 1 < res.totalChunks ? lastIdx + 1 : null;
 
   const pages = [
     ...new Set(
@@ -167,7 +169,11 @@ async function handler(
       text,
       chunks_returned: res.chunks.length,
       start_chunk: startChunk,
-      next_chunk: nextChunk,
+      // A number while text remains, null ONLY when the document is
+      // exhausted. The model reads this to decide whether to call again;
+      // conflating "done" with "budget hit" is what turns a partial read
+      // into a confident summary of the first few pages.
+      next_chunk: res.nextChunk,
       total_chunks: res.totalChunks,
       ...(pages.length > 0 ? { pages } : {}),
       ...(warnings.length > 0 ? { extraction_warnings: warnings } : {}),

@@ -699,6 +699,17 @@ export interface ReadDocumentTextResult {
   totalChunks: number;
   /** Chunks dropped in this window because their DEK is gone or failed auth. */
   unreadableChunks: number;
+  /**
+   * Where a follow-up call should resume, or null when the document is
+   * exhausted. Computed HERE, not by the caller, because only this
+   * function knows which rows the window actually examined.
+   *
+   * The distinction matters when every row in a window is undecryptable:
+   * `chunks` comes back empty, and a caller deriving "resume after the
+   * last returned chunk" would hand back the offset it was already given
+   * and spin on that window forever.
+   */
+  nextChunk: number | null;
 }
 
 interface RawChunkRow {
@@ -751,7 +762,13 @@ export async function readDocumentText(
   );
   const totalChunks = Number(countRows[0]?.count ?? 0);
   if (totalChunks === 0) {
-    return { source: "nextcloud", chunks: [], totalChunks: 0, unreadableChunks: 0 };
+    return {
+      source: "nextcloud",
+      chunks: [],
+      totalChunks: 0,
+      unreadableChunks: 0,
+      nextChunk: null,
+    };
   }
 
   const args: unknown[] = [];
@@ -806,6 +823,11 @@ export async function readDocumentText(
   const chunks: ReadDocumentTextResult["chunks"] = [];
   let unreadableChunks = 0;
   let used = 0;
+  // The chunkIdx of the last row this window CONSUMED — admitted or
+  // dropped. Not the same as the last row returned: a window whose rows
+  // were all undecryptable consumes them and returns none, and resuming
+  // from the last *returned* chunk would replay the same window forever.
+  let consumedThrough: number | null = null;
   for (const r of rows) {
     let text = r.text;
     if (isEncryptedColumn(text)) {
@@ -814,6 +836,7 @@ export async function readDocumentText(
       if (!dek) {
         console.warn("chunk.unreadable.dek_missing", { path: params.path, keyId });
         unreadableChunks++;
+        consumedThrough = r.chunkIdx;
         continue;
       }
       try {
@@ -825,6 +848,7 @@ export async function readDocumentText(
           error: String(e),
         });
         unreadableChunks++;
+        consumedThrough = r.chunkIdx;
         continue;
       }
     }
@@ -839,12 +863,23 @@ export async function readDocumentText(
       warnings: r.warnings ?? [],
     });
     used += text.length;
+    consumedThrough = r.chunkIdx;
   }
+
+  // An empty row set means the window found nothing at or past startChunk,
+  // so there is nothing further to resume from even though totalChunks > 0
+  // (reachable when chunkIdx numbering is sparse). Terminate rather than
+  // hand back an offset that would return empty again.
+  const nextChunk =
+    consumedThrough !== null && consumedThrough + 1 < totalChunks
+      ? consumedThrough + 1
+      : null;
 
   return {
     source: rows[0]?.source ?? "nextcloud",
     chunks,
     totalChunks,
     unreadableChunks,
+    nextChunk,
   };
 }

@@ -136,6 +136,7 @@ export interface ContextDeps {
     }>;
     totalChunks: number;
     unreadableChunks: number;
+    nextChunk: number | null;
   }>;
 }
 
