@@ -26,7 +26,9 @@ import {
   plannedToolNames,
   runToolSpec,
   type StepDispatcher,
+  type Summarizer,
 } from "../services/tool-spec-runner.service.js";
+import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 import {
   firstToolDeniedForPrincipal,
   resolveToolAccessScope,
@@ -43,11 +45,46 @@ type SpecStatus = (typeof SPEC_STATUSES)[number];
 // operator-typed names.
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-const stepSchema = z.object({
+/**
+ * A step is either a tool CALL or — since WARP-1996 — a SUMMARIZE, which
+ * turns what the earlier steps gathered into prose. `call` stays the default
+ * so every spec authored before this keeps parsing unchanged.
+ *
+ * A summarize step names no tool: there is nothing for the §3 scope check to
+ * authorize, and it can only read the trace the run already produced under
+ * that check.
+ */
+const callStepSchema = z.object({
   kind: z.literal("call").default("call"),
   tool: z.string().min(1).max(64),
   args: z.record(z.unknown()).optional(),
 });
+
+const summarizeStepSchema = z.object({
+  kind: z.literal("summarize"),
+  /** Optional framing; the runner supplies its default when absent. */
+  prompt: z.string().min(1).max(4000).optional(),
+});
+
+const stepSchema = z.union([callStepSchema, summarizeStepSchema]);
+
+type ParsedStep = z.infer<typeof stepSchema>;
+
+/**
+ * Shape a validated step for the `ToolStep.args` JSON column.
+ *
+ * The two kinds store different payloads, so this cannot be one literal:
+ * a `call` keeps `{tool, args}` — the shape `parseCallStep` reads — and a
+ * `summarize` keeps `{prompt}`. Writing a summarize step through the call
+ * shape would persist `tool: undefined` and the runner would reject it as
+ * malformed on the next run.
+ */
+function storedArgsFor(s: ParsedStep): Record<string, unknown> {
+  if (s.kind === "summarize") {
+    return s.prompt ? { prompt: s.prompt } : {};
+  }
+  return { tool: s.tool, args: s.args ?? {} };
+}
 
 const createSpecSchema = z.object({
   slug: z.string().min(2).max(80).regex(SLUG_RE),
@@ -143,6 +180,12 @@ function projectSpec(
 export function createToolsRouter(
   prisma: PrismaClient,
   dispatcher: StepDispatcher,
+  /**
+   * WARP-1996 — injected so tests can drive a `summarize` step without an
+   * inference backend, the same reason `dispatcher` is a parameter. Defaults
+   * to the on-box summarizer; a spec with no summarize step never calls it.
+   */
+  summarizer: Summarizer = createToolSpecSummarizer(),
 ): Router {
   const router = Router();
 
@@ -253,7 +296,7 @@ export function createToolsRouter(
                 create: parsed.data.steps.map((s, idx) => ({
                   idx,
                   kind: s.kind,
-                  args: { tool: s.tool, args: s.args ?? {} } as any,
+                  args: storedArgsFor(s) as any,
                 })),
               },
             },
@@ -350,7 +393,7 @@ export function createToolsRouter(
                     create: parsed.data.steps.map((s, idx) => ({
                       idx,
                       kind: s.kind,
-                      args: { tool: s.tool, args: s.args ?? {} } as any,
+                      args: storedArgsFor(s) as any,
                     })),
                   }
                 : undefined,
@@ -470,6 +513,7 @@ export function createToolsRouter(
           steps: spec.steps,
           triggeredBy,
           scope,
+          summarizer,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({
