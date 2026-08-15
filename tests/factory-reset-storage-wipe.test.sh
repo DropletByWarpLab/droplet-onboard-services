@@ -334,6 +334,109 @@ echo "--- Phase 5: busy mounts, fstab warning ---"
 ) >/dev/null 2>&1 && pass "wipe returns 0 even when a target is skipped" \
                  || fail "a skipped target aborted the wipe (reset would half-finish)"
 
+# --- Phase 6: a refused --stop must gate the member wipe ---------------------
+echo ""
+echo "--- Phase 6: a failed array stop leaves its members alone ---"
+
+# stop_fails — mdadm --stop exits non-zero and, like a real EBUSY refusal,
+# leaves /sys/block/<md>/slaves in place. Every other subcommand still works.
+# The shipped suite's stub always succeeded, so this whole path was uncovered.
+stop_fails() {
+  cat > "$TMP/bin/mdadm" <<'STUB'
+#!/usr/bin/env bash
+echo "mdadm $*" >> "$TMP/calls"
+case "$1" in
+  --stop) exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$TMP/bin/mdadm"
+}
+
+# The critical one. `mdadm --stop` refusing (array mounted or resyncing) used
+# to select a warning message and then fall straight into the member loop:
+# zero-superblock + wipefs against every member of a STILL-ASSEMBLED array.
+# That does not free the disks, it degrades the mirror — the 2026-08-14 lab-box
+# incident reached from a second entry point.
+( make_fixture
+  stop_fails
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -q "zero-superblock" "$TMP/calls"
+) >/dev/null 2>&1 && pass "a failed --stop zeroes no superblocks" \
+                 || fail "superblocks were zeroed under a still-assembled array"
+
+( make_fixture
+  stop_fails
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -qF "wipefs -a /dev/sda" "$TMP/calls" \
+    && ! grep -qF "wipefs -a /dev/sdb" "$TMP/calls"
+) >/dev/null 2>&1 && pass "a failed --stop wipes no members" \
+                 || fail "wipefs ran on members of an array that never stopped"
+
+# ...and it must say so, not report a bare warning and continue silently.
+( make_fixture
+  stop_fails
+  out="$(sw_wipe_droplet_storage 2>&1)"
+  printf '%s' "$out" | grep -qF "refusing: could not stop /dev/md0"
+) >/dev/null 2>&1 && pass "a failed --stop is reported as a refusal" \
+                 || fail "the failed stop was not surfaced as a refusal"
+
+# The reset must still finish — a refusal is not an abort.
+( make_fixture
+  stop_fails
+  sw_wipe_droplet_storage >/dev/null 2>&1
+) >/dev/null 2>&1 && pass "wipe returns 0 when an array refuses to stop" \
+                 || fail "a failed stop aborted the wipe"
+
+# Compounding case: step 1 and step 2 used to share no state, so a pool that
+# refused to unmount was still handed to --stop — busy by definition.
+( make_fixture
+  echo "$TMP/mnt/droplet/mass-storage-cadf51ee" > "$TMP/busy"
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -q "mdadm --stop" "$TMP/calls" && ! grep -q "zero-superblock" "$TMP/calls"
+) >/dev/null 2>&1 && pass "an array behind a busy mount is never torn down" \
+                 || fail "a busy pool's array was stopped/wiped anyway"
+
+# Belt and braces: a stop that exits 0 but leaves the array assembled must not
+# reach the member wipe either — sysfs, not the exit code, is the authority.
+( make_fixture
+  cat > "$TMP/bin/mdadm" <<'STUB'
+#!/usr/bin/env bash
+echo "mdadm $*" >> "$TMP/calls"
+exit 0
+STUB
+  chmod +x "$TMP/bin/mdadm"
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -q "zero-superblock" "$TMP/calls"
+) >/dev/null 2>&1 && pass "a lying --stop (exit 0, still assembled) wipes nothing" \
+                 || fail "members were wiped while sysfs still listed them"
+
+# The OS-mount side of sw_is_os_disk must fail closed too. When lsblk cannot
+# resolve /'s own source, the old fallback compared a partition basename
+# against TYPE=disk names — a comparison that can never match, so every
+# candidate silently passed the guard.
+( make_fixture
+  unset SW_TEST_OSDISK
+  # Resolves every device EXCEPT /'s own LVM source — the transient dm/partition
+  # lookup failure the fallback was there to paper over. The candidate (sda)
+  # still resolves, so this isolates the OS-mount side of the guard.
+  cat > "$TMP/bin/lsblk" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  -nso*)
+    [ "${!#}" = "/dev/mapper/ubuntu--vg-ubuntu--lv" ] && exit 0
+    for d in $(awk -F'\t' -v k="${!#}" '$1 == k { print $2 }' "$TMP/ancestors"); do
+      printf '%s disk\n' "$d"
+    done
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "$TMP/bin/lsblk"
+  sw_is_os_disk /dev/sda
+) >/dev/null 2>&1 && pass "an unresolvable OS mount fails CLOSED" \
+                 || fail "an unresolvable OS mount let a candidate through"
+
 # --- Summary -----------------------------------------------------------------
 echo ""
 echo "  ------------------------------------------------"

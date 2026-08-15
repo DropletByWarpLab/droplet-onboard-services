@@ -63,6 +63,11 @@ SW_SUDO="${SW_SUDO-sudo}"
 SW_WIPED_UUIDS=""
 SW_WIPED_COUNT=0
 SW_SKIPPED_COUNT=0
+# Backing devices of mounts we could NOT release in step 1. Step 2 consults
+# this before tearing an array down: a pool we failed to unmount is a pool with
+# a live writer on it, and stopping/wiping underneath one corrupts more than it
+# cleans — the same reasoning that makes sw_unmount non-lazy.
+SW_BUSY_SOURCES=""
 
 # --- helpers ----------------------------------------------------------------
 
@@ -100,7 +105,16 @@ sw_is_os_disk() {
     [ -n "$src" ] || continue
     src="${src%%[*}"   # btrfs/bind SOURCE is /dev/sdX[/subvol] (WARP-857)
     os_disks="$(sw_ancestor_disks "$src")"
-    [ -n "$os_disks" ] || os_disks="$(basename "$src")"
+    if [ -z "$os_disks" ]; then
+      # Fail CLOSED, same as the candidate side above. The old fallback here
+      # compared `basename "$src"` — a partition or dm name — against the
+      # candidate's TYPE=disk leaves, a comparison that can never match. An
+      # unresolvable OS mount would therefore have silently reported "not an OS
+      # disk" for every candidate, which is the opposite of this guard's
+      # documented contract.
+      _sw_warn "cannot resolve backing disks for $mp ($src) — treating $dev as OS-backed and skipping"
+      return 0
+    fi
     for o in $os_disks; do
       for d in $this_disks; do
         [ "$o" = "$d" ] && return 0
@@ -133,6 +147,19 @@ sw_is_array_member() {
   base="$(basename "$1")"
   for slave in "$SW_SYSFS_BLOCK"/*/slaves/"$base"; do
     [ -e "$slave" ] && return 0
+  done
+  return 1
+}
+
+# sw_is_busy_source <devnode> — 0 if <devnode> backs a mount step 1 could not
+# release. Step 1 and step 2 otherwise iterate with no shared state, so a pool
+# that refused to unmount was still handed to `mdadm --stop` — busy by
+# definition, and therefore straight into the failed-stop path below.
+sw_is_busy_source() {
+  local want b
+  want="$(basename "$1")"
+  for b in $SW_BUSY_SOURCES; do
+    [ "$want" = "$(basename "$b")" ] && return 0
   done
   return 1
 }
@@ -216,7 +243,9 @@ sw_wipe_droplet_storage() {
       continue
     fi
     [ -n "$src" ] && sw_note_uuid "$src"
-    sw_unmount "$mp" || true
+    if ! sw_unmount "$mp"; then
+      [ -n "$src" ] && SW_BUSY_SOURCES="$SW_BUSY_SOURCES $src"
+    fi
   done
 
   # 2) Tear down every assembled array whose members are all non-OS disks.
@@ -239,12 +268,38 @@ sw_wipe_droplet_storage() {
       SW_SKIPPED_COUNT=$((SW_SKIPPED_COUNT + 1))
       continue
     fi
+    # A mount we could not release in step 1 means a live writer. Don't even
+    # attempt the stop — say so plainly instead of reporting a stop failure
+    # whose real cause is two steps back.
+    if sw_is_busy_source "/dev/$md"; then
+      _sw_warn "refusing: array $md still backs a mount we could not release — not touching it"
+      SW_SKIPPED_COUNT=$((SW_SKIPPED_COUNT + 1))
+      continue
+    fi
     sw_note_uuid "/dev/$md"
     # Members were captured above, BEFORE --stop removes /sys/block/$md.
-    $SW_SUDO mdadm --stop "/dev/$md" >/dev/null 2>&1 \
-      && _sw_say "stopped array /dev/$md" \
-      || _sw_warn "could not stop /dev/$md"
+    #
+    # The stop MUST gate the wipe. `mdadm --stop` genuinely refuses (EBUSY on a
+    # mounted or resyncing array), and zeroing superblocks under a still-
+    # assembled array does not free its disks — it DEGRADES the mirror, which
+    # is the 2026-08-14 lab-box incident this file exists to prevent, reached
+    # from a second entry point. Step 3 already refuses on exactly this
+    # condition; step 2 now refuses too.
+    if ! $SW_SUDO mdadm --stop "/dev/$md" >/dev/null 2>&1; then
+      _sw_warn "refusing: could not stop /dev/$md — leaving its members alone"
+      SW_SKIPPED_COUNT=$((SW_SKIPPED_COUNT + 1))
+      continue
+    fi
+    _sw_say "stopped array /dev/$md"
     for m in $members; do
+      # Belt and braces: a stop that exits 0 but leaves the array assembled
+      # would put us back in the degrade-the-mirror case. sysfs is the
+      # authority on whether the disk is actually free, so ask it.
+      if sw_is_array_member "$m"; then
+        _sw_warn "refusing: $m is still an array member after the stop — not wiping it"
+        SW_SKIPPED_COUNT=$((SW_SKIPPED_COUNT + 1))
+        continue
+      fi
       sw_wipe_device "$m"
     done
   done
