@@ -7,7 +7,7 @@
 import { Router } from "express";
 import { fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import {
   getHardwarePayload,
@@ -58,7 +58,7 @@ export function createHardwareRouter(prisma: PrismaClient): Router {
    */
   router.get(
     "/hardware/gpu",
-    requireRole("owner", "admin"),
+    requireRoleOrMcpService("owner", "admin"),
     async (_req, res, next) => {
       try {
         const telemetry = await fetchGpuTelemetry();

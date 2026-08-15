@@ -64,15 +64,30 @@ export function KpiStrip({
         meta={
           gpu
             ? [
-                `${gpu.vramGb} GB`,
+                `${gpu.vramGb} GB VRAM`,
                 gpu.tempC !== null ? `${gpu.tempC}°C` : null,
+                // "busy", not "used". utilPct is gpu_busy_percent — COMPUTE
+                // utilisation. Rendered as "% used" beside a GB figure it
+                // reads as "97% of VRAM consumed", a different number that
+                // can be far lower.
                 gpu.utilPct !== null
-                  ? `${gpu.utilPct}% used`
-                  : "idle — not reporting",
+                  ? `${gpu.utilPct}% busy`
+                  : // NOT "idle": a null is a reading nobody took. The bridge
+                    // returns null on ANY sysfs failure, which covers a
+                    // runtime-suspended card AND a wedged or resetting one —
+                    // the same payload can show a held card while busy is
+                    // null. Asserting idleness would re-create in words the
+                    // fabricated zero this ticket exists to kill.
+                    "utilisation not reported",
               ]
                 .filter(Boolean)
                 .join(" · ")
-            : "No accelerator detected"
+            : // NOT "no accelerator". gpu is null on the most ordinary path
+              // there is: device-bridge is profile-gated (WARP-645), so a
+              // mini-rack with a 16 GB Radeon lands here whenever that
+              // profile or its token is absent. Claiming the hardware is
+              // missing sends the operator hunting for a GPU, not a bridge.
+              "Accelerator stats aren’t being reported"
         }
       />
 

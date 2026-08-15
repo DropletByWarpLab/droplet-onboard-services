@@ -193,6 +193,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   system: [
     "get_system_health",
+    "get_gpu_status",
     "list_drives",
     "list_storage_pools",
     "get_drive_health",
@@ -331,6 +332,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   list_notifications: "See notifications you've received",
   // System
   get_system_health: "Check that your Droplet is running smoothly",
+  // Home-user voice per ADR-002 — no "GPU utilisation", no "VRAM". What a
+  // household owner actually wants to know is whether the box is working hard
+  // and what is making it do so.
+  get_gpu_status: "See how hard the AI chip is working and what's using it",
   list_drives: "See your storage drives and free space",
   list_storage_pools: "Check your storage pools and whether any need attention",
   get_drive_health: "Check your drives' health and temperature",
