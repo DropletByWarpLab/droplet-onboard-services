@@ -84,6 +84,23 @@ def _build_splitter(capacity: int, overlap: int):
     from tokenizers import Tokenizer  # noqa: PLC0415
 
     tokenizer = Tokenizer.from_pretrained(_TOKENIZER_REPO)
+
+    # WARP-2055 — the splitter measures a candidate chunk by asking this
+    # tokenizer how many tokens it holds, so the tokenizer MUST report a
+    # true count. `tokenizer.json` for all-MiniLM-L6-v2 ships
+    # `truncation.max_length = 128`, which makes `encode()` return at most
+    # 128 ids for *any* input. The splitter therefore measured every
+    # candidate as <= 128 tokens, concluded it fit inside `capacity`, and
+    # never split: chunking silently became a no-op that emitted one chunk
+    # per Span regardless of length, and everything past the embedder's
+    # window in each Span was unreachable by search. Measured on the live
+    # corpus: a 462k-character spreadsheet produced exactly ONE chunk.
+    #
+    # Disabling truncation here affects only the measuring tokenizer, not
+    # the embedder — the ai-gateway loads its own for the actual vectors.
+    tokenizer.no_truncation()
+    tokenizer.no_padding()
+
     return TextSplitter.from_huggingface_tokenizer(
         tokenizer, capacity=capacity, overlap=overlap
     )

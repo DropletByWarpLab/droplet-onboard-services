@@ -12,7 +12,7 @@ from typing import Optional
 
 import grpc
 
-from config import AI_GATEWAY_GRPC_URL, EMBEDDING_MODEL
+from config import AI_GATEWAY_GRPC_URL, EMBED_MAX_BATCH, EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +66,32 @@ def _create_channel() -> grpc.Channel:
 def embed_texts(texts: list[str], model: str = EMBEDDING_MODEL) -> list[list[float]]:
     """Call the ai-gateway to compute embeddings.
 
-    Returns a list of float vectors, one per input text.
+    Returns a list of float vectors, one per input text, in input order.
     Raises on gRPC failure so the caller can skip indexing that file.
+
+    Requests are split into batches of at most ``EMBED_MAX_BATCH``. The
+    gateway enforces its own MAX_BATCH_SIZE and fails the whole RPC with
+    INTERNAL "Batch size N exceeds maximum 256" rather than splitting, and
+    the caller hands us every chunk of a document in one call — so before
+    this split, any document over ~256 chunks failed to index *entirely*.
+    That failure scaled with document size, which meant the largest and
+    most information-dense files were precisely the ones that never
+    reached the index, while small ones indexed fine and made the RAG look
+    healthy.
     """
     if not texts:
         return []
 
     from grpc_generated import inference_pb2
 
+    batch_size = max(1, EMBED_MAX_BATCH)
     stub = _get_stub()
-    request = inference_pb2.EmbedRequest(texts=texts, model=model)
-    response = stub.EmbedText(request, timeout=60)
+    vectors: list[list[float]] = []
 
-    return [list(arr.values) for arr in response.embeddings]
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        request = inference_pb2.EmbedRequest(texts=batch, model=model)
+        response = stub.EmbedText(request, timeout=60)
+        vectors.extend(list(arr.values) for arr in response.embeddings)
+
+    return vectors
