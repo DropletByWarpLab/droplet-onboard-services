@@ -24,7 +24,9 @@ FAIL=0
 setup() {
   WORK="$(mktemp -d)"
   export DROPLET_SSH_ACCESS_DIR="$WORK/state"
-  mkdir -p "$DROPLET_SSH_ACCESS_DIR" "$WORK/bin"
+  # intent.d/ is the container-writable half; the parent holds root-owned
+  # `state` and is bind-mounted read-only into the orchestrator.
+  mkdir -p "$DROPLET_SSH_ACCESS_DIR/intent.d" "$WORK/bin"
   # Pretend `ssh.service` exists; record every invocation.
   cat >"$WORK/bin/systemctl" <<'STUB'
 #!/bin/sh
@@ -58,7 +60,7 @@ check() { # check <label> <rc> [detail]
 
 run_case() { # run_case <intent-file-contents>
   setup
-  printf '%s' "$1" >"$DROPLET_SSH_ACCESS_DIR/intent"
+  printf '%s' "$1" >"$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
   /bin/sh "$SCRIPT" >/dev/null 2>&1
   RC=$?
   LOG="$(cat "$SYSTEMCTL_LOG" 2>/dev/null)"
@@ -160,7 +162,7 @@ teardown
 # --- 6. No ssh unit on this host --------------------------------------------
 # Must not write state: the dashboard's honest "unknown" depends on it.
 setup
-printf 'DROPLET_SSH_ACCESS=on\n' >"$DROPLET_SSH_ACCESS_DIR/intent"
+printf 'DROPLET_SSH_ACCESS=on\n' >"$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
 cat >"$WORK/bin/systemctl" <<'STUB'
 #!/bin/sh
 exit 1

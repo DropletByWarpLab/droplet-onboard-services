@@ -390,19 +390,32 @@ services:
       # git-ignored except for its README, so a dev checkout mounts an
       # effectively empty dir and the surface degrades to "nothing staged".
       - ../data/app-downloads:/opt/droplet/app-downloads:ro
-      # WARP-1984: the SSH-access toggle's intent/state directory. The
-      # orchestrator WRITES `intent` here; root-owned systemd watches it and
-      # writes `state` back (see scripts/host/usr-local-sbin/droplet-ssh-access).
-      # Read-write is required — but note this grants the container no
-      # privilege: the host script parses ONE key out of the file and validates
-      # it against `on|off`, so the worst a compromised orchestrator can do
-      # through this mount is toggle SSH, which is exactly what the dashboard
-      # button does anyway. It can NOT forge `state` (root-owned) and it can
-      # NOT reach systemd. Deliberately a directory bind, not a file bind: a
-      # `git checkout` that replaces a single-FILE bind mount's inode detaches
-      # it from the container (the WARP-1908 failure), and the host script
-      # rewrites `state` by rename on every apply.
-      - /var/lib/droplet-ssh-access:/var/lib/droplet-ssh-access
+      # WARP-1984: the SSH-access toggle's state directory, READ-ONLY. The
+      # dashboard trusts `state` as the source of truth for whether the door is
+      # actually open, so the container must not be able to rewrite it.
+      #
+      # File ownership alone does NOT give that guarantee: this orchestrator
+      # image carries no USER directive and so runs as container UID 0, and a
+      # bind mount performs no UID remapping — container root is host root on
+      # these inodes. A root-owned `state` inside a read-WRITE mount could be
+      # overwritten or deleted outright, letting a compromised orchestrator
+      # report `off` while sshd is live, during exactly the incident this
+      # feature exists to support. `:ro` is what makes the readback honest;
+      # same pattern as apply-update.sh and service-tls above.
+      - /var/lib/droplet-ssh-access:/var/lib/droplet-ssh-access:ro
+      # ...and the writable half, scoped to the one file the container is
+      # supposed to write. Nested under the read-only mount above (Docker
+      # applies mounts parent-first, so this rw child wins for its own subtree).
+      #
+      # Writing here grants no privilege: the host script parses ONE key out of
+      # the file and validates it against `on|off`, so the worst a compromised
+      # orchestrator can do is toggle SSH — exactly what the dashboard button
+      # does anyway. It cannot forge `state` and cannot reach systemd.
+      #
+      # Deliberately a directory bind, not a file bind: the orchestrator writes
+      # `intent` by mktemp+rename, and a single-FILE bind is detached from the
+      # container the moment its inode is replaced (the WARP-1908 failure).
+      - /var/lib/droplet-ssh-access/intent.d:/var/lib/droplet-ssh-access/intent.d
       # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
       # canonical /data/service-tls path — the Redis client reads ca.pem.
       - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro

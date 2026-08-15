@@ -36,7 +36,11 @@
 set -eu
 
 STATE_DIR="${DROPLET_SSH_ACCESS_DIR:-/var/lib/droplet-ssh-access}"
-INTENT_FILE="$STATE_DIR/intent"
+# The container-writable half lives in its own subdirectory so the directory
+# holding `state` can be bind-mounted READ-ONLY into the orchestrator. Splitting
+# the paths is what makes the readback below unforgeable — see the volume
+# comments in docker/docker-compose.yml.
+INTENT_FILE="$STATE_DIR/intent.d/intent"
 STATE_FILE="$STATE_DIR/state"
 
 log() { logger -t droplet-ssh-access "$@" 2>/dev/null || echo "droplet-ssh-access: $*" >&2; }

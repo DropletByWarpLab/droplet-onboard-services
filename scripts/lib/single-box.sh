@@ -289,12 +289,21 @@ EOF
   # path-triggered start really executes (see the note above on why the
   # openwrt-attach pair needs one and this does not).
   #
-  # The state dir is created root-owned but group-writable by the droplet
-  # user's group, so the container can write `intent` while `state` — which
-  # the dashboard trusts as the source of truth — stays root-owned and
-  # unforgeable from inside a container.
-  sudo install -d -m 0775 -o root -g "${DROPLET_GROUP:-droplet}" \
+  # The state dir is root-owned and NOT group-writable: `state` is what the
+  # dashboard trusts as the source of truth, and the container gets it through
+  # a read-only bind (see docker-compose.yml). Ownership alone would not be
+  # enough — the orchestrator runs as container UID 0 and a bind mount does no
+  # UID remapping, so a writable mount here would let it forge or delete
+  # `state` no matter who owns the file.
+  #
+  # The writable half is the intent.d/ subdirectory, bind-mounted rw on its
+  # own. A directory, not a bare file, because the orchestrator writes intent
+  # by mktemp+rename and a single-FILE bind detaches when its inode is
+  # replaced (WARP-1908).
+  sudo install -d -m 0755 -o root -g root \
     /var/lib/droplet-ssh-access
+  sudo install -d -m 0775 -o root -g "${DROPLET_GROUP:-droplet}" \
+    /var/lib/droplet-ssh-access/intent.d
   sudo install -m 0755 "$host_src/usr-local-sbin/droplet-ssh-access" \
     /usr/local/sbin/droplet-ssh-access
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-ssh-access.service" \

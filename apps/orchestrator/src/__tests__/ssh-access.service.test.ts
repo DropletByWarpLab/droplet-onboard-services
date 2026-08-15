@@ -94,11 +94,11 @@ describe("setSshAccess — writes an intent the host script can parse", () => {
   it("writes exactly the one whitelisted key, in the shape the script greps", async () => {
     const { setSshAccess } = await load();
     await setSshAccess(true);
-    const raw = readFileSync(join(dir, "intent"), "utf8");
+    const raw = readFileSync(join(dir, "intent.d", "intent"), "utf8");
     expect(raw).toMatch(/^DROPLET_SSH_ACCESS=on$/m);
 
     await setSshAccess(false);
-    expect(readFileSync(join(dir, "intent"), "utf8")).toMatch(
+    expect(readFileSync(join(dir, "intent.d", "intent"), "utf8")).toMatch(
       /^DROPLET_SSH_ACCESS=off$/m,
     );
   });
@@ -108,8 +108,8 @@ describe("setSshAccess — writes an intent the host script can parse", () => {
     // rename never happened and the watcher could read a partial file.
     const { setSshAccess } = await load();
     await setSshAccess(true);
-    expect(existsSync(join(dir, "intent.tmp"))).toBe(false);
-    expect(existsSync(join(dir, "intent"))).toBe(true);
+    expect(existsSync(join(dir, "intent.d", "intent.tmp"))).toBe(false);
+    expect(existsSync(join(dir, "intent.d", "intent"))).toBe(true);
   });
 
   it("never writes the state file — that is the host's word, not ours", async () => {

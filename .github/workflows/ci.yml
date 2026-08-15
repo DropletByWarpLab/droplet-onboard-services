@@ -125,6 +125,15 @@ jobs:
               - "packages/auth-policy/**"
               - "services/mcp-server/**"
               - "services/erp-connector/**"
+              # WARP-1984: the SSH toggle's privileged half. The orchestrator
+              # writes the intent file these consume, so its leg is the right
+              # owner — and the shell suite must run PRE-merge, not just as the
+              # push-to-main canary, since it is the only thing that proves the
+              # root script's parser refuses hostile input under real dash.
+              - "scripts/host/usr-local-sbin/droplet-ssh-access"
+              - "scripts/host/etc-systemd-system/droplet-ssh-access.service"
+              - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
+              - "tests/droplet-ssh-access.test.sh"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -343,6 +352,49 @@ jobs:
       - name: Test @droplet/orchestrator
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
+
+      # WARP-1984: the SSH toggle's host half. The orchestrator's vitest guard
+      # reads these artefacts as TEXT (it can prove `iptables` never appears);
+      # this RUNS them, which is the only way to prove the parser actually
+      # refuses `DROPLET_SSH_ACCESS=$(id)` rather than merely looking like it
+      # would. Lives here rather than in a `pull_request:` trigger on
+      # ssh-access-tests.yml, per the CI cost budget: PR-time coverage belongs
+      # in a detect-filtered ci.yml leg, and the per-service workflow stays a
+      # push-to-main canary. Seconds on an already-running leg.
+      #
+      # ubuntu-latest matters: /bin/sh is dash here, exactly as on the
+      # appliance. A shell that provides bash-as-sh accepts constructs dash
+      # rejects, so a script that only ever ran locally can still die on a box.
+      - name: SSH-access host script — shellcheck, units, dash suite
+        if: matrix.suite == 'orchestrator'
+        run: |
+          set -eu
+          shellcheck --severity=warning scripts/host/usr-local-sbin/droplet-ssh-access
+          out="$(systemd-analyze verify \
+            scripts/host/etc-systemd-system/droplet-ssh-access.service \
+            scripts/host/etc-systemd-system/droplet-ssh-access.path 2>&1 || true)"
+          printf '%s\n' "$out"
+          # Exactly two outputs are expected and only those two: ExecStart is
+          # installed by setup.sh and never exists on a runner, and the
+          # permission advisories fire on filesystems without POSIX modes. ANY
+          # other line fails — a filter wide enough to hide a real error would
+          # make this step decorative.
+          unexpected="$(printf '%s\n' "$out" \
+            | grep -v 'is not executable: No such file or directory' \
+            | grep -v 'Proceeding anyway' \
+            | grep -v '^$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::systemd-analyze verify reported a unit-file problem:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+          target="$(readlink -f /bin/sh)"
+          echo "/bin/sh -> $target"
+          case "$target" in
+            *dash) ;;
+            *) echo "::error::/bin/sh is $target, not dash — this step no longer reproduces the appliance" >&2; exit 1 ;;
+          esac
+          bash tests/droplet-ssh-access.test.sh
 
       # build IS the type-check for the matter sidecar — mirrors
       # matter-controller-tests.yml.

@@ -38,7 +38,10 @@ set -uo pipefail
 
 DEADMAN_SECONDS="${DEADMAN_SECONDS:-600}"
 STATE_DIR="${DROPLET_SSH_ACCESS_DIR:-/var/lib/droplet-ssh-access}"
-INTENT="$STATE_DIR/intent"
+# The writable half. STATE_DIR itself is bind-mounted read-only into the
+# orchestrator so `state` cannot be forged from inside a container.
+INTENT_DIR="$STATE_DIR/intent.d"
+INTENT="$INTENT_DIR/intent"
 STATE="$STATE_DIR/state"
 APPLIER=/usr/local/sbin/droplet-ssh-access
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -307,7 +310,18 @@ else
       && ok "host applied the container's intent end-to-end" \
       || bad "host did not apply the container's intent" "container writes but nothing happens"
   else
-    bad "container could NOT write the intent file" "check the mount's group ownership (0775, droplet group)"
+    bad "container could NOT write the intent file" "check the intent.d rw bind mount and its group ownership (0775, droplet group)"
+  fi
+
+  # The read-only half, asserted directly: nothing new may appear in the
+  # parent. This is what makes `state` unforgeable — ownership alone would not,
+  # since the orchestrator runs as container UID 0 and a bind mount does no UID
+  # remapping.
+  if docker exec "$ORCH" sh -c "touch $STATE_DIR/.rw-probe" 2>/dev/null; then
+    bad "container CAN write into $STATE_DIR" "the parent mount is not :ro — state is forgeable"
+    docker exec "$ORCH" rm -f "$STATE_DIR/.rw-probe" >/dev/null 2>&1 || true
+  else
+    ok "container cannot write into $STATE_DIR (read-only mount)"
   fi
 
   # The container must not be able to forge the state the dashboard trusts.

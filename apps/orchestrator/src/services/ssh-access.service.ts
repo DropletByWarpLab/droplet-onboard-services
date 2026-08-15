@@ -47,10 +47,18 @@ const logger = createLogger("ssh-access");
  */
 const STATE_DIR = process.env.DROPLET_SSH_ACCESS_DIR ?? "/var/lib/droplet-ssh-access";
 
-/** Written by US (droplet-owned). Watched by the root `.path` unit. */
-const INTENT_PATH = join(STATE_DIR, "intent");
+/**
+ * Written by US (droplet-owned). Watched by the root `.path` unit.
+ *
+ * In its own `intent.d/` subdirectory so that STATE_DIR itself can be
+ * bind-mounted READ-ONLY into this container while only this subtree stays
+ * writable. Without that split, a root-in-container process could overwrite
+ * the root-owned `state` below — ownership gives no protection across a bind
+ * mount, which does no UID remapping.
+ */
+const INTENT_PATH = join(STATE_DIR, "intent.d", "intent");
 
-/** Written by the HOST script (root-owned, we only ever read it). */
+/** Written by the HOST script (root-owned, read-only to us — we never write it). */
 const STATE_PATH = join(STATE_DIR, "state");
 
 /** The ONE key the host script will parse out of the intent file. */

@@ -103,7 +103,13 @@ describe("the toggle does not silently persist across reboots", () => {
 
 describe("the path unit actually fires every time", () => {
   it("watches the intent file and triggers the service", () => {
-    expect(PATH_UNIT).toMatch(/PathModified=\/var\/lib\/droplet-ssh-access\/intent/);
+    // The exact path, not a prefix: `intent` must live in the writable
+    // intent.d/ subtree, because the parent is bind-mounted read-only so the
+    // container cannot forge `state`. A watcher left on the old top-level path
+    // would silently never fire.
+    expect(PATH_UNIT).toMatch(
+      /PathModified=\/var\/lib\/droplet-ssh-access\/intent\.d\/intent$/m,
+    );
     expect(PATH_UNIT).toMatch(/Unit=droplet-ssh-access\.service/);
   });
 

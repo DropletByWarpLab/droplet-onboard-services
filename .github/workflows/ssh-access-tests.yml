@@ -9,15 +9,11 @@ name: ssh-access-tests
 # Developer shells provide bash-as-sh and accept constructs dash rejects, so a
 # script that only ever ran locally can still die on the box.
 
+# PR-time coverage lives in ci.yml's orchestrator leg (detect filter + the
+# "SSH-access host script" step), per the CI cost budget in CLAUDE.md: the
+# per-service `*-tests.yml` workflows are push-to-main canaries and must not
+# carry a `pull_request:` trigger.
 on:
-  pull_request:
-    paths:
-      - "scripts/host/usr-local-sbin/droplet-ssh-access"
-      - "scripts/host/etc-systemd-system/droplet-ssh-access.service"
-      - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
-      - "scripts/lib/single-box.sh"
-      - "tests/droplet-ssh-access.test.sh"
-      - ".github/workflows/ssh-access-tests.yml"
   push:
     branches: [main]
     paths:

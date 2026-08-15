@@ -22,7 +22,7 @@ Description=Apply the dashboard's SSH-access intent (WARP-1984)
 # PathModified fires on an in-place rewrite AND on atomic replace-by-rename.
 # The orchestrator writes via mktemp+rename, so this is the case that matters:
 # the watcher can never observe a half-written file.
-PathModified=/var/lib/droplet-ssh-access/intent
+PathModified=/var/lib/droplet-ssh-access/intent.d/intent
 Unit=droplet-ssh-access.service
 
 [Install]
