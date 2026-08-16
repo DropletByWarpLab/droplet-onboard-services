@@ -666,6 +666,132 @@ describe("expireIdleOverlayPeers", () => {
     expect(prisma.rows[0].status).toBe("revoked");
     expect(calls.filter((c) => c.name.startsWith("overlay.punch"))).toHaveLength(0);
   });
+
+  it("WARP-2060: spares a peer whose observed handshake is inside the idle window, refreshing lastSessionAt to the handshake time", async () => {
+    // The blocker scenario: lastSessionAt is stale (only ever stamped at
+    // approve/session-start), but the peer is ACTIVELY handshaking — a client
+    // on the no-rendezvous lan/direct/mapped candidates. Pre-fix the sweep
+    // revoked it mid-connection.
+    const staleClock = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
+    const handshakeEpochSec = Math.floor(FIXED_NOW.getTime() / 1000) - 3600; // 1h ago
+    const prisma = makePrisma([
+      { id: "a", publicKey: "LIVE", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = staleClock;
+    const { peers, removed } = makePeers({ LIVE: handshakeEpochSec });
+    const expired = await expireIdleOverlayPeers({
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      now: () => FIXED_NOW,
+    });
+    expect(expired).toBe(0);
+    expect(removed).toEqual([]);
+    expect(prisma.rows[0].status).toBe("active");
+    // The DB clock is refreshed to the HANDSHAKE time (not `now`), so a peer
+    // that stops handshaking ages out from its last real activity.
+    expect(prisma.rows[0].lastSessionAt).toEqual(new Date(handshakeEpochSec * 1000));
+  });
+
+  it("WARP-2060: revokes a peer whose observed handshake is itself older than the window", async () => {
+    const staleClock = new Date(FIXED_NOW.getTime() - 48 * 3_600_000);
+    const oldHandshake = Math.floor(FIXED_NOW.getTime() / 1000) - 13 * 3600; // 13h ago > 12h window
+    const prisma = makePrisma([
+      { id: "a", publicKey: "GONE", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = staleClock;
+    const { peers, removed } = makePeers({ GONE: oldHandshake });
+    const { metrics, calls } = makeMetrics();
+    const expired = await expireIdleOverlayPeers({
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      metrics,
+      now: () => FIXED_NOW,
+    });
+    expect(expired).toBe(1);
+    expect(removed).toHaveLength(1);
+    expect(prisma.rows[0].status).toBe("revoked");
+    // It DID handshake once — punch success, even though it is now idle.
+    expect(calls).toContainEqual({ name: "overlay.punch.succeeded", value: 1, labels: undefined });
+  });
+
+  it("WARP-2060: a wired handshake read that FAILS skips teardown entirely — never revoke blind", async () => {
+    // Pre-fix this only skipped telemetry and tore peers down anyway; with
+    // routing down there is no way to tell idle from live, and the safe
+    // direction is to wait for the next sweep.
+    const staleClock = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
+    const prisma = makePrisma([
+      { id: "a", publicKey: "P1", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+      { id: "b", publicKey: "P2", assignedIp: "10.0.0.3", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = staleClock;
+    (prisma.rows[1] as Record<string, unknown>).lastSessionAt = staleClock;
+    const removed: unknown[] = [];
+    const peers = {
+      install: async () => {},
+      remove: async (p: unknown) => {
+        removed.push(p);
+      },
+      listHandshakes: async () => {
+        throw new Error("routing down");
+      },
+    };
+    const expired = await expireIdleOverlayPeers({
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      now: () => FIXED_NOW,
+    });
+    expect(expired).toBe(0);
+    expect(removed).toEqual([]);
+    expect(prisma.rows[0].status).toBe("active");
+    expect(prisma.rows[1].status).toBe("active");
+  });
+
+  it("WARP-2060: a staged removal (applied:false) leaves the row active for retry; an applied one revokes", async () => {
+    const staleClock = new Date(FIXED_NOW.getTime() - 24 * 3_600_000);
+    const prisma = makePrisma([
+      { id: "a", publicKey: "STAGED", assignedIp: "10.0.0.2", status: "active", kind: "overlay" },
+    ]);
+    (prisma.rows[0] as Record<string, unknown>).lastSessionAt = staleClock;
+    let applied = false;
+    const removeCalls: unknown[] = [];
+    const peers = {
+      install: async () => {},
+      remove: async (p: unknown) => {
+        removeCalls.push(p);
+        return { applied };
+      },
+    };
+    const deps = {
+      config: baseConfig(),
+      identity: makeIdentity().identity,
+      prisma,
+      peers,
+      allocateIp: async () => "x",
+      now: () => FIXED_NOW,
+    };
+    // Sweep 1: routing staged the delete but never applied it. The peer is
+    // still live on wg0 — the row must stay active so the next sweep retries
+    // (pre-fix it was flipped to revoked and never revisited, leaving a
+    // "revoked" device with a working route into the LAN).
+    expect(await expireIdleOverlayPeers(deps)).toBe(0);
+    expect(removeCalls).toHaveLength(1);
+    expect(prisma.rows[0].status).toBe("active");
+    expect(prisma.rows[0].revokedAt ?? null).toBeNull();
+    // Sweep 2: the router applied it this time — now the row revokes.
+    applied = true;
+    expect(await expireIdleOverlayPeers(deps)).toBe(1);
+    expect(removeCalls).toHaveLength(2);
+    expect(prisma.rows[0].status).toBe("revoked");
+  });
 });
 
 // --- Enroll bridge (Part D) ------------------------------------------------

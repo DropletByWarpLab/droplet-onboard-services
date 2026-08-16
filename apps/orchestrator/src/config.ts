@@ -546,8 +546,15 @@ const envSchema = z.object({
   // Seconds between HQ long-poll ticks (event-driven; NOT a busy loop —
   // scheduled via cron-runtime). Bounded to keep the outbound heartbeat light.
   OVERLAY_CONNECT_POLL_SECONDS: z.coerce.number().int().min(2).max(300).default(15),
-  // Hours an overlay peer may sit without a session before the sweep revokes it.
-  OVERLAY_PEER_IDLE_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(12),
+  // Hours an overlay peer may sit without a session OR an observed handshake
+  // before the sweep revokes it. WARP-2060: overlay peers are CLIENT-initiated
+  // — a phone that is simply away holds no endpoint on the box and is inert,
+  // so an aggressive window buys no security and costs real breakage: at the
+  // old 12h default a phone left home for a weekend came back to a silently
+  // dead tunnel (row revoked, /profile 503s, owner re-approval required).
+  // 720h (30 days) reaps genuinely abandoned enrollments; with the sweep's
+  // handshake-sparing an active device is never reaped at any setting.
+  OVERLAY_PEER_IDLE_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(720),
 
   // --- Coverage extender APs (WARP-446) ---
   // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
