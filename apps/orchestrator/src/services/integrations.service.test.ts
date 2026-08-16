@@ -166,6 +166,74 @@ describe("integrations.service (WARP-1137, DB-independent)", () => {
     });
   });
 
+  // WARP-1998 — the hub list previously carried no timestamp at all, so any
+  // surface listing N connectors had no way to say how stale each one is
+  // (lastSyncedAt lived only on the provider-specific detail route).
+  describe("lastSyncedAt on the hub list", () => {
+    it("is an EXPLICIT null for a provider that has never synced", async () => {
+      const list = await svc.list();
+      const eagle = list.find((p) => p.provider === EAGLESOFT_PROVIDER)!;
+      expect(eagle.lastSyncedAt).toBeNull();
+      // Explicit, not merely absent: `undefined` would be dropped by JSON and
+      // the client could not tell "never synced" from "field not served".
+      expect(Object.prototype.hasOwnProperty.call(eagle, "lastSyncedAt")).toBe(true);
+    });
+
+    it("reports the last successful read as an ISO string", async () => {
+      const when = new Date("2026-08-14T09:12:00.000Z");
+      await mock.prisma.integrationConnection.create({
+        data: {
+          provider: EAGLESOFT_PROVIDER,
+          status: "CONNECTED",
+          host: "10.0.0.5",
+          databaseName: "PattersonPM",
+          secretRef: "secret://erp/eaglesoft/ro",
+          lastHealthyAt: when,
+        },
+      });
+      const list = await svc.list();
+      const eagle = list.find((p) => p.provider === EAGLESOFT_PROVIDER)!;
+      expect(eagle.lastSyncedAt).toBe(when.toISOString());
+    });
+
+    it("stays null on a configured-but-never-healthy row", async () => {
+      // A connector that was set up and never succeeded must not borrow a
+      // timestamp from its creation — that would read as a successful sync.
+      await mock.prisma.integrationConnection.create({
+        data: {
+          provider: EAGLESOFT_PROVIDER,
+          status: "ERROR",
+          host: "10.0.0.5",
+          databaseName: "PattersonPM",
+          secretRef: "secret://erp/eaglesoft/ro",
+        },
+      });
+      const list = await svc.list();
+      const eagle = list.find((p) => p.provider === EAGLESOFT_PROVIDER)!;
+      expect(eagle.configured).toBe(true);
+      expect(eagle.lastSyncedAt).toBeNull();
+    });
+
+    it("agrees with the detail route for the same row", async () => {
+      const when = new Date("2026-08-13T22:05:00.000Z");
+      await mock.prisma.integrationConnection.create({
+        data: {
+          provider: EAGLESOFT_PROVIDER,
+          status: "CONNECTED",
+          host: "10.0.0.5",
+          databaseName: "PattersonPM",
+          secretRef: "secret://erp/eaglesoft/ro",
+          lastHealthyAt: when,
+        },
+      });
+      const [list, detail] = await Promise.all([svc.list(), svc.getEaglesoft()]);
+      const eagle = list.find((p) => p.provider === EAGLESOFT_PROVIDER)!;
+      // Two projections of one column; if they ever disagree the UI shows two
+      // different staleness answers for the same connector.
+      expect(eagle.lastSyncedAt).toBe(detail.lastSyncedAt);
+    });
+  });
+
   describe("connect / test — honest mapping of the stubbed connector", () => {
     it("connect leaves status PROVISIONING (never fake CONNECTED) when the connector is blocked", async () => {
       const result = await svc.connect({

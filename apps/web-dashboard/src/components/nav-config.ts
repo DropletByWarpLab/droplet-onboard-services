@@ -16,7 +16,9 @@ import {
   Blocks,
   BookOpen,
   Calendar as CalendarIcon,
+  ChartColumn,
   Cpu,
+  Download,
   Film,
   FlaskConical,
   FolderKanban,
@@ -146,6 +148,22 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Workspace",
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
+      // WARP-1992: Reports is a PEER of Overview — the "how did it go" view
+      // next to the "what's happening now" view — not an admin tool. Placed
+      // here deliberately; it is not a Settings sub-page.
+      //
+      // Not module-gated: the page composes surfaces that are individually
+      // gated (files, cameras, network, erp) and each tile degrades on its
+      // own. A module gate here would hide the whole page because one of its
+      // ten tiles is off. Role-gated instead — a guest has access to almost
+      // nothing on it, so the nav never advertises a page that would be
+      // eight-tenths locked.
+      {
+        href: "/reports",
+        label: "Reports",
+        icon: ChartColumn,
+        roles: ["owner", "admin", "family"],
+      },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
       // WARP-1683: member-to-member team chat. Sits next to Ask AI (both
       // are conversation surfaces); gated by the team_chat module and
@@ -290,6 +308,12 @@ export const NAV_GROUPS: NavGroup[] = [
       // (ADR-004 §3), so family/guest see the same status-only view. Reuses the
       // Cpu glyph already imported for /devices. Active-state is automatic.
       { href: "/models", label: "Models", icon: Cpu },
+      // Client-app downloads. No `roles` gate and no `requiresModule` —
+      // every authenticated member needs the app for the box they were
+      // invited to, and GET /api/app-downloads makes the same call. Sits
+      // next to Settings/Help in the support/reference zone, since it is a
+      // one-time errand rather than a daily destination.
+      { href: "/downloads", label: "Get the app", icon: Download },
       { href: "/settings", label: "Settings", icon: Settings },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate; sits in the support/reference zone next to Help.

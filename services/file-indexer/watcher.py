@@ -32,7 +32,7 @@ from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
 from config import NEXTCLOUD_DATA_ROOT, SHARED_FOLDER_NAME, HOUSEHOLD_USER_ID
-from extractors.registry import dispatch
+from extractors.registry import EXTRACTOR_CAPABILITY, dispatch
 from chunker import chunk_spans, format_chunk_with_header
 from embedder import embed_texts
 from db import (
@@ -59,14 +59,19 @@ logger = logging.getLogger(__name__)
 # Dockerfile also installs Debian `media-types` as belt-and-suspenders,
 # but correctness must not hinge on an image detail).
 #
-# Kept to the WARP-1842 set: OOXML + legacy Word + ODF. Registered types
-# WITHOUT an extractor (.xlsx, all ODF) now take the honest
+# WARP-1842 registered OOXML + legacy Word + ODF; at that point .xlsx and
+# the ODF family had no extractor and took the honest
 # `skipped/unsupported_or_failed_extraction` path via dispatch() → None.
+# WARP-2055 supplies those extractors, and adds legacy .xls here — Python's
+# built-in table happens to know that one, but relying on a built-in for
+# some extensions and an explicit entry for others is the exact split that
+# made this fail silently the first time.
 OFFICE_MIME_TYPES: dict[str, str] = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".doc": "application/msword",
+    ".xls": "application/vnd.ms-excel",
     ".odt": "application/vnd.oasis.opendocument.text",
     ".ods": "application/vnd.oasis.opendocument.spreadsheet",
     ".odp": "application/vnd.oasis.opendocument.presentation",
@@ -658,6 +663,25 @@ RECONCILE_RETRY_STATUSES = {"indexing", "failed"}
 RECONCILE_RETRY_SKIP_REASONS = {"unknown_type"}
 
 
+def _skip_verdict_is_stale(capability: Optional[str]) -> bool:
+    """True when a `skipped` row was written by older extractors.
+
+    WARP-2056. The premise behind treating a skip as terminal is that the
+    outcome "cannot change" — which holds only while the extractors don't.
+    Every time they have changed, healing live boxes meant hand-deleting
+    status rows: WARP-1842 needed it for the Office MIME registration,
+    WARP-2051 for the PDF OCR fallback, WARP-2055 for the spreadsheet, ODF
+    and legacy-Word extractors.
+
+    Comparing the stamped generation against the current one retries exactly
+    the rows whose verdict was reached by code that no longer exists, and
+    still never re-runs a corpus the current extractors have already had
+    their shot at. NULL means the row predates the column, so it is stale by
+    definition and gets one pass.
+    """
+    return capability != EXTRACTOR_CAPABILITY
+
+
 def iter_watch_paths() -> Iterator[str]:
     """Yield the absolute path of every file in the watched subtrees:
     ``{root}/{user}/files/**`` and ``{root}/__groupfolders/**``.
@@ -720,13 +744,18 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
         row = status_map.get((target.index_user, target.stored_path))
         if row is not None:
             status, updated_at = row[0], row[1]
-            # WARP-1842: `reason` is the map's third element. Tolerate the
-            # legacy 2-tuple shape (a caller predating the reason column in
-            # fetch_index_status_map): no reason available means the
-            # pre-1842 behaviour — the row is not skip-retried.
+            # WARP-1842: `reason` is the map's third element; WARP-2056 adds
+            # the extractor generation as the fourth. Tolerate the shorter
+            # legacy tuples (a caller predating either column): a missing
+            # element means the older behaviour for that check.
             reason = row[2] if len(row) > 2 else None
+            capability = row[3] if len(row) > 3 else None
             retry = status in RECONCILE_RETRY_STATUSES or (
-                status == "skipped" and reason in RECONCILE_RETRY_SKIP_REASONS
+                status == "skipped"
+                and (
+                    reason in RECONCILE_RETRY_SKIP_REASONS
+                    or _skip_verdict_is_stale(capability)
+                )
             )
             if not retry:
                 try:

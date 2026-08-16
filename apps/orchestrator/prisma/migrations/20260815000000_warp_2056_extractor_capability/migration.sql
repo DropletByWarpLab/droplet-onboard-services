@@ -1,0 +1,12 @@
+-- WARP-2056: record which generation of the extractors produced a status row.
+--
+-- A `skipped` verdict means "the extractors, as they stood at the time, got no
+-- text out of this file". The reconcile has always treated that as terminal, so
+-- every extractor improvement needed a manual DELETE of status rows to heal a
+-- live box. Stamping the generation lets the reconcile retry exactly the rows
+-- whose verdict is stale, and leave the rest alone.
+--
+-- NULL means "written before this column existed" — the reconcile treats that
+-- as generation 1, so the first boot after this migration re-examines the
+-- historical skips once and then stamps them.
+ALTER TABLE "FileIndexStatus" ADD COLUMN "extractorCapability" TEXT;

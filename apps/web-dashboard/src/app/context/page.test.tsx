@@ -39,6 +39,7 @@ function fullStats(over: Partial<ContextStatsFull> = {}): ContextStatsFull {
     files: 0,
     chunks: 0,
     queued: 0,
+    skipped: 0,
     failed: 0,
     bytesIndexed: 0,
     recentlyIndexed: [],

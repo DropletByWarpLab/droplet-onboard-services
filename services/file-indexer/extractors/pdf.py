@@ -42,6 +42,57 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 # recursion limit unpredictably.
 _OUTLINE_MAX_DEPTH = 32
 
+# Per-page OCR fallback budget for PDFs with no text layer. 0 disables the
+# fallback entirely. Tesseract runs ~1-3 s/page, so an uncapped 500-page scan
+# would hold the indexer for 10+ minutes and stall every file queued behind it.
+_PDF_OCR_MAX_PAGES = int(os.environ.get("PDF_OCR_MAX_PAGES", "50"))
+
+# Rasterization DPI for the OCR fallback. 200 is the low end of Tesseract's
+# reliable range for body text; 300 roughly doubles the time for marginal gain
+# on the office-scan and fax material this path actually sees.
+_PDF_OCR_DPI = int(os.environ.get("PDF_OCR_DPI", "200"))
+
+
+def _ocr_pdf_pages(path: str, pages: list[int]) -> dict[int, str]:
+    """Rasterize the given 1-based page numbers and run Tesseract on each.
+
+    Returns ``{page_number: text}`` for pages that produced any text; pages
+    that OCR to nothing (genuinely blank) are omitted. Imported lazily so the
+    overwhelmingly common text-layer path never pays for the rasterizer.
+
+    Rendering goes through pypdfium2 directly rather than pdfplumber's
+    ``Page.to_image()``. pdfplumber wraps the same renderer but adds its own
+    page-parsing layer, and that layer silently reported **zero pages** for
+    two of the scanned referral forms on the lab corpus (pypdf read 1 and 3
+    pages from the same files). Since every page then fell out of range, the
+    OCR fallback returned nothing and the documents stayed unsearchable.
+    """
+    import pypdfium2
+
+    from extractors.image import _ocr_image
+
+    out: dict[int, str] = {}
+    doc = pypdfium2.PdfDocument(path)
+    try:
+        n_pages = len(doc)
+        for page_no in pages:
+            if page_no > n_pages:
+                continue
+            try:
+                img = doc[page_no - 1].render(scale=_PDF_OCR_DPI / 72).to_pil()
+                text, _warnings, _conf = _ocr_image(img)
+            except Exception as exc:  # noqa: BLE001 — one bad page must not abort the file
+                logger.warning(
+                    "extractor.pdf_ocr_page_failed",
+                    extra={"extractor": "pdf", "page": page_no, "error": str(exc)},
+                )
+                continue
+            if text.strip():
+                out[page_no] = text
+    finally:
+        doc.close()
+    return out
+
 
 def _flatten_outline(
     reader: PdfReader,
@@ -299,6 +350,37 @@ def extract(path: str) -> ExtractedDoc:
             extractor_name = "pdf+pdfminer"
             warnings.append("pypdf_letter_spaced_used_pdfminer")
 
+    # Scanned material — faxes, photographed forms, NAS scans — carries no text
+    # layer at all: pypdf and pdfminer both return "" for every page, the file
+    # produces zero Spans, and the watcher files it as `skipped/empty_extraction`
+    # with no user-visible signal that the document is unsearchable. Tesseract
+    # and Pillow are already in this image for the image extractor, so fall back
+    # to rasterize-then-OCR for any page that yielded no text. Pages are handled
+    # individually rather than gating on the whole document, so a scanned insert
+    # inside an otherwise-digital PDF is recovered too.
+    ocr_page_count = 0
+    blank_pages = [
+        idx for idx in range(1, n_pages + 1) if not page_texts.get(idx, "").strip()
+    ]
+    if blank_pages and _PDF_OCR_MAX_PAGES > 0:
+        budget = blank_pages[:_PDF_OCR_MAX_PAGES]
+        if len(blank_pages) > len(budget):
+            warnings.append("pdf_ocr_page_cap_reached")
+        try:
+            ocr_texts = _ocr_pdf_pages(path, budget)
+        except Exception as exc:  # noqa: BLE001 — OCR failure keeps the text-layer result
+            logger.warning(
+                "extractor.pdf_ocr_failed",
+                extra={"extractor": "pdf", "error": str(exc)},
+            )
+            warnings.append("pdf_ocr_failed")
+        else:
+            if ocr_texts:
+                page_texts.update(ocr_texts)
+                ocr_page_count = len(ocr_texts)
+                extractor_name = f"{extractor_name}+ocr"
+                warnings.append("pdf_ocr_used")
+
     for idx in range(1, n_pages + 1):
         text = page_texts.get(idx, "")
         if not text or not text.strip():
@@ -319,8 +401,9 @@ def extract(path: str) -> ExtractedDoc:
         language=None,
         metadata={
             "extractor_name": extractor_name,
-            "extractor_version": "3",
+            "extractor_version": "4",
             "page_count": n_pages,
+            "ocr_page_count": ocr_page_count,
         },
         warnings=warnings,
     )

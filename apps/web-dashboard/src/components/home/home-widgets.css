@@ -1013,6 +1013,21 @@
   flex-direction: column;
   gap: 2px;
 }
+/* WARP-1992 — the way out of the Activity widget, into /reports. Aligned to
+   the timeline text column (time 38px + gap 10px + icon 22px + gap 10px) so
+   it reads as the row after the last event, not as a detached button. */
+.droplet-home .timeline-more {
+  align-self: flex-start;
+  margin-top: 4px;
+  margin-left: 80px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--brand);
+  text-decoration: none;
+}
+.droplet-home .timeline-more:hover {
+  text-decoration: underline;
+}
 .droplet-home .timeline-row {
   display: flex;
   gap: 10px;
