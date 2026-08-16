@@ -1,0 +1,61 @@
+name: pr-title-ticket-lint
+
+# Board truth, half 1 — every PR names the ticket it implements.
+#
+# 20% of this repo's PRs carry no WARP key in their title (323 of 1,591 at
+# the 2026-08-15 readout), which is why 513 Done tickets can't be matched
+# to code and the board drifts from the repo after every merge wave. The
+# companion workflow (jira-close-on-merge.yml) transitions tickets when a
+# PR merges — it can only do that for keys the title actually carries.
+#
+# Convention this enforces, and that the failure message teaches:
+#   - the title carries the key(s) the PR IMPLEMENTS: "WARP-123: …" or
+#     "fix(scope): … (WARP-123)"
+#   - keys that are merely REFERENCED (a gate, a follow-up, a related
+#     ticket) belong in the PR body, never the title — the close-on-merge
+#     automation closes every key it finds in the title
+#   - genuinely ticketless maintenance opts out with "[no-ticket]"
+#
+# Exempt: dependabot (its PRs never map to tickets) and branch-sync /
+# promotion PRs whose head is stage or main (their titles describe a
+# merge, not a ticket).
+#
+# Cost: one ~5-second ubuntu job per PR event. No checkout, no actions.
+
+on:
+  pull_request:
+    # `edited` matters: a title fix must re-run the lint and clear the red X.
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  title-carries-ticket:
+    name: title carries a WARP key
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the title
+        env:
+          # env indirection — a PR title is attacker-controlled input and
+          # must never be interpolated into the script text itself.
+          TITLE: ${{ github.event.pull_request.title }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -u
+          if [ "$AUTHOR" = "dependabot[bot]" ]; then
+            echo "dependabot PR — exempt"; exit 0
+          fi
+          case "$HEAD_REF" in
+            stage|main)
+              echo "branch sync / promotion PR (head=$HEAD_REF) — exempt"; exit 0 ;;
+          esac
+          if printf '%s' "$TITLE" | grep -qE 'WARP-[0-9]+'; then
+            echo "title carries a WARP key"; exit 0
+          fi
+          if printf '%s' "$TITLE" | grep -qF '[no-ticket]'; then
+            echo "explicitly ticketless via [no-ticket]"; exit 0
+          fi
+          echo "::error title=PR title needs a WARP key::Add the ticket this PR implements to the title — 'WARP-123: …' or '… (WARP-123)'. Keys that are only referenced belong in the body, not the title (the title is what closes tickets on merge). For genuinely ticketless maintenance, add [no-ticket] to the title."
+          exit 1

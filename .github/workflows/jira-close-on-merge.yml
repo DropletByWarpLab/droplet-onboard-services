@@ -1,0 +1,119 @@
+name: jira-close-on-merge
+
+# Board truth, half 2 — merging a PR closes the ticket(s) its title names.
+#
+# The 2026-08-15 readout found 68 open tickets whose implementing PR had
+# already merged (median closure lag 0.92 days, p90 16.9). Tickets were
+# being closed by hand in batch sweeps; this closes them at the moment the
+# state actually changed, so the board stops needing sweeps.
+#
+# Contract (enforced socially by pr-title-ticket-lint.yml):
+#   - every WARP key in the MERGED PR's title is transitioned to Done
+#     (transition 51 — global in the WARP workflow) after a comment naming
+#     the PR
+#   - reference-only keys belong in the PR body, which this never reads
+#   - "[no-close]" in the title skips the transition for partial work
+#     (the comment is still posted, so the ticket links its PRs)
+#
+# Scope: fires on merges into stage or main from feature branches. A
+# promotion PR (head=stage) and syncs (head=main) are skipped — their
+# titles describe a merge, not a ticket, and stage→main would double-fire
+# every key that already closed when the feature landed on stage.
+#
+# Secrets: JIRA_EMAIL + JIRA_API_TOKEN (an Atlassian API token for that
+# account). Absent secrets → the job succeeds with a notice instead of
+# painting merged PRs red; the lint keeps titles honest either way.
+#
+# Failure posture: a Jira hiccup is a ::warning, never a failed check —
+# the merge already happened, and a red X on a merged PR is pure noise.
+# The job fails only if EVERY key errored, so a dead token stays visible.
+#
+# Cost: one ~10-second ubuntu job per merged PR. No checkout, no actions.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [stage, main]
+
+permissions: {}
+
+jobs:
+  close-tickets:
+    name: transition merged tickets to Done
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.ref != 'stage' &&
+      github.event.pull_request.head.ref != 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment and transition
+        env:
+          # env indirection — the title is untrusted input; never
+          # interpolate it into the script text.
+          TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_BASE_URL: https://warp-lab.atlassian.net
+        run: |
+          set -u
+          if [ -z "$JIRA_EMAIL" ] || [ -z "$JIRA_API_TOKEN" ]; then
+            echo "::notice title=jira-close-on-merge is dormant::JIRA_EMAIL / JIRA_API_TOKEN secrets are not set, so tickets were not transitioned. See the workflow header."
+            exit 0
+          fi
+
+          KEYS=$(printf '%s' "$TITLE" | grep -oE 'WARP-[0-9]+' | sort -u)
+          if [ -z "$KEYS" ]; then
+            echo "no WARP keys in title — nothing to do"; exit 0
+          fi
+
+          NO_CLOSE=0
+          if printf '%s' "$TITLE" | grep -qF '[no-close]'; then
+            NO_CLOSE=1
+            echo "[no-close] present — commenting only, no transitions"
+          fi
+
+          # The comment body is built with jq so the PR title lands in the
+          # JSON as data, never as syntax.
+          COMMENT_JSON=$(jq -n --arg text "PR #${PR_NUMBER} merged into ${BASE_REF}: ${TITLE} — ${PR_URL}" \
+            '{body:{type:"doc",version:1,content:[{type:"paragraph",content:[{type:"text",text:$text}]}]}}')
+
+          OK=0; FAILED=0
+          for KEY in $KEYS; do
+            # Comment first, then transition — the link survives even if
+            # the transition is rejected.
+            C=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -X POST "$JIRA_BASE_URL/rest/api/3/issue/$KEY/comment" \
+              -d "$COMMENT_JSON" || echo 000)
+            if [ "$C" != "201" ]; then
+              echo "::warning title=Jira comment failed::$KEY comment returned HTTP $C"
+              FAILED=$((FAILED+1)); continue
+            fi
+            if [ "$NO_CLOSE" = "1" ]; then OK=$((OK+1)); continue; fi
+            T=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -X POST "$JIRA_BASE_URL/rest/api/3/issue/$KEY/transitions" \
+              -d '{"transition":{"id":"51"}}' || echo 000)
+            if [ "$T" = "204" ]; then
+              echo "$KEY → Done"
+              OK=$((OK+1))
+            else
+              # Already-Done re-transitions also return 204 in this
+              # workflow (51 is global), so a non-204 is a real problem.
+              echo "::warning title=Jira transition failed::$KEY transition returned HTTP $T"
+              FAILED=$((FAILED+1))
+            fi
+          done
+
+          echo "done: $OK ok, $FAILED failed"
+          if [ "$OK" -eq 0 ] && [ "$FAILED" -gt 0 ]; then
+            # Every key failed — likely a dead token; surface it as red so
+            # someone notices, rather than silently rotting.
+            exit 1
+          fi
