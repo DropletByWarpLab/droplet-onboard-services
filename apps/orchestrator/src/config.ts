@@ -688,12 +688,24 @@ const envSchema = z.object({
   //                    releases, but never swaps containers. This is the correct
   //                    posture for dev laptops + CI (no host socket) and until
   //                    the compose socket mount is provisioned on a box.
-  //   COMPOSE_FILE   — the on-host compose file the helper drives.
+  //   COMPOSE_FILE   — the compose file the helper drives. WARP-1669: this
+  //                    path must be valid BOTH on the host and inside the
+  //                    orchestrator container, because the compose CLI runs
+  //                    in-container while the daemon resolves the file's
+  //                    relative bind mounts on the host. docker-compose.yml
+  //                    mounts the tree at its own host path (DROPLET_HOST_ROOT)
+  //                    to satisfy that; the default below is only the
+  //                    conventional install location.
+  //   CONFIG_ROOT    — where a release's configs.tar.gz is extracted. CI packs
+  //                    it as `docker/…` (`git archive HEAD docker`), so this is
+  //                    the REPO ROOT, one level above the compose file. The
+  //                    helper derives exactly that when this is unset.
   //   UPDATES_DIR    — root for <updateId>/{backup,configs.tar.gz}; the 7-day
   //                    backup GC (daily purge cron) reaps terminal-update dirs
   //                    under it. Maps to a named volume on the box.
   DROPLET_OTA_APPLY_SCRIPT: z.string().default(""),
   DROPLET_OTA_COMPOSE_FILE: z.string().default("/opt/droplet/docker/docker-compose.yml"),
+  DROPLET_OTA_CONFIG_ROOT: z.string().default(""),
   DROPLET_OTA_UPDATES_DIR: z.string().default("/data/updates"),
 
   // Client-app downloads — the Droplet apps (Windows installer, Android APK,

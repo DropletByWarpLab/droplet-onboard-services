@@ -127,8 +127,9 @@ run_capture() {
 }
 
 # ── WARP-244: pull-time image signature verification ─────────────────────────
-# Only images keyless-signed by THIS repo's publish-release workflow on main
-# may be pulled. cosign fetches the signature bundle from ghcr.io (the same
+# Only images keyless-signed by THIS repo's publish-release workflow, running
+# on a RELEASE BRANCH, may be pulled. cosign fetches the signature bundle from
+# ghcr.io (the same
 # registry the pull itself needs) and verifies it OFFLINE against the trust
 # root embedded in the vendored, checksum-pinned binary (orchestrator
 # Dockerfile, WARP-537) — no Rekor/TUF egress at verify time.
@@ -139,7 +140,13 @@ run_capture() {
 # access pulling manually (docs/SECURITY.md). The canonical "image-verify:"
 # stderr prefix is load-bearing: apply.ts classifies it as
 # rejected/image_signature_failed instead of retrying.
-COSIGN_IDENTITY_REGEXP='^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/main$'
+# WARP-1670 — main (stable) and stage (stage channel) are BOTH legitimate
+# publishers, so the identity accepts either. Written as an explicit
+# two-branch alternation, never `refs/heads/.*`: this regexp is the whole
+# supply-chain gate in front of `docker pull`, and a wildcard would let any
+# pushed branch mint images the box will trust. Adding a channel means
+# adding its branch here, on purpose, in a reviewed diff.
+COSIGN_IDENTITY_REGEXP='^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/(main|stage)$'
 COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
 # Ephemeral registry auth for BOTH cosign (in-process HTTPS to ghcr.io) and
@@ -339,7 +346,11 @@ cmd_snapshot() {
   # the deployment's config-root tar + a psql schema dump; kept as a single
   # host op so the backup is one directory the 7-day GC (WARP-539) reaps.
   log "snapshot for $UPDATE_ID -> $BACKUP_DIR"
-  run tar -czf "$BACKUP_DIR/configs-pre-image.tar.gz" -C "$(config_root)" .
+  # Scoped to the config subdir so the pre-image mirrors the layout of the
+  # release's own configs.tar.gz — restore-configs untars either one into
+  # config_root and gets the same tree back (WARP-1669).
+  run tar -czf "$BACKUP_DIR/configs-pre-image.tar.gz" \
+    -C "$(config_root)" "$(config_subdir)"
   # Schema-only pg_dump into the backup. Best-effort: a box whose DB is not up
   # yet must still snapshot its configs. Under dry-run only the command prints.
   if [ -n "$DRY_RUN" ]; then
@@ -352,10 +363,29 @@ cmd_snapshot() {
   fi
 }
 
-# Where the host config tree that stage-configs overwrites lives. The
-# deployment sets DROPLET_OTA_CONFIG_ROOT; default to the compose file's dir.
+# Where the host config tree that stage-configs overwrites lives.
+#
+# WARP-1669: this is the REPO ROOT, not the compose file's own directory.
+# CI packs configs with `git archive HEAD docker` (publish-release.yml), so
+# every entry in configs.tar.gz is prefixed `docker/`. Extracting that into
+# the compose dir — the old default — produced `…/docker/docker/…` on every
+# deployment, silently: tar happily creates the nested tree and the running
+# stack keeps reading the real one, so the update looks applied and changes
+# nothing.
+#
+# DROPLET_OTA_CONFIG_ROOT still overrides for layouts that don't put the
+# compose file one level below the packed root.
 config_root() {
-  printf '%s' "${DROPLET_OTA_CONFIG_ROOT:-$(dirname "$COMPOSE_FILE")}"
+  printf '%s' "${DROPLET_OTA_CONFIG_ROOT:-$(dirname "$(dirname "$COMPOSE_FILE")")}"
+}
+
+# The single subdirectory of config_root that a release's configs.tar.gz
+# owns — `docker`, matching what CI packs. Snapshot/restore are scoped to
+# it: `tar -C "$(config_root)" .` would otherwise pack the ENTIRE repo
+# (node_modules, data/, every volume-backed file under it) into a backup
+# taken on the critical path of every update.
+config_subdir() {
+  printf '%s' "$(basename "$(dirname "$COMPOSE_FILE")")"
 }
 
 cmd_pull_images() {

@@ -160,6 +160,7 @@ run_apply() {
   DOCKER_STUB_HELPER_JSON="${DOCKER_STUB_HELPER_JSON:-}" \
   COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  DROPLET_OTA_CONFIG_ROOT="${DROPLET_OTA_CONFIG_ROOT:-}" \
   bash "$APPLY_SH" "$@"
 }
 
@@ -773,6 +774,95 @@ if printf '%s\n' "$DRY_GC_OUT" | grep -q "^DRY-RUN: docker logs droplet-ota-self
   pass "dry-run prints the GC commands without touching anything"
 else
   fail "dry-run GC output/side-effects wrong (got: $DRY_GC_OUT)"
+fi
+
+# =============================================================================
+# 7. WARP-1669 — config-tree paths: the tar round-trip CI packs and the
+#    device unpacks. These are the assertions that were missing when
+#    stage-configs shipped double-nesting every deployment.
+# =============================================================================
+echo ""
+echo "  7. Config tree: pack like CI, extract like the device"
+
+# A deployment laid out exactly like the real one: <root>/docker/<compose>.
+CFG_ROOT="$TMP/cfgroot"
+mkdir -p "$CFG_ROOT/docker/nginx"
+cat > "$CFG_ROOT/docker/docker-compose.yml" <<'EOF'
+services:
+  orchestrator:
+    image: placeholder
+EOF
+echo "old-nginx" > "$CFG_ROOT/docker/nginx/nginx.conf"
+echo "keep-me" > "$CFG_ROOT/untracked-runtime-state"
+
+# configs.tar.gz exactly as publish-release.yml builds it: `git archive
+# HEAD docker`, so every entry is prefixed `docker/`.
+NEWCFG="$TMP/newcfg"
+mkdir -p "$NEWCFG/docker/nginx"
+cat > "$NEWCFG/docker/docker-compose.yml" <<'EOF'
+services:
+  orchestrator:
+    image: shipped-by-release
+EOF
+echo "new-nginx" > "$NEWCFG/docker/nginx/nginx.conf"
+CONFIGS_TAR="$TMP/configs.tar.gz"
+tar -czf "$CONFIGS_TAR" -C "$NEWCFG" docker
+
+CFG_UPDATE_ID="du-cfg-1"
+CFG_UDIR="$UPDATES_DIR/$CFG_UPDATE_ID"
+mkdir -p "$CFG_UDIR/backup"
+
+# 7a. snapshot packs ONLY the config subdir — not the whole repo root.
+run_apply snapshot --update-id "$CFG_UPDATE_ID" \
+  --compose-file "$CFG_ROOT/docker/docker-compose.yml" \
+  --backup-dir "$CFG_UDIR/backup" >/dev/null 2>&1 || true
+PRE_TAR="$CFG_UDIR/backup/configs-pre-image.tar.gz"
+if [ -f "$PRE_TAR" ] \
+   && tar -tzf "$PRE_TAR" | grep -q "^docker/docker-compose.yml$" \
+   && ! tar -tzf "$PRE_TAR" | grep -q "untracked-runtime-state"; then
+  pass "snapshot packs the docker/ subtree only, rooted the same way as the release tar"
+else
+  fail "snapshot tar has the wrong root/scope (entries: $(tar -tzf "$PRE_TAR" 2>/dev/null | tr '\n' ' '))"
+fi
+
+# 7b. stage-configs lands the release configs OVER the live tree — not in a
+#     nested docker/docker/. This is the defect: tar happily creates the
+#     nested path, the stack keeps reading the real one, and the update
+#     reports success having changed nothing.
+run_apply stage-configs --update-id "$CFG_UPDATE_ID" \
+  --compose-file "$CFG_ROOT/docker/docker-compose.yml" \
+  --configs-tar "$CONFIGS_TAR" >/dev/null 2>&1
+if grep -q "shipped-by-release" "$CFG_ROOT/docker/docker-compose.yml" \
+   && [ ! -e "$CFG_ROOT/docker/docker" ]; then
+  pass "stage-configs extracts to <root>/docker, never <root>/docker/docker"
+else
+  fail "stage-configs double-nested or missed (docker/docker exists: $([ -e "$CFG_ROOT/docker/docker" ] && echo yes || echo no))"
+fi
+
+# 7c. restore-configs puts the pre-image back — the rollback half of 7b. It
+#     reads the snapshot 7a already wrote at the canonical backup path.
+run_apply restore-configs --update-id "$CFG_UPDATE_ID" \
+  --compose-file "$CFG_ROOT/docker/docker-compose.yml" >/dev/null 2>&1
+if grep -q "placeholder" "$CFG_ROOT/docker/docker-compose.yml" \
+   && grep -q "old-nginx" "$CFG_ROOT/docker/nginx/nginx.conf" \
+   && [ ! -e "$CFG_ROOT/docker/docker" ]; then
+  pass "restore-configs rolls the tree back to the snapshot"
+else
+  fail "restore-configs did not restore the pre-image tree"
+fi
+
+# 7d. An explicit DROPLET_OTA_CONFIG_ROOT still wins over the derivation,
+#     for layouts that don't put the compose file one level down.
+ALT_ROOT="$TMP/altroot"
+mkdir -p "$ALT_ROOT"
+DROPLET_OTA_CONFIG_ROOT="$ALT_ROOT" run_apply stage-configs \
+  --update-id "$CFG_UPDATE_ID" \
+  --compose-file "$CFG_ROOT/docker/docker-compose.yml" \
+  --configs-tar "$CONFIGS_TAR" >/dev/null 2>&1
+if [ -f "$ALT_ROOT/docker/docker-compose.yml" ]; then
+  pass "DROPLET_OTA_CONFIG_ROOT overrides the compose-relative derivation"
+else
+  fail "explicit DROPLET_OTA_CONFIG_ROOT was ignored"
 fi
 
 # =============================================================================

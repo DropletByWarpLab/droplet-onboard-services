@@ -20,6 +20,8 @@ outside the tests references this directory.
 | `release.malformed.json` + `.sig` | Truncated JSON, correctly signed with key A — passes signature, fails parse → `malformed_manifest`. |
 | `release.schema-downgrade.json` + `.sig` | `schemaVersion: 0`, correctly signed → `schema_downgrade`. |
 | `release.schema-invalid.json` + `.sig` | Parseable JSON with invalid fields (bad gitSha, empty services, bad sha256), correctly signed → `schema_invalid`. |
+| `release.channel-beta.json` + `.sig` | Valid manifest claiming an unsubscribed channel → the poller's `channel_mismatch` gate. |
+| `release.channel-stage.json` + `.sig` | Valid manifest on `channel: stage` (WARP-1670) — the stage-box happy path, and the counter-example proving a stage-tagged release still has to say `stage` in its SIGNED manifest. |
 
 The malformed / downgrade / invalid fixtures are signed with the **valid**
 key on purpose: each test must prove its rejection comes from the named gate,
@@ -31,7 +33,8 @@ not from an incidental signature failure earlier in the chain.
 export COSIGN_PASSWORD=droplet-test-fixtures
 cosign generate-key-pair --output-key-prefix TEST-ONLY-signing      # only if rotating the fixture key
 for f in release.valid.json release.valid-v2.json release.schema-downgrade.json \
-         release.schema-invalid.json release.malformed.json; do
+         release.schema-invalid.json release.malformed.json \
+         release.channel-beta.json release.channel-stage.json; do
   cosign sign-blob --yes --key TEST-ONLY-signing.key --tlog-upload=false \
     --output-signature "$f.sig" "$f"
 done
@@ -43,3 +46,9 @@ cp release.valid.json.sig release.tampered.json.sig   # tampered = valid sig, mu
 `--tlog-upload=false` mirrors the production publish workflow
 (`.github/workflows/publish-release.yml`): private releases, offline
 key-based device verification, no public Rekor entry.
+
+On cosign v3 the signing defaults moved: add
+`--use-signing-config=false --new-bundle-format=false` to each
+`sign-blob` above, or it refuses `--tlog-upload=false` and emits a bundle
+the device-side `verify-blob --signature` path cannot read. Verification
+is unaffected — v3 still verifies these v2-shaped signatures.

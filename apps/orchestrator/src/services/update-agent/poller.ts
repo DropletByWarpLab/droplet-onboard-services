@@ -4,9 +4,13 @@
  * `checkForUpdate()` is the 15-minute tick (wired in index.ts through
  * cron-runtime `scheduleInterval` — no `while (true)`, per CLAUDE.md):
  *
- *   1. GET the GitHub Releases `latest` endpoint (deployment-configured
- *      via DROPLET_OTA_RELEASES_URL; DROPLET_OTA_GITHUB_TOKEN for the
- *      private repo).
+ *   1. Discover the newest release FOR THIS BOX'S CHANNEL (WARP-1670).
+ *      `stable` GETs the GitHub Releases `latest` endpoint
+ *      (deployment-configured via DROPLET_OTA_RELEASES_URL;
+ *      DROPLET_OTA_GITHUB_TOKEN for the private repo). Every other
+ *      channel lists releases and takes the newest tagged
+ *      `ota-<channel>-*`, because `latest` deliberately skips the
+ *      prereleases that non-stable channels publish as.
  *   2. Download the `release.json` + `release.json.sig` assets to a
  *      temp dir.
  *   3. Run the full WARP-537 trust chain (`verifyAndParseRelease`):
@@ -15,7 +19,10 @@
  *      `update.verify_failed` log event. Unverified data never touches
  *      the database.
  *   4. Refuse releases from a different channel than the device's
- *      persisted setting (single `stable` channel today).
+ *      persisted setting. This gate survives step 1's channel-aware
+ *      discovery on purpose: discovery filters on the TAG, which is
+ *      unsigned repo metadata, while this compares the channel inside
+ *      the cosign-verified manifest. Only the second one is trust.
  *   5. If the release's gitSha is already tracked (any status) — no-op:
  *      the table is append-only and one row per release is the
  *      invariant.
@@ -64,6 +71,13 @@ export interface CheckForUpdateOptions {
   prisma: PrismaClient;
   /** GitHub Releases `latest` endpoint (config.DROPLET_OTA_RELEASES_URL). */
   releasesLatestUrl: string;
+  /**
+   * WARP-1670 — the releases LIST endpoint, used by non-stable channels.
+   * Optional: derived from `releasesLatestUrl` when omitted (that is the
+   * production path — one .env knob, not two). Set it explicitly for
+   * mirrors, or for tests that serve a fake releases list.
+   */
+  releasesListUrl?: string;
   /** Token for private-repo access; omit for unauthenticated (tests). */
   githubToken?: string;
   fetchImpl?: typeof fetch;
@@ -72,6 +86,44 @@ export interface CheckForUpdateOptions {
   publicKeyPath?: string;
   /** Cosign binary override — tests only. */
   cosignBin?: string;
+}
+
+/**
+ * How deep to look for a channel's newest release. GitHub returns
+ * releases newest-first, and stable publishes interleave with stage
+ * ones, so this is "how many releases back a stage box will still find
+ * its build" — one page is many weeks at any realistic cadence, and
+ * bounding it keeps a poll to a single request.
+ */
+const RELEASES_LIST_PAGE_SIZE = 30;
+
+/**
+ * `…/releases/latest` → `…/releases?per_page=<n>`.
+ *
+ * Returns null when the configured URL is not a `latest` endpoint (a
+ * file-served test fake, say). Callers must treat that as "cannot
+ * discover for this channel" and say so — never as "no release", which
+ * would silently park a stage box on nothing forever.
+ */
+export function deriveReleasesListUrl(
+  releasesLatestUrl: string,
+  perPage = RELEASES_LIST_PAGE_SIZE,
+): string | null {
+  let url: URL;
+  try {
+    url = new URL(releasesLatestUrl);
+  } catch {
+    return null;
+  }
+  if (!url.pathname.endsWith("/releases/latest")) return null;
+  url.pathname = url.pathname.slice(0, -"/latest".length);
+  url.search = `?per_page=${perPage}`;
+  return url.toString();
+}
+
+/** The tag prefix a channel's releases carry (publish-release.yml). */
+export function channelTagPrefix(channel: string): string {
+  return `ota-${channel}-`;
 }
 
 export type CheckForUpdateResult =
@@ -119,30 +171,79 @@ export async function checkForUpdate(
   // Every-15-minutes chatter — debug, not info (WARP-541 level convention).
   log.debug?.({ event: "update.check_started" }, "OTA release check started");
 
-  // ── 1. discover the latest release ──
+  // The channel is read BEFORE discovery (WARP-1670): it selects which
+  // endpoint to ask, not just which answer to accept.
+  const settings = await getUpdateAgentSettings(opts.prisma);
+  const headers = {
+    accept: "application/vnd.github+json",
+    ...(opts.githubToken ? { authorization: `Bearer ${opts.githubToken}` } : {}),
+  };
+
+  // ── 1. discover the newest release for this box's channel ──
   let release: GithubLatestRelease;
-  try {
-    const res = await fetchImpl(opts.releasesLatestUrl, {
-      headers: {
-        accept: "application/vnd.github+json",
-        ...(opts.githubToken ? { authorization: `Bearer ${opts.githubToken}` } : {}),
-      },
-    });
-    if (res.status === 404) {
-      // No release published yet — normal on a fresh repo, debug only.
-      log.debug?.({ event: "update.no_release" }, "no OTA release published yet");
-      return { outcome: "no_release" };
-    }
-    if (!res.ok) {
-      const detail = `releases latest endpoint returned HTTP ${res.status}`;
+  if (settings.channel === "stable") {
+    // `latest` skips prereleases, so it already means "newest stable".
+    try {
+      const res = await fetchImpl(opts.releasesLatestUrl, { headers });
+      if (res.status === 404) {
+        // No release published yet — normal on a fresh repo, debug only.
+        log.debug?.({ event: "update.no_release" }, "no OTA release published yet");
+        return { outcome: "no_release" };
+      }
+      if (!res.ok) {
+        const detail = `releases latest endpoint returned HTTP ${res.status}`;
+        log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
+        return { outcome: "fetch_failed", detail };
+      }
+      release = (await res.json()) as GithubLatestRelease;
+    } catch (err) {
+      const detail = `releases latest endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`;
       log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
       return { outcome: "fetch_failed", detail };
     }
-    release = (await res.json()) as GithubLatestRelease;
-  } catch (err) {
-    const detail = `releases latest endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`;
-    log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
-    return { outcome: "fetch_failed", detail };
+  } else {
+    const listUrl =
+      opts.releasesListUrl ?? deriveReleasesListUrl(opts.releasesLatestUrl);
+    if (!listUrl) {
+      // Misconfiguration, not absence: say so loudly rather than reporting
+      // "no release" every 15 minutes on a box that can never find one.
+      const detail = `channel ${settings.channel} needs a releases list endpoint, and none could be derived from ${opts.releasesLatestUrl}`;
+      log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
+      return { outcome: "fetch_failed", detail };
+    }
+    let listed: GithubLatestRelease[];
+    try {
+      const res = await fetchImpl(listUrl, { headers });
+      if (!res.ok) {
+        const detail = `releases list endpoint returned HTTP ${res.status}`;
+        log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
+        return { outcome: "fetch_failed", detail };
+      }
+      const body = (await res.json()) as unknown;
+      if (!Array.isArray(body)) {
+        const detail = "releases list endpoint did not return an array";
+        log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
+        return { outcome: "fetch_failed", detail };
+      }
+      listed = body as GithubLatestRelease[];
+    } catch (err) {
+      const detail = `releases list endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`;
+      log.warn({ event: "update.check_failed", detail }, "OTA release check failed");
+      return { outcome: "fetch_failed", detail };
+    }
+    // GitHub returns releases newest-first. The tag prefix is a cheap
+    // pre-filter over UNSIGNED metadata — a release that lies in its tag
+    // still has to pass the manifest channel gate in step 4 below.
+    const prefix = channelTagPrefix(settings.channel);
+    const match = listed.find((r) => (r.tag_name ?? "").startsWith(prefix));
+    if (!match) {
+      log.debug?.(
+        { event: "update.no_release", channel: settings.channel },
+        "no OTA release published yet for this channel",
+      );
+      return { outcome: "no_release" };
+    }
+    release = match;
   }
 
   const assets = release.assets ?? [];
@@ -218,7 +319,9 @@ export async function checkForUpdate(
     );
 
     // ── 4. channel gate ──
-    const settings = await getUpdateAgentSettings(opts.prisma);
+    // Re-checked against the SIGNED manifest even though discovery already
+    // filtered on the tag: the tag is repo metadata anyone with write access
+    // can set, the manifest field is covered by the cosign signature.
     if (manifest.release.channel !== settings.channel) {
       log.warn(
         {
