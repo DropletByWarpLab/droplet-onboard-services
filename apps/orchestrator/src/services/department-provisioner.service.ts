@@ -89,6 +89,8 @@ interface DepartmentRow {
   slug: string;
   parentId: string | null;
   kind: "HOUSEHOLD" | "DEPARTMENT" | "TEAM";
+  /** Entry state — the verify branch keys its "convergence is news" gate on it. */
+  state: string;
   quotaBytes: bigint | null;
   ncGroupRw: string | null;
   ncGroupRo: string | null;
@@ -181,11 +183,17 @@ interface DepartmentIntent {
  *  3. It reuses `gfListFolders` — the exact call ADR-029 already carves out
  *     for id discovery, and one the provisioner makes on this code path
  *     anyway. The check therefore costs zero additional NC round-trips.
- *  4. It runs ONLY on the reconciler's failed-row retry sweep (see
- *     `provisionDepartment({ verifyOnFailure })`), never on first provision
- *     and never on the steady-state active-row drift pass. Those keep
- *     overwriting unconditionally, so the drift-overwrite guarantee in
- *     ADR-029 §3.6 is untouched.
+ *  4. It runs on the reconciler's sweeps only: the failed-row retry sweep
+ *     (WARP-1557) and — since groupfolders ≥ 17 turned the redundant
+ *     `addGroup` re-write into a duplicate-key HTTP 500 (droplet-sys,
+ *     2026-08-16; see ensureAdminsAttached in the reconciler) — the
+ *     steady-state active-row drift pass as well, where "overwrite
+ *     unconditionally" stopped being expressible. First provision still
+ *     writes unconditionally, and a folder that has drifted from intent
+ *     still falls through to the full overwrite path, so the
+ *     drift-overwrite guarantee in ADR-029 §3.6 holds; only the redundant
+ *     re-write of an already-converged folder (now a Nextcloud error, not
+ *     a no-op) is skipped.
  *
  * Without this, a row whose NC state already matches intent has no way to
  * observe that fact: the reconciler can only re-issue the write that is
@@ -212,10 +220,13 @@ function folderMatchesIntent(
 /** Options accepted by `provisionDepartment` / `archiveDepartment`. */
 export interface ProvisionOptions {
   /**
-   * WARP-1557 — retry-path-only convergence verification. Set by the
+   * WARP-1557 — reconciler-only convergence verification. Set by the
    * reconciler for rows that entered the sweep in a non-converged state
    * (`failed` / `provisioning`, and `archive_failed` / `archiving` on the
-   * archive side). Two things switch on:
+   * archive side), and — since groupfolders ≥ 17 made the redundant
+   * `addGroup` re-write fail with a duplicate-key 500 (droplet-sys,
+   * 2026-08-16) — by the steady-state active-row drift pass too (see
+   * `folderMatchesIntent` point 4). Two things switch on:
    *
    *   1. a pre-write check that skips the writes entirely when Nextcloud
    *      already matches the Prisma-derived intent (see
@@ -223,8 +234,8 @@ export interface ProvisionOptions {
    *   2. `confirmOnFailure` on every NC write, so a write that reports 5xx
    *      but actually landed is not treated as a failure.
    *
-   * Deliberately OFF by default: first-provision and steady-state drift
-   * passes keep the pre-WARP-1557 write-only behaviour.
+   * Deliberately OFF by default: first provision keeps the write-only
+   * behaviour — a never-attempted row has nothing to verify.
    */
   verifyOnFailure?: boolean;
 }
@@ -319,25 +330,32 @@ export async function provisionDepartment(
             ncGroupfolderId: existing.id,
           },
         });
-        logger.warn(
-          { id, folderId: existing.id, mountPoint },
-          "WARP-1557: department already matched intent in Nextcloud; converged without re-issuing writes",
-        );
-        await recordActivity({
-          kind: "system",
-          severity: "ok",
-          sourceIcon: "folder-check",
-          what: "Department converged (already provisioned)",
-          sub: dept.name,
-          refs: {
-            departmentId: dept.id,
-            kind: dept.kind,
-            mountPoint,
-            folderId: existing.id,
-            verified: true,
-          },
-          actor: { type: "system" },
-        });
+        // Convergence is only NEWS when the row was actually failing. The
+        // steady-state drift pass (reconcileActiveDepartment) hits this
+        // branch on EVERY tick for EVERY healthy department now — a per-tick
+        // warn + ActivityRow here would itself be the log spam this branch
+        // exists to prevent.
+        if (dept.state !== "active") {
+          logger.warn(
+            { id, folderId: existing.id, mountPoint },
+            "WARP-1557: department already matched intent in Nextcloud; converged without re-issuing writes",
+          );
+          await recordActivity({
+            kind: "system",
+            severity: "ok",
+            sourceIcon: "folder-check",
+            what: "Department converged (already provisioned)",
+            sub: dept.name,
+            refs: {
+              departmentId: dept.id,
+              kind: dept.kind,
+              mountPoint,
+              folderId: existing.id,
+              verified: true,
+            },
+            actor: { type: "system" },
+          });
+        }
         return;
       }
     }
