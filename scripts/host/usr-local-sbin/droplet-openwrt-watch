@@ -1,0 +1,78 @@
+#!/bin/sh
+# droplet-openwrt-watch — re-apply the openwrt attach on container lifecycle
+# (WARP-2064).
+#
+# The problem this closes: every host-side provision of the droplet-openwrt
+# container is PER-NETNS — the AP phy move, the OpenWrt root password, the
+# hostapd conf, and the WG overlay NAT whose DNAT/masquerade/DOCKER-USER rules
+# name the container's bridge IP (droplet-openwrt-attach:~1538). All of it is
+# rebuilt only when droplet-openwrt-attach runs, and that unit is a boot-time
+# oneshot re-triggered only by the WARP-843 creds watcher and by setup.sh. A
+# no-wipe deploy that recreates the container (`docker compose up -d` onto a
+# new main — an acknowledged live path, see compose.sh) left the NAT pointing
+# at a dead IP: inbound udp/51820 DNATed to a corpse and dropped with no ICMP,
+# no log line and no failing health signal — the WARP-1980 silent-blackhole
+# shape, this time armed by a routine deploy.
+#
+# Design: block on the docker events stream and fire the existing WARP-843
+# reapply relay (which serializes restarts of the attach service) on every
+# container `start`. This is EVENT-DRIVEN, not a poller — the read blocks on
+# the docker socket at zero cost until an event arrives (the architecture rule
+# against while-true schedulers targets busy polling; a blocking event
+# consumer is the opposite of one). The stream dies when dockerd restarts;
+# systemd Restart=always brings the watcher back, and the startup heal below
+# covers whatever happened in the gap.
+#
+# Repo-tracked at scripts/host/usr-local-sbin/ and installed by
+# scripts/lib/single-box.sh (setup.sh --single-box) — never hand-placed.
+set -u
+
+CONTAINER="droplet-openwrt"
+REAPPLY_UNIT="droplet-openwrt-attach-reapply.service"
+
+log() { echo "droplet-openwrt-watch: $*"; }
+
+reapply() {
+  # The relay is the single serialization point (systemd coalesces starts of
+  # the same unit), and it performs the *restart* the RemainAfterExit attach
+  # unit needs. A failure must not kill the watcher — log and keep watching.
+  systemctl start "$REAPPLY_UNIT" || log "WARN: could not start $REAPPLY_UNIT — attach not re-applied"
+}
+
+# --- Startup heal ------------------------------------------------------------
+# Events that fired while this watcher was down are gone — the stream has no
+# replay. Detect the one stale state a missed event leaves behind: the overlay
+# DNAT naming an IP the live container no longer holds. Guarded so a box where
+# the attach has not run yet (no nft table) or the container is down changes
+# nothing — boot-time provisioning belongs to the attach unit itself.
+live_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$CONTAINER" 2>/dev/null | awk '{print $1}')
+if [ -n "${live_ip:-}" ] && nft list table ip droplet_overlay_nat >/dev/null 2>&1; then
+  if ! nft list table ip droplet_overlay_nat 2>/dev/null | grep -q "dnat to ${live_ip}:51820"; then
+    log "overlay DNAT does not target the live container IP ${live_ip} — re-applying attach"
+    reapply
+  fi
+fi
+
+# --- Event loop --------------------------------------------------------------
+# Each `start` of the container is a fresh (or reset) netns: the phy, the AP,
+# the root password and the host NAT are all gone, so re-apply unconditionally
+# — the attach script is idempotent by design (it drops and rebuilds its whole
+# nft table each run, and hostapd only respawns when its conf changed).
+# NO --format template here: the events message struct differs across Docker
+# versions ("can't evaluate field Status in type *events.Message" on the box's
+# docker — caught live on droplet-sys, 2026-08-16). The default text line is
+# stable everywhere, and its content is irrelevant — the filters guarantee
+# every line IS a start of our container.
+docker events \
+  --filter "container=${CONTAINER}" \
+  --filter event=start \
+  | while read -r _event; do
+      log "container ${CONTAINER} started — re-applying attach (per-netns provisioning is gone)"
+      reapply
+    done
+
+# The pipeline ends only when the docker events stream does (dockerd restart
+# or shutdown). Exit non-zero so systemd's Restart=always is doing what the
+# unit says it does, rather than restarting a "successful" unit.
+log "docker events stream ended — exiting for systemd to restart the watch"
+exit 1
