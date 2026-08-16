@@ -18,8 +18,23 @@ RestartSec=10
 # launcher writes net.netfilter.nf_conntrack_acct.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/droplet/egress-audit
+# read-only, NOT yes: /etc/default/droplet-egress-audit points DROPLET_ENV_FILE
+# and DROPLET_EGRESS_ALLOWLIST at @REPO_ROOT@, which lives under /home on a
+# normal install. `ProtectHome=yes` makes /home an empty tmpfs inside the
+# namespace, so the launcher's `grep SERVICE_TOKEN_EGRESS_AUDIT "$DROPLET_ENV_FILE"`
+# failed with "No such file or directory" and the unit exited 2/INVALIDARGUMENT.
+# The collector only ever READS those two files, so read-only is sufficient.
+ProtectHome=read-only
+# StateDirectory=, NOT ReadWritePaths=: systemd only whitelists ReadWritePaths,
+# it never creates them, and namespace setup hard-fails 226/NAMESPACE when the
+# path is absent. Nothing in the installer created /var/lib/droplet/egress-audit,
+# so with Restart=on-failure the unit crash-looped every 10s and had never once
+# started. sink.py's own mkdir could not save it — the interpreter never ran.
+# StateDirectory is set up BEFORE the namespace, implies ReadWritePaths, and
+# self-heals after a factory reset. It is relative to /var/lib, so this yields
+# exactly /var/lib/droplet/egress-audit. Mode stays default 0755 because
+# docs/security/egress-audit.md documents tailing the NDJSON as a non-root user.
+StateDirectory=droplet/egress-audit
 PrivateTmp=yes
 
 [Install]

@@ -270,6 +270,20 @@ vi.mock("@prisma/client", () => {
           },
         ];
       }
+      // WARP-2056 — files the extractors produced no text for.
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "FileIndexStatus" WHERE "userId" = \$1 AND "status" = 'skipped'$/.test(
+          sql,
+        )
+      ) {
+        return [
+          {
+            c: BigInt(
+              fisFor(userId).filter((f) => f.status === "skipped").length,
+            ),
+          },
+        ];
+      }
       // Indexed-text bytes for synced chunks
       if (/sum\(length\("text"\)\), 0\)::bigint AS b\s+FROM "FileContentChunk"/.test(sql)) {
         return [

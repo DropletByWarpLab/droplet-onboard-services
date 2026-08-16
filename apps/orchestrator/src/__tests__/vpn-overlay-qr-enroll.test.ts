@@ -752,10 +752,9 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
   // ── re-approve is the RECOVERY path for a failed provision ──
   describe("re-approve retries provisioning (the only recovery a box has)", () => {
     // Provision failure leaves the row 'approved' with no peer, and /profile
-    // 503s. The connect tick that would otherwise self-heal is behind
-    // OVERLAY_CONNECT_ENABLED, which defaults false and appears in no
-    // deployment artifact — so on a shipping box re-approve is the ONLY way
-    // out. It must actually retry, not short-circuit to a no-op.
+    // 503s. The connect tick runs by default since WARP-1767, but it only acts
+    // on a session the device initiates — so re-approve stays the recovery the
+    // owner can drive. It must actually retry, not short-circuit to a no-op.
     it("recovers a device stuck approved-with-no-peer, still without a second vouch", async () => {
       const overlayEnroll = vi.fn(async () => ({ device_ref: "hq-dev-9" }));
       const { app, prisma } = buildApp({ overlayEnroll });
@@ -1173,10 +1172,10 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     expect(res.status).toBe(503);
     expect(res.body.error).toBe("tunnel_not_ready");
     expect(res.body.message).not.toMatch(/[a-z]+_[a-z]+/);
-    // Nothing retries this on its own: the connect tick that could self-heal is
-    // behind OVERLAY_CONNECT_ENABLED (default false, in no deployment
-    // artifact). "Try again in a moment" would promise progress that never
-    // comes; the copy must name the action that DOES recover it — re-approval.
+    // Nothing retries this on its own. The connect tick (on by default since
+    // WARP-1767) waits on the device to start a session, so "try again in a
+    // moment" would promise progress the box is not making; the copy must name
+    // the action that DOES recover it — re-approval.
     expect(res.body.message).not.toMatch(/in a moment/i);
     expect(res.body.message).toMatch(/approv/i);
   });

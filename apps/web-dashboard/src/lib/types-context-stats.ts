@@ -38,6 +38,12 @@ export interface ContextStatsSummary {
   chunks: number;
   queued: number;
   failed: number;
+  /** WARP-2056 — files the indexer produced no text for. `files` counts
+   *  every status, so without this the panel reports a total well above
+   *  what is actually searchable and gives the user no way to see the
+   *  difference. Surfaced as "Not indexed"; a normal outcome for photos
+   *  and installers, so it reads as information rather than an error. */
+  skipped: number;
   recentlyIndexed: RecentlyIndexedItem[];
 }
 

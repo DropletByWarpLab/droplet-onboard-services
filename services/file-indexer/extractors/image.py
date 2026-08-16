@@ -21,12 +21,49 @@ from extractors.types import ExtractedDoc
 
 OCR_CONFIDENCE_THRESHOLD = int(os.environ.get("OCR_CONFIDENCE_THRESHOLD", 50))
 
+# Longest edge fed to Tesseract. Modern camera output is ~45 MP (8256x5504);
+# OCR at that size costs minutes and a lot of RAM for no accuracy gain, since
+# any text large enough to read survives the downscale.
+OCR_MAX_EDGE_PX = int(os.environ.get("OCR_MAX_EDGE_PX", 4000))
+
 
 def _mean_confidence(data: dict) -> float:
     confs = [int(c) for c in data.get("conf", []) if c not in (None, "-1", -1, "")]
     if not confs:
         return 0.0
     return sum(confs) / len(confs)
+
+
+def _prepare_for_ocr(img: Image.Image) -> Image.Image:
+    """Normalize an image into something Tesseract will accept and finish.
+
+    pytesseract validates ``Image.format`` against its own allow-list before
+    doing anything, and raises ``TypeError: Unsupported image format/type``
+    for anything outside it. Camera JPEGs are commonly **MPO** (a JPEG that
+    carries several frames), which Pillow decodes perfectly but which is not
+    on that list — so photographed documents were rejected before OCR ever
+    ran.
+
+    Rather than mirror pytesseract's allow-list here (it would drift on the
+    next upgrade), hand it an image whose ``format`` is None: that is the
+    in-memory case, which pytesseract treats as PNG and always accepts.
+    Pillow has already decoded the pixels by this point, so the on-disk
+    container format has no bearing on what Tesseract sees.
+
+    Also bounds the pixel count (see OCR_MAX_EDGE_PX).
+    """
+    oversized = max(img.size) > OCR_MAX_EDGE_PX
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")  # also drops `format`
+    elif img.format is not None or oversized:
+        # Own a copy before thumbnail(), which resizes in place — the caller
+        # (frame OCR, PDF page render) may still need its original.
+        img = img.copy()
+
+    if oversized:
+        img.thumbnail((OCR_MAX_EDGE_PX, OCR_MAX_EDGE_PX))
+
+    return img
 
 
 def _ocr_image(img: Image.Image) -> tuple[str, list[str], float]:
@@ -36,6 +73,7 @@ def _ocr_image(img: Image.Image) -> tuple[str, list[str], float]:
     `low_confidence_ocr` warning when text is non-empty but mean
     confidence falls below the threshold.
     """
+    img = _prepare_for_ocr(img)
     text = pytesseract.image_to_string(img).strip()
     data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
     mean_conf = _mean_confidence(data)

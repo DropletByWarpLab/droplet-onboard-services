@@ -1,0 +1,788 @@
+/* ============================================================
+   WARP-1992 — Reports bento.
+
+   Scoped under `.droplet-reports`, which sits INSIDE `.droplet-shell`
+   (ShellPage). Two token families are in play and the split is deliberate:
+
+     · surfaces, text, borders, radii, easing, accent  →  the indigo shell
+       scope (`--surface`, `--text`, `--text-muted`, `--border`, `--card-bg`,
+       `--card-bd`, `--brand`, `--brand-subtle`, `--radius-card`, `--ease`).
+       These are what make the page read as a sibling of Files / Network /
+       Health.
+
+     · status colour  →  the GLOBAL `--color-system-*` ramp from
+       globals.css, which already carries light AND dark values and is the
+       same ramp the design handoff names.
+
+   Use `--brand-subtle` for the accent wash, NOT the legacy pre-DESIGN.md
+   accent-subtle token — `scripts/check-dashboard-classes.sh` fails the build
+   on the latter. (That guard greps raw text, comments included, so this note
+   deliberately does not spell the forbidden name.)
+
+   No new tokens are defined here. Note `--color-system-red-text` for red
+   used as BODY TEXT — the vivid red computes ~3.1:1 on a tint and fails
+   WCAG AA (WARP-633). Vivid red stays for dots, borders, and icons.
+   ============================================================ */
+
+.droplet-reports {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Provenance strip ───────────────────────────────────────
+   Persistent, directly under the page header. Brief §3. */
+.rp-provenance {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.rp-provenance svg {
+  flex: 0 0 auto;
+  color: var(--brand);
+}
+
+.rp-provenance time {
+  font-family: var(--font-mono);
+}
+
+/* ── Date scope chips ───────────────────────────────────────── */
+.rp-scope {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--inset);
+}
+
+.rp-scope-chip {
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.25s var(--ease), color 0.25s var(--ease);
+}
+
+.rp-scope-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.rp-scope-chip[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--brand);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(20, 22, 45, 0.08);
+}
+
+/* ── The bento grid ─────────────────────────────────────────
+   Desktop 12-col. Tablet collapses to 6. Mobile is 2-col so the number
+   strip lands as a 2x2 instead of four full-width rows that would push
+   everything else below the fold (brief §8). */
+.rp-bento {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-auto-rows: minmax(132px, auto);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.rp-bento > [data-span="8x2"] { grid-column: span 8; grid-row: span 2; }
+.rp-bento > [data-span="4x2"] { grid-column: span 4; grid-row: span 2; }
+.rp-bento > [data-span="6x2"] { grid-column: span 6; grid-row: span 2; }
+.rp-bento > [data-span="3x1"] { grid-column: span 3; grid-row: span 1; }
+
+@media (max-width: 1279px) {
+  .rp-bento {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+  }
+  .rp-bento > [data-span="8x2"],
+  .rp-bento > [data-span="4x2"],
+  .rp-bento > [data-span="6x2"] { grid-column: span 6; }
+  .rp-bento > [data-span="3x1"] { grid-column: span 3; }
+}
+
+@media (max-width: 767px) {
+  .rp-bento {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .rp-bento > [data-span="8x2"],
+  .rp-bento > [data-span="4x2"],
+  .rp-bento > [data-span="6x2"] { grid-column: span 2; }
+  .rp-bento > [data-span="3x1"] { grid-column: span 1; }
+}
+
+/* ── Tile chrome ────────────────────────────────────────────
+   Every tile is the same card with the same header, so the page's
+   coherence comes from the header being identical everywhere. */
+.rp-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  background: var(--card-bg);
+  box-shadow: 0 1px 2px rgba(20, 22, 45, 0.04);
+  overflow: hidden;
+}
+
+@media (max-width: 767px) {
+  .rp-tile { padding: 16px; }
+}
+
+.rp-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.rp-tile-mark {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+.rp-tile-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* Trailing affordance in a tile header — a link, chip, or icon button. */
+.rp-tile-trail {
+  margin-left: auto;
+  font-size: 13px;
+}
+
+.rp-tile-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* Compact number tiles carry no mark square; the icon sits inline. */
+.rp-num {
+  gap: 6px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.rp-num-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Trailing affordance slot in a tile header. */
+.rp-tile-trail-slot {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Visually hidden but present for assistive tech. */
+.rp-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Number tiles ───────────────────────────────────────────
+   The tile is position:relative so the status dot can sit top-right. */
+.rp-tile[data-tile^="b"] {
+  position: relative;
+  gap: 6px;
+}
+
+.rp-num-count {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.rp-num-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── Status dot ─────────────────────────────────────────────
+   Never the only signal — every dot sits beside a label or an icon
+   (brief §8). `unknown` is the neutral tone, not a colour. */
+.rp-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--text-muted);
+}
+
+.rp-tile[data-tile^="b"] .rp-dot {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.rp-dot.is-ok { background: var(--color-system-green); }
+.rp-dot.is-warn { background: var(--color-system-orange); }
+.rp-dot.is-offline,
+.rp-dot.is-err { background: var(--color-system-red); }
+.rp-dot.is-info { background: var(--brand); }
+.rp-dot.is-unknown { background: var(--text-muted); }
+
+/* Activity rows use a smaller dot inline with the row. */
+.rp-evt .rp-dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* ── Shared tile states ─────────────────────────────────────
+   Locked / error / empty all share one frame so a tile can't invent its
+   own. The tile keeps its dimensions — a bento with holes reads as
+   broken, a bento with locked tiles reads as designed (brief §7). */
+.rp-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.rp-state p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.rp-state-err {
+  /* Icon, not body text — the vivid red is fine here. Body text uses
+     --color-system-red-text (WARP-633). */
+  color: var(--color-system-red);
+}
+
+.rp-state-link {
+  font-size: 13px;
+  color: var(--brand);
+  text-decoration: none;
+}
+
+.rp-state-link:hover { text-decoration: underline; }
+
+.rp-retry {
+  padding: 5px 12px;
+  border: 1px solid var(--card-bd);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rp-retry:hover { background: var(--hover); }
+
+/* ── Scrolling row lists (Folders, Activity) ────────────────
+   Capped so a long list scrolls INSIDE its tile rather than growing the
+   grid row and shunting every neighbour down. */
+.rp-rows {
+  flex: 1;
+  min-height: 0;
+  max-height: 236px;
+  overflow-y: auto;
+}
+
+@media (max-width: 767px) {
+  .rp-rows { max-height: 168px; }
+}
+
+.rp-foot {
+  padding-top: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.rp-mono { font-family: var(--font-mono); font-size: 13px; }
+.rp-muted { color: var(--text-muted); }
+
+/* ── Folders rows ───────────────────────────────────────────── */
+.rp-folder {
+  display: grid;
+  grid-template-columns: 1fr 84px 84px 96px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--card-bd);
+}
+
+.rp-folder-name { min-width: 0; }
+
+.rp-folder-title {
+  display: block;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-folder-kind {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.rp-folder .rp-mono { text-align: right; }
+
+.rp-bar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--inset-strong);
+  overflow: hidden;
+}
+
+.rp-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+
+.rp-bar-fill.is-ok { background: var(--brand); }
+.rp-bar-fill.is-warn { background: var(--color-system-orange); }
+.rp-bar-fill.is-over { background: var(--color-system-red); }
+
+@media (max-width: 767px) {
+  /* The bar is the first thing to go — the numbers carry the fact. */
+  .rp-folder { grid-template-columns: 1fr 72px 72px; }
+  .rp-folder .rp-bar { display: none; }
+}
+
+/* ── Activity rows ──────────────────────────────────────────── */
+.rp-evt {
+  display: grid;
+  grid-template-columns: 56px 6px 16px 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.rp-evt-time {
+  color: var(--text-muted);
+  padding-top: 1px;
+}
+
+.rp-evt .rp-dot { margin-top: 6px; }
+
+.rp-evt-ico {
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.rp-evt-tx {
+  min-width: 0;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.rp-evt-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Daily report tile ──────────────────────────────────────
+   The prose is generated, and the footer's job is to make that visible.
+   A generated paragraph that reads as a hand-written fact is the failure
+   mode this tile is designed against. */
+.rp-report {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* The only sustained motion on the page, and only while writing. */
+.rp-report.is-writing {
+  animation: rp-breathe 2s ease-in-out infinite;
+}
+
+@keyframes rp-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.92; }
+}
+
+.rp-report-writing {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.rp-report-prose {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Max measure — long prose lines are the fastest way to make a briefing
+     unreadable. */
+  max-width: 68ch;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.rp-report-prose p { margin: 0 0 10px; }
+.rp-report-prose p:last-child { margin-bottom: 0; }
+
+.rp-report-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--card-bd);
+}
+
+.rp-report-stamp {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rp-report-stamp.is-stale { color: #9a5b00; }
+.dark .rp-report-stamp.is-stale { color: var(--color-system-orange); }
+
+.rp-report-chips {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+/* Provenance, NOT navigation — no hover, no pointer, no lift. */
+.rp-src-chip {
+  padding: 2px 7px;
+  border-radius: 9999px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.rp-report-stale {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #9a5b00;
+}
+
+.dark .rp-report-stale { color: var(--color-system-orange); }
+
+.rp-report-reason {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The "Writing…" label carries the state instead. */
+  .rp-report.is-writing { animation: none; }
+}
+
+/* ── Money tile ─────────────────────────────────────────────
+   Two halves split by a rule. The lower half ships permanently in its
+   not-connected state — there is no accounts-payable source anywhere in
+   the product (brief §9.1). */
+.rp-tile[data-tile="a2"] .rp-tile-body,
+.rp-tile[data-tile="a2"] > .rp-money-half:first-of-type {
+  flex: 1;
+}
+
+.rp-money-half {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  min-height: 0;
+}
+
+.rp-money-half + .rp-money-half {
+  border-top: 1px solid var(--card-bd);
+  padding-top: 16px;
+  margin-top: 8px;
+}
+
+.rp-money-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.rp-money-fig {
+  font-family: var(--font-display, var(--font-ui));
+  font-size: 34px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* Stale is greyed but never hidden — a figure the user can see and
+   distrust beats one silently withheld. */
+.rp-money-fig.is-stale { color: var(--text-muted); }
+
+.rp-money-note {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.rp-money-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* A visual anchor, NOT a progress meter — its width never varies by value. */
+.rp-money-bar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  margin-top: 6px;
+}
+
+.rp-money-bar.is-in { background: var(--brand); }
+.rp-money-bar.is-inert { background: var(--card-bd); opacity: 0.5; }
+
+.rp-chip.is-stale { color: #9a5b00; }
+.dark .rp-chip.is-stale { color: var(--color-system-orange); }
+
+/* ── Connector rows ─────────────────────────────────────────
+   Two columns on desktop so six connectors fit without scrolling; one on
+   anything narrower, where two would crush the pill. */
+.rp-conns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+  align-content: start;
+}
+
+@media (max-width: 1279px) {
+  .rp-conns { grid-template-columns: 1fr; }
+}
+
+.rp-conn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 0;
+}
+
+.rp-conn-mark {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rp-conn-tx { min-width: 0; flex: 1; }
+
+.rp-conn-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-conn-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Reserve the line height so a row doesn't jump when the clock arrives. */
+  min-height: 16px;
+}
+
+/* ── Status pills ───────────────────────────────────────────
+   Every pill carries an icon AND a label — status is never colour alone
+   (brief §8). Red and orange as TEXT use the darker ramps; the vivid
+   values are ~3.1:1 and fail WCAG AA at 11px (WARP-633). */
+.rp-pill {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.rp-pill.is-ok { color: var(--success); }
+.rp-pill.is-warn { color: #9a5b00; }
+.rp-pill.is-bad { color: var(--color-system-red-text); }
+.rp-pill.is-accent { color: var(--brand); }
+.rp-pill.is-muted { color: var(--text-muted); }
+
+/* On dark the vivid ramps clear AA against the dark surface, and the
+   darkened light-mode values would not. */
+.dark .rp-pill.is-warn { color: var(--color-system-orange); }
+.dark .rp-pill.is-bad { color: var(--color-system-red); }
+
+.rp-chip.is-writes {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #9a5b00;
+}
+
+.dark .rp-chip.is-writes { color: var(--color-system-orange); }
+
+/* ── Chain-verify chip ──────────────────────────────────────
+   Renders a server-side fact, not a control — styled as a static pill
+   with no hover or press affordance. */
+.rp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.rp-chip.is-ok { color: var(--color-system-green); }
+/* Red as TEXT needs the darker ramp — the vivid red is ~3.1:1 and fails
+   WCAG AA at this size (WARP-633). */
+.rp-chip.is-broken { color: var(--color-system-red-text); }
+
+.dark .rp-chip.is-broken { color: var(--color-system-red); }
+
+/* ── Skeletons ──────────────────────────────────────────────
+   This story ships the grid; sibling stories fill the bodies. Under
+   reduced motion the shimmer is replaced by a flat fill (brief §8) —
+   the placeholder still reads as "not yet here" without animating. */
+.rp-skel-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.rp-skel {
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--inset) 25%,
+    var(--inset-strong) 37%,
+    var(--inset) 63%
+  );
+  background-size: 320px 100%;
+  animation: rp-shimmer 1.4s linear infinite;
+}
+
+@keyframes rp-shimmer {
+  0% { background-position: -160px 0; }
+  100% { background-position: 160px 0; }
+}
+
+/* One full turn on press, then settle — a half-turn that springs back reads
+   as a wobble rather than a refresh. */
+.rp-spin {
+  animation: rp-turn 0.25s var(--ease);
+}
+
+@keyframes rp-turn {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rp-skel {
+    background: var(--inset);
+    animation: none;
+  }
+  .rp-scope-chip {
+    transition: none;
+  }
+  .rp-spin {
+    animation: none;
+  }
+}
+
+/* ── Focus ──────────────────────────────────────────────────
+   Brief §8: 2px brand ring at 2px offset on every interactive element. */
+.droplet-reports :focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

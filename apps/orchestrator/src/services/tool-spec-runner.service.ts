@@ -75,6 +75,31 @@ export interface StepDispatcher {
   call(tool: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
+/**
+ * WARP-1996 — the `summarize` step's seam.
+ *
+ * A spec could previously only CALL tools; there was no way to turn what it
+ * gathered into prose. That is the whole shape of a daily report, so the
+ * step model gains its second kind. The Prisma comment on ToolStep already
+ * anticipated this ("future kinds may include branch, wait") and `kind` is a
+ * plain String column, so no migration is involved.
+ *
+ * Injected rather than imported so the walk stays testable without an
+ * inference backend, exactly like `StepDispatcher`.
+ */
+export interface Summarizer {
+  /**
+   * `facts` is the run's trace SO FAR — the results the earlier steps
+   * gathered. Returns the prose. Throws on failure, which the walk records
+   * as a failed step like any other.
+   */
+  summarize(prompt: string, facts: RunStepTrace[]): Promise<string>;
+}
+
+/** The trace's `tool` slot for a step that calls no tool. Reserved rather
+ *  than blank so a reader (and the Activity row) can tell what ran. */
+export const SUMMARIZE_PSEUDO_TOOL = "(summarize)";
+
 interface StoredStep {
   id: string;
   idx: number;
@@ -108,6 +133,13 @@ interface RunArgs {
   specName: string;
   steps: StoredStep[];
   triggeredBy: string | null;
+  /**
+   * WARP-1996 — required only by specs containing a `summarize` step. When a
+   * spec has one and this is absent the step fails honestly rather than
+   * silently producing nothing: a report that quietly skipped its narrative
+   * would look like a report with nothing to say.
+   */
+  summarizer?: Summarizer | null;
   /**
    * WARP-1580 — the resolved §3 tool reach this run executes under. `null` /
    * omitted = no narrowing (owner, service, role-less). Never pass `null` to
@@ -166,6 +198,35 @@ function parseCallStep(
       : {};
   return { tool: a.tool, args: inner };
 }
+
+/**
+ * WARP-1996 — parse a `summarize` step. `args.prompt` is optional; a spec
+ * that omits it gets the default framing.
+ *
+ * Returns null for any other kind, so the caller can fall through to the
+ * malformed handling that already existed.
+ */
+function parseSummarizeStep(step: { kind: string; args: unknown }): { prompt: string } | null {
+  if (step.kind !== "summarize") return null;
+  const a =
+    typeof step.args === "object" && step.args !== null
+      ? (step.args as Record<string, unknown>)
+      : {};
+  const prompt = typeof a.prompt === "string" && a.prompt.trim() ? a.prompt : DEFAULT_SUMMARY_PROMPT;
+  return { prompt };
+}
+
+/**
+ * The default framing. Deliberately instructs the model to name gaps rather
+ * than omit them — a report that silently drops the half it couldn't read is
+ * the failure mode this whole surface is built against.
+ */
+export const DEFAULT_SUMMARY_PROMPT =
+  "Write a short briefing, in the second person, from the results above. " +
+  "Two to five short paragraphs of prose — no bullet points, no headings. " +
+  "Use only figures that appear in the results; never estimate or infer a " +
+  "number. If something could not be read, say so plainly in one clause " +
+  "rather than leaving it out.";
 
 /**
  * WARP-1580 — the tool names a spec's steps will call, in step order.
@@ -228,6 +289,54 @@ export async function runToolSpec(
   const stepsToWalk = forbiddenTool === null ? args.steps : [];
 
   for (const step of stepsToWalk) {
+    // WARP-1996 — `summarize` is checked BEFORE the malformed guard, which
+    // treats every non-"call" kind as malformed. It dispatches no tool, so
+    // it is outside the §3 scope check by construction: there is nothing to
+    // authorize. What it reads is the trace this run already gathered under
+    // that check, so it can never widen the run's reach.
+    const summarizeStep = parseSummarizeStep(step);
+    if (summarizeStep) {
+      if (!args.summarizer) {
+        // Fail rather than skip. A report that quietly dropped its narrative
+        // would render as a report with nothing to say.
+        const msg = `step ${step.idx}: summarize step but no summarizer configured`;
+        trace.push({
+          idx: step.idx,
+          tool: SUMMARIZE_PSEUDO_TOOL,
+          args: {},
+          ok: false,
+          error: msg,
+        });
+        outcome = { status: "failed", trace, error: msg };
+        break;
+      }
+      try {
+        // The facts are the trace SO FAR — a copy, so the summarizer cannot
+        // mutate the run's own record of what happened.
+        const prose = await args.summarizer.summarize(summarizeStep.prompt, [...trace]);
+        trace.push({
+          idx: step.idx,
+          tool: SUMMARIZE_PSEUDO_TOOL,
+          args: { prompt: summarizeStep.prompt },
+          ok: true,
+          result: prose,
+        });
+        prev = prose;
+      } catch (err) {
+        const msg = (err as Error).message ?? String(err);
+        trace.push({
+          idx: step.idx,
+          tool: SUMMARIZE_PSEUDO_TOOL,
+          args: { prompt: summarizeStep.prompt },
+          ok: false,
+          error: msg,
+        });
+        outcome = { status: "failed", trace, error: `step ${step.idx} (summarize): ${msg}` };
+        break;
+      }
+      continue;
+    }
+
     const parsed = parseCallStep(step);
     if (!parsed) {
       const msg = `step ${step.idx}: malformed (kind=${step.kind})`;

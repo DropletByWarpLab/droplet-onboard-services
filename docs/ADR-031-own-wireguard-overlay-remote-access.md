@@ -1,6 +1,6 @@
 # ADR-031: Own WireGuard overlay for remote access (direct-first, hole-punched, HQ-signaled)
 
-- **Status:** Accepted (founder decision, Stefan Cruceru, 2026-07-18) — relay-fallback transport sub-decision pending the WARP-1390 spike
+- **Status:** Accepted (founder decision, Stefan Cruceru, 2026-07-18). The relay-fallback transport sub-decision it left open was settled 2026-08-15 — self-run blind relays, [ADR-040](ADR-040-blind-relay-fallback-for-punch-failures.md).
 - **Epic:** [WARP-1382](https://warp-lab.atlassian.net/browse/WARP-1382) · this doc: [WARP-1383](https://warp-lab.atlassian.net/browse/WARP-1383)
 - **Supersedes:** the *customer-facing client* story of ADR-025A (`droplet-fleet-hq`) as amended by WARP-1000 (Cloudflare One/WARP client + Zero Trust org). The box-side `cloudflared` relay and the `still-credit-6887` Zero Trust org **remain**, re-scoped to *internal-only* (team + WARP-Lab-operated pilot boxes).
 - **Builds on:** ADR-009 (no public inbound), ADR-023 (per-device public-CA TLS, split-horizon `<name>.droplet-us.com`), WARP-975 (named addresses), the P1 hybrid home/away peer model (PR #897), and the P2 native WG clients (android #18, iOS #31, windows WARP-359).
@@ -69,11 +69,18 @@ Ship remote access as an **own WireGuard overlay**:
    ~10–15% of sessions, we will measure —
    [WARP-1389](https://warp-lab.atlassian.net/browse/WARP-1389)): a **blind
    relay** that forwards encrypted WG packets it cannot read. Transport choice
-   is data-gated by the [WARP-1390](https://warp-lab.atlassian.net/browse/WARP-1390)
+   was data-gated by the [WARP-1390](https://warp-lab.atlassian.net/browse/WARP-1390)
    spike: Cloudflare TURN (managed, per-GB, serverless-for-us) vs tiny
    self-run stateless relays (the Nabu Casa / Home Assistant precedent — the
    sovereign-appliance market leader runs exactly these blind relays as its
    paid cloud product). Either is invisible to customers.
+   **SETTLED 2026-08-15 — self-run blind relays, see
+   [ADR-040](ADR-040-blind-relay-fallback-for-punch-failures.md).** The deciding
+   argument was not cost: a plain UDP forwarder is a candidate the endpoint
+   ladder already understands, so it needs no client work, while TURN would mean
+   implementing allocation + ChannelData framing beneath the WG socket in all
+   three clients — and paying MTU for it on the constrained links where the
+   fallback exists to help.
 6. **The Zero Trust org `still-credit-6887` is internal-only** from this day.
    Team and WARP-Lab-operated pilot boxes may use the cloudflared/WARP bridge;
    **no external customer is ever enrolled in it**, so no customer ever
@@ -133,7 +140,7 @@ customer-facing change, because no third party is in the customer-facing path.
 | 1 | HQ signaling + device grants; box punch agent | WARP-1384, WARP-1385 |
 | 2 | Android reference client e2e (cellular → .87) | WARP-1386 |
 | 3 | iOS + Windows parity; telemetry | WARP-1387, WARP-1388, WARP-1389 |
-| 4 | Relay-fallback decision + implementation | WARP-1390 (+ follow-up ticket) |
+| 4 | Relay-fallback decision + implementation | WARP-1390 **decided** → ADR-040 (implementation ticket to follow) |
 
 Home mode (PR #897 semantics) is unchanged throughout: on the home LAN the
 apps keep dialing the box's LAN IP directly — it doubles as the fallback UX
