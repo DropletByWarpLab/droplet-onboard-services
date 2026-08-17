@@ -44,7 +44,7 @@ requests>=2.31
 # /bootstrap, and run-listing endpoints the orchestrator proxies to. The
 # scheduler (AsyncIOScheduler) and uvicorn share one asyncio event loop.
 fastapi>=0.140.7
-uvicorn[standard]>=0.52.1
+uvicorn[standard]>=0.52.3
 
 # WARP-1948 — OSV floors, kept in LOCKSTEP with tests/retrieval-eval/ragas/
 # requirements.txt (WARP-1406): the osv-nightly resolver scores transitive
