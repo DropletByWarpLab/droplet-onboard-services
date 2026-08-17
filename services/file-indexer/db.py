@@ -180,19 +180,27 @@ def set_index_status(
     (the FileIndexState enum). `reason` is persisted only for
     skipped/failed rows (truncated to 200 chars, mirroring
     BrainMemoryItem.failureReason).
+
+    WARP-2056: every row is stamped with the extractor generation that
+    produced it, so the reconcile can tell a still-valid `skipped` verdict
+    from one made by extractors that have since improved.
     """
+    from extractors.registry import EXTRACTOR_CAPABILITY  # noqa: PLC0415
+
     with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             """
             INSERT INTO "FileIndexStatus"
-                ("userId", "path", "ncFileId", "status", "reason", "updatedAt")
-            VALUES (%s, %s, %s, %s::"FileIndexState", %s, NOW())
+                ("userId", "path", "ncFileId", "status", "reason",
+                 "extractorCapability", "updatedAt")
+            VALUES (%s, %s, %s, %s::"FileIndexState", %s, %s, NOW())
             ON CONFLICT ("userId", "path")
             DO UPDATE SET
-                "ncFileId"  = EXCLUDED."ncFileId",
-                "status"    = EXCLUDED."status",
-                "reason"    = EXCLUDED."reason",
-                "updatedAt" = NOW()
+                "ncFileId"            = EXCLUDED."ncFileId",
+                "status"              = EXCLUDED."status",
+                "reason"              = EXCLUDED."reason",
+                "extractorCapability" = EXCLUDED."extractorCapability",
+                "updatedAt"           = NOW()
             """,
             (
                 user_id,
@@ -200,6 +208,7 @@ def set_index_status(
                 nc_file_id,
                 status,
                 (reason or "")[:200] if reason else None,
+                EXTRACTOR_CAPABILITY,
             ),
         )
 
@@ -214,22 +223,30 @@ def delete_index_status(user_id: str, path: str) -> None:
         )
 
 
-def fetch_index_status_map() -> dict[tuple[str, str], tuple[str, float, Optional[str]]]:
-    """Return {(userId, path): (status, updatedAt-epoch-seconds, reason)}
+def fetch_index_status_map() -> (
+    dict[tuple[str, str], tuple[str, float, Optional[str], Optional[str]]]
+):
+    """Return {(userId, path): (status, updatedAt-epoch, reason, capability)}
     for every row. Used by the startup reconcile scan to decide which
     on-disk files still need indexing without a per-file query.
 
     WARP-1842: `reason` rides along so the scan can retry `skipped` rows
     selectively (only reasons the current code genuinely resolves, e.g.
     `unknown_type` after the Office/ODF MIME registration) — never the
-    whole skipped corpus."""
+    whole skipped corpus.
+
+    WARP-2056: `extractorCapability` rides along too, and generalises that
+    idea — a `skipped` row written by an older generation of the extractors
+    is retried whatever its reason, because the verdict was made by code
+    that no longer exists."""
     with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             'SELECT "userId", "path", "status"::text, '
-            'EXTRACT(EPOCH FROM "updatedAt"), "reason" FROM "FileIndexStatus"'
+            'EXTRACT(EPOCH FROM "updatedAt"), "reason", "extractorCapability" '
+            'FROM "FileIndexStatus"'
         )
         rows = cur.fetchall()
-    return {(r[0], r[1]): (r[2], float(r[3]), r[4]) for r in rows}
+    return {(r[0], r[1]): (r[2], float(r[3]), r[4], r[5]) for r in rows}
 
 
 def delete_chunks_for_brain_item(brain_item_id: str) -> None:

@@ -144,10 +144,19 @@ class TestLoudFailures:
         assert not out.exists()
 
     def test_bad_channel_fails(self, tmp_path):
-        """Single `stable` channel per the WARP-534 design — anything else
-        is a typo until the design grows more channels."""
+        """Two channels today (stable/stage) — anything else is a typo
+        until the design grows more."""
         proc, out, _ = run_gen(tmp_path, [ORCH],
                                {"orchestrator": "sha256:" + "b" * 64},
                                channel="stabel")
         assert proc.returncode != 0
         assert not out.exists()
+
+    def test_stage_channel_is_allowed(self, tmp_path):
+        """WARP-1670 — the stage branch publishes `channel: stage`, and the
+        device-side channel gate compares against exactly this field."""
+        proc, out, _ = run_gen(tmp_path, [ORCH],
+                               {"orchestrator": "sha256:" + "b" * 64},
+                               channel="stage")
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(out.read_text())["release"]["channel"] == "stage"

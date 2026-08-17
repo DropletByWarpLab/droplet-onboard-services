@@ -1068,6 +1068,13 @@ model FileIndexStatus {
   reason    String?
   updatedAt DateTime       @default(now())
 
+  /// WARP-2056: which generation of the extractors produced this row
+  /// (`extractors/registry.py EXTRACTOR_CAPABILITY`). A `skipped` verdict is
+  /// only valid for the extractors that made it, so the reconcile retries
+  /// rows stamped with an older generation instead of treating every skip as
+  /// permanent. NULL = written before the column existed (treated as gen 1).
+  extractorCapability String?
+
   @@id([userId, path])
   @@index([userId, status])
 }

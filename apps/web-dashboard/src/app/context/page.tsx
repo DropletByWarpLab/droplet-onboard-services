@@ -4,7 +4,7 @@
  * WARP-225 — `/context` deep-dive page.
  *
  * Composes all 8 widgets per the design doc:
- *   - <StatCards />            (4 hero cards, stagger-revealed)
+ *   - <StatCards />            (5 hero cards, stagger-revealed)
  *   - <ThroughputSparkline />  (7-day area chart)
  *   - <CoverageDonut />        (source-type breakdown by file count)
  *   - <BytesBySource />        (same data, indexed-bytes lens)
@@ -118,6 +118,7 @@ export default function ContextPage() {
           files={full.files}
           chunks={full.chunks}
           queued={full.queued}
+          skipped={full.skipped}
           failed={full.failed}
         />
 

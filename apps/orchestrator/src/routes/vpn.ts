@@ -1118,13 +1118,14 @@ export function createVpnRouter(
           where: { publicKey: pending.wgPublicKey, status: "active" },
         });
         if (!peer) {
-          // NOT a "wait and it'll sort itself out" state. Nothing retries this
-          // on the device's behalf: approve-time provisioning already failed,
-          // and the connect tick that could self-heal the peer is behind
-          // OVERLAY_CONNECT_ENABLED — default false, and set in no deployment
-          // artifact. The one thing that DOES fix it is the owner approving the
-          // device again, which re-runs provisioning (and only provisioning).
-          // Say that, rather than promising a retry that will never happen.
+          // NOT a "wait and it'll sort itself out" state. Approve-time
+          // provisioning already failed, and nothing retries it on a schedule.
+          // Since WARP-1767 the connect tick does run by default, so a later
+          // Connect from this device can rebuild the peer — but that is the
+          // device's next attempt, not a repair in flight, and it re-runs the
+          // same provisioning that just failed. The one action that
+          // deterministically fixes it is the owner approving the device again.
+          // Say that, rather than promising a retry the device isn't making.
           return res.status(503).json({
             error: "tunnel_not_ready",
             message:
@@ -1226,12 +1227,12 @@ export function createVpnRouter(
           // branch short-circuits ahead of the claim. Provisioning is a
           // different matter — it is idempotent by construction (setup() is a
           // no-op on an existing wg0, an existing row's address is reused, and
-          // the router-side install is a refresh), and re-approval is the ONLY
-          // recovery a shipping box has when the first attempt failed: the row
-          // stays 'approved' with no usable peer, /profile 503s, and the
-          // connect tick that could self-heal is behind
-          // OVERLAY_CONNECT_ENABLED (default false, in no deployment
-          // artifact). So retry the provisioning half only.
+          // the router-side install is a refresh), and re-approval is the
+          // deterministic recovery when the first attempt failed: the row stays
+          // 'approved' with no usable peer and /profile 503s until something
+          // re-provisions. Since WARP-1767 the connect tick also runs by
+          // default and can rebuild the peer on the device's next Connect, but
+          // that waits on the device. So retry the provisioning half only.
           //
           // The original approver + enrolment time are passed back in so a
           // retry repairs the tunnel without rewriting the audit trail.
@@ -1392,9 +1393,10 @@ export function createVpnRouter(
         // reports honestly that the tunnel isn't ready. Recovery is an explicit
         // owner action: re-approving an already-'approved' row re-runs THIS
         // provisioning and nothing else (see the idempotent branch above), so
-        // the retry never reaches the vouch. Do not assume the connect tick
-        // will self-heal it — that tick is behind OVERLAY_CONNECT_ENABLED,
-        // which defaults false and is set in no deployment artifact.
+        // the retry never reaches the vouch. Do not lean on the connect tick to
+        // self-heal it: since WARP-1767 that tick runs by default, but it acts
+        // on a session the DEVICE initiates, so nothing moves until the device
+        // tries again. The owner action is the recovery this path can promise.
         const provisioned = await provisionApprovedPeer(req, pending, {
           linkTokenEnrolledBy: req.user?.id ?? null,
           deviceId,

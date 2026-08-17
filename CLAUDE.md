@@ -113,8 +113,56 @@ rationale, measured costs, and the cost-estimation formula:
   widening `paths:` on docker-build / setup-e2e / test-fips is a spend
   decision — estimate min/month first (formula in the doc) and state it
   in the PR. >2k min/mo needs a callout; >5k needs Romain's sign-off.
-- `publish-release.yml` stays `workflow_dispatch`-only until the cosign
-  key ceremony runs.
+- `publish-release.yml` stays `workflow_dispatch`-only. The cosign key
+  ceremony has run (2026-07-30), so runs can now succeed — which makes
+  the dispatch-only trigger a *cost* control, not a fail-closed one. A
+  full publish is ~2 runner-hours; don't automate it back onto every
+  merge without redoing the budget math.
+
+## Branching and releases (read before opening a PR)
+
+Two long-lived branches, and **feature branches never target `main`**:
+
+```
+feature branch ──PR──▶ stage ──PR──▶ main
+                        │              │
+                   channel: stage  channel: stable
+                   (prerelease)     (--latest)
+```
+
+- **Open every PR against `stage`.** `main` only ever receives merges
+  from `stage`. If you catch yourself opening a feature PR against
+  `main`, that is the mistake — retarget it.
+- **A promotion is its own PR:** `stage` → `main`, reviewed like any
+  other.
+- **Hotfixes take the same path.** A fix that skips `stage` ships to
+  every box without ever having run on one. If a hotfix is genuinely
+  too urgent for the stage soak, that is Romain's call to make
+  explicitly, not an agent's to assume.
+
+Each branch publishes its own OTA release channel, and a box subscribes
+to exactly one (`update-agent.settings.channel` on the orchestrator,
+`DROPLET_UPDATE_CHANNEL` for fleet-agent). Consequences worth knowing
+before you touch any of this:
+
+- The channel is **derived from the dispatch ref** in
+  `publish-release.yml`, never passed in. Dispatching from anything but
+  `main` or `stage` fails immediately, by design.
+- Stage releases publish as GitHub **prereleases**. That is load-bearing:
+  `/releases/latest` skips prereleases, and that endpoint is what stable
+  boxes poll. Removing `--prerelease` would ship stage builds to the
+  whole fleet.
+- A release's tag (`ota-<channel>-…`) is only a discovery *hint*. The
+  channel that decides anything is the one inside the cosign-signed
+  manifest. Never move a trust decision onto the tag.
+- Adding a channel is a four-file change, all of which must agree:
+  `ALLOWED_CHANNELS` (`scripts/release/gen-release-manifest.py`),
+  `RELEASE_CHANNELS` (`update-agent/settings.ts`), the discovery rule in
+  both pollers, and the cosign identity alternation in
+  `scripts/lib/apply-update.sh` — which is an enumerated `(main|stage)`
+  on purpose. Never widen it to a wildcard.
+
+Full rationale: WARP-1670; device-side trust model: `docs/SECURITY.md`.
 
 ## LLM tool calling
 

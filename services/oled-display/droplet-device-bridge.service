@@ -145,6 +145,17 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Writable paths the bridge actually touches. Log file is per-unit so
 # append:/var/log/... needs that path writable; StateDirectory above is
 # handled automatically.
+#
+# LOAD-BEARING PAIRING — do not split these two apart. `ReadWritePaths=` is
+# only a whitelist: systemd never creates the path, and namespace setup
+# hard-fails 226/NAMESPACE if it is missing. This line is safe ONLY because
+# `StandardOutput=append:` above makes systemd open the file with O_CREAT in
+# exec_child, which runs BEFORE the mount namespace is applied — so the file
+# always exists by the time this is evaluated. Move bridge logging to the
+# journal without also deleting this line and the unit crash-loops on a box
+# where the file is absent (e.g. straight after factory-reset.sh). Two sibling
+# units already hit exactly that: droplet-egress-audit and droplet-wifi-rotate.
+# If the path ever stops being auto-created, prefix it `-` to make it optional.
 ReadWritePaths=/var/log/droplet-device-bridge.log
 # WARP-843: the customer Wi-Fi writes (droplet-set-hostapd.sh /
 # droplet-set-guest-wifi.sh) land in this unit's own StateDirectory
