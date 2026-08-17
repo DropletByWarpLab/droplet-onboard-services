@@ -17,7 +17,7 @@
     "@droplet/shared-types": "0.1.0",
     "@simplewebauthn/browser": "13.3.0",
     "@zxing/browser": "^0.1.5",
-    "@zxing/library": "^0.21.3",
+    "@zxing/library": "^0.23.0",
     "framer-motion": "^12.43.0",
     "hls.js": "^1.6.17",
     "lucide-react": "^1.29.0",
