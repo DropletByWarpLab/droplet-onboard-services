@@ -1,5 +1,5 @@
 fastapi>=0.140.7
-uvicorn>=0.52.1
+uvicorn>=0.52.3
 # Floor raised to 0.0.32 (WARP-1948): every release below 0.0.31 carries at
 # least one OSV advisory (PYSEC-2026-1851/-1852/-3036..-3041). 0.0.32 matches
 # services/voice-io's pin.
