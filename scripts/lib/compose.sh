@@ -133,6 +133,20 @@ prepare_and_build() {
   ln -sfn ../.env "$_compose_env_link"
   unset _compose_env_link _stale_only
 
+  # --- Pin the repo's absolute host path for the OTA apply path (WARP-1669) ---
+  # The orchestrator runs `docker compose -f "$DROPLET_OTA_COMPOSE_FILE"` from
+  # INSIDE its container against the host daemon, so that file has to resolve
+  # to the same absolute path in both places. Otherwise the compose file's
+  # relative binds (./certs, ../data/secrets/…) resolve against a path that
+  # exists only in the container, Docker creates those host paths as empty
+  # directories, and the stack comes back up without its certs or secrets.
+  #
+  # Upserted on every run rather than backfilled-if-missing: it is derived
+  # from where the checkout actually is, so moving the repo must update it —
+  # a stale value is exactly the failure above. This writes the .env that
+  # compose interpolates, through the docker/.env symlink created just above.
+  _upsert_env_kv DROPLET_HOST_ROOT "$REPO_ROOT"
+
   # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
   local images=(

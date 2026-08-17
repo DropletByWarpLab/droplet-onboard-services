@@ -7,9 +7,15 @@ apscheduler job (agent.py), not a second process.
 
 What it does, every ~5 minutes when the operator has opted in:
 
-  1. GET the GitHub Releases ``latest`` endpoint of the ``releases``
+  1. Discover the newest release for THIS BOX'S CHANNEL
+     (``DROPLET_UPDATE_CHANNEL``, WARP-1670). On ``stable`` that is a GET
+     of the GitHub Releases ``latest`` endpoint of the ``releases``
      publisher (``DROPLET_OTA_RELEASES_URL`` — same deployment knob the
-     orchestrator poller reads).
+     orchestrator poller reads). Every other channel publishes as a
+     PRERELEASE, which ``latest`` skips by design, so those channels GET
+     the releases list instead and take the newest entry tagged
+     ``ota-<channel>-*``. That tag match is a cheap pre-filter over
+     unsigned metadata; step 4 still decides on the signed manifest.
   2. Download the ``release.json`` + ``release.json.sig`` assets.
   3. Run the full WARP-537 trust chain (release_verify.py): trust anchor
      → cosign signature → schema. An unsigned/tampered/invalid manifest
@@ -40,10 +46,15 @@ scheduler (and the mounting tick is `_fail_open`-wrapped on top).
 EGRESS AUDIT (ADR-012 discipline — everything this module can dial;
 the README carries the service-wide table):
 
-    GET {releases}                      ~5 min (opt-in) — release metadata
+    GET {releases}                      ~5 min (opt-in, stable channel) —
+                                        release metadata
+    GET {releases-list}                 ~5 min (opt-in, non-stable channel)
+                                        — same host/path minus `/latest`,
+                                        `?per_page=30`
     GET <asset url from that response>  per release — release.json / .sig bytes
 
-``{releases}`` = DROPLET_OTA_RELEASES_URL. Asset URLs are taken from the
+``{releases}`` = DROPLET_OTA_RELEASES_URL; ``{releases-list}`` is derived
+from it, so this adds no new host. Asset URLs are taken from the
 releases endpoint's own response (GitHub Releases asset API + its CDN
 redirect), never from the manifest content. Nothing else is ever dialed;
 every attempt is logged on the ``fleet_agent.egress`` logger. No payload
@@ -57,6 +68,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -74,6 +86,32 @@ _DEFAULT_TIMEOUT_S = 30.0
 # The ratified ADR-028 selector vocabulary (question 3): the portal's
 # machine model dimensions, plus the device_id canary.
 TARGETING_KEYS = ("device_id", "tier", "channel", "customer", "region", "hw")
+
+# WARP-1670 — how deep to look for a non-stable channel's newest release.
+# GitHub returns releases newest-first and the channels interleave, so this
+# is "how many releases back a stage box still finds its build". One page
+# keeps a poll to a single request.
+RELEASES_LIST_PAGE_SIZE = 30
+
+
+def channel_tag_prefix(channel: str) -> str:
+    """The tag prefix a channel's releases carry (publish-release.yml)."""
+    return f"ota-{channel}-"
+
+
+def releases_list_url(releases_url: str, per_page: int = RELEASES_LIST_PAGE_SIZE):
+    """``…/releases/latest`` → ``…/releases?per_page=<n>``.
+
+    Returns None when the configured URL is not a ``latest`` endpoint (a
+    file-served test fake, say), which callers must surface as a
+    configuration failure rather than "no release"."""
+    parsed = urlsplit(releases_url)
+    if not parsed.path.endswith("/releases/latest"):
+        return None
+    path = parsed.path[: -len("/latest")]
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, path, f"per_page={per_page}", "")
+    )
 
 
 @dataclass(frozen=True)
@@ -167,23 +205,18 @@ class UpdatePoller:
             tags["device_id"] = identity.machine_id
         return tags
 
-    async def poll_once(self) -> PollOutcome:
-        logger.debug("update.check_started — OTA release check started")
-
-        # ── 1. discover the latest release ──
-        headers = {"Accept": "application/vnd.github+json"}
-        if self._config.github_token:
-            headers["Authorization"] = f"Bearer {self._config.github_token}"
+    async def _discover_latest(self, headers: dict):
+        """`stable` discovery: GitHub's `latest` release. Returns the
+        release metadata dict, or a terminal PollOutcome."""
+        url = self._config.releases_url
         try:
-            response = await self._client.get(self._config.releases_url, headers=headers)
+            response = await self._client.get(url, headers=headers)
         except httpx.HTTPError as exc:
             detail = f"releases latest endpoint unreachable: {exc}"
-            egress_logger.warning("egress GET %s failed: %s", self._config.releases_url, exc)
+            egress_logger.warning("egress GET %s failed: %s", url, exc)
             logger.warning("update.check_failed — %s", detail)
             return PollOutcome(outcome="fetch_failed", detail=detail)
-        egress_logger.debug(
-            "egress GET %s -> %d", self._config.releases_url, response.status_code
-        )
+        egress_logger.debug("egress GET %s -> %d", url, response.status_code)
         if response.status_code == 404:
             # No release published yet — normal on a fresh repo.
             logger.debug("update.no_release — no OTA release published yet")
@@ -198,8 +231,81 @@ class UpdatePoller:
             detail = "releases latest endpoint returned non-JSON body"
             logger.warning("update.check_failed — %s", detail)
             return PollOutcome(outcome="fetch_failed", detail=detail)
-        if not isinstance(release_meta, dict):
-            release_meta = {}
+        return release_meta if isinstance(release_meta, dict) else {}
+
+    async def _discover_for_channel(self, channel: str, headers: dict):
+        """Non-stable discovery: the newest listed release whose tag
+        carries this channel's prefix. Returns the release metadata dict,
+        or a terminal PollOutcome.
+
+        The tag match is a CHEAP PRE-FILTER over unsigned repo metadata.
+        The channel that decides whether this box installs anything is the
+        one inside the cosign-verified manifest, checked in step 4 exactly
+        as it is for stable."""
+        url = releases_list_url(self._config.releases_url)
+        if not url:
+            # Misconfiguration, not absence — a box that can never discover
+            # must say so, not report "no release" every five minutes.
+            detail = (
+                f"channel {channel!r} needs a releases list endpoint, and none "
+                f"could be derived from {self._config.releases_url}"
+            )
+            logger.warning("update.check_failed — %s", detail)
+            return PollOutcome(outcome="fetch_failed", detail=detail)
+        try:
+            response = await self._client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            detail = f"releases list endpoint unreachable: {exc}"
+            egress_logger.warning("egress GET %s failed: %s", url, exc)
+            logger.warning("update.check_failed — %s", detail)
+            return PollOutcome(outcome="fetch_failed", detail=detail)
+        egress_logger.debug("egress GET %s -> %d", url, response.status_code)
+        if response.status_code < 200 or response.status_code >= 300:
+            detail = f"releases list endpoint returned HTTP {response.status_code}"
+            logger.warning("update.check_failed — %s", detail)
+            return PollOutcome(outcome="fetch_failed", detail=detail)
+        try:
+            listed = response.json()
+        except ValueError:
+            detail = "releases list endpoint returned non-JSON body"
+            logger.warning("update.check_failed — %s", detail)
+            return PollOutcome(outcome="fetch_failed", detail=detail)
+        if not isinstance(listed, list):
+            detail = "releases list endpoint did not return an array"
+            logger.warning("update.check_failed — %s", detail)
+            return PollOutcome(outcome="fetch_failed", detail=detail)
+        # GitHub returns releases newest-first.
+        prefix = channel_tag_prefix(channel)
+        for entry in listed:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("tag_name") or "").startswith(prefix):
+                return entry
+        logger.debug(
+            "update.no_release — no OTA release published yet for channel %s", channel
+        )
+        return PollOutcome(outcome="no_release")
+
+    async def poll_once(self) -> PollOutcome:
+        logger.debug("update.check_started — OTA release check started")
+
+        # ── 1. discover the newest release FOR THIS BOX'S CHANNEL ──
+        # WARP-1670: `stable` reads GitHub's `latest` endpoint, which
+        # already skips prereleases. Every other channel publishes AS a
+        # prerelease (so it stays invisible to stable boxes), so `latest`
+        # would never return it — those channels list releases and take
+        # the newest carrying the channel's tag prefix.
+        headers = {"Accept": "application/vnd.github+json"}
+        if self._config.github_token:
+            headers["Authorization"] = f"Bearer {self._config.github_token}"
+        channel = self._config.update_channel
+        if channel == "stable":
+            outcome_or_meta = await self._discover_latest(headers)
+        else:
+            outcome_or_meta = await self._discover_for_channel(channel, headers)
+        if isinstance(outcome_or_meta, PollOutcome):
+            return outcome_or_meta
+        release_meta = outcome_or_meta
 
         release_tag = str(release_meta.get("tag_name") or "(untagged)")
         assets = release_meta.get("assets")

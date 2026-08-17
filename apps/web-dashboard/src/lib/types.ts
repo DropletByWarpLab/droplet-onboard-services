@@ -2629,3 +2629,66 @@ export interface PendingComposerPayload {
   /** Plain-language starter line dropped into the composer for the user to edit. */
   seedText: string;
 }
+
+/* ─────────────────────── Client-app downloads ─────────────────────── */
+
+/** Platforms the box can describe a client app for. Mirrors
+ *  `APP_PLATFORMS` in the orchestrator's services/app-downloads/catalog.ts —
+ *  the two are one contract and change together. */
+export type AppDownloadPlatform =
+  | "windows"
+  | "macos"
+  | "linux"
+  | "android"
+  | "ios";
+
+/** What an asset is, which decides how the page offers it. */
+export type AppDownloadAssetKind = "installer" | "signature" | "manifest";
+
+/**
+ * How the catalog's authenticity was established.
+ *
+ * `digest-only` is the DEFAULT and is not a weakness: the artifacts ship
+ * inside the appliance image, and the box re-hashes every byte against
+ * the catalog's pinned sha256 before serving. `signed` additionally means
+ * a cosign signature over the catalog verified against a real trust
+ * anchor — only claimed when it was actually checked.
+ */
+export type AppDownloadAttestation = "signed" | "digest-only";
+
+export interface AppDownloadAsset {
+  name: string;
+  kind: AppDownloadAssetKind;
+  size: number;
+  /** Lowercase hex sha256, shown so a customer can verify by hand. */
+  sha256: string;
+  /** For a signature asset, the installer it signs. */
+  signs: string | null;
+  signatureAlgorithm: string | null;
+  /** Absolute API path that streams the verified bytes. */
+  url: string;
+}
+
+export interface AppDownloadPlatformEntry {
+  platform: AppDownloadPlatform;
+  version: string;
+  /** `name` of the asset that is THE download. Null when store-distributed. */
+  primary: string | null;
+  /** Where this platform really ships, when that is not the box. */
+  storeUrl: string | null;
+  note: string | null;
+  minOsVersion: string | null;
+  releasedAt: string | null;
+  assets: AppDownloadAsset[];
+}
+
+export interface AppDownloadCatalog {
+  /** False when nothing is staged, or the catalog could not be trusted. */
+  available: boolean;
+  /** Canonical failure reason from the store; null when available. */
+  reason: string | null;
+  detail: string | null;
+  attestation: AppDownloadAttestation | null;
+  generatedAt?: string | null;
+  platforms: AppDownloadPlatformEntry[];
+}

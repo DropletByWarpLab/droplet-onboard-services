@@ -8,6 +8,7 @@ import { boxDisplayName } from "../src/lib/box-identity.js";
 // no-op once the canonical defaults are in place, and operator-edited
 // values are never overwritten.
 import { seedWorkspaceSettings } from "../src/services/workspace-settings.service.js";
+import { seedDailyReportSpec } from "../src/services/daily-report-spec.service.js";
 
 const prisma = new PrismaClient();
 
@@ -61,6 +62,15 @@ async function main() {
   console.log(
     "Workspace settings: %d inserted (steady-state = 0 after first boot)",
     settingsResult.inserted,
+  );
+
+  // WARP-1996: the Reports narrative tile runs this spec. Without it the
+  // "Write report" button 404s with nothing the user can do about it.
+  // Non-destructive on re-run — an operator-edited spec is left alone.
+  const reportSpec = await seedDailyReportSpec(prisma);
+  console.log(
+    "Daily report spec: %s",
+    reportSpec.created ? "created" : "already present (left unchanged)",
   );
 }
 

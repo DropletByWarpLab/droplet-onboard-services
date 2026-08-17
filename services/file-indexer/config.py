@@ -50,6 +50,13 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 CHUNK_SIZE_TOKENS = int(os.environ.get("CHUNK_SIZE_TOKENS", "512"))
 CHUNK_OVERLAP_RATIO = float(os.environ.get("CHUNK_OVERLAP_RATIO", "0.2"))
 
+# Max texts per EmbedText RPC. The ai-gateway caps a single request at
+# MAX_BATCH_SIZE (providers/embeddings.py, 256) to bound peak memory on
+# constrained hardware and REJECTS anything larger outright — it does not
+# split for us. Keep this at or below the gateway's cap; embedder.py splits
+# oversized calls into this many texts per request.
+EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "256"))
+
 # WARP-1140: shared "Household" groupfolder support. Groupfolder content
 # physically lives under {NEXTCLOUD_DATA_ROOT}/__groupfolders/<id>/..., never
 # under a user home, so the watcher indexes it under the HOUSEHOLD_USER_ID

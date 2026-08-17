@@ -46,7 +46,16 @@ import {
   localModelIdentifiers,
 } from "../services/active-model.service.js";
 import { requireRole } from "../middleware/auth.js";
-import { decideCloudTurn, isLocalProvider } from "../services/cloud-access.service.js";
+import {
+  decideCloudTurn,
+  isLocalProvider,
+  resolveOffLanProvider,
+} from "../services/cloud-access.service.js";
+import {
+  OFF_LAN_ATTACHMENT_NOTICE,
+  OFF_LAN_WITHHELD_NOTICE,
+  withholdStoredContentTools,
+} from "../services/stored-content-egress.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
@@ -900,6 +909,28 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      // WARP-1983 — the stored-content egress gate. Resolved ONCE here and
+      // reused by both egress paths below (tool advertisement, attachment
+      // injection) so the two can never disagree about whether this turn is
+      // leaving the box.
+      //
+      // Asked separately from `decideCloudTurn` above, not read off its
+      // verdict: that gate returns ALLOWED for `service` principals and for
+      // sessions with no person id BEFORE resolving a provider, so its
+      // "allowed" says nothing about where the request goes. See the
+      // `resolveOffLanProvider` docstring.
+      //
+      // Keys off the RESOLVED provider, never `chatReq.provider` alone — a
+      // client that labels `claude-opus-4` as `ollama` resolves to anthropic
+      // through the catalogue and the prefix mirror, so a crafted request
+      // cannot talk its way back into the Drive.
+      const offLanProvider = await resolveOffLanProvider({
+        user: (req as AuthedRequest).user,
+        model: chatReq.model,
+        provider: chatReq.provider,
+      });
+      const isOffLanTurn = offLanProvider !== null;
+
       // RBAC: write tools require owner/admin. /api/llm/chat is the
       // live MCP-backed route — without this gate any authenticated
       // session could drive write tools via curl.
@@ -976,6 +1007,23 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
       if (interviewActive) {
         allowedForUser = await stripWriteToolsForInterview(allowedForUser);
+      }
+
+      // WARP-1983 — withhold the Drive/brain surface from an off-LAN turn.
+      // Runs LAST of the narrowings so no later step can widen it back.
+      //
+      // `undefined` is the privileged-caller sentinel meaning "the full live
+      // registry", and it MUST be materialised before filtering: the owner is
+      // precisely the role most likely to be driving a cloud model, so letting
+      // their `undefined` fall through would make this gate a no-op for the
+      // one person it most needs to hold for. Same obligation and the same
+      // listTools()-with-empty-fallback shape as stripWriteToolsForInterview —
+      // a crashed MCP child yields zero tools, never a privileged default.
+      if (isOffLanTurn) {
+        const materialised =
+          allowedForUser ??
+          (await mcpClient.listTools().catch(() => [])).map((t) => t.name);
+        allowedForUser = withholdStoredContentTools(materialised);
       }
 
       // Resolve the caller's Nextcloud session token so file-tool
@@ -1415,13 +1463,33 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // When no vision model is available, fall back to OCR text + a note.
         // Gated on actually having a renderable image, so non-image / pre-
         // feature uploads behave exactly as before.
-        let ocrRefs: { itemId: string }[] = chatReq.attachments;
-        let visionNote: string | null = null;
+        // WARP-1983 — on an off-LAN turn NOTHING from the attachment reaches
+        // the model: not the OCR'd text, and not the image bytes the vision
+        // route would otherwise inline straight into the user message. A
+        // photographed chart is PHI exactly as much as the typed document is,
+        // so gating only the text half would leave the wider hole open.
+        //
+        // Emptying `ocrRefs` is what closes BOTH paths, because both read it:
+        // `buildImageBlocks` below and `buildAttachmentContext` further down.
+        // (On the local path this is a no-op rename — `ocrRefs` still IS
+        // `chatReq.attachments` at this point; it is only narrowed later,
+        // after the vision route claims the images it handled.) `visionNote`
+        // then carries the explanation into the same system message the
+        // vision fallback already uses, so the model degrades honestly
+        // instead of silently ignoring a file the user can see they sent.
+        //
+        // Pinned by `llm-chat.stored-content-egress.test.ts` — if a later
+        // refactor stops routing the image path through `ocrRefs`, that suite
+        // goes red rather than this quietly becoming a text-only gate.
+        let ocrRefs: { itemId: string }[] = isOffLanTurn ? [] : chatReq.attachments;
+        let visionNote: string | null = isOffLanTurn
+          ? OFF_LAN_ATTACHMENT_NOTICE
+          : null;
         try {
           const { blocks, usedItemIds } = await buildImageBlocks(
             prisma,
             brainOwnerId,
-            chatReq.attachments.map((a) => a.itemId),
+            ocrRefs.map((a) => a.itemId),
             { maxImages: config.vision.maxImages },
           );
           if (usedItemIds.length > 0) {
@@ -1694,7 +1762,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             memoryBlock +
             // WARP-1121 (§9.3) — conductor appended AFTER the base prompt on
             // interview turns; "" on every other turn.
-            (interviewBlock ? "\n\n" + interviewBlock : ""),
+            (interviewBlock ? "\n\n" + interviewBlock : "") +
+            // WARP-1983 — name the privacy boundary on an off-LAN turn. The
+            // withheld tools are already gone from `allowedForUser` above, so
+            // this changes no capability; it exists because a model that
+            // merely finds no file tools invents a reason (a permissions
+            // error, an outage) or answers from its own weights as though it
+            // had read the document. Stating the constraint is what lets it
+            // tell the user the truth and name the remedy.
+            (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : ""),
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }

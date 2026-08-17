@@ -81,6 +81,16 @@ export interface ContextStatsSummary {
   chunks: number;
   queued: number;
   failed: number;
+  /** WARP-2056 — files the indexer deliberately produced no text for
+   *  (no text layer, no extractor for the format, empty document).
+   *
+   *  `files` counts every status, so before this existed the surface said
+   *  "622 files" for a corpus where 505 were actually searchable, and there
+   *  was nowhere at all a user could see that the other 117 were not. Every
+   *  extraction defect found on the box hid behind exactly that gap. A skip
+   *  is a normal outcome for a photo or an installer, so this is reported
+   *  alongside `failed`, not as an error. */
+  skipped: number;
   recentlyIndexed: RecentlyIndexedItem[];
 }
 
@@ -444,8 +454,15 @@ async function fetchFailed(
 async function fetchNcCounts(
   prisma: PrismaClient,
   ncUsername: string,
-): Promise<{ files: number; indexing: number; failed: number; chunks: number; textBytes: number }> {
-  const [filesRow, indexingRow, failedRow, chunksRow, bytesRow] =
+): Promise<{
+  files: number;
+  indexing: number;
+  failed: number;
+  skipped: number;
+  chunks: number;
+  textBytes: number;
+}> {
+  const [filesRow, indexingRow, failedRow, skippedRow, chunksRow, bytesRow] =
     await Promise.all([
       prisma.$queryRaw<Array<{ c: bigint }>>`
         SELECT count(*)::bigint AS c
@@ -463,6 +480,11 @@ async function fetchNcCounts(
            AND "status" = 'failed'`,
       prisma.$queryRaw<Array<{ c: bigint }>>`
         SELECT count(*)::bigint AS c
+          FROM "FileIndexStatus"
+         WHERE "userId" = ${ncUsername}
+           AND "status" = 'skipped'`,
+      prisma.$queryRaw<Array<{ c: bigint }>>`
+        SELECT count(*)::bigint AS c
           FROM "FileContentChunk"
          WHERE "userId" = ${ncUsername}
            AND "source" = 'nextcloud'`,
@@ -476,6 +498,7 @@ async function fetchNcCounts(
     files: toNum(filesRow[0]?.c),
     indexing: toNum(indexingRow[0]?.c),
     failed: toNum(failedRow[0]?.c),
+    skipped: toNum(skippedRow[0]?.c),
     chunks: toNum(chunksRow[0]?.c),
     textBytes: toNum(bytesRow[0]?.b),
   };
@@ -741,6 +764,9 @@ export async function getSummary(
       chunks: counts.chunks + ncCounts.chunks,
       queued: counts.queued + ncCounts.indexing,
       failed: counts.failed + ncCounts.failed,
+      // Brain uploads have no 'skipped' state — the brain pipeline records
+      // a failure instead — so this is the Nextcloud count alone.
+      skipped: ncCounts.skipped,
       recentlyIndexed: mergeRecentlyIndexed(brainRecent, ncRecent, 10),
     };
   });
@@ -780,6 +806,9 @@ export async function getFull(
       chunks: counts.chunks + ncCounts.chunks,
       queued: counts.queued + ncCounts.indexing,
       failed: counts.failed + ncCounts.failed,
+      // Brain uploads have no 'skipped' state — the brain pipeline records
+      // a failure instead — so this is the Nextcloud count alone.
+      skipped: ncCounts.skipped,
       bytesIndexed: counts.bytes + ncCounts.textBytes,
       recentlyIndexed: mergeRecentlyIndexed(brainRecent, ncRecent, 10),
       byCategory: mergeByCategory(brainByCategory, ncByCategory),

@@ -35,6 +35,29 @@ logger = logging.getLogger(__name__)
 # Recursion contract (WARP-199 / spec §7).
 MAX_RECURSION_DEPTH = 2
 
+# ── WARP-2056: extraction capability generation ──
+# A `skipped` row records that *the extractors as they stood at the time*
+# could not get text out of a file. That verdict is only durable while the
+# extractors don't change — and every time they have changed, healing the
+# affected boxes has required a manual DELETE of status rows, because the
+# reconcile treats `skipped` as terminal.
+#
+# Stamping this value on each status row makes the verdict self-invalidating:
+# the reconcile retries any `skipped` row stamped with a different
+# generation, and leaves alone the ones whose verdict still stands. So a
+# released extractor fix heals a live box on the next restart, and files
+# that genuinely have no text are still not re-extracted on every boot.
+#
+# BUMP THIS whenever a change could turn a `skipped` file into an indexed
+# one: a new extractor, a new routed MIME, an OCR/fallback path, a fix to an
+# existing extractor. `tests/test_extractor_capability.py` pins the routed
+# MIME set so adding a format without bumping fails the build.
+#
+#   1 — implicit baseline for every row written before this existed (NULL)
+#   2 — WARP-2051: PDF OCR fallback, NUL stripping
+#   3 — WARP-2055: spreadsheet/ODF/legacy-Word extractors, MPO images
+EXTRACTOR_CAPABILITY = "3"
+
 # Default doc cap — preserved from Phase 1 (50 MB).
 DEFAULT_MAX_BYTES = int(os.environ.get("MAX_INDEX_BYTES", 50 * 1024 * 1024))
 
@@ -57,12 +80,32 @@ def _route(mime: str) -> Optional[Callable[..., ExtractedDoc]]:
     if mime == "application/pdf":
         from extractors.pdf import extract as pdf_extract  # noqa: PLC0415
         return pdf_extract
-    if mime in {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    }:
+    if mime == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ):
         from extractors.docx import extract as docx_extract  # noqa: PLC0415
         return docx_extract
+    # Legacy binary Word is a different format from OOXML, not a variant of
+    # it. Routing application/msword at python-docx made every .doc fail with
+    # "is not a Word file, content type is ...themeManager+xml".
+    try:
+        from extractors import doc as doc_ext  # type: ignore  # noqa: PLC0415
+        if mime in doc_ext.SUPPORTED_MIMES:
+            return doc_ext.extract
+    except ImportError:
+        pass
+    try:
+        from extractors import spreadsheet as sheet_ext  # type: ignore  # noqa: PLC0415
+        if mime in sheet_ext.SUPPORTED_MIMES:
+            return sheet_ext.extract
+    except ImportError:
+        pass
+    try:
+        from extractors import odf as odf_ext  # type: ignore  # noqa: PLC0415
+        if mime in odf_ext.SUPPORTED_MIMES:
+            return odf_ext.extract
+    except ImportError:
+        pass
     # WARP-435 (ADR-003 Phase 1): PPTX. python-pptx is heavy (lxml at
     # import), so we lazy-import like the other extractors. Try/except
     # so the registry stays usable on branches that haven't shipped

@@ -82,6 +82,10 @@ function ncZeroStubs(): Array<{ match: RegExp; rows: RowFn }> {
       rows: () => [{ c: 0n }],
     },
     {
+      match: /"FileIndexStatus" WHERE "userId" = \$1 AND "status" = 'skipped'$/,
+      rows: () => [{ c: 0n }],
+    },
+    {
       match: /AS c FROM "FileContentChunk" WHERE "userId" = \$1 AND "source" = 'nextcloud'$/,
       rows: () => [{ c: 0n }],
     },
@@ -488,6 +492,10 @@ describe("dual-source aggregation (WARP-1394)", () => {
       },
       {
         match: /"FileIndexStatus" WHERE "userId" = \$1 AND "status" = 'failed'$/,
+        rows: () => [{ c: 1n }],
+      },
+      {
+        match: /"FileIndexStatus" WHERE "userId" = \$1 AND "status" = 'skipped'$/,
         rows: () => [{ c: 1n }],
       },
       {

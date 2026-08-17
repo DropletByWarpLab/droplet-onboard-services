@@ -36,7 +36,7 @@ from config import load_config
 from errors import ErrorReporter
 from portal import PortalClient
 from state import StateStore
-from update_poll import UpdatePoller, matches_target
+from update_poll import UpdatePoller, matches_target, releases_list_url
 
 _FIXTURES = (
     Path(__file__).resolve().parents[3]
@@ -526,3 +526,136 @@ def test_scheduler_update_poll_runs_without_telemetry_consent(state_dir):
     finally:
         if scheduler.running:
             scheduler.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# WARP-1670 — two branches, two channels
+# ---------------------------------------------------------------------------
+
+RELEASES_LIST_URL = (
+    "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services"
+    "/releases?per_page=30"
+)
+STAGE_MANIFEST_URL = "https://api.github.com/assets/stage-release-json"
+STAGE_SIG_URL = "https://api.github.com/assets/stage-release-json-sig"
+
+
+def _list_entry(tag: str, manifest_url: str, sig_url: str) -> dict:
+    return {
+        "tag_name": tag,
+        "assets": [
+            {"name": "release.json", "url": manifest_url},
+            {"name": "release.json.sig", "url": sig_url},
+        ],
+    }
+
+
+def serve_releases_list(entries: list[dict]) -> None:
+    """GitHub's `GET /releases`, newest-first as the API returns it."""
+    respx.get(RELEASES_LIST_URL).mock(return_value=httpx.Response(200, json=entries))
+
+
+def test_releases_list_url_derivation():
+    assert releases_list_url(RELEASES_URL) == RELEASES_LIST_URL
+    # Not a `latest` endpoint → the caller must fail loudly, not go quiet.
+    assert releases_list_url("https://example.test/some/release.json") is None
+
+
+@respx.mock
+async def test_stage_box_takes_the_newest_stage_tagged_release(state_dir):
+    # Newest-first: the stable release is FIRST, so a box that simply took
+    # the head of the list would install the wrong build.
+    serve_releases_list(
+        [
+            _list_entry("ota-stable-9-gstable", MANIFEST_ASSET_URL, SIG_ASSET_URL),
+            _list_entry("ota-stage-8-gstage", STAGE_MANIFEST_URL, STAGE_SIG_URL),
+        ]
+    )
+    respx.get(STAGE_MANIFEST_URL).mock(
+        return_value=httpx.Response(200, content=fx("release.channel-stage.json"))
+    )
+    respx.get(STAGE_SIG_URL).mock(
+        return_value=httpx.Response(200, content=fx("release.channel-stage.json.sig"))
+    )
+    poller, store, _ = build_poller(
+        update_env(state_dir, DROPLET_UPDATE_CHANNEL="stage")
+    )
+
+    outcome = await poller.poll_once()
+
+    assert outcome.outcome == "candidate_recorded", outcome.detail
+    candidate = store.update_candidate()
+    assert candidate["channel"] == "stage"
+    assert candidate["release_tag"] == "ota-stage-8-gstage"
+
+
+@respx.mock
+async def test_stable_box_never_reads_the_releases_list(state_dir):
+    # Only `latest` is mocked. respx fails any unmocked call, so this
+    # asserts by construction that a stable box's discovery is unchanged
+    # — and therefore that stage prereleases stay invisible to it.
+    serve_release("ota-stable-9-gstable", fx("release.valid.json"), fx("release.valid.json.sig"))
+    poller, store, _ = build_poller(update_env(state_dir))  # box channel: stable
+
+    outcome = await poller.poll_once()
+
+    assert outcome.outcome == "candidate_recorded", outcome.detail
+    assert store.update_candidate()["channel"] == "stable"
+
+
+@respx.mock
+async def test_stage_tagged_release_still_obeys_the_signed_manifest(state_dir):
+    # The tag is unsigned repo metadata — discovery may be fooled by it,
+    # the trust decision may not.
+    serve_releases_list(
+        [_list_entry("ota-stage-7-gliar", STAGE_MANIFEST_URL, STAGE_SIG_URL)]
+    )
+    respx.get(STAGE_MANIFEST_URL).mock(
+        return_value=httpx.Response(200, content=fx("release.channel-beta.json"))
+    )
+    respx.get(STAGE_SIG_URL).mock(
+        return_value=httpx.Response(200, content=fx("release.channel-beta.json.sig"))
+    )
+    poller, store, _ = build_poller(
+        update_env(state_dir, DROPLET_UPDATE_CHANNEL="stage")
+    )
+
+    outcome = await poller.poll_once()
+
+    assert outcome.outcome == "not_targeted"
+    assert "channel" in outcome.detail
+    assert store.update_candidate() is None
+
+
+@respx.mock
+async def test_stage_box_with_no_stage_release_is_quiet(state_dir):
+    serve_releases_list(
+        [_list_entry("ota-stable-9-gstable", MANIFEST_ASSET_URL, SIG_ASSET_URL)]
+    )
+    poller, store, _ = build_poller(
+        update_env(state_dir, DROPLET_UPDATE_CHANNEL="stage")
+    )
+
+    outcome = await poller.poll_once()
+
+    assert outcome.outcome == "no_release"
+    assert store.update_candidate() is None
+
+
+@respx.mock
+async def test_underivable_list_endpoint_is_fetch_failed_not_no_release(state_dir):
+    # A box that can never discover must say so on every tick, not report
+    # "nothing published" and look healthy.
+    poller, store, _ = build_poller(
+        update_env(
+            state_dir,
+            DROPLET_UPDATE_CHANNEL="stage",
+            DROPLET_OTA_RELEASES_URL="https://example.test/some/release.json",
+        )
+    )
+
+    outcome = await poller.poll_once()
+
+    assert outcome.outcome == "fetch_failed"
+    assert "list endpoint" in outcome.detail
+    assert store.update_candidate() is None

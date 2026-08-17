@@ -168,14 +168,100 @@ droplet_backup_prepare_restic_env() {
 
 # =============================================================================
 # droplet_backup_ensure_repo — initializes the restic repository on first use.
-# `restic cat config` distinguishes "repo absent" from "wrong password":
-# an existing repo the derived password cannot open makes init fail loudly
-# ("already initialized") instead of silently creating a second repo.
+#
+# THREE states, not two (WARP-2059). `restic cat config` exits non-zero for
+# both "no repository here" and "a repository is here but this password does
+# not open it". Treating every non-zero exit as "absent" sends the second case
+# into `restic init`, which then fails with
+#
+#     Fatal: create repository at <repo> failed: config file already exists
+#
+# — a message describing the init attempt rather than the actual fault. It
+# reads like missing init-detection, and was misdiagnosed as exactly that.
+# The real cause on the box: factory-reset.sh rotated DEVICE_SECRET_KEY (the
+# HKDF input the repository password is derived from — see the stability
+# contract above) while /var/lib/droplet/restic-repo, which lives on the data
+# disk factory-reset does NOT wipe, survived keyed to the OLD secret. Every
+# nightly run failed from then on and the existing snapshots were unreadable.
+#
+# So: probe, then branch on WHY the probe failed. A repository that exists but
+# cannot be opened is a hard stop with an actionable message — never an init
+# attempt, whose error misdirects. Tolerating "config file already exists" and
+# proceeding would not help either: `restic backup` needs the same password
+# and would fail a step later, having discarded the one signal that says the
+# snapshot history has been orphaned.
 # =============================================================================
+
+# Recovery guidance for a present-but-unopenable repository. Deliberately
+# advisory: both remedies (restore the old secret / discard the old repo) are
+# destructive in opposite directions, so the operator chooses.
+_droplet_backup_log_key_mismatch() {
+  log_error "A restic repository EXISTS at $RESTIC_REPOSITORY but the password derived"
+  log_error "from this device's DEVICE_SECRET_KEY does not open it."
+  log_error "restic: ${1:-wrong password or no key found}"
+  log_error ""
+  log_error "This means the device identity was rotated (factory-reset.sh / a fresh"
+  log_error "setup.sh run mints a new DEVICE_SECRET_KEY) while the repository — which"
+  log_error "lives on the data disk a factory reset does not wipe — survived, still"
+  log_error "keyed to the PREVIOUS secret. Existing snapshots are unreadable until the"
+  log_error "old secret is supplied. Refusing to touch the repository."
+  log_error ""
+  log_error "Either recover the old snapshots, if the previous DEVICE_SECRET_KEY is"
+  log_error "still available (an .env backup taken before the reset):"
+  log_error "    DEVICE_SECRET_KEY=<old-secret> restic snapshots"
+  log_error "Or, if this device is intentionally starting a fresh identity and the old"
+  log_error "snapshots are expendable, move the stale repository aside so the next run"
+  log_error "initializes a new one:"
+  log_error "    mv $RESTIC_REPOSITORY $RESTIC_REPOSITORY.orphaned-\$(date +%Y%m%d)"
+}
+
+# Case-insensitive substring test, done in-process. NOT `printf | grep -q`:
+# grep -q exits on the first match and can SIGPIPE the upstream printf, which
+# under `set -o pipefail` makes the pipeline return 141 — a MATCH reported as
+# a non-zero (false) status. That failure mode is silent and only shows up on
+# the path you least want it on.
+_droplet_backup_err_matches() {
+  local haystack="${1,,}" needle
+  shift
+  for needle in "$@"; do
+    case "$haystack" in *"$needle"*) return 0 ;; esac
+  done
+  return 1
+}
+
 droplet_backup_ensure_repo() {
-  if restic cat config >/dev/null 2>&1; then
+  local probe_err init_out rc=0
+  probe_err="$(restic cat config 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     return 0
   fi
+
+  # A repository is present but no key matches. Match on the stable fragments —
+  # restic has reworded the surrounding text across versions, but "wrong
+  # password" / "no key found" have been constant.
+  if _droplet_backup_err_matches "$probe_err" 'wrong password' 'no key found'; then
+    _droplet_backup_log_key_mismatch "$probe_err"
+    return 2
+  fi
+
   log_info "Initializing restic repository at $RESTIC_REPOSITORY..."
-  restic init
+  # Belt and braces: if the probe failed for some wording we do not recognize
+  # yet, init is still the right next move — but a "config file already
+  # exists" from it means the repository was there all along, so surface the
+  # same actionable diagnostic rather than restic's misdirecting Fatal.
+  rc=0
+  init_out="$(restic init 2>&1)" || rc=$?
+  # `if`, not `[ -n … ] && printf`: the callers run under `set -e`, where a
+  # trailing && whose left side is false makes the whole function return 1.
+  if [ -n "$init_out" ]; then
+    printf '%s\n' "$init_out"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    if _droplet_backup_err_matches "$init_out" 'config file already exists' 'already initialized'; then
+      _droplet_backup_log_key_mismatch "$init_out"
+      return 2
+    fi
+    return "$rc"
+  fi
+  return 0
 }
