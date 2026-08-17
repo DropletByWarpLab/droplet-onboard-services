@@ -14,6 +14,7 @@ import {
   getUpdateAgentSettings,
   saveUpdateAgentSettings,
   DEFAULT_UPDATE_AGENT_SETTINGS,
+  RELEASE_CHANNELS,
   UPDATE_AGENT_SETTINGS_KEY,
 } from "./settings.js";
 
@@ -87,6 +88,25 @@ describe("update-agent settings (WARP-538)", () => {
     ).rejects.toThrow(/channel/i);
   });
 
+  it("refuses a channel outside the known set (WARP-1670)", async () => {
+    // The channel decides which branch's builds this box installs, so a
+    // typo fails at the write, where an operator is there to read it —
+    // not silently, six hours later, as an update that never arrives.
+    await expect(
+      saveUpdateAgentSettings(asPrisma(createPrismaStub()), { channel: "stagng" }),
+    ).rejects.toThrow(/unknown channel/i);
+  });
+
+  it("accepts every known release channel (WARP-1670)", async () => {
+    for (const channel of RELEASE_CHANNELS) {
+      const saved = await saveUpdateAgentSettings(
+        asPrisma(createPrismaStub()),
+        { channel },
+      );
+      expect(saved.channel).toBe(channel);
+    }
+  });
+
   it("degrades a corrupt stored row to defaults instead of throwing", async () => {
     const stub = createPrismaStub({
       [UPDATE_AGENT_SETTINGS_KEY]: {
@@ -106,14 +126,14 @@ describe("update-agent settings (WARP-538)", () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
     await saveUpdateAgentSettings(
       asPrisma(stub),
-      { channel: "beta-test" },
+      { channel: "stage" },
       logger as never as pino.Logger,
     );
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "update.settings_changed",
         previous: expect.objectContaining({ channel: "stable" }),
-        next: expect.objectContaining({ channel: "beta-test" }),
+        next: expect.objectContaining({ channel: "stage" }),
       }),
       expect.any(String),
     );
@@ -121,7 +141,7 @@ describe("update-agent settings (WARP-538)", () => {
     logger.info.mockClear();
     await saveUpdateAgentSettings(
       asPrisma(stub),
-      { channel: "beta-test" },
+      { channel: "stage" },
       logger as never as pino.Logger,
     );
     expect(logger.info).not.toHaveBeenCalled();

@@ -372,6 +372,37 @@ describe("WARP-1557 — bounded convergence verification (retry path only)", () 
     expect(ncEnsureGroupMock).not.toHaveBeenCalled();
   });
 
+  it("re-verifying an already-ACTIVE row (the steady-state drift pass) converges QUIETLY — no per-tick 'converged' warn/activity", async () => {
+    // Since groupfolders ≥ 17 made redundant re-adds fail (duplicate-key
+    // 500), reconcileActiveDepartment runs every healthy department through
+    // this branch on EVERY 5-minute tick. Convergence of a row that was
+    // never failing is not news — an ActivityRow per department per tick
+    // would be its own spam problem.
+    gfListFoldersMock.mockResolvedValue([fullyProvisionedFolder()]);
+    const d = dept({ state: "active" });
+    const prisma = buildPrisma([d]);
+
+    await provisionDepartment(prisma as any, d.id, { verifyOnFailure: true });
+
+    expect(prisma.rows.get(d.id)!.state).toBe("active");
+    expect(gfAddGroupMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("healing a FAILED row still records the 'converged' activity — quietness is scoped to rows that were already active", async () => {
+    gfListFoldersMock.mockResolvedValue([fullyProvisionedFolder()]);
+    const d = dept({ state: "failed" });
+    const prisma = buildPrisma([d]);
+
+    await provisionDepartment(prisma as any, d.id, { verifyOnFailure: true });
+
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Department converged (already provisioned)",
+      }),
+    );
+  });
+
   it("verification is OFF by default — first provision still writes unconditionally (ADR-029 write-only projection)", async () => {
     gfListFoldersMock.mockResolvedValue([fullyProvisionedFolder()]);
     const d = dept({ state: "pending" });

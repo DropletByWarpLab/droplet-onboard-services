@@ -19,6 +19,17 @@
  *   - a channel mismatch produces NO row;
  *   - the 03:00 window handler is an honest stub: logs, never advances
  *     status.
+ *
+ * AC under test (WARP-1670 — two branches, two channels):
+ *   - a `stage` box discovers through the releases LIST and takes the
+ *     newest `ota-stage-*` entry, not the newest release overall;
+ *   - a `stable` box keeps reading `latest`, so a stage prerelease is
+ *     invisible to it;
+ *   - a stage-TAGGED release whose signed manifest claims another
+ *     channel is still refused — the tag is a filter, the manifest is
+ *     the trust decision;
+ *   - a box that cannot derive a list endpoint reports the
+ *     misconfiguration instead of pretending there is no release.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import http from "node:http";
@@ -27,7 +38,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import type pino from "pino";
-import { checkForUpdate, runApplyWindow } from "./poller.js";
+import { checkForUpdate, deriveReleasesListUrl, runApplyWindow } from "./poller.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
 
 const fx = (name: string): Buffer =>
@@ -47,6 +58,21 @@ type ServedRelease = {
 let server: http.Server;
 let baseUrl = "";
 let served: ServedRelease = null;
+/**
+ * WARP-1670 — the `GET /releases` list a non-stable channel discovers
+ * from, newest-first exactly as GitHub returns it. Each entry serves its
+ * own manifest under /assets/<i>/…, so a test can prove WHICH entry the
+ * poller picked, not merely that it picked something.
+ */
+let servedList: NonNullable<ServedRelease>[] = [];
+
+function assetsFor(prefix: string) {
+  return [
+    { name: "release.json", url: `${baseUrl}${prefix}/manifest` },
+    { name: "release.json.sig", url: `${baseUrl}${prefix}/signature` },
+    { name: "configs.tar.gz", url: `${baseUrl}${prefix}/configs` },
+  ];
+}
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
@@ -60,14 +86,31 @@ beforeAll(async () => {
       res.end(
         JSON.stringify({
           tag_name: served.tagName,
-          assets: [
-            { name: "release.json", url: `${baseUrl}/assets/manifest` },
-            { name: "release.json.sig", url: `${baseUrl}/assets/signature` },
-            { name: "configs.tar.gz", url: `${baseUrl}/assets/configs` },
-          ],
+          assets: assetsFor("/assets"),
         }),
       );
       return;
+    }
+    if (req.url?.startsWith("/releases?")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify(
+          servedList.map((r, i) => ({
+            tag_name: r.tagName,
+            assets: assetsFor(`/assets/${i}`),
+          })),
+        ),
+      );
+      return;
+    }
+    const listed = /^\/assets\/(\d+)\/(manifest|signature)$/.exec(req.url ?? "");
+    if (listed) {
+      const entry = servedList[Number(listed[1])];
+      if (entry) {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(listed[2] === "manifest" ? entry.manifest : entry.signature);
+        return;
+      }
     }
     if (req.url === "/assets/manifest" && served) {
       res.writeHead(200, { "content-type": "application/octet-stream" });
@@ -205,7 +248,15 @@ function opts(
 
 beforeEach(() => {
   served = null;
+  servedList = [];
 });
+
+/** Prisma stub pre-seeded with a persisted channel setting. */
+function prismaOnChannel(channel: string) {
+  return createPrismaStub({
+    [UPDATE_AGENT_SETTINGS_KEY]: { channel, applyWindowCron: "0 3 * * *", autoApply: true },
+  });
+}
 
 // ---------------------------------------------------------------------------
 
@@ -386,6 +437,149 @@ describe("checkForUpdate (WARP-538)", () => {
         bare.close((err) => (err ? reject(err) : resolve())),
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-1670 — two branches, two channels
+// ---------------------------------------------------------------------------
+
+describe("deriveReleasesListUrl (WARP-1670)", () => {
+  it("turns a latest endpoint into a bounded list endpoint", () => {
+    expect(
+      deriveReleasesListUrl(
+        "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest",
+      ),
+    ).toBe(
+      "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases?per_page=30",
+    );
+  });
+
+  it("returns null for a URL that is not a latest endpoint", () => {
+    // The caller must report this as a configuration failure — reporting
+    // "no release" would park a stage box on nothing, silently, forever.
+    expect(deriveReleasesListUrl("http://127.0.0.1:9/fake-release.json")).toBeNull();
+    expect(deriveReleasesListUrl("not a url")).toBeNull();
+  });
+});
+
+describe("checkForUpdate — channel-aware discovery (WARP-1670)", () => {
+  it("a stage box installs the newest ota-stage release and ignores stable", async () => {
+    // Newest-first, as GitHub returns it: the stable release is FIRST, so
+    // a box that just took `latest` (or the head of the list) would get the
+    // wrong build.
+    servedList = [
+      {
+        tagName: "ota-stable-9-gstable",
+        manifest: fx("release.valid.json"),
+        signature: fx("release.valid.json.sig"),
+      },
+      {
+        tagName: "ota-stage-8-gstage",
+        manifest: fx("release.channel-stage.json"),
+        signature: fx("release.channel-stage.json.sig"),
+      },
+    ];
+    const prisma = prismaOnChannel("stage");
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate(opts(prisma, logger));
+
+    expect(res).toMatchObject({ outcome: "pending_created", gitSha: "c".repeat(40) });
+    const rows = prisma.deviceUpdate._rows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: "pending",
+      channel: "stage",
+      releaseTag: "ota-stage-8-gstage",
+    });
+  });
+
+  it("a stable box still reads `latest` and never sees the stage prerelease", async () => {
+    served = {
+      tagName: "ota-stable-9-gstable",
+      manifest: fx("release.valid.json"),
+      signature: fx("release.valid.json.sig"),
+    };
+    // A stage release exists and is newer — it must be invisible here.
+    servedList = [
+      {
+        tagName: "ota-stage-8-gstage",
+        manifest: fx("release.channel-stage.json"),
+        signature: fx("release.channel-stage.json.sig"),
+      },
+    ];
+    const prisma = prismaOnChannel("stable");
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate(opts(prisma, logger));
+
+    expect(res.outcome).toBe("pending_created");
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      channel: "stable",
+      releaseTag: "ota-stable-9-gstable",
+    });
+  });
+
+  it("refuses a stage-TAGGED release whose SIGNED manifest says another channel", async () => {
+    // The tag is unsigned repo metadata; anyone with write access can set
+    // it. Discovery may be fooled by it — the trust decision may not.
+    servedList = [
+      {
+        tagName: "ota-stage-7-gliar",
+        manifest: fx("release.channel-beta.json"),
+        signature: fx("release.channel-beta.json.sig"),
+      },
+    ];
+    const prisma = prismaOnChannel("stage");
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate(opts(prisma, logger));
+
+    expect(res).toMatchObject({
+      outcome: "channel_mismatch",
+      releaseChannel: "beta",
+      deviceChannel: "stage",
+    });
+    expect(prisma.deviceUpdate._rows()).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.channel_mismatch" }),
+      expect.any(String),
+    );
+  });
+
+  it("is a quiet no_release when the list holds nothing for this channel", async () => {
+    servedList = [
+      {
+        tagName: "ota-stable-9-gstable",
+        manifest: fx("release.valid.json"),
+        signature: fx("release.valid.json.sig"),
+      },
+    ];
+    const prisma = prismaOnChannel("stage");
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate(opts(prisma, logger));
+
+    expect(res.outcome).toBe("no_release");
+    expect(prisma.deviceUpdate._rows()).toHaveLength(0);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("reports fetch_failed — not no_release — when no list endpoint can be derived", async () => {
+    const prisma = prismaOnChannel("stage");
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate({
+      ...opts(prisma, logger),
+      releasesLatestUrl: "http://127.0.0.1:9/fake-release.json",
+    });
+
+    expect(res.outcome).toBe("fetch_failed");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.check_failed" }),
+      expect.any(String),
+    );
   });
 });
 

@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const {
   ncEnsureGroupMock,
   gfListFoldersMock,
+  gfGetFolderMock,
   gfCreateFolderMock,
   gfDeleteFolderMock,
   gfAddGroupMock,
@@ -25,6 +26,10 @@ const {
 } = vi.hoisted(() => ({
   ncEnsureGroupMock: vi.fn().mockResolvedValue(undefined),
   gfListFoldersMock: vi.fn().mockResolvedValue([]),
+  // groupfolders ≥ 17 duplicate-key fix: ensureAdminsAttached reads the
+  // folder before writing. Default null ("folder not visible") = the
+  // pre-read behaviour every earlier spec assumed — attach unconditionally.
+  gfGetFolderMock: vi.fn().mockResolvedValue(null),
   gfCreateFolderMock: vi.fn().mockResolvedValue(42),
   gfDeleteFolderMock: vi.fn().mockResolvedValue(undefined),
   gfAddGroupMock: vi.fn().mockResolvedValue(undefined),
@@ -63,6 +68,7 @@ vi.mock("../services/nextcloud.client.js", () => ({
 
 vi.mock("../services/nextcloud-groups.client.js", () => ({
   gfListFolders: gfListFoldersMock,
+  gfGetFolder: gfGetFolderMock,
   gfCreateFolder: gfCreateFolderMock,
   gfDeleteFolder: gfDeleteFolderMock,
   gfAddGroup: gfAddGroupMock,
@@ -353,6 +359,7 @@ beforeEach(() => {
   _resetReconcileKickForTests();
   ncEnsureGroupMock.mockResolvedValue(undefined);
   gfListFoldersMock.mockResolvedValue([]);
+  gfGetFolderMock.mockResolvedValue(null);
   gfCreateFolderMock.mockResolvedValue(42);
   gfDeleteFolderMock.mockResolvedValue(undefined);
   gfAddGroupMock.mockResolvedValue(undefined);
@@ -498,22 +505,67 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
 
     await reconcileDepartments(prisma as any);
 
-    // WARP-1557: an ACTIVE DEPARTMENT row is re-converged through
-    // provisionDepartment, whose writes carry a trailing GfWriteOptions.
-    // `confirmOnFailure: false` — the steady-state drift pass keeps
-    // overwriting unconditionally, no read-back.
+    // The seeded folder (groups: {}) does NOT match intent, so the drift
+    // pass falls through to the full overwrite path. Since groupfolders ≥ 17
+    // turned redundant re-adds into duplicate-key 500s, the steady-state
+    // pass runs with `verifyOnFailure` — its writes carry
+    // `confirmOnFailure: true` so a 500 fired after an effective write
+    // resolves via its postcondition.
     expect(gfAddGroupMock).toHaveBeenCalledWith(
       expect.any(String),
       7,
       DROPLET_ADMINS_GROUP,
-      expect.objectContaining({ confirmOnFailure: false }),
+      expect.objectContaining({ confirmOnFailure: true }),
     );
     expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
       expect.any(String),
       7,
       DROPLET_ADMINS_GROUP,
       MASK_ADMIN,
-      expect.objectContaining({ confirmOnFailure: false }),
+      expect.objectContaining({ confirmOnFailure: true }),
+    );
+  });
+
+  it("REGRESSION (groupfolders ≥ 17): an active DEPARTMENT already matching intent issues ZERO groupfolder writes — and stays quiet", async () => {
+    // On droplet-sys the re-add of an attached group 500s (duplicate key), so
+    // the pre-fix unconditional overwrite failed every tick and knocked the
+    // converged row into `provisioning`. Prove no write is even attempted.
+    gfAddGroupMock.mockRejectedValue(new Error("Groupfolder add group: 500"));
+    const active = dept({
+      id: "d-active",
+      state: "active",
+      ncGroupRw: "dept-engineering",
+      ncGroupRo: "dept-engineering-ro",
+      ncGroupfolderId: 7,
+    });
+    gfListFoldersMock.mockResolvedValue([
+      {
+        id: 7,
+        mountPoint: "Engineering",
+        groups: {
+          "dept-engineering": MASK_RW,
+          "dept-engineering-ro": MASK_RO,
+          [DROPLET_ADMINS_GROUP]: MASK_ADMIN,
+        },
+        quota: -3,
+        size: 0,
+        acl: false,
+        manage: [],
+      },
+    ]);
+    const prisma = buildPrisma([active]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(gfAddGroupMock).not.toHaveBeenCalled();
+    expect(gfSetGroupPermissionsMock).not.toHaveBeenCalled();
+    expect(gfCreateFolderMock).not.toHaveBeenCalled();
+    expect(prisma.deptRows.get("d-active")!.state).toBe("active");
+    expect(result.departmentsStillFailed).toBe(0);
+    // Quiet: a healthy row re-verified on the steady-state pass must not
+    // emit a "converged" ActivityRow every 5 minutes.
+    expect(recordActivityMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ what: "Department converged (already provisioned)" }),
     );
   });
 
@@ -528,12 +580,83 @@ describe("reconcileDepartments — droplet-admins invariant", () => {
 
     await reconcileDepartments(prisma as any);
 
-    expect(gfAddGroupMock).toHaveBeenCalledWith(expect.any(String), 3, DROPLET_ADMINS_GROUP);
+    // gfGetFolder default (null): the folder can't be read, so the invariant
+    // is asserted the pre-read way — attach + mask, confirm-on-failure.
+    expect(gfAddGroupMock).toHaveBeenCalledWith(
+      expect.any(String),
+      3,
+      DROPLET_ADMINS_GROUP,
+      expect.objectContaining({ confirmOnFailure: true }),
+    );
     expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
       expect.any(String),
       3,
       DROPLET_ADMINS_GROUP,
       MASK_ADMIN,
+      expect.objectContaining({ confirmOnFailure: true }),
+    );
+  });
+
+  it("REGRESSION (groupfolders ≥ 17): a HOUSEHOLD folder already carrying droplet-admins at MASK_ADMIN gets NO writes", async () => {
+    // The droplet-sys spam: folder 1 converged since the first-ever tick,
+    // yet every 5-minute tick re-added droplet-admins and logged the
+    // duplicate-key 500 as a level-50 error. Steady state must now be a
+    // single read.
+    gfAddGroupMock.mockRejectedValue(new Error("Groupfolder add group: 500"));
+    gfGetFolderMock.mockResolvedValue({
+      id: 3,
+      mountPoint: "Household",
+      groups: { household: 1, [DROPLET_ADMINS_GROUP]: MASK_ADMIN },
+      quota: -3,
+      size: 0,
+      acl: false,
+      manage: [],
+    });
+    const household = dept({
+      id: "d-household",
+      kind: "HOUSEHOLD",
+      state: "active",
+      ncGroupfolderId: 3,
+    });
+    const prisma = buildPrisma([household]);
+
+    const result = await reconcileDepartments(prisma as any);
+
+    expect(gfGetFolderMock).toHaveBeenCalledWith(expect.any(String), 3);
+    expect(gfAddGroupMock).not.toHaveBeenCalled();
+    expect(gfSetGroupPermissionsMock).not.toHaveBeenCalled();
+    expect(result.departmentsStillFailed).toBe(0);
+  });
+
+  it("corrects a wrong droplet-admins mask with set-permissions ONLY — no doomed re-add of an attached group", async () => {
+    gfGetFolderMock.mockResolvedValue({
+      id: 3,
+      mountPoint: "Household",
+      groups: { [DROPLET_ADMINS_GROUP]: 15 }, // attached, drifted below MASK_ADMIN
+      quota: -3,
+      size: 0,
+      acl: false,
+      manage: [],
+    });
+    const household = dept({
+      id: "d-household",
+      kind: "HOUSEHOLD",
+      state: "active",
+      ncGroupfolderId: 3,
+    });
+    const prisma = buildPrisma([household]);
+
+    await reconcileDepartments(prisma as any);
+
+    // Re-adding an attached group is a duplicate-key 500 on groupfolders
+    // ≥ 17 — the mask fix must go straight to set-permissions.
+    expect(gfAddGroupMock).not.toHaveBeenCalled();
+    expect(gfSetGroupPermissionsMock).toHaveBeenCalledWith(
+      expect.any(String),
+      3,
+      DROPLET_ADMINS_GROUP,
+      MASK_ADMIN,
+      expect.objectContaining({ confirmOnFailure: true }),
     );
   });
 

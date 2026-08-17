@@ -530,20 +530,31 @@ const envSchema = z.object({
   DROPLET_DEVICE_ID: z.string().default("droplet"),
 
   // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
-  // OVERLAY_CONNECT_ENABLED — explicit opt-in for the box overlay connect agent.
-  //   Default FALSE: the agent long-polls HQ's /api/overlay/* endpoints, which
-  //   ship in WARP-1384; until a box's HQ deployment exposes them, polling would
-  //   just 404 each tick. Boxes flip this on once HQ signaling is live. Also
-  //   requires HQ_ISSUANCE_URL to be set (the agent shares that HQ base URL).
+  // OVERLAY_CONNECT_ENABLED — the box overlay connect agent (WARP-1767).
+  //   Default TRUE. It was FALSE because the agent long-polls HQ's
+  //   /api/overlay/* endpoints, which had not shipped yet, so polling would have
+  //   404'd every tick. WARP-1384 deployed them and they answer, so the reason
+  //   for the opt-in has expired — and while it persisted, the default silently
+  //   meant no shipping box could be reached from outside at all. Set false to
+  //   opt a box out (LAN-only); it changes nothing about home-LAN operation.
+  //   Also requires HQ_ISSUANCE_URL (the agent shares that HQ base URL) and
+  //   router supervision — index.ts gates on all three.
   OVERLAY_CONNECT_ENABLED: z
     .string()
     .transform((v) => v === "true" || v === "1")
-    .default("false"),
+    .default("true"),
   // Seconds between HQ long-poll ticks (event-driven; NOT a busy loop —
   // scheduled via cron-runtime). Bounded to keep the outbound heartbeat light.
   OVERLAY_CONNECT_POLL_SECONDS: z.coerce.number().int().min(2).max(300).default(15),
-  // Hours an overlay peer may sit without a session before the sweep revokes it.
-  OVERLAY_PEER_IDLE_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(12),
+  // Hours an overlay peer may sit without a session OR an observed handshake
+  // before the sweep revokes it. WARP-2060: overlay peers are CLIENT-initiated
+  // — a phone that is simply away holds no endpoint on the box and is inert,
+  // so an aggressive window buys no security and costs real breakage: at the
+  // old 12h default a phone left home for a weekend came back to a silently
+  // dead tunnel (row revoked, /profile 503s, owner re-approval required).
+  // 720h (30 days) reaps genuinely abandoned enrollments; with the sweep's
+  // handshake-sparing an active device is never reaped at any setting.
+  OVERLAY_PEER_IDLE_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(720),
 
   // --- Coverage extender APs (WARP-446) ---
   // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
@@ -684,12 +695,24 @@ const envSchema = z.object({
   //                    releases, but never swaps containers. This is the correct
   //                    posture for dev laptops + CI (no host socket) and until
   //                    the compose socket mount is provisioned on a box.
-  //   COMPOSE_FILE   — the on-host compose file the helper drives.
+  //   COMPOSE_FILE   — the compose file the helper drives. WARP-1669: this
+  //                    path must be valid BOTH on the host and inside the
+  //                    orchestrator container, because the compose CLI runs
+  //                    in-container while the daemon resolves the file's
+  //                    relative bind mounts on the host. docker-compose.yml
+  //                    mounts the tree at its own host path (DROPLET_HOST_ROOT)
+  //                    to satisfy that; the default below is only the
+  //                    conventional install location.
+  //   CONFIG_ROOT    — where a release's configs.tar.gz is extracted. CI packs
+  //                    it as `docker/…` (`git archive HEAD docker`), so this is
+  //                    the REPO ROOT, one level above the compose file. The
+  //                    helper derives exactly that when this is unset.
   //   UPDATES_DIR    — root for <updateId>/{backup,configs.tar.gz}; the 7-day
   //                    backup GC (daily purge cron) reaps terminal-update dirs
   //                    under it. Maps to a named volume on the box.
   DROPLET_OTA_APPLY_SCRIPT: z.string().default(""),
   DROPLET_OTA_COMPOSE_FILE: z.string().default("/opt/droplet/docker/docker-compose.yml"),
+  DROPLET_OTA_CONFIG_ROOT: z.string().default(""),
   DROPLET_OTA_UPDATES_DIR: z.string().default("/data/updates"),
 
   // Client-app downloads — the Droplet apps (Windows installer, Android APK,
