@@ -69,10 +69,15 @@ operator consents; either half runs without the other.
 
 Every ~5 minutes ([`update_poll.py`](update_poll.py)):
 
-1. **Discover** — GET the GitHub Releases `latest` endpoint
+1. **Discover** — find the newest release for this box's channel, then
+   download its `release.json` + `release.json.sig` assets. On `stable`
+   that is a GET of the GitHub Releases `latest` endpoint
    (`DROPLET_OTA_RELEASES_URL`, the same deployment knob the
-   orchestrator's WARP-538 poller reads) and download the
-   `release.json` + `release.json.sig` assets.
+   orchestrator's WARP-538 poller reads). Other channels publish as
+   prereleases, which `latest` skips by design, so they read the
+   releases list instead and take the newest `ota-<channel>-*` entry
+   (WARP-1670). That tag match is a cheap pre-filter over unsigned
+   metadata — step 2 still decides on the signed manifest.
 2. **Verify** — the full WARP-537 trust chain
    ([`release_verify.py`](release_verify.py), a Python port of the
    orchestrator's `update-agent/{manifest,verify}.ts`, tested against
@@ -133,7 +138,7 @@ tick wrapper. A failing poll can never degrade the box.
 | `DROPLET_OTA_RELEASES_URL` | GitHub Releases `latest` endpoint (same knob as the orchestrator poller) | canonical publisher |
 | `DROPLET_OTA_GITHUB_TOKEN` | bearer for a private releases repo; empty = no auth header | empty |
 | `DROPLET_UPDATE_POLL_SEC` | poll cadence | `300` |
-| `DROPLET_UPDATE_CHANNEL` | release channel this box accepts | `stable` |
+| `DROPLET_UPDATE_CHANNEL` | release channel this box tracks — `stable` (built from `main`) or `stage` (built from `stage`, WARP-1670). This also selects HOW releases are discovered: `stable` reads GitHub's `latest`, every other channel reads the releases list and takes the newest `ota-<channel>-*` entry, because stage publishes as a prerelease and `latest` skips those. | `stable` |
 | `DROPLET_CUSTOMER` | `customer` targeting tag (ADR-028 selector vocabulary) | unset |
 
 ## Tests
