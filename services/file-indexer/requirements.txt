@@ -97,5 +97,5 @@ striprtf>=0.0.29
 
 # WARP-1948 — OSV floors (see block rationale in sibling services):
 # idna via httpx, scipy via imagehash.
-idna>=3.15
+idna>=3.18
 scipy>=1.10.0
