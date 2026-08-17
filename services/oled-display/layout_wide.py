@@ -690,7 +690,14 @@ def _cell_netstore(disp, draw, v: dict) -> None:
     store = v.get("storage") or {}
 
     _eyebrow(draw, "NETWORK", x)
-    d._v3_text(draw, str(wifi.get("ssid") or "—")[:14], x, 76,
+    # WARP-2047 — ask the display for the household SSID rather than reading
+    # the client-scan feed directly. `wifi` (the bridge's /wifi) is a STATION
+    # scan and carries no ssid on the shapes where an external access point
+    # hosts the network, so this tile could only ever name the box's own
+    # hotspot. On droplet-sys that meant it printed the vitals placeholder
+    # while the household was on "Warp". household_ssid() prefers the
+    # /openwrt/qr join feed, which resolves all three shapes.
+    d._v3_text(draw, (disp.household_ssid() or "—")[:14], x, 76,
                font=d._get_font(18, weight="bold"), fill=d.V3_TEXT)
     detail = " · ".join(p for p in (
         wifi.get("band") or None,

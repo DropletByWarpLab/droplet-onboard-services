@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import urllib.error
 from pathlib import Path
 
@@ -67,6 +68,7 @@ def test_hostapd_mode_env_creds_yield_real_matrix_and_payload(
     monkeypatch.setattr(bridge, "openwrt_wifi_credentials",
                         lambda: (_ for _ in ()).throw(
                             AssertionError("UCI path used in hostapd mode")))
+    _stub_run(monkeypatch, bridge)
 
     snap = bridge.qr_snapshot()
 
@@ -95,6 +97,7 @@ def test_hostapd_mode_dict_shape_matches_multibox(
         "DROPLET_AP_SSID": "Droplet",
         "DROPLET_AP_PSK": "Droplet123!",
     })
+    _stub_run(monkeypatch, bridge)
     snap = bridge.qr_snapshot()
     for field in ("ok", "ssid", "security", "hidden", "disabled",
                   "payload", "matrix", "version", "key",
@@ -112,6 +115,7 @@ def test_hostapd_mode_rotation_disabled(monkeypatch: pytest.MonkeyPatch):
         "DROPLET_AP_PSK": "Droplet123!",
         "WIFI_KEY_ROTATION_ENABLED": "true",
     })
+    _stub_run(monkeypatch, bridge)
     snap = bridge.qr_snapshot()
     assert snap["rotation_enabled"] is False
     # And no live countdown should be advertised in hostapd mode.
@@ -147,6 +151,50 @@ wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 """
 
+# `iw dev` output for a box whose own radio IS hosting `ssid=Droplet` — the
+# state every hostapd-mode test below implicitly assumes. WARP-2047 made that
+# assumption explicit: the bridge now corroborates locally-read creds against
+# the radio before publishing them, so a hostapd test that stubs only the
+# hostapd.conf read is describing a box with a config file and no Wi-Fi.
+_IW_DEV_DROPLET_AP = """phy#0
+\tInterface wlan0
+\t\tifindex 4
+\t\tssid Droplet
+\t\ttype AP
+\t\tchannel 6 (2437 MHz), width: 20 MHz
+"""
+
+
+def _stub_run(monkeypatch, bridge, *, conf=None, iw=None, iw_rc=0):
+    """Command-aware `_run` stub for the two `docker exec` boundaries.
+
+    `iw dev` and `cat /etc/hostapd.conf` are different questions and tests need
+    to answer them independently — a stub that returns one blob for any argv
+    lets a hostapd.conf fixture masquerade as radio state. Anything not
+    explicitly stubbed raises, so a new shell-out can't slip in unnoticed.
+
+    Returns the recorded argv list.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, timeout=15):
+        calls.append(list(cmd))
+        if "iw" in cmd:
+            if iw_rc != 0:
+                return iw_rc, "", "iw: not found"
+            return 0, (iw if iw is not None else _IW_DEV_DROPLET_AP), ""
+        if conf is not None and any(str(a).endswith("hostapd.conf") for a in cmd):
+            return 0, conf, ""
+        raise AssertionError("unexpected _run: {}".format(cmd))
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    return calls
+
+
+def _conf_was_read(calls) -> bool:
+    return any(
+        any(str(a).endswith("hostapd.conf") for a in cmd) for cmd in calls)
+
 
 def test_hostapd_conf_fallback_parses_ssid_and_psk(
         monkeypatch: pytest.MonkeyPatch):
@@ -154,22 +202,19 @@ def test_hostapd_conf_fallback_parses_ssid_and_psk(
     # `docker exec droplet-openwrt cat /etc/hostapd.conf` and parse it.
     bridge = _load_bridge(monkeypatch, {"DROPLET_AP_MODE": "hostapd"})
 
-    calls = {}
-
-    def fake_run(cmd, timeout=15):
-        calls["cmd"] = cmd
-        return 0, _HOSTAPD_CONF, ""
-
-    monkeypatch.setattr(bridge, "_run", fake_run)
+    calls = _stub_run(monkeypatch, bridge, conf=_HOSTAPD_CONF)
 
     snap = bridge.qr_snapshot()
     assert snap["ok"] is True
     assert snap["ssid"] == "Droplet"
     assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:Droplet123!;;"
     # It really did go through the docker-exec hostapd.conf reader.
-    assert "docker" in calls["cmd"]
-    assert "/etc/hostapd.conf" in calls["cmd"]
-    assert "droplet-openwrt" in calls["cmd"]
+    conf_cmd = next(
+        cmd for cmd in calls
+        if any(str(a).endswith("hostapd.conf") for a in cmd))
+    assert "docker" in conf_cmd
+    assert "/etc/hostapd.conf" in conf_cmd
+    assert "droplet-openwrt" in conf_cmd
 
 
 def test_hostapd_conf_parser_handles_quotes_and_spacing(
@@ -195,20 +240,22 @@ def test_hostapd_conf_parser_no_ssid_is_error(monkeypatch: pytest.MonkeyPatch):
 def test_hostapd_env_creds_take_priority_over_conf(
         monkeypatch: pytest.MonkeyPatch):
     # When both env and hostapd.conf are available, env wins (cleanest source)
-    # and we never shell out to docker.
+    # and the hostapd.conf reader is never invoked. (Since WARP-2047 the radio
+    # IS asked — that is the corroboration step, not a creds source — so the
+    # assertion is scoped to the conf read rather than to `docker` generally.)
     bridge = _load_bridge(monkeypatch, {
         "DROPLET_AP_MODE": "hostapd",
         "DROPLET_AP_SSID": "EnvNet",
         "DROPLET_AP_PSK": "envpass",
     })
+    calls = _stub_run(
+        monkeypatch, bridge,
+        iw="\tInterface wlan0\n\t\tssid EnvNet\n\t\ttype AP\n")
 
-    def boom(cmd, timeout=15):
-        raise AssertionError("docker exec used despite env creds")
-
-    monkeypatch.setattr(bridge, "_run", boom)
     snap = bridge.qr_snapshot()
     assert snap["ssid"] == "EnvNet"
     assert snap["payload"] == "WIFI:T:WPA;S:EnvNet;P:envpass;;"
+    assert not _conf_was_read(calls), "hostapd.conf read despite env creds"
 
 
 # ---------------------------------------------------------------------------
@@ -231,15 +278,16 @@ def test_hostapd_reads_psk_from_persisted_file_when_env_psk_absent(
         # No DROPLET_AP_PSK in env on purpose — the file is the source.
         "DROPLET_AP_PSK_FILE": str(psk_file),
     })
-    # Must not shell out to the container when the persisted file answers.
-    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("docker exec used despite persisted PSK file")))
+    # Must not read hostapd.conf when the persisted file answers.
+    calls = _stub_run(monkeypatch, bridge)
 
     snap = bridge.qr_snapshot()
     assert snap["ok"] is True
     assert snap["ssid"] == "Droplet"
     assert snap["key"] == "480M4GnTS7wPfF36"
     assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:480M4GnTS7wPfF36;;"
+    assert not _conf_was_read(calls), \
+        "hostapd.conf read despite persisted PSK file"
 
 
 def test_hostapd_env_psk_takes_priority_over_persisted_file(
@@ -253,6 +301,7 @@ def test_hostapd_env_psk_takes_priority_over_persisted_file(
         "DROPLET_AP_PSK": "envwins123456",
         "DROPLET_AP_PSK_FILE": str(psk_file),
     })
+    _stub_run(monkeypatch, bridge)
     snap = bridge.qr_snapshot()
     assert snap["key"] == "envwins123456"
 
@@ -282,10 +331,7 @@ def test_hostapd_empty_env_and_file_psk_falls_through_to_conf(
         "DROPLET_AP_PSK_FILE": str(psk_file),
     })
 
-    def fake_run(cmd, timeout=15):
-        return 0, _HOSTAPD_CONF, ""
-
-    monkeypatch.setattr(bridge, "_run", fake_run)
+    _stub_run(monkeypatch, bridge, conf=_HOSTAPD_CONF)
 
     snap = bridge.qr_snapshot()
     assert snap["ok"] is True
@@ -917,3 +963,294 @@ def test_key_based_ssh_does_not_need_sshpass(monkeypatch: pytest.MonkeyPatch):
     bridge._ssh_openwrt("uci show wireless")
 
     assert seen["argv"][0] == "ssh"
+
+
+# ---------------------------------------------------------------------------
+# The local hostapd creds must be CORROBORATED by a live BSS before the panel
+# advertises them.
+#
+# Live failure this reproduces (droplet-sys, 2026-08-14): the bridge's own env
+# said DROPLET_AP_SSID=Warp / DROPLET_AP_PSK=Droplet123!, the container's
+# hostapd.conf said ssid=Droplet-AI, and the household AP was broadcasting
+# "Warp" under a completely different passphrase. The panel rendered
+# `WIFI:T:WPA;S:Warp;P:Droplet123!;;` — a QR naming a real network with the
+# wrong password, so every phone that scanned it failed to authenticate. The
+# box's radio was in `type managed` and droplet-openwrt-attach had exited 1, so
+# there was no local BSS at all.
+#
+# hostapd_wifi_credentials() documents its sources as "coherent with what
+# hostapd serves". Nothing enforced that, and the env had drifted.
+# ---------------------------------------------------------------------------
+
+_IW_DEV_AP_UP = """phy#1
+\tInterface phy01-0
+\t\tifindex 17
+\t\taddr 80:ea:0b:39:ae:26
+\t\tssid Droplet
+\t\ttype AP
+\t\tchannel 36 (5180 MHz), width: 80 MHz
+phy#0
+\tInterface phy00-0
+\t\tifindex 16
+\t\taddr 80:ea:0b:39:ae:25
+\t\tssid Droplet
+\t\ttype AP
+\t\tchannel 6 (2437 MHz), width: 20 MHz
+"""
+
+# The real droplet-sys output: the radio is a STATION and the P2P-device has no
+# ssid at all. Nothing is being beaconed.
+_IW_DEV_NO_AP = """phy#0
+\tInterface wlp10s0
+\t\tifindex 3
+\t\twdev 0x1
+\t\taddr f4:28:9d:d2:1d:db
+\t\ttype managed
+\t\ttxpower 3.00 dBm
+\tUnnamed/non-netdev interface
+\t\twdev 0x2
+\t\taddr f6:28:9d:d2:1d:db
+\t\ttype P2P-device
+\t\ttxpower 3.00 dBm
+"""
+
+
+def _stub_iw(monkeypatch, bridge, rc: int, out: str, err: str = ""):
+    """`_stub_run` scoped to the radio probe — no hostapd.conf arm at all.
+
+    These tests are about the corroboration step, so a conf read here would be
+    an unexpected shell-out and must raise rather than quietly answer.
+    """
+    return _stub_run(monkeypatch, bridge, iw=out, iw_rc=rc)
+
+
+def _hostapd_box(monkeypatch, ssid="Warp", psk="Droplet123!"):
+    return _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": ssid,
+        "DROPLET_AP_PSK": psk,
+    })
+
+
+def test_no_local_bss_refuses_the_env_creds_and_asks_the_orchestrator(
+        monkeypatch: pytest.MonkeyPatch):
+    """The exact droplet-sys shape: env creds present, nothing on the air.
+
+    The env is not evidence. The household answer has to come from the
+    orchestrator's canonical resolver instead.
+    """
+    bridge = _hostapd_box(monkeypatch)
+    _stub_iw(monkeypatch, bridge, 0, _IW_DEV_NO_AP)
+    seen: dict = {}
+    _fake_join_response(monkeypatch, bridge, {
+        "ssid": "Warp", "key": "Warp123!", "source": "ap",
+        "detail": "Broadcast by the access point.",
+    }, seen)
+
+    snap = bridge.qr_snapshot()
+
+    assert snap["ok"] is True
+    assert snap["source"] == "orchestrator", "the stale local env must not win"
+    # The AP's REAL passphrase, not the bridge env's stale one.
+    assert snap["key"] == "Warp123!"
+    assert "Droplet123!" not in snap["payload"]
+    # The corroboration verdict survives the fallback: the published creds are
+    # the orchestrator's, and `liveness` records WHY they aren't local.
+    assert snap["liveness"] == "refused"
+
+
+def test_no_local_bss_and_no_approved_ap_emits_no_qr_at_all(
+        monkeypatch: pytest.MonkeyPatch):
+    """droplet-sys as it actually stands: nothing local, no AP approved yet.
+
+    A blank rail with a reason is the honest answer. An unjoinable QR is worse
+    than no QR — the owner blames the Wi-Fi, not the missing setup step.
+    """
+    bridge = _hostapd_box(monkeypatch)
+    _stub_iw(monkeypatch, bridge, 0, _IW_DEV_NO_AP)
+    _fake_join_response(monkeypatch, bridge, {
+        "ssid": None, "key": None, "source": None,
+        "detail": "No Wi-Fi is being broadcast yet — this Droplet's radio "
+                  "isn't hosting a network and no access point has been "
+                  "approved.",
+    }, {})
+
+    snap = bridge.qr_snapshot()
+
+    assert snap["ok"] is False
+    assert snap["payload"] is None and snap["matrix"] is None
+    # Both halves of the story survive: the local radio is idle AND no AP is
+    # approved. Either alone sends someone debugging the wrong layer.
+    assert "not hosting a network" in snap["error"]
+    assert "no access point has been approved" in snap["error"]
+    # Never echo the passphrase we just refused to trust.
+    assert "Droplet123!" not in snap["error"]
+    # The no-QR snapshot still says the local creds were REFUSED, not unchecked.
+    assert snap["liveness"] == "refused"
+
+
+def test_a_configured_ssid_absent_from_the_air_is_refused(
+        monkeypatch: pytest.MonkeyPatch):
+    """A BSS is up, but under a different name than the env claims.
+
+    That proves the env drifted, which makes its PASSPHRASE untrustworthy too —
+    so this is a refusal, not a silent SSID substitution.
+    """
+    bridge = _hostapd_box(monkeypatch, ssid="Warp")
+    # On the air as "Droplet" — what the attach script actually wrote.
+    _stub_iw(monkeypatch, bridge, 0, _IW_DEV_AP_UP)
+    _fake_join_response(monkeypatch, bridge, {
+        "ssid": "Droplet", "key": "realpsk123456", "source": "ap",
+    }, {})
+
+    snap = bridge.qr_snapshot()
+
+    assert snap["source"] == "orchestrator"
+    assert snap["ssid"] == "Droplet"
+    assert snap["liveness"] == "refused"
+
+
+def test_a_live_bss_corroborates_the_local_creds(
+        monkeypatch: pytest.MonkeyPatch):
+    """The single-box happy path stays local, keeps its payload byte-order and
+    never gains an orchestrator dependency."""
+    bridge = _hostapd_box(monkeypatch, ssid="Droplet", psk="Droplet123!")
+    _stub_iw(monkeypatch, bridge, 0, _IW_DEV_AP_UP)
+    monkeypatch.setattr(bridge, "_orchestrator_household_wifi",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("orchestrator used on happy path")))
+
+    snap = bridge.qr_snapshot()
+
+    assert snap["ok"] is True and snap["source"] == "hostapd"
+    assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:Droplet123!;;"
+    assert snap["liveness"] == "corroborated"
+
+
+def test_an_unrunnable_probe_keeps_the_local_answer(
+        monkeypatch: pytest.MonkeyPatch):
+    """"Could not ask" is not "nothing is there".
+
+    An install where `docker exec`/`iw` is unavailable must keep working exactly
+    as it did — failing closed here would blank the QR on boxes whose hotspot is
+    genuinely up. Same discipline as the AP fan-out's `apsNotReporting`: a
+    degraded read never renders as a confident zero.
+    """
+    bridge = _hostapd_box(monkeypatch, ssid="Droplet", psk="Droplet123!")
+    _stub_iw(monkeypatch, bridge, 127, "", "iw: not found")
+    monkeypatch.setattr(bridge, "_orchestrator_household_wifi",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("unknown probe must not fall through")))
+
+    snap = bridge.qr_snapshot()
+
+    assert snap["ok"] is True and snap["source"] == "hostapd"
+
+
+def test_an_unrunnable_probe_is_marked_in_snapshot_and_log(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """Serve-anyway must not mean silent.
+
+    The uncorroborated publish is the one remaining path where a wrong SSID can
+    still reach the glass, so it has to be visible in both places someone would
+    look. The snapshot needs a marker — without one it reads byte-identical to
+    a corroborated answer — and the log line needs to be at WARNING, because
+    debug is below the default level, i.e. nowhere. An unverifiable radio is
+    not routine.
+    """
+    bridge = _hostapd_box(monkeypatch, ssid="Droplet", psk="Droplet123!")
+    _stub_iw(monkeypatch, bridge, 127, "", "iw: not found")
+
+    with caplog.at_level(logging.WARNING, logger="droplet.bridge"):
+        snap = bridge.qr_snapshot()
+
+    assert snap["ok"] is True
+    assert snap["liveness"] == "unavailable", \
+        "an unchecked publish must not look like a corroborated one"
+    assert any(
+        r.levelno >= logging.WARNING
+        and "AP liveness probe unavailable" in r.getMessage()
+        for r in caplog.records
+    ), "the degraded path must be loud enough to be seen"
+
+
+def test_the_bss_probe_is_cached_across_polls(
+        monkeypatch: pytest.MonkeyPatch):
+    """The panel polls this endpoint continuously; one `docker exec` per poll
+    would be a self-inflicted load bug — the WARP-834 finding that gave
+    _use_hostapd_mode its TTL."""
+    bridge = _hostapd_box(monkeypatch, ssid="Droplet", psk="Droplet123!")
+    calls = _stub_iw(monkeypatch, bridge, 0, _IW_DEV_AP_UP)
+
+    bridge.qr_snapshot()
+    bridge.qr_snapshot()
+    bridge.qr_snapshot()
+
+    assert len(calls) == 1, "expected one cached probe, got {}".format(len(calls))
+
+
+def test_uci_mode_never_probes_the_local_radio(
+        monkeypatch: pytest.MonkeyPatch):
+    """The guard is about the box's OWN hostapd. On the UCI/SSH shape the creds
+    already come from the router that hosts the network, so a local radio probe
+    there would be a second opinion about someone else's AP."""
+    bridge = _load_bridge(monkeypatch, {"DROPLET_AP_MODE": "uci"})
+    monkeypatch.setattr(bridge, "openwrt_wifi_credentials", lambda: ({
+        "ssid": "Droplet", "key": "routerpsk1234", "encryption": "psk2",
+        "hidden": False, "disabled": False,
+    }, None))
+
+    def no_run(cmd, timeout=15):
+        raise AssertionError("uci mode must not shell out: {}".format(cmd))
+
+    monkeypatch.setattr(bridge, "_run", no_run)
+
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is True and snap["source"] == "uci"
+    # No probe ran, and none applies — three-valued stays three-valued, so
+    # "didn't apply" must not masquerade as any of checked/refused/unavailable.
+    assert snap["liveness"] is None
+
+
+# --- the iw parser ----------------------------------------------------------
+
+def test_iw_parser_reads_only_ap_mode_interfaces(
+        monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch, {})
+    assert bridge._parse_iw_dev_ap_ssids(_IW_DEV_AP_UP) == {"Droplet"}
+    assert bridge._parse_iw_dev_ap_ssids(_IW_DEV_NO_AP) == set()
+    assert bridge._parse_iw_dev_ap_ssids("") == set()
+
+
+def test_iw_parser_does_not_leak_an_ssid_across_interface_blocks(
+        monkeypatch: pytest.MonkeyPatch):
+    """`ssid` prints BEFORE `type`, so a scan that doesn't reset per interface
+    carries one block's SSID into the next and invents an AP.
+
+    This is not hypothetical on a Droplet: the box's Wi-Fi leg runs as a STATION
+    joined to the household network (`type managed`, and it therefore HAS an
+    ssid), and the AP interface that follows may have none while it is down.
+    A leaking parser then reports the upstream network as the box's own hotspot
+    and the panel publishes a QR for someone else's Wi-Fi.
+    """
+    bridge = _load_bridge(monkeypatch, {})
+    station_then_downed_ap = (
+        "phy#0\n"
+        "\tInterface wlp10s0\n\t\tssid HomeNet-5G\n\t\ttype managed\n"
+        "\tInterface ap0\n\t\ttype AP\n"
+    )
+    assert bridge._parse_iw_dev_ap_ssids(station_then_downed_ap) == set()
+
+    # ...and the reverse order must still report the one real AP.
+    ap_then_station = (
+        "phy#0\n"
+        "\tInterface ap0\n\t\tssid Droplet\n\t\ttype AP\n"
+        "\tInterface wlp10s0\n\t\tssid HomeNet-5G\n\t\ttype managed\n"
+    )
+    assert bridge._parse_iw_dev_ap_ssids(ap_then_station) == {"Droplet"}
+
+
+def test_iw_parser_keeps_ssids_with_spaces(monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch, {})
+    out = "\tInterface ap0\n\t\tssid My Home Net\n\t\ttype AP\n"
+    assert bridge._parse_iw_dev_ap_ssids(out) == {"My Home Net"}

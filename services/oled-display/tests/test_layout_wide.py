@@ -10,6 +10,7 @@ the rack.
 
 from __future__ import annotations
 
+import datetime as _dt
 import time
 
 import pytest
@@ -588,8 +589,23 @@ def test_long_host_shrinks_but_never_spills(populated):
 # Vertical safe area — the whole-panel guard
 # ---------------------------------------------------------------------------
 
-def _all_boxes(disp, monkeypatch):
-    """Every glyph box drawn by a full LIVE render, panel coordinates."""
+# Frozen wall clock for every glyph capture. The top rail draws the live time
+# as a single glyph string ("16:25"), and tests that render TWICE and compare
+# glyph text — test_top_chrome_moves_with_the_inset keys its dict on the text —
+# break when the minute rolls over between the two renders. That failure was
+# observed in a full-suite run and is unrelated to anything the test guards:
+# a ~0.3s window per minute, so it passes in isolation and surfaces in CI.
+# render_status() already takes `now`; use it rather than leaving a real clock
+# in the assertion path.
+_FIXED_NOW = _dt.datetime(2026, 8, 14, 16, 25, 30)
+
+
+def _all_boxes(disp, monkeypatch, now=_FIXED_NOW):
+    """Every glyph box drawn by a full render, panel coordinates.
+
+    `now` is frozen by default — see _FIXED_NOW. Pass an explicit value to
+    exercise clock-dependent rendering.
+    """
     drawn = []
     real = ImageDraw.ImageDraw.text
 
@@ -600,7 +616,7 @@ def _all_boxes(disp, monkeypatch):
         return real(self, xy, text, *a, **kw)
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
-    lw.render_status(disp)
+    lw.render_status(disp, now=now)
     assert drawn, "spy never fired — the render path changed"
     return drawn
 
@@ -1077,3 +1093,97 @@ def test_the_debug_target_stays_unlabelled(populated):
     for word in ("DEBUG", "DIAGNOSE", "RECOVERY"):
         assert not any(word in t.upper() for t in drawn if len(t) > 1), \
             f"{word!r} appeared in the chrome — the target should stay silent"
+
+
+# ---------------------------------------------------------------------------
+# WARP-2047 — the NETWORK tile must name the household network, or nothing.
+#
+# Live on droplet-sys the tile read "Droplet-AI" while the household Wi-Fi was
+# "Warp", broadcast by the external access point. Two causes, both here:
+#   * the tile read `wifi` — the bridge's /wifi STATION scan, which carries no
+#     ssid at all on the shapes where an external AP hosts the network;
+#   * the vitals default for that ssid was the literal string "Droplet-AI", so
+#     the tile's own `or "—"` fallback could never fire.
+# ---------------------------------------------------------------------------
+
+def test_network_tile_prefers_the_household_join_feed(populated):
+    """`wifi_join` (/openwrt/qr) resolves the SSID across all three box shapes;
+    the client-scan feed only ever knows the box's own hotspot."""
+    populated._v3["wifi"]["ssid"] = "Droplet-AI"      # stale client-scan value
+    populated._v3["wifi_join"] = {
+        "ok": True, "ssid": "Warp", "key": "Warp123!", "source": "orchestrator"}
+
+    t = _texts(populated)
+
+    assert "Warp" in t
+    assert "Droplet-AI" not in t
+
+
+def test_network_tile_shows_a_dash_when_no_ssid_is_known(populated):
+    """An unknown network renders as unknown. This is the droplet-sys state
+    once the bridge stops vouching for creds no radio is beaconing."""
+    populated._v3["wifi"]["ssid"] = ""
+    populated._v3["wifi_join"] = {}
+
+    t = _texts(populated)
+
+    assert "—" in t
+    assert "Droplet-AI" not in t, "a hardcoded SSID reached the glass"
+
+
+def test_network_tile_ignores_creds_the_bridge_refused(populated):
+    """`ok: False` is the bridge saying it cannot vouch for these — the WARP-2047
+    refusal. Rendering the ssid alongside it would put the stale name back."""
+    populated._v3["wifi"]["ssid"] = ""
+    populated._v3["wifi_join"] = {
+        "ok": False, "ssid": "Warp", "key": "Droplet123!",
+        "error": "this Droplet's radio is not hosting a network"}
+
+    t = _texts(populated)
+
+    assert "Warp" not in t
+    assert "—" in t
+
+
+# --- household_ssid() resolution order --------------------------------------
+
+def test_household_ssid_prefers_join_then_scan_then_empty(wide):
+    wide._v3["wifi"] = {"ssid": "ScanNet"}
+    wide._v3["wifi_join"] = {"ok": True, "ssid": "JoinNet"}
+    assert wide.household_ssid() == "JoinNet"
+
+    # No join answer -> the single-box client-scan value is a legitimate source.
+    wide._v3["wifi_join"] = {}
+    assert wide.household_ssid() == "ScanNet"
+
+    # Nothing anywhere -> empty, never a placeholder.
+    wide._v3["wifi"] = {"ssid": ""}
+    assert wide.household_ssid() == ""
+
+
+def test_household_ssid_drops_a_refused_join_answer(wide):
+    """ok:False must not be mined for its ssid — that is exactly the stale pair
+    the bridge just declined to publish."""
+    wide._v3["wifi"] = {"ssid": ""}
+    wide._v3["wifi_join"] = {"ok": False, "ssid": "Warp", "key": "Droplet123!"}
+    assert wide.household_ssid() == ""
+
+
+def test_household_ssid_tolerates_absent_feeds(wide):
+    """`ok` is absent until the first bridge snapshot lands; a cold box must
+    return "" rather than raise on the missing keys."""
+    wide._v3["wifi_join"] = {}
+    wide._v3["wifi"] = {}
+    assert wide.household_ssid() == ""
+
+
+def test_the_vitals_ssid_default_is_empty_not_a_plausible_name(sim_display):
+    """The defect was in the DEFAULT, not the renderers.
+
+    While `_v3["wifi"]["ssid"]` defaulted to the literal "Droplet-AI", every
+    `or "—"` fallback downstream was unreachable — the placeholder was truthy,
+    so a box that had never learned its SSID still printed a real-looking one.
+    Guard the default directly; a renderer test that sets the field cannot.
+    """
+    assert sim_display._v3["wifi"]["ssid"] == ""
+    assert sim_display.household_ssid() == ""

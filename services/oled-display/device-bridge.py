@@ -669,6 +669,143 @@ def _hostapd_conf_creds_or_error():
     return creds, err
 
 
+# ---------------------------------------------------------------------------
+# Is the box's own radio ACTUALLY hosting a network? (WARP-2047)
+#
+# Every source hostapd_wifi_credentials() reads is a *config* read — the env,
+# a persisted file, hostapd.conf. Its docstring says those are "coherent with
+# what hostapd serves", but nothing enforced it, and on droplet-sys they had
+# drifted three ways at once: the bridge env said `Warp`/`Droplet123!`, the
+# container's hostapd.conf said `Droplet-AI`, and the household AP was
+# beaconing `Warp` under a different passphrase entirely. The panel published
+# the env's pair, so the QR named a real network with the wrong password and
+# no phone could join it.
+#
+# A config file is not evidence that a radio is transmitting. Ask the radio.
+# `iw dev` is the same boundary the conf reader already uses (docker exec into
+# the AP container, where droplet-openwrt-attach parks the phy) and it answers
+# the only question that matters: which SSIDs are up in AP mode right now.
+#
+# Deliberately three-valued. `None` means the probe could not run, which is NOT
+# "no AP is up" — an install without `iw` must keep behaving exactly as before
+# rather than have its working QR blanked. Same discipline as the AP fan-out's
+# `apsNotReporting`: a degraded read never renders as a confident zero.
+# ---------------------------------------------------------------------------
+
+def _parse_iw_dev_ap_ssids(out):
+    """SSIDs of the `type AP` interfaces in `iw dev` output.
+
+    Parsed per interface BLOCK, not line by line: `iw` prints `ssid` *before*
+    `type`, so a running scan that just remembers the last SSID it saw will
+    attribute it to the next interface and invent an AP on a station-only
+    radio. Blocks start at `Interface <name>` (and at the `Unnamed/non-netdev`
+    P2P pseudo-interface, which carries a type and no ssid).
+    """
+    found = set()
+    ssid = None
+    mode = None
+
+    def _flush():
+        if mode == "AP" and ssid:
+            found.add(ssid)
+
+    for raw in (out or "").splitlines():
+        line = raw.strip()
+        if line.startswith("Interface ") or line.startswith("Unnamed/"):
+            _flush()
+            ssid, mode = None, None
+        elif line.startswith("ssid "):
+            # SSIDs may contain spaces — take the remainder verbatim.
+            ssid = line[len("ssid "):].strip()
+        elif line.startswith("type "):
+            mode = line[len("type "):].strip()
+    _flush()
+    return found
+
+
+def _live_ap_ssids_uncached():
+    """(ssids, None) when the radio answered; (None, reason) when it could not.
+
+    An empty SET is a real, load-bearing answer: the radio is up and hosting
+    nothing.
+    """
+    rc, out, err = _run(
+        ["docker", "exec", AP_HOSTAPD_CONTAINER, "iw", "dev"], timeout=8)
+    if rc != 0:
+        return None, (err.strip() or "iw dev unavailable")
+    return _parse_iw_dev_ap_ssids(out), None
+
+
+_AP_LIVENESS_TTL_S = 30.0
+_ap_liveness_lock = threading.Lock()
+_ap_liveness_cache = {"value": None, "err": None, "at": 0.0}
+
+
+def _live_ap_ssids():
+    """TTL-cached `_live_ap_ssids_uncached()`.
+
+    The panel polls /openwrt/qr continuously; an uncached `docker exec` per
+    poll is the same self-inflicted load bug WARP-834 found behind
+    _use_hostapd_mode, so it gets the same treatment (single-flight under a
+    lock, short TTL). 30s is well under the time it takes anyone to notice a
+    changed SSID and short enough that a hotspot coming up mid-boot is picked
+    up on the next poll or two.
+    """
+    now = time.time()
+    with _ap_liveness_lock:
+        cached_at = _ap_liveness_cache["at"]
+        if cached_at and (now - cached_at) < _AP_LIVENESS_TTL_S:
+            return _ap_liveness_cache["value"], _ap_liveness_cache["err"]
+        value, err = _live_ap_ssids_uncached()
+        _ap_liveness_cache.update({"value": value, "err": err, "at": now})
+        return value, err
+
+
+def _corroborate_local_creds(creds):
+    """Gate locally-read hostapd creds on the radio actually beaconing them.
+
+    Returns (creds, err, liveness). liveness is the probe's three-valued
+    verdict, mirrored into the snapshot's `liveness` field:
+
+      "corroborated" — the radio is beaconing the configured SSID; publish.
+      "refused"      — the radio answered and does NOT vouch for these creds
+                       (creds is None, err says why); qr_snapshot()'s
+                       WARP-1800 fallback asks the orchestrator, i.e. the AP
+                       that really does host the network.
+      "unavailable"  — the probe could not run; the creds still publish
+                       (err is None) but UNCORROBORATED, and the snapshot
+                       says so.
+
+    A live BSS under a DIFFERENT name is refused rather than silently relabelled
+    with the live SSID: if the configured SSID is stale then the passphrase
+    sitting beside it is equally unverified, and publishing a name/password pair
+    assembled from two sources is how the unjoinable QR happened in the first
+    place.
+    """
+    live, probe_err = _live_ap_ssids()
+    if live is None:
+        # Could not ask. Keep the pre-WARP-2047 serve-anyway behaviour — an
+        # install without `iw` must not lose its working QR — but not silently:
+        # at WARNING, because an unverifiable radio is not routine, and with
+        # the "unavailable" marker, because without one this snapshot reads
+        # byte-identical to a corroborated answer and a wrong SSID on this
+        # path would be invisible everywhere.
+        logger.warning(
+            "AP liveness probe unavailable (%s); publishing local creds "
+            "uncorroborated", probe_err)
+        return creds, None, "unavailable"
+    if not live:
+        return None, ("this Droplet's radio is not hosting a network "
+                      "(no AP interface is up)"), "refused"
+    if creds["ssid"] not in live:
+        # Names only — never the passphrase we just declined to trust.
+        return None, (
+            "configured SSID {!r} is not on the air (broadcasting: {}) — "
+            "the local Wi-Fi config has drifted from the radio".format(
+                creds["ssid"], ", ".join(sorted(live)))), "refused"
+    return creds, None, "corroborated"
+
+
 def _hostapd_wifi_payload(ssid, key):
     """Format the WiFi QR payload for a WPA hostapd AP.
 
@@ -962,6 +1099,13 @@ def qr_snapshot():
         # 0 means "no expiry" (the production posture in both shapes unless
         # UCI-mode rotation is explicitly enabled).
         "ttl_seconds": 0,
+        # WARP-2047 — outcome of the local-radio corroboration step:
+        # "corroborated" / "refused" / "unavailable", or None when the step
+        # does not apply (UCI shape, or no local creds to check). Load-bearing
+        # for "unavailable": that is the one path that still publishes creds
+        # no radio vouched for, and without the marker such a snapshot is
+        # indistinguishable from a corroborated one.
+        "liveness": None,
     }
     if rotation_enabled:
         out["ttl_seconds"] = _key_ttl_seconds()
@@ -969,6 +1113,13 @@ def qr_snapshot():
 
     if hostapd:
         creds, err = hostapd_wifi_credentials()
+        # WARP-2047 — every hostapd source above is a config read. Publish it
+        # only if the radio is actually beaconing that SSID; otherwise drop to
+        # the orchestrator fallback below, which asks the AP that really hosts
+        # the network. Only the hostapd branch needs this: the UCI branch's
+        # creds already come from the router that serves them.
+        if creds is not None:
+            creds, err, out["liveness"] = _corroborate_local_creds(creds)
     else:
         creds, err = openwrt_wifi_credentials()
 
