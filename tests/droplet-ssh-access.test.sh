@@ -173,6 +173,32 @@ chmod +x "$WORK/bin/systemctl"
 check "no ssh unit: writes no state, so the UI stays 'unknown'" $? "state file written anyway"
 teardown
 
+# --- 7. The parser stops READING at the first match --------------------------
+# The intent file is container-writable input to a ROOT process, so the read
+# itself must be bounded, not just the acting. The old `sed ... | head -n1`
+# bounded the MATCHES only: head can SIGPIPE sed solely after a printed line
+# arrives, so sed kept reading an arbitrarily large file long after it had
+# the one value it needed. The `{s//\1/p;q}` form quits the moment the key
+# line matches — proved here by feeding the intent as a fifo that never
+# reaches EOF. The old pipeline blocks on it forever (timeout ⇒ FAIL); the
+# fixed parser exits as soon as it has its value.
+setup
+FIFO="$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+mkfifo "$FIFO"
+# Open read-write so neither end blocks, then feed exactly one valid line.
+# The fd stays open, so a reader that insists on EOF never gets one.
+exec 3<>"$FIFO"
+printf 'DROPLET_SSH_ACCESS=on\n' >&3
+timeout 10 /bin/sh "$SCRIPT" >/dev/null 2>&1
+RC=$?
+exec 3>&-
+LOG="$(cat "$SYSTEMCTL_LOG" 2>/dev/null)"
+[ "$RC" != "124" ] && [ "$RC" != "137" ]
+check "first match: parser exits without waiting for EOF" $? "rc=$RC (timed out reading past the match)"
+echo "$LOG" | grep -q '^start ssh.service$'
+check "first match: the value read this way still applies" $? "log=[$LOG]"
+teardown
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

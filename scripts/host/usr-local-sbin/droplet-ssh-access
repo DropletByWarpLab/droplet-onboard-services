@@ -50,11 +50,19 @@ if [ ! -r "$INTENT_FILE" ]; then
   exit 0
 fi
 
-# Read ONE key. `head -n1` bounds a hostile file to a single match, and the
-# anchored pattern means a line like `DROPLET_SSH_ACCESS=on; rm -rf /` does not
-# match at all rather than matching loosely.
-value="$(sed -n 's/^[[:space:]]*DROPLET_SSH_ACCESS[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*$/\1/p' \
-  "$INTENT_FILE" 2>/dev/null | head -n1)"
+# Read ONE key. The `{s//\1/p;q}` form quits the moment the anchored line
+# matches, so sed never reads past the value it acts on. The previous
+# `... | head -n1` bounded the MATCHES but not the READING: head can only
+# SIGPIPE sed after a printed line arrives, so this root process could be
+# made to chew through an arbitrarily large container-written file even
+# after finding its value. (A file with NO matching line is still scanned to
+# EOF — and then refused below.) The anchor means a line like
+# `DROPLET_SSH_ACCESS=on; rm -rf /` does not match at all rather than
+# matching loosely, and the empty s-regex reuses the address, so there is
+# exactly one pattern to keep correct.
+value="$(sed -n \
+  '/^[[:space:]]*DROPLET_SSH_ACCESS[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*$/{s//\1/p;q;}' \
+  "$INTENT_FILE" 2>/dev/null)"
 
 # Validate against the two literals. Default branch refuses.
 case "$value" in
