@@ -250,6 +250,27 @@ describe("read_document_text — guards", () => {
     );
   });
 
+  // chunkIdx numbering is not promised dense: with chunks at 0/100/200,
+  // total_chunks is 3 and the legitimate resume offset after idx 100 is
+  // 101. A `start_chunk >= total_chunks` rejection would refuse the very
+  // offset the previous response handed out and strand the read
+  // mid-document — so "past the end" must mean "the window found no row
+  // at or past this offset", never index-vs-count arithmetic.
+  it("accepts a sparse-numbering resume offset larger than total_chunks", async () => {
+    const read = vi.fn().mockResolvedValue(
+      result({ chunks: [chunk(200, "tail")], totalChunks: 3 }),
+    );
+    const res = await tool.handler(
+      { path: "/Docs/long.pdf", start_chunk: 101 },
+      makeCtx(read),
+    );
+    expect(res.ok).toBe(true);
+    const data = (res as { ok: true; data: Record<string, unknown> }).data;
+    expect(data.text).toBe("tail");
+    expect(data.next_chunk).toBeNull();
+    expect(data.total_chunks).toBe(3);
+  });
+
   it("rejects a start_chunk past the end with a message naming the real length", async () => {
     const read = vi.fn().mockResolvedValue(result({ totalChunks: 4 }));
     const res = await tool.handler(
@@ -259,6 +280,21 @@ describe("read_document_text — guards", () => {
     const e = res as { ok: false; error: { code: string; message: string } };
     expect(e.error.code).toBe("INVALID_ARGS");
     expect(e.error.message).toContain("4");
+  });
+
+  // The all-undecryptable window (asserted ok above) and the past-the-end
+  // window both return zero chunks; `unreadable_chunks` is what separates
+  // them. A window that consumed real rows — however unreadable — is a
+  // position IN the document, not past its end.
+  it("does not mistake an all-undecryptable window for past-the-end", async () => {
+    const read = vi.fn().mockResolvedValue(
+      result({ totalChunks: 6, unreadableChunks: 2, nextChunk: 4 }),
+    );
+    const res = await tool.handler(
+      { path: "/Docs/sealed.pdf", start_chunk: 2 },
+      makeCtx(read),
+    );
+    expect(res.ok).toBe(true);
   });
 
   it("maps a throwing shim to DOCUMENT_READ_FAILED", async () => {

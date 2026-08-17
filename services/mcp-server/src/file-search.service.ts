@@ -688,7 +688,10 @@ export interface ReadDocumentTextParams {
 }
 
 export interface ReadDocumentTextResult {
-  source: FileContentSource;
+  /** Source of the rows the window examined — read from a real row, never
+   *  guessed. Null only when the window examined no rows (path not indexed,
+   *  or an offset past the last real row): derived state is never guessed. */
+  source: FileContentSource | null;
   chunks: Array<{
     chunkIdx: number;
     pageNumber: number | null;
@@ -704,10 +707,14 @@ export interface ReadDocumentTextResult {
    * exhausted. Computed HERE, not by the caller, because only this
    * function knows which rows the window actually examined.
    *
-   * The distinction matters when every row in a window is undecryptable:
-   * `chunks` comes back empty, and a caller deriving "resume after the
-   * last returned chunk" would hand back the offset it was already given
-   * and spin on that window forever.
+   * Always the chunkIdx of a REAL fetched-but-unconsumed row, so a
+   * follow-up window is never empty. Two derivations it must never use:
+   * the last RETURNED chunk (a window whose rows were all undecryptable
+   * returns none while consuming them — resuming there would spin
+   * forever), and index-vs-count arithmetic against `totalChunks`
+   * (chunkIdx numbering is not promised dense; with chunks at 0/100/200
+   * an index-vs-count comparison read "exhausted" one chunk early and
+   * silently truncated the document).
    */
   nextChunk: number | null;
 }
@@ -763,7 +770,9 @@ export async function readDocumentText(
   const totalChunks = Number(countRows[0]?.count ?? 0);
   if (totalChunks === 0) {
     return {
-      source: "nextcloud",
+      // No rows were examined, so there is no source to report — and it is
+      // never guessed.
+      source: null,
       chunks: [],
       totalChunks: 0,
       unreadableChunks: 0,
@@ -783,12 +792,16 @@ export async function readDocumentText(
   const startParam = p++;
   args.push(params.startChunk);
   const limitParam = p++;
-  args.push(
-    Math.min(
-      READ_DOC_MAX_ROWS,
-      Math.ceil(params.maxChars / READ_DOC_MIN_CHUNK_CHARS) + 1,
-    ),
+  // Named because pagination termination hangs off it below: a fetch that
+  // comes back SHORT of this limit proves the DB has nothing past its last
+  // row. The `+ 1` keeps it ≥ 2 for any maxChars, so the proof-of-more
+  // reserve below never claims a window's ONLY row and the always-admit-
+  // the-first-chunk progress rule keeps its footing.
+  const fetchLimit = Math.min(
+    READ_DOC_MAX_ROWS,
+    Math.ceil(params.maxChars / READ_DOC_MIN_CHUNK_CHARS) + 1,
   );
+  args.push(fetchLimit);
 
   const sql = `
     SELECT source,
@@ -820,15 +833,35 @@ export async function readDocumentText(
       ])
     : new Map<string, Buffer>();
 
+  // Termination comes from WINDOW EXHAUSTION, never from arithmetic
+  // between a chunk index and the chunk COUNT. `chunkIdx` numbering is not
+  // promised dense (re-extraction can retire indices), so with chunks at
+  // 0/100/200 an index-vs-count test like `lastIdx + 1 < totalChunks` read
+  // "exhausted" after idx 100 and silently truncated the document — the
+  // exact failure this tool exists to prevent.
+  //
+  //   - A SHORT fetch (rows.length < fetchLimit) is proof the DB holds
+  //     nothing past its last row: consuming everything fetched means the
+  //     document is exhausted.
+  //   - A FULL fetch proves nothing about the end, so its LAST row is
+  //     reserved as proof-of-more instead of being consumed: that row's
+  //     own chunkIdx is exactly where the follow-up resumes, under any
+  //     numbering, and it guarantees the handed-out offset lands on a real
+  //     row rather than steering the caller into an empty window.
+  const reserved = rows.length === fetchLimit ? rows[rows.length - 1]! : null;
+  const consumable = reserved ? rows.slice(0, -1) : rows;
+
   const chunks: ReadDocumentTextResult["chunks"] = [];
   let unreadableChunks = 0;
   let used = 0;
-  // The chunkIdx of the last row this window CONSUMED — admitted or
-  // dropped. Not the same as the last row returned: a window whose rows
-  // were all undecryptable consumes them and returns none, and resuming
-  // from the last *returned* chunk would replay the same window forever.
-  let consumedThrough: number | null = null;
-  for (const r of rows) {
+  // Where the follow-up resumes: the first row this window fetched but did
+  // NOT consume (char-budget stop, else the reserved proof-of-more row),
+  // or null when a short fetch was consumed whole. Never derived from the
+  // returned chunks — a window whose rows were all undecryptable returns
+  // none while consuming them, and resuming from the last returned chunk
+  // would replay that window forever.
+  let nextChunk: number | null = null;
+  for (const r of consumable) {
     let text = r.text;
     if (isEncryptedColumn(text)) {
       const keyId = r.brainItemId ? `brain:${r.brainItemId}` : null;
@@ -836,7 +869,6 @@ export async function readDocumentText(
       if (!dek) {
         console.warn("chunk.unreadable.dek_missing", { path: params.path, keyId });
         unreadableChunks++;
-        consumedThrough = r.chunkIdx;
         continue;
       }
       try {
@@ -848,14 +880,16 @@ export async function readDocumentText(
           error: String(e),
         });
         unreadableChunks++;
-        consumedThrough = r.chunkIdx;
         continue;
       }
     }
     // Budget check AFTER decrypt, and always admit the first chunk: a
     // single chunk larger than the whole budget must still make progress,
     // or a caller paging with `next_chunk` would loop on it forever.
-    if (chunks.length > 0 && used + text.length > params.maxChars) break;
+    if (chunks.length > 0 && used + text.length > params.maxChars) {
+      nextChunk = r.chunkIdx; // first unconsumed row — text provably remains
+      break;
+    }
     chunks.push({
       chunkIdx: r.chunkIdx,
       pageNumber: r.pageNumber,
@@ -863,20 +897,15 @@ export async function readDocumentText(
       warnings: r.warnings ?? [],
     });
     used += text.length;
-    consumedThrough = r.chunkIdx;
   }
-
-  // An empty row set means the window found nothing at or past startChunk,
-  // so there is nothing further to resume from even though totalChunks > 0
-  // (reachable when chunkIdx numbering is sparse). Terminate rather than
-  // hand back an offset that would return empty again.
-  const nextChunk =
-    consumedThrough !== null && consumedThrough + 1 < totalChunks
-      ? consumedThrough + 1
-      : null;
+  if (nextChunk === null && reserved) nextChunk = reserved.chunkIdx;
 
   return {
-    source: rows[0]?.source ?? "nextcloud",
+    // From the rows the window examined — never guessed. An empty row set
+    // (offset past the last real row, reachable under sparse numbering)
+    // has no source to report; every path that reports text or unreadable
+    // counts examined a real row.
+    source: rows[0]?.source ?? null,
     chunks,
     totalChunks,
     unreadableChunks,

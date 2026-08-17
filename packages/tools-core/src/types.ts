@@ -143,7 +143,10 @@ export interface ToolContext {
     /** Approximate character budget; whole chunks are always returned. */
     maxChars: number;
   }) => Promise<{
-    source: "nextcloud" | "brain";
+    /** Read from the rows the window examined — never guessed. Null only
+     *  when the window examined no rows (not indexed, or an offset past
+     *  the last real row), and those paths never reach an ok result. */
+    source: "nextcloud" | "brain" | null;
     chunks: Array<{
       chunkIdx: number;
       pageNumber: number | null;

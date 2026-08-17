@@ -127,7 +127,8 @@ export interface ContextDeps {
     startChunk: number;
     maxChars: number;
   }) => Promise<{
-    source: "nextcloud" | "brain";
+    /** Null when the window examined no rows — never guessed. */
+    source: "nextcloud" | "brain" | null;
     chunks: Array<{
       chunkIdx: number;
       pageNumber: number | null;

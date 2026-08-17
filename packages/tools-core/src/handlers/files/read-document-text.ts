@@ -141,7 +141,17 @@ async function handler(
     );
   }
 
-  if (startChunk >= res.totalChunks) {
+  // Past the end — detected by WINDOW EMPTINESS, not by comparing the
+  // offset against totalChunks. chunkIdx numbering is not promised dense:
+  // with chunks at 0/100/200, totalChunks is 3 and the legitimate resume
+  // offset after idx 100 is 101, which a `startChunk >= totalChunks` test
+  // would reject — refusing the very offset the previous response handed
+  // out and stranding the read mid-document. A window that examined ZERO
+  // rows (nothing returned, nothing unreadable) is the one sparse-safe
+  // signal that no text exists at or past this offset; the producer never
+  // steers a paging caller here, so reaching it means the offset was made
+  // up rather than taken from `next_chunk`.
+  if (res.chunks.length === 0 && res.unreadableChunks === 0) {
     return err(
       "INVALID_ARGS",
       `start_chunk ${startChunk} is past the end of the document (${res.totalChunks} chunks).`,
@@ -165,7 +175,10 @@ async function handler(
     data: {
       type: "read_document_text",
       path,
-      source: res.source,
+      // Non-null on every reachable ok path (the guards above return
+      // before any window that examined zero rows); spread conditionally
+      // so an absent source is omitted rather than guessed or nulled.
+      ...(res.source !== null ? { source: res.source } : {}),
       text,
       chunks_returned: res.chunks.length,
       start_chunk: startChunk,
