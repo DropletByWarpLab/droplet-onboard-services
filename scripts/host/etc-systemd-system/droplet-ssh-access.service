@@ -43,5 +43,14 @@ ProtectSystem=strict
 StateDirectory=droplet-ssh-access
 PrivateTmp=yes
 
-[Install]
-WantedBy=multi-user.target
+# ── WHY THERE IS NO [Install] SECTION ───────────────────────────────────────
+# The path watcher is the ONLY thing that may start this unit. An
+# [Install]/WantedBy= stanza here would be inert — the installer never
+# enables this unit — right up until some future installer edit ran
+# `systemctl enable droplet-ssh-access.service`, at which point the applier
+# would run at every boot with whatever the intent file already said, and
+# SSH would silently survive reboots as a standing open door. With no stanza,
+# that `enable` fails loudly ("has no installation config") instead of
+# succeeding silently. The boot-time OFF default lives in
+# droplet-ssh-access-boot-reset.service, which is the unit that is MEANT to
+# run at boot.
