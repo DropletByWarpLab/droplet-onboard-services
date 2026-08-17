@@ -1686,6 +1686,41 @@ export async function setUpnp(enabled: boolean): Promise<NetworkCommandResult> {
   return data;
 }
 
+/**
+ * WARP-1984 — SSH access to the appliance itself, for support troubleshooting.
+ *
+ * `status` is why this is not just a boolean. `applied` means the HOST
+ * confirmed it; `pending` means the orchestrator wrote the request but the
+ * host has not acknowledged; `unknown` means no host state exists at all
+ * (the units aren't installed on this deployment shape, or have never run).
+ * The card renders all three differently — a toggle that showed "on" while
+ * the host had never confirmed would send someone hunting for a door that
+ * isn't open.
+ */
+export interface SshAccessStatus {
+  enabled: boolean;
+  status: "applied" | "pending" | "unknown";
+  changedAt: string | null;
+}
+
+export async function fetchSshAccess(): Promise<SshAccessStatus> {
+  const res = await authFetch(`${BASE}/api/network/ssh`);
+  if (!res.ok) throw new Error(`Failed to fetch SSH access status: ${res.status}`);
+  return res.json();
+}
+
+/** Allow / disallow SSH. Tier 3 — answers 202 `confirmation_required`. */
+export async function setSshAccess(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/ssh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update SSH access");
+  return data;
+}
+
 /** Band-steering state of the external Droplet AP (WARP-1703). `supported`
  *  false = no approved Droplet access point is online (or its software
  *  predates the feature) — the card then shows an honest unavailable state. */

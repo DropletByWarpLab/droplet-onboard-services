@@ -105,6 +105,7 @@ vi.mock("../services/file-search.service.js", () => ({
 
 const {
   gfListFoldersMock,
+  gfGetFolderMock,
   gfCreateFolderMock,
   gfDeleteFolderMock,
   gfAddGroupMock,
@@ -117,6 +118,10 @@ const {
   ncListGroupMembersStrictMock,
 } = vi.hoisted(() => ({
   gfListFoldersMock: vi.fn().mockResolvedValue([]),
+  // groupfolders ≥ 17 duplicate-key fix: ensureAdminsAttached reads the
+  // folder before writing. Default null = attach unconditionally, the
+  // pre-read behaviour every spec here was written against.
+  gfGetFolderMock: vi.fn().mockResolvedValue(null),
   gfCreateFolderMock: vi.fn().mockResolvedValue(42),
   gfDeleteFolderMock: vi.fn().mockResolvedValue(undefined),
   gfAddGroupMock: vi.fn().mockResolvedValue(undefined),
@@ -140,6 +145,7 @@ const {
 }));
 vi.mock("../services/nextcloud-groups.client.js", () => ({
   gfListFolders: gfListFoldersMock,
+  gfGetFolder: gfGetFolderMock,
   gfCreateFolder: gfCreateFolderMock,
   gfDeleteFolder: gfDeleteFolderMock,
   gfAddGroup: gfAddGroupMock,

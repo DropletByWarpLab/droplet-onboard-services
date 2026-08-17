@@ -58,6 +58,17 @@ export function buildOverlayEnrollMessage(
   return `${OVERLAY_ENROLL_PREFIX}${deviceId}:${signKeyFingerprint}:${wgPublicKey}`;
 }
 
+const OVERLAY_REVOKE_PREFIX = "droplet-overlay-revoke:v1:";
+
+/** `droplet-overlay-revoke:v1:<device_id>:<wg_public_key>` — byte-for-byte the
+ *  string HQ's verifyBoxSignature rebuilds (fleet-hq worker/src/crypto.ts). */
+export function buildOverlayRevokeMessage(
+  deviceId: string,
+  wgPublicKey: string,
+): string {
+  return `${OVERLAY_REVOKE_PREFIX}${deviceId}:${wgPublicKey}`;
+}
+
 /** Stable lowercase-hex sha256 (the sign-key fingerprint embedded in the enroll
  *  grant is `sha256(sign_public_key_pem)`). */
 export function sha256Hex(data: string): string {
@@ -111,6 +122,14 @@ export interface OverlayOffer {
   expiresAt?: string;
 }
 
+/** Outcome of an overlay peer removal at this seam (WARP-2060). Production
+ *  derives it from routing's DeleteVpnPeerResult via `isRevokeApplied`. */
+export interface OverlayRemoveResult {
+  /** `false` ⇒ the router staged the removal but never applied it — the peer
+   *  is still live on the interface and the row must NOT be marked revoked. */
+  applied: boolean;
+}
+
 /** The wg-peer collaborator (openwrt.client in production). */
 export interface OverlayPeerOps {
   install(p: {
@@ -121,7 +140,15 @@ export interface OverlayPeerOps {
     persistentKeepalive: number;
     description: string;
   }): Promise<void>;
-  remove(p: { interface: string; publicKey: string }): Promise<void>;
+  /** Remove a peer from the interface. May return an outcome: `applied: false`
+   *  means the router STAGED the removal (peer out of config, STILL LIVE on
+   *  wg0 — the busy-router uci.apply timeout case). A void return is treated
+   *  as applied, mirroring `isRevokeApplied`'s absent-means-applied rule, so
+   *  seams that cannot report the distinction keep working (WARP-2060). */
+  remove(p: {
+    interface: string;
+    publicKey: string;
+  }): Promise<OverlayRemoveResult | void>;
   /** WARP-1389 — per-peer runtime `latest handshake` epoch (seconds), keyed by
    *  public_key, for peers whose handshake state was actually OBSERVED: value 0
    *  = observed never-handshook, > 0 = handshook. A peer whose handshake is
@@ -593,6 +620,23 @@ export async function runOverlayConnectTick(
  * lastSessionAt < cutoff` — never derived from a NULL. Removes the router peer,
  * then marks the row revoked. Returns the count expired.
  *
+ * WARP-2060 — the handshake read below is load-bearing for CORRECTNESS, not
+ * just telemetry. `lastSessionAt` is only ever stamped at approve-time and at
+ * HQ punch-session start; the lan/direct/mapped candidates deliberately use no
+ * rendezvous at all, so a client connected through them NEVER refreshes the DB
+ * clock. Before this fix the sweep revoked such peers mid-connection — the
+ * tunnel died under active traffic. Now:
+ *   - an OBSERVED handshake inside the idle window is proof of life: the row's
+ *     `lastSessionAt` is refreshed to the handshake time and the peer is
+ *     spared (it ages out naturally from its last real handshake);
+ *   - when the handshake read is WIRED but FAILS (routing down), teardown is
+ *     skipped for the whole sweep — revoking blind is how live tunnels die;
+ *     the next sweep retries. A consumer that never wired `listHandshakes`
+ *     proceeds on the DB clock alone, as before;
+ *   - a peer ABSENT from the map (routing had no runtime data — the realistic
+ *     case is a row whose wg peer is already gone) proceeds to teardown on the
+ *     DB clock, which is what keeps orphaned rows from holding slots forever.
+ *
  * WARP-1389 — this is also where the punch outcome is settled: reading each
  * torn-down peer's real wg `latest handshake` (the SAME peer status this sweep
  * reads to decide teardown), a peer that ever handshook is a punch SUCCESS; one
@@ -606,7 +650,8 @@ export async function expireIdleOverlayPeers(
   const logger = deps.logger ?? noopLogger;
   const metrics = deps.metrics ?? noopMetrics;
   const now = deps.now?.() ?? new Date();
-  const cutoff = new Date(now.getTime() - config.idleExpiryHours * 3_600_000);
+  const idleWindowMs = config.idleExpiryHours * 3_600_000;
+  const cutoff = new Date(now.getTime() - idleWindowMs);
   const stale = await prisma.vpnPeer.findMany({
     where: {
       kind: "overlay",
@@ -616,22 +661,67 @@ export async function expireIdleOverlayPeers(
   });
   if (stale.length === 0) return 0;
   // One read of the live per-peer handshake state (0/absent = never handshook).
-  const handshakes = deps.peers.listHandshakes
-    ? await deps.peers.listHandshakes(config.vpnInterface).catch((err) => {
-        logger.warn(
-          { err },
-          "overlay-connect: could not read peer handshakes — outcome telemetry skipped this sweep",
-        );
-        return null;
-      })
-    : null;
-  let expired = 0;
-  for (const row of stale) {
+  let handshakes: Record<string, number> | null = null;
+  if (deps.peers.listHandshakes) {
     try {
-      await deps.peers.remove({
+      handshakes = await deps.peers.listHandshakes(config.vpnInterface);
+    } catch (err) {
+      // WARP-2060: without handshake data we cannot tell an idle peer from a
+      // live one whose clock simply never refreshes (lan/direct/mapped). Do
+      // NOT revoke blind — skip teardown entirely and retry next sweep.
+      logger.warn(
+        { err },
+        "overlay-connect: could not read peer handshakes — teardown skipped this sweep (revoking blind would kill live tunnels)",
+      );
+      return 0;
+    }
+  }
+  let expired = 0;
+  let spared = 0;
+  for (const row of stale) {
+    // WARP-2060: an observed handshake inside the idle window is activity.
+    // Refresh the DB clock to the handshake time and spare the peer. The
+    // refresh failing must never fall through to removal — sparing is the
+    // safe direction.
+    if (handshakes) {
+      const observed = handshakes[row.publicKey];
+      if (
+        observed !== undefined &&
+        observed > 0 &&
+        now.getTime() - observed * 1000 < idleWindowMs
+      ) {
+        try {
+          await prisma.vpnPeer.update({
+            where: { publicKey: row.publicKey },
+            data: { lastSessionAt: new Date(observed * 1000) },
+          });
+        } catch (err) {
+          logger.warn(
+            { err, publicKey: row.publicKey },
+            "overlay-connect: failed to refresh lastSessionAt from a live handshake — peer spared anyway",
+          );
+        }
+        spared += 1;
+        continue;
+      }
+    }
+    try {
+      const removal = await deps.peers.remove({
         interface: config.vpnInterface,
         publicKey: row.publicKey,
       });
+      // WARP-2060: routing can answer "staged" — peer out of config, STILL
+      // LIVE on wg0 (busy router, uci.apply timeout). Marking the row revoked
+      // would free the device's slot and tell the owner it is cut off while it
+      // keeps a working route into the LAN, and nothing would ever retry. Same
+      // defect the manual revoke route already fixed (vpn.ts, REVOKE_STAGED).
+      if (removal && removal.applied === false) {
+        logger.warn(
+          { publicKey: row.publicKey },
+          "overlay-connect: router staged the peer removal but never applied it — peer still live on the interface; row left active for retry next sweep",
+        );
+        continue;
+      }
       await prisma.vpnPeer.update({
         where: { publicKey: row.publicKey },
         data: { status: "revoked", revokedAt: now },
@@ -657,8 +747,11 @@ export async function expireIdleOverlayPeers(
       );
     }
   }
-  if (expired > 0) {
-    logger.info({ expired }, "overlay-connect: expired idle overlay peers");
+  if (expired > 0 || spared > 0) {
+    logger.info(
+      { expired, spared },
+      "overlay-connect: idle sweep done (spared = actively-handshaking peers whose lastSessionAt was refreshed)",
+    );
   }
   return expired;
 }
@@ -732,5 +825,90 @@ export async function enrollOverlayDevice(
       `HQ overlay enroll returned ${r.status}: ${body.slice(0, 200)}`,
     );
   }
-  return (await r.json()) as unknown;
+  const result = (await r.json()) as { state?: unknown } & Record<
+    string,
+    unknown
+  >;
+  // WARP-2061: HQ's enroll is idempotent on wg_public_key and deliberately
+  // never un-revokes — a replayed enroll for a revoked client answers HTTP 200
+  // with state:'revoked'. Treating that 200 as success is how a factory-reset
+  // (whose release path revokes every client at HQ) permanently bricked
+  // re-enrollment: the box showed the device linked while HQ 403'd its every
+  // connect, forever, with no error anywhere. A non-active state is a FAILED
+  // vouch and must fail loudly. `state` absent (older HQ builds) is treated as
+  // active — absent-means-ok, consistent with isRevokeApplied's rule.
+  if (result.state !== undefined && result.state !== "active") {
+    throw new OverlayEnrollRejectedError(String(result.state));
+  }
+  return result;
+}
+
+/** WARP-2061 — HQ answered the enroll but the device's registry state is not
+ *  'active' (typically 'revoked' after a factory-reset release or an owner
+ *  revoke). The vouch did NOT take; connects from this client will be refused
+ *  by HQ. The device must re-enroll with a FRESH WireGuard keypair — HQ's
+ *  idempotency keys on wg_public_key and never un-revokes. */
+export class OverlayEnrollRejectedError extends Error {
+  readonly hqState: string;
+  constructor(hqState: string) {
+    super(
+      `HQ enrollment state is '${hqState}', not 'active' — the vouch did not take; the device must enroll with a fresh WireGuard key`,
+    );
+    this.name = "OverlayEnrollRejectedError";
+    this.hqState = hqState;
+  }
+}
+
+/**
+ * WARP-2061 — tell HQ an owner revoked a client device, so the revocation
+ * STICKS. Without this call the device stays 'active' in HQ's registry: its
+ * next connect request passes HQ's client-PoP gate, the box's connect tick
+ * receives the offer, and installOrRefreshOverlayPeer resurrects the revoked
+ * row — the owner's revoke silently un-revokes itself within one poll tick.
+ * HQ's revoke also expires the client's in-flight sessions, so a session
+ * already brokered cannot land after the local peer is gone.
+ *
+ * 404 ("client not found for this device") is success: the device was never
+ * enrolled at HQ — nothing to revoke is the state the caller wants.
+ */
+export async function revokeOverlayDeviceAtHq(
+  deps: OverlayEnrollDeps,
+  wgPublicKey: string,
+): Promise<void> {
+  const { config, identity } = deps;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const timeoutMs = config.httpTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
+  if (!config.hqBaseUrl) {
+    throw new Error(
+      "HQ_ISSUANCE_URL not configured — cannot revoke overlay device at HQ",
+    );
+  }
+  const pop = await signOverlayMessage(
+    identity,
+    buildOverlayRevokeMessage(config.deviceId, wgPublicKey),
+  );
+  const base = config.hqBaseUrl.replace(/\/+$/, "");
+  const r = await overlayFetch(
+    fetchImpl,
+    `${base}/api/overlay/devices/revoke`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        device_id: config.deviceId,
+        key_fingerprint: pop.key_fingerprint,
+        sig: pop.sig,
+        sig_alg: pop.sig_alg,
+        wg_public_key: wgPublicKey,
+      }),
+    },
+    timeoutMs,
+  );
+  if (r.status === 404) return;
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(
+      `HQ overlay revoke returned ${r.status}: ${body.slice(0, 200)}`,
+    );
+  }
 }

@@ -34,6 +34,10 @@ import listFiles from "./handlers/files/list-files.js";
 import readFile from "./handlers/files/read-file.js";
 import searchFiles from "./handlers/files/search-files.js";
 import searchContent from "./handlers/files/search-content.js";
+// Whole-document read over the file-indexer's extracted text — the PDF /
+// scanned-document path `read_file` cannot serve (it rejects declared
+// binaries) and `search_content` only answers query-shaped questions for.
+import readDocumentText from "./handlers/files/read-document-text.js";
 import listRecentFiles from "./handlers/files/list-recent-files.js";
 import writeFile from "./handlers/files/write-file.js";
 import deleteFile from "./handlers/files/delete-file.js";
@@ -148,6 +152,9 @@ import searchContacts from "./handlers/email/search-contacts.js";
 
 // Native PM module (ADR-026) — tools dispatch through the orchestrator
 // WARP-509 — write tools
+// Project creation — completes the write surface: work items could only
+// ever be added to a project a human had already made by hand.
+import pmCreateProject from "./handlers/pm/create-project.js";
 import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
 import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
 import pmAddWorkItemComment from "./handlers/pm/add-work-item-comment.js";
@@ -235,6 +242,7 @@ const allTools: Tool[] = [
   readFile,
   searchFiles,
   searchContent,
+  readDocumentText,
   listRecentFiles,
   writeFile,
   deleteFile,
@@ -333,6 +341,7 @@ const allTools: Tool[] = [
   // WARP-1425: forget a remembered fact (Tier-2: write + confirmation)
   memoryForget,
   // WARP-509: native PM (write tools — requiresWrite + requiresConfirmation)
+  pmCreateProject,
   pmCreateWorkItem,
   pmUpdateWorkItem,
   pmAddWorkItemComment,

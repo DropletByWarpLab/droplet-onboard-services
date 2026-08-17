@@ -1,0 +1,29 @@
+[Unit]
+# WARP-1984 — watch the dashboard's SSH-access intent file and apply it.
+#
+# This is the WARP-843 shape, reused: the orchestrator runs in a container and
+# must never hold a privileged path to the host, so it writes an intent file
+# and root-owned systemd does the rest. Zero grants to the droplet user; no
+# polkit rule (the box lacks polkitd JS-rules support — that route was tried in
+# PR #551 and never fired); no Docker socket (ADR-030 fences that to the
+# cosign-verified OTA applier, and widening it for a UI toggle would hand any
+# compromised customer-facing surface `docker run --privileged`).
+#
+# Unlike droplet-openwrt-attach, this points straight at its service with NO
+# relay in between. That indirection exists there only because the attach
+# service is `RemainAfterExit=yes` and therefore always active, which makes a
+# path-triggered start a no-op. droplet-ssh-access.service is a plain oneshot —
+# inactive between runs — so every trigger genuinely executes. If anyone ever
+# adds RemainAfterExit to it, this unit silently stops working and a relay
+# becomes necessary; the service file carries the same warning.
+Description=Apply the dashboard's SSH-access intent (WARP-1984)
+
+[Path]
+# PathModified fires on an in-place rewrite AND on atomic replace-by-rename.
+# The orchestrator writes via mktemp+rename, so this is the case that matters:
+# the watcher can never observe a half-written file.
+PathModified=/var/lib/droplet-ssh-access/intent.d/intent
+Unit=droplet-ssh-access.service
+
+[Install]
+WantedBy=multi-user.target

@@ -661,3 +661,254 @@ export async function searchHybrid(
   // tag them rather than leaving the consumer to infer the scale.
   return tagSimilarity(fused.slice(0, limit));
 }
+
+// ── whole-document read ────────────────────────────────────────────────
+
+/**
+ * Row cap per call. The char budget is the real limiter, but it can only
+ * be applied AFTER decrypt (ciphertext length tells you nothing about
+ * plaintext length), so SQL needs its own bound to keep a 500-page scan
+ * from being materialized in one go.
+ */
+const READ_DOC_MAX_ROWS = 200;
+/** Pessimistic chars-per-chunk used to turn a char budget into a row
+ *  limit. Deliberately low: over-fetching a few rows is cheap, while
+ *  under-fetching would silently short a caller who asked for more. */
+const READ_DOC_MIN_CHUNK_CHARS = 100;
+
+export interface ReadDocumentTextParams {
+  userId: string;
+  /** WARP-1014: extra chunk-owner keys (see SearchByVectorParams.additionalUserIds). */
+  additionalUserIds?: string[];
+  path: string;
+  /** 0-based chunk index to resume from. */
+  startChunk: number;
+  /** Approximate character budget; whole chunks are always returned. */
+  maxChars: number;
+}
+
+export interface ReadDocumentTextResult {
+  /** Source of the rows the window examined — read from a real row, never
+   *  guessed. Null only when the window examined no rows (path not indexed,
+   *  or an offset past the last real row): derived state is never guessed. */
+  source: FileContentSource | null;
+  chunks: Array<{
+    chunkIdx: number;
+    pageNumber: number | null;
+    text: string;
+    warnings: string[];
+  }>;
+  /** Total chunks for this path, ignoring the window. 0 ⇒ not indexed. */
+  totalChunks: number;
+  /** Chunks dropped in this window because their DEK is gone or failed auth. */
+  unreadableChunks: number;
+  /**
+   * Where a follow-up call should resume, or null when the document is
+   * exhausted. Computed HERE, not by the caller, because only this
+   * function knows which rows the window actually examined.
+   *
+   * Always the chunkIdx of a REAL fetched-but-unconsumed row, so a
+   * follow-up window is never empty. Two derivations it must never use:
+   * the last RETURNED chunk (a window whose rows were all undecryptable
+   * returns none while consuming them — resuming there would spin
+   * forever), and index-vs-count arithmetic against `totalChunks`
+   * (chunkIdx numbering is not promised dense; with chunks at 0/100/200
+   * an index-vs-count comparison read "exhausted" one chunk early and
+   * silently truncated the document).
+   */
+  nextChunk: number | null;
+}
+
+interface RawChunkRow {
+  source: FileContentSource;
+  chunkIdx: number;
+  pageNumber: number | null;
+  brainItemId: string | null;
+  text: string;
+  warnings: string[] | null;
+}
+
+/**
+ * Ordered whole-document read backing the `read_document_text` tool.
+ *
+ * Same RBAC predicate and same decrypt-on-read as the search arms — which
+ * is the point of putting it in this file rather than in the tool handler.
+ * It differs from those arms in one way that matters: it selects `text`
+ * WHOLE. `SNIPPET_SQL` truncates to 280 chars for a citation chip, which
+ * is precisely wrong when the caller's purpose is to read the document, so
+ * this path must not reuse it (nor `decryptSnippets`, which re-truncates
+ * after decrypt).
+ *
+ * `totalChunks` is counted independently of the window so the caller can
+ * tell apart three states an empty `chunks` array would otherwise blur:
+ * not indexed at all (0), a valid but exhausted window, and a window whose
+ * every row was undecryptable.
+ */
+export async function readDocumentText(
+  prisma: PrismaClient,
+  params: ReadDocumentTextParams,
+): Promise<ReadDocumentTextResult> {
+  const countArgs: unknown[] = [];
+  const { predicate: countPredicate, nextParam: countNext } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    countArgs,
+  );
+  countArgs.push(params.path);
+  const countRows = await (
+    prisma as unknown as {
+      $queryRawUnsafe: (
+        sql: string,
+        ...p: unknown[]
+      ) => Promise<Array<{ count: bigint | number }>>;
+    }
+  ).$queryRawUnsafe(
+    `SELECT COUNT(*)::bigint AS count FROM "FileContentChunk"
+     WHERE ${countPredicate} AND path = $${countNext}`,
+    ...countArgs,
+  );
+  const totalChunks = Number(countRows[0]?.count ?? 0);
+  if (totalChunks === 0) {
+    return {
+      // No rows were examined, so there is no source to report — and it is
+      // never guessed.
+      source: null,
+      chunks: [],
+      totalChunks: 0,
+      unreadableChunks: 0,
+      nextChunk: null,
+    };
+  }
+
+  const args: unknown[] = [];
+  const { predicate, nextParam } = buildUserIdPredicate(
+    params.userId,
+    params.additionalUserIds,
+    args,
+  );
+  let p = nextParam;
+  const pathParam = p++;
+  args.push(params.path);
+  const startParam = p++;
+  args.push(params.startChunk);
+  const limitParam = p++;
+  // Named because pagination termination hangs off it below: a fetch that
+  // comes back SHORT of this limit proves the DB has nothing past its last
+  // row. The `+ 1` keeps it ≥ 2 for any maxChars, so the proof-of-more
+  // reserve below never claims a window's ONLY row and the always-admit-
+  // the-first-chunk progress rule keeps its footing.
+  const fetchLimit = Math.min(
+    READ_DOC_MAX_ROWS,
+    Math.ceil(params.maxChars / READ_DOC_MIN_CHUNK_CHARS) + 1,
+  );
+  args.push(fetchLimit);
+
+  const sql = `
+    SELECT source,
+           "chunkIdx",
+           "pageNumber",
+           "brainItemId",
+           text,
+           warnings
+    FROM "FileContentChunk"
+    WHERE ${predicate} AND path = $${pathParam} AND "chunkIdx" >= $${startParam}
+    ORDER BY "chunkIdx" ASC
+    LIMIT $${limitParam}
+  `;
+  const rows = await (
+    prisma as unknown as {
+      $queryRawUnsafe: (sql: string, ...p: unknown[]) => Promise<RawChunkRow[]>;
+    }
+  ).$queryRawUnsafe(sql, ...args);
+
+  // WARP-242: decrypt-on-read, keeping the FULL plaintext. Rows whose DEK
+  // is missing or fails authentication are dropped and counted — handing
+  // the model base64 garbage would be worse than a reported hole.
+  const encrypted = rows.filter((r) => isEncryptedColumn(r.text));
+  const deks = encrypted.length
+    ? await getDeksByIds(prisma, [
+        ...new Set(
+          encrypted.flatMap((r) => (r.brainItemId ? [`brain:${r.brainItemId}`] : [])),
+        ),
+      ])
+    : new Map<string, Buffer>();
+
+  // Termination comes from WINDOW EXHAUSTION, never from arithmetic
+  // between a chunk index and the chunk COUNT. `chunkIdx` numbering is not
+  // promised dense (re-extraction can retire indices), so with chunks at
+  // 0/100/200 an index-vs-count test like `lastIdx + 1 < totalChunks` read
+  // "exhausted" after idx 100 and silently truncated the document — the
+  // exact failure this tool exists to prevent.
+  //
+  //   - A SHORT fetch (rows.length < fetchLimit) is proof the DB holds
+  //     nothing past its last row: consuming everything fetched means the
+  //     document is exhausted.
+  //   - A FULL fetch proves nothing about the end, so its LAST row is
+  //     reserved as proof-of-more instead of being consumed: that row's
+  //     own chunkIdx is exactly where the follow-up resumes, under any
+  //     numbering, and it guarantees the handed-out offset lands on a real
+  //     row rather than steering the caller into an empty window.
+  const reserved = rows.length === fetchLimit ? rows[rows.length - 1]! : null;
+  const consumable = reserved ? rows.slice(0, -1) : rows;
+
+  const chunks: ReadDocumentTextResult["chunks"] = [];
+  let unreadableChunks = 0;
+  let used = 0;
+  // Where the follow-up resumes: the first row this window fetched but did
+  // NOT consume (char-budget stop, else the reserved proof-of-more row),
+  // or null when a short fetch was consumed whole. Never derived from the
+  // returned chunks — a window whose rows were all undecryptable returns
+  // none while consuming them, and resuming from the last returned chunk
+  // would replay that window forever.
+  let nextChunk: number | null = null;
+  for (const r of consumable) {
+    let text = r.text;
+    if (isEncryptedColumn(text)) {
+      const keyId = r.brainItemId ? `brain:${r.brainItemId}` : null;
+      const dek = keyId ? deks.get(keyId) : undefined;
+      if (!dek) {
+        console.warn("chunk.unreadable.dek_missing", { path: params.path, keyId });
+        unreadableChunks++;
+        continue;
+      }
+      try {
+        text = decryptColumn(dek, text, keyId!);
+      } catch (e) {
+        console.warn("chunk.unreadable.decrypt_failed", {
+          path: params.path,
+          keyId,
+          error: String(e),
+        });
+        unreadableChunks++;
+        continue;
+      }
+    }
+    // Budget check AFTER decrypt, and always admit the first chunk: a
+    // single chunk larger than the whole budget must still make progress,
+    // or a caller paging with `next_chunk` would loop on it forever.
+    if (chunks.length > 0 && used + text.length > params.maxChars) {
+      nextChunk = r.chunkIdx; // first unconsumed row — text provably remains
+      break;
+    }
+    chunks.push({
+      chunkIdx: r.chunkIdx,
+      pageNumber: r.pageNumber,
+      text,
+      warnings: r.warnings ?? [],
+    });
+    used += text.length;
+  }
+  if (nextChunk === null && reserved) nextChunk = reserved.chunkIdx;
+
+  return {
+    // From the rows the window examined — never guessed. An empty row set
+    // (offset past the last real row, reachable under sparse numbering)
+    // has no source to report; every path that reports text or unreadable
+    // counts examined a real row.
+    source: rows[0]?.source ?? null,
+    chunks,
+    totalChunks,
+    unreadableChunks,
+    nextChunk,
+  };
+}

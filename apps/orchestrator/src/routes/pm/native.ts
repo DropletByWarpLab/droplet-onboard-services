@@ -4,8 +4,8 @@
  * orchestrator) the 9 `pm_*` MCP tools.
  *
  * Auth: mounted AFTER authMiddleware. PM is household-shared — reads are open
- * to any authenticated role; writes are gated with `requireRole`. Work-item +
- * comment writes additionally admit the MCP service principal
+ * to any authenticated role; writes are gated with `requireRole`. Project,
+ * work-item + comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
  * through here (the tool layer owns the human-facing confirmation gate).
  *
@@ -196,7 +196,12 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/pm/projects", requireRole(...WRITE), async (req, res, next) => {
+  // Admits `_service:mcp` alongside the human WRITE roles so the
+  // confirmation-gated `pm_create_project` tool can dispatch here. Without
+  // it the tool ships registered and dead — a plain `requireRole` 403s the
+  // MCP principal, which is neither owner nor admin. The human-facing
+  // confirmation gate lives in the tool layer, same split as work-items.
+  router.post("/pm/projects", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
     try {
       const parsed = projectCreateSchema.safeParse(req.body);
       if (!parsed.success) return badRequest(res, parsed);

@@ -12,7 +12,7 @@ import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
 import { RerankerClient } from "./reranker.client.js";
-import { searchHybrid } from "./file-search.service.js";
+import { readDocumentText, searchHybrid } from "./file-search.service.js";
 import { resolveChunkOwnerIds } from "./chunk-owner.js";
 import { createMatterController } from "./matter.controller.js";
 
@@ -319,6 +319,23 @@ async function main(): Promise<void> {
           reranker: rerankerClient,
           candidates: _enhancement?.searchOverrides?.rerankCandidates,
         },
+      });
+    },
+    // Ordered whole-document read backing `read_document_text`. No
+    // embedding step — this arm addresses a document by path, not by
+    // similarity — but it resolves owner keys through the SAME
+    // dual-shape helper as search: a document uploaded through chat is
+    // keyed by User.id UUID while its Nextcloud twin is keyed by
+    // username, so a single-shape predicate here would report a
+    // perfectly well-indexed file as NOT_INDEXED.
+    readDocumentText: async ({ userId, path, startChunk, maxChars }) => {
+      const ownerIds = await resolveChunkOwnerIds(prisma, userId);
+      return readDocumentText(prisma, {
+        userId: ownerIds[0],
+        additionalUserIds: ownerIds.length > 1 ? ownerIds.slice(1) : undefined,
+        path,
+        startChunk,
+        maxChars,
       });
     },
   };

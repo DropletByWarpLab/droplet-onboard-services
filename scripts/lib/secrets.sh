@@ -761,7 +761,7 @@ HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.de
 #   router supervision; index.ts gates on all three.
 OVERLAY_CONNECT_ENABLED=${OVERLAY_CONNECT_ENABLED:-true}
 OVERLAY_CONNECT_POLL_SECONDS=${OVERLAY_CONNECT_POLL_SECONDS:-15}
-OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-12}
+OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}
 # TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
 #   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
 #   relay OFF — single-box.sh only activates the `relay` compose profile
@@ -936,7 +936,7 @@ migrate_env() {
   # `false`) keeps that value across the re-run.
   _migrate_ensure_key OVERLAY_CONNECT_ENABLED "${OVERLAY_CONNECT_ENABLED:-true}"
   _migrate_ensure_key OVERLAY_CONNECT_POLL_SECONDS "${OVERLAY_CONNECT_POLL_SECONDS:-15}"
-  _migrate_ensure_key OVERLAY_PEER_IDLE_EXPIRY_HOURS "${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-12}"
+  _migrate_ensure_key OVERLAY_PEER_IDLE_EXPIRY_HOURS "${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}"
   # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
   # from the provisioning environment (empty = self-provision disabled). Pairs
   # with the seed-block `${DROPLET_PROVISION_TOKEN:-}` above so a fresh or

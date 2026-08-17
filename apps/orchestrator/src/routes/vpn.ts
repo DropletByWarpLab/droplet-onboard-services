@@ -62,6 +62,8 @@ import { overlayRequiresApproval } from "../services/overlay-enroll-policy.servi
 import { createLogger } from "../lib/logger.js";
 import {
   enrollOverlayDevice,
+  revokeOverlayDeviceAtHq,
+  OverlayEnrollRejectedError,
   type OverlayEnrollInput,
 } from "../services/overlay-connect.service.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
@@ -326,6 +328,25 @@ function defaultOverlayEnroll(input: OverlayEnrollInput): Promise<unknown> {
   );
 }
 
+/** WARP-2061 — the box→HQ revocation call, the enroll's inverse. Same
+ *  injection seam and the same PoP channel. Without it an owner revoke never
+ *  reaches HQ, the device stays 'active' in the registry, and the connect
+ *  tick resurrects the peer on the device's next connect request. */
+export type OverlayRevokeFn = (wgPublicKey: string) => Promise<void>;
+
+function defaultOverlayRevoke(wgPublicKey: string): Promise<void> {
+  return revokeOverlayDeviceAtHq(
+    {
+      config: {
+        hqBaseUrl: config.HQ_ISSUANCE_URL,
+        deviceId: config.DROPLET_DEVICE_ID,
+      },
+      identity: createDeviceIdentityClient(),
+    },
+    wgPublicKey,
+  );
+}
+
 // WARP-1385 (Part D) — body for POST /api/vpn/overlay/devices. base64 wg key
 // (43 chars + '='); a PEM public key; a human label.
 const overlayEnrollSchema = z.object({
@@ -434,6 +455,7 @@ export function createVpnRouter(
   prisma: PrismaClient,
   opts: {
     overlayEnroll?: OverlayEnrollFn;
+    overlayRevoke?: OverlayRevokeFn;
     now?: () => Date;
     recordOverlayAudit?: OverlayAuditFn;
     overlayRateLimits?: Partial<OverlayRateLimits>;
@@ -441,6 +463,7 @@ export function createVpnRouter(
 ): Router {
   const router = Router();
   const overlayEnroll = opts.overlayEnroll ?? defaultOverlayEnroll;
+  const overlayRevoke = opts.overlayRevoke ?? defaultOverlayRevoke;
   const now = opts.now ?? (() => new Date());
   const audit = opts.recordOverlayAudit ?? defaultOverlayAudit;
   const limits: OverlayRateLimits = {
@@ -670,11 +693,26 @@ export function createVpnRouter(
         }
 
         // The HQ vouch, byte-identical to the approve path's.
-        const vouch = await overlayEnroll({
-          wgPublicKey: parsed.data.wg_public_key,
-          signPublicKeyPem: parsed.data.sign_public_key_pem,
-          label: parsed.data.label,
-        });
+        let vouch: unknown;
+        try {
+          vouch = await overlayEnroll({
+            wgPublicKey: parsed.data.wg_public_key,
+            signPublicKeyPem: parsed.data.sign_public_key_pem,
+            label: parsed.data.label,
+          });
+        } catch (vouchErr) {
+          // WARP-2061 — same terminal case as the approve path: HQ has this
+          // wg key revoked and will never un-revoke it, so a retry with the
+          // same key cannot succeed. Tell the client to rotate its key.
+          if (vouchErr instanceof OverlayEnrollRejectedError) {
+            return res.status(409).json({
+              error: "enrollment_rejected_by_hq",
+              message:
+                "The fleet directory has this device marked as revoked (this happens after a factory reset or an earlier revoke), so it can't be re-linked with its old key. Remove the Droplet from the device's app and link it again from scratch — that gives it a fresh key.",
+            });
+          }
+          throw vouchErr;
+        }
 
         // Provisioning failure does NOT roll the vouch back — it is not
         // idempotent and HQ already knows this device. The client is told the
@@ -1287,10 +1325,18 @@ export function createVpnRouter(
             );
 
         // Hard cap on concurrently-active QR-enrolled overlay devices — reject
-        // over cap BEFORE vouching. Our own row is 'approving', so it is NOT
-        // counted in the 'approved' tally.
-        const activeCount = await prisma.pendingOverlayEnrollment.count({
-          where: { state: "approved" },
+        // over cap BEFORE vouching. WARP-2061: the cap counts LIVE overlay
+        // peers, not historical 'approved' enrollment rows. The old count was
+        // a lifetime odometer — nothing ever transitioned an approved row out
+        // of 'approved' on revocation, so 20 approvals over a box's life
+        // (accelerated by WARP-1591's iOS key-loss churn) permanently bricked
+        // QR enrollment even with zero devices connected. Live peers are the
+        // thing the cap exists to bound; revoking a device frees its slot the
+        // moment the row flips, with no enrollment-state bookkeeping to leak.
+        // Our own device's peer is not installed yet at this point, so it is
+        // not counted — same off-by-none semantics as the old query.
+        const activeCount = await prisma.vpnPeer.count({
+          where: { kind: "overlay", status: "active" },
         });
         if (activeCount >= limits.maxActiveQrDevices) {
           await compensate();
@@ -1354,6 +1400,33 @@ export function createVpnRouter(
             label: pending.label,
           });
         } catch (vouchErr) {
+          // WARP-2061 — HQ answering "state:'revoked'" is not a transient
+          // fault: HQ's enroll idempotency keys on the wg public key and never
+          // un-revokes, so every retry of THIS key fails identically, forever
+          // (the factory-reset release path revokes all clients, so this is
+          // the normal state after a reset + re-pair). Compensating to
+          // 'pending' would invite an approve→fail loop with no exit; the
+          // honest terminal state is denied + copy that names the way out —
+          // re-link the device so it enrolls a fresh key.
+          if (vouchErr instanceof OverlayEnrollRejectedError) {
+            await prisma.pendingOverlayEnrollment.updateMany({
+              where: { id: pending.id, state: "approving" },
+              data: { state: "denied" },
+            });
+            audit({
+              event: "overlay_enroll_vouch_rejected",
+              method: req.method,
+              route: ROUTE_APPROVE,
+              status: 409,
+              clientId,
+              refs: { pending_id: pending.id, hq_state: vouchErr.hqState },
+            });
+            return res.status(409).json({
+              error: "enrollment_rejected_by_hq",
+              message:
+                "The fleet directory has this device marked as revoked (this happens after a factory reset or an earlier revoke), so it can't be re-linked with its old key. Remove the Droplet from the device's app and link it again from scratch — that gives it a fresh key.",
+            });
+          }
           await compensate();
           logger.warn(
             { err: vouchErr, pendingId: pending.id },
@@ -1403,7 +1476,7 @@ export function createVpnRouter(
         });
         // Finalize approving → approved. Guarded on 'approving' so a compensating
         // path (or a manual state change) can't be silently clobbered.
-        await prisma.pendingOverlayEnrollment.updateMany({
+        const finalized = await prisma.pendingOverlayEnrollment.updateMany({
           where: { id: pending.id, state: "approving" },
           data: {
             state: "approved",
@@ -1412,6 +1485,58 @@ export function createVpnRouter(
             hqDeviceRef: deviceId,
           },
         });
+        // WARP-2061 — the finalize matching 0 rows means the enrollment left
+        // 'approving' underneath us (a concurrent state write; deny is guarded
+        // to 'pending' now, but this is the row's last line of defense). The
+        // vouch and provisioning already happened, so returning 200 approved
+        // would leave a live, HQ-vouched device behind a row that says
+        // otherwise. Tear the grant back down — HQ revoke first so it sticks,
+        // then the local peer — and report the conflict honestly.
+        if (finalized.count === 0) {
+          logger.error(
+            { pendingId: pending.id },
+            "overlay approve: enrollment state changed during approval — tearing down the just-provisioned grant",
+          );
+          try {
+            await overlayRevoke(pending.wgPublicKey);
+          } catch (revokeErr) {
+            logger.error(
+              { err: revokeErr, pendingId: pending.id },
+              "overlay approve: teardown could not revoke at HQ — device may remain vouched; owner must revoke from the device list",
+            );
+          }
+          if (provisioned !== null) {
+            try {
+              const removal = await deleteVpnPeer({
+                publicKey: pending.wgPublicKey,
+              });
+              if (isRevokeApplied(removal)) {
+                await prisma.vpnPeer.updateMany({
+                  where: { publicKey: pending.wgPublicKey, status: "active" },
+                  data: { status: "revoked", revokedAt: nowDate },
+                });
+              }
+            } catch (removeErr) {
+              logger.error(
+                { err: removeErr, pendingId: pending.id },
+                "overlay approve: teardown could not remove the provisioned peer — owner must revoke from the device list",
+              );
+            }
+          }
+          audit({
+            event: "overlay_enroll_approve_conflict",
+            method: req.method,
+            route: ROUTE_APPROVE,
+            status: 409,
+            clientId,
+            refs: { pending_id: pending.id },
+          });
+          return res.status(409).json({
+            error: "state_changed_during_approval",
+            message:
+              "This device's request changed while the approval was running — the approval was rolled back. Check the request list and try again.",
+          });
+        }
         // WARP-1757: provisionOverlayPeer now owns the peer row and stamps the
         // same provenance, so the previous best-effort updateMany here would be
         // a second writer for the same fields — removed rather than left to
@@ -1454,10 +1579,29 @@ export function createVpnRouter(
         if (!pending) {
           return res.status(404).json({ error: "not_found" });
         }
-        await prisma.pendingOverlayEnrollment.update({
-          where: { id: pending.id },
+        // WARP-2061 — deny is only valid from 'pending'. The old unconditional
+        // update let a deny land on an 'approving' row mid-approve (yielding an
+        // HQ-vouched, wg0-provisioned device whose row reads denied) and on an
+        // 'approved' row (flipping the label while the live peer stays
+        // installed). Guarding the write makes those explicit conflicts; the
+        // approve path's finalize handles the losing side of the race.
+        const denied = await prisma.pendingOverlayEnrollment.updateMany({
+          where: { id: pending.id, state: "pending" },
           data: { state: "denied" },
         });
+        if (denied.count === 0) {
+          if (pending.state === "denied") {
+            // Idempotent: it is already in the state the caller asked for.
+            return res.status(200).json({ state: "denied" });
+          }
+          const explanation =
+            pending.state === "approved"
+              ? "This device is already approved. To cut off its access, revoke it from the device list — denying the old request would only change a label while the device stays connected."
+              : "This device is being approved right now. Wait for the approval to finish, then revoke it from the device list if it shouldn't have access.";
+          return res
+            .status(409)
+            .json({ error: "not_pending", state: pending.state, message: explanation });
+        }
         audit({
           event: "overlay_enroll_denied",
           method: req.method,
@@ -1845,6 +1989,35 @@ export function createVpnRouter(
       if (peer.status === "revoked") {
         // Already gone in our world; treat as idempotent success.
         return res.json({ status: "revoked", id });
+      }
+
+      // WARP-2061 — for a QR-enrolled overlay device, revoke at HQ FIRST.
+      // A local-only revoke silently un-revokes itself: the device stays
+      // 'active' in HQ's registry, its next connect request passes HQ's
+      // client-PoP gate, and the box's own connect tick (on by default since
+      // WARP-1767) receives the offer and reinstalls the peer — the owner
+      // revoked a stolen phone and it is back inside the LAN within one poll
+      // tick of trying. HQ's revoke is idempotent and also expires the
+      // client's in-flight sessions, so this ordering leaves no window where
+      // an already-brokered session lands after the local peer is gone. If HQ
+      // is unreachable, fail the whole revoke honestly — nothing has changed,
+      // the retry is safe, and the alternative (revoked-looking row that
+      // quietly reactivates later) is this exact bug.
+      if (peer.kind === "overlay") {
+        try {
+          await overlayRevoke(peer.publicKey);
+        } catch (err) {
+          logger.error(
+            { err, peerId: id, publicKey: peer.publicKey },
+            "vpn: HQ overlay revoke failed — device left enrolled; nothing revoked locally either",
+          );
+          return res.status(502).json({
+            code: "HQ_REVOKE_FAILED",
+            error:
+              "Couldn't reach the fleet directory to revoke this device. Nothing was changed — try again in a moment.",
+            id,
+          });
+        }
       }
 
       // Delete on the router first. If that fails we leave the DB row

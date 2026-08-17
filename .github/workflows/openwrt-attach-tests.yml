@@ -1,12 +1,14 @@
 name: openwrt-attach-tests
 
 # Host-side single-box AP bring-up tooling: droplet-openwrt-attach (moves the
-# Wi-Fi phy into the openwrt container + wires hostapd/dnsmasq/fw4) and
-# droplet-wifi-watchdog (revives a silently-wedged radio). These pure shell
-# units ran against fake sysfs + stubs (no root/PCI/Docker) — fast, but until
-# now NOTHING in CI executed them, which is how a quote-break regression in the
-# attach body (AP comes up with no forwarding) and a watchdog false-wedge on the
-# container phy both shipped unnoticed.
+# Wi-Fi phy into the openwrt container + wires hostapd/dnsmasq/fw4),
+# droplet-wifi-watchdog (revives a silently-wedged radio) and
+# droplet-openwrt-watch (re-applies the attach when the container restarts —
+# WARP-2064). These pure shell units ran against fake sysfs + stubs (no
+# root/PCI/Docker) — fast, but until now NOTHING in CI executed them, which is
+# how a quote-break regression in the attach body (AP comes up with no
+# forwarding) and a watchdog false-wedge on the container phy both shipped
+# unnoticed.
 on:
   pull_request:
     paths:
@@ -18,6 +20,12 @@ on:
       - "scripts/host/etc-systemd-system/droplet-openwrt-attach.path"
       - "scripts/host/etc-systemd-system/droplet-openwrt-attach-reapply.service"
       - "scripts/host/etc-systemd-system/droplet-openwrt-attach.service"
+      # WARP-2064: the container-lifecycle watcher. The path-unit suite pins
+      # its unit/installer wiring AND the nft heal-syntax agreement between
+      # droplet-openwrt-watch and droplet-openwrt-attach, so an edit touching
+      # only the watcher files must still re-run the suite.
+      - "scripts/host/usr-local-sbin/droplet-openwrt-watch"
+      - "scripts/host/etc-systemd-system/droplet-openwrt-watch.service"
       - "scripts/host/droplet-set-hostapd.sh"
       - "scripts/host/droplet-set-guest-wifi.sh"
       - "services/oled-display/droplet-device-bridge.service"
@@ -46,6 +54,9 @@ on:
       - "scripts/host/etc-systemd-system/droplet-openwrt-attach.path"
       - "scripts/host/etc-systemd-system/droplet-openwrt-attach-reapply.service"
       - "scripts/host/etc-systemd-system/droplet-openwrt-attach.service"
+      # WARP-2064: see the pull_request paths note above.
+      - "scripts/host/usr-local-sbin/droplet-openwrt-watch"
+      - "scripts/host/etc-systemd-system/droplet-openwrt-watch.service"
       - "scripts/host/droplet-set-hostapd.sh"
       - "scripts/host/droplet-set-guest-wifi.sh"
       - "services/oled-display/droplet-device-bridge.service"

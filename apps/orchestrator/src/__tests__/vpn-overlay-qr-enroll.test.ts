@@ -69,12 +69,16 @@ vi.mock("../services/openwrt.client.js", () => ({
   vpnStatus: vi.fn(async () => ({})),
   createVpnPeer: vi.fn(),
   deleteVpnPeer: vi.fn(async () => ({ status: "ok", removed: 1 })),
+  // Mirrors the real absent-means-applied rule (openwrt.client.ts) — vpn.ts
+  // calls this on the DELETE path the WARP-2061 tests exercise.
+  isRevokeApplied: (r: { applied?: boolean }) => r?.applied !== false,
   fetchNetworkSummary: vi.fn(async () => {
     throw new Error("no summary in unit tests");
   }),
   RouterError: FakeRouterError,
 }));
 
+import * as openwrt from "../services/openwrt.client.js";
 import { createVpnRouter } from "../routes/vpn.js";
 import { createRequestLogger } from "../middleware/request-logger.js";
 import { config } from "../config.js";
@@ -84,6 +88,7 @@ import {
   signKeyFingerprint,
   OVERLAY_LINK_TOKEN_TTL_MS,
 } from "../services/overlay-link.service.js";
+import { OverlayEnrollRejectedError } from "../services/overlay-connect.service.js";
 
 const VALID_WG_KEY = "A".repeat(43) + "=";
 const VALID_WG_KEY_2 = "B".repeat(43) + "=";
@@ -210,6 +215,7 @@ interface AuditEntry {
 function buildApp(opts: {
   prisma?: any;
   overlayEnroll?: any;
+  overlayRevoke?: any;
   audit?: AuditEntry[];
   rateLimits?: any;
   user?: { id: string; username: string; role: string } | null;
@@ -235,6 +241,7 @@ function buildApp(opts: {
     "/api",
     createVpnRouter(prisma, {
       overlayEnroll: opts.overlayEnroll ?? vi.fn(async () => ({ device_ref: "hq-dev-1" })),
+      overlayRevoke: opts.overlayRevoke ?? vi.fn(async () => {}),
       recordOverlayAudit: (e: AuditEntry) => audit.push(e),
       overlayRateLimits: opts.rateLimits,
       now: opts.now,
@@ -728,6 +735,35 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/approve", () => {
     expect(overlayEnroll).toHaveBeenCalledTimes(1);
   });
 
+  it("WARP-2061: the cap counts LIVE peers, not lifetime approvals — revoked devices free their slots", async () => {
+    // Pre-fix the cap counted 'approved' enrollment rows, which nothing ever
+    // transitioned out on revocation: 20 approvals over a box's life bricked
+    // QR enrollment forever even with zero devices connected. Seed a box at
+    // the cap in HISTORICAL terms (approved rows) with every peer revoked —
+    // a fresh approval must proceed.
+    const { app, prisma } = buildApp({ rateLimits: { maxActiveQrDevices: 1 } });
+    prisma._pendings.push({
+      id: "pend-old",
+      state: "approved",
+      wgPublicKey: "OLDKEY000000000000000000000000000000000000A=",
+      signKeyFingerprint: "oldfp",
+      signPublicKeyPem: "PEM",
+      label: "Old phone",
+      conflict: false,
+    });
+    prisma._vpnPeers.push({
+      id: "vp-old",
+      publicKey: "OLDKEY000000000000000000000000000000000000A=",
+      kind: "overlay",
+      status: "revoked", // owner revoked it — the slot must be free
+    });
+    const p = await stage(app);
+    const res = await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${p}/approve`)
+      .send({});
+    expect(res.status).toBe(200);
+  });
+
   it("emits overlay_enroll_approved audit", async () => {
     const audit: AuditEntry[] = [];
     const { app } = buildApp({ audit });
@@ -1198,6 +1234,188 @@ describe("POST /api/vpn/overlay/pending-enrollments/:id/deny", () => {
     expect(overlayEnroll).not.toHaveBeenCalled();
     expect(prisma._pendings[0].state).toBe("denied");
     expect(audit.some((a) => a.event === "overlay_enroll_denied")).toBe(true);
+  });
+
+  it("WARP-2061: deny is guarded to 'pending' — an approved row 409s (revoke is the cutoff path)", async () => {
+    const { app, prisma } = buildApp({});
+    prisma._pendings.push({
+      id: "pend-approved",
+      state: "approved",
+      wgPublicKey: VALID_WG_KEY,
+      signKeyFingerprint: "fp",
+      signPublicKeyPem: "PEM",
+      label: "Phone",
+      conflict: false,
+    });
+    const res = await request(app)
+      .post("/api/vpn/overlay/pending-enrollments/pend-approved/deny")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("not_pending");
+    expect(res.body.state).toBe("approved");
+    // The label did NOT quietly flip while the peer stayed installed.
+    expect(prisma._pendings[0].state).toBe("approved");
+  });
+
+  it("WARP-2061: deny of an 'approving' row 409s — the in-flight approve owns it", async () => {
+    const { app, prisma } = buildApp({});
+    prisma._pendings.push({
+      id: "pend-mid",
+      state: "approving",
+      wgPublicKey: VALID_WG_KEY,
+      signKeyFingerprint: "fp",
+      signPublicKeyPem: "PEM",
+      label: "Phone",
+      conflict: false,
+    });
+    const res = await request(app)
+      .post("/api/vpn/overlay/pending-enrollments/pend-mid/deny")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(prisma._pendings[0].state).toBe("approving");
+  });
+
+  it("WARP-2061: deny of an already-denied row is idempotent 200", async () => {
+    const { app, prisma } = buildApp({});
+    prisma._pendings.push({
+      id: "pend-denied",
+      state: "denied",
+      wgPublicKey: VALID_WG_KEY,
+      signKeyFingerprint: "fp",
+      signPublicKeyPem: "PEM",
+      label: "Phone",
+      conflict: false,
+    });
+    const res = await request(app)
+      .post("/api/vpn/overlay/pending-enrollments/pend-denied/deny")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ state: "denied" });
+  });
+});
+
+describe("WARP-2061 — HQ enroll state gate on approve", () => {
+  async function stage(app: any) {
+    const tokenRes = await mint(app);
+    const key = p256();
+    const res = await request(app).post("/api/vpn/overlay/devices/by-token").send({
+      token: tokenRes.body.token,
+      wg_public_key: VALID_WG_KEY,
+      sign_public_key_pem: key.pem,
+      label: "Phone",
+    });
+    return res.body.pending_id as string;
+  }
+
+  it("a vouch rejected by HQ (state:'revoked') is terminal — 409, row denied, NOT compensated to pending", async () => {
+    // Compensating to 'pending' would invite an approve→fail loop with no
+    // exit: HQ keys idempotency on the wg public key and never un-revokes, so
+    // every retry of this key fails identically. The way out is a fresh key,
+    // and the copy must say so.
+    const overlayEnroll = vi.fn(async () => {
+      throw new OverlayEnrollRejectedError("revoked");
+    });
+    const audit: AuditEntry[] = [];
+    const { app, prisma } = buildApp({ overlayEnroll, audit });
+    const pendingId = await stage(app);
+    const res = await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("enrollment_rejected_by_hq");
+    expect(res.body.message).toMatch(/link it again/i);
+    const row = prisma._pendings.find((p: any) => p.id === pendingId);
+    expect(row.state).toBe("denied");
+    expect(audit.some((a) => a.event === "overlay_enroll_vouch_rejected")).toBe(true);
+    // No peer was provisioned for the rejected device.
+    expect(prisma._vpnPeers).toHaveLength(0);
+  });
+
+  it("a transient vouch failure still compensates to pending (retryable), unchanged", async () => {
+    const overlayEnroll = vi.fn(async () => {
+      throw new Error("fetch failed: connect timeout");
+    });
+    const { app, prisma } = buildApp({ overlayEnroll });
+    const pendingId = await stage(app);
+    const res = await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    expect(res.status).toBe(503);
+    const row = prisma._pendings.find((p: any) => p.id === pendingId);
+    expect(row.state).toBe("pending");
+  });
+});
+
+describe("WARP-2061 — owner revoke reaches HQ (DELETE /api/vpn/peers/:id)", () => {
+  it("revoking an overlay peer calls HQ revoke BEFORE the router delete, then revokes locally", async () => {
+    const order: string[] = [];
+    const overlayRevoke = vi.fn(async () => {
+      order.push("hq");
+    });
+    (openwrt.deleteVpnPeer as any).mockImplementation(async () => {
+      order.push("router");
+      return { status: "ok", interface: "wg0", removed: 1 };
+    });
+    const { app, prisma } = buildApp({ overlayRevoke });
+    prisma._vpnPeers.push({
+      id: "vp-ov",
+      publicKey: VALID_WG_KEY,
+      kind: "overlay",
+      status: "active",
+      deviceLabel: "Phone",
+    });
+    const res = await request(app).delete("/api/vpn/peers/vp-ov");
+    expect(res.status).toBe(200);
+    expect(overlayRevoke).toHaveBeenCalledWith(VALID_WG_KEY);
+    // HQ first: once HQ has it revoked, no new session can be brokered while
+    // the local teardown proceeds — no window where a brokered session lands
+    // after the local peer is gone.
+    expect(order).toEqual(["hq", "router"]);
+    expect(prisma._vpnPeers[0].status).toBe("revoked");
+  });
+
+  it("HQ revoke failure fails the whole revoke — nothing changed, honest 502", async () => {
+    const overlayRevoke = vi.fn(async () => {
+      throw new Error("hq unreachable");
+    });
+    (openwrt.deleteVpnPeer as any).mockClear();
+    const { app, prisma } = buildApp({ overlayRevoke });
+    prisma._vpnPeers.push({
+      id: "vp-ov",
+      publicKey: VALID_WG_KEY,
+      kind: "overlay",
+      status: "active",
+      deviceLabel: "Phone",
+    });
+    const res = await request(app).delete("/api/vpn/peers/vp-ov");
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("HQ_REVOKE_FAILED");
+    // The row is still active (retryable) and the router was never touched —
+    // a half-revoke that silently un-revokes later is the exact bug this
+    // guards against.
+    expect(prisma._vpnPeers[0].status).toBe("active");
+    expect(openwrt.deleteVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("a static (non-overlay) peer never calls HQ", async () => {
+    const overlayRevoke = vi.fn(async () => {});
+    (openwrt.deleteVpnPeer as any).mockResolvedValue({
+      status: "ok",
+      interface: "wg0",
+      removed: 1,
+    });
+    const { app, prisma } = buildApp({ overlayRevoke });
+    prisma._vpnPeers.push({
+      id: "vp-static",
+      publicKey: VALID_WG_KEY,
+      kind: "static",
+      status: "active",
+      deviceLabel: "Laptop",
+    });
+    const res = await request(app).delete("/api/vpn/peers/vp-static");
+    expect(res.status).toBe(200);
+    expect(overlayRevoke).not.toHaveBeenCalled();
+    expect(prisma._vpnPeers[0].status).toBe("revoked");
   });
 });
 

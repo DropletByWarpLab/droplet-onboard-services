@@ -3,6 +3,10 @@ name: storage-pool-tests
 # Fast unit tests for scripts/host/droplet-storage-pool.sh — pool_destroy
 # captures md members BEFORE `mdadm --stop` so each superblock is actually
 # zeroed (no array re-assembles on next boot). < 5s, no Docker.
+#
+# WARP-1988 adds the factory-reset storage wipe to the same job: same shape
+# (fake sysfs + stub binaries, no root/disks/Docker), same invariant family —
+# never touch the OS disk, never wipe a member out from under a live array.
 
 on:
   # Temporarily disabled: manual-only until GitHub Actions testing minutes
@@ -20,3 +24,5 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run storage-pool unit tests
         run: bash tests/storage-pool-destroy-superblock.test.sh
+      - name: Run factory-reset storage-wipe unit tests
+        run: bash tests/factory-reset-storage-wipe.test.sh

@@ -27,6 +27,8 @@ import { registerDeviceRoutes } from "./network-devices.routes.js";
 import { registerScheduleRoutes } from "./network-schedules.routes.js";
 import { registerPhoneHomeRoutes } from "./network-phone-home.routes.js";
 import { registerFabricRoutes } from "./network-fabric.routes.js";
+// WARP-1984 — Network → System's "Allow SSH" toggle.
+import { registerSshRoutes } from "./network-ssh.routes.js";
 
 export function createNetworkRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -114,6 +116,7 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   // WARP-1732 (ADR-035 §5): read-only fabric inventory. Serves FabricMember
   // rows straight from Postgres — no routing-service call, no device write.
   registerFabricRoutes(router, { prisma });
+  registerSshRoutes(router, { prisma });
 
   return router;
 }
