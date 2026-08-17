@@ -36,6 +36,13 @@ const DOMAIN_BY_NAME: ReadonlyMap<string, ToolDomain> = new Map(
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "search_content",
   "read_file",
+  // WARP-2057 — must be core for the same reason `read_file` is, and
+  // more urgently: `read_file` REJECTS PDFs and scans outright. Leaving
+  // its only PDF-capable sibling behind a domain match is the worst of
+  // both worlds — every turn advertises the reader that cannot open the
+  // file, and the one that can is absent unless the user happened to
+  // type a files-domain word.
+  "read_document_text",
   "list_files",
   "memory_recall",
 ]);
@@ -79,6 +86,14 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   { pattern: /\b(remind(er)?s?|tasks?|to-?dos?|don'?t forget|shopping list)\b/i, domains: ["reminders"] },
   { pattern: /\b(notifications?|notify|alerts?)\b/i, domains: ["notifications"] },
+  // WARP-2058 — the `pm` domain had NO rule, so under the shipping
+  // `domains` default not one `pm_*` tool was ever advertised: the whole
+  // project tracker was unreachable from chat regardless of RBAC. Kept
+  // distinct from the `reminders` rule above, which owns bare
+  // "tasks"/"to-dos" — a household to-do is not a tracker work item, and
+  // both domains matching a sentence that mentions each is the intended
+  // generous behaviour, not a collision.
+  { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work)\b/i, domains: ["pm"] },
   { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|replied?|sent)\b/i, domains: ["email"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
   { pattern: /\b(business|company|opening hours|customers?)\b/i, domains: ["business"] },

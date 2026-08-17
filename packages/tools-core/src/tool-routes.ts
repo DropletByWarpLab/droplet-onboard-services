@@ -150,6 +150,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "read_file", client: "nextcloud", hops: [admit("get", "/api/files/download")] },
   { tool: "search_files", client: "nextcloud", hops: [admit("get", "/api/files/search")] },
   none("search_content"), // ctx.searchHybrid shim (no ctx.http hop)
+  none("read_document_text"), // ctx.readDocumentText shim (no ctx.http hop)
   { tool: "list_recent_files", client: "nextcloud", hops: [admit("get", "/api/files/recents")] },
   { tool: "write_file", client: "nextcloud", hops: [admit("post", "/api/files/upload")] },
   { tool: "delete_file", client: "nextcloud", hops: [admit("delete", "/api/files")] },
@@ -289,6 +290,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("memory_forget"), // ctx.prisma
 
   // ── pm (native, orchestrator /api/pm/* via callOrch) ────────────────────
+  { tool: "pm_create_project", client: "orchestrator", hops: [admit("post", "/api/pm/projects")] },
   { tool: "pm_create_work_item", client: "orchestrator", hops: [admit("post", "/api/pm/projects/:id/work-items")] },
   { tool: "pm_update_work_item", client: "orchestrator", hops: [admit("patch", "/api/pm/work-items/:id")] },
   { tool: "pm_add_work_item_comment", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/comments")] },

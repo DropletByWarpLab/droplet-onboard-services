@@ -25,6 +25,14 @@ const POOL = [
 /** Pool with camera tools, for the WARP-1921 phrasing cases below. */
 const CAMERA_POOL = [...POOL, "list_cameras", "list_camera_events", "list_clips"];
 
+/** Pool with tracker tools, for the WARP-2058 cases below. */
+const PM_POOL = [
+  ...POOL,
+  "pm_create_project",
+  "pm_create_work_item",
+  "pm_list_projects",
+];
+
 describe("selectAdvertisedTools (spec §3)", () => {
   it("mode off is a pass-through", () => {
     const r = selectAdvertisedTools({
@@ -47,6 +55,50 @@ describe("selectAdvertisedTools (spec §3)", () => {
    * whole sentences, and why several deliberately avoid the domain's own
    * nouns.
    */
+  /**
+   * WARP-2058 — the `pm` domain had no rule at all, so under the shipping
+   * `domains` default not one `pm_*` tool was ever advertised. RBAC and
+   * registration were both correct; the tracker was simply invisible.
+   *
+   * A count-based assertion would not have caught that (the core set is
+   * always non-empty), so these name the tracker tools explicitly.
+   */
+  describe("tracker phrasing reaches the pm domain (WARP-2058)", () => {
+    const PM_SENTENCES = [
+      "set up a project for the roof replacement",
+      "turn this quote into a project with tasks",
+      "what's still open on the kitchen refit project?",
+      "add a ticket for the broken dishwasher",
+    ];
+    it.each(PM_SENTENCES)("%s", (sentence) => {
+      const r = selectAdvertisedTools({
+        mode: "domains",
+        userMessage: sentence,
+        pool: PM_POOL,
+        conversationToolNames: [],
+      });
+      expect(
+        r.matchedDomains,
+        `"${sentence}" advertised only [${r.advertised.join(", ")}]`,
+      ).toContain("pm");
+      expect(r.advertised).toContain("pm_create_project");
+    });
+  });
+
+  // WARP-2057 — read_file is core but REJECTS PDFs, so its PDF-capable
+  // sibling has to be core too; otherwise a turn that never says a
+  // files-domain word advertises only the reader that cannot open the file.
+  it("always advertises read_document_text alongside read_file", () => {
+    expect(CORE_TOOL_NAMES.has("read_document_text")).toBe(true);
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "turn the lights off in the den",
+      pool: [...POOL, "read_document_text"],
+      conversationToolNames: [],
+    });
+    expect(r.advertised).toContain("read_document_text");
+  });
+
   describe("real household phrasing → the right domain", () => {
     const CAMERA_SENTENCES = [
       // The original miss. Contains no camera vocabulary at all.

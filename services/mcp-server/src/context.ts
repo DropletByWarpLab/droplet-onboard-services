@@ -108,6 +108,37 @@ export interface ContextDeps {
       metadata: Record<string, unknown> | null;
     }>
   >;
+  /**
+   * Ordered whole-document read shim wired in `index.ts`, backing the
+   * `read_document_text` tool. Delegates to `file-search.service.ts` so
+   * the RBAC predicate, decrypt-on-read and dual-shape chunk-owner
+   * resolution stay in one place — same rationale as `searchHybrid`.
+   *
+   * Optional for the same reasons: unit tests don't exercise it, and on a
+   * fresh device the corpus may be unreachable at boot. The handler
+   * returns `DOCUMENT_READ_UNAVAILABLE` when missing.
+   *
+   * Bound per-call with the calling user's id; never pass through
+   * unauthenticated.
+   */
+  readDocumentText?: (args: {
+    userId: string;
+    path: string;
+    startChunk: number;
+    maxChars: number;
+  }) => Promise<{
+    /** Null when the window examined no rows — never guessed. */
+    source: "nextcloud" | "brain" | null;
+    chunks: Array<{
+      chunkIdx: number;
+      pageNumber: number | null;
+      text: string;
+      warnings: string[];
+    }>;
+    totalChunks: number;
+    unreadableChunks: number;
+    nextChunk: number | null;
+  }>;
 }
 
 /**
@@ -158,6 +189,14 @@ export function buildContext(
             _enhancement: args._enhancement ?? metaEnhancement,
           })
       : undefined;
+  // Same binding discipline as searchHybrid: the authenticated userId is
+  // baked in here, so the tool handler names a path and never sees (or
+  // can forge) an owner key.
+  const readDocumentText =
+    deps.readDocumentText && userId
+      ? async (args: { path: string; startChunk: number; maxChars: number }) =>
+          deps.readDocumentText!({ userId, ...args })
+      : undefined;
   return {
     prisma: deps.prisma,
     matter: deps.matter,
@@ -188,6 +227,7 @@ export function buildContext(
     },
     embedText: deps.embedText,
     searchHybrid,
+    readDocumentText,
     userId,
     // HTTP: the JWT claim is authoritative. Stdio (no claims): the
     // orchestrator forwards the caller's role via _meta.userRole
