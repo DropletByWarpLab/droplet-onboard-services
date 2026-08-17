@@ -1,0 +1,122 @@
+#!/bin/sh
+# droplet-ssh-access — WARP-1984. The privileged half of the dashboard's
+# "Allow SSH" toggle (Network → System).
+#
+# Runs as root from droplet-ssh-access.service, which is started by
+# droplet-ssh-access.path whenever the orchestrator rewrites the intent file.
+# Installed by scripts/lib/single-box.sh — never hand-placed on a box
+# (architecture-guard rule 20).
+#
+# ── THE SECURITY SHAPE ───────────────────────────────────────────────────────
+# The intent file is DROPLET-WRITABLE and this script is ROOT. That is exactly
+# the combination ADR-037 forbids handling carelessly, so:
+#
+#   * the file is NEVER sourced (`.`) and never `eval`-ed. Sourcing would let
+#     anything that could write it execute arbitrary shell AS ROOT;
+#   * it is NEVER an EnvironmentFile on the unit. EnvironmentFile loads EVERY
+#     key, so a compromised container could set an unrelated variable and have
+#     this root service act on it — the LPE that PR #551 nearly shipped;
+#   * exactly ONE key is read, by a regex anchored to the whole line, and its
+#     value must match `on` or `off` EXACTLY. Anything else — a missing key, a
+#     second key, a shell metacharacter, a 4 GB file of junk — is refused
+#     without acting. There is no code path from file contents to a command.
+#
+# The value is never interpolated into a command either: it selects between
+# two fixed literal branches below.
+#
+# ── LAN-ONLY, BY OMISSION AND ON PURPOSE ────────────────────────────────────
+# This script starts and stops sshd. It does NOT touch nftables/iptables, does
+# NOT add a port-forward, and does NOT request a UPnP mapping. The appliance's
+# WAN edge is not widened by any path through here — off-site support access
+# is the WireGuard overlay's job (FOUNDATION.md: the Vault is never reachable
+# from the internet side). Anyone extending this file: adding a firewall rule
+# here would break that guarantee, and the guard test in
+# apps/orchestrator/src/__tests__/ssh-access.host-script.guard.test.ts greps
+# this file to make sure nobody does.
+set -eu
+
+STATE_DIR="${DROPLET_SSH_ACCESS_DIR:-/var/lib/droplet-ssh-access}"
+# The container-writable half lives in its own subdirectory so the directory
+# holding `state` can be bind-mounted READ-ONLY into the orchestrator. Splitting
+# the paths is what makes the readback below unforgeable — see the volume
+# comments in docker/docker-compose.yml.
+INTENT_FILE="$STATE_DIR/intent.d/intent"
+STATE_FILE="$STATE_DIR/state"
+
+log() { logger -t droplet-ssh-access "$@" 2>/dev/null || echo "droplet-ssh-access: $*" >&2; }
+
+if [ ! -r "$INTENT_FILE" ]; then
+  log "no readable intent file at $INTENT_FILE; nothing to do"
+  exit 0
+fi
+
+# Read ONE key. The `{s//\1/p;q}` form quits the moment the anchored line
+# matches, so sed never reads past the value it acts on. The previous
+# `... | head -n1` bounded the MATCHES but not the READING: head can only
+# SIGPIPE sed after a printed line arrives, so this root process could be
+# made to chew through an arbitrarily large container-written file even
+# after finding its value. (A file with NO matching line is still scanned to
+# EOF — and then refused below.) The anchor means a line like
+# `DROPLET_SSH_ACCESS=on; rm -rf /` does not match at all rather than
+# matching loosely, and the empty s-regex reuses the address, so there is
+# exactly one pattern to keep correct.
+value="$(sed -n \
+  '/^[[:space:]]*DROPLET_SSH_ACCESS[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*$/{s//\1/p;q;}' \
+  "$INTENT_FILE" 2>/dev/null)"
+
+# Validate against the two literals. Default branch refuses.
+case "$value" in
+  on|off) ;;
+  *)
+    log "refusing malformed or absent DROPLET_SSH_ACCESS value; leaving sshd untouched"
+    exit 0
+    ;;
+esac
+
+# Resolve the unit name once. Debian/Ubuntu ship `ssh.service`; most others
+# `sshd.service`. Checked rather than assumed so this does not silently no-op
+# on a box whose base image differs.
+unit=""
+for candidate in ssh sshd; do
+  if systemctl list-unit-files "$candidate.service" >/dev/null 2>&1 &&
+     systemctl cat "$candidate.service" >/dev/null 2>&1; then
+    unit="$candidate"
+    break
+  fi
+done
+
+if [ -z "$unit" ]; then
+  log "no ssh/sshd unit on this host; cannot apply '$value'"
+  exit 0
+fi
+
+# Two fixed branches — the parsed value chooses between them, it is never part
+# of a command.
+if [ "$value" = "on" ]; then
+  # `start`, not `enable`: support access is a deliberate, current decision and
+  # must not silently survive a reboot as a standing open door. The dashboard
+  # toggle is the only thing that turns it on, every time.
+  systemctl start "$unit.service" || { log "failed to start $unit"; exit 1; }
+  log "ssh access ALLOWED (started $unit)"
+else
+  systemctl stop "$unit.service" || { log "failed to stop $unit"; exit 1; }
+  # Belt-and-braces: a socket-activated sshd comes straight back on the next
+  # connection even after the service is stopped, so stop the socket too. `||
+  # true` because most boxes have no ssh.socket at all and that is not a
+  # failure.
+  systemctl stop "$unit.socket" >/dev/null 2>&1 || true
+  log "ssh access DISALLOWED (stopped $unit)"
+fi
+
+# Report what we actually DID, for the dashboard to read back. Written
+# atomically so a concurrent read never sees a half-file, and root-owned so the
+# container can read but not forge it.
+umask 022
+tmp="$STATE_FILE.tmp"
+{
+  echo "# WARP-1984 — written by /usr/local/sbin/droplet-ssh-access. Read-only to the orchestrator."
+  echo "state=$value"
+  echo "changed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "unit=$unit.service"
+} >"$tmp"
+mv -f "$tmp" "$STATE_FILE"

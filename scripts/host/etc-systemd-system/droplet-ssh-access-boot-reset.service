@@ -1,0 +1,50 @@
+[Unit]
+# WARP-1984 — reset the dashboard's SSH-access INTENT to `off`, once per boot.
+#
+# The applier `start`s sshd without enabling it, so sshd is down after every
+# reboot — deliberate. But PathModified= does not fire when a path unit
+# starts against a pre-existing unchanged file, so without this unit nothing
+# re-ran the applier at boot: `state` kept saying `on` from before the
+# reboot, and the dashboard read back a green toggle over a box nobody could
+# reach. This oneshot makes the boot a REAL intent change: it rewrites the
+# intent to `off`, the already-watching path unit fires on the modification,
+# and the applier records `state=off` truthfully.
+#
+# NOT the other way round: re-applying the STORED intent at boot would turn
+# "allow SSH while I troubleshoot" into a standing open door across reboots.
+Description=Reset the dashboard's SSH-access intent to off at boot (WARP-1984)
+# The write must land while droplet-ssh-access.path is already watching, or
+# the modification happens unobserved and the applier never runs. Wants=
+# rather than Requires=: a masked watcher must not fail the boot — the
+# readback then reports the honest `pending`, not a lie.
+Wants=droplet-ssh-access.path
+After=droplet-ssh-access.path
+# Finish before the boot counts as up, so a dashboard readback in the first
+# seconds of a session never races the reset.
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-ssh-access-boot-reset
+
+# Same hardening posture as droplet-ssh-access.service — the whole job is one
+# file write under the state directory.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+# WARP-2048 shape: StateDirectory=, never a bare ReadWritePaths= carve-out. A
+# ReadWritePaths= target that does not exist when the unit starts fails the
+# whole mount-namespace setup; StateDirectory= makes systemd CREATE
+# /var/lib/droplet-ssh-access before the namespace is built and implies the
+# read-write carve-out. tests/systemd-readwritepaths-must-exist.test.sh pins
+# this for every shipped unit.
+StateDirectory=droplet-ssh-access
+PrivateTmp=yes
+
+[Install]
+# Unlike droplet-ssh-access.service — which deliberately carries NO [Install]
+# section, because enabling the applier would make SSH survive reboots — this
+# unit is MEANT to run at every boot. single-box.sh enables it WITHOUT
+# `--now`: the reset belongs to the next boot, and installing the toggle must
+# not itself change whether SSH is on.
+WantedBy=multi-user.target

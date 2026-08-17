@@ -1,0 +1,56 @@
+[Unit]
+# WARP-1984 — the privileged half of the dashboard's "Allow SSH" toggle.
+# Started by droplet-ssh-access.path whenever the orchestrator rewrites
+# /var/lib/droplet-ssh-access/intent.
+#
+# ── WHY THERE IS NO EnvironmentFile HERE ────────────────────────────────────
+# The intent file is DROPLET-WRITABLE and this unit is ROOT. Pointing
+# `EnvironmentFile=` at it would be the ADR-037 LPE: EnvironmentFile loads
+# EVERY key in the file, so anything that could write it could inject an
+# arbitrary variable into a root service. The same reasoning is spelled out at
+# length on droplet-openwrt-attach.service, which keeps its customer-writable
+# creds file out of EnvironmentFile for exactly this reason.
+#
+# Instead ExecStart parses ONE key out of the file itself and validates it
+# against `on|off` before acting. The file's contents never reach a shell.
+Description=Apply the dashboard's SSH-access intent (WARP-1984)
+After=network.target
+
+[Service]
+# Plain oneshot — NOT RemainAfterExit. The path unit that triggers this starts
+# it on every change, and a start of an already-active unit is a no-op, so
+# adding RemainAfterExit=yes here would silently break the toggle after its
+# first use. (droplet-openwrt-attach needs a relay unit precisely because it
+# made the other choice.)
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-ssh-access
+
+# Hardening. The script's whole job is `systemctl start/stop ssh` plus one
+# state file, so it needs almost nothing: no new privileges beyond root, no
+# home directories, no writable filesystem outside its own state dir. Kept
+# tight because this is the unit an attacker would most want to influence.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+# WARP-2048: StateDirectory=, not a bare ReadWritePaths= carve-out. A
+# ReadWritePaths= target that does not exist when the unit starts fails the
+# whole mount-namespace setup, so the service never runs at all — the failure
+# mode that kept droplet-egress-audit dead. StateDirectory= makes systemd
+# CREATE /var/lib/droplet-ssh-access (root:root 0755, matching the installer)
+# before the namespace is built, and implies the read-write carve-out.
+# tests/systemd-readwritepaths-must-exist.test.sh pins this for every shipped
+# unit.
+StateDirectory=droplet-ssh-access
+PrivateTmp=yes
+
+# ── WHY THERE IS NO [Install] SECTION ───────────────────────────────────────
+# The path watcher is the ONLY thing that may start this unit. An
+# [Install]/WantedBy= stanza here would be inert — the installer never
+# enables this unit — right up until some future installer edit ran
+# `systemctl enable droplet-ssh-access.service`, at which point the applier
+# would run at every boot with whatever the intent file already said, and
+# SSH would silently survive reboots as a standing open door. With no stanza,
+# that `enable` fails loudly ("has no installation config") instead of
+# succeeding silently. The boot-time OFF default lives in
+# droplet-ssh-access-boot-reset.service, which is the unit that is MEANT to
+# run at boot.

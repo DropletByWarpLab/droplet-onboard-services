@@ -39,6 +39,8 @@ import { InterfacesTable } from "@/components/network/InterfacesTable";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
+// WARP-1984 — the support-troubleshooting SSH toggle (Network → System).
+import { SshAccessCard } from "@/components/network/SshAccessCard";
 import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/FirewallRuleForm";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
@@ -1067,6 +1069,12 @@ function SystemTab({
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
+
+      {/* WARP-1984: the support-troubleshooting SSH door. owner/admin only,
+          mirroring the route's own requireRole — a role that cannot change it
+          also should not be shown whether a shell is currently open on the
+          box, which is itself a security-relevant fact on a shared appliance. */}
+      {canEdit && <SshAccessCard />}
 
       {/* WARP-871: static DHCP reservations (owner/admin, Tier 1) were fully
           wired server-side but had no UI — the only ways to pin a device to an

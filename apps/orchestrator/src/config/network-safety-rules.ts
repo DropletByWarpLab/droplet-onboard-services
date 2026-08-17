@@ -135,6 +135,15 @@ const TIER_3_OPERATIONS = new Set([
   "revoke_ai_access",
   // Switch — never let AI disable the port the appliance is on
   "switch_disable_protected_port",
+  // WARP-1984 — opening a shell on the appliance itself. Tier 3, not Tier 2,
+  // and deliberately a level above the `set_upnp` it otherwise resembles:
+  // UPnP opens a port to a service, this opens an interactive root-capable
+  // session to the box that holds every customer's data. It is the one
+  // control on this page whose blast radius is "everything", so it is
+  // web-UI-only and never AI-triggerable. The route ALSO omits the MCP
+  // principal, so an AI caller is refused twice, independently — the same
+  // belt-and-braces posture as the VPN and firmware entries above.
+  "set_ssh_access",
 ]);
 
 /**
@@ -145,6 +154,10 @@ const TIER_3_OPERATIONS = new Set([
  * Operations without an entry fall back to the generic reason.
  */
 const BLAST_RADIUS_REASON: Record<string, string> = {
+  // WARP-1984. Says what turning it ON costs, because that is the direction
+  // that carries risk — turning it off only ever closes something.
+  set_ssh_access:
+    "Allowing SSH opens a command-line login to the appliance from your local network, for support troubleshooting. While it's on, anyone on this network who has the login can reach everything stored on the box. Turn it back off when you're done.",
   create_interface:
     "Adding a network interface changes how the appliance connects. A wrong setting can disconnect devices — and could cut this dashboard's own connection.",
   edit_interface:

@@ -292,6 +292,55 @@ EOF
     "$host_src/etc-systemd-system/droplet-openwrt-watch.service" \
     /etc/systemd/system/droplet-openwrt-watch.service
 
+  # --- SSH access toggle (WARP-1984) ---------------------------------------
+  # Network → System's "Allow SSH" control. The orchestrator (a container)
+  # writes an intent file; this root-owned path+service pair applies it. No
+  # relay unit here: droplet-ssh-access.service is a plain oneshot, so a
+  # path-triggered start really executes (see the note above on why the
+  # openwrt-attach pair needs one and this does not).
+  #
+  # The state dir is root-owned and NOT group-writable: `state` is what the
+  # dashboard trusts as the source of truth, and the container gets it through
+  # a read-only bind (see docker-compose.yml). Ownership alone would not be
+  # enough — the orchestrator runs as container UID 0 and a bind mount does no
+  # UID remapping, so a writable mount here would let it forge or delete
+  # `state` no matter who owns the file.
+  #
+  # The writable half is the intent.d/ subdirectory, bind-mounted rw on its
+  # own. A directory, not a bare file, because the orchestrator writes intent
+  # by mktemp+rename and a single-FILE bind detaches when its inode is
+  # replaced (WARP-1908).
+  sudo install -d -m 0755 -o root -g root \
+    /var/lib/droplet-ssh-access
+  sudo install -d -m 0775 -o root -g "${DROPLET_GROUP:-droplet}" \
+    /var/lib/droplet-ssh-access/intent.d
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-ssh-access" \
+    /usr/local/sbin/droplet-ssh-access
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-ssh-access.service" \
+    /etc/systemd/system/droplet-ssh-access.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-ssh-access.path" \
+    /etc/systemd/system/droplet-ssh-access.path
+  # Boot reset (the third artefact): PathModified= does not fire when the
+  # path unit starts against a pre-existing unchanged intent file, so without
+  # this oneshot a reboot left `state` claiming on while sshd (deliberately
+  # start-not-enabled) was down — a green toggle over an unreachable box. At
+  # boot it rewrites the intent to off; the watcher fires on the modification
+  # and the applier records the truth.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-ssh-access-boot-reset" \
+    /usr/local/sbin/droplet-ssh-access-boot-reset
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-ssh-access-boot-reset.service" \
+    /etc/systemd/system/droplet-ssh-access-boot-reset.service
+  # Enable the WATCHER, not the service — the service is meant to run only when
+  # the intent file changes. Deliberately no `systemctl start` of the service
+  # here: installing the toggle must not itself change whether SSH is on.
+  sudo systemctl enable --now droplet-ssh-access.path >/dev/null 2>&1 || true
+  # The boot reset: `enable`, never `enable --now`. It belongs to the NEXT
+  # boot — running it at install time would flip a live support session's
+  # intent to off mid-setup, and installing the toggle must not itself change
+  # whether SSH is on, in either direction.
+  sudo systemctl enable droplet-ssh-access-boot-reset.service >/dev/null 2>&1 || true
+  log_success "Installed the SSH-access toggle (droplet-ssh-access.path + service + boot reset)"
+
   # --- /etc/tmpfiles.d/ and /etc/avahi/services/ --------------------------
   sudo install -m 0644 "$host_src/etc-tmpfiles.d/droplet.conf" \
     /etc/tmpfiles.d/droplet.conf
