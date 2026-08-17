@@ -744,14 +744,16 @@ DROPLET_PUBLIC_FQDN=
 #   the box permanently lost its droplet-us.com cert + FQDN → remote access
 #   dead-ends (WARP-978), which is exactly the reflash-self-signed regression the
 #   baked default fixes. Plain outbound HTTPS; no WG tunnel required.
-#   The default MUST be a hostname that exists: the intended vanity name
-#   fleet-hq.droplet-us.com was never bound in DNS (NXDOMAIN as of 2026-07-16),
-#   so every box that inherited it dead-ended issuance at DNS resolution and
-#   silently stayed on the self-signed bootstrap cert. Until the HQ production
-#   cutover binds the vanity name (droplet-fleet-hq HQ-CUTOVER-RUNBOOK), the
-#   default is the live HQ Worker URL; flip it back in the SAME commit that
-#   creates the DNS record.
-HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}
+#   The default MUST be a hostname that exists — a box pointed at an unbound
+#   name dead-ends issuance at DNS resolution and silently stays on the
+#   self-signed bootstrap cert (this bit once: the vanity name was NXDOMAIN
+#   from 2026-07-16 until fleet-hq #17 bound it as a Workers custom domain).
+#   The PR flipping this line merges only after the fleet-hq deploy is
+#   live-verified (curl https://fleet-hq.droplet-us.com/readyz). Existing
+#   boxes keep their stored workers.dev URL (still served, additive binding);
+#   fresh installs and migrate-backfilled boxes missing the key get the
+#   vanity name.
+HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://fleet-hq.droplet-us.com}
 # OVERLAY_CONNECT_ENABLED: the box half of customer remote access (WARP-1767 /
 #   ADR-031) — outbound long-poll to HQ signaling, STUN mapping discovery, and
 #   the wg0 peer install that lands a hole-punched session. ON by default: this
@@ -926,7 +928,7 @@ migrate_env() {
   # off). Pairs with the seed-block defaults above. `_migrate_ensure_key` only
   # appends when the key is ABSENT, so an existing (even intentionally-empty)
   # value is never clobbered on re-run.
-  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}"
+  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://fleet-hq.droplet-us.com}"
   _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
   # WARP-1767: backfill the overlay connect agent onto boxes already in the field.
   # These installs predate the key entirely, so the orchestrator fell back to the
