@@ -415,6 +415,157 @@ else
 fi
 
 # =============================================================================
+# Repository init-vs-use branching (WARP-2059) — bash only, stubbed restic.
+#
+# Regression. On a box whose DEVICE_SECRET_KEY was rotated (factory-reset.sh,
+# then a fresh setup.sh) while /var/lib/droplet/restic-repo survived on the
+# data disk a factory reset does NOT wipe, the derived password stops opening
+# the repository. `restic cat config` then fails the same way it fails when
+# there is no repository at all, so a two-state ensure_repo falls through to
+# `restic init`, which dies with
+#
+#     Fatal: create repository at <repo> failed: config file already exists
+#
+# — a message about the init attempt rather than the fault. Every nightly
+# backup failed for two days and the message sent the diagnosis the wrong way
+# (read as missing init-detection, which was already implemented).
+#
+# These cases pin the THREE-state behavior. restic is stubbed, so they run on
+# any runner — no Docker, no restic, no network.
+# =============================================================================
+echo ""
+echo "--- Repository init-vs-use branching (WARP-2059) ---"
+
+if [ -f "$LIB_SCRIPT" ]; then
+  ENSURE_TMP="$(mktemp -d)"
+  mkdir -p "$ENSURE_TMP/bin"
+
+  # $1 = shell body for `restic cat …`; $2 = body for `restic init`.
+  # Every invocation is appended to calls.log so a test can assert that init
+  # was NEVER attempted — the assertion that actually matters here.
+  make_restic_stub() {
+    cat > "$ENSURE_TMP/bin/restic" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$ENSURE_TMP/calls.log"
+case "\$1" in
+  cat)  $1 ;;
+  init) $2 ;;
+  *)    exit 0 ;;
+esac
+STUB
+    chmod +x "$ENSURE_TMP/bin/restic"
+    : > "$ENSURE_TMP/calls.log"
+  }
+
+  # Run under `set -euo pipefail` exactly as droplet-backup.sh does, so a
+  # function that returns non-zero on a success path is caught here too.
+  run_ensure() {
+    ( set -euo pipefail
+      PATH="$ENSURE_TMP/bin:$PATH"
+      export RESTIC_REPOSITORY="$ENSURE_TMP/repo"
+      # shellcheck disable=SC1090
+      source "$LIB_SCRIPT"
+      droplet_backup_ensure_repo
+    ) >"$ENSURE_TMP/out" 2>&1
+  }
+
+  init_was_attempted() { grep -qx 'init' "$ENSURE_TMP/calls.log"; }
+
+  # --- 1. Repository present and openable → proceed, do NOT re-init ---------
+  make_restic_stub 'echo "{\"version\":2}"; exit 0' 'exit 0'
+  rc=0; run_ensure || rc=$?
+  if [ "$rc" -eq 0 ] && ! init_was_attempted; then
+    pass "existing openable repo: proceeds without calling restic init"
+  else
+    fail "existing openable repo: rc=$rc init_attempted=$(init_was_attempted && echo yes || echo no)"
+  fi
+
+  # --- 2. Repository absent → init (the first-run path stays intact) -------
+  make_restic_stub \
+    'echo "Fatal: unable to open config file: no such file or directory
+Is there a repository at the following location?" >&2; exit 1' \
+    'echo "created restic repository 0a1b2c3d at $RESTIC_REPOSITORY"; exit 0'
+  rc=0; run_ensure || rc=$?
+  if [ "$rc" -eq 0 ] && init_was_attempted; then
+    pass "absent repo: initializes on first use"
+  else
+    fail "absent repo: rc=$rc init_attempted=$(init_was_attempted && echo yes || echo no)"
+  fi
+  if grep -q "created restic repository" "$ENSURE_TMP/out"; then
+    pass "absent repo: restic init output is surfaced to the journal"
+  else
+    fail "absent repo: init output swallowed"
+  fi
+
+  # --- 3. Repository present but NOT openable (THE regression) -------------
+  # Rotated device identity. Must stop immediately, never touch init, and say
+  # something the on-call operator can act on.
+  make_restic_stub \
+    'echo "Fatal: wrong password or no key found" >&2; exit 1' \
+    'echo "Fatal: create repository at $RESTIC_REPOSITORY failed: config file already exists" >&2; exit 1'
+  rc=0; run_ensure || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    pass "key mismatch: fails non-zero (backup must not continue)"
+  else
+    fail "key mismatch: returned 0 — a broken backup would report success"
+  fi
+  if init_was_attempted; then
+    fail "key mismatch: called restic init anyway — reintroduces the misleading error"
+  else
+    pass "key mismatch: never attempts restic init"
+  fi
+  if grep -qi 'config file already exists' "$ENSURE_TMP/out"; then
+    fail "key mismatch: surfaced restic's misdirecting 'config file already exists'"
+  else
+    pass "key mismatch: does not surface the misdirecting init error"
+  fi
+  if grep -qi 'DEVICE_SECRET_KEY' "$ENSURE_TMP/out" &&
+     grep -qi 'does not open it' "$ENSURE_TMP/out"; then
+    pass "key mismatch: names the derived-password/identity cause"
+  else
+    fail "key mismatch: diagnostic does not explain the cause"
+  fi
+  if grep -q "$ENSURE_TMP/repo" "$ENSURE_TMP/out"; then
+    pass "key mismatch: names the affected repository path"
+  else
+    fail "key mismatch: does not name the repository path"
+  fi
+
+  # --- 4. Belt and braces: probe wording we do not recognize yet ------------
+  # restic reworded the "no repository" error before. If the probe error is
+  # unfamiliar we still try init, but its "already exists" must be translated
+  # into the same actionable diagnostic instead of the raw Fatal.
+  make_restic_stub \
+    'echo "Fatal: some future restic wording" >&2; exit 1' \
+    'echo "Fatal: create repository at $RESTIC_REPOSITORY failed: config file already exists" >&2; exit 1'
+  rc=0; run_ensure || rc=$?
+  if [ "$rc" -ne 0 ] && grep -qi 'does not open it' "$ENSURE_TMP/out"; then
+    pass "unrecognized probe error + 'already exists' init: same actionable diagnostic"
+  else
+    fail "unrecognized probe error: rc=$rc, diagnostic missing"
+  fi
+
+  # --- 5. An unrelated init failure must NOT be misreported as key mismatch -
+  make_restic_stub \
+    'echo "Fatal: some future restic wording" >&2; exit 1' \
+    'echo "Fatal: mkdir /var/lib/droplet: permission denied" >&2; exit 3'
+  rc=0; run_ensure || rc=$?
+  if [ "$rc" -eq 3 ] && ! grep -qi 'does not open it' "$ENSURE_TMP/out"; then
+    pass "unrelated init failure: propagates rc, not misdiagnosed as key mismatch"
+  else
+    fail "unrelated init failure: rc=$rc (expected 3) or misdiagnosed"
+  fi
+
+  if [ "${KEEP_ARTIFACTS:-0}" = "1" ]; then
+    info "kept ensure_repo artifacts: $ENSURE_TMP"
+  else
+    rm -rf "$ENSURE_TMP"
+  fi
+else
+  skip "lib missing — ensure_repo branching checks"
+fi
+
+# =============================================================================
 # Live docker drill.
 # =============================================================================
 echo ""

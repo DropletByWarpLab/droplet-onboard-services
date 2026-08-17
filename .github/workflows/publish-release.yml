@@ -2,14 +2,28 @@ name: publish-release
 
 # WARP-536 — CI half of the OTA update system (WARP-534).
 #
-# On demand (workflow_dispatch from main — see the manual-only note
-# below): re-run the must-pass test suites (gate), build
+# On demand (workflow_dispatch from main or stage — see the manual-only
+# note below): re-run the must-pass test suites (gate), build
 # every appliance app image, push to GHCR tagged by commit sha, capture
 # the immutable digests, pack the tracked runtime configs, generate the
 # design-schema-v1 release.json, cosign-sign it, and publish everything
 # as a GitHub Release. The device-side update agent (WARP-537/538) polls
-# Releases `latest`, verifies release.json.sig against the baked-in
-# cosign.pub, and applies by digest.
+# Releases, verifies release.json.sig against the baked-in cosign.pub,
+# and applies by digest.
+#
+# ── TWO BRANCHES, TWO CHANNELS (WARP-1670) ──
+# The dispatch ref decides the channel — it is never a free-text input,
+# so a release can only ever claim the channel of the branch it was
+# actually built from:
+#
+#   refs/heads/stage → channel `stage`  → tag ota-stage-*  → PRERELEASE
+#   refs/heads/main  → channel `stable` → tag ota-stable-* → --latest
+#
+# `--prerelease` on stage is load-bearing, not cosmetic: GitHub's
+# /releases/latest endpoint SKIPS prereleases, and that endpoint is what
+# stable devices poll. It is the mechanism that keeps a stage build off
+# every stable box. Any other ref is refused before a single image is
+# built (see the `channel` job).
 #
 # ── FAILS UNTIL THE KEY CEREMONY RUNS ──
 # The sign step requires the COSIGN_PRIVATE_KEY + COSIGN_PASSWORD repo
@@ -25,7 +39,8 @@ name: publish-release
 # at "Sign release manifest" — ~400 doomed runs in the 30 days before this
 # change, against a $100/month Actions budget. Until the key ceremony
 # provisions COSIGN_PRIVATE_KEY/COSIGN_PASSWORD, publishing is dispatch-only:
-# run it from main once the sha you want to ship is green on ci-summary.
+# run it from main or stage once the sha you want to ship is green on
+# ci-summary.
 # When re-enabling a per-merge (or tag-triggered) flow after the ceremony,
 # also drop the inline gate jobs in favor of the ci.yml full-matrix push run
 # (the WARP-536 follow-up) — they re-prove what ci-summary already proved
@@ -34,11 +49,13 @@ name: publish-release
 on:
   workflow_dispatch:
 
-# One release at a time, never cancelled mid-publish: a cancelled run
-# could leave images pushed but no signed manifest, or a half-uploaded
-# Release. Queued runs each publish their own sha in order.
+# One release at a time PER CHANNEL, never cancelled mid-publish: a
+# cancelled run could leave images pushed but no signed manifest, or a
+# half-uploaded Release. Queued runs each publish their own sha in order.
+# Keyed by ref so a ~2h stage build can never queue a stable hotfix
+# behind it — the two channels are independent publishers.
 concurrency:
-  group: publish-release
+  group: publish-release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -47,8 +64,56 @@ permissions:
   id-token: write # cosign / future keyless & provenance work
 
 jobs:
+  # WARP-1670 — resolve the channel from the dispatch ref and refuse
+  # anything that is not a release branch. This runs FIRST and gates the
+  # gate jobs themselves: a dispatch from a feature branch must cost zero
+  # runner-minutes, not fail two hours later at `gh release create`.
+  #
+  # The channel is derived, never an input. That is the whole safety
+  # property: a release cannot claim a channel its branch didn't earn,
+  # and the device-side trust regexp (scripts/lib/apply-update.sh) only
+  # accepts workflow identities from these same two refs.
+  channel:
+    name: resolve channel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      # `gh release create` flags: --latest for stable, --prerelease for
+      # stage. Passed as a string the publish job expands unquoted.
+      release_flags: ${{ steps.resolve.outputs.release_flags }}
+    steps:
+      - name: Resolve release channel from the dispatch ref
+        id: resolve
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            refs/heads/main)
+              channel=stable
+              flags="--latest"
+              ;;
+            refs/heads/stage)
+              channel=stage
+              # --latest=false is explicit rather than implied: GitHub
+              # would otherwise promote this release to `latest` when it
+              # happens to be the newest, which is exactly what stable
+              # boxes poll.
+              flags="--prerelease --latest=false"
+              ;;
+            *)
+              echo "::error::publish-release may only be dispatched from refs/heads/main (stable) or refs/heads/stage (stage); got ${REF}"
+              exit 1
+              ;;
+          esac
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+          echo "release_flags=${flags}" >> "$GITHUB_OUTPUT"
+          echo "publishing channel=${channel} from ${REF}" >> "$GITHUB_STEP_SUMMARY"
+
   gate-node:
     name: gate / node suites
+    needs: channel
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -123,6 +188,7 @@ jobs:
 
   gate-python:
     name: gate / ${{ matrix.service }} pytest
+    needs: channel
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -193,7 +259,7 @@ jobs:
     name: build, push, sign, release
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    needs: [gate-node, gate-python]
+    needs: [channel, gate-node, gate-python]
     steps:
       - uses: actions/checkout@v7
 
@@ -319,7 +385,13 @@ jobs:
           set -euo pipefail
           owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
           registry="ghcr.io/${owner_lc}"
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-release.yml@refs/heads/main"
+          # WARP-1670: the identity carries the ref this run was dispatched
+          # from, so a stage publish self-verifies against @refs/heads/stage.
+          # Hardcoding main here made every non-main publish fail its own
+          # verify step. The `channel` job has already proven GITHUB_REF is
+          # one of the two release branches, which is what keeps this
+          # interpolation from widening the policy.
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-release.yml@${GITHUB_REF}"
           issuer="https://token.actions.githubusercontent.com"
           : > dist/image-verify.jsonl
           while read -r name digest; do
@@ -400,6 +472,8 @@ jobs:
           sha256sum dist/configs.tar.gz
 
       - name: Generate release.json
+        env:
+          CHANNEL: ${{ needs.channel.outputs.channel }}
         run: |
           set -euo pipefail
           owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
@@ -408,7 +482,7 @@ jobs:
             --digests dist/digests.json \
             --configs dist/configs.tar.gz \
             --git-sha "${GITHUB_SHA}" \
-            --channel stable \
+            --channel "${CHANNEL}" \
             --registry "ghcr.io/${owner_lc}" \
             --out dist/release.json
           cat dist/release.json
@@ -438,17 +512,28 @@ jobs:
             --output-signature dist/release.json.sig \
             dist/release.json
 
+      # WARP-1670: the tag carries the channel (`ota-<channel>-<run>-g<sha7>`)
+      # because it is the ONLY per-channel selector a device can see without
+      # downloading and verifying a manifest first — the non-stable poller
+      # uses it as a cheap pre-filter over the releases list. It stays a
+      # HINT, never the trust decision: the device re-checks the channel
+      # inside the cosign-verified manifest before accepting anything.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.channel.outputs.channel }}
+          RELEASE_FLAGS: ${{ needs.channel.outputs.release_flags }}
         run: |
           set -euo pipefail
-          tag="ota-${GITHUB_RUN_NUMBER}-g${GITHUB_SHA::7}"
+          tag="ota-${CHANNEL}-${GITHUB_RUN_NUMBER}-g${GITHUB_SHA::7}"
+          # Split the resolved flag string into an argv array rather than
+          # letting it word-split at the call site.
+          read -r -a release_flags <<< "${RELEASE_FLAGS}"
           gh release create "${tag}" \
             --target "${GITHUB_SHA}" \
             --title "OTA release ${tag}" \
-            --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor). Plus CycloneDX 1.5 SBOMs: droplet-<service>.cdx.json per image and droplet-device.cdx.json aggregated (WARP-245)." \
-            --latest \
+            --notes "Automated OTA release for ${GITHUB_SHA} (channel: ${CHANNEL}). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor). Plus CycloneDX 1.5 SBOMs: droplet-<service>.cdx.json per image and droplet-device.cdx.json aggregated (WARP-245)." \
+            "${release_flags[@]}" \
             dist/release.json dist/release.json.sig dist/configs.tar.gz \
             dist/image-signatures.json \
             apps/orchestrator/src/services/update-agent/cosign.pub \

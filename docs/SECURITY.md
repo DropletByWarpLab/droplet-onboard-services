@@ -161,7 +161,7 @@ verifies before pulling, and how anyone can verify independently.
 
 | Layer | What it authenticates | Key/identity | Where verified |
 |---|---|---|---|
-| **Keyless image signatures** (WARP-244) | "this individual image was built by our release CI" | GitHub Actions OIDC identity of `.github/workflows/publish-release.yml@refs/heads/main`, certificate from Fulcio, entry in the public Rekor transparency log | on-device before every `docker pull` (`scripts/lib/apply-update.sh`), in CI post-sign self-check, and by anyone (below) |
+| **Keyless image signatures** (WARP-244) | "this individual image was built by our release CI" | GitHub Actions OIDC identity of `.github/workflows/publish-release.yml@refs/heads/main` (stable) or `@refs/heads/stage` (stage channel, WARP-1670), certificate from Fulcio, entry in the public Rekor transparency log | on-device before every `docker pull` (`scripts/lib/apply-update.sh`), in CI post-sign self-check, and by anyone (below) |
 | **Key-based release-manifest signature** (WARP-536) | "this exact set of image digests + configs constitutes release X" | org-held cosign keypair; public half baked into the orchestrator image at `apps/orchestrator/src/services/update-agent/cosign.pub` | on-device by the OTA update agent before a manifest byte is parsed |
 
 Images are referenced **by digest only** end to end (`…@sha256:…`), so a
@@ -178,6 +178,10 @@ cosign verify \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:<digest-from-release.json>
 ```
+
+For an image from a **stage** release (`ota-stage-*`), swap the identity's
+`@refs/heads/main` for `@refs/heads/stage` — a stage build is signed by the
+same workflow running on the stage branch, so the identity differs by ref.
 
 Exit 0 plus a JSON verification bundle = genuine. Any other image ref —
 including a re-tagged copy of our own image pushed by someone else —
@@ -210,7 +214,7 @@ ref it runs, **before** `docker pull`:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/main$' \
+  --certificate-identity-regexp '^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/(main|stage)$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   --offline=true \
   "$img"

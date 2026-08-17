@@ -10,7 +10,7 @@ been built and pushed by digest. Inputs:
               pushed images
   --configs   the packed configs.tar.gz (sha256 recorded in the manifest)
   --git-sha   the commit the release was built from
-  --channel   release channel — single `stable` channel per WARP-534
+  --channel   release channel — `stable` (main) or `stage` (WARP-1670)
   --registry  image registry/namespace prefix (lowercase; GHCR requires it)
   --out       where to write release.json
 
@@ -45,9 +45,15 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 MIN_ORCHESTRATOR_SCHEMA = 1
 
-# Single release channel per the WARP-534 design. Growing this set is a
-# design change, not a workflow flag.
-ALLOWED_CHANNELS = {"stable"}
+# The release channels a manifest may claim. Growing this set is a design
+# change, not a workflow flag — every value here needs a matching release
+# branch (publish-release.yml derives the channel from the dispatch ref),
+# a device-side discovery rule (poller.ts / update_poll.py), and an entry
+# in the cosign identity policy (scripts/lib/apply-update.sh).
+#
+#   stable — refs/heads/main,  the release every box eventually gets
+#   stage  — refs/heads/stage, the pre-flight channel (WARP-1670)
+ALLOWED_CHANNELS = {"stable", "stage"}
 
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
