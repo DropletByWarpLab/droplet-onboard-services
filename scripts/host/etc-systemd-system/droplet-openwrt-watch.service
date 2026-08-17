@@ -38,6 +38,10 @@ ProtectKernelTunables=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# Explicitly false (the systemd default) — load-bearing, see the Needs note
+# above; pinned by tests/openwrt-attach-path-unit.test.sh so a hardening
+# sweep cannot flip it and blind the heal.
+PrivateNetwork=false
 LockPersonality=true
 RestrictRealtime=true
 
