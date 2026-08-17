@@ -546,8 +546,13 @@ async function main() {
         install: async (p) => {
           await openwrt.installOverlayVpnPeer(p);
         },
+        // WARP-2060 — the staged-vs-applied distinction must survive this
+        // seam: a `staged / applied:false` delete leaves the peer LIVE on wg0,
+        // and the sweep must not mark the row revoked (mirrors the manual
+        // revoke route's isRevokeApplied gate).
         remove: async (p) => {
-          await openwrt.deleteVpnPeer(p);
+          const result = await openwrt.deleteVpnPeer(p);
+          return { applied: openwrt.isRevokeApplied(result) };
         },
         // WARP-1389 — real per-peer runtime handshake, read from the routing
         // peer list, so the idle-expiry sweep can settle each torn-down peer as
