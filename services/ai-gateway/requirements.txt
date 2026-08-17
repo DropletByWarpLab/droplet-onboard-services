@@ -56,4 +56,4 @@ huggingface_hub>=0.24,<1.0
 # by the orchestrator's adaptive retrieval router. transformers is already
 # pulled in transitively via sentence-transformers, but pinning it here
 # keeps the dependency intent explicit.
-transformers>=4.40,<5
+transformers>=5.15.0,<6
