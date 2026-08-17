@@ -9,6 +9,8 @@ import {
   probeBoxEndpoint,
   expireIdleOverlayPeers,
   enrollOverlayDevice,
+  revokeOverlayDeviceAtHq,
+  OverlayEnrollRejectedError,
   installOrRefreshOverlayPeer,
   type OverlayConnectDeps,
   type OverlayVpnPeerRow,
@@ -839,6 +841,129 @@ describe("enrollOverlayDevice", () => {
     expect(signedPayloads[0]).toBe(
       `droplet-overlay-enroll:v1:droplet-abc:${expectedFp}:${wgKey}`,
     );
+  });
+
+  it("WARP-2061: a 200 whose state is not 'active' is a REJECTED vouch, not a success", async () => {
+    // HQ's enroll is idempotent on wg_public_key and never un-revokes: a
+    // replayed enroll for a revoked client answers HTTP 200 with
+    // state:'revoked'. Treating that as success is how a factory-reset
+    // re-enrollment silently bricked the client (HQ 403s its every connect).
+    const { identity } = makeIdentity();
+    const { impl: fetchImpl } = makeFetch(() =>
+      jsonResponse(200, {
+        device_id: "droplet-abc",
+        wg_public_key: "WGPUB123",
+        state: "revoked",
+        idempotent: true,
+      }),
+    );
+    await expect(
+      enrollOverlayDevice(
+        {
+          config: { hqBaseUrl: "https://hq.test", deviceId: "droplet-abc" },
+          identity,
+          fetchImpl,
+        },
+        {
+          wgPublicKey: "WGPUB123",
+          signPublicKeyPem: "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n",
+          label: "Alice iPhone",
+        },
+      ),
+    ).rejects.toThrow(OverlayEnrollRejectedError);
+  });
+
+  it("WARP-2061: state:'active' passes; an ABSENT state (older HQ) is treated as active", async () => {
+    const { identity } = makeIdentity();
+    for (const body of [
+      { device_id: "d", wg_public_key: "W", state: "active", idempotent: false },
+      { device_ref: "dev-1" }, // pre-state HQ build: no state field at all
+    ]) {
+      const { impl: fetchImpl } = makeFetch(() => jsonResponse(200, body));
+      await expect(
+        enrollOverlayDevice(
+          {
+            config: { hqBaseUrl: "https://hq.test", deviceId: "droplet-abc" },
+            identity,
+            fetchImpl,
+          },
+          {
+            wgPublicKey: "WGPUB123",
+            signPublicKeyPem: "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n",
+            label: "Alice iPhone",
+          },
+        ),
+      ).resolves.toEqual(body);
+    }
+  });
+});
+
+describe("revokeOverlayDeviceAtHq (WARP-2061)", () => {
+  it("signs the exact revoke string HQ verifies and posts the wire body", async () => {
+    const { identity, signedPayloads } = makeIdentity();
+    const { impl: fetchImpl, calls } = makeFetch((call) => {
+      if (call.url.endsWith("/api/overlay/devices/revoke")) {
+        return jsonResponse(200, {
+          device_id: "droplet-abc",
+          wg_public_key: "WGPUB123",
+          state: "revoked",
+        });
+      }
+      return jsonResponse(500, { error: "unexpected " + call.url });
+    });
+    await revokeOverlayDeviceAtHq(
+      {
+        config: { hqBaseUrl: "https://hq.test", deviceId: "droplet-abc" },
+        identity,
+        fetchImpl,
+      },
+      "WGPUB123",
+    );
+    const revoke = calls.find((c) => c.url.endsWith("/api/overlay/devices/revoke"))!;
+    expect(revoke.method).toBe("POST");
+    expect(revoke.body).toEqual({
+      device_id: "droplet-abc",
+      key_fingerprint: "BOXFP",
+      sig: SIG_B64,
+      sig_alg: "ecdsa-sha256",
+      wg_public_key: "WGPUB123",
+    });
+    // Byte-for-byte the string fleet-hq's verifyBoxSignature rebuilds.
+    expect(signedPayloads[0]).toBe("droplet-overlay-revoke:v1:droplet-abc:WGPUB123");
+  });
+
+  it("404 (never enrolled at HQ) is success — nothing to revoke IS the goal state", async () => {
+    const { identity } = makeIdentity();
+    const { impl: fetchImpl } = makeFetch(() =>
+      jsonResponse(404, { error: "client not found for this device" }),
+    );
+    await expect(
+      revokeOverlayDeviceAtHq(
+        {
+          config: { hqBaseUrl: "https://hq.test", deviceId: "droplet-abc" },
+          identity,
+          fetchImpl,
+        },
+        "WGPUB123",
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("a 5xx throws — the caller must not report the device revoked", async () => {
+    const { identity } = makeIdentity();
+    const { impl: fetchImpl } = makeFetch(() =>
+      jsonResponse(500, { error: "boom" }),
+    );
+    await expect(
+      revokeOverlayDeviceAtHq(
+        {
+          config: { hqBaseUrl: "https://hq.test", deviceId: "droplet-abc" },
+          identity,
+          fetchImpl,
+        },
+        "WGPUB123",
+      ),
+    ).rejects.toThrow(/HQ overlay revoke returned 500/);
   });
 });
 

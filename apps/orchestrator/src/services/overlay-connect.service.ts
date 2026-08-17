@@ -58,6 +58,17 @@ export function buildOverlayEnrollMessage(
   return `${OVERLAY_ENROLL_PREFIX}${deviceId}:${signKeyFingerprint}:${wgPublicKey}`;
 }
 
+const OVERLAY_REVOKE_PREFIX = "droplet-overlay-revoke:v1:";
+
+/** `droplet-overlay-revoke:v1:<device_id>:<wg_public_key>` — byte-for-byte the
+ *  string HQ's verifyBoxSignature rebuilds (fleet-hq worker/src/crypto.ts). */
+export function buildOverlayRevokeMessage(
+  deviceId: string,
+  wgPublicKey: string,
+): string {
+  return `${OVERLAY_REVOKE_PREFIX}${deviceId}:${wgPublicKey}`;
+}
+
 /** Stable lowercase-hex sha256 (the sign-key fingerprint embedded in the enroll
  *  grant is `sha256(sign_public_key_pem)`). */
 export function sha256Hex(data: string): string {
@@ -814,5 +825,90 @@ export async function enrollOverlayDevice(
       `HQ overlay enroll returned ${r.status}: ${body.slice(0, 200)}`,
     );
   }
-  return (await r.json()) as unknown;
+  const result = (await r.json()) as { state?: unknown } & Record<
+    string,
+    unknown
+  >;
+  // WARP-2061: HQ's enroll is idempotent on wg_public_key and deliberately
+  // never un-revokes — a replayed enroll for a revoked client answers HTTP 200
+  // with state:'revoked'. Treating that 200 as success is how a factory-reset
+  // (whose release path revokes every client at HQ) permanently bricked
+  // re-enrollment: the box showed the device linked while HQ 403'd its every
+  // connect, forever, with no error anywhere. A non-active state is a FAILED
+  // vouch and must fail loudly. `state` absent (older HQ builds) is treated as
+  // active — absent-means-ok, consistent with isRevokeApplied's rule.
+  if (result.state !== undefined && result.state !== "active") {
+    throw new OverlayEnrollRejectedError(String(result.state));
+  }
+  return result;
+}
+
+/** WARP-2061 — HQ answered the enroll but the device's registry state is not
+ *  'active' (typically 'revoked' after a factory-reset release or an owner
+ *  revoke). The vouch did NOT take; connects from this client will be refused
+ *  by HQ. The device must re-enroll with a FRESH WireGuard keypair — HQ's
+ *  idempotency keys on wg_public_key and never un-revokes. */
+export class OverlayEnrollRejectedError extends Error {
+  readonly hqState: string;
+  constructor(hqState: string) {
+    super(
+      `HQ enrollment state is '${hqState}', not 'active' — the vouch did not take; the device must enroll with a fresh WireGuard key`,
+    );
+    this.name = "OverlayEnrollRejectedError";
+    this.hqState = hqState;
+  }
+}
+
+/**
+ * WARP-2061 — tell HQ an owner revoked a client device, so the revocation
+ * STICKS. Without this call the device stays 'active' in HQ's registry: its
+ * next connect request passes HQ's client-PoP gate, the box's connect tick
+ * receives the offer, and installOrRefreshOverlayPeer resurrects the revoked
+ * row — the owner's revoke silently un-revokes itself within one poll tick.
+ * HQ's revoke also expires the client's in-flight sessions, so a session
+ * already brokered cannot land after the local peer is gone.
+ *
+ * 404 ("client not found for this device") is success: the device was never
+ * enrolled at HQ — nothing to revoke is the state the caller wants.
+ */
+export async function revokeOverlayDeviceAtHq(
+  deps: OverlayEnrollDeps,
+  wgPublicKey: string,
+): Promise<void> {
+  const { config, identity } = deps;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const timeoutMs = config.httpTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
+  if (!config.hqBaseUrl) {
+    throw new Error(
+      "HQ_ISSUANCE_URL not configured — cannot revoke overlay device at HQ",
+    );
+  }
+  const pop = await signOverlayMessage(
+    identity,
+    buildOverlayRevokeMessage(config.deviceId, wgPublicKey),
+  );
+  const base = config.hqBaseUrl.replace(/\/+$/, "");
+  const r = await overlayFetch(
+    fetchImpl,
+    `${base}/api/overlay/devices/revoke`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        device_id: config.deviceId,
+        key_fingerprint: pop.key_fingerprint,
+        sig: pop.sig,
+        sig_alg: pop.sig_alg,
+        wg_public_key: wgPublicKey,
+      }),
+    },
+    timeoutMs,
+  );
+  if (r.status === 404) return;
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(
+      `HQ overlay revoke returned ${r.status}: ${body.slice(0, 200)}`,
+    );
+  }
 }
