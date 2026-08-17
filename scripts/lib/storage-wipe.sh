@@ -22,6 +22,12 @@
 # WHAT IS IN SCOPE
 #   - md arrays assembled on this box (the storage pools)
 #   - filesystems mounted under /mnt/droplet (pools + adopted drives)
+#   - unmounted whole disks whose fs UUID is on the automount trust list —
+#     the drives the box RECORDED as adopted (drive_adopt/pool_format seed the
+#     list; the boot reconcile re-seeds it). A disk with no trusted UUID is
+#     NOT Droplet-managed and survives, whatever filesystem it carries: a
+#     customer's own drive plugged in at reset time is not factory state.
+#     The list is consulted in step 3, before step 4 truncates it.
 #   - the automount trust list and the mountpoint directories
 #
 # WHAT IS NEVER TOUCHED — the guard that makes this safe to default ON
@@ -31,8 +37,9 @@
 #   PKNAME` stops at the dm node and silently reports the partition — the trap
 #   recorded in automount-hijacks-boot-partitions-on-lvm). This matters
 #   concretely: automount's trust list on the lab box contains the ESP and
-#   /boot UUIDs, so "everything automount manages" is NOT a safe scope. Backing
-#   disk identity is.
+#   /boot UUIDs, so trust-list membership NARROWS the scope but never widens
+#   it — a trusted UUID on the OS disk is still refused by this guard, which
+#   always runs first.
 #
 # The erase is STRUCTURAL, not forensic: stop the array, zero every member's md
 # superblock, wipefs each member. That destroys the pool, its metadata and its
@@ -185,6 +192,45 @@ sw_source_of() {
   printf '%s' "${src%%[*}"
 }
 
+# sw_is_droplet_disk <dev> — 0 if the box RECORDED <dev>'s filesystem as
+# Droplet-managed: its fs UUID is on automount's trust list, where
+# drive_adopt/pool_format seed every adopted drive and pool (whole-device
+# filesystems, so the UUID sits on the disk node — matches `grep -qxF`, the
+# exact shape trusted_list_add writes). Fails CLOSED for the wipe's purposes:
+# no UUID, or no trust list, means NOT ours — never "carries a signature, so
+# probably ours". This is what keeps a never-adopted drive plugged in at
+# reset time out of step 3's blast radius.
+sw_is_droplet_disk() {
+  local uuid
+  uuid="$(blkid -o value -s UUID "$1" 2>/dev/null || true)"
+  [ -n "$uuid" ] || return 1
+  [ -f "$SW_TRUSTED_LIST" ] || return 1
+  grep -qxF "$uuid" "$SW_TRUSTED_LIST" 2>/dev/null
+}
+
+# sw_standalone_droplet_disks — the disks ONLY step 3 will erase: recorded as
+# Droplet-managed on the trust list, not a member of an assembled array, not
+# currently backing a mount under $SW_MNT_BASE, not the OS disk. The
+# confirmation prompt threads these in so every drive is NAMED before the
+# operator types RESET — pools and mounted drives are already named by
+# sw_assembled_arrays/sw_droplet_mounts, and without this list an unmounted
+# adopted drive was erased unnamed.
+sw_standalone_droplet_disks() {
+  local mounted mp disk node
+  mounted=" "
+  for mp in $(sw_droplet_mounts); do
+    mounted="${mounted}$(basename "$(sw_source_of "$mp")") "
+  done
+  for disk in $(lsblk -ndo NAME,TYPE 2>/dev/null | awk '$2 == "disk" { print $1 }'); do
+    node="/dev/$disk"
+    case "$mounted" in *" $disk "*) continue ;; esac
+    sw_is_os_disk "$node" && continue
+    sw_is_array_member "$node" && continue
+    sw_is_droplet_disk "$node" && printf '%s\n' "$node"
+  done
+  return 0
+}
+
 # sw_note_uuid <dev> — remember a UUID we are about to destroy so the caller
 # can warn about fstab entries that will become dead-but-nofail (a silent
 # failure generator: the mount just never appears and nothing logs).
@@ -304,9 +350,16 @@ sw_wipe_droplet_storage() {
     done
   done
 
-  # 3) Any remaining whole disk that is not an OS disk and carries a Droplet
-  #    filesystem signature but is no longer mounted or arrayed — the adopted
-  #    drives. Enumerated from lsblk, guarded the same way.
+  # 3) Any remaining whole disk the box RECORDED as Droplet-managed but that
+  #    is no longer mounted or arrayed — the adopted drives. "Recorded" means
+  #    automount's trust list (sw_is_droplet_disk), consulted here BEFORE
+  #    step 4 truncates it. The old gate — "reports any FSTYPE" — was wider
+  #    than this file's own contract: it erased a never-adopted drive that
+  #    happened to be plugged in at reset time, and leaned on whether lsblk
+  #    reports a bare partition table as an FSTYPE, which varies by
+  #    util-linux version. A trusted UUID does not bypass the guards: the
+  #    OS-disk check still runs first (the lab box's trust list contains the
+  #    ESP and /boot UUIDs).
   local disk node
   for disk in $(lsblk -ndo NAME,TYPE 2>/dev/null | awk '$2 == "disk" { print $1 }'); do
     node="/dev/$disk"
@@ -319,11 +372,19 @@ sw_wipe_droplet_storage() {
       SW_SKIPPED_COUNT=$((SW_SKIPPED_COUNT + 1))
       continue
     fi
-    # Already handled above (its signatures are gone) — wipefs is a no-op then.
-    if [ -n "$(lsblk -ndo FSTYPE "$node" 2>/dev/null)" ]; then
-      sw_note_uuid "$node"
-      sw_wipe_device "$node"
+    # Not ours (never adopted, or already erased above so its UUID is gone) —
+    # silently out of scope, like the OS disk.
+    sw_is_droplet_disk "$node" || continue
+    # A mount we could not release in step 1 means a live writer on this very
+    # disk. sw_unmount promised "leaving it and its device alone" — honor it,
+    # same refusal step 2 applies to arrays behind busy mounts.
+    if sw_is_busy_source "$node"; then
+      _sw_warn "refusing: $node still backs a mount we could not release — not wiping it"
+      SW_SKIPPED_COUNT=$((SW_SKIPPED_COUNT + 1))
+      continue
     fi
+    sw_note_uuid "$node"
+    sw_wipe_device "$node"
   done
 
   # 4) Automount trust list — the UUIDs are gone, so the entries are stale.
@@ -351,7 +412,7 @@ sw_wipe_droplet_storage() {
   #    fstab during a reset.
   local u
   for u in $SW_WIPED_UUIDS; do
-    if [ -n "$u" ] && grep -q "$u" "$SW_FSTAB" 2>/dev/null; then
+    if [ -n "$u" ] && grep -qF "$u" "$SW_FSTAB" 2>/dev/null; then
       _sw_warn "$SW_FSTAB still references the wiped UUID $u — remove that line or the next boot mounts nothing (silently, under nofail)"
     fi
   done

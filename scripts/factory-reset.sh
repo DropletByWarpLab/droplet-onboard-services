@@ -185,15 +185,18 @@ printf "    ${_RED}•${_RESET} Sync targets and file metadata\n"
 printf "    ${_RED}•${_RESET} TLS certificates and device secrets\n"
 # WARP-1988: name the drives BEFORE the operator types RESET. A reset that
 # silently kept the old pool is what shipped a box with its previous storage
-# still on it; a reset that silently erases one would be worse. Say which.
+# still on it; a reset that silently erases one would be worse. Say which —
+# ALL of which: pools, mounted drives, AND the unmounted adopted drives that
+# only the standalone sweep (step 3) touches. Those used to be erased unnamed.
 if [ "$KEEP_STORAGE" = "true" ]; then
   printf "\n"
   printf "  ${_DIM}Attached data drives are being KEPT (--keep-storage).${_RESET}\n"
 else
   _fr_pools="$(sw_assembled_arrays | tr '\n' ' ')"
   _fr_mounts="$(sw_droplet_mounts | tr '\n' ' ')"
+  _fr_disks="$(sw_standalone_droplet_disks | tr '\n' ' ')"
   printf "    ${_RED}•${_RESET} Bulk storage: ${_BOLD}%s${_RESET}\n" \
-    "${_fr_pools:-no md pools}${_fr_mounts:+ | mounted: $_fr_mounts}"
+    "${_fr_pools:-no md pools}${_fr_mounts:+ | mounted: $_fr_mounts}${_fr_disks:+ | unmounted adopted: $_fr_disks}"
   printf "      ${_DIM}(arrays stopped, superblocks zeroed, members wiped — pass --keep-storage to skip)${_RESET}\n"
 fi
 printf "\n"

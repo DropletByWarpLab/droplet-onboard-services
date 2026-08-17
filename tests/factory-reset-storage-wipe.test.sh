@@ -109,9 +109,17 @@ make_fixture() {
 /dev/nvme0n1p2	nvme0n1
 /dev/mapper/ubuntu--vg-ubuntu--lv	nvme0n1
 ANC
-  : > "$TMP/trusted.list"
+  # The trust list as pool_format/drive_adopt/the boot reconcile actually
+  # leave it: the pool's fs UUID, one per line. Step 3's scope is exactly
+  # this file, and the "trust list is cleared" test below is only meaningful
+  # when the list starts non-empty.
+  printf 'cadf51ee-d482-4984-a5b9-a9c47028f9e8\n' > "$TMP/trusted.list"
   printf 'UUID=cadf51ee-d482-4984-a5b9-a9c47028f9e8 /mnt/droplet/mass-storage-cadf51ee ext4 defaults,nofail 0 2\n' \
     > "$TMP/fstab"
+  # DEV<TAB>fs UUID (what `blkid -o value -s UUID <dev>` answers). Only /dev/md0
+  # carries one out of the box: raid members expose no fs UUID of their own,
+  # and the OS disk's UUIDs are never asked for.
+  printf '/dev/md0\tcadf51ee-d482-4984-a5b9-a9c47028f9e8\n' > "$TMP/uuids"
   : > "$TMP/calls"
   : > "$TMP/busy"
 
@@ -149,10 +157,7 @@ STUB
 
   cat > "$TMP/bin/blkid" <<'STUB'
 #!/usr/bin/env bash
-case "${!#}" in
-  */md0) echo "cadf51ee-d482-4984-a5b9-a9c47028f9e8" ;;
-  *)     echo "" ;;
-esac
+awk -F'\t' -v d="${!#}" '$1 == d { print $2 }' "$TMP/uuids"
 STUB
 
   # --stop removes the slaves dir, exactly as the kernel does.
@@ -174,6 +179,9 @@ echo "wipefs $*" >> "$TMP/calls"
 d="$(basename "${!#}")"
 awk -F'\t' -v d="$d" 'BEGIN{OFS="\t"} $1 == d { $3 = "" } { print }' "$TMP/disks" > "$TMP/disks.new"
 mv "$TMP/disks.new" "$TMP/disks"
+# ...and its fs UUID goes with the signature — blkid answers nothing after.
+awk -F'\t' -v d="/dev/$d" '$1 != d' "$TMP/uuids" > "$TMP/uuids.new"
+mv "$TMP/uuids.new" "$TMP/uuids"
 exit 0
 STUB
 
@@ -195,7 +203,10 @@ STUB
   SW_TRUSTED_LIST="$TMP/trusted.list"
   SW_FSTAB="$TMP/fstab"
   SW_SUDO=""
-  export SW_SYSFS_BLOCK SW_MDSTAT SW_MNT_BASE SW_TRUSTED_LIST SW_FSTAB SW_SUDO
+  # The prompt tests exec factory-reset.sh, whose logging.sh would otherwise
+  # append to <repo>/.data/setup.log — keep test side-effects inside $TMP.
+  LOG_FILE="$TMP/setup.log"
+  export SW_SYSFS_BLOCK SW_MDSTAT SW_MNT_BASE SW_TRUSTED_LIST SW_FSTAB SW_SUDO LOG_FILE
   unset SW_TEST_OSDISK
   # shellcheck disable=SC1090
   source "$LIB"
@@ -207,6 +218,33 @@ os_disk_member() {
   grep -v "^/dev/$1[[:space:]]" "$TMP/ancestors" > "$TMP/a.tmp"
   printf '/dev/%s\tnvme0n1\n' "$1" >> "$TMP/a.tmp"
   mv "$TMP/a.tmp" "$TMP/ancestors"
+}
+
+# add_disk <name> <fstype> <uuid> [trusted] — attach a standalone whole disk to
+# the fixture (its own backing disk, no array, no mount). "trusted" also puts
+# its fs UUID on the automount trust list — i.e. the box ADOPTED this drive at
+# some point (drive_adopt/pool_format seed the list; the reconcile re-seeds it
+# every boot). Without "trusted" it models a drive the box never managed:
+# a customer's own disk that happens to be plugged in at reset time.
+add_disk() {
+  printf '%s\tdisk\t%s\n' "$1" "$2" >> "$TMP/disks"
+  printf '/dev/%s\t%s\n' "$1" "$1" >> "$TMP/ancestors"
+  printf '/dev/%s\t%s\n' "$1" "$3" >> "$TMP/uuids"
+  if [ "${4:-}" = "trusted" ]; then
+    printf '%s\n' "$3" >> "$TMP/trusted.list"
+  fi
+  return 0
+}
+
+# stub_docker — factory-reset.sh probes `docker compose version` before the
+# confirmation prompt; stub it so the prompt tests reach the banner on a
+# runner with no Docker.
+stub_docker() {
+  cat > "$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$TMP/bin/docker"
 }
 
 # --- Phase 2: the happy path ------------------------------------------------
@@ -436,6 +474,104 @@ STUB
   sw_is_os_disk /dev/sda
 ) >/dev/null 2>&1 && pass "an unresolvable OS mount fails CLOSED" \
                  || fail "an unresolvable OS mount let a candidate through"
+
+# --- Phase 7: step 3 wipes ONLY what the box recorded as Droplet-managed -----
+echo ""
+echo "--- Phase 7: the standalone sweep is scoped to the automount trust list ---"
+
+# The positive case: a drive the box ADOPTED (fs UUID on the trust list) that
+# is attached but not mounted and not in an array — exactly the step-3
+# customer. It must be erased. This also pins the read-before-truncate
+# ordering: step 4 truncates the trust list, so a step 3 that consulted the
+# list after truncation would find nothing trusted and wipe nothing.
+( make_fixture
+  add_disk sdc ext4 "7a30be6e-6f0a-4b6e-9a3c-2f8f6f6c21aa" trusted
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  grep -qF "wipefs -a /dev/sdc" "$TMP/calls" \
+    && grep -qF "mdadm --zero-superblock /dev/sdc" "$TMP/calls"
+) >/dev/null 2>&1 && pass "an adopted (trust-listed) unmounted drive is erased" \
+                 || fail "the adopted unmounted drive survived — step 3 lost its positive case"
+
+# The blast-radius case the review flagged: a disk the box NEVER adopted — a
+# customer's own drive plugged in at reset time. It carries a filesystem, it
+# is not the OS disk, it is not in an array, and under the old FSTYPE-only
+# gate step 3 erased it. It must SURVIVE: "Droplet-managed" means what the
+# box recorded as managed, not "anything with a signature".
+( make_fixture
+  add_disk sdd ntfs "01D9432EBCE2F260"
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -qF "wipefs -a /dev/sdd" "$TMP/calls" \
+    && ! grep -qF "mdadm --zero-superblock /dev/sdd" "$TMP/calls"
+) >/dev/null 2>&1 && pass "a never-adopted disk survives the wipe" \
+                 || fail "step 3 erased a disk the box never managed"
+
+# Whether `lsblk -ndo FSTYPE` reports a partition-table-only disk as empty is
+# util-linux-version-dependent — the trust-list gate must make that variance
+# irrelevant. A partitioned foreign disk has no whole-disk fs UUID, so it can
+# never match the list, whatever lsblk says its FSTYPE is.
+( make_fixture
+  add_disk sde gpt ""
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -qF "wipefs -a /dev/sde" "$TMP/calls"
+) >/dev/null 2>&1 && pass "a partition-table-only disk survives (lsblk FSTYPE variance is moot)" \
+                 || fail "a bare partition table was enough for step 3 to erase the disk"
+
+# An adopted drive whose mount refused to release has a live writer on it.
+# sw_unmount's own warning promises "leaving it and its device alone" — step 3
+# must honor that, not wipe the device out from under the writer.
+( make_fixture
+  add_disk sdc ext4 "7a30be6e-6f0a-4b6e-9a3c-2f8f6f6c21aa" trusted
+  printf '%s\t%s\n' "$TMP/mnt/droplet/drive-7a30be6e" "/dev/sdc" >> "$TMP/mounts"
+  echo "$TMP/mnt/droplet/drive-7a30be6e" > "$TMP/busy"
+  sw_wipe_droplet_storage >/dev/null 2>&1
+  ! grep -qF "wipefs -a /dev/sdc" "$TMP/calls"
+) >/dev/null 2>&1 && pass "a trusted drive behind a busy mount is left alone" \
+                 || fail "step 3 wiped a device whose mount never released"
+
+# --- Phase 8: the prompt names every step-3 target ---------------------------
+echo ""
+echo "--- Phase 8: the confirmation prompt names the step-3 drives ---"
+
+# sw_standalone_droplet_disks is what the prompt threads in: the disks ONLY
+# step 3 will erase. Pool members and mounted drives are already named by
+# sw_assembled_arrays / sw_droplet_mounts.
+( make_fixture
+  add_disk sdc ext4 "7a30be6e-6f0a-4b6e-9a3c-2f8f6f6c21aa" trusted
+  add_disk sdd ntfs "01D9432EBCE2F260"
+  [ "$(sw_standalone_droplet_disks)" = "/dev/sdc" ]
+) >/dev/null 2>&1 && pass "standalone candidates: exactly the unmounted adopted drive" \
+                 || fail "sw_standalone_droplet_disks named the wrong disks"
+
+# A mounted adopted drive is already named by its mountpoint — listing its
+# device node again would read as a THIRD drive to the operator.
+( make_fixture
+  add_disk sdc ext4 "7a30be6e-6f0a-4b6e-9a3c-2f8f6f6c21aa" trusted
+  printf '%s\t%s\n' "$TMP/mnt/droplet/drive-7a30be6e" "/dev/sdc" >> "$TMP/mounts"
+  [ -z "$(sw_standalone_droplet_disks)" ]
+) >/dev/null 2>&1 && pass "a mounted adopted drive is not double-named" \
+                 || fail "a drive already named by its mountpoint was listed again"
+
+# The contract the review held the prompt to: name the drives BEFORE the
+# operator types RESET. A drive only step 3 touches used to be erased without
+# ever being named. Run the real script up to the prompt, decline, and check
+# the banner named the step-3 target.
+( make_fixture
+  add_disk sdc ext4 "7a30be6e-6f0a-4b6e-9a3c-2f8f6f6c21aa" trusted
+  stub_docker
+  out="$(printf 'no\n' | "$RESET" 2>&1 || true)"
+  printf '%s' "$out" | grep -qF "/dev/sdc"
+) >/dev/null 2>&1 && pass "the RESET prompt names the unmounted adopted drive" \
+                 || fail "a step-3 drive was never named before the operator types RESET"
+
+# Declining the prompt must leave every device untouched — the banner's
+# discovery pass is read-only (the calls log only records mutating stubs).
+( make_fixture
+  add_disk sdc ext4 "7a30be6e-6f0a-4b6e-9a3c-2f8f6f6c21aa" trusted
+  stub_docker
+  printf 'no\n' | "$RESET" >/dev/null 2>&1 || true
+  [ ! -s "$TMP/calls" ]
+) >/dev/null 2>&1 && pass "declining the prompt runs no mutating command" \
+                 || fail "the prompt's discovery pass touched a device"
 
 # --- Summary -----------------------------------------------------------------
 echo ""
