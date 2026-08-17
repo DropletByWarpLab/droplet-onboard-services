@@ -1,0 +1,49 @@
+[Unit]
+# WARP-2064 — re-apply the openwrt attach whenever the container starts.
+#
+# The attach unit is a boot-time oneshot; before this watcher, a no-wipe
+# deploy that recreated droplet-openwrt (`docker compose up -d` onto a new
+# main) left the WG overlay DNAT/masquerade/DOCKER-USER rules naming the OLD
+# container IP — inbound udp/51820 silently blackholed until the next reboot
+# or a manual attach restart, and the AP phy/root-password/hostapd
+# provisioning (all per-netns) was gone with it. This unit consumes the
+# docker events stream (event-driven, blocks at zero cost — not a poller) and
+# fires the existing WARP-843 reapply relay on every container start; on its
+# own (re)start it first heals a stale DNAT left by any event it missed.
+#
+# Repo-tracked at scripts/host/etc-systemd-system/ and installed + enabled by
+# scripts/lib/single-box.sh (setup.sh --single-box) — never hand-placed
+# (architecture-guard rule 20).
+Description=Re-apply droplet-openwrt attach on container lifecycle (WARP-2064)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/droplet-openwrt-watch
+# The watcher exits when the docker events stream ends (dockerd restart) or
+# before docker is up at boot; always come back. 5s spacing keeps the boot
+# retry loop under systemd's default start-limit window.
+Restart=always
+RestartSec=5
+
+# --- Hardening ---
+# Needs: the docker socket (AF_UNIX), systemctl to PID 1 (AF_UNIX), and nft
+# reads for the startup heal (AF_NETLINK — which is also why PrivateNetwork
+# must stay OFF: it would put nft in an empty netns and the heal would read
+# the wrong table). ProtectKernelModules stays off for the same reason —
+# nft may autoload nf_tables on a box where the attach has not run yet.
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# Explicitly false (the systemd default) — load-bearing, see the Needs note
+# above; pinned by tests/openwrt-attach-path-unit.test.sh so a hardening
+# sweep cannot flip it and blind the heal.
+PrivateNetwork=false
+LockPersonality=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

@@ -168,7 +168,12 @@ install_single_box_host_integration() {
     /usr/local/sbin/droplet-openwrt-attach
   sudo install -m 0755 "$host_src/usr-local-sbin/droplet-host-net" \
     /usr/local/sbin/droplet-host-net
-  log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net"
+  # WARP-2064: the container-lifecycle watcher — re-applies the attach (via the
+  # WARP-843 relay) whenever droplet-openwrt starts, so a no-wipe deploy that
+  # recreates the container cannot strand the WG overlay NAT on a dead IP.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-openwrt-watch" \
+    /usr/local/sbin/droplet-openwrt-watch
+  log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net + droplet-openwrt-watch"
 
   # --- /etc/default/ envs -------------------------------------------------
   # droplet-host-net is committed as-is (no secrets). Copy directly.
@@ -281,6 +286,11 @@ EOF
   sudo install -m 0644 \
     "$host_src/etc-systemd-system/droplet-openwrt-attach-reapply.service" \
     /etc/systemd/system/droplet-openwrt-attach-reapply.service
+  # WARP-2064: container-lifecycle watcher for the attach (see the sbin
+  # install above). Long-running docker-events consumer, Restart=always.
+  sudo install -m 0644 \
+    "$host_src/etc-systemd-system/droplet-openwrt-watch.service" \
+    /etc/systemd/system/droplet-openwrt-watch.service
 
   # --- /etc/tmpfiles.d/ and /etc/avahi/services/ --------------------------
   sudo install -m 0644 "$host_src/etc-tmpfiles.d/droplet.conf" \
@@ -432,6 +442,13 @@ EOF
   # next reboot) — the wizard's first Wi-Fi save can happen minutes after
   # setup.sh finishes. The relay itself is start-on-demand (no [Install]).
   sudo systemctl enable --now droplet-openwrt-attach.path >/dev/null 2>&1
+  # WARP-2064: --now so the container-lifecycle watcher is live immediately —
+  # the very next `docker compose up -d` could recreate droplet-openwrt, and
+  # the watcher's own startup heal also fixes a DNAT already stranded by an
+  # earlier recreate on this box. `restart` covers a re-run of setup.sh
+  # replacing the script under a running watcher.
+  sudo systemctl enable droplet-openwrt-watch.service >/dev/null 2>&1
+  sudo systemctl restart droplet-openwrt-watch.service >/dev/null 2>&1 || true
   sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
   # WARP-445: when the pre-rename unit was just stopped above, the renamed
   # unit must be STARTED now (not just enabled) — otherwise br-lan loses its
