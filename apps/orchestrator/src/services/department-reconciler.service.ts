@@ -68,6 +68,7 @@ import {
 import { ncSetUserEnabled, ncEnsureGroup } from "./nextcloud.client.js";
 import {
   gfListFolders,
+  gfGetFolder,
   gfAddGroup,
   gfSetGroupPermissions,
   ncAddUserToGroup,
@@ -213,19 +214,44 @@ export interface ReconcileResult {
 /**
  * Re-attach `droplet-admins` at MASK_ADMIN on a folder — the invariant
  * every active groupfolder (department, team, and household alike) must
- * hold. Idempotent: `gfAddGroup` + `gfSetGroupPermissions` both no-op
- * cleanly when the group is already assigned at the target mask.
+ * hold.
+ *
+ * READ-FIRST, not blind re-assert. This used to fire an unconditional
+ * `gfAddGroup` + `gfSetGroupPermissions` pair on the assumption both no-op
+ * cleanly when the group is already assigned — but groupfolders ≥ 17 (17.0.17
+ * on NC 29.0.16, reproduced on droplet-sys 2026-08-16) rejects re-adding an
+ * attached group with an HTTP 500 (`SQLSTATE[23505] duplicate key value
+ * violates unique constraint "groups_folder_group"`). Once a Household folder
+ * was converged — i.e. from the second tick a box ever ran — every 5-minute
+ * tick logged a level-50 `Groupfolder add group: 500` forever (227 of 229
+ * error lines in a 24h window on droplet-sys), drowning real errors.
+ *
+ * So the folder is read once and the invariant-already-holds case is a
+ * no-op; only the missing pieces are written. Same ADR-029 posture as
+ * `folderMatchesIntent`: NC is only asked "is what Prisma decided already
+ * here?", never what the intent should be, and any mismatch still falls
+ * through to the overwrite. The writes carry `confirmOnFailure` so a
+ * duplicate-500 racing a concurrent attach (kick tick vs cron tick) resolves
+ * via its postcondition instead of surfacing as a failure.
  */
 async function ensureAdminsAttached(
   adminToken: string,
   folderId: number,
 ): Promise<void> {
-  await gfAddGroup(adminToken, folderId, DROPLET_ADMINS_GROUP);
+  const folder = await gfGetFolder(adminToken, folderId);
+  const mask = folder?.groups[DROPLET_ADMINS_GROUP];
+  if (mask === MASK_ADMIN) return;
+  if (mask === undefined) {
+    await gfAddGroup(adminToken, folderId, DROPLET_ADMINS_GROUP, {
+      confirmOnFailure: true,
+    });
+  }
   await gfSetGroupPermissions(
     adminToken,
     folderId,
     DROPLET_ADMINS_GROUP,
     MASK_ADMIN,
+    { confirmOnFailure: true },
   );
 }
 
@@ -242,7 +268,14 @@ async function reconcileActiveDepartment(
   prisma: PrismaClient,
   id: string,
 ): Promise<{ active: boolean; ncGroupRw: string | null; ncGroupRo: string | null }> {
-  await provisionDepartment(prisma, id);
+  // WARP-1557's verify machinery, ON for the steady-state pass too since
+  // groupfolders ≥ 17 rejects re-adding an already-attached group with a
+  // duplicate-key 500 (see ensureAdminsAttached above): the unconditional
+  // re-add FAILED on every tick and knocked converged rows into
+  // `provisioning`. The pre-write intent check is now how this pass observes
+  // convergence; a folder that has drifted from intent still falls through
+  // to the full overwrite path.
+  await provisionDepartment(prisma, id, { verifyOnFailure: true });
   const row = await prisma.department.findUnique({
     where: { id },
     select: { state: true, ncGroupRw: true, ncGroupRo: true },
