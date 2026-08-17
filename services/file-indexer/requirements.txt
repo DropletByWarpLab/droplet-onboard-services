@@ -62,7 +62,7 @@ imagehash==4.3.2
 # so we add a tiny FastAPI/uvicorn server alongside the watcher (same
 # stack as services/ai-gateway/ and services/routing/, kept in lockstep).
 fastapi>=0.140.7
-uvicorn>=0.52.1
+uvicorn>=0.52.3
 # WARP-435 (ADR-003 Phase 1) — sentence-aware chunking.
 # semantic-text-splitter is a Rust-backed Python wheel (~8 MB) that walks
 # Unicode sentence/word/character boundaries with an HF-tokenizer-aware
