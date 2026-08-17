@@ -764,9 +764,17 @@ def _live_ap_ssids():
 def _corroborate_local_creds(creds):
     """Gate locally-read hostapd creds on the radio actually beaconing them.
 
-    Returns (creds, None) to publish, or (None, reason) to refuse — in which
-    case qr_snapshot()'s WARP-1800 fallback asks the orchestrator, i.e. the AP
-    that really does host the network.
+    Returns (creds, err, liveness). liveness is the probe's three-valued
+    verdict, mirrored into the snapshot's `liveness` field:
+
+      "corroborated" — the radio is beaconing the configured SSID; publish.
+      "refused"      — the radio answered and does NOT vouch for these creds
+                       (creds is None, err says why); qr_snapshot()'s
+                       WARP-1800 fallback asks the orchestrator, i.e. the AP
+                       that really does host the network.
+      "unavailable"  — the probe could not run; the creds still publish
+                       (err is None) but UNCORROBORATED, and the snapshot
+                       says so.
 
     A live BSS under a DIFFERENT name is refused rather than silently relabelled
     with the live SSID: if the configured SSID is stale then the passphrase
@@ -776,21 +784,26 @@ def _corroborate_local_creds(creds):
     """
     live, probe_err = _live_ap_ssids()
     if live is None:
-        # Could not ask. Keep the pre-WARP-2047 behaviour and say why, so a
-        # wrong SSID on this path is still debuggable from the snapshot.
-        logger.debug("AP liveness probe unavailable (%s); trusting local creds",
-                     probe_err)
-        return creds, None
+        # Could not ask. Keep the pre-WARP-2047 serve-anyway behaviour — an
+        # install without `iw` must not lose its working QR — but not silently:
+        # at WARNING, because an unverifiable radio is not routine, and with
+        # the "unavailable" marker, because without one this snapshot reads
+        # byte-identical to a corroborated answer and a wrong SSID on this
+        # path would be invisible everywhere.
+        logger.warning(
+            "AP liveness probe unavailable (%s); publishing local creds "
+            "uncorroborated", probe_err)
+        return creds, None, "unavailable"
     if not live:
         return None, ("this Droplet's radio is not hosting a network "
-                      "(no AP interface is up)")
+                      "(no AP interface is up)"), "refused"
     if creds["ssid"] not in live:
         # Names only — never the passphrase we just declined to trust.
         return None, (
             "configured SSID {!r} is not on the air (broadcasting: {}) — "
             "the local Wi-Fi config has drifted from the radio".format(
-                creds["ssid"], ", ".join(sorted(live))))
-    return creds, None
+                creds["ssid"], ", ".join(sorted(live)))), "refused"
+    return creds, None, "corroborated"
 
 
 def _hostapd_wifi_payload(ssid, key):
@@ -1086,6 +1099,13 @@ def qr_snapshot():
         # 0 means "no expiry" (the production posture in both shapes unless
         # UCI-mode rotation is explicitly enabled).
         "ttl_seconds": 0,
+        # WARP-2047 — outcome of the local-radio corroboration step:
+        # "corroborated" / "refused" / "unavailable", or None when the step
+        # does not apply (UCI shape, or no local creds to check). Load-bearing
+        # for "unavailable": that is the one path that still publishes creds
+        # no radio vouched for, and without the marker such a snapshot is
+        # indistinguishable from a corroborated one.
+        "liveness": None,
     }
     if rotation_enabled:
         out["ttl_seconds"] = _key_ttl_seconds()
@@ -1099,7 +1119,7 @@ def qr_snapshot():
         # the network. Only the hostapd branch needs this: the UCI branch's
         # creds already come from the router that serves them.
         if creds is not None:
-            creds, err = _corroborate_local_creds(creds)
+            creds, err, out["liveness"] = _corroborate_local_creds(creds)
     else:
         creds, err = openwrt_wifi_credentials()
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import urllib.error
 from pathlib import Path
 
@@ -1053,6 +1054,9 @@ def test_no_local_bss_refuses_the_env_creds_and_asks_the_orchestrator(
     # The AP's REAL passphrase, not the bridge env's stale one.
     assert snap["key"] == "Warp123!"
     assert "Droplet123!" not in snap["payload"]
+    # The corroboration verdict survives the fallback: the published creds are
+    # the orchestrator's, and `liveness` records WHY they aren't local.
+    assert snap["liveness"] == "refused"
 
 
 def test_no_local_bss_and_no_approved_ap_emits_no_qr_at_all(
@@ -1081,6 +1085,8 @@ def test_no_local_bss_and_no_approved_ap_emits_no_qr_at_all(
     assert "no access point has been approved" in snap["error"]
     # Never echo the passphrase we just refused to trust.
     assert "Droplet123!" not in snap["error"]
+    # The no-QR snapshot still says the local creds were REFUSED, not unchecked.
+    assert snap["liveness"] == "refused"
 
 
 def test_a_configured_ssid_absent_from_the_air_is_refused(
@@ -1101,6 +1107,7 @@ def test_a_configured_ssid_absent_from_the_air_is_refused(
 
     assert snap["source"] == "orchestrator"
     assert snap["ssid"] == "Droplet"
+    assert snap["liveness"] == "refused"
 
 
 def test_a_live_bss_corroborates_the_local_creds(
@@ -1117,6 +1124,7 @@ def test_a_live_bss_corroborates_the_local_creds(
 
     assert snap["ok"] is True and snap["source"] == "hostapd"
     assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:Droplet123!;;"
+    assert snap["liveness"] == "corroborated"
 
 
 def test_an_unrunnable_probe_keeps_the_local_answer(
@@ -1137,6 +1145,33 @@ def test_an_unrunnable_probe_keeps_the_local_answer(
     snap = bridge.qr_snapshot()
 
     assert snap["ok"] is True and snap["source"] == "hostapd"
+
+
+def test_an_unrunnable_probe_is_marked_in_snapshot_and_log(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """Serve-anyway must not mean silent.
+
+    The uncorroborated publish is the one remaining path where a wrong SSID can
+    still reach the glass, so it has to be visible in both places someone would
+    look. The snapshot needs a marker — without one it reads byte-identical to
+    a corroborated answer — and the log line needs to be at WARNING, because
+    debug is below the default level, i.e. nowhere. An unverifiable radio is
+    not routine.
+    """
+    bridge = _hostapd_box(monkeypatch, ssid="Droplet", psk="Droplet123!")
+    _stub_iw(monkeypatch, bridge, 127, "", "iw: not found")
+
+    with caplog.at_level(logging.WARNING, logger="droplet.bridge"):
+        snap = bridge.qr_snapshot()
+
+    assert snap["ok"] is True
+    assert snap["liveness"] == "unavailable", \
+        "an unchecked publish must not look like a corroborated one"
+    assert any(
+        r.levelno >= logging.WARNING
+        and "AP liveness probe unavailable" in r.getMessage()
+        for r in caplog.records
+    ), "the degraded path must be loud enough to be seen"
 
 
 def test_the_bss_probe_is_cached_across_polls(
@@ -1172,6 +1207,9 @@ def test_uci_mode_never_probes_the_local_radio(
 
     snap = bridge.qr_snapshot()
     assert snap["ok"] is True and snap["source"] == "uci"
+    # No probe ran, and none applies — three-valued stays three-valued, so
+    # "didn't apply" must not masquerade as any of checked/refused/unavailable.
+    assert snap["liveness"] is None
 
 
 # --- the iw parser ----------------------------------------------------------
