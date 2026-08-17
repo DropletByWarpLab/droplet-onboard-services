@@ -131,8 +131,10 @@ jobs:
               # push-to-main canary, since it is the only thing that proves the
               # root script's parser refuses hostile input under real dash.
               - "scripts/host/usr-local-sbin/droplet-ssh-access"
+              - "scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset"
               - "scripts/host/etc-systemd-system/droplet-ssh-access.service"
               - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
+              - "scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service"
               - "tests/droplet-ssh-access.test.sh"
             web-dashboard:
               - "apps/web-dashboard/**"
@@ -369,10 +371,16 @@ jobs:
         if: matrix.suite == 'orchestrator'
         run: |
           set -eu
-          shellcheck --severity=warning scripts/host/usr-local-sbin/droplet-ssh-access
+          shellcheck --severity=warning \
+            scripts/host/usr-local-sbin/droplet-ssh-access \
+            scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset
+          # One invocation for all three units, so the boot-reset's
+          # Wants=/After= reference to the path unit resolves against the
+          # file under test rather than whatever the runner has installed.
           out="$(systemd-analyze verify \
             scripts/host/etc-systemd-system/droplet-ssh-access.service \
-            scripts/host/etc-systemd-system/droplet-ssh-access.path 2>&1 || true)"
+            scripts/host/etc-systemd-system/droplet-ssh-access.path \
+            scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service 2>&1 || true)"
           printf '%s\n' "$out"
           # Exactly two outputs are expected and only those two: ExecStart is
           # installed by setup.sh and never exists on a runner, and the

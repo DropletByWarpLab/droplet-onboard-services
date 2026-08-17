@@ -31,6 +31,20 @@ const PATH_UNIT = readFileSync(
   join(REPO, "scripts", "host", "etc-systemd-system", "droplet-ssh-access.path"),
   "utf8",
 );
+const BOOT_RESET_UNIT = readFileSync(
+  join(
+    REPO,
+    "scripts",
+    "host",
+    "etc-systemd-system",
+    "droplet-ssh-access-boot-reset.service",
+  ),
+  "utf8",
+);
+const BOOT_RESET_SCRIPT = readFileSync(
+  join(REPO, "scripts", "host", "usr-local-sbin", "droplet-ssh-access-boot-reset"),
+  "utf8",
+);
 const INSTALLER = readFileSync(join(REPO, "scripts", "lib", "single-box.sh"), "utf8");
 
 /** Strip comments so a rule is never satisfied by prose ABOUT the rule. */
@@ -99,6 +113,69 @@ describe("the toggle does not silently persist across reboots", () => {
     // connection anyway — the toggle would read "off" over an open port.
     expect(code(SCRIPT)).toMatch(/\.socket/);
   });
+
+  it("the applier unit carries no [Install] section at all", () => {
+    // The path watcher is the ONLY thing that may start this unit. An
+    // [Install]/WantedBy= stanza here is inert right up until some future
+    // installer edit runs `systemctl enable droplet-ssh-access.service` — at
+    // which point the applier runs at every boot with whatever the intent
+    // file already says, and SSH silently survives reboots. With no stanza,
+    // that `enable` fails loudly ("has no installation config") instead.
+    expect(code(UNIT)).not.toMatch(/\[Install\]/);
+    expect(code(UNIT)).not.toMatch(/WantedBy/);
+  });
+});
+
+describe("the toggle resets to OFF at boot, so the readback cannot lie after a reboot", () => {
+  // The applier `start`s sshd without enabling it, so sshd is down after
+  // every reboot — deliberate. But PathModified= does NOT fire when the path
+  // unit starts against a pre-existing unchanged file, so without the boot
+  // reset nothing re-ran the applier: `state` kept saying `on` from before
+  // the reboot and the dashboard rendered a green toggle over a box nobody
+  // could reach. The boot reset rewrites the INTENT to `off`; the
+  // already-watching path unit sees a genuine modification and the applier
+  // records `state=off` truthfully.
+  it("orders the reset after the watcher and before multi-user.target", () => {
+    // After= the path unit: the write must land while the watcher is already
+    // watching, or the modification happens unobserved and the applier never
+    // runs. Before= multi-user.target: the boot is not "up" until the reset
+    // has landed, so a dashboard readback never races it.
+    expect(code(BOOT_RESET_UNIT)).toMatch(/^Wants=droplet-ssh-access\.path$/m);
+    expect(code(BOOT_RESET_UNIT)).toMatch(/^After=droplet-ssh-access\.path$/m);
+    expect(code(BOOT_RESET_UNIT)).toMatch(/^Before=multi-user\.target$/m);
+  });
+
+  it("is a plain oneshot running the boot-reset script", () => {
+    expect(code(BOOT_RESET_UNIT)).toMatch(/^Type=oneshot$/m);
+    expect(code(BOOT_RESET_UNIT)).toMatch(
+      /^ExecStart=\/usr\/local\/sbin\/droplet-ssh-access-boot-reset$/m,
+    );
+    expect(code(BOOT_RESET_UNIT)).not.toMatch(/RemainAfterExit/);
+  });
+
+  it("is enabled at boot — unlike the applier, this unit is MEANT to run then", () => {
+    expect(code(BOOT_RESET_UNIT)).toMatch(/^WantedBy=multi-user\.target$/m);
+  });
+
+  it("resets to off — it never re-applies the stored intent", () => {
+    // Re-applying the stored intent at boot would turn "allow SSH while I
+    // troubleshoot" into a standing open door across reboots — explicitly
+    // rejected. The script writes the literal off value; it never reads the
+    // previous one and never drives systemd itself (acting stays the
+    // applier's job, via the path unit).
+    const body = code(BOOT_RESET_SCRIPT);
+    expect(body).toMatch(/DROPLET_SSH_ACCESS=off/);
+    expect(body).not.toMatch(/\bsystemctl\b/);
+    expect(body).not.toMatch(/\bsed\b|\bgrep\b|\bawk\b/);
+  });
+
+  it("writes the intent atomically, like the orchestrator does", () => {
+    // The path watcher must never observe a half-written file. Temp file in
+    // the same directory + rename is the contract the .path unit documents.
+    const body = code(BOOT_RESET_SCRIPT);
+    expect(body).toMatch(/\.tmp/);
+    expect(body).toMatch(/mv -f/);
+  });
 });
 
 describe("the path unit actually fires every time", () => {
@@ -128,6 +205,8 @@ describe("the artefacts ship through setup.sh, not by hand (guard rule 20)", () 
     "usr-local-sbin/droplet-ssh-access",
     "etc-systemd-system/droplet-ssh-access.service",
     "etc-systemd-system/droplet-ssh-access.path",
+    "usr-local-sbin/droplet-ssh-access-boot-reset",
+    "etc-systemd-system/droplet-ssh-access-boot-reset.service",
   ])("installs %s", (artefact) => {
     expect(INSTALLER).toContain(artefact);
   });
@@ -136,5 +215,22 @@ describe("the artefacts ship through setup.sh, not by hand (guard rule 20)", () 
     // Installing the toggle must not itself change whether SSH is on.
     expect(INSTALLER).toMatch(/systemctl enable --now droplet-ssh-access\.path/);
     expect(INSTALLER).not.toMatch(/systemctl\s+start\s+droplet-ssh-access\.service/);
+  });
+
+  it("enables the boot reset for the NEXT boot, without running it now", () => {
+    // `enable`, never `enable --now`: the reset belongs to the next boot.
+    // Running it at install time would flip a live support session's intent
+    // to off mid-setup — installing the toggle must not itself change
+    // whether SSH is on, in either direction.
+    expect(INSTALLER).toMatch(/systemctl enable droplet-ssh-access-boot-reset\.service/);
+    expect(INSTALLER).not.toMatch(/enable --now droplet-ssh-access-boot-reset/);
+    expect(INSTALLER).not.toMatch(/systemctl\s+start\s+droplet-ssh-access-boot-reset/);
+  });
+
+  it("never enables the applier service itself", () => {
+    // The trap the missing [Install] section closes, closed at the installer
+    // end too: `systemctl enable droplet-ssh-access.service` would make SSH
+    // survive reboots.
+    expect(INSTALLER).not.toMatch(/systemctl\s+enable\s+(--now\s+)?droplet-ssh-access\.service/);
   });
 });

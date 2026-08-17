@@ -18,8 +18,10 @@ on:
     branches: [main]
     paths:
       - "scripts/host/usr-local-sbin/droplet-ssh-access"
+      - "scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset"
       - "scripts/host/etc-systemd-system/droplet-ssh-access.service"
       - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
+      - "scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service"
       - "scripts/lib/single-box.sh"
       - "tests/droplet-ssh-access.test.sh"
       - ".github/workflows/ssh-access-tests.yml"
@@ -37,10 +39,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: shellcheck the SSH-access applier
+      - name: shellcheck the SSH-access applier and boot reset
         # warning severity to match ship-check's bar; no global excludes —
         # waivers live inline per scripts/test/ship-check.sh convention.
-        run: shellcheck --severity=warning scripts/host/usr-local-sbin/droplet-ssh-access
+        run: |
+          shellcheck --severity=warning \
+            scripts/host/usr-local-sbin/droplet-ssh-access \
+            scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset
 
       - name: Validate the unit files
         # systemd-analyze parses a unit exactly the way systemd will, so a bad
@@ -49,11 +54,14 @@ jobs:
         # never exists on a runner, and the permission advisories fire on
         # filesystems that do not carry POSIX modes. ANY other line fails the
         # job — a filter wide enough to hide a real error would make this step
-        # decorative.
+        # decorative. One invocation for all three units, so the boot-reset's
+        # Wants=/After= reference to the path unit resolves against the file
+        # under test rather than whatever the runner has installed.
         run: |
           out="$(systemd-analyze verify \
             scripts/host/etc-systemd-system/droplet-ssh-access.service \
-            scripts/host/etc-systemd-system/droplet-ssh-access.path 2>&1 || true)"
+            scripts/host/etc-systemd-system/droplet-ssh-access.path \
+            scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service 2>&1 || true)"
           printf '%s\n' "$out"
           unexpected="$(printf '%s\n' "$out" \
             | grep -v 'is not executable: No such file or directory' \

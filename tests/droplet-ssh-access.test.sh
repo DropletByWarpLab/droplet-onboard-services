@@ -199,6 +199,62 @@ echo "$LOG" | grep -q '^start ssh.service$'
 check "first match: the value read this way still applies" $? "log=[$LOG]"
 teardown
 
+# --- 8. The boot reset (droplet-ssh-access-boot-reset) -----------------------
+# The applier `start`s sshd without enabling it, so sshd is down after every
+# reboot — deliberate. But PathModified= does NOT fire when the path unit
+# starts against a pre-existing unchanged file, so without a reset nothing
+# re-ran the applier at boot: `state` kept saying on from before the reboot —
+# a green toggle over a box nobody can reach. At boot this script rewrites
+# the INTENT to off; the already-watching path unit sees a real modification
+# and the applier records the truth. It must never re-apply the stored intent
+# (a standing open door across reboots) and never drive systemd itself.
+RESET="$HERE/../scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset"
+
+if command -v dash >/dev/null 2>&1; then
+  dash -n "$RESET" 2>/tmp/ssh-access-reset-dash-err
+  check "boot reset: parses under dash" $? "$(cat /tmp/ssh-access-reset-dash-err 2>/dev/null)"
+else
+  sh -n "$RESET" 2>/tmp/ssh-access-reset-dash-err
+  check "boot reset: parses under sh (dash unavailable)" $? "$(cat /tmp/ssh-access-reset-dash-err 2>/dev/null)"
+fi
+
+# The owner had SSH on before the reboot. The reset must flip the intent to
+# off — the literal, not the stored value — without touching systemd.
+setup
+printf 'DROPLET_SSH_ACCESS=on\n' >"$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+/bin/sh "$RESET" >/dev/null 2>&1
+RC=$?
+[ "$RC" = "0" ]
+check "boot reset: exits 0" $? "rc=$RC"
+grep -q '^DROPLET_SSH_ACCESS=off$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+check "boot reset: rewrites the intent to off" $? \
+  "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null)]"
+[ -z "$(cat "$SYSTEMCTL_LOG" 2>/dev/null)" ]
+check "boot reset: never calls systemctl itself" $? "log=[$(cat "$SYSTEMCTL_LOG" 2>/dev/null)]"
+leftover="$(ls "$DROPLET_SSH_ACCESS_DIR/intent.d" | grep -v '^intent$' || true)"
+[ -z "$leftover" ]
+check "boot reset: leaves no temp litter next to the watched path" $? "leftover=[$leftover]"
+
+# ...and the applier, run on that modification as the path unit would run it,
+# ends the reboot sequence with sshd stopped and an honest state=off.
+/bin/sh "$SCRIPT" >/dev/null 2>&1
+LOG="$(cat "$SYSTEMCTL_LOG" 2>/dev/null)"
+STATE="$(cat "$DROPLET_SSH_ACCESS_DIR/state" 2>/dev/null || echo '<none>')"
+echo "$LOG" | grep -q '^stop ssh.service$'
+check "reboot sequence: the applier stops sshd" $? "log=[$LOG]"
+echo "$STATE" | grep -q '^state=off$'
+check "reboot sequence: state reads off — readback and reality agree" $? "state=[$STATE]"
+teardown
+
+# A wiped intent.d must not defeat the reset: recreate and write.
+setup
+rm -rf "$DROPLET_SSH_ACCESS_DIR/intent.d"
+/bin/sh "$RESET" >/dev/null 2>&1
+grep -q '^DROPLET_SSH_ACCESS=off$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null
+check "boot reset: recreates a missing intent.d and still lands" $? \
+  "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null || echo '<none>')]"
+teardown
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

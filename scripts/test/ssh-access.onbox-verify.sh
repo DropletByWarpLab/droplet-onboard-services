@@ -100,8 +100,15 @@ if [ "$DO_INSTALL" = "1" ]; then
     /etc/systemd/system/droplet-ssh-access.service
   install -m 0644 "$REPO_ROOT/scripts/host/etc-systemd-system/droplet-ssh-access.path" \
     /etc/systemd/system/droplet-ssh-access.path
+  install -m 0755 "$REPO_ROOT/scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset" \
+    /usr/local/sbin/droplet-ssh-access-boot-reset
+  install -m 0644 "$REPO_ROOT/scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service" \
+    /etc/systemd/system/droplet-ssh-access-boot-reset.service
   systemctl daemon-reload
   systemctl enable --now droplet-ssh-access.path >/dev/null 2>&1 || true
+  # `enable`, never `--now`: the boot reset belongs to the next boot. Running
+  # it here would flip the live intent to off mid-verification.
+  systemctl enable droplet-ssh-access-boot-reset.service >/dev/null 2>&1 || true
 fi
 
 [ -x "$APPLIER" ] && ok "applier installed at $APPLIER" \
@@ -122,6 +129,17 @@ if systemctl show droplet-ssh-access.service -p RemainAfterExit 2>/dev/null \
   ok "service is a plain oneshot (path triggers really re-run it)"
 else
   bad "service has RemainAfterExit set" "path-triggered starts will become no-ops"
+fi
+
+# Without the boot reset enabled, a reboot leaves `state` claiming on while
+# sshd (start-not-enabled, deliberately) is down: a green toggle over a box
+# nobody can reach. PathModified= does not fire for a pre-existing unchanged
+# file at path-unit start, so the reset is what makes boots honest.
+if systemctl is-enabled droplet-ssh-access-boot-reset.service >/dev/null 2>&1; then
+  ok "boot reset is enabled (reboot resets the intent to off)"
+else
+  bad "droplet-ssh-access-boot-reset.service is NOT enabled" \
+    "after a reboot the readback would claim on with sshd down; re-run with --install"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

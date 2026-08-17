@@ -14,8 +14,11 @@ import { ToggleSwitch } from "@/components/smart-home/ToggleSwitch";
 /**
  * SSH access (Droplet Design System · Network · System) — WARP-1984.
  *
- * The support-troubleshooting door. Off by default, stays on until someone
- * turns it off, and LAN-only: this never opens anything on the internet side.
+ * The support-troubleshooting door. Off by default, and off again after every
+ * restart: a boot oneshot (droplet-ssh-access-boot-reset) rewrites the host
+ * intent to off, so this toggle can never read green over a box that came
+ * back up with sshd down. LAN-only: this never opens anything on the
+ * internet side.
  *
  * COPY POSTURE (ADR-002, home-user persona). The audience for this card is not
  * a sysadmin — it is whoever owns the business. So it says "command-line login
@@ -117,7 +120,8 @@ export function SshAccessCard() {
           <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
           <span>
             Leave this on only while someone is troubleshooting, then turn it
-            back off. It stays on until you do.
+            back off. If you forget, it turns itself off the next time this
+            Droplet restarts.
           </span>
         </div>
       )}
