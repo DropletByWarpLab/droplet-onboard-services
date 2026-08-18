@@ -11,6 +11,13 @@
  * rendered — the customer sees a friendly generic instead ("Drive", or
  * "Storage pool" when the caller knows the volume is pool-backed).
  *
+ * Note which link actually fires for a pool: pool_format always labels the
+ * filesystem (WARP-1338), so the FS-LABEL link resolves before the generic
+ * ever does. Since WARP-2097 that label is the owner's chosen name, so a named
+ * pool renders it; an unnamed one carries the default label "pool" and renders
+ * "Pool". The "Storage pool" generic is reachable only for a volume whose
+ * label is EMPTY — a legacy pool created before labelling existed.
+ *
  * Casing intentionally mirrors DrivesPanel's pre-existing driveName() EXACTLY
  * ([-_]+ → space, then title-case each lowercase word start). WARP-832 owns
  * any casing change — do not alter it here.

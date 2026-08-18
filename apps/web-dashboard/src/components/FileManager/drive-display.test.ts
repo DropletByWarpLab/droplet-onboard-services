@@ -407,3 +407,56 @@ describe("volumeCrumbLabel — GUID never the location label (WARP-1338 UX revie
     expect(volumeCrumbLabel("Documents", [poolDrive], [])).toBeUndefined();
   });
 });
+
+// =====================================================================
+// WARP-2097 — what a REAL pool renders. Every pool fixture above uses
+// `label: ""`, which only describes a legacy pool created before
+// pool_format labelled anything; those "Storage pool" expectations are
+// correct for that shape but do not describe a pool the box makes today.
+// A real pool always carries an fs label, so the FS-LABEL link of the
+// chain resolves before the generic ever does.
+// =====================================================================
+describe("driveDisplayName — a labelled pool renders its label (WARP-2097)", () => {
+  it("renders the owner's format-time name with no displayName set", () => {
+    // The point of the ticket: the name reaches the FILESYSTEM, so the Files
+    // surfaces show it without waiting for a separate DB-only rename.
+    expect(
+      driveDisplayName(
+        vol({ mount: "/mnt/droplet/Family_Photos-cafef00d", label: "Family_Photos" }),
+        { poolBacked: true },
+      ),
+    ).toBe("Family Photos");
+  });
+
+  it("renders 'Pool' — not 'Storage pool' — for a pool left unnamed", () => {
+    // pool_format's default label is the literal "pool", so the generic is
+    // unreachable here. Pinning the real string keeps the next reader from
+    // "fixing" copy they never actually see.
+    expect(
+      driveDisplayName(
+        vol({ mount: "/mnt/droplet/pool-cafef00d", label: "pool" }),
+        { poolBacked: true },
+      ),
+    ).toBe("Pool");
+  });
+
+  it("still lets a customer displayName win over the format-time label", () => {
+    expect(
+      driveDisplayName(
+        vol({
+          mount: "/mnt/droplet/Family_Photos-cafef00d",
+          label: "Family_Photos",
+          displayName: "The Vault",
+        }),
+        { poolBacked: true },
+      ),
+    ).toBe("The Vault");
+  });
+
+  it("keeps the named pool's mount tail out of the machine-tail guard", () => {
+    // PREFIXED_HEX_TAIL only suppresses drive-/pool-<hex>; a named pool's tail
+    // must stay renderable, or naming would gain nothing on the Files screen.
+    expect(isMachineTail("Family_Photos-cafef00d")).toBe(false);
+    expect(isMachineTail("pool-cafef00d")).toBe(true);
+  });
+});

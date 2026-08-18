@@ -768,6 +768,39 @@ def test_pool_format_labels_mounts_stable_name_seeds_trust_and_registers(tmp_pat
     assert reg_idx > mount_idx, cmds
 
 
+def test_pool_format_carries_owner_label_into_fs_label_and_mount_tail(tmp_path):
+    # WARP-2097: the owner's chosen name must reach the FILESYSTEM, not just the
+    # StoragePool DB row. The fs label becomes the mount tail, which becomes the
+    # Nextcloud external-storage folder AND every /files?path= deep link — none
+    # of which the DB-only PATCH rename can ever reach. pool_format used to
+    # hardcode "-L pool" and throw an owner-supplied label away.
+    proc, cmds = _exec_run(
+        "pool_format", {"device": "md0", "fstype": "ext4",
+                        "label": "Family_Photos",
+                        "confirm_phrase": "ERASE md0"},
+        tmp_path, extra_env=_pool_state_env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    # (a) the label reaches mkfs.
+    mkfs = [c for c in cmds if c.startswith("mkfs.ext4")]
+    assert mkfs and "-L Family_Photos" in mkfs[0] and "/dev/md0" in mkfs[0], cmds
+    # (b) the mount tail derives from the SAME label — the WARP-1338
+    # creation-time == reboot-derivation invariant must hold for a NAMED pool
+    # too, not just the default one.
+    mount_idx = _first(cmds, "mount /dev/md0")
+    assert mount_idx >= 0, cmds
+    assert cmds[mount_idx].endswith("/mnt/droplet/Family_Photos-cafef00d"), (
+        "named pool mount tail differs from the automount derivation: %r"
+        % cmds[mount_idx]
+    )
+    # (c) trust seeding is label-independent (keys off the fs UUID).
+    assert "cafef00d-848" in _trusted_list(tmp_path), _trusted_list(tmp_path)
+    # (d) the Nextcloud folder follows the tail with no extra plumbing — this is
+    # what makes the owner's name visible on the Files screen.
+    reg_idx = _first(cmds, "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create /Family_Photos-cafef00d")
+    assert reg_idx > mount_idx, cmds
+
+
 # Down-container docker stub: every `docker exec … php occ …` call fails, the
 # way a warming/absent Nextcloud container does. Passed via stub_overrides so
 # _exec_run's stub rewrite can't clobber it back to the success stub (the old

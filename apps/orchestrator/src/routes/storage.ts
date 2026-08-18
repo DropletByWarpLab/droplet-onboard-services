@@ -1188,18 +1188,32 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       // WARP-1338 review: same pinned allow-list as adopt/reclaim. The old
       // shape-only regex admitted fstypes whose mkfs doesn't take -L (vfat
-      // uses -n), and the host's pool_format now unconditionally runs
-      // `mkfs.$FSTYPE -L pool` — a loose fstype would fail the op there.
+      // uses -n), and the host's pool_format always runs `mkfs.$FSTYPE -L
+      // <label>` — a loose fstype would fail the op there.
       const fstype = req.body?.fstype;
       if (fstype !== undefined && !VALID_FSTYPES.has(String(fstype))) {
         return res.status(400).json({ error: "Invalid fstype" });
+      }
+      // WARP-2097: the owner's chosen name for the pool's FILESYSTEM. Same
+      // contract and same conditional forward as adopt/reclaim — the host
+      // script derives the mount tail (and therefore the Nextcloud folder and
+      // every /files?path= deep link) from it, falling back to "pool" when the
+      // key is absent. Omit rather than send an empty string: an empty LABEL
+      // would mount the array at "drive-<uuid>".
+      const { label } = req.body || {};
+      if (label != null && !/^[A-Za-z0-9_-]{1,16}$/.test(String(label))) {
+        return res.status(400).json({ error: "Invalid label (1-16 chars: letters, digits, _ or -)" });
       }
       return evalAndRespond(
         res,
         prisma,
         "pool_format",
         device,
-        { fstype, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        {
+          fstype,
+          ...(label != null ? { label: String(label) } : {}),
+          confirm_phrase: req.body?.confirmPhrase ?? "",
+        },
         req.user?.id,
       );
     } catch (err) {

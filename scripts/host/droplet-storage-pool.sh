@@ -18,7 +18,7 @@
 # Operations (all DATA-DESTROYING):
 #   pool_create     {device, level, members[], confirm_phrase}
 #   pool_destroy    {device, confirm_phrase}
-#   pool_format     {device, fstype?, confirm_phrase}   (formats AND mounts)
+#   pool_format     {device, fstype?, label?, confirm_phrase} (formats AND mounts)
 #   pool_set_level  {device, level, confirm_phrase}
 #   pool_add_spare  {device, member, confirm_phrase}
 #   pool_remove_disk{device, member, confirm_phrase}
@@ -109,7 +109,8 @@ FSTYPE="$(json_field fstype)"
 MEMBER="$(json_field member)"
 CONFIRM="$(json_field confirm_phrase)"
 WIPE_METHOD="$(json_field wipe_method)"   # WARP-662 drive_adopt: quick|secure
-LABEL="$(json_field label)"               # WARP-662 drive_adopt: optional fs label
+LABEL="$(json_field label)"               # WARP-662 adopt/reclaim + WARP-2097
+                                          # pool_format: optional fs label
 RECLAIM_MD="$(json_field md)"             # WARP-1048 drive_reclaim: owning md array
 mapfile -t MEMBERS < <(json_field members)
 
@@ -593,12 +594,12 @@ build_cmd() {
       printf 'mdadm --stop %s && mdadm --zero-superblock (members)' "$MD"
       ;;
     pool_format)
-      # mkfs (labelled "pool" — WARP-1338 automount-stable naming) then mount
-      # under /mnt/droplet + register with Nextcloud — mirrors drive_adopt's
-      # final step so the dashboard's "Format & mount" promise is kept
-      # (WARP-936).
-      printf 'mkfs.%s -L pool %s -> mount /mnt/droplet -> register nextcloud' \
-        "${FSTYPE:-ext4}" "$MD"
+      # mkfs (labelled with the owner's chosen name, else "pool" — WARP-1338
+      # automount-stable naming, WARP-2097 owner naming) then mount under
+      # /mnt/droplet + register with Nextcloud — mirrors drive_adopt's final
+      # step so the dashboard's "Format & mount" promise is kept (WARP-936).
+      printf 'mkfs.%s -L %s %s -> mount /mnt/droplet -> register nextcloud' \
+        "${FSTYPE:-ext4}" "${LABEL:-pool}" "$MD"
       ;;
     pool_set_level)
       printf 'mdadm --grow %s --level=%s' "$MD" "$LEVEL"
@@ -703,11 +704,18 @@ case "$OP" in
     ;;
   pool_format)
     # WARP-1338: label the filesystem so the automount derivation has a
-    # stable human-meaningful stem ("pool") — the reboot remount then lands
-    # on the SAME pool-<short-uuid> tail as this creation-time mount, and the
-    # dashboard's machine-tail guard keeps the tile titled "Storage pool",
-    # never a GUID.
-    "mkfs.${FSTYPE:-ext4}" -L pool "$MD"
+    # stable human-meaningful stem — the reboot remount then lands on the
+    # SAME <label>-<short-uuid> tail as this creation-time mount, never a
+    # GUID.
+    # WARP-2097: honour the owner's chosen name (route-validated, 1-16 chars
+    # of [A-Za-z0-9_-]) so it reaches the FILESYSTEM — the label becomes the
+    # mount tail, which becomes the Nextcloud external-storage folder and
+    # every /files?path= deep link. The DB-only pool rename can reach none of
+    # those. Falls back to "pool" rather than copying drive_adopt's
+    # label-less else-branch: an UNLABELLED md filesystem is frozen at its
+    # fs-UUID mount name on reboot (WARP-1361), so mkfs must never run
+    # label-less here.
+    "mkfs.${FSTYPE:-ext4}" -L "${LABEL:-pool}" "$MD"
     # Complete the flow (WARP-936 UX review): a formatted-but-unmounted array
     # is indistinguishable from an unformatted one in the dashboard, turning
     # "Format & mount" into a destructive dead-end loop. Mount under the shared
@@ -717,7 +725,7 @@ case "$OP" in
     # matches md array nodes as of WARP-936; the name it re-derives is
     # IDENTICAL to this one (automount_mount_name — WARP-1338).
     pool_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
-    pool_mnt="/mnt/droplet/$(automount_mount_name pool "$pool_uuid")"
+    pool_mnt="/mnt/droplet/$(automount_mount_name "${LABEL:-pool}" "$pool_uuid")"
     mkdir -p "$pool_mnt"
     host_mount "$MD" "$pool_mnt"
     # WARP-1338: trust + registration. trusted.list keeps the reboot remount

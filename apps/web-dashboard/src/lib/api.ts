@@ -957,7 +957,11 @@ export async function requestDestroyPool(
  *  (buildConfirmPhrase(["md127"]) → "ERASE md127"). */
 export async function requestFormatPool(
   device: string,
-  input: { confirmPhrase: string; fstype?: string },
+  // WARP-2097: `label` is the owner's name for the pool's FILESYSTEM — it
+  // becomes the mount tail, the Nextcloud folder and every /files?path= deep
+  // link. Matches requestAdoptDrive's shape; omit the key entirely when the
+  // sanitizer yields nothing (the host script then falls back to "pool").
+  input: { confirmPhrase: string; fstype?: string; label?: string },
 ): Promise<PoolCommandToken> {
   const res = await authFetch(
     `${BASE}/api/storage/pools/${encodeURIComponent(device)}/format`,

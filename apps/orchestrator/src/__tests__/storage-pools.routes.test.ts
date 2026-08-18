@@ -417,6 +417,85 @@ describe("POST /api/storage/pools/:device/format — pinned fstype allow-list", 
   });
 });
 
+// WARP-2097 — pool_format must carry the owner's chosen fs label. Same
+// validator and same conditional-forward shape adopt/reclaim already use. The
+// label is what reaches the FILESYSTEM (and therefore the mount tail, the
+// Nextcloud folder and every /files?path= deep link); the StoragePool PATCH
+// rename is DB-only and can reach none of those. Assertions are on the PARAMS
+// the bridge actually receives — a status-code-only test stays green if the
+// route silently drops the field.
+describe("POST /api/storage/pools/:device/format — optional fs label (WARP-2097)", () => {
+  /** The params object the route forwarded to the bridge's /pools/command. */
+  function bridgeParams(bridge: any): any {
+    const call = bridge.mock.calls.find((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    if (!call) return null;
+    return JSON.parse(String(call[1]?.body ?? "{}")).params ?? null;
+  }
+
+  it("forwards a valid label through the confirm token into the bridge params", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app)
+      .post("/api/storage/pools/md0/format")
+      .send({ fstype: "ext4", label: "Family_Photos", confirmPhrase: "ERASE md0" });
+    expect(res.status).toBe(202);
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: res.body.confirmationToken,
+        service: "pool_format",
+        resourceId: "md0",
+      });
+    expect(confirm.status).toBe(200);
+    expect(bridgeParams(bridge)).toMatchObject({ label: "Family_Photos" });
+  });
+
+  it("omits the label key entirely when the caller sends none", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app)
+      .post("/api/storage/pools/md0/format")
+      .send({ fstype: "ext4", confirmPhrase: "ERASE md0" });
+    expect(res.status).toBe(202);
+    await request(app)
+      .post("/api/storage/command/confirm")
+      .send({
+        confirmationToken: res.body.confirmationToken,
+        service: "pool_format",
+        resourceId: "md0",
+      });
+    // Absent, not empty-string: the host script falls back to "pool" only when
+    // LABEL is unset/empty, and an empty label would mount at "drive-<uuid>".
+    expect(bridgeParams(bridge)).not.toHaveProperty("label");
+  });
+
+  it("rejects an out-of-contract label with 400 and never mints a token", async () => {
+    for (const bad of [
+      "way-too-long-a-label-here", // >16 chars
+      "has spaces",
+      "slash/es",
+      "semi;colon",
+      "", // empty string is not a name
+    ]) {
+      const prisma = createPrismaMock();
+      const bridge = bridgePoolsResponse([]);
+      const app = makeApp(prisma, bridge);
+      const res = await request(app)
+        .post("/api/storage/pools/md0/format")
+        .send({ fstype: "ext4", label: bad, confirmPhrase: "ERASE md0" });
+      expect(res.status, `label=${JSON.stringify(bad)}`).toBe(400);
+      expect(res.body.confirmationToken).toBeUndefined();
+      const hit = (bridge as any).mock.calls.some((c: any[]) =>
+        String(c[0]).endsWith("/pools/command"),
+      );
+      expect(hit).toBe(false);
+    }
+  });
+});
 // WARP-1337 — POST /api/storage/pools accepts an optional customer-facing
 // displayName. Zod-validated BEFORE any prisma call (pre-DB gate); carried in
 // the confirm-token params (never forwarded to the bridge — the host script

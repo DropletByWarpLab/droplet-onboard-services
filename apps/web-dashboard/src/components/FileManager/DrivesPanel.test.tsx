@@ -681,6 +681,27 @@ describe("DrivesPanel — reclaim clarity + typed confirmation (WARP-1915)", () 
   });
 });
 
+// WARP-2097 — "Format & mount" now opens a naming step first, and the erase
+// confirm follows it. The name has to be fixed BEFORE the confirm token is
+// minted (confirmStorageCommand replays params frozen at mint time), so it
+// cannot live in the erase dialog. These flows advance past it.
+async function passNamingStep(name?: string) {
+  fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+  const nameDialog = await screen.findByRole("dialog");
+  if (name !== undefined) {
+    fireEvent.change(within(nameDialog).getByLabelText(/pool name/i), {
+      target: { value: name },
+    });
+  }
+  fireEvent.click(within(nameDialog).getByRole("button", { name: /continue/i }));
+  // Let the naming dialog unmount before the caller reaches for the erase
+  // confirm — both render as role="dialog", so querying too early returns the
+  // one we just dismissed.
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /continue/i })).toBeNull(),
+  );
+}
+
 describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => {
   it("offers Format & mount on a pool with no mounted filesystem and wires the confirm flow", async () => {
     (requestFormatPool as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -692,7 +713,7 @@ describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => 
     (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
     setup({ drives: [], pools: [md127] });
 
-    fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+    await passNamingStep();
     await waitFor(() =>
       expect(requestFormatPool).toHaveBeenCalledWith(
         "md127",
@@ -723,7 +744,7 @@ describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => 
     (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
     setup({ drives: [], pools: [md127] });
 
-    fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+    await passNamingStep();
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: /format & mount/i }));
     await waitFor(() =>
@@ -784,5 +805,93 @@ describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => 
   it("hides Format & mount from non-admins", () => {
     setup({ role: "family", drives: [], pools: [md127] });
     expect(screen.queryByRole("button", { name: /format & mount/i })).not.toBeInTheDocument();
+  });
+});
+
+// WARP-2097 — the pool rename that already shipped is DB-only: it retitles the
+// card and the tile, and never touches the filesystem label, the mount path,
+// the Nextcloud folder built from that path, or a bookmarked /files?path= link.
+// Those all come from the fs label pool_format writes, which used to be the
+// hardcoded literal "pool". These assertions are on the ARGUMENTS
+// requestFormatPool receives — the WARP-936 objectContaining assertions above
+// stay green whether or not a label is sent, so they are not coverage for this.
+describe("DrivesPanel — the owner names the pool before formatting (WARP-2097)", () => {
+  /** The input object handed to requestFormatPool on the most recent call. */
+  function formatInput(): Record<string, unknown> {
+    const calls = (requestFormatPool as ReturnType<typeof vi.fn>).mock.calls;
+    return calls[calls.length - 1][1];
+  }
+
+  function mockFormatFlow() {
+    (requestFormatPool as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-fmt",
+      service: "pool_format",
+      resourceId: "md127",
+    });
+    (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+  }
+
+  it("carries the sanitized name through to the format request", async () => {
+    mockFormatFlow();
+    setup({ drives: [], pools: [md127] });
+
+    await passNamingStep("Family Photos");
+
+    await waitFor(() => expect(requestFormatPool).toHaveBeenCalled());
+    expect(formatInput()).toMatchObject({ label: "Family_Photos" });
+  });
+
+  it("omits the label entirely when nothing usable survives sanitizing", async () => {
+    mockFormatFlow();
+    setup({ drives: [], pools: [md127] });
+
+    // Punctuation-only: sanitizeFsLabel returns undefined. Sending "" instead
+    // of omitting would mount the array at "drive-<uuid>" — the host script
+    // only falls back to "pool" when LABEL is unset or empty.
+    await passNamingStep("!!!");
+
+    await waitFor(() => expect(requestFormatPool).toHaveBeenCalled());
+    expect(formatInput()).not.toHaveProperty("label");
+  });
+
+  it("shows what the name becomes before the destructive step runs", async () => {
+    mockFormatFlow();
+    setup({ drives: [], pools: [md127] });
+
+    fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(/pool name/i), {
+      target: { value: "Wedding Photos 2026" },
+    });
+
+    // The 16-char cap is lossy and permanent — the owner sees the truncation
+    // here, not after an irreversible format.
+    expect(within(dialog).getByText("Wedding_Photos_2")).toBeInTheDocument();
+    expect(requestFormatPool).not.toHaveBeenCalled();
+  });
+
+  it("uniquifies against a name another volume already holds", async () => {
+    mockFormatFlow();
+    // The host script's mount is raw: two volumes sharing a label would stack
+    // one mount over the other. (The pool's OWN volume can never appear here —
+    // poolHasMountedFs withdraws the Format CTA the moment an md drive exists —
+    // so the collision that reaches this code is always a different disk.)
+    setup({
+      drives: [
+        makeDrive({
+          device: "/dev/sdc1",
+          mount: "/mnt/droplet/Family_Photos-aa11bb22",
+          label: "Family_Photos",
+        }),
+      ],
+      pools: [md127],
+    });
+
+    await passNamingStep("Family Photos");
+
+    await waitFor(() => expect(requestFormatPool).toHaveBeenCalled());
+    // Truncated to fit the 16-char cap, then suffixed from the md device.
+    expect(formatInput()).toMatchObject({ label: "Family_Phot_d127" });
   });
 });

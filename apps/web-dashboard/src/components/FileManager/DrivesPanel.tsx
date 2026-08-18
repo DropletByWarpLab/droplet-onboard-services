@@ -92,6 +92,29 @@ function poolName(pool: PoolInfo): string {
   return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
 
+// WARP-2097 — show the owner what their name BECOMES before it is committed
+// to the filesystem. sanitizeFsLabel is lossy on purpose (ASCII only, spaces →
+// underscores, 16 chars), and the result is visible forever in the Files path,
+// so the truncation must not be a surprise discovered after a DESTRUCTIVE
+// format. Empty input is legitimate — the host script defaults to "pool" —
+// and this says so rather than blocking the flow.
+function PoolLabelPreview({ label }: { label?: string }) {
+  return (
+    <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+      {label ? (
+        <>
+          Saved as <code>{label}</code> — your files will live in{" "}
+          <code>/{label}-…</code>
+        </>
+      ) : (
+        <>
+          No name yet — this pool will just be called <code>pool</code>.
+        </>
+      )}
+    </p>
+  );
+}
+
 // WARP-1338: driveContentsHref moved to the shared drive-display helper —
 // VolumesPanel tiles deep-link to the same target now, and a private copy
 // here would let the two surfaces drift.
@@ -233,6 +256,15 @@ export function DrivesPanel() {
   } | null>(null);
   const [formatBusy, setFormatBusy] = useState<string | null>(null);
 
+  // WARP-2097 — the owner names the pool BEFORE the format starts. The confirm
+  // token is minted inside handleStartFormat and confirmStorageCommand replays
+  // the params FROZEN at mint time, so a name typed in the erase dialog would
+  // arrive too late to reach mkfs. A brand-new array has no displayName to
+  // seed from either, so this is a real input step rather than a derived
+  // default — otherwise the common case (a fresh pool) keeps the "pool" name.
+  const [namePending, setNamePending] = useState<PoolInfo | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
+
   // WARP-1048 — reclaim a pool-MEMBER disk into standalone use: break it out of
   // its md array, then adopt it. Same two-step confirm-token flow as adopt; the
   // disk carries its owning `md` so the host script detaches it first.
@@ -349,12 +381,31 @@ export function DrivesPanel() {
     }
   }
 
-  async function handleStartFormat(pool: PoolInfo) {
+  // WARP-2097: the fs label this format will actually apply. Same shape as
+  // adopt's seeding (sanitize → uniquify), excluding the volumes the format is
+  // about to erase — re-formatting a pool under its own name is not a
+  // collision. Undefined when nothing usable survives sanitizing; callers then
+  // OMIT the key and the host script falls back to "pool".
+  function derivedPoolLabel(pool: PoolInfo, raw: string): string | undefined {
+    return uniqueFsLabel(
+      sanitizeFsLabel(raw),
+      takenVolumeNames(drives.filter((d) => drivePoolName(d) !== pool.device)),
+      pool.device,
+    );
+  }
+
+  function beginFormatNaming(pool: PoolInfo) {
     destructiveTriggerRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setNameDraft(pool.displayName || "");
+    setNamePending(pool);
+  }
+
+  async function handleStartFormat(pool: PoolInfo, label?: string) {
     setFormatBusy(pool.device);
     try {
       const token = await requestFormatPool(pool.device, {
+        ...(label ? { label } : {}),
         confirmPhrase: buildConfirmPhrase([pool.device]),
       });
       setFormatPending({
@@ -608,7 +659,7 @@ export function DrivesPanel() {
                   isAdmin && p.status !== "failed" && !poolHasMountedFs(p)
                 }
                 formatting={formatBusy === p.device}
-                onFormat={() => handleStartFormat(p)}
+                onFormat={() => beginFormatNaming(p)}
                 onRenamed={() => refreshPools()}
               />
             ))}
@@ -733,6 +784,50 @@ export function DrivesPanel() {
       />
 
       {/* WARP-936 — format & mount confirm for a never-formatted pool. */}
+      {/* WARP-2097 — name the pool BEFORE the confirm token is minted. The
+          filesystem label is what reaches the mount path, the Nextcloud folder
+          and every saved /files?path= link; the pool rename is DB-only and
+          reaches none of those. Neutral variant: naming is not the destructive
+          step — the erase confirm follows it. */}
+      <ConfirmDialog
+        open={namePending !== null}
+        onConfirm={async () => {
+          const pool = namePending;
+          if (!pool) return;
+          const label = derivedPoolLabel(pool, nameDraft);
+          setNamePending(null);
+          await handleStartFormat(pool, label);
+        }}
+        onCancel={() => setNamePending(null)}
+        title="Name this pool"
+        description="This name is saved onto the storage itself, so it names the folder your files live in and any link you bookmark — not just the tile on this page."
+        confirmLabel="Continue"
+        variant="neutral"
+        triggerRef={destructiveTriggerRef}
+        accessory={
+          namePending ? (
+            <div className="flex flex-col gap-2">
+              <input
+                autoFocus
+                aria-label="Pool name"
+                value={nameDraft}
+                maxLength={DRIVE_NAME_MAX}
+                placeholder="Family Photos"
+                onChange={(e) => setNameDraft(e.target.value)}
+                className="w-full outline-none text-[16px] lg:text-[13.5px]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  padding: "6px 10px",
+                }}
+              />
+              <PoolLabelPreview label={derivedPoolLabel(namePending, nameDraft)} />
+            </div>
+          ) : null
+        }
+      />
+
       <ConfirmDialog
         open={formatPending !== null}
         onConfirm={doFormat}

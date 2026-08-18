@@ -169,8 +169,13 @@ export function VolumesPanel() {
         <VolumeTile
           key={pool.device}
           // The pool's OWN displayName leads the shared chain; the matched
-          // drive's fs label / GUID-guarded mount tail back it up, so a
-          // nameless pool says "Storage pool" — never its GUID.
+          // drive's fs label / GUID-guarded mount tail back it up, so the
+          // customer never sees a GUID. WARP-2097: pool_format now writes the
+          // owner's chosen name as the FS LABEL, so a pool named at format
+          // time reads back here even with no displayName set. A pool left
+          // unnamed carries the literal label "pool" and therefore reads
+          // "Pool" — the "Storage pool" generic is only reached when the label
+          // is EMPTY (a legacy pre-WARP-1338 pool).
           name={driveDisplayName(
             { mount: drive.mount, label: drive.label, displayName: pool.displayName },
             { poolBacked: true },
