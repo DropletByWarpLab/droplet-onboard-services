@@ -477,6 +477,15 @@ network. Host-published ports and host-network services are called out.
 - **Gotcha:** `docker restart` does **not** re-read `env_file`. After editing
   `.env`, recreate: `docker compose -f docker/docker-compose.yml --env-file .env
   up -d --force-recreate <service>`.
+- **Network drive (`samba` service, `linux` profile):** exports the
+  `droplet-share` volume as the SMB share "Droplet" so the box shows up
+  natively in Windows Explorer (WS-Discovery via bundled wsdd2) and macOS
+  Finder (host Avahi `_smb._tcp`, `scripts/lib/local-dns.sh`). Host network,
+  smbd on `:445`; account `droplet` (uid 33 = www-data) with the per-device
+  `SMB_PASSWORD`. The same volume mounts into Nextcloud as the `/Droplet`
+  files_external mount (`nextcloud-init.sh`) so web + desktop see one tree.
+  Connect info: `GET /api/storage/network-drive` (owner/admin). Guide:
+  [`network-drive.md`](network-drive.md).
 
 ## scripts/
 
