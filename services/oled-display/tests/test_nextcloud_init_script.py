@@ -45,6 +45,15 @@ _PHP_STUB = r"""
 printf 'php %s\n' "$*" >> "$CMD_LOG"
 case " $* " in
   *" app:enable files_external "*) exit "${STUB_FILES_EXTERNAL_RC:-0}" ;;
+  *" files_external:list "*) printf '%s' "${STUB_EXT_LIST_JSON:-[]}"; exit 0 ;;
+  *" files_external:create "*) echo "Storage created with id 7"; exit 0 ;;
+  " -r"*)
+    # Inline `php -r` parse helpers (both call sites pipe a JSON listing on
+    # stdin). Emulate just enough: emit the /Droplet mount id when the piped
+    # listing contains it, else nothing — mirroring the real parser's output.
+    input="$(cat)"
+    case "$input" in *'"mount_point": "/Droplet"'*) printf 7 ;; esac
+    exit 0 ;;
 esac
 exit 0
 """
@@ -57,6 +66,16 @@ def _run_hook(tmp_path: Path, extra_env: dict | None = None):
     php.write_text("#!/usr/bin/env bash\n" + _PHP_STUB.lstrip("\n"),
                    encoding="utf-8", newline="\n")
     os.chmod(php, 0o755)
+    # Stub `sleep` too: with the php stub, every appstore-install check
+    # "fails", so the hook's bounded retry loops (groupfolders, the
+    # richdocuments/onlyoffice connector) run to exhaustion and their real
+    # sleeps add up to ~3 minutes per run — past the 120 s subprocess
+    # timeout on a slow runner. The sleeps carry no semantics any test
+    # asserts on; stubbing them makes every run fast and deterministic.
+    slp = stub_dir / "sleep"
+    slp.write_text("#!/usr/bin/env bash\nexit 0\n",
+                   encoding="utf-8", newline="\n")
+    os.chmod(slp, 0o755)
 
     log = tmp_path / "cmd-log.txt"
     if not log.exists():
@@ -105,6 +124,45 @@ def test_files_external_enable_failure_is_never_fatal(tmp_path):
     joined = "\n".join(cmds)
     # The steps after the enable still executed (bootstrap owner group add).
     assert "group:adduser" in joined, joined
+
+
+def test_network_drive_registers_droplet_external_mount(tmp_path):
+    # With the droplet-share volume present, the hook registers the "/Droplet"
+    # files_external local mount and asserts filesystem_check_changes so
+    # SMB-side writes appear in the web Files UI without a manual files:scan.
+    share = tmp_path / "droplet-share"
+    share.mkdir()
+    proc, cmds = _run_hook(tmp_path, {"DROPLET_SHARE_DIR": _posix(share)})
+    assert proc.returncode == 0, proc.stderr
+    joined = "\n".join(cmds)
+    assert "files_external:create /Droplet local null::null" in joined, joined
+    assert "files_external:option 7 filesystem_check_changes 1" in joined, joined
+
+
+def test_network_drive_skips_create_when_mount_exists(tmp_path):
+    # Re-run with an existing "/Droplet" mount in the files_external listing:
+    # the hook must NOT create a duplicate, only re-assert the option.
+    share = tmp_path / "droplet-share"
+    share.mkdir()
+    existing = '[{"mount_id": 7, "mount_point": "/Droplet", "storage": "Local"}]'
+    proc, cmds = _run_hook(tmp_path, {
+        "DROPLET_SHARE_DIR": _posix(share),
+        "STUB_EXT_LIST_JSON": existing,
+    })
+    assert proc.returncode == 0, proc.stderr
+    joined = "\n".join(cmds)
+    assert "files_external:create" not in joined, joined
+    assert "files_external:option 7 filesystem_check_changes 1" in joined, joined
+
+
+def test_network_drive_absent_volume_skips_block(tmp_path):
+    # No /droplet-share mount (e.g. a dev bring-up without the volume): the
+    # block must skip cleanly and never abort the hook.
+    proc, cmds = _run_hook(
+        tmp_path, {"DROPLET_SHARE_DIR": _posix(tmp_path / "missing")}
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "files_external:create" not in "\n".join(cmds)
 
 
 def test_hook_rerun_is_idempotent(tmp_path):

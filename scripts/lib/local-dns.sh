@@ -140,6 +140,22 @@ _write_avahi_service_file() {
     <type>_https._tcp</type>
     <port>443</port>
   </service>
+  <!-- Network drive: puts the box in macOS Finder's Network browser/sidebar.
+       smbd itself is the compose `samba` service (host network, :445, `linux`
+       profile) — the host daemon only advertises; if the samba container is
+       down, connecting fails but nothing else breaks. Windows discovery is
+       wsdd2 inside that same container, not avahi. -->
+  <service>
+    <type>_smb._tcp</type>
+    <port>445</port>
+  </service>
+  <!-- Finder device icon (cosmetic): _device-info is a TXT-only pseudo
+       service; port 0 is the convention for it. -->
+  <service>
+    <type>_device-info._tcp</type>
+    <port>0</port>
+    <txt-record>model=Xserve</txt-record>
+  </service>
 </service-group>
 XML
   sudo chmod 644 "$service_path"

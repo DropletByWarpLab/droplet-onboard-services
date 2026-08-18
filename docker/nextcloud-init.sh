@@ -90,6 +90,58 @@ else
   echo "[droplet] WARP-1338: files_external did NOT enable — drive tiles won't browse until the next boot's idempotent re-run reconciles it" >&2
 fi
 
+# 1c. Network drive — register the SMB share directory as external storage.
+#
+#     The `droplet-share` volume (mounted here at /droplet-share) is exported
+#     over SMB by the compose `samba` service so the "Droplet" folder shows up
+#     natively in Windows Explorer / macOS Finder. Registering the SAME
+#     directory as a files_external LOCAL mount ("/Droplet", available to all
+#     users) makes the web Files UI and the desktop share two views of one
+#     tree. External storage — not a groupfolder — on purpose: smbd writes
+#     out-of-band, which desyncs oc_filecache for groupfolder paths, while
+#     external mounts tolerate out-of-band writers; `filesystem_check_changes=1`
+#     makes Nextcloud re-stat on access so SMB-side changes appear without a
+#     manual `occ files:scan`. Every step is guarded/idempotent — a re-run
+#     finds the existing "/Droplet" mount and only re-asserts its option.
+# Env-overridable for the hermetic hook tests (which have no volume mount);
+# compose always mounts the volume at the default path.
+DROPLET_SHARE_DIR="${DROPLET_SHARE_DIR:-/droplet-share}"
+if [ -d "$DROPLET_SHARE_DIR" ]; then
+  # Fresh named volumes materialize root-owned; Nextcloud (and smbd via
+  # `force user` uid 33) writes as www-data. Non-recursive on purpose — only
+  # the root dir's ownership matters for a local mount, and a recursive chown
+  # over a populated share would stall every boot. `|| true`: already-correct
+  # ownership or an unprivileged re-run must not abort the hook.
+  chown www-data:www-data "$DROPLET_SHARE_DIR" 2>/dev/null || true
+  if EXT_LIST="$($OCC files_external:list --output=json 2>/dev/null)"; then
+    EXT_ID="$(printf '%s' "$EXT_LIST" | php -r '
+        $j = json_decode(stream_get_contents(STDIN), true) ?: [];
+        foreach ($j as $m) {
+          if (($m["mount_point"] ?? null) === "/Droplet") { echo $m["mount_id"]; exit; }
+        }
+      ' 2>/dev/null || true)"
+    if [ -z "$EXT_ID" ]; then
+      # `files_external:create` prints "Storage created with id <n>".
+      EXT_ID="$($OCC files_external:create "/Droplet" local null::null \
+        -c datadir="$DROPLET_SHARE_DIR" | tr -dc '0-9' || true)"
+      if [ -n "$EXT_ID" ]; then
+        echo "[droplet] network drive: registered /Droplet external mount (id ${EXT_ID})"
+      else
+        echo "[droplet] network drive: files_external:create failed — the next boot's idempotent re-run reconciles it" >&2
+      fi
+    else
+      echo "[droplet] network drive: /Droplet external mount already registered (id ${EXT_ID}) — skipping create"
+    fi
+    if [ -n "$EXT_ID" ]; then
+      $OCC files_external:option "$EXT_ID" filesystem_check_changes 1 || true
+    fi
+  else
+    echo "[droplet] network drive: files_external unavailable — /Droplet mount deferred to the next boot's idempotent re-run" >&2
+  fi
+else
+  echo "[droplet] network drive: /droplet-share volume not mounted — skipping /Droplet registration"
+fi
+
 # 2. Ensure the household group exists (idempotent — group:add is a no-op /
 #    harmless error if it already exists, so don't let it abort the script).
 if ! $OCC group:list --output=json | grep -q "\"${HOUSEHOLD_GROUP}\""; then

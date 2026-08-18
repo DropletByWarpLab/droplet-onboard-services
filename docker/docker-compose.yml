@@ -913,11 +913,97 @@ services:
         bind:
           create_host_path: true
           propagation: rshared
+      # Network-drive share (see the `samba` service below): the same
+      # `droplet-share` volume smbd exports as the "Droplet" SMB share is
+      # registered here as a files_external LOCAL mount ("/Droplet", with
+      # filesystem_check_changes=1 — see docker/nextcloud-init.sh), so a file
+      # saved from Windows Explorer / macOS Finder appears in the web Files UI
+      # and vice versa. Registered as external storage rather than a
+      # groupfolder ON PURPOSE: groupfolders live inside oc_filecache-tracked
+      # __groupfolders/ where an out-of-band smbd write desyncs the cache,
+      # while a local external mount tolerates out-of-band writes by design.
+      - droplet-share:/droplet-share
     restart: always
     <<: *default-logging
     mem_limit: ${NEXTCLOUD_MEM_LIMIT:-768m}
     cpus: ${NEXTCLOUD_CPUS:-1.0}
     pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
+
+  # ==========================================================================
+  # Network drive (SMB) — the "Droplet" folder in Windows Explorer / macOS Finder
+  # ==========================================================================
+  # Exports the shared `droplet-share` volume as an SMB share named "Droplet"
+  # so the box shows up natively in both desktop file systems:
+  #   * Windows: WS-Discovery (the image's bundled wsdd2) lists the box under
+  #     Explorer's "Network"; the share itself is `\\droplet-ai.lan\Droplet`
+  #     (router DNS) or `\\droplet-ai.local\Droplet` (mDNS, Win10+).
+  #   * macOS: the HOST avahi advertisement (_smb._tcp in
+  #     scripts/lib/local-dns.sh) puts the box in Finder's Network/sidebar;
+  #     `smb://droplet-ai.local/Droplet` connects directly.
+  # Connection info + credential surface: GET /api/storage/network-drive
+  # (owner/admin) rendered by the dashboard's "Connect network drive" dialog.
+  # Full operator guide: docs/network-drive.md.
+  #
+  # `network_mode: host` on purpose: wsdd2's WS-Discovery multicast does not
+  # traverse the compose bridge, and smbd binding :445 directly avoids a
+  # port-mapping layer on the LAN data path (same posture as routing/
+  # camera-discovery). `linux` profile: host networking only works on Linux
+  # (the shipping appliance) — macOS dev hosts skip it, which also sidesteps
+  # macOS's own :445 handler.
+  samba:
+    # Pinned tag + digest (third-party image, same trust posture as the
+    # nextcloud pin above). Tag scheme is a<alpine>-s<samba>; the default
+    # (full) variant bundles smbd + wsdd2 + avahi, of which avahi is disabled
+    # below in favor of the host daemon.
+    image: ghcr.io/servercontainers/samba:a3.24.1-s4.23.8-r0@sha256:9c629b0b9261ba04289275479f67f6bdaadd6ed18e90631e1ed451749ea69d18
+    container_name: droplet-samba
+    profiles: ["linux"]
+    network_mode: host
+    # wsdd2 (Windows discovery) needs NET_ADMIN — documented image requirement.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      # The HOST avahi daemon (scripts/lib/local-dns.sh) already advertises
+      # _smb._tcp + _device-info for Finder under the box's canonical
+      # `droplet-ai` mDNS identity. The in-container avahi would fight it over
+      # the name on the same host interfaces — keep it off.
+      - AVAHI_DISABLE=1
+      # NetBIOS (nmbd) is pre-Win10 legacy discovery; wsdd2 covers every
+      # supported Windows. Off = no listeners on :137/:138.
+      - NETBIOS_DISABLE=1
+      - SAMBA_CONF_WORKGROUP=WORKGROUP
+      - SAMBA_CONF_SERVER_STRING=Droplet
+      # Device-wide share credential, generated per-device by setup.sh
+      # (scripts/lib/secrets.sh). Username is deliberately FIXED to `droplet`
+      # — the dashboard dialog, the orchestrator endpoint, and this account
+      # definition must always agree, and a rename knob buys nothing but a
+      # three-way drift hazard. If SMB_PASSWORD is empty (a .env predating
+      # this service, before migrate_env backfills it), the account is created
+      # with an empty password and smbd's `null passwords = no` DEFAULT
+      # refuses every logon — fails closed rather than failing the whole
+      # stack's interpolation with `:?` (which would brick an OTA recreate
+      # that runs before the .env migration).
+      - ACCOUNT_droplet=${SMB_PASSWORD:-}
+      # Uid 33 = www-data in the nextcloud image. With `force user` below,
+      # every SMB write lands owned by the same uid Nextcloud itself writes
+      # as, so neither surface can strand files the other cannot touch.
+      - UID_droplet=33
+      # Share definition (the image splits on `;` into smb.conf lines).
+      - >-
+        SAMBA_VOLUME_CONFIG_droplet=[Droplet];
+        path = /shares/droplet;
+        valid users = droplet;
+        guest ok = no;
+        read only = no;
+        browseable = yes;
+        force user = droplet
+    volumes:
+      - droplet-share:/shares/droplet
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${SAMBA_MEM_LIMIT:-256m}
+    cpus: ${SAMBA_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ==========================================================================
   # WARP-882 / WARP-1686 — Document engine (in-browser viewing/editing + co-author)
@@ -2978,6 +3064,13 @@ volumes:
   frigate-config:
   aikeys:
   nextcloud-data:
+  # The "Droplet" network-drive folder: exported over SMB by the `samba`
+  # service and simultaneously mounted into Nextcloud as the "/Droplet"
+  # files_external local mount (docker/nextcloud-init.sh), so the desktop and
+  # web surfaces see the same tree. Root dir is chown'd to www-data (uid 33)
+  # by the Nextcloud init hook; smbd writes as the same uid via `force user`.
+  # Wiped by factory reset's volume sweep like all user data.
+  droplet-share:
   # WARP-337: ops-console JSONL audit trail. Named volume rather than a
   # bind mount so the trail survives container restarts during support
   # engagements and doesn't require operators to pre-create a host dir.
