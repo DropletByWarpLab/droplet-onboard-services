@@ -30,6 +30,9 @@ on:
       - "tests/dmr-default-provisioning.test.sh"
       # WARP-1947: single-box derives the overlay home endpoint IP
       - "tests/wireguard-home-endpoint.test.sh"
+      # WARP-2099: NVR_MEDIA_SOURCE must have a writer on every provisioning
+      # path — with none, a factory reset silently sends footage to the boot disk
+      - "tests/nvr-media-source-wiring.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -64,6 +67,9 @@ on:
       - "tests/dmr-default-provisioning.test.sh"
       # WARP-1947: single-box derives the overlay home endpoint IP
       - "tests/wireguard-home-endpoint.test.sh"
+      # WARP-2099: NVR_MEDIA_SOURCE must have a writer on every provisioning
+      # path — with none, a factory reset silently sends footage to the boot disk
+      - "tests/nvr-media-source-wiring.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -99,6 +105,13 @@ jobs:
         # launcher/healthcheck, host installers deliver client certs. Pure
         # bash + a functional migrate_env run, no Docker.
         run: bash tests/internal-mtls-wiring.test.sh
+      - name: Run NVR recordings-target wiring guards
+        # WARP-2099: nothing in scripts/ ever wrote NVR_MEDIA_SOURCE, so every
+        # factory reset silently reverted 24/7 footage to the OS/boot disk
+        # (`:-nvrdata` absorbs an unset variable by design). Pins the writer on
+        # both provisioning paths, the docs on both catalogues, and the
+        # deliberate non-change that factory-reset keeps deleting .env.
+        run: bash tests/nvr-media-source-wiring.test.sh
       - name: Run nginx internal-scheme unit tests
         # WARP-1061: the default/mtls upstream-scheme variants, the
         # entrypoint selector, and nginx.conf's first-party-only

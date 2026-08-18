@@ -798,6 +798,18 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 # macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
 # Add "full" by hand if you want the hardware-facing services.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
+
+# WARP-2099 — where Frigate writes NVR recordings. Compose reads this at
+# docker/docker-compose.yml as `${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate`,
+# so an UNSET value silently resolves to a named volume on the OS/boot disk.
+# It is written explicitly — even at the default — because "absent" and
+# "deliberately the built-in volume" used to be indistinguishable, and
+# factory-reset.sh correctly deletes .env, so nothing ever re-established it.
+#   nvrdata            → the compose-declared named volume (boot disk)
+#   /mnt/droplet/<...> → an absolute path on a mounted data drive or pool
+# A bare name MUST be a volume compose declares, or `docker compose up` fails
+# on an undefined volume. Changing this does NOT migrate existing footage.
+NVR_MEDIA_SOURCE=nvrdata
 EOF
 
   mv "$env_tmp" "$env_write_target"
@@ -1056,6 +1068,15 @@ migrate_env() {
   # byte-identical posture to before). Append-if-missing only, so a box whose
   # operator flipped it to 1 keeps that choice across setup re-runs.
   _migrate_ensure_key DROPLET_INTERNAL_TLS 0
+
+  # WARP-2099: backfill the NVR recordings target. A key present in
+  # generate_env() but missing here leaves every UPGRADED box without it —
+  # the exact trap this function exists to close. Append-if-missing only, so a
+  # box already pointed at a pool keeps that value. The default names the
+  # compose volume explicitly rather than leaving compose to infer it from an
+  # absent variable, so `grep NVR_MEDIA_SOURCE .env` always answers the
+  # question "where is my footage going?".
+  _migrate_ensure_key NVR_MEDIA_SOURCE nvrdata
 
   # WARP-235: move existing installs from the shared-password plaintext broker
   # to the mTLS endpoint (single listener :8883; identity = client cert CN).

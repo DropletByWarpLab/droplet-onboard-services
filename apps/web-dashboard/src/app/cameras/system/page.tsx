@@ -37,6 +37,43 @@ import { Card, Kpi, Meter } from "@/components/shell/primitives";
  * camera-disable / camera-delete buttons use — restart drops every
  * stream for ~10 seconds, so we don't want a stray click to do it.
  */
+/**
+ * WARP-1963 — footage on the wrong disk. Louder than near-full on purpose: a
+ * full drive shortens retention, but this means the dedicated recordings drive
+ * is doing nothing at all while the system disk fills. It is the exact silent
+ * failure that left this box's 1.8 TB array empty for a month.
+ *
+ * WARP-2099 — rendered ABOVE the per-camera breakdown rather than inside it.
+ * This used to live in the else-branch of a zero-cameras ternary, which made it
+ * structurally unreachable on a box with nothing adopted yet — precisely the
+ * state a box is in right after a factory reset, and precisely when the wrong
+ * answer gets baked in for every camera adopted afterwards.
+ */
+function BootDiskWarning() {
+  return (
+    <div
+      data-testid="boot-disk-warning"
+      style={{
+        display: "flex",
+        gap: 8,
+        alignItems: "flex-start",
+        marginBottom: 12,
+        color: "#ef4444",
+        fontSize: 12,
+      }}
+    >
+      <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+      <span>
+        <strong>Recordings are being written to the system disk.</strong>{" "}
+        The dedicated recordings drive isn&apos;t mounted, so footage is filling
+        the same disk the appliance runs on and you have far less room than you
+        think. Check that the recordings volume is mounted, then restart the
+        camera service.
+      </span>
+    </div>
+  );
+}
+
 export default function CameraSystemPage() {
   const router = useRouter();
   const { data, error, isLoading, mutate } = useSWR<CameraSystemStatus>(
@@ -416,6 +453,10 @@ export default function CameraSystemPage() {
             className="span2"
             style={{ marginBottom: 16 }}
           >
+            {/* WARP-2099: gated on the flag ALONE — never on whether any
+                camera is recording yet. `null` means the box cannot tell, and
+                must stay silent rather than cry wolf. */}
+            {storage?.recordingsOnBootDisk === true && <BootDiskWarning />}
             {storageError ? (
               <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
                 Storage usage is unavailable right now, so this list may be
@@ -430,34 +471,6 @@ export default function CameraSystemPage() {
               </p>
             ) : (
               <>
-                {/* WARP-1963 — footage on the wrong disk.
-                    Louder than near-full on purpose: a full drive shortens
-                    retention, but this means the dedicated recordings drive
-                    is doing nothing at all while the system disk fills. It
-                    is the exact silent failure that left this box's 1.8 TB
-                    array empty for a month. */}
-                {storage.recordingsOnBootDisk === true && (
-                  <div
-                    data-testid="boot-disk-warning"
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      alignItems: "flex-start",
-                      marginBottom: 12,
-                      color: "#ef4444",
-                      fontSize: 12,
-                    }}
-                  >
-                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                    <span>
-                      <strong>Recordings are being written to the system disk.</strong>{" "}
-                      The dedicated recordings drive isn&apos;t mounted, so footage
-                      is filling the same disk the appliance runs on and you have
-                      far less room than you think. Check that the recordings
-                      volume is mounted, then restart the camera service.
-                    </span>
-                  </div>
-                )}
                 {storage.nearFull && (
                   <div
                     style={{

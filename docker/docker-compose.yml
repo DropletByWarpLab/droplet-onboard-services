@@ -1752,10 +1752,12 @@ services:
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
-      # deployment works out of the box. On GPU lab hosts the operator
-      # can redirect this to a dedicated NVMe partition by overriding
-      # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
-      # once the partition is provisioned. See docs/STATUS.md.
+      # deployment works out of the box — but that volume lives on the OS/boot
+      # disk, so redirect it to a mounted data drive or pool once one exists
+      # (e.g. NVR_MEDIA_SOURCE=/mnt/droplet/<pool>-<uuid>). setup.sh writes the
+      # key explicitly on every provisioning path (WARP-2099), so an absent
+      # value means someone removed it. Full contract, accepted value shapes
+      # and the recreate-don't-restart caveat: docs/ENVIRONMENT.md.
       - ${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
       # Writable: Frigate 0.17 persists API-driven config changes
