@@ -88,7 +88,7 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
   body="$(location_body "$prefix")"
 
   # Same variable-driven, per-request Docker-DNS resolution as every other leg.
-  if printf '%s' "$body" | grep -qE 'set \$upstream_nextcloud[[:space:]]+"nextcloud:80";'; then
+  if grep -qE 'set \$upstream_nextcloud[[:space:]]+"nextcloud:80";' <<<"$body"; then
     pass "  $prefix sets \$upstream_nextcloud (per-request DNS re-resolution)"
   else
     fail "  $prefix does not set \$upstream_nextcloud like the other legs"
@@ -98,7 +98,7 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
   # must be forwarded UNSTRIPPED. A trailing slash here would not "strip /apps/"
   # — against a variable upstream it sends every one of these requests upstream
   # as literally `/` (WARP-1966, guarded file-wide in Phase 3).
-  if printf '%s' "$body" | grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud;[[:space:]]*$'; then
+  if grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud;[[:space:]]*$' <<<"$body"; then
     pass "  $prefix forwards the prefix UNSTRIPPED (no trailing slash on proxy_pass)"
   else
     fail "  $prefix must use 'proxy_pass http://\$upstream_nextcloud;' with NO trailing slash — Nextcloud expects these at its own root"
@@ -106,7 +106,7 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
 
   for hdr in 'Host \$host' 'X-Real-IP \$remote_addr' \
              'X-Forwarded-For \$proxy_add_x_forwarded_for' 'X-Forwarded-Proto \$scheme'; do
-    if printf '%s' "$body" | grep -qE "proxy_set_header[[:space:]]+$hdr;"; then
+    if grep -qE "proxy_set_header[[:space:]]+$hdr;" <<<"$body"; then
       pass "  $prefix sets proxy_set_header ${hdr%% *}"
     else
       fail "  $prefix is missing proxy_set_header ${hdr%% *} (diverges from every other gateway leg)"
@@ -122,7 +122,7 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
   # justification prose, then the `# nosemgrep:` line, then the directive.
   for rule in dynamic-proxy-host.dynamic-proxy-host \
               request-host-used.request-host-used; do
-    if printf '%s' "$body" | grep -qF "# nosemgrep: generic.nginx.security.$rule"; then
+    if grep -qF "# nosemgrep: generic.nginx.security.$rule" <<<"$body"; then
       pass "  $prefix carries the ${rule%%.*} suppression"
     else
       fail "  $prefix is missing '# nosemgrep: generic.nginx.security.$rule' — the diff-scoped semgrep gate blocks the PR without it"
@@ -170,8 +170,8 @@ echo "--- Phase 1b: the Host variable never appears in PROSE (file-wide) ---"
 prose_hits=""
 while IFS=: read -r lineno _; do
   [ -n "$lineno" ] || continue
-  if ! sed -n "${lineno}p" "$CONF" \
-     | grep -qE '^[[:space:]]*proxy_set_header Host \$host;$'; then
+  if ! grep -qE '^[[:space:]]*proxy_set_header Host \$host;$' \
+       <<<"$(sed -n "${lineno}p" "$CONF")"; then
     prose_hits="$prose_hits $lineno"
   fi
 done <<EOF
@@ -307,13 +307,13 @@ else
   fail "location /nextcloud/ is missing — the whole Nextcloud proxy leg is gone"
 fi
 
-if printf '%s' "$NC_BODY" | grep -qE '^[[:space:]]*rewrite \^/nextcloud/\(\.\*\)\$ /\$1 break;[[:space:]]*$'; then
+if grep -qE '^[[:space:]]*rewrite \^/nextcloud/\(\.\*\)\$ /\$1 break;[[:space:]]*$' <<<"$NC_BODY"; then
   pass "the /nextcloud/ leg strips its prefix with an explicit 'rewrite … break'"
 else
   fail "the /nextcloud/ leg must strip its prefix with 'rewrite ^/nextcloud/(.*)\$ /\$1 break;' — a trailing slash on proxy_pass cannot do it against a variable upstream"
 fi
 
-if printf '%s' "$NC_BODY" | grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud;[[:space:]]*$'; then
+if grep -qE '^[[:space:]]*proxy_pass http://\$upstream_nextcloud;[[:space:]]*$' <<<"$NC_BODY"; then
   pass "the /nextcloud/ leg's proxy_pass carries NO URI (the rewrite owns the path)"
 else
   fail "the /nextcloud/ leg's proxy_pass must be 'http://\$upstream_nextcloud;' with no URI — a URI on a variable upstream REPLACES the request path with itself"
@@ -401,13 +401,13 @@ fi
 
 # The default branch is what leaves a non-DAV request (and an already-correct
 # Destination) alone. Without it the map yields "" and nginx DROPS the header.
-if printf '%s' "$(sed -n '/map \$http_destination/,/^[[:space:]]*}/p' "$CONF")"    | grep -qE '^[[:space:]]*default[[:space:]]+\$http_destination;'; then
+if grep -qE '^[[:space:]]*default[[:space:]]+\$http_destination;' <<<"$(sed -n '/map \$http_destination/,/^[[:space:]]*}/p' "$CONF")"; then
   pass "the map passes an unprefixed Destination through unchanged (default branch)"
 else
   fail "the map has no 'default \$http_destination' — a Destination without the prefix would be dropped, breaking MOVE for clients that never had it"
 fi
 
-if printf '%s' "$NC_BODY" | grep -qE '^[[:space:]]*proxy_set_header Destination \$dav_destination;'; then
+if grep -qE '^[[:space:]]*proxy_set_header Destination \$dav_destination;' <<<"$NC_BODY"; then
   pass "the /nextcloud/ leg rewrites the Destination header"
 else
   fail "the /nextcloud/ leg strips the prefix from the request line but not from Destination — MOVE/COPY will 403"
