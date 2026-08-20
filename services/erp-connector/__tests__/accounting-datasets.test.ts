@@ -80,10 +80,13 @@ const OPEN_INVOICES_CSV = [
   "",
 ].join("\n");
 
+// Deliberately NOT in due-date order: BILL-78 (due 08-19) is listed before
+// BILL-77 (due 08-04). The previous fixture was already sorted, so the
+// "drop the sort" mutation this file names could not turn anything red.
 const UNPAID_BILLS_CSV = [
   "Date,Num,Vendor,Due Date,Amount,Open Balance",
-  "2026-07-05,BILL-77,Henry Schein,2026-08-04,\"2,000.00\",\"2,000.00\"",
   "2026-07-20,BILL-78,Patterson Dental,2026-08-19,\"850.25\",\"850.25\"",
+  "2026-07-05,BILL-77,Henry Schein,2026-08-04,\"2,000.00\",\"2,000.00\"",
   "",
 ].join("\n");
 
