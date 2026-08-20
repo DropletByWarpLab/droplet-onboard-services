@@ -57,7 +57,7 @@ import {
 } from "../connector.js";
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
-import { sortByKey } from "../api-dto.js";
+import { sortByKey, sumMoney, sumMoneyWithGaps } from "../api-dto.js";
 import {
   GENERIC_VENDOR,
   knownVendors,
@@ -467,12 +467,7 @@ export class ExportDropConnector implements Connector {
         // Reproduces the SQL aggregate — and `api-dto.aggregateArSummary`'s
         // client-side equivalent — exactly: COUNT over rows, SUM over the
         // finite balances, and never the raw ledger rows.
-        let total = 0;
-        for (const row of rows) {
-          const n = Number(row.balance);
-          if (Number.isFinite(n)) total += n;
-        }
-        return [{ account_count: rows.length, total_balance: total }];
+        return [{ account_count: rows.length, total_balance: sumMoney(rows) }];
       }
 
       // ── WARP-2107 — accounting ──────────────────────────────────────────
@@ -504,14 +499,11 @@ export class ExportDropConnector implements Connector {
 
       case "get_ap_summary": {
         const rows = this.rowsFor(snapshot, "ap_summary", op);
-        // Deliberately identical in shape and method to get_ar_summary: COUNT
-        // over rows, SUM over the finite balances, never the raw rows.
-        let total = 0;
-        for (const row of rows) {
-          const n = Number(row.balance);
-          if (Number.isFinite(n)) total += n;
-        }
-        return [{ vendor_count: rows.length, total_balance: total }];
+        // Same method as get_ar_summary — COUNT over rows, SUM over the
+        // balances, never the raw rows — plus the gap count, so a total that
+        // omits an unreadable balance says so instead of just being short.
+        const { total, unaccounted } = sumMoneyWithGaps(rows);
+        return [{ vendor_count: rows.length, total_balance: total, unaccounted_count: unaccounted }];
       }
 
       default:

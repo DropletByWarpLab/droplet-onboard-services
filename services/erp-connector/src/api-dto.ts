@@ -67,12 +67,71 @@ export function sortByKey<T extends Record<string, unknown>>(rows: T[], key: str
  * the minimum-necessary contract — the connector returns the two numbers, never
  * the raw ledger rows. `route.fields` must map a `balance` key.
  */
-export function aggregateArSummary(payload: unknown, route: RouteSpec): { account_count: number; total_balance: number } {
-  const rows = mapRows(payload, route);
+/**
+ * Sum a column of money and return it as a currency figure.
+ *
+ * WARP-2107. Accumulating IEEE-754 doubles is exact for a handful of values and
+ * visibly wrong for a ledger: six real balances sum to `17018.979999999996`,
+ * and that is what a dashboard renders and what the assistant reads aloud.
+ * Rounding to cents at the END (never per addition, which would compound the
+ * rounding instead of removing it) gives the figure a person would get.
+ *
+ * Cents, not arbitrary precision: every currency this reads is decimal to two
+ * places, and a total this size is nowhere near the point where a double loses
+ * integer precision.
+ */
+export function roundCents(value: number): number {
+  // +0 normalises -0, so a zero total never serializes as "-0".
+  return Math.round((value + Number.EPSILON) * 100) / 100 + 0;
+}
+
+/** Sum the finite values of `column` across `rows`, as a currency figure. */
+export function sumMoney(
+  rows: readonly Record<string, unknown>[],
+  column = "balance",
+): number {
   let total = 0;
   for (const r of rows) {
-    const n = Number(r.balance);
+    const n = Number(r[column]);
     if (Number.isFinite(n)) total += n;
   }
-  return { account_count: rows.length, total_balance: total };
+  return roundCents(total);
+}
+
+/**
+ * Sum a money column AND report how many rows could not be read.
+ *
+ * WARP-2107, after a pre-PR review found the two halves contradicting each
+ * other: the list reads deliberately KEEP a document whose balance will not
+ * parse ("money we cannot account for must stay visible"), while the summary
+ * silently skipped it. The same bill was therefore listed as open money owed
+ * and contributed nothing to what the business was told it owed — and the total
+ * carried no signal that anything was missing.
+ *
+ * A total that is short is not fixable by the reader unless they know it is
+ * short. So `unaccounted_count` travels WITH the number, always, and is 0 in
+ * the normal case rather than being omitted — an absent field would be one more
+ * thing inferred from absence.
+ *
+ * Note `get_ar_summary` has the same latent issue on shipped code and is NOT
+ * changed here: its row shape is a published contract across three tracks, and
+ * changing it belongs in its own ticket rather than riding along with this one.
+ */
+export function sumMoneyWithGaps(
+  rows: readonly Record<string, unknown>[],
+  column = "balance",
+): { total: number; unaccounted: number } {
+  let total = 0;
+  let unaccounted = 0;
+  for (const r of rows) {
+    const n = Number(r[column]);
+    if (Number.isFinite(n)) total += n;
+    else unaccounted += 1;
+  }
+  return { total: roundCents(total), unaccounted };
+}
+
+export function aggregateArSummary(payload: unknown, route: RouteSpec): { account_count: number; total_balance: number } {
+  const rows = mapRows(payload, route);
+  return { account_count: rows.length, total_balance: sumMoney(rows) };
 }

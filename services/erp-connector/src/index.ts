@@ -206,3 +206,7 @@ export {
   parseExportTimestamp,
   parseMoney,
 } from "./export-drop/values.js";
+
+// WARP-2107 — money aggregation shared by every track, so a total is a currency
+// figure rather than an accumulation of doubles.
+export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";

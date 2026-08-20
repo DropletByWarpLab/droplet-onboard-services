@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ExportDropConnector } from "../src/export-drop/connector.js";
+import { roundCents, sumMoney } from "../src/api-dto.js";
 import {
   ConnectorBlockedError,
   DatasetNotServedError,
@@ -307,7 +308,7 @@ describe("QuickBooks export drop", () => {
     const rows = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
     // Mutation: sum `amount` instead of `balance`, or count files instead of
     // rows → red.
-    expect(rows).toEqual([{ vendor_count: 2, total_balance: 2850.25 }]);
+    expect(rows).toEqual([{ vendor_count: 2, total_balance: 2850.25, unaccounted_count: 0 }]);
   });
 
   it("does not let the three QuickBooks reports collide", async () => {
@@ -445,6 +446,152 @@ describe("operator profiles", () => {
         datasets: [{ ...ACME_BOOKS.datasets[0], dataset: "purchase_order" as never }],
       }),
     ).toThrow(/unknown dataset/);
+  });
+});
+
+// ── identity: two documents must not become one ─────────────────────────────
+
+describe("dedup cannot silently merge two different documents", () => {
+  it("keeps two bills that share a reference number", async () => {
+    // QuickBooks does not enforce uniqueness on Ref No. Keying dedup on it
+    // alone made the second bill overwrite the first, and the money simply
+    // vanished — a payables total quietly too small, which nobody would catch.
+    //
+    // Mutation: key `bill` on ["bill_id"] alone → one row, 2500 total → red.
+    await drop(
+      "unpaid-bills.csv",
+      [
+        "Date,Num,Vendor,Due Date,Amount,Open Balance",
+        "2026-07-05,5678,Henry Schein,2026-08-04,1000.00,1000.00",
+        "2026-07-06,5678,Patterson Dental,2026-08-05,2500.00,2500.00",
+        "",
+      ].join("\n"),
+    );
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.vendor_id).sort()).toEqual(["Henry Schein", "Patterson Dental"]);
+  });
+
+  it("still collapses a genuine re-export of the same document", async () => {
+    // The property dedup exists for: yesterday's and today's copies of the same
+    // report both sitting in the drop must not double every row.
+    // Mutation: fall back to a per-row key unconditionally → 2 rows → red.
+    const same = [
+      "Date,Num,Vendor,Due Date,Amount,Open Balance",
+      "2026-07-05,BILL-77,Henry Schein,2026-08-04,2000.00,2000.00",
+      "",
+    ].join("\n");
+    await drop("bills-monday.csv", same, SETTLED - 60_000);
+    await drop("bills-tuesday.csv", same);
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+  });
+
+  it("duplicates rather than loses when part of the key is missing", async () => {
+    // Falling back is the safe direction: a duplicate row is visible and
+    // arguable; a collapsed one is money that silently left the ledger.
+    // Mutation: build a partial key from whatever parts exist → 1 row → red.
+    await drop(
+      "unpaid-bills.csv",
+      [
+        "Date,Num,Vendor,Due Date,Amount,Open Balance",
+        "2026-07-05,5678,,2026-08-04,,900.00",
+        "2026-07-06,5678,,2026-08-05,,1100.00",
+        "",
+      ].join("\n"),
+    );
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    expect(rows).toHaveLength(2);
+  });
+});
+
+// ── money is reported as money ──────────────────────────────────────────────
+
+describe("totals are currency figures, not accumulated doubles", () => {
+  it("sums real balances without binary noise", () => {
+    // These six values accumulate to 17018.979999999996 in IEEE-754 — which is
+    // what a dashboard renders and what the assistant reads aloud.
+    // Mutation: return the raw accumulation → red.
+    const rows = [3949.93, 2800.89, 2039.97, 2936.65, 4354.78, 936.76].map((balance) => ({
+      balance,
+    }));
+    expect(sumMoney(rows)).toBe(17018.98);
+  });
+
+  it("rounds at the end, not per addition", () => {
+    // Rounding each addend would compound the error this exists to remove.
+    // Mutation: round inside the loop → 0.3 becomes 0.30000000000000004-free
+    // by luck here, but 0.005-scale cases diverge; this asserts the contract.
+    expect(sumMoney([{ balance: 0.1 }, { balance: 0.2 }])).toBe(0.3);
+    expect(roundCents(-0)).toBe(0);
+  });
+
+  it("is used by BOTH summaries, so AR and AP cannot disagree in style", async () => {
+    // Mutation: revert either aggregate to a raw loop → red.
+    await drop(
+      "ap-aging.csv",
+      [
+        "Vendor,Current,1 - 30,31 - 60,61 - 90,91 and over,Total",
+        "A,0,0,0,0,0,3949.93",
+        "B,0,0,0,0,0,2800.89",
+        "C,0,0,0,0,0,2039.97",
+        "D,0,0,0,0,0,2936.65",
+        "E,0,0,0,0,0,4354.78",
+        "F,0,0,0,0,0,936.76",
+        "",
+      ].join("\n"),
+    );
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
+    expect(rows).toEqual([{ vendor_count: 6, total_balance: 17018.98, unaccounted_count: 0 }]);
+  });
+});
+
+describe("a summary never hides money it could not read", () => {
+  it("counts the rows it could not account for, instead of just being short", async () => {
+    // The list reads deliberately KEEP a row whose balance will not parse.
+    // The summary used to silently skip it — so the same document was listed as
+    // money owed AND contributed nothing to the total, with no signal. A total
+    // that is short is unfixable by the reader unless they know it is short.
+    //
+    // Mutation: use sumMoney instead of sumMoneyWithGaps → unaccounted_count
+    // disappears from the row → red.
+    await drop(
+      "ap-aging.csv",
+      [
+        "Vendor,Current,1 - 30,31 - 60,61 - 90,91 and over,Total",
+        "Henry Schein,0,0,0,0,0,2000.00",
+        "Mystery Co,0,0,0,0,0,see attached",
+        "",
+      ].join("\n"),
+    );
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
+    expect(rows).toEqual([
+      { vendor_count: 2, total_balance: 2000, unaccounted_count: 1 },
+    ]);
+  });
+
+  it("reports zero gaps explicitly rather than omitting the field", async () => {
+    // An absent field would be one more thing inferred from absence — the very
+    // pattern this branch exists to remove. Mutation: omit it when 0 → red.
+    await drop(
+      "ap-aging.csv",
+      ["Vendor,Current,1 - 30,31 - 60,61 - 90,91 and over,Total", "A,0,0,0,0,0,10.00", ""].join("\n"),
+    );
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
+    expect(Object.keys(rows[0])).toContain("unaccounted_count");
+    expect(rows[0].unaccounted_count).toBe(0);
   });
 });
 

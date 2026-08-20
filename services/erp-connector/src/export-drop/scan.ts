@@ -310,17 +310,36 @@ export async function readExportBytes(path: string, maxBytes: number): Promise<B
   }
 }
 
-/** The column whose value identifies a row for dedup across re-exports. */
-const NATURAL_KEY: Readonly<Record<DatasetName, string>> = {
-  appointment: "appt_id",
-  patient: "patient_id",
-  account: "account_id",
-  // WARP-2107 — accounting. `ap_summary` keys on the vendor because it is
-  // already one aggregated row per vendor; re-exporting it must replace the
-  // vendor's row, not accumulate a second one and double its balance.
-  invoice: "invoice_id",
-  bill: "bill_id",
-  ap_summary: "vendor_id",
+/**
+ * The columns whose values TOGETHER identify a row for dedup across re-exports.
+ *
+ * Dedup exists so yesterday's and today's copies of the same report, both
+ * sitting in the drop, do not double every row. It is therefore only safe to
+ * key on something that genuinely identifies a document.
+ *
+ * ⚠ For the practice datasets one column does: `appt_id` and `patient_id` are
+ * primary keys in a PMS. **For the accounting datasets they are not.**
+ * QuickBooks does not enforce uniqueness on invoice or bill reference numbers,
+ * and the shipped profile maps `bill_id` onto the report's `Num` column — so
+ * keying on it alone silently collapses two genuinely different bills that
+ * happen to share a Ref No., and the earlier one's money disappears. A payables
+ * total that is quietly too small is the worst failure this file can produce.
+ *
+ * So an accounting key is COMPOSITE: reference number plus counterparty, date
+ * and amount. Two different documents differ in at least one of those; a true
+ * re-export of the same document matches on all of them.
+ */
+const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
+  appointment: ["appt_id"],
+  patient: ["patient_id"],
+  account: ["account_id"],
+  // WARP-2107 — accounting. See the ⚠ above for why these are composite.
+  invoice: ["invoice_id", "customer_id", "issued_at", "amount"],
+  bill: ["bill_id", "vendor_id", "issued_at", "amount"],
+  // `ap_summary` is already one aggregated row per vendor, so the vendor IS the
+  // identity: re-exporting must replace the vendor's row, not accumulate a
+  // second one and double its balance.
+  ap_summary: ["vendor_id"],
 };
 
 /**
@@ -535,16 +554,31 @@ export async function scanDropDirectory(
       const { row, placed } = projectRow(dataset.dataset, dataset.columns, headerIndex, record);
       if (!placed) info.unplaced += 1;
 
-      const keyColumn = NATURAL_KEY[dataset.dataset];
-      const keyValue = row[keyColumn];
-      // Fall back to a per-row key when the natural key is absent. A PMS that
-      // only assigns an appointment id at check-in exports walk-ins with the id
-      // cell blank; keying those on one shared value would collapse them into a
-      // single row and silently drop the rest. `normalizeText` yields undefined
-      // for a blank cell (never ""), so this one condition covers both "the
+      // Fall back to a per-row key when ANY part of the natural key is absent.
+      // A PMS that only assigns an appointment id at check-in exports walk-ins
+      // with the id cell blank; keying those on one shared value would collapse
+      // them into a single row and silently drop the rest. `normalizeText`
+      // yields undefined for a blank cell (never ""), so this covers both "the
       // profile maps no id column" and "the id cell is empty".
-      const key =
-        typeof keyValue === "string" ? `k:${keyValue}` : `f:${file.name}#${index}`;
+      //
+      // Requiring EVERY part is deliberate: a partial composite would key two
+      // different documents together precisely when the distinguishing column
+      // is the missing one. Falling back duplicates a row; collapsing loses it.
+      const parts: string[] = [];
+      for (const column of NATURAL_KEY[dataset.dataset]) {
+        const value = row[column];
+        // Numbers count: `amount` is parsed money, not text, and it is one of
+        // the columns that tells two same-numbered bills apart.
+        if (typeof value === "string") parts.push(value);
+        else if (typeof value === "number") parts.push(String(value));
+        else {
+          parts.length = 0;
+          break;
+        }
+      }
+      // A NUL cannot appear in a parsed cell, so no combination of values can
+      // forge another row's key by containing the separator.
+      const key = parts.length > 0 ? `k:${parts.join(" ")}` : `f:${file.name}#${index}`;
       bucket.set(key, row);
     }
     if (malformedBefore !== info.malformed) {

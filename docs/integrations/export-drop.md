@@ -158,7 +158,7 @@ Every built-in is marked `verified: false` in code and surfaced as `usingUnverif
 
 ## 5. What the reads do
 
-The same five named reads as the other tracks, returning the same row shapes.
+The same named reads as the other tracks, returning the same row shapes. Five are practice-management (`get_schedule_today`, `find_patient`, `get_patient`, `get_recall_due`, `get_ar_summary`); three are accounting and were added by WARP-2107 (`get_open_invoices`, `get_open_bills`, `get_ap_summary`). Which of them a given connection serves depends on its profile — see the capability section above.
 
 | Read | Behaviour on this track |
 |---|---|
