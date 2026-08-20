@@ -313,7 +313,50 @@ describe("reads", () => {
     // Mutation: count rows instead of distinct vendors → vendor_count 3 → red.
     const { c } = qbo({ pages: [BILL_PAGE] });
     const rows = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
-    expect(rows).toEqual([{ vendor_count: 2, total_balance: 2850.25 }]);
+    expect(rows).toEqual([
+      { vendor_count: 2, total_balance: 2850.25, unaccounted_count: 0 },
+    ]);
+  });
+
+  it("counts a bill it cannot read rather than dropping it from the total", async () => {
+    // The contradiction a pre-PR review found: `get_open_bills` KEEPS a bill
+    // whose Balance will not parse, while the summary silently skipped it — so
+    // one document was listed as money owed and contributed nothing to what the
+    // business was told it owed.
+    //
+    // Mutation: filter unparseable balances out before aggregating →
+    // unaccounted_count 0 and the vendor disappears → red.
+    const { c } = qbo({
+      pages: [
+        {
+          QueryResponse: {
+            Bill: [
+              { Id: "1", DocNumber: "B-1", VendorRef: { name: "Henry Schein" }, Balance: 2000 },
+              { Id: "2", DocNumber: "B-2", VendorRef: { name: "Mystery Co" } },
+            ],
+          },
+        },
+      ],
+    });
+    const listed = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    const summary = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
+    // Both reads see the same two documents. The summary says so.
+    expect(listed).toHaveLength(2);
+    expect(summary).toEqual([
+      { vendor_count: 2, total_balance: 2000, unaccounted_count: 1 },
+    ]);
+  });
+
+  it("does not report itself healthy before a company is connected", async () => {
+    // `health()` used to ask about the budget and the token clock, and an
+    // absent token failed neither — so an unconsented connection was "healthy".
+    // Mutation: derive health from the budget/clock again → red.
+    const unconfigured = new QuickBooksOnlineConnector({
+      realmId: "9130350",
+      credentialsSecretRef: "secret://qbo/9130350",
+    });
+    await expect(unconfigured.health()).rejects.toBeInstanceOf(ConnectorBlockedError);
+    expect((await unconfigured.status()).ok).toBe(false);
   });
 
   it("pins the API minor version on every request", async () => {

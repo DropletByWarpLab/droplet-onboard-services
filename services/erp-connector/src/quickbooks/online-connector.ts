@@ -75,7 +75,7 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
-import { sortByKey } from "../api-dto.js";
+import { sortByKey, sumMoneyWithGaps } from "../api-dto.js";
 import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
 
 /** Provider key for this track. */
@@ -456,11 +456,21 @@ export class QuickBooksOnlineConnector implements Connector {
   }
 
   async health(): Promise<{ ok: boolean }> {
-    const headroom = this.budget.snapshot().remaining;
-    if (headroom <= 0) throw new QuotaExhaustedError(this.budget.snapshot().spent, this.budget.ceiling);
-    const after = this.reauthorizeAfter();
-    if (after !== null && after <= 0) {
+    // Derived from the SAME explicit state `status()` reports, not from
+    // whichever fields happen to be populated. Before this, a connection the
+    // owner had never consented to reported itself healthy — because `health`
+    // asked about the budget and the token clock, and an absent token failed
+    // neither test. That is the inferred-from-absence failure ADR-041 §5 names.
+    const state = await this.state();
+    if (state === "needs_reconnect") {
       throw new ReauthorizationRequiredError("the refresh token has expired");
+    }
+    if (state === "error") {
+      const b = this.budget.snapshot();
+      throw new QuotaExhaustedError(b.spent, b.ceiling);
+    }
+    if (state === "disconnected") {
+      throw this.blocked("health", "no QuickBooks company is connected");
     }
     return { ok: true };
   }
@@ -525,7 +535,9 @@ export class QuickBooksOnlineConnector implements Connector {
     const after = this.reauthorizeAfter();
     return {
       state,
-      ok: b.remaining > 0 && (after === null || after > 0),
+      // One source of truth. `ok` used to be computed independently, which let
+      // it disagree with `state` inside a single returned object.
+      ok: state === "connected",
       realmId: this.config.realmId,
       budget: { spent: b.spent, ceiling: b.ceiling, remaining: b.remaining },
       reauthorizeInDays: after === null ? null : Math.floor(after / (24 * 60 * 60 * 1000)),
@@ -641,16 +653,28 @@ export class QuickBooksOnlineConnector implements Connector {
         // metered call-set instead of two, and it cannot disagree with
         // get_open_bills, which a second source could.
         const raw = await this.pull(op, "Bill");
-        const byVendor = new Map<string, number>();
-        for (const r of raw) {
-          const balance = QuickBooksOnlineConnector.money(r.Balance);
-          if (balance === undefined || balance === 0) continue;
-          const vendor = QuickBooksOnlineConnector.ref(r.VendorRef) ?? "(unknown vendor)";
-          byVendor.set(vendor, (byVendor.get(vendor) ?? 0) + balance);
+        // Aggregate over exactly the rows `get_open_bills` returns, so the two
+        // reads on one pull cannot contradict each other. The first cut skipped
+        // any bill whose Balance would not parse — so the same document was
+        // listed as money owed AND contributed nothing to what the business was
+        // told it owed, with no signal that anything was missing.
+        const open = raw
+          .map((r) => ({
+            vendor_id: QuickBooksOnlineConnector.ref(r.VendorRef) ?? "(unknown vendor)",
+            balance: QuickBooksOnlineConnector.money(r.Balance),
+          }))
+          .filter((r) => typeof r.balance !== "number" || r.balance !== 0);
+
+        const byVendor = new Map<string, Record<string, unknown>[]>();
+        for (const r of open) {
+          const list = byVendor.get(r.vendor_id) ?? [];
+          list.push(r);
+          byVendor.set(r.vendor_id, list);
         }
-        let total = 0;
-        for (const v of byVendor.values()) total += v;
-        return [{ vendor_count: byVendor.size, total_balance: total }];
+        const { total, unaccounted } = sumMoneyWithGaps(open);
+        return [
+          { vendor_count: byVendor.size, total_balance: total, unaccounted_count: unaccounted },
+        ];
       }
 
       default:
