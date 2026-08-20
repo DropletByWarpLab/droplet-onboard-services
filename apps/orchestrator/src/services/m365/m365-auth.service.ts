@@ -1,0 +1,367 @@
+/**
+ * WARP-2115 / ADR-041 — the Microsoft 365 connection lifecycle.
+ *
+ * This is the cloud-connector auth layer: it owns the per-user link between a
+ * Droplet account and a Microsoft 365 account, the encrypted token cache, and
+ * the explicit state a person sees in the dashboard.
+ *
+ * Shape, and why:
+ *
+ *   - **Delegated, per user.** ADR-041 rules out application permissions,
+ *     which would grant "read every mailbox in the tenant". The box reads
+ *     Microsoft *as the signed-in person*, so it can never see more than they
+ *     can. One `M365Connection` row per user, keyed by `userId`.
+ *   - **Prisma and the Entra client are injected**, matching the repo's
+ *     service style (cf. `email-channel.service.ts`) and keeping the whole
+ *     lifecycle testable without a database or a network.
+ *   - **State is explicit, never inferred** from whether a token happens to
+ *     decrypt. DISCONNECTED and NEEDS_RECONNECT look identical to a
+ *     "do we have a working token" check but mean opposite things to a person.
+ *   - **Nothing here logs a token, a cache blob, or a device code.** The public
+ *     view is built by an explicit allow-list, not by spreading the row.
+ */
+import type { PrismaClient } from "@prisma/client";
+
+import { sealTokenCache, unsealTokenCache } from "./token-cache.js";
+import {
+  classifyAuthFailure,
+  isPendingFlowExpired,
+  redactAuthError,
+  PENDING_FLOW_TTL_MS,
+} from "./state.js";
+
+// --- The Entra port -------------------------------------------------------
+//
+// Narrow on purpose: the service depends on this, not on MSAL, so the
+// lifecycle is testable and the SDK stays swappable.
+
+/** What Microsoft gives us to show the person so they can approve the sign-in. */
+export interface DeviceCodeInfo {
+  userCode: string;
+  verificationUri: string;
+  expiresAt: Date;
+  /** Microsoft's own instruction text. Displayed verbatim — it is localized. */
+  message: string;
+}
+
+/** The result of a completed (or silently refreshed) authentication. */
+export interface EntraAuthResult {
+  homeAccountId: string;
+  tenantId: string | null;
+  accountUpn: string | null;
+  /** Space-separated scopes Microsoft actually granted — may be narrower than asked. */
+  grantedScopes: string;
+  /** Serialized MSAL cache. Contains the refresh token; sealed before storage. */
+  serializedCache: string;
+  /** Present on a silent acquisition; the bearer for a Graph call. */
+  accessToken?: string;
+}
+
+export interface EntraClient {
+  /**
+   * Begin a device-code sign-in. `onCode` fires as soon as Microsoft issues
+   * the code (so the caller can show it immediately); the promise resolves
+   * only once the person has approved it.
+   */
+  acquireByDeviceCode(opts: {
+    onCode: (info: DeviceCodeInfo) => void;
+  }): Promise<EntraAuthResult>;
+
+  /** Refresh silently from a stored cache. */
+  acquireSilent(serializedCache: string, homeAccountId: string): Promise<EntraAuthResult>;
+}
+
+// --- Errors ---------------------------------------------------------------
+
+/** No usable Microsoft link for this person. Callers should surface the
+ *  connection state rather than treating this as a server fault. */
+export class M365NotConnectedError extends Error {
+  constructor(public readonly state: string) {
+    super(`Microsoft 365 is not connected (state: ${state}).`);
+    this.name = "M365NotConnectedError";
+  }
+}
+
+// --- The public view ------------------------------------------------------
+
+export type M365State =
+  | "DISCONNECTED"
+  | "PENDING_CONSENT"
+  | "CONNECTED"
+  | "NEEDS_RECONNECT"
+  | "ERROR";
+
+/**
+ * What a route may return. Built field-by-field rather than by spreading the
+ * row, so a column added later (another secret, say) cannot leak by default.
+ */
+export interface M365ConnectionView {
+  state: M365State;
+  /** Which Microsoft account is linked, for the person to recognise. Not secret. */
+  accountUpn: string | null;
+  tenantId: string | null;
+  grantedScopes: string[];
+  connectedAt: Date | null;
+  lastRefreshOkAt: Date | null;
+  /** Redacted, human-readable reason for ERROR / NEEDS_RECONNECT. */
+  lastError: string | null;
+}
+
+interface ConnectionRow {
+  state: string;
+  accountUpn: string | null;
+  tenantId: string | null;
+  grantedScopes: string | null;
+  connectedAt: Date | null;
+  lastRefreshOkAt: Date | null;
+  lastError: string | null;
+  pendingFlowExpiresAt: Date | null;
+  homeAccountId: string | null;
+  tokenCacheEnc: string | null;
+}
+
+const DISCONNECTED_VIEW: M365ConnectionView = {
+  state: "DISCONNECTED",
+  accountUpn: null,
+  tenantId: null,
+  grantedScopes: [],
+  connectedAt: null,
+  lastRefreshOkAt: null,
+  lastError: null,
+};
+
+function toView(row: ConnectionRow, now: Date): M365ConnectionView {
+  // A sign-in whose code has expired is reported as DISCONNECTED. The flow
+  // itself lives in memory and does not survive a restart, so without this the
+  // row would read "pending" forever and block any new attempt.
+  const state =
+    row.state === "PENDING_CONSENT" && isPendingFlowExpired(row.pendingFlowExpiresAt, now)
+      ? "DISCONNECTED"
+      : (row.state as M365State);
+
+  return {
+    state,
+    accountUpn: row.accountUpn ?? null,
+    tenantId: row.tenantId ?? null,
+    grantedScopes: row.grantedScopes ? row.grantedScopes.split(" ").filter(Boolean) : [],
+    connectedAt: row.connectedAt ?? null,
+    lastRefreshOkAt: row.lastRefreshOkAt ?? null,
+    lastError: row.lastError ?? null,
+  };
+}
+
+// --- Reads ----------------------------------------------------------------
+
+/** The connection as the dashboard should see it. Never carries token material. */
+export async function getConnectionView(
+  prisma: PrismaClient,
+  userId: string,
+  now: Date = new Date(),
+): Promise<M365ConnectionView> {
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  return row ? toView(row, now) : DISCONNECTED_VIEW;
+}
+
+// --- Connect --------------------------------------------------------------
+
+/**
+ * Start a device-code sign-in.
+ *
+ * Resolves as soon as Microsoft issues the code, so the caller can show it
+ * immediately; the sign-in itself completes in the background and flips the
+ * row to CONNECTED (or ERROR / NEEDS_RECONNECT). The dashboard polls
+ * `getConnectionView` to follow it.
+ *
+ * Connecting IS the consent event (ADR-041): a cloud connector ships off and
+ * carries nothing until a person does this deliberately.
+ */
+export async function beginDeviceCodeConnect(
+  prisma: PrismaClient,
+  entra: EntraClient,
+  userId: string,
+  now: Date = new Date(),
+): Promise<DeviceCodeInfo> {
+  const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
+
+  await prisma.m365Connection.upsert({
+    where: { userId },
+    create: {
+      userId,
+      state: "PENDING_CONSENT",
+      pendingFlowExpiresAt: expiresAt,
+      lastError: null,
+    },
+    update: {
+      state: "PENDING_CONSENT",
+      pendingFlowExpiresAt: expiresAt,
+      lastError: null,
+    },
+  });
+
+  return await new Promise<DeviceCodeInfo>((resolve, reject) => {
+    let handedBack = false;
+
+    const completion = entra.acquireByDeviceCode({
+      onCode: (info) => {
+        handedBack = true;
+        resolve(info);
+      },
+    });
+
+    completion
+      .then(async (result) => {
+        await persistConnected(prisma, userId, result);
+      })
+      .catch(async (err: unknown) => {
+        await persistFailure(prisma, userId, err);
+        // If Microsoft failed before ever issuing a code, the caller is still
+        // waiting on this promise — reject it so the request does not hang.
+        if (!handedBack) reject(err);
+      });
+  });
+}
+
+async function persistConnected(
+  prisma: PrismaClient,
+  userId: string,
+  result: EntraAuthResult,
+  now: Date = new Date(),
+): Promise<void> {
+  await prisma.m365Connection.update({
+    where: { userId },
+    data: {
+      state: "CONNECTED",
+      homeAccountId: result.homeAccountId,
+      tenantId: result.tenantId,
+      accountUpn: result.accountUpn,
+      grantedScopes: result.grantedScopes,
+      tokenCacheEnc: sealTokenCache(userId, result.serializedCache),
+      pendingFlowExpiresAt: null,
+      connectedAt: now,
+      lastRefreshOkAt: now,
+      lastError: null,
+    },
+  });
+}
+
+/**
+ * Record a failed authentication in the state the person can act on.
+ *
+ * The classification is the whole point: a dead grant is routine and asks for
+ * a new sign-in; a rejected app registration or a tenant policy block is ours
+ * to fix and must not loop the customer through a flow that cannot succeed.
+ */
+async function persistFailure(
+  prisma: PrismaClient,
+  userId: string,
+  err: unknown,
+): Promise<void> {
+  const failure = (err ?? {}) as { errorCode?: string; errorMessage?: string };
+  await prisma.m365Connection.update({
+    where: { userId },
+    data: {
+      state: classifyAuthFailure(failure),
+      pendingFlowExpiresAt: null,
+      lastError: redactAuthError(failure),
+    },
+  });
+}
+
+// --- Disconnect -----------------------------------------------------------
+
+/**
+ * Unlink the account and PURGE the stored token.
+ *
+ * ADR-041 is explicit that a disconnect is not a flag flip — the credential
+ * must actually go. The account label goes with it so the dashboard cannot
+ * keep showing a Microsoft identity the box can no longer act as.
+ */
+export async function disconnect(prisma: PrismaClient, userId: string): Promise<void> {
+  const existing = await prisma.m365Connection.findUnique({ where: { userId } });
+  if (!existing) return; // never connected — nothing to purge
+
+  await prisma.m365Connection.update({
+    where: { userId },
+    data: {
+      state: "DISCONNECTED",
+      tokenCacheEnc: null,
+      homeAccountId: null,
+      accountUpn: null,
+      tenantId: null,
+      grantedScopes: null,
+      pendingFlowExpiresAt: null,
+      connectedAt: null,
+      lastError: null,
+    },
+  });
+}
+
+// --- Token acquisition ----------------------------------------------------
+
+/**
+ * A bearer token for a Graph call, refreshing silently as needed.
+ *
+ * This is the seam the sync engine (WARP-2118) will call. Every failure path
+ * updates the connection state before throwing, so a caller never has to
+ * interpret an Entra error itself.
+ */
+export async function getAccessToken(
+  prisma: PrismaClient,
+  entra: EntraClient,
+  userId: string,
+  now: Date = new Date(),
+): Promise<string> {
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+
+  if (!row || !row.tokenCacheEnc || !row.homeAccountId) {
+    throw new M365NotConnectedError(row?.state ?? "DISCONNECTED");
+  }
+
+  // An unreadable cache is expected after a factory reset regenerates
+  // DEVICE_SECRET_KEY: the rows survive, the key does not. That is a
+  // reconnect, not a crash — and not an ERROR the person cannot act on.
+  let cache: string;
+  try {
+    cache = unsealTokenCache(userId, row.tokenCacheEnc);
+  } catch {
+    await prisma.m365Connection.update({
+      where: { userId },
+      data: {
+        state: "NEEDS_RECONNECT",
+        tokenCacheEnc: null,
+        lastError: "The stored Microsoft sign-in could not be read. Please connect again.",
+      },
+    });
+    throw new M365NotConnectedError("NEEDS_RECONNECT");
+  }
+
+  let result: EntraAuthResult;
+  try {
+    result = await entra.acquireSilent(cache, row.homeAccountId);
+  } catch (err) {
+    await persistFailure(prisma, userId, err);
+    throw err;
+  }
+
+  await prisma.m365Connection.update({
+    where: { userId },
+    data: {
+      state: "CONNECTED",
+      // MSAL rotates the refresh token on use, so the cache must be re-sealed
+      // every time or the next refresh replays a superseded token.
+      tokenCacheEnc: sealTokenCache(userId, result.serializedCache),
+      grantedScopes: result.grantedScopes,
+      lastRefreshOkAt: now,
+      lastError: null,
+    },
+  });
+
+  if (!result.accessToken) {
+    throw new M365NotConnectedError("ERROR");
+  }
+  return result.accessToken;
+}
