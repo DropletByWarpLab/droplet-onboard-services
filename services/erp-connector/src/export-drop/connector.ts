@@ -421,6 +421,23 @@ export class ExportDropConnector implements Connector {
     // name is an UnknownReadQueryError regardless of connection state — the
     // same ordering both other tracks use.
     const query = getReadQuery(name);
+    // A vendor with NO profile in force is not a vendor that "will never have
+    // that data" — it is a vendor nobody has mapped yet, which is a different
+    // statement and a fixable one. Without this, `servesDatasets` is empty and
+    // every read raised DatasetNotServedError, whose documented meaning is
+    // "this connection works perfectly and will never have that data". For
+    // `generic-export` — whose whole purpose is to be mapped by an operator on
+    // site — that was a confident false statement telling the installer to give
+    // up. Checked BEFORE the capability check, because it is the more specific
+    // and more actionable answer.
+    if (this.profiles.length === 0) {
+      throw this.blocked(
+        `runRead:${name}`,
+        this.config.vendor === GENERIC_VENDOR
+          ? `vendor "${GENERIC_VENDOR}" has no built-in profiles — supply one via ERP_EXPORT_DROP_PROFILES`
+          : `no profile is registered for vendor "${this.config.vendor}"`,
+      );
+    }
     // Then capability, before touching the snapshot: a vendor whose profile has
     // no `bill` concept is not missing a file, and must not be told to go run
     // an export that does not exist for their product.

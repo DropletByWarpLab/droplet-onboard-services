@@ -31,6 +31,7 @@ import {
 import { EaglesoftApiConnector } from "../src/api-connector.js";
 import { READ_QUERIES } from "../src/read-queries.js";
 import {
+  GENERIC_VENDOR,
   CANONICAL_COLUMNS,
   COLUMN_KIND,
   DATASETS,
@@ -215,6 +216,40 @@ describe("a track refuses datasets it does not serve", () => {
       expect(result, `${label} must throw, not return rows`).toBeInstanceOf(Error);
       expect(Array.isArray(result), `${label} returned an array`).toBe(false);
     }
+  });
+
+  it("does not tell an UNMAPPED vendor its data will never exist", async () => {
+    // Three states, and only the middle one is a dead end:
+    //   no profile for this vendor  -> blocked, and an operator can write one
+    //   profile has no such dataset -> DatasetNotServedError, nothing helps
+    //   profile has it, file absent -> blocked, run the export
+    //
+    // `generic-export` exists precisely to be mapped on site, so telling its
+    // installer "this connection will never have that data" is both false and
+    // the most discouraging thing the product could say.
+    //
+    // Mutation: run assertDatasetsServed before the profile check (the original
+    // ordering) -> DatasetNotServedError -> red.
+    const c = new ExportDropConnector(
+      { vendor: GENERIC_VENDOR, root },
+      { now: () => NOW, profiles: [], minRefreshMs: Number.POSITIVE_INFINITY },
+    );
+    const err = await c.runRead("get_schedule_today", { from: "a", to: "b" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect(err).not.toBeInstanceOf(DatasetNotServedError);
+    expect((err as Error).message).toMatch(/ERP_EXPORT_DROP_PROFILES/);
+  });
+
+  it("says which vendor is unmapped when it is not the generic one", async () => {
+    // Mutation: drop the vendor name from the message -> red. "No profile" with
+    // no vendor named is not actionable at a site with two connections.
+    const c = new ExportDropConnector(
+      { vendor: "someproduct", root },
+      { now: () => NOW, profiles: [], minRefreshMs: Number.POSITIVE_INFINITY },
+    );
+    const err = await c.runRead("get_ar_summary", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect((err as Error).message).toMatch(/someproduct/);
   });
 
   it("distinguishes 'this track has no bills' from 'the bill export is missing'", async () => {
