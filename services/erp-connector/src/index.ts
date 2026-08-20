@@ -210,3 +210,28 @@ export {
 // WARP-2107 — money aggregation shared by every track, so a total is a currency
 // figure rather than an accumulation of doubles.
 export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";
+
+// WARP-2127 — Dentrix Ascend: the cloud dental PMS, read over Henry Schein
+// One's published Public API. This is the Dentrix surface that CAN be written
+// honestly — the on-premise Developer Program withholds its schema as policy,
+// so a connector for that one would invent every field reference (WARP-2126).
+export {
+  DentrixAscendConnector,
+  AscendAuthorizationError,
+  UnsafeAscendBaseUrlError,
+  assertSafeAscendBaseUrl,
+  blockedAscendTokenResolver,
+  ASCEND_ALLOWED_HOST_SUFFIX,
+  ASCEND_DATASETS,
+  ASCEND_PRODUCTION_BASE_URL,
+  ASCEND_SANDBOX_BASE_URL,
+  ASCEND_SPEC_VERSION,
+  ASCEND_TRACK_REMEDIATION,
+  DENTRIX_ASCEND_PROVIDER,
+  type AscendConnectionState,
+  type AscendStatus,
+  type AscendToken,
+  type AscendTokenResolver,
+  type DentrixAscendConfig,
+  type DentrixAscendDeps,
+} from "./dentrix/ascend-connector.js";
