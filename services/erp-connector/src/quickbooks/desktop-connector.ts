@@ -115,12 +115,17 @@ export interface QbwcSessionDeps {
   newTicket?: () => string;
   /** Cap on one posted response, mirroring the export track's file ceiling. */
   maxResponseBytes?: number;
+  /** How long a session ticket stays usable. Defaults to 30 minutes — long
+   *  enough for a large company's two queries, short enough that a ticket left
+   *  behind by a crashed Web Connector stops working the same morning. */
+  ticketTtlMs?: number;
 }
 
 /** What `authenticate` returns to the Web Connector: [ticket, companyFileHint]. */
 export type AuthenticateResult = [string, string];
 
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_TICKET_TTL_MS = 30 * 60 * 1000;
 
 /** Constant-time string comparison that does not leak length through timing
  *  any more than it has to. Both sides are hashed to a fixed width by padding
@@ -160,9 +165,15 @@ export class QbwcSession {
   /** Set when a session aborts. The ticket deliberately stays valid — see
    *  {@link QbwcSession.abort}. */
   private failed = false;
+  /** Set once a session has published. A ticket must not be able to publish
+   *  twice — see {@link QbwcSession.commit}. */
+  private completed = false;
+  /** When the live ticket was issued, for the TTL in {@link assertTicket}. */
+  private ticketIssuedAt = 0;
   private readonly now: () => number;
   private readonly newTicket: () => string;
   private readonly maxResponseBytes: number;
+  private readonly ticketTtlMs: number;
 
   constructor(
     private readonly credentials: QbwcCredentials,
@@ -172,6 +183,7 @@ export class QbwcSession {
     this.now = deps.now ?? (() => Date.now());
     this.newTicket = deps.newTicket ?? (() => randomBytes(24).toString("hex"));
     this.maxResponseBytes = deps.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    this.ticketTtlMs = deps.ticketTtlMs ?? DEFAULT_TICKET_TTL_MS;
   }
 
   /**
@@ -193,20 +205,35 @@ export class QbwcSession {
     // is not resumable and a leaked ticket must not outlive the run it belongs
     // to.
     this.ticket = this.newTicket();
+    this.ticketIssuedAt = this.now();
     this.stepIndex = 0;
     this.pending = {};
     this.lastError = "";
     this.failed = false;
+    this.completed = false;
     // Empty company-file hint = "use the file currently open in QuickBooks",
     // which is what an integration reading one practice's books wants. Naming a
     // path would make us responsible for a filesystem we cannot see.
     return [this.ticket, ""];
   }
 
-  /** Reject any call whose ticket is not the live one. Unknown tickets are not
-   *  distinguished from stale ones — both mean "not this session". */
+  /**
+   * Reject any call whose ticket is not the live one, or whose session has been
+   * open too long. Unknown, stale and expired tickets are not distinguished —
+   * all three mean "not this session", and telling them apart would only help
+   * somebody guessing.
+   *
+   * The TTL exists because `closeConnection` is the only thing that retires a
+   * ticket, and it is exactly what does NOT happen when the Web Connector
+   * crashes, the LAN drops, or a user kills the run. Without it that ticket
+   * stayed valid indefinitely.
+   */
   private assertTicket(ticket: string): void {
     if (!this.ticket || !secretEquals(ticket, this.ticket)) {
+      throw new Error("unknown or expired Web Connector session ticket");
+    }
+    if (this.now() - this.ticketIssuedAt > this.ticketTtlMs) {
+      this.ticket = null;
       throw new Error("unknown or expired Web Connector session ticket");
     }
   }
@@ -217,7 +244,7 @@ export class QbwcSession {
     // A failed session has no more work. Returning "" is the guide's "nothing
     // to do", which lets the Web Connector wind down through getLastError and
     // closeConnection instead of being handed another request to run.
-    if (this.failed) return "";
+    if (this.failed || this.completed) return "";
     const step = QBXML_STEPS[this.stepIndex];
     if (!step) return "";
     return buildRequest(step, String(this.stepIndex + 1));
@@ -233,6 +260,16 @@ export class QbwcSession {
    */
   receiveResponseXML(ticket: string, response: string): number {
     this.assertTicket(ticket);
+    // A session that has already aborted must not keep ingesting. `abort()`
+    // resets `stepIndex` to 0, so without this check a failed run simply
+    // started over from step one on the next post and could go on to publish —
+    // defeating the abort entirely, which is the property the previous snapshot
+    // depends on.
+    if (this.failed) return -1;
+    // A session that has already published must not publish again. The ticket
+    // outlives `commit()` so the Web Connector can wind down through
+    // `closeConnection`; that is not licence to replay a financial snapshot.
+    if (this.completed) return 100;
     if (response.length > this.maxResponseBytes) {
       this.lastError = `response exceeds the ${this.maxResponseBytes}-byte ceiling`;
       this.abort();
@@ -273,9 +310,12 @@ export class QbwcSession {
 
   closeConnection(ticket: string): string {
     this.assertTicket(ticket);
-    // The only place a ticket is retired. One session, one ticket, no resume.
+    // The only place a ticket is retired on the happy path; the TTL in
+    // `assertTicket` covers the case where this is never called at all.
+    // One session, one ticket, no resume.
     this.ticket = null;
     this.failed = false;
+    this.completed = false;
     return "OK";
   }
 
@@ -325,6 +365,7 @@ export class QbwcSession {
     });
     this.pending = {};
     this.stepIndex = 0;
+    this.completed = true;
   }
 }
 

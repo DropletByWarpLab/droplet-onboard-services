@@ -144,6 +144,54 @@ describe("the XML reader refuses what it does not understand", () => {
     expect(() => parseXml("   ")).toThrow(XmlError);
   });
 
+  it("parses a hostile attribute run in linear time, not quadratic", () => {
+    // The regex this replaced backtracked catastrophically on a tag body with a
+    // long run of word characters and no `=`. A valid-looking qbXML envelope
+    // carrying tens of kilobytes of that blocked the event loop for minutes —
+    // a remote DoS from a machine on the practice LAN.
+    //
+    // Asserted as a TIME BOUND because that is the actual property; a
+    // correctness assertion would have passed against the vulnerable version
+    // too (it eventually returns, just not this side of lunch).
+    //
+    // Mutation: restore the regex → this test hangs rather than failing fast,
+    // which is itself the signal. The bound is deliberately loose (2s vs the
+    // ~10ms observed) so it cannot flake on a loaded CI box.
+    const hostile = `<QBXML><A requestID="1" ${"a".repeat(40_000)}></A></QBXML>`;
+    const started = Date.now();
+    expect(() => parseXml(hostile)).toThrow(XmlError);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("keeps a raw > inside an attribute value instead of silently dropping it", () => {
+    // Only `<` and `&` must be escaped in an attribute value, so this is legal
+    // XML. `indexOf(">")` ended the tag at the wrong offset and the attribute
+    // vanished with no error — the "quietly does the wrong thing" behaviour the
+    // module docstring promises never to have.
+    //
+    // Mutation: go back to indexOf(">") → `note` is absent → red.
+    const el = parseXml('<A note="a>b"><B/></A>');
+    expect(el.attributes.note).toBe("a>b");
+    expect(el.children.map((c) => c.name)).toEqual(["B"]);
+  });
+
+  it("refuses a malformed attribute rather than skipping it", () => {
+    // The regex ignored anything it could not match, so a bare word in a tag
+    // body was invisible. Mutation: return silently instead of failing → red.
+    expect(() => parseXml('<A bare></A>')).toThrow(XmlError);
+    expect(() => parseXml('<A x=unquoted></A>')).toThrow(/not quoted/);
+    expect(() => parseXml('<A x="unterminated></A>')).toThrow(XmlError);
+  });
+
+  it("bounds attributes, which are not elements", () => {
+    // 200k attributes on ONE element counts as a single element, so maxElements
+    // never engaged and the document amplified manyfold in heap.
+    // Mutation: drop the attribute ceiling → parses → red.
+    const many = "<A " + Array.from({ length: 50 }, (_, i) => `a${i}="0"`).join(" ") + "/>";
+    expect(() => parseXml(many, { maxAttributes: 10 })).toThrow(/attribute ceiling/);
+    expect(() => parseXml(many, { maxAttributes: 100 })).not.toThrow();
+  });
+
   it("reads attributes, nesting and self-closing tags", () => {
     const el = parseXml(`<r s="0" m="ok"><c><d>7</d></c><e/></r>`);
     expect(el.attributes).toEqual({ s: "0", m: "ok" });
@@ -296,6 +344,56 @@ describe("the Web Connector session", () => {
     const [t] = s.authenticate(CREDS.username, CREDS.password);
     expect(s.receiveResponseXML(t, INVOICE_RS)).toBe(-1);
     expect(s.getLastError(t)).toMatch(/ceiling/);
+  });
+
+  it("an aborted session cannot resume and publish", () => {
+    // `abort()` resets stepIndex to 0, so without a `failed` check the next post
+    // simply started the session over and could go on to publish — defeating
+    // the abort, and with it the previous snapshot's protection.
+    // Mutation: drop the `failed` check in receiveResponseXML → red.
+    const store = new QbdSnapshotStore();
+    const s = new QbwcSession(CREDS, store, { now: () => NOW, newTicket: () => "T" });
+    const [t] = s.authenticate(CREDS.username, CREDS.password);
+    s.sendRequestXML(t);
+    expect(s.receiveResponseXML(t, "<QBXML><unclosed>")).toBe(-1);
+
+    // The Web Connector posts again anyway.
+    expect(s.sendRequestXML(t)).toBe("");
+    expect(s.receiveResponseXML(t, INVOICE_RS)).toBe(-1);
+    expect(s.receiveResponseXML(t, BILL_RS)).toBe(-1);
+    expect(store.current).toBeNull();
+  });
+
+  it("a completed session cannot publish a second time", () => {
+    // The ticket outlives commit() so the connector can wind down through
+    // closeConnection. That is not licence to replay a financial snapshot.
+    // Mutation: drop the `completed` check → the store is republished → red.
+    const store = new QbdSnapshotStore();
+    const { session, ticket } = runSession(store, [INVOICE_RS, BILL_RS]);
+    const first = store.current;
+    expect(first).not.toBeNull();
+
+    expect(session.sendRequestXML(ticket)).toBe("");
+    expect(session.receiveResponseXML(ticket, BILL_RS)).toBe(100);
+    expect(store.current).toBe(first);
+  });
+
+  it("expires a ticket left behind by a Web Connector that never closed", () => {
+    // closeConnection is the only thing that retires a ticket on the happy
+    // path, and it is exactly what does not happen when the connector crashes
+    // or a user kills the run. Mutation: remove the TTL → the stale ticket
+    // still drives a session → red.
+    const store = new QbdSnapshotStore();
+    let t = NOW;
+    const s = new QbwcSession(CREDS, store, {
+      now: () => t,
+      newTicket: () => "T",
+      ticketTtlMs: 60_000,
+    });
+    const [ticket] = s.authenticate(CREDS.username, CREDS.password);
+    expect(s.sendRequestXML(ticket)).toContain("InvoiceQueryRq");
+    t = NOW + 61_000;
+    expect(() => s.sendRequestXML(ticket)).toThrow(/ticket/);
   });
 
   it("derives the payables aggregate from the same bills it ingested", () => {

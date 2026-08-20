@@ -56,6 +56,15 @@ export interface XmlLimits {
   maxBytes: number;
   maxDepth: number;
   maxElements: number;
+  /**
+   * Total attributes across the document.
+   *
+   * Separate from `maxElements` because attributes sat outside every ceiling
+   * this reader advertised: one element can carry hundreds of thousands of
+   * them, counting as a single element while amplifying the document
+   * manyfold in heap. A ceiling on elements is not a ceiling on memory.
+   */
+  maxAttributes: number;
 }
 
 export const DEFAULT_XML_LIMITS: XmlLimits = {
@@ -67,6 +76,9 @@ export const DEFAULT_XML_LIMITS: XmlLimits = {
   // short of a stack problem.
   maxDepth: 64,
   maxElements: 2_000_000,
+  // qbXML uses a handful per response (requestID, statusCode, statusSeverity).
+  // Far past anything legitimate, far short of a memory problem.
+  maxAttributes: 100_000,
 };
 
 const PREDEFINED: Readonly<Record<string, string>> = {
@@ -111,6 +123,56 @@ export function decodeEntities(text: string): string {
 }
 
 /**
+ * Scan `name="value"` pairs out of a tag body, linearly.
+ *
+ * Returns how many attributes were read. Deliberately strict: a malformed
+ * pair is an error rather than something skipped, because this reader's
+ * posture is that unrecognised input stops instead of travelling. The regex
+ * this replaces silently ignored anything it could not match, which is how a
+ * dropped attribute went unnoticed.
+ */
+function scanAttributes(
+  body: string,
+  from: number,
+  out: Record<string, string>,
+  fail: (msg: string) => never,
+): number {
+  let k = from;
+  let count = 0;
+  const isSpace = (c: string) => c === " " || c === "\t" || c === "\n" || c === "\r";
+
+  while (k < body.length) {
+    while (k < body.length && isSpace(body[k])) k += 1;
+    if (k >= body.length) break;
+
+    if (!/[A-Za-z_]/.test(body[k])) {
+      fail(`unexpected "${body[k]}" where an attribute name was expected`);
+    }
+    const nameStart = k;
+    while (k < body.length && /[\w.:-]/.test(body[k])) k += 1;
+    const name = body.slice(nameStart, k);
+
+    while (k < body.length && isSpace(body[k])) k += 1;
+    if (body[k] !== "=") fail(`attribute "${name}" has no value`);
+    k += 1;
+    while (k < body.length && isSpace(body[k])) k += 1;
+
+    const quote = body[k];
+    if (quote !== '"' && quote !== "'") {
+      fail(`attribute "${name}" value is not quoted`);
+    }
+    k += 1;
+    const valueStart = k;
+    while (k < body.length && body[k] !== quote) k += 1;
+    if (k >= body.length) fail(`attribute "${name}" value is unterminated`);
+    out[name] = decodeEntities(body.slice(valueStart, k));
+    k += 1;
+    count += 1;
+  }
+  return count;
+}
+
+/**
  * Parse an XML document into a single root element.
  *
  * Comments, the XML declaration and processing instructions (qbXML uses
@@ -133,6 +195,7 @@ export function parseXml(source: string, limits: Partial<XmlLimits> = {}): XmlEl
 
   let i = 0;
   let elements = 0;
+  let attrCount = 0;
   const stack: XmlElement[] = [];
   let root: XmlElement | null = null;
 
@@ -191,7 +254,30 @@ export function parseXml(source: string, limits: Partial<XmlLimits> = {}): XmlEl
       continue;
     }
 
-    const gt = source.indexOf(">", i);
+    // Find the tag's end by scanning, tracking quote state.
+    //
+    // `indexOf(">")` was wrong twice over. A raw `>` inside an attribute
+    // value is LEGAL XML — only `<` and `&` must be escaped there — and it
+    // truncated the tag at the wrong offset, after which the attribute was
+    // silently dropped rather than refused. Quote-aware scanning ends the tag
+    // where the tag actually ends.
+    let gt = -1;
+    let quote = "";
+    for (let j = i + 1; j < source.length; j += 1) {
+      const ch = source[j];
+      if (quote) {
+        if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (ch === ">") {
+        gt = j;
+        break;
+      }
+    }
     if (gt === -1) fail("unterminated tag");
 
     // Closing tag.
@@ -221,10 +307,21 @@ export function parseXml(source: string, limits: Partial<XmlLimits> = {}): XmlEl
 
     const attributes: Record<string, string> = {};
     if (spaceAt !== -1) {
-      const attrRe = /([A-Za-z_][\w.:-]*)\s*=\s*("([^"]*)"|'([^']*)')/g;
-      const attrSrc = body.slice(spaceAt);
-      for (const m of attrSrc.matchAll(attrRe)) {
-        attributes[m[1]] = decodeEntities(m[3] ?? m[4] ?? "");
+      // ⚠ Parsed with a LINEAR scanner, deliberately not a regex.
+      //
+      // The regex this replaces backtracked quadratically on a tag body
+      // holding a long run of word characters with no `=`. A syntactically
+      // valid qbXML envelope carrying a few tens of kilobytes of that blocks
+      // the orchestrator's event loop for minutes; a little more and it does
+      // not finish. That is a remote denial of service from a machine on the
+      // practice LAN, and it was the one XML attack class this file's
+      // "Bounded" docblock did not actually stop.
+      //
+      // A hand-written scanner is O(n) with no backtracking at all — a
+      // property of the algorithm rather than of the input.
+      attrCount += scanAttributes(body, spaceAt, attributes, fail);
+      if (attrCount > lim.maxAttributes) {
+        throw new XmlError(`document exceeds the ${lim.maxAttributes}-attribute ceiling`);
       }
     }
 
