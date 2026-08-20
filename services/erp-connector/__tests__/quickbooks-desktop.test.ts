@@ -304,8 +304,56 @@ describe("the Web Connector session", () => {
     const store = new QbdSnapshotStore();
     runSession(store, [INVOICE_RS, BILL_RS]);
     expect(store.current!.rows.ap_summary).toEqual([
-      { vendor_count: 2, total_balance: 2850.25 },
+      { vendor_count: 2, total_balance: 2850.25, unaccounted_count: 0 },
     ]);
+  });
+
+  it("counts a bill it could not read rather than dropping it from the total", async () => {
+    // The list read KEEPS a bill whose OpenAmount is missing; the aggregate used
+    // to skip exactly those, so one bill was visible as money owed and absent
+    // from what the business was told it owed.
+    // Mutation: filter unparseable balances before aggregating → red.
+    const rs = `<QBXML><QBXMLMsgsRs>
+      <BillQueryRs statusCode="0">
+        <BillRet><TxnID>B1</TxnID><RefNumber>BILL-A</RefNumber>
+          <VendorRef><FullName>Henry Schein</FullName></VendorRef>
+          <AmountDue>500.00</AmountDue><OpenAmount>500.00</OpenAmount></BillRet>
+        <BillRet><TxnID>B2</TxnID><RefNumber>BILL-B</RefNumber>
+          <VendorRef><FullName>Mystery Co</FullName></VendorRef>
+          <AmountDue>300.00</AmountDue></BillRet>
+      </BillQueryRs>
+    </QBXMLMsgsRs></QBXML>`;
+    const store = new QbdSnapshotStore();
+    runSession(store, [INVOICE_RS, rs]);
+    expect(store.current!.rows.bill).toHaveLength(2);
+    expect(store.current!.rows.ap_summary).toEqual([
+      { vendor_count: 2, total_balance: 500, unaccounted_count: 1 },
+    ]);
+  });
+
+  it("reads the document total, not the pre-tax subtotal", async () => {
+    // qbXML prints `Subtotal` (pre-tax) AND `SalesTaxTotal`. Reading Subtotal
+    // as `amount` understated a taxed invoice by the whole tax line and
+    // disagreed with QBO (`TotalAmt`) and export-drop (`Amount`) for the same
+    // document. Mutation: go back to amountFields: ["Subtotal"] → 1000 → red.
+    const rs = `<QBXML><QBXMLMsgsRs>
+      <InvoiceQueryRs statusCode="0">
+        <InvoiceRet><TxnID>A9</TxnID><RefNumber>INV-TAX</RefNumber>
+          <CustomerRef><FullName>Northside Clinic</FullName></CustomerRef>
+          <Subtotal>1000.00</Subtotal><SalesTaxTotal>80.00</SalesTaxTotal>
+          <BalanceRemaining>1080.00</BalanceRemaining></InvoiceRet>
+      </InvoiceQueryRs>
+    </QBXMLMsgsRs></QBXML>`;
+    const rows = parseResponse("invoice", rs);
+    expect(rows[0].amount).toBe(1080);
+    expect(rows[0].balance).toBe(1080);
+  });
+
+  it("leaves an untaxed invoice's amount alone", async () => {
+    // A missing sibling field must not collapse the total to undefined.
+    // Mutation: require every field → undefined → red.
+    const rows = parseResponse("invoice", INVOICE_RS);
+    expect(rows[0].amount).toBe(1200);
   });
 });
 
@@ -317,6 +365,17 @@ describe("QuickBooksDesktopConnector", () => {
     runSession(store, [INVOICE_RS, BILL_RS]);
     return { store, c: new QuickBooksDesktopConnector(store, {}, { now: () => NOW }) };
   }
+
+  it("refuses rather than fabricating a zero payables total", async () => {
+    // `publish` is public and exported so the orchestrator can own the SOAP
+    // transport; nothing guarantees a publisher included an ap_summary key.
+    // Returning a zero total for absent data states "you owe nobody anything".
+    // Mutation: restore the `?? [{ vendor_count: 0, total_balance: 0 }]` → red.
+    const store = new QbdSnapshotStore();
+    store.publish({ completedAt: NOW, rows: { bill: [] } });
+    const c = new QuickBooksDesktopConnector(store, {}, { now: () => NOW });
+    await expect(c.runRead("get_ap_summary", {})).rejects.toBeInstanceOf(ConnectorBlockedError);
+  });
 
   it("blocks with an ACTIONABLE reason before any session has run", async () => {
     // Distinct from a capability gap: "run the Web Connector" is something a

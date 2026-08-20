@@ -52,7 +52,7 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
-import { sortByKey } from "../api-dto.js";
+import { sortByKey, sumMoneyWithGaps } from "../api-dto.js";
 import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
 import {
   buildRequest,
@@ -303,21 +303,24 @@ export class QbwcSession {
     const bills = this.pending.bill ?? [];
     // Aggregated from the bills this same session returned rather than from a
     // separate query: one source cannot disagree with itself, and two can.
-    const byVendor = new Map<string, number>();
-    for (const row of bills) {
-      const balance = row.balance;
-      if (typeof balance !== "number" || balance === 0) continue;
-      const vendor = typeof row.vendor_id === "string" ? row.vendor_id : "(unknown vendor)";
-      byVendor.set(vendor, (byVendor.get(vendor) ?? 0) + balance);
-    }
-    let total = 0;
-    for (const v of byVendor.values()) total += v;
+    //
+    // The rows counted here are exactly the rows `get_open_bills` returns — a
+    // non-zero balance, INCLUDING one that would not parse. The first cut
+    // skipped unparseable balances, so a bill the connector deliberately keeps
+    // visible was silently absent from both the total and the vendor count.
+    const open = bills.filter((row) => typeof row.balance !== "number" || row.balance !== 0);
+    const vendors = new Set(
+      open.map((row) => (typeof row.vendor_id === "string" ? row.vendor_id : "(unknown vendor)")),
+    );
+    const { total, unaccounted } = sumMoneyWithGaps(open);
 
     this.store.publish({
       completedAt: this.now(),
       rows: {
         ...this.pending,
-        ap_summary: [{ vendor_count: byVendor.size, total_balance: total }],
+        ap_summary: [
+          { vendor_count: vendors.size, total_balance: total, unaccounted_count: unaccounted },
+        ],
       },
     });
     this.pending = {};
@@ -461,8 +464,18 @@ export class QuickBooksDesktopConnector implements Connector {
         const rows = (snap.rows.bill ?? []).filter(isOpen);
         return sortByKey(sortByKey(rows, "bill_id"), "due_at");
       }
-      case "get_ap_summary":
-        return snap.rows.ap_summary ?? [{ vendor_count: 0, total_balance: 0 }];
+      case "get_ap_summary": {
+        // NOT `?? [{ total_balance: 0 }]`. A fabricated zero states "you owe
+        // nobody anything" for data this track does not have — the one thing
+        // the module docstring says must never happen. `publish` is public and
+        // exported, so nothing guarantees a publisher included this key; if it
+        // is absent, say so.
+        const rows = snap.rows.ap_summary;
+        if (!rows) {
+          throw this.blocked(op, "the last session published no payables summary");
+        }
+        return rows;
+      }
       default:
         throw this.blocked(op, "read is not served by the QuickBooks Desktop track");
     }

@@ -12,6 +12,7 @@
  * PURE: no I/O, no clock.
  */
 import { childrenNamed, escapeXml, parseXml, textAt, type XmlElement } from "./xml.js";
+import { roundCents } from "../api-dto.js";
 
 /**
  * qbXML spec version we request.
@@ -60,6 +61,24 @@ export class QbxmlStatusError extends Error {
   }
 }
 
+/**
+ * Total the money fields that make up a document's face value.
+ *
+ * `undefined` when NONE of them is present, so an absent amount stays
+ * distinguishable from a zero one — but a present field plus a missing sibling
+ * (an untaxed invoice has no `SalesTaxTotal`) totals what is there rather than
+ * collapsing to undefined.
+ */
+function sumFields(row: XmlElement, fields: readonly string[]): number | undefined {
+  let total: number | undefined;
+  for (const field of fields) {
+    const value = money(textAt(row, field));
+    if (value === undefined) continue;
+    total = (total ?? 0) + value;
+  }
+  return total === undefined ? undefined : roundCents(total);
+}
+
 /** Money as QuickBooks prints it in qbXML: a plain decimal string. */
 function money(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
@@ -97,7 +116,12 @@ const SHAPE = {
     idColumn: "invoice_id",
     partyColumn: "customer_id",
     refElement: "CustomerRef",
-    amountField: "Subtotal",
+    // ⚠ `Subtotal` is the PRE-TAX line total, not the document total. Reading
+    // it as `amount` understated a taxed invoice by the whole tax line, and —
+    // worse — disagreed with the other two tracks for the same invoice: QBO
+    // reports `TotalAmt` and an exported report's `Amount` column, both of
+    // which include tax. The document total is Subtotal + SalesTaxTotal.
+    amountFields: ["Subtotal", "SalesTaxTotal"],
     balanceField: "BalanceRemaining",
   },
   bill: {
@@ -106,7 +130,9 @@ const SHAPE = {
     idColumn: "bill_id",
     partyColumn: "vendor_id",
     refElement: "VendorRef",
-    amountField: "AmountDue",
+    // A bill's `AmountDue` IS the document total; QuickBooks carries vendor tax
+    // in the line items rather than a sibling total field.
+    amountFields: ["AmountDue"],
     balanceField: "OpenAmount",
   },
 } as const;
@@ -146,7 +172,7 @@ export function parseResponse(step: QbxmlStep, xml: string): Record<string, unkn
       issued_at: date(textAt(row, "TxnDate")),
       due_at: date(textAt(row, "DueDate")),
       [shape.partyColumn]: refName(row, shape.refElement),
-      amount: money(textAt(row, shape.amountField)),
+      amount: sumFields(row, shape.amountFields),
       balance: money(textAt(row, shape.balanceField)),
       status: undefined as string | undefined,
     };
