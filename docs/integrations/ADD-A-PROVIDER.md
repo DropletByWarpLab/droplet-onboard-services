@@ -12,6 +12,9 @@ The orchestrator service + route layer and the dashboard hub are **provider-agno
 
 Today all providers live in the `@droplet/erp-connector` package (`services/erp-connector/`). If you're adding an ERP/PMS-shaped provider, add it there behind the same `Connector` interface. A radically different category (non-database, API-based) may warrant its own sidecar package following the same contract — discuss in an ADR first (`droplet-architecture-guard`).
 
+> **Building a cloud connector — read [ADR-041](../ADR-041-cloud-connector-class.md) first.**
+> A provider whose system of record is a SaaS (Microsoft 365, Salesforce) is a **cloud connector**, a separate class with its own terms: outbound-only (the box registers no webhook — it polls, because it has no inbound path), enabled per-account by the owner rather than configured by an operator, every destination registered in [`allowed-egress.yaml`](../security/allowed-egress.yaml) with a declared `data_class`, tokens encrypted at rest and purged on disconnect, and synced data **persisted** on the box (unlike the read-through ERP tracks). The ADR also settles where the code goes: **in-process in the orchestrator, not the sidecar** — the sidecar exists to isolate a *native driver*, and an HTTPS API needs none. Sections 1–4 below describe the LAN/database shape and mostly do not apply; §5 (tools) and §6 onward do.
+
 > **Before writing a connector at all — can the export-drop track cover it?**
 > If the product can export its reports to a file, adding it is a **declarative profile**, not a provider: a header signature plus a column map, in code or in an operator's JSON. No connector, no driver, no vendor enrolment, and read-only by construction. See [`export-drop.md`](export-drop.md) §4. Sections 1–4 below are for a provider that needs a live connection to the system of record — reach for them when the practice needs data fresher than an export, or needs writes.
 
@@ -128,7 +131,7 @@ The moment the **orchestrator imports your connector package**, the build graph 
 - **`secretRef` pointer** — never a cleartext password in a row, log, or export.
 - **Audit `scope` is PHI-free** — ids/counts/tokens only; redact search terms.
 - **No `while True`** — schedule via `cron-runtime`; **no new `MATTER_*` env vars**; **no `any`**; **no** "poc"/"test"/"dev"/"prototype" naming in surfaces.
-- **On-box / LAN-only** — no egress from the connector.
+- **On-box** — a LAN connector adds **no egress at all**; a cloud connector egresses only to its registered `allowed-egress.yaml` destination, only once the owner connects that account (ADR-041).
 
 ---
 
