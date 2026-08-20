@@ -38,7 +38,7 @@ If you only read one thing: the [System map](#system-map) and
 ## System map
 
 The appliance is a **single Docker Compose stack** (`docker/docker-compose.yml`,
-25 services) fronted by one nginx `gateway`. The **orchestrator** is the brain —
+32 services) fronted by one nginx `gateway`. The **orchestrator** is the brain —
 every client request and every internal coordination path goes through it. There
 is deliberately **no separate API gateway service** in front of the orchestrator
 (ADR-009): the nginx `gateway` is only a TLS terminator + path router.
@@ -462,7 +462,7 @@ network. Host-published ports and host-network services are called out.
 
 ## docker/
 
-- **Compose:** `docker-compose.yml` (base, 25 services across all profiles) + `docker-compose.dev.yml`
+- **Compose:** `docker-compose.yml` (base, 32 services across all profiles) + `docker-compose.dev.yml`
   (local overrides) + `docker-compose.test.override.yml` (exposes orchestrator,
   disables auth, polling watcher for tests).
 - **Profiles:** `linux` (Frigate + voice-io + camera/audio), `display` (oled),
