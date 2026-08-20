@@ -103,6 +103,60 @@ export const QBO_PRODUCTION_BASE_URL = "https://quickbooks.api.intuit.com";
  */
 export const QBO_MINOR_VERSION = "75";
 
+/**
+ * The only hosts this connector will send a bearer token to.
+ *
+ * The access token is a credential to the customer's whole company file, and it
+ * travels in an `Authorization: Bearer` header on every request. `baseUrl` is
+ * operator configuration — it exists so a sandbox company can be pointed at
+ * Intuit's sandbox host without a code change — and before this it was accepted
+ * with no scheme and no host check at all. A misconfigured (or malicious)
+ * connection row could therefore ship the token in cleartext to any host on the
+ * internet.
+ *
+ * ADR-041 §3 requires every destination be registered and screened. This is the
+ * code-side half of that: the registry says which hosts are allowed, and this
+ * refuses to talk to anything else even if a row says otherwise. Belt and
+ * braces, because the failure mode is handing away a customer's books.
+ */
+export const QBO_ALLOWED_HOST_SUFFIX = ".intuit.com";
+
+/** Thrown when a connection names a destination this track will not dial. */
+export class UnsafeBaseUrlError extends Error {
+  readonly code = "UNSAFE_BASE_URL";
+  constructor(reason: string) {
+    super(`refusing to send a QuickBooks token there: ${reason}`);
+    this.name = "UnsafeBaseUrlError";
+  }
+}
+
+/**
+ * Validate an operator-supplied API base, or throw.
+ *
+ * HTTPS only — a bearer token over http is the token given away — and an Intuit
+ * host only. Rejects userinfo (`https://evil@quickbooks.api.intuit.com`), which
+ * some HTTP clients resolve to a different authority than a reader expects.
+ */
+export function assertSafeBaseUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new UnsafeBaseUrlError(`"${raw}" is not a URL`);
+  }
+  if (url.protocol !== "https:") {
+    throw new UnsafeBaseUrlError(`"${url.protocol}//" is not https`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new UnsafeBaseUrlError("the URL carries userinfo");
+  }
+  const host = url.hostname.toLowerCase();
+  if (host !== "intuit.com" && !host.endsWith(QBO_ALLOWED_HOST_SUFFIX)) {
+    throw new UnsafeBaseUrlError(`"${host}" is not an Intuit host`);
+  }
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+}
+
 /** The OAuth material for one company. Cleartext for the life of a call only —
  *  the caller resolves it from the encrypted store and never persists it here. */
 export interface QboTokens {
@@ -328,7 +382,10 @@ export class QuickBooksOnlineConnector implements Connector {
     this.persistTokens = deps.persistTokens;
     this.fetchImpl = deps.fetchImpl;
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.baseUrl = (config.baseUrl ?? QBO_PRODUCTION_BASE_URL).replace(/\/+$/, "");
+    // Validated at CONSTRUCTION, not at request time: a connection that
+    // names a destination we will not dial should fail to build, loudly,
+    // rather than look fine until the first read ships a token.
+    this.baseUrl = assertSafeBaseUrl(config.baseUrl ?? QBO_PRODUCTION_BASE_URL);
     this.budget =
       deps.budget ?? new CallBudget(config.callCeiling ?? DEFAULT_CALL_CEILING, this.now);
     this.reauthWarningMs =

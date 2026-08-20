@@ -21,6 +21,7 @@ import {
   type QboTokens,
 } from "../src/quickbooks/online-connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
+import { UnsafeBaseUrlError, assertSafeBaseUrl } from "../src/quickbooks/online-connector.js";
 import { CANONICAL_COLUMNS } from "../src/export-drop/profiles.js";
 
 const NOW = Date.UTC(2026, 7, 19, 12, 0, 0);
@@ -437,6 +438,55 @@ describe("ADR-041 connection state", () => {
     expect(allowed).toContain((await c.status()).state);
     await c.runRead("get_open_bills", {});
     expect(allowed).toContain((await c.status()).state);
+  });
+});
+
+describe("the bearer token only ever goes to Intuit", () => {
+  it("refuses a non-Intuit host at construction", () => {
+    // `baseUrl` is operator configuration and was accepted with no checks, so a
+    // misconfigured or malicious connection row shipped an account-level access
+    // token in an Authorization header to any host on the internet.
+    // Mutation: drop the host check → constructing succeeds → red.
+    expect(
+      () =>
+        new QuickBooksOnlineConnector({
+          realmId: "1",
+          credentialsSecretRef: "r",
+          baseUrl: "https://attacker.example",
+        }),
+    ).toThrow(UnsafeBaseUrlError);
+  });
+
+  it("refuses cleartext http even to Intuit", () => {
+    // A bearer token over http is the token given away.
+    // Mutation: drop the protocol check → red.
+    expect(() => assertSafeBaseUrl("http://quickbooks.api.intuit.com")).toThrow(/not https/);
+  });
+
+  it("refuses a URL carrying userinfo", () => {
+    // Some clients resolve https://evil@real-host to a different authority than
+    // a reader expects. Mutation: drop the userinfo check → red.
+    expect(() => assertSafeBaseUrl("https://evil@quickbooks.api.intuit.com")).toThrow(/userinfo/);
+  });
+
+  it("allows production and sandbox", () => {
+    // The reason baseUrl is configurable at all. Mutation: hardcode the
+    // production host → the sandbox case throws → red.
+    expect(assertSafeBaseUrl("https://quickbooks.api.intuit.com")).toBe(
+      "https://quickbooks.api.intuit.com",
+    );
+    expect(assertSafeBaseUrl("https://sandbox-quickbooks.api.intuit.com/")).toBe(
+      "https://sandbox-quickbooks.api.intuit.com",
+    );
+  });
+
+  it("is not fooled by a lookalike host", () => {
+    // Mutation: use `includes(".intuit.com")` instead of a suffix test → the
+    // first case passes → red.
+    expect(() => assertSafeBaseUrl("https://quickbooks.api.intuit.com.evil.test")).toThrow(
+      UnsafeBaseUrlError,
+    );
+    expect(() => assertSafeBaseUrl("https://notintuit.com")).toThrow(UnsafeBaseUrlError);
   });
 });
 
