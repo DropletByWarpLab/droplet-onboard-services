@@ -11,7 +11,11 @@ class HealthResponse(BaseModel):
     connected: bool
     switch_host: str
     driver: str
-    system_info: Optional[dict] = None
+    # WARP-2111: NO `system_info` field. /health is auth-exempt on a
+    # 0.0.0.0:8081 host-network bind, so echoing get_system_info() (switch
+    # model, firmware, MAC, hostname) leaked hardware inventory to any
+    # unauthenticated LAN client. The detail is served by the bearer-gated
+    # GET /system/info; /health is liveness + auth-config only.
     error: Optional[str] = None
     # Whether SERVICE_SECRET is set (presence ONLY — never the value). /health is
     # auth-exempt, so it can falsely read "ok" while every privileged route is

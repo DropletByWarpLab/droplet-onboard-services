@@ -664,7 +664,10 @@ class HealthResponse(BaseModel):
     status: str
     connected: bool
     router_host: str
-    board: Optional[dict] = None
+    # WARP-2111: NO `board` field. /health is auth-exempt on a 0.0.0.0:8080
+    # host-network bind, so echoing board_info() (model, CPU, kernel, hostname)
+    # leaked hardware inventory to any unauthenticated LAN client. Board detail
+    # is served by the bearer-gated GET /system/info; /health is liveness only.
     error: Optional[str] = None
     # WARP-826: the explicit deployment-topology posture
     # (PRIMARY_ROUTER | DOWNSTREAM_ROUTER | UNKNOWN), carried alongside `connected`
