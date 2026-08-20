@@ -62,6 +62,11 @@ import {
   setApWifi,
   getApRadioSummary,
 } from "../services/ap-onboard.service.js";
+// WARP-1984 — the appliance's own SSH toggle is Tier 3, so its write also
+// executes on the confirm path below and not in the POST handler. It is the
+// one operation on this dispatcher that touches the APPLIANCE rather than the
+// router; see the case for why it has to live here anyway.
+import { setSshAccess } from "../services/ssh-access.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -972,6 +977,42 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           // KAN-10 Tier-3 confirm for POST /network/restart.
           writeResult = await restartNetwork();
           break;
+        case "set_ssh_access": {
+          // WARP-1984 — the only case here that does NOT reconfigure the router.
+          // It belongs on this dispatcher regardless: POST /network/ssh mints a
+          // Tier-3 token like every other confirm-gated write, and the dashboard
+          // hands that token back to this one endpoint.
+          //
+          // Without this case the switch fell through to the default and the
+          // toggle answered "Unknown operation: set_ssh_access", so SSH could
+          // never be turned on from the dashboard. That is not a cosmetic gap:
+          // droplet-ssh-access-boot-reset stops sshd on EVERY boot by design, and
+          // this toggle is the only thing meant to bring it back — so a claimed
+          // box had no management shell at all and no remote way to open one.
+          //
+          // Distinct from `rotate_ai_token` / `revoke_ai_access`, which are
+          // deliberately caseless Tier-3 reservations rendered disabled in the
+          // UI. This one ships an enabled toggle and blast-radius copy, so the
+          // missing case was an omission rather than a reservation.
+          const sshEnabled = params?.enabled;
+          if (typeof sshEnabled !== "boolean") {
+            // The mint route rejects a non-boolean before a token exists, so this
+            // is unreachable in practice — but `setSshAccess(undefined)` would
+            // coerce to "off" and silently close the door the operator just asked
+            // to open. On a Tier-3 control, refuse rather than guess.
+            return res.status(400).json({
+              error: "Confirmed set_ssh_access carries no boolean `enabled`",
+              code: "TOKEN_PARAMS_INVALID",
+            });
+          }
+          await setSshAccess(sshEnabled);
+          // No routing-service Operation-Id to poll: the host applies this
+          // asynchronously (intent file → .path unit → root applier). The
+          // dashboard re-reads GET /network/ssh, which reports what the HOST
+          // actually did rather than what we asked for.
+          writeResult = { operationId: null };
+          break;
+        }
         case "sysupgrade":
           // KAN-8 ⚠️ BRICK RISK. Re-assert the PRIMARY_ROUTER posture at confirm
           // time — a posture change (or a single-box that only LOOKED primary at
