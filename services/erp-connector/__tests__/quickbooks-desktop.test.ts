@@ -53,21 +53,32 @@ const INVOICE_RS = `<?xml version="1.0"?><?qbxml version="13.0"?>
   </InvoiceQueryRs>
 </QBXMLMsgsRs></QBXML>`;
 
+// Three OPEN bills across TWO vendors, listed out of due-date order.
+//
+// Both properties are deliberate and were absent before. With two bills from
+// two vendors, `vendor_count` was pinned to the literal 2 by three different
+// wrong formulas (bills.length, vendors.size, even invoices.length), so the
+// mutation the aggregate test named could not turn it red. And the bills were
+// already in due-date order, so the ordering test could not tell a sorted
+// result from ingest order.
 const BILL_RS = `<?xml version="1.0"?><?qbxml version="13.0"?>
 <QBXML><QBXMLMsgsRs>
   <BillQueryRs requestID="2" statusCode="0" statusSeverity="Info">
     <BillRet>
-      <TxnID>B1</TxnID><RefNumber>BILL-77</RefNumber>
-      <TxnDate>2026-07-05</TxnDate><DueDate>2026-08-04</DueDate>
-      <VendorRef><ListID>90000001</ListID><FullName>Henry Schein</FullName></VendorRef>
-      <AmountDue>2000.00</AmountDue><OpenAmount>2000.00</OpenAmount>
-    </BillRet>
-    <BillRet>
       <TxnID>B2</TxnID><RefNumber>BILL-78</RefNumber>
       <TxnDate>2026-07-20</TxnDate><DueDate>2026-08-19</DueDate>
       <VendorRef><ListID>90000002</ListID><FullName>Patterson Dental</FullName></VendorRef>
-      <AmountDue>1000.00</AmountDue><OpenAmount>850.25</OpenAmount>
-    </BillRet>
+      <AmountDue>1000.00</AmountDue><OpenAmount>850.25</OpenAmount></BillRet>
+    <BillRet>
+      <TxnID>B1</TxnID><RefNumber>BILL-77</RefNumber>
+      <TxnDate>2026-07-05</TxnDate><DueDate>2026-08-04</DueDate>
+      <VendorRef><ListID>90000001</ListID><FullName>Henry Schein</FullName></VendorRef>
+      <AmountDue>2000.00</AmountDue><OpenAmount>2000.00</OpenAmount></BillRet>
+    <BillRet>
+      <TxnID>B3</TxnID><RefNumber>BILL-79</RefNumber>
+      <TxnDate>2026-07-21</TxnDate><DueDate>2026-08-20</DueDate>
+      <VendorRef><ListID>90000001</ListID><FullName>Henry Schein</FullName></VendorRef>
+      <AmountDue>300.00</AmountDue><OpenAmount>300.00</OpenAmount></BillRet>
   </BillQueryRs>
 </QBXMLMsgsRs></QBXML>`;
 
@@ -228,8 +239,12 @@ describe("qbXML", () => {
     // BILL-78 is the one that catches it: 1000.00 due, 850.25 open.
     // Mutation: read AmountDue as the balance → 1000 → red.
     const bills = parseResponse("bill", BILL_RS);
-    expect(bills[1].balance).toBe(850.25);
-    expect(bills[1].amount).toBe(1000);
+    // By identity, not index: the fixture order is deliberately not sorted, and
+    // an index-based assertion silently follows a fixture change to a different
+    // row rather than failing.
+    const partPaid = bills.find((b) => b.bill_id === "BILL-78")!;
+    expect(partPaid.balance).toBe(850.25);
+    expect(partPaid.amount).toBe(1000);
   });
 
   it("maps a response onto canonical rows", () => {
@@ -295,7 +310,7 @@ describe("the Web Connector session", () => {
     expect(s.receiveResponseXML(ticket, BILL_RS)).toBe(100);
     expect(store.current).not.toBeNull();
     expect(store.current!.rows.invoice).toHaveLength(2);
-    expect(store.current!.rows.bill).toHaveLength(2);
+    expect(store.current!.rows.bill).toHaveLength(3);
   });
 
   it("leaves the previous snapshot intact when a session dies halfway", () => {
@@ -305,7 +320,7 @@ describe("the Web Connector session", () => {
     const store = new QbdSnapshotStore();
     runSession(store, [INVOICE_RS, BILL_RS]);
     const good = store.current!;
-    expect(good.rows.bill).toHaveLength(2);
+    expect(good.rows.bill).toHaveLength(3);
 
     const s2 = new QbwcSession(CREDS, store, { now: () => NOW + 1000, newTicket: () => "T2" });
     const [t2] = s2.authenticate(CREDS.username, CREDS.password);
@@ -316,7 +331,7 @@ describe("the Web Connector session", () => {
     expect(s2.receiveResponseXML(t2, rs)).toBe(-1);
 
     expect(store.current).toBe(good);
-    expect(store.current!.rows.bill).toHaveLength(2);
+    expect(store.current!.rows.bill).toHaveLength(3);
   });
 
   it("aborts on unparseable XML rather than ingesting nothing", () => {
@@ -333,8 +348,17 @@ describe("the Web Connector session", () => {
     expect(store.current).toBe(good);
   });
 
-  it("refuses an oversized response before parsing it", () => {
-    // Mutation: parse first, check size after → a hostile response is parsed.
+  it("refuses an oversized response BEFORE parsing it", () => {
+    // The ordering is the property, and the previous version could not see it:
+    // it posted a VALID oversized document, so the ceiling message came back
+    // whether the size check ran before the parse or after it.
+    //
+    // This document is oversized AND malformed. If the size check runs first
+    // the error is the ceiling; if the parse runs first the error is a parse
+    // failure. Only one of those can be true.
+    //
+    // Mutation: move the size check below the parse → getLastError reports the
+    // unclosed element instead of the ceiling → red.
     const store = new QbdSnapshotStore();
     const s = new QbwcSession(CREDS, store, {
       now: () => NOW,
@@ -342,8 +366,9 @@ describe("the Web Connector session", () => {
       maxResponseBytes: 10,
     });
     const [t] = s.authenticate(CREDS.username, CREDS.password);
-    expect(s.receiveResponseXML(t, INVOICE_RS)).toBe(-1);
+    expect(s.receiveResponseXML(t, "<QBXML><unclosed>" + "x".repeat(200))).toBe(-1);
     expect(s.getLastError(t)).toMatch(/ceiling/);
+    expect(s.getLastError(t)).not.toMatch(/unclosed/);
   });
 
   it("an aborted session cannot resume and publish", () => {
@@ -401,8 +426,11 @@ describe("the Web Connector session", () => {
     // Mutation: count rows rather than distinct vendors → red.
     const store = new QbdSnapshotStore();
     runSession(store, [INVOICE_RS, BILL_RS]);
+    // 3 open bills, 2 distinct vendors: 2000 + 850.25 + 300.
+    // `bills.length` would give 3 and is now a DIFFERENT number, so the
+    // mutation named below can actually fail.
     expect(store.current!.rows.ap_summary).toEqual([
-      { vendor_count: 2, total_balance: 2850.25, unaccounted_count: 0 },
+      { vendor_count: 2, total_balance: 3150.25, unaccounted_count: 0 },
     ]);
   });
 
@@ -498,7 +526,8 @@ describe("QuickBooksDesktopConnector", () => {
     // Mutation: drop the sort → red.
     const { c } = connected();
     const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
-    expect(rows.map((r) => r.bill_id)).toEqual(["BILL-77", "BILL-78"]);
+    // The fixture lists BILL-78 first; due-date order puts BILL-77 first.
+    expect(rows.map((r) => r.bill_id)).toEqual(["BILL-77", "BILL-78", "BILL-79"]);
   });
 
   it("reports staleness without going unhealthy", async () => {
