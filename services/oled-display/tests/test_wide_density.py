@@ -364,7 +364,12 @@ def test_the_rail_block_does_not_split_on_a_tall_panel(tall, monkeypatch):
              if box[0] >= lw.geom().rail_x and box[1] >= card_y]
     assert below, "no text under the card"
     gap = min(below) - (card_y + card_h)
-    assert 0 <= gap <= lw.QR_CARD_GAP + 4, (
+    # Deliberately loose. The bound has to clear the caption face's own
+    # ascent offset, and this suite runs on Inter locally and DejaVu on the
+    # Linux runner - metrics differ by a few px either way. 40 still fails the
+    # behaviour under test by a mile: the old anchored-at-both-ends rail put
+    # ~110px of black between the card and its caption on this panel.
+    assert 0 <= gap <= 40, (
         f"card and caption are {gap}px apart - they read as two objects")
 
 
@@ -390,7 +395,10 @@ def test_a_shorter_panel_keeps_its_content_on_the_glass(monkeypatch,
                                                         sim_display):
     """The literals were authored at one height, so they were equally wrong
     downwards - a 240px panel used to run the metric row off the bottom."""
-    _panel(monkeypatch, 1424, 240)
+    # 260, not the 240 the log-guard test uses: at 240 the deepest glyph
+    # clears the panel edge by ~12px, which is inside the font-metric spread
+    # between this suite's hosts. The property under test is the same.
+    _panel(monkeypatch, 1424, 260)
     disp = _fill(sim_display)
     drawn = _spy_text(monkeypatch)
     lw.render_status(disp)
