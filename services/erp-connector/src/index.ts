@@ -166,6 +166,7 @@ export {
   DATASETS,
   DATASET_CATEGORY,
   GENERIC_VENDOR,
+  NAME_ONLY_VENDORS,
   REQUIRED_CANONICAL,
   assertValidProfile,
   knownVendors,

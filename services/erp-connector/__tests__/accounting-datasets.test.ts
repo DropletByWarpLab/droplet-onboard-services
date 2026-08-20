@@ -20,7 +20,7 @@ import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ExportDropConnector } from "../src/export-drop/connector.js";
+import { ExportDropConnector, exportProviders } from "../src/export-drop/connector.js";
 import { roundCents, sumMoney } from "../src/api-dto.js";
 import {
   ConnectorBlockedError,
@@ -31,6 +31,8 @@ import {
 import { EaglesoftApiConnector } from "../src/api-connector.js";
 import { READ_QUERIES } from "../src/read-queries.js";
 import {
+  BUILT_IN_PROFILES,
+  NAME_ONLY_VENDORS,
   GENERIC_VENDOR,
   CANONICAL_COLUMNS,
   COLUMN_KIND,
@@ -630,6 +632,139 @@ describe("a summary never hides money it could not read", () => {
     const rows = (await c.runRead("get_ap_summary", {})) as Record<string, unknown>[];
     expect(Object.keys(rows[0])).toContain("unaccounted_count");
     expect(rows[0].unaccounted_count).toBe(0);
+  });
+});
+
+// ── name-only vendors: connectable, deliberately unmapped ───────────────────
+
+describe("a vendor we ship no profile for", () => {
+  it("is STILL a connectable provider key", () => {
+    // The regression this exists to prevent. `knownVendors()` is built from
+    // BUILT_IN_PROFILES, so simply deleting the Dentrix profile would have made
+    // `isKnownErpProvider("dentrix-export")` false and destroyed the very
+    // discovery path an installer needs — a worse outcome than the guess.
+    //
+    // Mutation: drop NAME_ONLY_VENDORS from knownVendors() -> red.
+    expect(exportProviders()).toContain("dentrix-export");
+    expect(NAME_ONLY_VENDORS).toContain("dentrix");
+    expect(BUILT_IN_PROFILES.map((p) => p.vendor)).not.toContain("dentrix");
+  });
+
+  it("blocks with an actionable reason rather than claiming the data never exists", async () => {
+    // Mutation: remove dentrix from NAME_ONLY_VENDORS so it is simply unknown,
+    // or restore the capability-check-first ordering -> DatasetNotServedError.
+    const c = new ExportDropConnector(
+      { vendor: "dentrix", root },
+      { now: () => NOW, minRefreshMs: Number.POSITIVE_INFINITY },
+    );
+    const err = await c.connect().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect(err).not.toBeInstanceOf(DatasetNotServedError);
+    expect((err as Error).message).toMatch(/dentrix/);
+  });
+
+  it("reports an unrecognised file WITH its headers, which is the whole point", async () => {
+    // Shipping no profile is only defensible because this diagnostic exists: it
+    // is exactly what lets an operator author the real mapping on site, from
+    // the file in front of them, in minutes.
+    //
+    // Mutation: drop `headers` from the unrecognized diagnostic -> red.
+    await drop(
+      "dentrix-schedule.csv",
+      ["Appt ID,Appt Date,Provider,Status", "A-1,08/21/2026,DR1,Confirmed", ""].join("\n"),
+    );
+    const c = new ExportDropConnector(
+      { vendor: "dentrix", root },
+      { now: () => NOW, minRefreshMs: Number.POSITIVE_INFINITY },
+    );
+    await c.connect().catch(() => undefined);
+    const status = await c.status();
+    const unrecognized = status.diagnostics.filter((d) => d.reason === "unrecognized");
+    expect(unrecognized.length).toBeGreaterThan(0);
+    expect(unrecognized[0].headers).toEqual(["Appt ID", "Appt Date", "Provider", "Status"]);
+  });
+
+  it("works end to end the moment an operator supplies a profile", async () => {
+    // The intended path. Nothing about being name-only is a dead end.
+    // Mutation: make profilesForVendor ignore operator overrides -> red.
+    await drop(
+      "guarantors.csv",
+      ["Guarantor,Balance Due", "G-1,\"1,240.50\"", "G-2,(300.00)", ""].join("\n"),
+    );
+    const c = new ExportDropConnector(
+      { vendor: "dentrix", root },
+      {
+        now: () => NOW,
+        minRefreshMs: Number.POSITIVE_INFINITY,
+        profiles: [
+          {
+            vendor: "dentrix",
+            label: "Dentrix — Maple Street Dental",
+            verified: true,
+            datasets: [
+              {
+                dataset: "account",
+                required: ["Guarantor", "Balance Due"],
+                columns: { account_id: "Guarantor", balance: "Balance Due" },
+              },
+            ],
+          },
+        ],
+      },
+    );
+    await c.connect();
+    expect(await c.runRead("get_ar_summary", {})).toEqual([
+      { account_count: 2, total_balance: 940.5 },
+    ]);
+    // An operator profile is confirmation; it is not "unverified".
+    expect((await c.status()).usingUnverifiedProfiles).toBe(false);
+  });
+});
+
+// ── the invariant that made the Dentrix guess dangerous ─────────────────────
+
+describe("no built-in may map a timestamp column to a date-only-looking header", () => {
+  it("holds for every shipped profile", () => {
+    // THE structural guard. The withdrawn Dentrix profile mapped the canonical
+    // TIMESTAMP column `appt_time` to a header named "Appt Date" — the only
+    // built-in whose column KIND disagreed with its header NAME.
+    //
+    // That combination is uniquely dangerous rather than merely untidy:
+    // `parseExportTimestamp` accepts a date-only cell and returns midnight, and
+    // the schedule read is a [from, to) window filter — so a real export
+    // printing a date-only column under that header is CLAIMED, parses
+    // cleanly, and puts every appointment of the day at 00:00 in arbitrary
+    // order. Wrong rows, not a failed match.
+    //
+    // Scoped to columns whose TIME OF DAY is load-bearing — today just
+    // `appt_time`, the one column a read filters a [from, to) window on.
+    // `issued_at` and `due_at` are deliberately NOT included: an invoice due
+    // date has no time of day, midnight is the right answer for it, and nothing
+    // filters a window over it. Flagging those would be noise that teaches
+    // people to suppress the check.
+    //
+    // The heuristic within that scope is narrow: the header may not end in
+    // "date" unless it also says "time" ("AptDateTime" passes, "Appt Date"
+    // does not). It cannot catch every bad mapping — only a real export can —
+    // but it catches exactly the shape that shipped.
+    //
+    // Mutation: re-add a profile mapping appt_time to "Appt Date" -> red.
+    // Canonical columns a read filters a TIME WINDOW on. Extend this when a
+    // new read does the same; a date-only cell is safe everywhere else.
+    const WINDOW_FILTERED = new Set(["appt_time"]);
+    const offenders: string[] = [];
+    for (const profile of BUILT_IN_PROFILES) {
+      for (const ds of profile.datasets) {
+        for (const [canonical, header] of Object.entries(ds.columns)) {
+          if (!WINDOW_FILTERED.has(canonical)) continue;
+          const h = header.toLowerCase();
+          if (/date$/.test(h.trim()) && !h.includes("time")) {
+            offenders.push(`${profile.vendor}.${ds.dataset}.${canonical} -> "${header}"`);
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
