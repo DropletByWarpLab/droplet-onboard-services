@@ -91,6 +91,57 @@ export interface IntrospectionResult {
 }
 
 /**
+ * Thrown when a caller asks a track for a dataset that track does not serve.
+ *
+ * WARP-2107. Distinct from `ConnectorBlockedError` on purpose, and the
+ * distinction is the point: blocked means "this connection is not working and
+ * here is what would fix it"; NOT_SERVED means "this connection is working
+ * perfectly and will never have that data". A QuickBooks connection has no
+ * appointments and a Dentrix connection has no vendor bills — neither is a
+ * fault, and neither is fixed by anything an installer can do.
+ *
+ * The alternative — returning an empty array — was rejected explicitly. `[]`
+ * from `get_open_bills` reads as "you owe nobody anything", which is a
+ * confident false statement about money, and no caller can tell it apart from
+ * a genuinely empty payables ledger.
+ */
+export class DatasetNotServedError extends Error {
+  readonly code = "DATASET_NOT_SERVED";
+  constructor(
+    readonly provider: string,
+    readonly query: string,
+    readonly missing: readonly string[],
+  ) {
+    super(
+      `"${query}" needs ${missing.map((d) => `"${d}"`).join(", ")}, ` +
+        `which the "${provider}" track does not serve`,
+    );
+    this.name = "DatasetNotServedError";
+  }
+}
+
+/**
+ * Refuse a read whose datasets this track has not declared.
+ *
+ * Called by every connector at the top of `runRead`, after the registry lookup
+ * and before any I/O, so an unserved read costs nothing and cannot half-run.
+ * Placing it here rather than in each connector keeps one definition of what
+ * "serves" means — three copies of this check would drift the moment a track
+ * grew a dataset.
+ */
+export function assertDatasetsServed(
+  provider: string,
+  serves: readonly string[],
+  queryName: string,
+  dependsOn: readonly string[],
+): void {
+  const missing = dependsOn.filter((d) => !serves.includes(d));
+  if (missing.length > 0) {
+    throw new DatasetNotServedError(provider, queryName, missing);
+  }
+}
+
+/**
  * The provider abstraction (brief §4.4, §6). Keeping this API-shaped means a
  * future "Eaglesoft-via-official-API" or an OpenDental/MySQL provider can drop
  * in behind the same interface. Every method that touches the database is
@@ -98,6 +149,20 @@ export interface IntrospectionResult {
  */
 export interface Connector {
   readonly provider: string;
+  /**
+   * The logical datasets this track can serve (WARP-2107).
+   *
+   * Declared rather than inferred. Before this existed, "can this track answer
+   * that?" was answered by attempting the read and seeing what fell out —
+   * a schema-resolution failure on the SQL track, a `rowsFor` miss on the
+   * export track — which produced three different errors for one question and
+   * made a genuinely-absent dataset indistinguishable from a broken one.
+   *
+   * A track whose datasets depend on runtime configuration (export-drop, whose
+   * datasets are whatever the practice actually exported) computes this; the
+   * fixed-schema tracks hardcode it.
+   */
+  readonly servesDatasets: readonly string[];
   /** Open the pooled read connection (brief §7.3). */
   connect(): Promise<void>;
   close(): Promise<void>;
@@ -141,8 +206,20 @@ export interface EaglesoftConnectorDeps {
  * deployment without the (license-governed, operator-supplied) SAP client
  * degrades to ERP_NOT_CONNECTED rather than pretending.
  */
+/**
+ * The datasets a practice-management system's own schema carries.
+ *
+ * Shared by both Eaglesoft tracks because they read the SAME product by two
+ * transports — if one grew a dataset the other did not, that would be a bug in
+ * one of them, not a capability difference.
+ */
+export const PRACTICE_DATASETS: readonly string[] = ["appointment", "patient", "account"];
+
 export class EaglesoftConnector implements Connector {
   readonly provider = "eaglesoft";
+  /** Eaglesoft's schema is dental practice management; it carries no
+   *  accounts-payable ledger, so the accounting reads are refused up front. */
+  readonly servesDatasets = PRACTICE_DATASETS;
   private schema: IntrospectionResult | null = null;
   private map: SchemaMap | null = null;
   private readonly bridge: SqlBridgeClient | null;
@@ -289,6 +366,9 @@ export class EaglesoftConnector implements Connector {
     // Validate the name against the shared registry FIRST, so an unknown query
     // is an UnknownReadQueryError regardless of connection state.
     const query = getReadQuery(name);
+    // Then the capability check, before any I/O: asking this track for a bill
+    // is not a connection fault and must not be reported as one.
+    assertDatasetsServed(this.provider, this.servesDatasets, name, query.dependsOnTables);
     const bridge = this.requireBridge("runRead");
     if (!this.map) {
       throw new ConnectorBlockedError("runRead (introspection required first)", SQL_TRACK_REMEDIATION);

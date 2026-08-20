@@ -85,6 +85,9 @@ export {
 export {
   EaglesoftConnector,
   ConnectorBlockedError,
+  DatasetNotServedError,
+  PRACTICE_DATASETS,
+  assertDatasetsServed,
   SQL_TRACK_REMEDIATION,
   fingerprintTables,
   type Connector,
@@ -159,7 +162,9 @@ export {
 export {
   BUILT_IN_PROFILES,
   CANONICAL_COLUMNS,
+  COLUMN_KIND,
   DATASETS,
+  DATASET_CATEGORY,
   GENERIC_VENDOR,
   REQUIRED_CANONICAL,
   assertValidProfile,

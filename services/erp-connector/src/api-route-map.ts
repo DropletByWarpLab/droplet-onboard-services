@@ -18,6 +18,7 @@
  * registries so this map can never silently drift out of sync with them.
  */
 import { READ_QUERIES } from "./read-queries.js";
+import { PRACTICE_DATASETS } from "./connector.js";
 import { WRITE_COMMANDS } from "./write-commands.js";
 
 export type HttpVerb = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -95,11 +96,26 @@ export const KNOWN_ROUTE_SKELETON: EaglesoftApiRouteMap = {
   },
 };
 
-/** The op names that MUST have a route slot — derived from the shared registries
- *  so the skeleton cannot drift from the read/write contracts. */
+/**
+ * The op names that MUST have a route slot — derived from the shared registries
+ * so the skeleton cannot drift from the read/write contracts.
+ *
+ * WARP-2107 scoped the read half to the datasets THIS track serves. The
+ * registry is shared across every provider, so once it grew accounting reads
+ * (`get_open_bills` and friends) "every registered read" stopped meaning
+ * "every read Patterson could answer" — Eaglesoft has no accounts-payable
+ * ledger, and demanding a Patterson route slot for one would be demanding a
+ * route that cannot exist.
+ *
+ * The filter is on the same declared capability the connector enforces at
+ * runtime (`PRACTICE_DATASETS`), so the skeleton and the connector cannot
+ * disagree about what this track is for.
+ */
 export function requiredRouteOps(): { reads: readonly string[]; writes: readonly string[] } {
   return {
-    reads: READ_QUERIES.map((q) => q.name),
+    reads: READ_QUERIES.filter((q) =>
+      q.dependsOnTables.every((t) => PRACTICE_DATASETS.includes(t)),
+    ).map((q) => q.name),
     writes: WRITE_COMMANDS.map((c) => c.name),
   };
 }

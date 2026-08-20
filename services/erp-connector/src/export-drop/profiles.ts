@@ -24,10 +24,45 @@
  * PURE: no I/O.
  */
 
-/** The logical datasets this track can serve. These are the tables the read
- *  registry's queries depend on (`ReadQuery.dependsOnTables`). */
-export const DATASETS = ["appointment", "patient", "account"] as const;
+/**
+ * The logical datasets this track can serve. These are the tables the read
+ * registry's queries depend on (`ReadQuery.dependsOnTables`).
+ *
+ * WARP-2107 widened this from the original dental-only trio to cover
+ * accounting. The vocabulary is deliberately ONE list rather than a
+ * per-category one: a dataset name is the join between a profile, a read
+ * query's `dependsOnTables`, and a connector's declared capability, and
+ * splitting it would mean three places to keep in agreement instead of one.
+ */
+export const DATASETS = [
+  // practice-management (WARP-1964)
+  "appointment",
+  "patient",
+  "account",
+  // accounting (WARP-2107)
+  "invoice",
+  "bill",
+  "ap_summary",
+] as const;
 export type DatasetName = (typeof DATASETS)[number];
+
+/**
+ * What a dataset is *about*.
+ *
+ * This is descriptive, not a permission: a vendor profile may legitimately
+ * span both (a practice-management system that also carries receivables
+ * already does — `account` is a practice profile's accounting-shaped dataset).
+ * It exists so a caller can say "this connection has no accounting data"
+ * without hardcoding a name list, and so the dashboard can group them.
+ */
+export const DATASET_CATEGORY: Readonly<Record<DatasetName, "practice" | "accounting">> = {
+  appointment: "practice",
+  patient: "practice",
+  account: "accounting",
+  invoice: "accounting",
+  bill: "accounting",
+  ap_summary: "accounting",
+};
 
 /**
  * The canonical column names per dataset — the SELECT identifiers the SQL track
@@ -39,6 +74,14 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
   appointment: ["appt_id", "appt_time", "provider_id", "operatory_id", "status", "patient_id"],
   patient: ["patient_id", "first_name", "last_name"],
   account: ["account_id", "balance"],
+  // Money OWED TO the business. `balance` is what remains unpaid, which is not
+  // the same as `amount` — an invoice part-paid still has its original amount,
+  // and summing amounts instead of balances overstates receivables.
+  invoice: ["invoice_id", "issued_at", "due_at", "customer_id", "amount", "balance", "status"],
+  // Money OWED BY the business — the half WARP-1991 records as having no data
+  // source anywhere in the product.
+  bill: ["bill_id", "issued_at", "due_at", "vendor_id", "amount", "balance", "status"],
+  ap_summary: ["vendor_id", "balance"],
 };
 
 /**
@@ -47,12 +90,74 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
  * because the patient read is a name prefix search. A profile missing one of
  * these would produce a dataset that parses and then answers every query
  * wrongly, so it is rejected at registration instead.
+ *
+ * For the accounting datasets the required column is the one the aggregate is
+ * computed over. A `bill` dataset without `balance` would sum to zero and
+ * report it as fact — the same class of confidently-wrong answer, in the one
+ * domain where nobody would notice it was wrong.
  */
 export const REQUIRED_CANONICAL: Readonly<Record<DatasetName, readonly string[]>> = {
   appointment: ["appt_id", "appt_time"],
   patient: ["patient_id", "last_name"],
   account: ["balance"],
+  invoice: ["invoice_id", "balance"],
+  bill: ["bill_id", "balance"],
+  ap_summary: ["balance"],
 };
+
+/**
+ * How a canonical column's cell is parsed out of an exported file.
+ *
+ * Declared here rather than branched on by name in the scanner, which is what
+ * `projectRow` did while there were exactly two special cases (`appt_time`,
+ * `balance`). With money and dates on four datasets that branch becomes a list
+ * of names in a different file from the list of columns — so the kind travels
+ * WITH the column, and a new canonical column cannot be added without saying
+ * how to read it.
+ *
+ * Every canonical column must appear here; `assertColumnKindsComplete` proves
+ * it at module load, so a missing entry is a startup failure rather than a
+ * column that silently parses as text (a money column read as text would
+ * serialize an amount as the string "1,234.56" and break every aggregate).
+ */
+export const COLUMN_KIND: Readonly<Record<string, "text" | "money" | "timestamp">> = {
+  // practice
+  appt_id: "text",
+  appt_time: "timestamp",
+  provider_id: "text",
+  operatory_id: "text",
+  status: "text",
+  patient_id: "text",
+  first_name: "text",
+  last_name: "text",
+  account_id: "text",
+  balance: "money",
+  // accounting
+  invoice_id: "text",
+  bill_id: "text",
+  issued_at: "timestamp",
+  due_at: "timestamp",
+  customer_id: "text",
+  vendor_id: "text",
+  amount: "money",
+};
+
+/** Fail at module load if a canonical column has no declared parse kind. */
+function assertColumnKindsComplete(): void {
+  const missing: string[] = [];
+  for (const dataset of DATASETS) {
+    for (const column of CANONICAL_COLUMNS[dataset]) {
+      if (!(column in COLUMN_KIND)) missing.push(`${dataset}.${column}`);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `COLUMN_KIND is missing an entry for: ${missing.join(", ")} — ` +
+        `every canonical column must declare how its cell is parsed`,
+    );
+  }
+}
+assertColumnKindsComplete();
 
 /** One dataset's mapping within a vendor profile. */
 export interface DatasetProfile {
@@ -230,6 +335,68 @@ export const BUILT_IN_PROFILES: readonly ExportProfile[] = [
         dataset: "account",
         required: ["Guarantor ID", "Balance"],
         columns: { account_id: "Guarantor ID", balance: "Balance" },
+      },
+    ],
+  },
+  {
+    // WARP-2107 — the first ACCOUNTING vendor on this track, and the first
+    // profile whose datasets are not dental. Shapes are taken from the columns
+    // QuickBooks prints in its own report UI; Desktop and Online emit the same
+    // report names and broadly the same headers, so one profile covers both
+    // products, which is what makes this the cheapest QuickBooks integration
+    // available (no SDK, no OAuth, no meter, no vendor approval).
+    //
+    // Report → dataset mapping this assumes the practice exports:
+    //   "Open Invoices"        → invoice
+    //   "Unpaid Bills Detail"  → bill
+    //   "A/P Aging Summary"    → ap_summary
+    //
+    // The `required` lists carry DISCRIMINATORS beyond the strictly-required
+    // canonical columns, because the three reports overlap heavily. Open
+    // Invoices and Unpaid Bills Detail both print `Num` + `Open Balance` and
+    // differ only by `Customer` vs `Vendor`; A/P Aging Summary is separated by
+    // `Current`, its first ageing bucket. Without those, two profiles would
+    // claim one file and the matcher would (correctly) refuse it as ambiguous
+    // rather than guess — a refusal is safe, but a needless one wastes a site
+    // visit.
+    //
+    // `status` is deliberately UNMAPPED on both: QuickBooks' open-item reports
+    // carry a `Transaction Type` column whose value is the document kind
+    // ("Invoice", "Bill"), not a payment status. Mapping it would put a
+    // confident wrong value in a field callers read as state — and an unmapped
+    // canonical column is present-and-undefined, which is honest.
+    vendor: "quickbooks",
+    label: "QuickBooks (Intuit) — Desktop or Online",
+    verified: false,
+    datasets: [
+      {
+        dataset: "invoice",
+        required: ["Num", "Open Balance", "Customer"],
+        columns: {
+          invoice_id: "Num",
+          issued_at: "Date",
+          due_at: "Due Date",
+          customer_id: "Customer",
+          amount: "Amount",
+          balance: "Open Balance",
+        },
+      },
+      {
+        dataset: "bill",
+        required: ["Num", "Open Balance", "Vendor"],
+        columns: {
+          bill_id: "Num",
+          issued_at: "Date",
+          due_at: "Due Date",
+          vendor_id: "Vendor",
+          amount: "Amount",
+          balance: "Open Balance",
+        },
+      },
+      {
+        dataset: "ap_summary",
+        required: ["Vendor", "Total", "Current"],
+        columns: { vendor_id: "Vendor", balance: "Total" },
       },
     ],
   },

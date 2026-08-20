@@ -32,6 +32,7 @@ import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.
 import { decodeExportBytes, DelimitedLimitError, parseDelimited } from "./csv.js";
 import {
   CANONICAL_COLUMNS,
+  COLUMN_KIND,
   matchDataset,
   normalizeHeader,
   type DatasetName,
@@ -314,6 +315,28 @@ const NATURAL_KEY: Readonly<Record<DatasetName, string>> = {
   appointment: "appt_id",
   patient: "patient_id",
   account: "account_id",
+  // WARP-2107 — accounting. `ap_summary` keys on the vendor because it is
+  // already one aggregated row per vendor; re-exporting it must replace the
+  // vendor's row, not accumulate a second one and double its balance.
+  invoice: "invoice_id",
+  bill: "bill_id",
+  ap_summary: "vendor_id",
+};
+
+/**
+ * The timestamp column a row cannot be USED without, per dataset.
+ *
+ * Only `appointment` has one: the schedule read is a time-window filter, so an
+ * appointment whose time will not parse cannot be placed on a day and is
+ * counted as unplaced rather than silently dropped into the wrong window.
+ *
+ * The accounting datasets deliberately have none. A bill whose `due_at` cell is
+ * blank or unparseable is still a real bill with a real balance, and every
+ * accounting read here aggregates or lists by balance — refusing the row would
+ * understate what the business owes, which is the more dangerous error.
+ */
+const PLACEMENT_COLUMN: Readonly<Partial<Record<DatasetName, string>>> = {
+  appointment: "appt_time",
 };
 
 /**
@@ -340,22 +363,33 @@ function projectRow(
     const idx = header === undefined ? undefined : headerIndex.get(normalizeHeader(header));
     const raw = idx === undefined ? undefined : record[idx];
 
-    if (canonical === "appt_time") {
-      const iso = parseExportTimestamp(raw);
-      // Only a mapped-but-unparseable cell counts as unplaced. `appt_time` is
-      // a required mapping, so in practice this is always the parse failing.
-      if (iso === undefined && header !== undefined) placed = false;
-      row[canonical] = iso;
-      continue;
+    // WARP-2107: the parse kind travels with the column (COLUMN_KIND) instead
+    // of being a list of special-cased names here. With money and dates now on
+    // four datasets, a name-branch in this file would be a second list to keep
+    // in step with the column list in profiles.ts — and the failure mode of
+    // them disagreeing is an amount silently read as text, which serializes as
+    // "1,234.56" and makes every aggregate over it wrong.
+    switch (COLUMN_KIND[canonical]) {
+      case "timestamp": {
+        const iso = parseExportTimestamp(raw);
+        // Only a mapped-but-unparseable cell counts as unplaced. `appt_time` is
+        // a required mapping, so in practice this is always the parse failing.
+        if (iso === undefined && header !== undefined && canonical === PLACEMENT_COLUMN[dataset]) {
+          placed = false;
+        }
+        row[canonical] = iso;
+        break;
+      }
+      case "money":
+        row[canonical] = parseMoney(raw);
+        break;
+      default:
+        row[canonical] = normalizeText(raw);
+        break;
     }
-    if (canonical === "balance") {
-      row[canonical] = parseMoney(raw);
-      continue;
-    }
-    row[canonical] = normalizeText(raw);
   }
 
-  return { row, placed: dataset === "appointment" ? placed : true };
+  return { row, placed };
 }
 
 /**
