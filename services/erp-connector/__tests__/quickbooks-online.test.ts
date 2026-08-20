@@ -245,12 +245,22 @@ describe("failure states are distinguishable", () => {
   });
 
   it("leaks no token material into any error", async () => {
-    // Errors travel into the chat transcript via error.details. Mutation: put
-    // the request URL or an Authorization header into a message → red.
+    // Errors travel into the chat transcript via error.details.
+    //
+    // The tripwires are the token strings AND the request URL. Naming the URL
+    // as a mutation was previously wrong: the token rides in a header, not the
+    // query, so a leaked URL could never trip a "SECRET"/"Bearer" check and
+    // that half of the claim could not fail. The realm id is customer-
+    // identifying and belongs in neither.
+    //
+    // Mutation: interpolate the request URL into the blocked message → red.
+    // Mutation: interpolate the access token → red.
     const { c } = qbo({ status: 500, pages: [{}] });
     const err = (await c.runRead("get_open_bills", {}).catch((e: unknown) => e)) as Error;
     expect(err.message).not.toContain("SECRET");
-    expect(JSON.stringify(err.message)).not.toContain("Bearer");
+    expect(err.message).not.toContain("Bearer");
+    expect(err.message).not.toContain("9130350");
+    expect(err.message).not.toContain("quickbooks.api.intuit.com");
   });
 });
 
