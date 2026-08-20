@@ -9,9 +9,25 @@
 
 ## 1. What an integration is
 
-An **integration** connects Droplet to an external **system of record** on the customer's own network — a dental practice-management system (Eaglesoft), an accounting package (QuickBooks), another ERP — so the household/office can read and (carefully) act on that system's data through the Droplet dashboard and the local assistant, **without anything leaving the premises**.
+An **integration** connects Droplet to an external **system of record** — a dental practice-management system (Eaglesoft), an accounting package (QuickBooks), another ERP, or a SaaS the business already lives in (Microsoft 365, Salesforce) — so the household/office can read and (carefully) act on that system's data through the Droplet dashboard and the local assistant.
 
-This is a first-class fit for Droplet's founding thesis (`shared_brain/FOUNDATION.md`): the local AI and data **see and manage** the network but are **never exposed** to it. An integration reads over the **LAN only**, runs **on the box**, is **screened and audited**, and defaults to **read-only**. No cloud, no vendor SaaS relay, no data egress.
+This is a first-class fit for Droplet's founding thesis (`shared_brain/FOUNDATION.md`): the local AI and data **see and manage** the network but are **never exposed** to it. Every integration runs **on the box**, is **screened and audited**, and defaults to **read-only**.
+
+### Two connector classes — know which one you are building
+
+|  | **LAN connectors** | **Cloud connectors** (ADR-041) |
+|---|---|---|
+| System of record | On the customer's own network | A SaaS the customer already pays for |
+| Network | **LAN only. No egress. Nothing leaves the premises.** | Outbound HTTPS only, to a destination registered in [`allowed-egress.yaml`](../security/allowed-egress.yaml) |
+| Enabled by | Operator configuring the connection | **The owner connecting that specific account** — ships off, no default credentials |
+| Data | Read-through; nothing persisted | **Persisted on the box** — the local copy is the point |
+| Examples | `eaglesoft`, `eaglesoft-api`, `<vendor>-export` | `m365`, `salesforce` |
+
+**The LAN-only guarantee is absolute for LAN connectors and always will be** — for a system sitting one switch-port away there is no reason for a packet to leave the building, and PHI never does.
+
+**Cloud connectors are the deliberate, bounded exception**, decided in [ADR-041](../ADR-041-cloud-connector-class.md). They exist because most small businesses keep their mail, calendar, documents and pipeline in someone else's cloud, and a Droplet that cannot see any of it cannot answer the questions those businesses actually ask. The terms are fixed: outbound-only (the box opens no port and registers no webhook — it polls), owner-enabled per connection, every destination in the default-deny egress registry with its `data_class` declared, tokens encrypted at rest and purged on disconnect, and delegated per-user authorization so **the box can never read what the signed-in user cannot**. Read the ADR before building one.
+
+The honest one-line version, which the UI should use too: *nothing leaves the box unless the owner turns on a specific connection — and everything that does is registered, screened and audited.*
 
 Integrations are a **framework**, not a one-off. Eaglesoft is provider #1 behind a generic abstraction; other providers slot in behind the same interface, the same dashboard hub, the same safety pipeline (see [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md)).
 
@@ -54,7 +70,7 @@ Rules baked into this shape:
 - **The dashboard talks to the orchestrator, never to the external system directly.**
 - **Tool dispatch lives in the orchestrator** (`CLAUDE.md` — "LLM tool calling"). The assistant reaches an integration **only** through named `tools-core/handlers/erp/*` commands — it **never emits SQL**.
 - **The connector sidecar owns the driver.** The provider-specific dependency (e.g. the SQL Anywhere client) is isolated in the sidecar so the orchestrator stays language-agnostic behind the sidecar's internal REST contract.
-- **Everything stays on the LAN.** No egress from the connector; PHI never leaves the box.
+- **For a LAN connector, everything stays on the LAN.** No egress from the connector; PHI never leaves the box. (A **cloud connector** dials out instead — outbound only, to a registered destination, once the owner connects that account. The diagram above is the LAN shape; see [ADR-041](../ADR-041-cloud-connector-class.md).)
 
 ---
 
@@ -134,7 +150,7 @@ Reads are safe; writing back into a live system of record is the sharp edge. Eve
 7. **Everything is audited.** Every read and every write transition writes an append-only `ErpAuditLog` row with a **PHI-free `scope`** (internal ids, counts, action — never names, DOB, or notes; a patient-search term is recorded only as its length).
 8. **Schema-drift fails safe.** The discovered schema is fingerprinted (`schemaHash`). When an upgrade changes it, the connection goes **`DRIFT_LOCKED`**: writes freeze, reads degrade to still-matching fields, and the dashboard shows a "re-check" state. Droplet refuses to act against a schema it can no longer prove.
 9. **Kill-switch.** A per-practice and global write kill-switch instantly returns the integration to read-only. Default off.
-10. **On-box, LAN-only, encrypted.** No egress; PHI cache + secrets encrypted at rest; the external link uses TLS where the server supports it. Stated in the UI as a **capability**, not a policy promise.
+10. **On-box and encrypted; LAN-only for a LAN connector.** PHI cache + secrets encrypted at rest; the external link uses TLS where the server supports it. A LAN connector adds **no egress at all**. A **cloud connector** (ADR-041) egresses only to its registered destination, only after the owner connects that account, and purges its tokens on disconnect. Stated in the UI as a **capability**, not a policy promise — and a cloud connection must say plainly, at connect time, what will be read and that it will be copied onto the box.
 
 Every error the dashboard renders is a typed `ErpError` (`erp-error.ts`) mapped to an HTTP status — e.g. `ERP_NOT_CONNECTED` → 503, `WRITE_NOT_ENABLED` / `INVALID_STATE` → 409, `FORBIDDEN` → 403 — so the UI can branch (render a "connect" empty state vs a hard-error banner) without ever seeing a raw driver error.
 
