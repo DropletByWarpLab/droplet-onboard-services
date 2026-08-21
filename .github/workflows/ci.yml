@@ -157,6 +157,9 @@ jobs:
               - "services/erp-connector/**"
             ai-gateway:
               - "services/ai-gateway/**"
+            # WARP-2131: the vendored model-catalog sidecar.
+            inference-manager:
+              - "services/inference-manager/**"
               - "proto/**"
             routing:
               - "services/routing/**"
@@ -207,7 +210,8 @@ jobs:
           ALL_PYTHON: >-
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
-            "voice-io","device-identity-svc","erp-sql-bridge"]
+            "voice-io","device-identity-svc","erp-sql-bridge",
+            "inference-manager"]
           ALL_STORAGE: '["storage"]'
         run: |
           set -eu
@@ -247,7 +251,9 @@ jobs:
                then {sysdeps: "libtss2-dev pkg-config", reqs: "requirements.txt",
                      extra_pip: "pytest", needs_pythonpath: "1"} else {} end)
             + (if . == "erp-sql-bridge"
-               then {sysdeps: "unixodbc"} else {} end)]' \
+               then {sysdeps: "unixodbc"} else {} end)
+            + (if . == "inference-manager"
+               then {reqs: "requirements-dev.lock"} else {} end)]' \
             <<<"$python")
           {
             echo "node-suites=$node"
