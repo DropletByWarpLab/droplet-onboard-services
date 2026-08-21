@@ -24,19 +24,38 @@ function jsonResp(body: unknown, ok = true, status?: number): Response {
   } as unknown as Response;
 }
 
-/** A catalog entry as the sidecar reports it — every field present. */
+/**
+ * A catalog entry as the sidecar reports it, every field populated.
+ *
+ * WARP-2129 — every value here is now one the sidecar can actually emit.
+ * It previously carried `class: "flagship"` and `capabilities: ["chat", …]`,
+ * neither of which is producible: `ManifestEntry.cls` is
+ * `Literal["fast","balanced","smart"]`, and `chat` is a ROLE in the manifest
+ * vocabulary, never a capability. A fixture is the closest thing this side of
+ * the seam has to a spec for that payload, so a fabricated value here teaches
+ * the wrong vocabulary to everything written against it. These values mirror
+ * the real `gpt-oss:20b` entry in droplet-local-LLM
+ * `models/model-manifest.json`.
+ *
+ * `pull_tag` was a fiction too, and a larger one: `/models/eligible` never
+ * emitted the key at all, so the comment above this fixture described a
+ * payload that had never existed. Fixed sidecar-side in droplet-local-LLM #53
+ * — the field is real now. The `name` !== `pull_tag` divergence it exists to
+ * carry is exercised at the route level in `models.routes.test.ts`
+ * (`divergentCatalog`), not here.
+ */
 const FULL_ENTRY = {
   name: "gpt-oss:20b",
   pull_tag: "gpt-oss:20b",
-  min_vram_gb: 13,
-  class: "flagship",
+  min_vram_gb: 14,
+  class: "smart",
   default: true,
   display_name: "GPT-OSS 20B",
   maker: "OpenAI",
-  description: "A strong general model.",
-  capabilities: ["chat", "tools"],
+  description: "Everyday chat and agent tool use. The box's proven default.",
+  capabilities: ["tools", "thinking"],
   roles: ["chat"],
-  disk_gb: 14,
+  disk_gb: 13.8,
   pulled: false,
 };
 
