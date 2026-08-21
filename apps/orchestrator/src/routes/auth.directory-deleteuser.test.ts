@@ -133,6 +133,9 @@ import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js
 /** Prisma stub: findUnique by nextcloudUsername + count + tx passthrough. */
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
+  // Every seeded user is given a Microsoft 365 link, so the delete tests can
+  // assert the credential actually goes with them (WARP-2115).
+  const m365Rows: any[] = seed.map((u: any) => ({ userId: u.id }));
   const self: any = {};
   // WARP-1570: shared seam — records the options argument (auth.ts opens
   // the removal rails with SERIALIZABLE_TX) and rolls `users` back when the
@@ -196,6 +199,21 @@ function createPrismaMock(seed: any[] = []) {
       return n;
     }),
   };
+  // WARP-2115 — the delete path also purges the removed person's Microsoft 365
+  // connection. Without this delegate the route's try/catch would swallow a
+  // TypeError and the cascade would look like it worked while doing nothing.
+  self.m365Connection = {
+    deleteMany: vi.fn(async ({ where }: any = {}) => {
+      const before = m365Rows.length;
+      for (let i = m365Rows.length - 1; i >= 0; i -= 1) {
+        if (where?.userId === undefined || m365Rows[i].userId === where.userId) {
+          m365Rows.splice(i, 1);
+        }
+      }
+      return { count: before - m365Rows.length };
+    }),
+  };
+  self._m365Rows = m365Rows;
   self._users = users;
   return self;
 }
@@ -245,6 +263,14 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
     expect(res.body).toMatchObject({ status: "deleted", username: "alice" });
     expect(nc.ncDeleteUser).toHaveBeenCalledWith("test-nc-token", "alice");
     expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "alice");
+    // WARP-2115 — the removed person's Microsoft 365 refresh token must go
+    // with them. Nothing cascades (userId is not an FK) and the /api/m365
+    // routes scope to the requester's OWN connection, so a row left behind
+    // holds a live mailbox credential nobody can ever disconnect.
+    expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice" },
+    });
+    expect(prisma._m365Rows.some((r: any) => r.userId === "u-alice")).toBe(false);
     // Rail 6 — previously this surface revoked NOTHING and audited NOTHING.
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
     expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));

@@ -117,6 +117,7 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // before OCS is asked to provision an admin-tier account into it.
 import { DROPLET_ADMINS_GROUP } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
+import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -3666,6 +3667,30 @@ export function createProtectedAuthRouter(
             { username: req.params.username, userId: row.id },
             "local row not deleted after Nextcloud removal — re-activated concurrently; left for operator review",
           );
+        } else {
+          // WARP-2115 — the deleted person may hold a Microsoft 365 link whose
+          // refresh token is still valid. Nothing cascades (userId is not an
+          // FK), and the /api/m365 routes scope to the requester's OWN
+          // connection, so an orphaned row could never be disconnected by
+          // anyone. Purge it here, gated on a CONFIRMED delete so a
+          // concurrently re-activated account keeps its link.
+          try {
+            const purgedM365 = await purgeM365ForUser(prisma, row.id);
+            if (purgedM365 > 0) {
+              logger.info(
+                { username: req.params.username, userId: row.id },
+                "Purged Microsoft 365 connection after user delete",
+              );
+            }
+          } catch (err) {
+            // Same posture as the brain-memory cascade above: the account is
+            // already gone upstream, so do not fail the request — but log loud,
+            // because what is left behind is a live cloud credential.
+            logger.error(
+              { err, username: req.params.username, userId: row.id },
+              "Microsoft 365 purge failed after user delete — a live refresh token may remain",
+            );
+          }
         }
       }
 
