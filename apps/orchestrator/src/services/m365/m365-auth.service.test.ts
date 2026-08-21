@@ -21,6 +21,7 @@ import {
   disconnect,
   getConnectionView,
   getAccessToken,
+  purgeM365ForUser,
   M365NotConnectedError,
   type EntraClient,
   type EntraAuthResult,
@@ -44,6 +45,25 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       update: vi.fn(async ({ data }: any) => {
         row = { ...(row ?? { id: "row-1", userId: USER }), ...data };
         return { ...row };
+      }),
+      // Conditional write: only applies when the row matches every scalar in
+      // `where`. This is what makes the disconnect-race guard real, so the
+      // fake must honour it rather than always writing.
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        if (!row) return { count: 0 };
+        const matches = Object.entries(where).every(
+          ([k, v]) => (row as any)[k] === v,
+        );
+        if (!matches) return { count: 0 };
+        row = { ...row, ...data };
+        return { count: 1 };
+      }),
+      deleteMany: vi.fn(async ({ where }: any) => {
+        if (!row || (where.userId && (row as any).userId !== where.userId)) {
+          return { count: 0 };
+        }
+        row = null;
+        return { count: 1 };
       }),
     },
   };
@@ -154,6 +174,35 @@ describe("beginDeviceCodeConnect", () => {
     expect(row.grantedScopes).toContain("Mail.ReadWrite");
   });
 
+  // --- review #1658 finding 3 --------------------------------------------
+  it("returns to DISCONNECTED when the person abandons the sign-in", async () => {
+    // Drives the REAL abandoned path (the code lapses after the UI already has
+    // it) rather than seeding an expired row. Previously this landed in ERROR,
+    // which also defeated the read-time expiry downgrade: the background
+    // .catch had already overwritten the state by the time it would apply.
+    const prisma = fakePrisma(null);
+    const entra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async ({ onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        throw { errorCode: "expired_token", errorMessage: "the code expired" };
+      }),
+    });
+
+    await beginDeviceCodeConnect(prisma as never, entra, USER);
+    await vi.waitFor(() => expect((prisma.__row() as any).state).toBe("DISCONNECTED"));
+
+    const row = prisma.__row() as any;
+    expect(row.lastError).toBeNull(); // nothing went wrong; say nothing
+    expect(await getConnectionView(prisma as never, USER)).toMatchObject({
+      state: "DISCONNECTED",
+    });
+  });
+
   it("records a tenant that blocks device code as ERROR, so the UI can offer the fallback", async () => {
     // Microsoft recommends tenants block this flow, so it is an expected path
     // — and it must NOT read as "reconnect", which would loop the person.
@@ -198,6 +247,61 @@ describe("disconnect", () => {
   it("is safe to call when nothing is connected", async () => {
     const prisma = fakePrisma(null);
     await expect(disconnect(prisma as never, USER)).resolves.not.toThrow();
+  });
+
+  // --- review #1658 finding 4 --------------------------------------------
+  it("cannot be undone by a device-code flow that resolves after it", async () => {
+    // The race that reversed ADR-041's purge guarantee: connect → disconnect
+    // (token purged) → the still-in-flight poll resolves → the row was
+    // rewritten to CONNECTED with a fresh sealed token nobody asked for.
+    const prisma = fakePrisma(null);
+    let finish!: (r: EntraAuthResult) => void;
+
+    const entra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async ({ onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        return await new Promise<EntraAuthResult>((resolve) => {
+          finish = resolve;
+        });
+      }),
+    });
+
+    await beginDeviceCodeConnect(prisma as never, entra, USER);
+    await disconnect(prisma as never, USER); // person changes their mind
+    finish(authResult()); // Microsoft answers late
+    await vi.waitFor(() => expect(prisma.m365Connection.updateMany).toHaveBeenCalled());
+
+    const row = prisma.__row() as any;
+    expect(row.state).toBe("DISCONNECTED");
+    expect(row.tokenCacheEnc).toBeNull();
+  });
+});
+
+// --- review #1658 finding 5 ----------------------------------------------
+describe("purgeM365ForUser", () => {
+  it("removes the row so a deleted user's refresh token cannot survive", async () => {
+    // userId is not an FK, so nothing cascades; and the API scopes to the
+    // requester's OWN connection, so an orphaned row could never be
+    // disconnected by anyone — it would hold a live mailbox credential forever.
+    const prisma = fakePrisma({
+      id: "row-1",
+      userId: USER,
+      state: "CONNECTED",
+      tokenCacheEnc: sealTokenCache(USER, CACHE),
+    });
+
+    expect(await purgeM365ForUser(prisma as never, USER)).toBe(1);
+    expect(prisma.__row()).toBeNull();
+  });
+
+  it("is a no-op for a user who never connected", async () => {
+    const prisma = fakePrisma(null);
+    expect(await purgeM365ForUser(prisma as never, USER)).toBe(0);
   });
 });
 
@@ -268,6 +372,31 @@ describe("getAccessToken", () => {
 
     await expect(getAccessToken(prisma as never, fakeEntra(), USER)).rejects.toBeTruthy();
     expect((prisma.__row() as any).state).toBe("NEEDS_RECONNECT");
+  });
+
+  // --- review #1658 finding 2 --------------------------------------------
+  it("leaves a healthy connection CONNECTED when the network wobbles", async () => {
+    // ERROR is terminal and the sync engine skips rows in it, so downgrading
+    // on a transient failure would stop syncing permanently and silently.
+    const prisma = fakePrisma({
+      id: "row-1",
+      userId: USER,
+      state: "CONNECTED",
+      accountUpn: "sam@practice.com",
+      homeAccountId: "uid.utid",
+      tokenCacheEnc: sealTokenCache(USER, CACHE),
+    });
+    const entra = fakeEntra({
+      acquireSilent: vi.fn(async () => {
+        throw { errorCode: "network_error", errorMessage: "socket hang up" };
+      }),
+    });
+
+    await expect(getAccessToken(prisma as never, entra, USER)).rejects.toBeTruthy();
+
+    const row = prisma.__row() as any;
+    expect(row.state).toBe("CONNECTED");
+    expect(row.tokenCacheEnc).toBeTruthy(); // token not discarded either
   });
 
   it("returns a token and records the refresh on the happy path", async () => {

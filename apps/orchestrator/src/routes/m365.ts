@@ -59,14 +59,20 @@ export function createM365Router(
       const userId = (req as AuthedRequest).user?.id;
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
 
-      const view = await getConnectionView(prisma, userId);
-      return res.json({
-        ...view,
-        // Lets the dashboard distinguish "you have not connected yet" from
-        // "this device cannot offer Microsoft 365 at all", which are different
-        // things to tell a person.
-        available: isM365Configured(),
-      });
+      try {
+        const view = await getConnectionView(prisma, userId);
+        return res.json({
+          ...view,
+          // Lets the dashboard distinguish "you have not connected yet" from
+          // "this device cannot offer Microsoft 365 at all", which are
+          // different things to tell a person.
+          available: isM365Configured(),
+        });
+      } catch {
+        // Without this an async rejection leaves the request hanging rather
+        // than answering — the connection card would spin forever.
+        return res.status(500).json({ error: "m365_status_unavailable" });
+      }
     },
   );
 
@@ -76,6 +82,15 @@ export function createM365Router(
     async (req, res) => {
       const userId = (req as AuthedRequest).user?.id;
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
+
+      // Checked BEFORE the service call so an unconfigured device answers
+      // without first dirtying the row through PENDING_CONSENT → ERROR.
+      if (!isM365Configured()) {
+        return res.status(503).json({
+          error: "m365_not_configured",
+          message: "Microsoft 365 is not set up on this device yet.",
+        });
+      }
 
       try {
         const started = await beginDeviceCodeConnect(prisma, entra, userId);
@@ -115,8 +130,14 @@ export function createM365Router(
       const userId = (req as AuthedRequest).user?.id;
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
 
-      await disconnect(prisma, userId);
-      return res.status(204).send();
+      try {
+        await disconnect(prisma, userId);
+        return res.status(204).send();
+      } catch {
+        // Answer rather than hang. The caller can retry; nothing is left in a
+        // half-disconnected state because disconnect's write is a single update.
+        return res.status(500).json({ error: "m365_disconnect_failed" });
+      }
     },
   );
 

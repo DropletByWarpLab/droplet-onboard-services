@@ -28,6 +28,7 @@ import {
   isPendingFlowExpired,
   redactAuthError,
   PENDING_FLOW_TTL_MS,
+  type EntraFailureLike,
 } from "./state.js";
 
 // --- The Entra port -------------------------------------------------------
@@ -223,14 +224,27 @@ export async function beginDeviceCodeConnect(
   });
 }
 
+/**
+ * Record a completed sign-in — but ONLY if the flow that produced it is still
+ * the one the row is waiting on.
+ *
+ * A device-code poll can outlive the person's interest in it. Without the
+ * `state: "PENDING_CONSENT"` guard this sequence silently reverses a purge:
+ * connect → the person disconnects (token purged, ADR-041's guarantee) → the
+ * still-in-flight poll resolves minutes later → the row is rewritten to
+ * CONNECTED with a freshly sealed token nobody asked for.
+ *
+ * `updateMany` is what makes the check-and-write atomic; a read-then-update
+ * would leave the same race open, just narrower.
+ */
 async function persistConnected(
   prisma: PrismaClient,
   userId: string,
   result: EntraAuthResult,
   now: Date = new Date(),
 ): Promise<void> {
-  await prisma.m365Connection.update({
-    where: { userId },
+  await prisma.m365Connection.updateMany({
+    where: { userId, state: "PENDING_CONSENT" },
     data: {
       state: "CONNECTED",
       homeAccountId: result.homeAccountId,
@@ -258,11 +272,35 @@ async function persistFailure(
   userId: string,
   err: unknown,
 ): Promise<void> {
-  const failure = (err ?? {}) as { errorCode?: string; errorMessage?: string };
-  await prisma.m365Connection.update({
+  const failure = (err ?? {}) as EntraFailureLike;
+  const kind = classifyAuthFailure(failure);
+
+  // A wobble must not touch a healthy connection. ERROR is terminal by its own
+  // definition and the sync engine skips rows in it, so downgrading on a
+  // thirty-second WAN outage would stop syncing permanently and silently.
+  // Record the reason for support; leave the state alone.
+  if (kind === "TRANSIENT") {
+    await prisma.m365Connection.updateMany({
+      where: { userId },
+      data: { lastError: redactAuthError(failure) },
+    });
+    return;
+  }
+
+  // The person closed the tab or pressed Cancel. Nothing failed; put the
+  // connection back where it started so they can simply try again.
+  if (kind === "ABANDONED") {
+    await prisma.m365Connection.updateMany({
+      where: { userId },
+      data: { state: "DISCONNECTED", pendingFlowExpiresAt: null, lastError: null },
+    });
+    return;
+  }
+
+  await prisma.m365Connection.updateMany({
     where: { userId },
     data: {
-      state: classifyAuthFailure(failure),
+      state: kind,
       pendingFlowExpiresAt: null,
       lastError: redactAuthError(failure),
     },
@@ -296,6 +334,29 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
       lastError: null,
     },
   });
+}
+
+/**
+ * Remove a person's Microsoft link entirely, row and all.
+ *
+ * Called when the user is deleted from the directory. `disconnect` above is
+ * the owner-initiated path and deliberately keeps the row (so the dashboard
+ * can still say "not connected"); this is the deprovisioning path, where
+ * leaving anything behind is a security problem rather than a UX nicety.
+ *
+ * Without this a deleted employee's row survives holding a still-valid,
+ * still-decryptable refresh token to their mailbox — and it is unreachable
+ * through the API, which scopes strictly to the requester's own connection,
+ * so nobody can ever disconnect it. `M365Connection.userId` is not a foreign
+ * key (matching the other per-user tables here), so nothing cascades on our
+ * behalf.
+ */
+export async function purgeM365ForUser(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<number> {
+  const { count } = await prisma.m365Connection.deleteMany({ where: { userId } });
+  return count;
 }
 
 // --- Token acquisition ----------------------------------------------------

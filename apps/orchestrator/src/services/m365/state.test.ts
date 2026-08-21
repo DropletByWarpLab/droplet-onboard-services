@@ -80,6 +80,45 @@ describe("classifyAuthFailure", () => {
     expect(classifyAuthFailure({ errorCode: "something_new" })).toBe("ERROR");
     expect(classifyAuthFailure({})).toBe("ERROR");
   });
+
+  // --- review #1658 finding 2 --------------------------------------------
+  it("classifies transport failures as TRANSIENT, so a WAN blip cannot downgrade a healthy box", () => {
+    // ERROR is terminal by its own definition, and the sync engine skips rows
+    // in it. If a thirty-second outage during a silent refresh landed there,
+    // syncing would stop permanently and nothing would self-heal it.
+    for (const code of [
+      "network_error",
+      "temporarily_unavailable",
+      "request_timeout",
+      "server_error",
+      "ECONNRESET",
+      "ENOTFOUND",
+    ]) {
+      expect(classifyAuthFailure({ errorCode: code })).toBe("TRANSIENT");
+    }
+  });
+
+  it("treats 429 and 5xx as TRANSIENT, and 4xx client errors as not-transient", () => {
+    expect(classifyAuthFailure({ statusCode: 429 })).toBe("TRANSIENT");
+    expect(classifyAuthFailure({ statusCode: 503 })).toBe("TRANSIENT");
+    expect(classifyAuthFailure({ statusCode: 500 })).toBe("TRANSIENT");
+    expect(classifyAuthFailure({ statusCode: 400 })).toBe("ERROR");
+  });
+
+  // --- review #1658 finding 3 --------------------------------------------
+  it("treats an abandoned sign-in as ABANDONED, not a failure", () => {
+    // Closing the tab, letting the code lapse, or pressing Cancel are normal.
+    // Recording them as ERROR would show an alarming, untrue banner.
+    for (const code of [
+      "authorization_declined",
+      "access_denied",
+      "expired_token",
+      "device_code_expired",
+      "user_cancelled",
+    ]) {
+      expect(classifyAuthFailure({ errorCode: code })).toBe("ABANDONED");
+    }
+  });
 });
 
 describe("isPendingFlowExpired", () => {
@@ -133,5 +172,41 @@ describe("redactAuthError", () => {
 
   it("still returns something useful when Entra gives us nothing", () => {
     expect(redactAuthError({}).length).toBeGreaterThan(0);
+  });
+
+  // --- review #1658 finding 1 --------------------------------------------
+  it("removes a BARE JWT entirely, not just labels it", () => {
+    // The original rule appended "=[redacted]" to the match and kept the token
+    // verbatim, so an id_token echoed by Entra would have been persisted to
+    // lastError, rendered in the dashboard, and returned in the error body.
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const out = redactAuthError({ errorCode: "invalid_grant", errorMessage: `failed with ${jwt}` });
+
+    expect(out).not.toContain(jwt);
+    expect(out).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+    expect(out).toContain("invalid_grant");
+  });
+
+  it("removes a bare opaque secret that carries no name or delimiter", () => {
+    const secret = "0AXoAqwertyuiopasdfghjklzxcvbnm1234567890QWERTYUIOP";
+    const out = redactAuthError({ errorMessage: `rejected ${secret}` });
+    expect(out).not.toContain(secret);
+  });
+
+  it("keeps the credential's NAME while dropping its value", () => {
+    // "which credential was involved" is diagnostic; the value never is.
+    const out = redactAuthError({
+      errorMessage: "refresh_token=0.AXoAsecretvalue was rejected",
+    });
+    expect(out).toContain("refresh_token");
+    expect(out).not.toContain("0.AXoAsecretvalue");
+  });
+
+  it("keeps a plain Error's message instead of collapsing to 'no reason'", () => {
+    // A DNS or Prisma failure has `message`, not `errorMessage`; losing it
+    // left support with nothing to go on.
+    const out = redactAuthError({ message: "getaddrinfo EAI_AGAIN login.example" } as never);
+    expect(out).toContain("EAI_AGAIN");
   });
 });
