@@ -10,6 +10,7 @@ No hardware, no /dev, no root: the mmap is swapped for a bytearray.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ def make_fb(width=PANEL_W, height=PANEL_H, stride=PANEL_STRIDE,
     o._row_bytes = width * 4
     o._fd = -1
     o._jitter = 0
+    o._reported_mismatches = set()
     o._mm = bytearray(stride * height)
     return o
 
@@ -124,6 +126,71 @@ def test_oversized_frame_is_cropped_not_wrapped():
     dev = make_fb(width=8, height=2, stride=32)
     dev.blit(Image.new("RGB", (16, 4), (255, 0, 0)))
     assert len(dev._mm) == 64                        # no overrun
+
+
+# --- WARP-2128: a wrong geometry must read as a SETTING, not a dead panel --
+#
+# The WARP-2128 bug (setup.sh never re-read virtual_size after the first
+# run) renders e.g. 1920x1080 into a 1424x280 panel. The crop to the top-left
+# is what makes that look like broken hardware, and the old per-frame warning
+# buried the one line explaining it. So: say it ONCE, loudly, with the fix.
+
+def test_oversized_frame_logs_a_config_error_with_the_fix(caplog):
+    dev = make_fb()                                  # 1424x280 panel
+    with caplog.at_level(logging.DEBUG, logger="droplet.tft.fb"):
+        dev.blit(Image.new("RGB", (1920, 1080)))     # bench-monitor render
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errs) == 1, [r.getMessage() for r in caplog.records]
+    msg = errs[0].getMessage()
+    # Must name the real panel size so the operator can act without measuring.
+    assert "LCD_WIDTH=1424" in msg and "LCD_HEIGHT=280" in msg
+    # Must say it is config, not hardware — that is the whole point.
+    assert "CONFIG ERROR" in msg
+
+
+def test_oversized_mismatch_is_reported_once_not_every_frame(caplog):
+    dev = make_fb()
+    with caplog.at_level(logging.DEBUG, logger="droplet.tft.fb"):
+        for _ in range(20):
+            dev.blit(Image.new("RGB", (1920, 1080)))
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errs) == 1, f"logged {len(errs)} times — should be once"
+
+
+def test_a_different_mismatch_is_reported_again(caplog):
+    """Log-once must key on the actual sizes, or a panel swap goes unreported."""
+    dev = make_fb()
+    with caplog.at_level(logging.DEBUG, logger="droplet.tft.fb"):
+        dev.blit(Image.new("RGB", (1920, 1080)))
+        dev.blit(Image.new("RGB", (1280, 400)))      # different wrong geometry
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errs) == 2, [r.getMessage() for r in errs]
+
+
+def test_undersized_frame_warns_but_is_not_an_error(caplog):
+    """Letterboxing is a deliberate, working fallback — it must not shout
+    CONFIG ERROR the way a crop does."""
+    dev = make_fb()
+    with caplog.at_level(logging.DEBUG, logger="droplet.tft.fb"):
+        dev.blit(Image.new("RGB", (400, 200)))
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_matching_geometry_logs_nothing(caplog):
+    dev = make_fb()
+    with caplog.at_level(logging.DEBUG, logger="droplet.tft.fb"):
+        dev.blit(Image.new("RGB", (PANEL_W, PANEL_H)))
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING]
+
+
+def test_oversized_frame_still_renders_after_the_error(caplog):
+    """Never raise, never go dark: a cropped panel still beats a blank one."""
+    dev = make_fb(width=8, height=2, stride=32)
+    with caplog.at_level(logging.DEBUG, logger="droplet.tft.fb"):
+        dev.blit(Image.new("RGB", (16, 4), (255, 0, 0)))
+    assert dev._mm[0:4] != b"\x00\x00\x00\x00"       # pixels actually landed
 
 
 # --- failing soft ---------------------------------------------------------
