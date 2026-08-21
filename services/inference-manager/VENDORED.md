@@ -98,8 +98,15 @@ These are edits, not omissions. Re-apply them on every re-sync.
 5. **The two manifest tests read `parents[1]`**, following (4).
 6. **`requirements.txt` drops** `prometheus-fastapi-instrumentator`,
    `prometheus-client`, and `apscheduler`, following the removals above. Both
-   `.lock` files were regenerated with `scripts/refresh-lockfile.sh`.
-7. **`test_shipped_manifest_agrees_with_oci_sources` is not vendored.**
+   `.lock` files were regenerated (see Re-syncing below).
+7. **`scripts/refresh-lockfile.sh` is not vendored.** Its "install uv" hint
+   contains `https://astral.sh/uv/install.sh`, and this repo's `egress-gate`
+   workflow is PR-blocking on any hostname absent from
+   `docs/security/allowed-egress.yaml`. Registering a developer-machine tool
+   host in the appliance's egress allowlist would be the wrong trade — that
+   allowlist is a customer-facing data-egress promise, not a dev-tooling list.
+   The two commands it wrapped are inlined below instead.
+8. **`test_shipped_manifest_agrees_with_oci_sources` is not vendored.**
    `models/oci-sources.json` is a build-time packaging input that belongs
    upstream; that cross-check stays there.
 
@@ -111,8 +118,9 @@ git -C ../droplet-local-LLM diff <last-synced-sha>..origin/main -- services/infe
 
 # 2. Apply what is relevant, skipping anything in "What was removed".
 # 3. Re-apply every item under "Deliberate divergences".
-# 4. Regenerate the locks if requirements.txt changed:
-./scripts/refresh-lockfile.sh
+# 4. Regenerate the locks if requirements.txt changed (needs `uv`):
+uv pip compile --generate-hashes -o requirements.lock     requirements.txt
+uv pip compile --generate-hashes -o requirements-dev.lock requirements-dev.txt
 # 5. Update the Provenance table above with the new upstream SHA.
 ```
 
