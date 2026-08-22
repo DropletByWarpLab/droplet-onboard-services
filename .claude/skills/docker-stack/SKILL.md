@@ -2,7 +2,7 @@
 name: docker-stack
 description: |
   Reference for the Docker Compose stack: per-service ports/profiles
-  table (all 34 services), COMPOSE_PROFILES behavior per deployment
+  table (all 32 services), COMPOSE_PROFILES behavior per deployment
   shape, and the update-.env-on-a-running-stack procedure. Use when
   starting/restarting services, editing .env on a deployed stack,
   wondering which profile a service belongs to, why a service didn't
@@ -11,7 +11,7 @@ description: |
 
 # Docker stack reference
 
-## Services (34 in `docker/docker-compose.yml`)
+## Services (32 in `docker/docker-compose.yml`)
 
 | Service        | Port  | Profile | Notes                      |
 |----------------|-------|---------|----------------------------|
@@ -27,6 +27,7 @@ description: |
 | ai-gateway     | —     | — | Proxied at `/ai/`                         |
 | file-indexer   | —     | — | Filesystem indexer + embedder             |
 | routing        | :8080 | — | OpenWrt control, host network             |
+| samba          | :445 (host net) | `linux` | SMB network drive — the "Droplet" folder in Windows Explorer / macOS Finder (wsdd2 discovery; shares the `droplet-share` volume, also mounted in Nextcloud as `/Droplet`) |
 | frigate        | —     | `linux` | NVR + AI detection (needs `/dev/dri/renderD128`) |
 | voice-io       | —     | `linux` | Voice loop (wake → STT → orchestrator agent loop → TTS; needs `/dev/snd`) |
 | wyoming-faster-whisper | — | `linux` | STT backend for the voice loop     |

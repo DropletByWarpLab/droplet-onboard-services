@@ -320,6 +320,12 @@ generate_env() {
   # alphanumeric ([A-Za-z0-9]) so it's safe for `passwd`, the docker secret
   # file, and the ubus `… login` JSON string (no shell/JSON-hostile chars).
   openwrt_password=$(_gen_password 24)
+  # SMB network-drive credential (compose `samba` service, account `droplet`).
+  # Alphanumeric via _gen_password: the value rides through compose env
+  # interpolation, smbpasswd, AND gets typed by hand into Windows/macOS
+  # connect dialogs — 20 chars is the typing-friendly compromise.
+  local smb_password
+  smb_password=$(_gen_password 20)
   device_secret=$(_gen_fernet_key)
   device_secret_key=$(openssl rand -base64 32)
   jwt_secret=$(openssl rand -hex 64)
@@ -543,6 +549,16 @@ MQTT_BROKER_LOCAL=mqtts://localhost:8883
 NEXTCLOUD_ADMIN_USER=admin
 NEXTCLOUD_ADMIN_PASSWORD=$nc_password
 NEXTCLOUD_URL=http://nextcloud:80
+
+# --- Network drive (SMB — the "Droplet" folder in Explorer/Finder) ---
+# Device-wide credential for the \`samba\` compose service's "Droplet" share
+# (username is fixed to \`droplet\`). Surfaced to owner/admin accounts by the
+# dashboard's "Connect network drive" dialog via GET /api/storage/network-drive.
+SMB_PASSWORD=$smb_password
+# EXPLICIT master switch for the network-drive surface (never derived from
+# SMB_PASSWORD emptiness). Mirrors the \`linux\` compose profile that actually
+# starts smbd: 1 on Linux, 0 on macOS dev hosts (host networking + :445).
+SMB_ENABLED=$([ "$(uname)" = "Linux" ] && printf 1 || printf 0)
 
 # --- Document server (WARP-882 / WS-4 — in-browser editing + co-authoring) ---
 # ONLYOFFICE_JWT_SECRET: device-unique HS256 secret the OnlyOffice Document
@@ -905,6 +921,17 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+  # Network-drive backfill: existing installs predate the `samba` compose
+  # service. Without SMB_PASSWORD, compose interpolates ACCOUNT_droplet to
+  # empty and smbd's `null passwords = no` default refuses every logon —
+  # fails closed, but the share is unusable until this backfill runs.
+  # SMB_ENABLED mirrors the platform rule generate_env writes (the `linux`
+  # profile is what actually starts smbd); only set when missing, so an
+  # operator's explicit 0 survives upgrades.
+  local smb_enabled_default=0
+  [ "$(uname)" = "Linux" ] && smb_enabled_default=1
+  _migrate_ensure_key SMB_PASSWORD "$(_gen_password 20)"
+  _migrate_ensure_key SMB_ENABLED "$smb_enabled_default"
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #

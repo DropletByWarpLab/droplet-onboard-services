@@ -334,6 +334,58 @@ entries:
     review_by: 2027-07-04
     code_refs: [scripts/host/etc-dnsmasq.d/droplet-ap.conf, scripts/host/droplet-watchdog.sh, apps/orchestrator/src/routes/network-status.routes.ts, apps/web-dashboard/src/components/network/DnsServersForm.tsx]
 
+  # ── cloud connectors (ADR-041) — owner-enabled, per-connection, off by default ──
+  # A cloud connector reads a customer's SaaS system of record onto the box.
+  # It only ever dials OUT (no webhook, no inbound path — the box has none),
+  # ships disabled, and carries nothing until the owner connects that account
+  # in the dashboard. Disconnecting purges the stored tokens. See ADR-041.
+  - id: m365-graph-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [graph.microsoft.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Microsoft 365 connector (ADR-041) — reads the mail, calendar, contacts
+      and OneDrive/SharePoint files of accounts the owner explicitly connected,
+      onto the box, via Graph delta queries. Carries that user content in the
+      response, plus drafted replies the owner chooses to send. Delegated
+      per-user authorization only: the box can never read what the signed-in
+      user cannot. Nothing is sent opportunistically. Off until connected.
+    ticket: WARP-2114
+    added: 2026-08-19
+    review_by: 2027-08-19
+    # Code lands in WARP-2115 (auth) and WARP-2118 (sync engine); this entry is
+    # registered with the ADR that authorises the class, ahead of the client.
+    code_refs: [docs/ADR-041-cloud-connector-class.md]
+
+  - id: m365-entra-login
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [login.microsoftonline.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Microsoft Entra ID token endpoint for the M365 connector (ADR-041) —
+      device-code and authorization-code sign-in, plus token refresh. Carries
+      OAuth protocol traffic only: no mail, files, or box-local content.
+      DELIBERATE DUPLICATE HOST: login.microsoftonline.com is also registered
+      under 'sso-oidc-idps' (WARP-243) for admin-configured Entra SSO. Same
+      host, unrelated call path and consent model — the connector's use is
+      per-owner account authorization, not box sign-in. Registered separately
+      so neither can be removed on the assumption the other covers it; if one
+      is ever retired, check the other before deleting the host.
+    ticket: WARP-2114
+    added: 2026-08-19
+    review_by: 2027-08-19
+    code_refs: [docs/ADR-041-cloud-connector-class.md]
+
   # ── dynamic (config-driven) destinations ────────────────────────────────
   - id: fleet-hq-issuance
     kind: egress

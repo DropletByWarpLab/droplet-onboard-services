@@ -432,13 +432,21 @@ async def health():
             auth_configured=auth_configured,
         )
     try:
-        info = await driver_instance.get_system_info()
+        # WARP-2111: get_system_info() is the reachability probe — a successful
+        # call proves the switch answered — but its RESULT (switch model,
+        # firmware version, MAC, hostname) must NOT be echoed here. /health is
+        # auth-exempt and this service binds 0.0.0.0:8081 (network_mode: host),
+        # so a returned system_info dict is hardware inventory handed to any
+        # unauthenticated LAN client — the same information-disclosure defect
+        # fixed for routing's /health, and directly against the presence-ONLY
+        # intent this handler already states. The bearer-gated GET /system/info
+        # serves the detail; /health reports liveness + auth-config only.
+        await driver_instance.get_system_info()
         return HealthResponse(
             status="ok",
             connected=True,
             switch_host=SWITCH_HOST,
             driver=SWITCH_DRIVER,
-            system_info=info,
             auth_configured=auth_configured,
         )
     except SwitchError as exc:

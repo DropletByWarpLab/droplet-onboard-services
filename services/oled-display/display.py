@@ -114,6 +114,23 @@ def _safe_inset() -> Tuple[int, int]:
         return 0, 0
 
 
+def _letterbox_band() -> Optional[int]:
+    """Band height when this panel is letterboxed, else None.
+
+    Diagnostic only — the render path asks layout_wide directly. This is what
+    makes the difference between "my screen has black edges" and "my panel is
+    broken" visible on /health without standing in front of the box.
+
+    Fails CLOSED for the same reason as _safe_inset: geometry must never take
+    the display service down.
+    """
+    try:
+        import layout_wide
+        return layout_wide.band_height(WIDTH, HEIGHT)
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
 def _safe_canvas(bg) -> Image.Image:
     """Blank canvas for a 480x320-authored screen: the panel minus the bezel."""
     ix, iy = _safe_inset()
@@ -826,7 +843,14 @@ class TFTDisplay:
             "temp": None, "gpu": None,
             "ip": "-", "hostname": "droplet", "uptime": "-", "now": "",
             "date": "",
-            "sparks_cpu": [],
+            # Three histories, not one. The wide layout's tall density tier
+            # (the 1280x400 panel, and any panel with spare band-B height)
+            # draws MEM and DISK trends beside the CPU spark. A bare "61%"
+            # cannot say whether the box is climbing or settling, which is
+            # most of what you walk to the rack to find out. Seeded EMPTY so a
+            # cold panel draws "no history yet" instead of a flat line at zero
+            # - same rule as WARP-1643's sensors: unknown renders as unknown.
+            "sparks_cpu": [], "sparks_mem": [], "sparks_disk": [],
             # WARP-2047 — ssid defaults EMPTY, not to a plausible name. It used
             # to default to the literal "Droplet-AI", so the System screen's
             # NETWORK tile printed that on a box whose household network was
@@ -1952,13 +1976,20 @@ class TFTDisplay:
         for k in ("temp", "gpu"):
             if k in data and data[k] is None:
                 self._v3[k] = None
-        try:
-            self._v3["sparks_cpu"].append(float(self._v3.get("cpu") or 0))
-            if len(self._v3["sparks_cpu"]) > self._v3_spark_len:
-                self._v3["sparks_cpu"] = \
-                    self._v3["sparks_cpu"][-self._v3_spark_len:]
-        except (TypeError, ValueError):
-            pass
+        # One cadence, three series, so the tall panel's trend block compares
+        # like with like. Per-series try/except rather than one around the
+        # lot: a single unparseable sample must not silently stall the other
+        # two and leave the histories out of step with each other.
+        for buf_key, src_key in (("sparks_cpu", "cpu"),
+                                 ("sparks_mem", "mem"),
+                                 ("sparks_disk", "disk")):
+            try:
+                buf = self._v3.setdefault(buf_key, [])
+                buf.append(float(self._v3.get(src_key) or 0))
+                if len(buf) > self._v3_spark_len:
+                    self._v3[buf_key] = buf[-self._v3_spark_len:]
+            except (TypeError, ValueError, AttributeError):
+                pass
 
     def update_wifi(self, data: dict) -> None:
         for k, v in data.items():
@@ -1992,13 +2023,23 @@ class TFTDisplay:
             self._v3["lan_clients"] = data["lan_clients"]
 
     def seed_cpu_history(self, value: float, n: Optional[int] = None) -> None:
-        """Fill the CPU sparkline buffer with jittered samples around `value`
-        so a freshly-seeded sim renders a believable sparkline (dev/PNG only)."""
+        """Fill the sparkline buffers with jittered samples around `value` so a
+        freshly-seeded sim renders believable trends (dev/PNG only).
+
+        Seeds MEM and DISK from their own current readings too. A dev preview
+        that filled CPU alone would show the tall panel's trend block half
+        empty and invite someone to "fix" a layout that is working."""
         import random
         n = n or self._v3_spark_len
-        self._v3["sparks_cpu"] = [
-            max(3.0, min(92.0, value + random.uniform(-6, 6))) for _ in range(n)
-        ]
+        for buf_key, base in (("sparks_cpu", value),
+                              ("sparks_mem", self._v3.get("mem")),
+                              ("sparks_disk", self._v3.get("disk"))):
+            if base is None:
+                continue
+            self._v3[buf_key] = [
+                max(3.0, min(92.0, float(base) + random.uniform(-6, 6)))
+                for _ in range(n)
+            ]
 
     # ----- the redesigned frames ---------------------------------------
 
@@ -2101,7 +2142,13 @@ class TFTDisplay:
         the combined System screen rather than rendering something cramped."""
         import layout_wide
         if not layout_wide.is_wide():
-            return self.render_system(now=now)
+            # A monitor gets the same band treatment as the System
+            # screen rather than being bounced to it — the debug screen is the
+            # one you want ON a bench monitor. Falls through to render_system
+            # on a genuinely small panel, as before.
+            boxed = layout_wide.render_letterboxed(
+                self, layout_wide.render_debug, now=now)
+            return boxed if boxed is not None else self.render_system(now=now)
         return layout_wide.render_debug(self, now=now)
 
     def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
@@ -2118,6 +2165,16 @@ class TFTDisplay:
         import layout_wide
         if layout_wide.is_wide():
             return layout_wide.render_status(self, now=now)
+        # A panel that is neither a bar nor a 480x320 TFT — i.e.
+        # the HDMI monitor someone plugs into the box, whose geometry setup.sh
+        # writes straight into LCD_WIDTH/LCD_HEIGHT. The 480-authored body
+        # below paints ~1.6% of a 1080p screen, so a wide-enough panel gets
+        # the real bar layout letterboxed into a band instead. Returns None on
+        # anything else, including the 480x320 TFT, which falls through.
+        boxed = layout_wide.render_letterboxed(
+            self, layout_wide.render_status, now=now)
+        if boxed is not None:
+            return boxed
         if now is None:
             now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
         img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
@@ -3574,6 +3631,9 @@ class TFTDisplay:
             # LCD_WIDTH/LCD_HEIGHT disagrees with the hardware, fb.py letterboxes
             # rather than stretching — and this is where you see that.
             "resolution": f"{WIDTH}x{HEIGHT}",
+            # Non-null when this panel is too square for the bar
+            # layout and the frame is a centred band of this height.
+            "letterbox_band": _letterbox_band(),
             "panel": (None if self._fb is None else {
                 "width": self._fb.width,
                 "height": self._fb.height,

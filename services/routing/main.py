@@ -566,11 +566,32 @@ class OperationTrackingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# WARP-2111: the interactive API docs + the OpenAPI schema that backs them
+# enumerate every mutation endpoint on this service — VPN setup, firewall
+# authoring, SSID/PSK writes, factory-reset. Auth on the routes is a
+# `Depends(require_bearer)` app dependency, but FastAPI mounts /docs, /redoc
+# and /openapi.json OUTSIDE the router, so that dependency never guards them:
+# on the 0.0.0.0:8080 host-network bind they answer any LAN client unauthed,
+# handing an attacker a labelled map of the whole control surface (the sibling
+# switch/display services gate their docs because their auth is middleware, not
+# a route dependency — so this gap is routing-only). Default them OFF; opt back
+# in for local dev with ROUTING_ENABLE_DOCS=1, the same secure-by-default,
+# env-opt-in idiom as ROUTING_ALLOW_NO_AUTH above.
+ROUTING_ENABLE_DOCS = os.environ.get("ROUTING_ENABLE_DOCS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 app = FastAPI(
     title="Droplet Routing Service",
     version="1.0.0",
     lifespan=lifespan,
     dependencies=[Depends(require_bearer)],
+    docs_url="/docs" if ROUTING_ENABLE_DOCS else None,
+    redoc_url="/redoc" if ROUTING_ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ROUTING_ENABLE_DOCS else None,
 )
 app.add_middleware(OperationTrackingMiddleware)
 app.add_middleware(RequestIdMiddleware)
@@ -625,12 +646,20 @@ def health():
             error=error,
         )
     try:
-        board = router_instance.system.board_info()
+        # WARP-2111: board_info() is the reachability probe — a successful call
+        # is how we know the router answered — but its RESULT (board model, CPU,
+        # kernel, hostname) must NOT be echoed here. /health is auth-exempt and
+        # this service binds 0.0.0.0:8080 (network_mode: host), so a returned
+        # `board` dict is hardware inventory handed to any unauthenticated LAN
+        # client — an information-disclosure defect on a security-first
+        # appliance (FOUNDATION.md: visibility flows outward, reachability never
+        # flows inward). Callers that legitimately need the board detail use the
+        # bearer-gated GET /system/info. /health reports liveness only.
+        router_instance.system.board_info()
         return HealthResponse(
             status="ok",
             connected=True,
             router_host=OPENWRT_HOST,
-            board=board,
             topology=_best_effort_topology(),
         )
     except (ConnectionLost, UbusError) as exc:

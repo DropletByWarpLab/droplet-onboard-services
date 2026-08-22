@@ -397,6 +397,45 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   });
 
   /**
+   * GET /api/storage/network-drive — connection info for the SMB "Droplet"
+   * share (the compose `samba` service), rendered by the dashboard's
+   * "Connect network drive" dialog: host names, the Windows UNC path, the
+   * macOS smb:// URL, and the device-wide credential.
+   *
+   * Owner/admin only via requireRole: the credential is DEVICE-WIDE — it
+   * opens the whole share regardless of who types it — so handing it to
+   * family/guest sessions would bypass the per-user file permissions every
+   * other files surface enforces. Per-user SMB accounts are the follow-up
+   * that relaxes this (see docs/network-drive.md).
+   *
+   * `enabled` mirrors config.SMB_ENABLED (the explicit switch setup.sh
+   * writes); `password` is null when the share is disabled or the credential
+   * was never generated, so the dialog renders honest "not available" copy
+   * instead of an empty string that looks like a blank password.
+   */
+  router.get(
+    "/storage/network-drive",
+    requireRole("owner", "admin"),
+    (_req, res) => {
+      const enabled = config.SMB_ENABLED;
+      const hasCredential = config.SMB_PASSWORD !== "";
+      const mdnsHost = `${config.DROPLET_MDNS_HOSTNAME}.local`;
+      const lanHost = config.DROPLET_LAN_HOSTNAME;
+      res.json({
+        enabled,
+        share: "Droplet",
+        username: "droplet",
+        password: enabled && hasCredential ? config.SMB_PASSWORD : null,
+        hosts: { mdns: mdnsHost, lan: lanHost },
+        // Router DNS for Windows (resolves on every client via dnsmasq);
+        // mDNS for macOS (always on, no router dependency).
+        windowsPath: `\\\\${lanHost}\\Droplet`,
+        macosUrl: `smb://${mdnsHost}/Droplet`,
+      });
+    },
+  );
+
+  /**
    * GET /api/storage/drives — USB drives auto-mounted on the appliance host.
    *
    * Reads from the device-bridge (services/oled-display/device-bridge.py)

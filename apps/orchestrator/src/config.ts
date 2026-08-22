@@ -243,6 +243,30 @@ const envSchema = z.object({
   // so it isn't shown twice. Deliberately NOT a `MATTER_*` var (no matter.js
   // collision); plain string, default "Household".
   DROPLET_SHARED_FOLDER_NAME: z.string().min(1).default("Household"),
+  // Network drive (SMB) — the compose `samba` service exports the shared
+  // "Droplet" folder to Windows Explorer / macOS Finder; these keys back
+  // GET /api/storage/network-drive (connection info + credential for the
+  // dashboard's "Connect network drive" dialog, owner/admin only).
+  //
+  // SMB_ENABLED is the EXPLICIT master switch (same string→bool idiom as
+  // DOCS_ENABLED above; never derived from SMB_PASSWORD emptiness). Written
+  // by setup.sh: 1 on Linux — where the `linux` compose profile actually
+  // starts smbd — 0 on macOS dev hosts. Default 0: an orchestrator without a
+  // provisioned .env should say "no network drive", not advertise a share
+  // that isn't running.
+  SMB_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  // Device-wide credential for the fixed `droplet` SMB account, generated
+  // per-device by scripts/setup.sh. Empty default lets tests run without it;
+  // the route returns password:null when it's empty.
+  SMB_PASSWORD: z.string().default(""),
+  // Names the box answers on, for rendering the connect paths. Same defaults
+  // as scripts/lib/local-dns.sh (`droplet-ai` mDNS host, `droplet-ai.lan`
+  // router-DNS record) so an unset .env still renders working addresses.
+  DROPLET_MDNS_HOSTNAME: z.string().min(1).default("droplet-ai"),
+  DROPLET_LAN_HOSTNAME: z.string().min(1).default("droplet-ai.lan"),
   // WARP-580 — auth is FAIL-CLOSED. The default is `true`; the only way to run
   // with auth off is an EXPLICIT `AUTH_ENABLED=false` AND a non-production
   // NODE_ENV (see resolveAuthEnabled below). A bare/missing var, or `=false`
@@ -258,6 +282,20 @@ const envSchema = z.object({
   // default lets tests run without setting the env var; production fails
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
+
+  // --- Microsoft 365 cloud connector (WARP-2115, ADR-041) ---
+  // The Entra application (client) id of Droplet's multi-tenant app. NOT a
+  // secret: a public-client id is designed to ship inside the client, and the
+  // delegated device-code/auth-code flows use no client secret at all — which
+  // also sidesteps the tenant app-management policies that increasingly block
+  // long-lived secrets. Empty default = the connector is simply unavailable
+  // (isM365Configured() is false); it never half-starts.
+  M365_CLIENT_ID: z.string().default(""),
+  // Entra login host. Overridable only so a national cloud (login.microsoftonline.us,
+  // login.chinacloudapi.cn) can be pointed at without a code change; the
+  // worldwide endpoint is correct for every commercial tenant. Whatever this
+  // resolves to must also be registered in docs/security/allowed-egress.yaml.
+  M365_AUTHORITY_HOST: z.string().default("https://login.microsoftonline.com"),
 
   // WARP-242: path to the doc-KEK master keyfile (raw 32 bytes, mode 0600,
   // minted by scripts/setup.sh as data/secrets/doc-kek.key and single-file

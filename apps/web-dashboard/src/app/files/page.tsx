@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   Folder,
   FolderPlus,
+  HardDrive,
   Link as LinkIcon,
   X,
   Eye,
@@ -26,6 +27,7 @@ import {
 } from "@/components/FileManager/ContextMenu";
 import { SelectionToolbar } from "@/components/FileManager/SelectionToolbar";
 import { MoveCopyDialog } from "@/components/FileManager/MoveCopyDialog";
+import { ConnectDriveDialog } from "@/components/FileManager/ConnectDriveDialog";
 import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPanel";
 import { TagChips } from "@/components/FileManager/TagChips";
 import { CommentsPanel } from "@/components/FileManager/CommentsPanel";
@@ -347,6 +349,10 @@ export default function FilesPage() {
   const { toast } = useToast();
   const [error, setError] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
+  // Network drive (SMB): owner/admin-only connect instructions — the
+  // credential behind it is device-wide, so the trigger hides for other
+  // roles (the endpoint 403s them regardless).
+  const [showConnectDrive, setShowConnectDrive] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   // Reader posture (WARP-1267): close a still-open new-folder composer if
   // the active space becomes read-only out from under it (space switch).
@@ -1330,6 +1336,17 @@ export default function FilesPage() {
   // by dragging.
   const filesActions = (
     <>
+      {isOwnerOrAdmin && (
+        <button
+          onClick={() => setShowConnectDrive(true)}
+          aria-label="Connect network drive"
+          className="btn ghost"
+          type="button"
+        >
+          <HardDrive size={14} />
+          <span className="hidden sm:inline">Connect drive</span>
+        </button>
+      )}
       <button
         onClick={() => !isReaderSpace && setShowNewFolder(true)}
         disabled={isReaderSpace}
@@ -2048,6 +2065,12 @@ export default function FilesPage() {
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      {/* Connect-network-drive instructions (owner/admin) */}
+      <ConnectDriveDialog
+        open={showConnectDrive}
+        onClose={() => setShowConnectDrive(false)}
+      />
 
       {/* Move / Copy dialog */}
       {moveDialog && (

@@ -149,3 +149,23 @@ def test_health_never_leaks_secret_value(client, set_secret):
     body = resp.json()
     assert body["auth_configured"] is True
     assert "super-secret-value-123" not in resp.text
+
+
+def test_health_does_not_leak_switch_inventory(client, monkeypatch):
+    """WARP-2111: /health is auth-exempt on a 0.0.0.0:8081 host-network bind, so
+    it must NOT echo get_system_info() (model/firmware/MAC/hostname) to
+    unauthenticated LAN clients. Exercises the CONNECTED branch — a fake driver
+    whose get_system_info() returns full inventory — to prove the switch model
+    ("Fake 10-Port PoE Switch") and hostname never reach the wire. The detail
+    lives behind GET /system/info."""
+    from tests.fakes import FakeSwitchDriver
+
+    monkeypatch.setattr(main, "driver_instance", FakeSwitchDriver())
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["connected"] is True
+    assert "system_info" not in body
+    assert "Fake 10-Port PoE Switch" not in resp.text
+    assert "fake-switch" not in resp.text
