@@ -47,7 +47,15 @@ export function useEaglesoftSchedule(dateIso: string | null) {
     () => fetchEaglesoftSchedule(dateIso as string),
     { shouldRetryOnError: false },
   );
-  return { entries: data?.entries ?? [], isLoading };
+  // WARP-2135: `connected` + `reason` reach the caller so an empty schedule
+  // can be reported for what it is. `entries: []` alone cannot tell "no
+  // appointments today" from "this connector does not serve schedules".
+  return {
+    entries: data?.entries ?? [],
+    connected: data?.connected ?? false,
+    reason: data?.reason,
+    isLoading,
+  };
 }
 
 /**

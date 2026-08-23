@@ -605,6 +605,22 @@ export function MoneyBody({
             </div>
             <span className="rp-money-bar is-in" />
           </>
+        ) : ar.connected ? (
+          /* WARP-2135 — connected, but this connector does not serve the
+             receivables dataset (orchestrator: connected:true +
+             reason:DATASET_NOT_SERVED). Falling through to the copy below
+             told the owner of a healthy, connected practice system that they
+             had none, and pointed them at the connector browser to fix a
+             problem they do not have. A capability gap is not an outage. */
+          <>
+            <div className="rp-money-note">
+              This system doesn&apos;t provide money owed to you
+            </div>
+            <div className="rp-money-sub">
+              The connected system is healthy — it just doesn&apos;t serve this figure.
+            </div>
+            <span className="rp-money-bar is-inert" />
+          </>
         ) : (
           <>
             <div className="rp-money-note">No practice system connected</div>

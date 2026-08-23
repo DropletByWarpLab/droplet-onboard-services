@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createErpService } from "./erp.service.js";
-import { ConnectorBlockedError } from "@droplet/erp-connector";
+import { ConnectorBlockedError, DatasetNotServedError } from "@droplet/erp-connector";
 
 type ConnRow = {
   id: string;
@@ -190,6 +190,61 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       expect(res.connected).toBe(false);
       expect(res.items).toEqual([]);
       expect(mock._state.auditLog.at(-1)!.action).toBe("read:recall-due");
+    });
+
+    // WARP-2135 — the WARP-2107 capability-gap branch had no test at all, and
+    // it is the one branch where `connected` stays TRUE on a thrown read. That
+    // distinction is load-bearing: `connected: false, rows: []` would be
+    // indistinguishable from "no invoices", i.e. a confident false statement
+    // about money, and the dashboard did exactly that with it.
+    describe("a capability gap is not a fault (WARP-2107 branch)", () => {
+      function servedButNotThisDataset() {
+        return makeBlockedConnector({
+          // The session establishes fine — this connector is healthy.
+          connect: vi.fn(async () => {}),
+          // Full ctor signature (provider, query, missing) on purpose: it
+          // formats `missing` in its message, so a short call throws a
+          // TypeError from inside the constructor instead — which lands in
+          // the generic ERROR branch and would make this test assert the
+          // opposite of its name.
+          runRead: vi.fn(async () => {
+            throw new DatasetNotServedError("eaglesoft", "get_ar_summary", [
+              "total_balance",
+            ]);
+          }),
+        });
+      }
+
+      it("reports connected:true + DATASET_NOT_SERVED, not a disconnection", async () => {
+        build({ connector: servedButNotThisDataset() });
+        const res = await svc.getArSummary(OWNER);
+        expect(res.connected).toBe(true);
+        expect(res.reason).toBe("DATASET_NOT_SERVED");
+      });
+
+      it("still fabricates no figures — a gap is not a zero", async () => {
+        build({ connector: servedButNotThisDataset() });
+        const res = await svc.getArSummary(OWNER);
+        expect(res.totalBalance).toBeNull();
+        expect(res.accountCount).toBeNull();
+      });
+
+      it("audits the read like any other, and closes the connector", async () => {
+        build({ connector: servedButNotThisDataset() });
+        await svc.getArSummary(OWNER);
+        expect(mock._state.auditLog.at(-1)!.action).toBe("read:ar-summary");
+        expect(connector.close).toHaveBeenCalled();
+      });
+
+      it("keeps the gap distinct from a blocked connector on the same call", async () => {
+        // The pair that must never collapse into one another.
+        build({ connector: servedButNotThisDataset() });
+        const gap = await svc.getArSummary(OWNER);
+        build();
+        const blocked = await svc.getArSummary(OWNER);
+        expect([gap.connected, gap.reason]).toEqual([true, "DATASET_NOT_SERVED"]);
+        expect([blocked.connected, blocked.reason]).toEqual([false, "ERP_NOT_CONNECTED"]);
+      });
     });
   });
 

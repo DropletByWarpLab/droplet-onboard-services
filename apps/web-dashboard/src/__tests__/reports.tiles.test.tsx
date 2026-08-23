@@ -369,6 +369,57 @@ describe("MoneyBody (WARP-1995)", () => {
     expect(screen.queryByText("$0.00")).toBeNull();
   });
 
+  it("distinguishes a capability gap from a missing connector (WARP-2135)", async () => {
+    // The defect: `connected: true` + DATASET_NOT_SERVED fell through to the
+    // not-connected copy, so a healthy connected practice system was reported
+    // as absent and the owner was sent to browse connectors for a problem
+    // they did not have.
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      reason: "DATASET_NOT_SERVED",
+      totalBalance: null,
+      accountCount: null,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    expect(
+      await screen.findByText(/doesn't provide money owed to you/i),
+    ).toBeTruthy();
+    expect(screen.queryByText("No practice system connected")).toBeNull();
+    // Still no fabricated figure — a gap is not a zero.
+    expect(screen.queryByText("$0.00")).toBeNull();
+  });
+
+  it("drops the 'browse connectors' CTA from the half that IS connected", async () => {
+    // The call to action has to match the diagnosis: there is nothing to
+    // connect for receivables, so that link would send the owner somewhere
+    // useless. Counted, not asserted-absent: the "Paid out" half ships
+    // permanently not-connected (brief §9.1) and keeps its own CTA, so the
+    // contract is "one link, from the other half" — not "no links".
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      reason: "DATASET_NOT_SERVED",
+      totalBalance: null,
+      accountCount: null,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    await screen.findByText(/doesn't provide money owed to you/i);
+    expect(screen.getAllByText(/Browse connectors/i)).toHaveLength(1);
+  });
+
+  it("keeps both CTAs when nothing is connected at all", async () => {
+    // Guards the count above from passing for the wrong reason: with no
+    // connector, BOTH halves legitimately invite the owner to add one.
+    fetchArSummaryMock.mockResolvedValue({
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+      totalBalance: null,
+      accountCount: null,
+    });
+    render(<MoneyBody canRead now={NOW} />);
+    await screen.findByText("No practice system connected");
+    expect(screen.getAllByText(/Browse connectors/i)).toHaveLength(2);
+  });
+
   it("locks on a 403 — the connector-grant case", async () => {
     const { ForbiddenError } = await import("@/app/reports/api");
     fetchArSummaryMock.mockRejectedValue(new ForbiddenError());

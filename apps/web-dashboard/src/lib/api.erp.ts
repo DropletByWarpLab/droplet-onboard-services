@@ -39,6 +39,19 @@ interface ScheduleEnvelope {
 export interface EaglesoftScheduleResponse {
   date: string;
   entries: ScheduleEntry[];
+  /**
+   * WARP-2135 — carried, not dropped. The orchestrator distinguishes three
+   * states and this adapter used to flatten the last two into one:
+   *   connected: true                              → a real answer
+   *   connected: true,  reason: DATASET_NOT_SERVED → connector is healthy,
+   *     it just does not serve this dataset
+   *   connected: false, reason: ERP_NOT_CONNECTED  → nothing is connected
+   * With both fields gone, an empty `entries` was the only signal left, so a
+   * served-but-not-for-this-dataset vendor was indistinguishable from a box
+   * with no practice system at all — and got told it had none.
+   */
+  connected: boolean;
+  reason?: string;
 }
 
 /** GET /api/erp/schedule → the backend's { connected, reason, date, items }
@@ -51,7 +64,14 @@ export async function fetchEaglesoftSchedule(
     `/api/erp/schedule?date=${encodeURIComponent(date)}`,
     init,
   );
-  return { date: r.date ?? date, entries: r.items ?? [] };
+  return {
+    date: r.date ?? date,
+    entries: r.items ?? [],
+    // Absent `connected` means the not-yet-wired 404 path (see the module
+    // banner) — that is "not connected", never an optimistic true.
+    connected: r.connected === true,
+    reason: r.reason,
+  };
 }
 
 export async function searchPatients(
