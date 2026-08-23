@@ -141,6 +141,12 @@ jobs:
               - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
               - "scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service"
               - "tests/droplet-ssh-access.test.sh"
+              # WARP-2142: the install-mode SSH window is planted by the
+              # autoinstall seed, and the vitest guard now reads user-data to
+              # pin the marker-path agreement with the boot reset — so a
+              # user-data edit must re-run this leg pre-merge, or a path typo
+              # ships as a window that silently never opens.
+              - "scripts/image/autoinstall/user-data"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the

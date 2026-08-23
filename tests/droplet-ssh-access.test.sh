@@ -255,6 +255,109 @@ check "boot reset: recreates a missing intent.d and still lands" $? \
   "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null || echo '<none>')]"
 teardown
 
+# --- 9. Install mode (WARP-2142) ---------------------------------------------
+# The autoinstall seed plants an epoch-stamped marker at
+# $STATE_DIR/install-mode — the ROOT-owned half of the state dir, never the
+# container-writable intent.d/, so nothing in a container can mint or extend
+# an install window. While the marker is FRESH (<48h) the boot reset stamps
+# the intent ON instead of off: the path unit fires, the applier starts sshd,
+# and a box that is still being commissioned comes back reachable after every
+# reboot (last night's dead-ends — WARP-2100/2122/2133 — all reduced to "the
+# box hung and nobody could get in"). The moment the marker is absent,
+# malformed, or expired, the reset stamps off and DELETES it: fail-open for
+# commissioning, fail-closed for everything else.
+
+# Fresh marker → intent ON; the marker survives (the window spans reboots
+# until setup.sh completes or the 48h backstop expires it).
+setup
+date +%s >"$DROPLET_SSH_ACCESS_DIR/install-mode"
+printf 'DROPLET_SSH_ACCESS=off\n' >"$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+/bin/sh "$RESET" >/dev/null 2>&1
+RC=$?
+[ "$RC" = "0" ]
+check "install mode: exits 0 with a fresh marker" $? "rc=$RC"
+grep -q '^DROPLET_SSH_ACCESS=on$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+check "install mode: a fresh marker stamps the intent ON" $? \
+  "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null)]"
+[ -f "$DROPLET_SSH_ACCESS_DIR/install-mode" ]
+check "install mode: a fresh marker survives the boot (window spans reboots)" $?
+[ -z "$(cat "$SYSTEMCTL_LOG" 2>/dev/null)" ]
+check "install mode: the boot reset still never calls systemctl itself" $? \
+  "log=[$(cat "$SYSTEMCTL_LOG" 2>/dev/null)]"
+# ...and the applier, run on that modification as the path unit would run it,
+# STARTS sshd — the outcome the ticket demands: sshd running after every boot
+# while install mode lasts.
+/bin/sh "$SCRIPT" >/dev/null 2>&1
+LOG="$(cat "$SYSTEMCTL_LOG" 2>/dev/null)"
+STATE="$(cat "$DROPLET_SSH_ACCESS_DIR/state" 2>/dev/null || echo '<none>')"
+echo "$LOG" | grep -q '^start ssh.service$'
+check "install mode: the applier starts sshd from the stamped intent" $? "log=[$LOG]"
+echo "$STATE" | grep -q '^state=on$'
+check "install mode: state reads on — the readback stays honest" $? "state=[$STATE]"
+teardown
+
+# A marker whose write lost its trailing newline still counts (read hits EOF
+# with the value already assigned).
+setup
+printf '%s' "$(date +%s)" >"$DROPLET_SSH_ACCESS_DIR/install-mode"
+/bin/sh "$RESET" >/dev/null 2>&1
+grep -q '^DROPLET_SSH_ACCESS=on$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+check "install mode: a marker without a trailing newline still reads" $? \
+  "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null)]"
+teardown
+
+# A FUTURE timestamp (installer clock ahead of the first-boot clock — a box
+# with no RTC sync yet) is treated as fresh: fail OPEN for commissioning. The
+# backstop still bounds the window once the clock passes stamp+48h.
+setup
+echo "$(( $(date +%s) + 3600 ))" >"$DROPLET_SSH_ACCESS_DIR/install-mode"
+/bin/sh "$RESET" >/dev/null 2>&1
+grep -q '^DROPLET_SSH_ACCESS=on$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+check "install mode: clock skew (future stamp) fails open, not closed" $? \
+  "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null)]"
+teardown
+
+# An EXPIRED marker (>48h) → off, and the marker is DELETED so an abandoned
+# box closes its window for good on the first boot after expiry.
+setup
+echo "$(( $(date +%s) - 172801 ))" >"$DROPLET_SSH_ACCESS_DIR/install-mode"
+/bin/sh "$RESET" >/dev/null 2>&1
+grep -q '^DROPLET_SSH_ACCESS=off$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+check "install mode: an expired marker stamps off (48h backstop)" $? \
+  "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null)]"
+[ ! -f "$DROPLET_SSH_ACCESS_DIR/install-mode" ]
+check "install mode: an expired marker is deleted — the window cannot reopen" $?
+teardown
+
+# Malformed markers → off, deleted, and NOTHING ever executes. The marker is
+# root-owned, but this script must stay paranoid anyway: the same strict-parse
+# posture as the applier, with no code path from file contents to a command.
+PWNED2="/tmp/droplet-ssh-access-marker-pwned-$$"
+for badmark in \
+  "not-a-number" \
+  "1234abc" \
+  "\$(touch $PWNED2)" \
+  "\`touch $PWNED2\`" \
+  "" \
+  "12345678901234567890123"; do
+  setup
+  printf '%s\n' "$badmark" >"$DROPLET_SSH_ACCESS_DIR/install-mode"
+  /bin/sh "$RESET" >/dev/null 2>&1
+  RC=$?
+  label="$(printf '%s' "$badmark" | head -c 24)"
+  [ "$RC" = "0" ]
+  check "install mode: refuses [$label] without failing the boot" $? "rc=$RC"
+  grep -q '^DROPLET_SSH_ACCESS=off$' "$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+  check "install mode: refuses [$label]: stamps off" $? \
+    "intent=[$(cat "$DROPLET_SSH_ACCESS_DIR/intent.d/intent" 2>/dev/null)]"
+  [ ! -f "$DROPLET_SSH_ACCESS_DIR/install-mode" ]
+  check "install mode: refuses [$label]: deletes the bad marker" $?
+  teardown
+done
+[ ! -e "$PWNED2" ]
+check "install mode: no marker content was ever executed" $? "$PWNED2 was created"
+rm -f "$PWNED2"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]

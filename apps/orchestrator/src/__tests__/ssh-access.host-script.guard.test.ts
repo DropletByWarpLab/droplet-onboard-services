@@ -46,6 +46,14 @@ const BOOT_RESET_SCRIPT = readFileSync(
   "utf8",
 );
 const INSTALLER = readFileSync(join(REPO, "scripts", "lib", "single-box.sh"), "utf8");
+// WARP-2142: the autoinstall seed opens the install-mode SSH window and
+// setup.sh closes it — both are part of the toggle's contract now, so both
+// are read here.
+const USER_DATA = readFileSync(
+  join(REPO, "scripts", "image", "autoinstall", "user-data"),
+  "utf8",
+);
+const SETUP = readFileSync(join(REPO, "scripts", "setup.sh"), "utf8");
 
 /** Strip comments so a rule is never satisfied by prose ABOUT the rule. */
 function code(text: string): string {
@@ -160,13 +168,24 @@ describe("the toggle resets to OFF at boot, so the readback cannot lie after a r
   it("resets to off — it never re-applies the stored intent", () => {
     // Re-applying the stored intent at boot would turn "allow SSH while I
     // troubleshoot" into a standing open door across reboots — explicitly
-    // rejected. The script writes the literal off value; it never reads the
-    // previous one and never drives systemd itself (acting stays the
-    // applier's job, via the path unit).
+    // rejected. The script writes fixed literals; it never reads the
+    // previous intent value and never drives systemd itself (acting stays
+    // the applier's job, via the path unit).
+    //
+    // WARP-2142 carve-out, pinned in its own describe below: while a fresh
+    // install-mode MARKER is present the script stamps the literal `on`
+    // instead — still a fixed literal, still gated on a file only root can
+    // write, still never the stored intent. The steady-state contract here
+    // is unchanged: no marker, no open door.
     const body = code(BOOT_RESET_SCRIPT);
     expect(body).toMatch(/DROPLET_SSH_ACCESS=off/);
     expect(body).not.toMatch(/\bsystemctl\b/);
     expect(body).not.toMatch(/\bsed\b|\bgrep\b|\bawk\b/);
+    // "Never reads the previous intent" made explicit now that the script
+    // legitimately reads ANOTHER file (the marker): the intent file itself
+    // must only ever be a write target here.
+    expect(body).not.toMatch(/(cat|read[^A-Za-z_])[^\n]*INTENT_FILE/);
+    expect(body).not.toMatch(/<\s*"?\$\{?INTENT_FILE/);
   });
 
   it("writes the intent atomically, like the orchestrator does", () => {
@@ -175,6 +194,101 @@ describe("the toggle resets to OFF at boot, so the readback cannot lie after a r
     const body = code(BOOT_RESET_SCRIPT);
     expect(body).toMatch(/\.tmp/);
     expect(body).toMatch(/mv -f/);
+  });
+});
+
+describe("install mode (WARP-2142) — SSH open while commissioning, closed by the box itself", () => {
+  // The commissioning dead-ends of 2026-08 (WARP-2100 hang with no way in,
+  // 2122's toggle with no execute path, 2133's OTA stall) all reduced to "a
+  // box mid-install that nobody could reach". Install mode is the fix:
+  // fail-OPEN while the box is being commissioned, fail-CLOSED the moment
+  // provisioning succeeds — or after the 48h backstop when it never does.
+  // The window is anchored to one root-owned marker file; these assertions
+  // pin every leg of its lifecycle, and above all that the THREE files that
+  // spell its path (seed, boot reset, completion hook) actually agree.
+  const MARKER = "/var/lib/droplet-ssh-access/install-mode";
+
+  it("the seed plants an epoch-stamped marker at the exact path the boot reset checks", () => {
+    // A typo between user-data and the boot reset would be a window that
+    // silently never opens (or never closes) — it must die here, in CI.
+    expect(code(USER_DATA)).toContain(`date +%s > ${MARKER}`);
+    // The boot reset composes the same path from its default state dir...
+    expect(BOOT_RESET_SCRIPT).toMatch(
+      /DROPLET_SSH_ACCESS_DIR:-\/var\/lib\/droplet-ssh-access\}/,
+    );
+    // ...and the marker basename, pinned as an exact assignment.
+    expect(code(BOOT_RESET_SCRIPT)).toMatch(
+      /INSTALL_MODE_FILE="\$STATE_DIR\/install-mode"/,
+    );
+  });
+
+  it("the marker lives in the root-owned half — a container can never mint install mode", () => {
+    // intent.d/ is droplet-writable by design; the marker must NOT be. If it
+    // moved under intent.d, a compromised orchestrator could re-open the
+    // window forever.
+    expect(code(BOOT_RESET_SCRIPT)).not.toMatch(/intent\.d\/install-mode/);
+    expect(code(USER_DATA)).not.toMatch(/intent\.d/);
+  });
+
+  it("the seed enables ssh in the installed target", () => {
+    // On boot 1 none of the WARP-1984 machinery exists yet — setup.sh
+    // installs it mid-provision — so standing enablement in the target is
+    // the only thing that can open the window on the very first boot.
+    expect(code(USER_DATA)).toMatch(/systemctl enable ssh\.service/);
+  });
+
+  it("the boot reset honors the marker only within the 48h backstop, then deletes it", () => {
+    const body = code(BOOT_RESET_SCRIPT);
+    expect(body).toMatch(/172800/);
+    expect(body).toMatch(/rm -f "\$INSTALL_MODE_FILE"/);
+  });
+
+  it("the boot reset validates the marker as digits before doing arithmetic on it", () => {
+    // Same posture as the applier's on|off parse: strict validation, no code
+    // path from file contents to a command — and still no external parser
+    // (the sed/grep/awk ban above covers this file's whole body).
+    expect(code(BOOT_RESET_SCRIPT)).toMatch(/\*\[!0-9\]\*/);
+  });
+
+  it("install mode still stamps fixed literals, never file contents", () => {
+    const body = code(BOOT_RESET_SCRIPT);
+    expect(body).toMatch(/DROPLET_SSH_ACCESS=on/);
+    expect(body).toMatch(/DROPLET_SSH_ACCESS=off/);
+    // No interpolation into the stamped value: the marker chooses BETWEEN
+    // the two literals, it is never part of one.
+    expect(body).not.toMatch(/DROPLET_SSH_ACCESS=\$/);
+  });
+
+  it("a SUCCESSFUL provision closes the window: marker removed, ssh disabled, intent off", () => {
+    const installer = code(INSTALLER);
+    // The hook exists, removes the same marker path, and undoes the seed's
+    // standing enablement — steady state returns to WARP-1984
+    // start-not-enable, owner-toggle-only.
+    expect(installer).toMatch(/close_install_mode_ssh_window\(\)/);
+    expect(installer).toContain(MARKER);
+    expect(installer).toMatch(/systemctl disable ssh\.service ssh\.socket/);
+    expect(installer).toMatch(/systemctl disable sshd\.service sshd\.socket/);
+    // ...and re-asserts the off intent so the APPLIER (via the path unit)
+    // stops sshd and records state=off — acting stays the applier's job.
+    expect(installer).toMatch(/DROPLET_SSH_ACCESS=off/);
+  });
+
+  it("setup.sh calls the close hook from its success tail", () => {
+    // set -e semantics make placement the failure contract: a provision that
+    // dies anywhere earlier never reaches the call, the marker survives, and
+    // the box stays rescuable over SSH — exactly the point.
+    expect(code(SETUP)).toMatch(/close_install_mode_ssh_window/);
+  });
+
+  it("the completion hook never drives the applier service directly", () => {
+    // Closing the window must ride the same path as every other intent
+    // change: write the file, let the watcher fire. Starting or enabling
+    // droplet-ssh-access.service from the installer stays banned (the
+    // assertions in the installer describe below pin the same thing for the
+    // install path).
+    expect(code(INSTALLER)).not.toMatch(
+      /systemctl\s+(start|enable)\s+(--now\s+)?droplet-ssh-access\.service/,
+    );
   });
 });
 
