@@ -23,7 +23,10 @@ Threat-model mapping (`docs/THREAT_MODEL.md`):
 - **T5.8 / accepted-risk R4** — plaintext data-at-rest. Covered by the `rest.*`
   checks (LUKS2 header, Argon2id KDF, TPM-sealed keyslot, raw-partition entropy,
   mount coverage across the WARP-232 surfaces — `/data/docker` docker data-root,
-  `/data/droplet/env/.env`, `/data/droplet/secrets` — plus USB automounts).
+  `/data/droplet/env/.env`, `/data/droplet/secrets` — plus USB automounts, plus
+  the WARP-2102 `rest.docker.store-root` probe that resolves where the RUNNING
+  docker/containerd daemons really keep the image store via their `/proc/<pid>/fd`
+  bolt-db handles — Docker ≥ 28's containerd image store ignores `data-root`).
 - **T1.2** — edge terminator protocol floor. Covered by `transit.pg.tls13` and
   `transit.edge.tls-policy`.
 - **T2.8 / T5.x** — internal service-to-service plaintext. Covered by
@@ -54,7 +57,7 @@ Everything else (`cryptsetup`, `lsblk`, `findmnt`, `dd`, `openssl`, `python3`,
 ## Run it
 
 ```bash
-# Full pass (all 16 checks):
+# Full pass (all 17 checks):
 sudo bash scripts/host/droplet-verify-encryption.sh
 
 # A subset (comma-separated check ids):
@@ -110,6 +113,7 @@ harness bugs.
 |---|---|---|
 | `rest.luks.device` / `rest.luks.header` / `rest.luks.tpm-token` / `rest.entropy` / `rest.mount-coverage` (R-01..R-05) | PASS | WARP-232 landed: `droplet-data` LUKS2/Argon2id LV with TPM2 keyslot, provisioned at first boot; `/data/docker`, `/data/droplet/env/.env`, `/data/droplet/secrets` all sit on the encrypted LV. FAILs here mean the box predates WARP-232 provisioning |
 | `rest.usb-luks` (R-06) | SKIP | no USB mounts on the bench box by default |
+| `rest.docker.store-root` (R-07) | PASS | WARP-2102: `daemon.json` pins `containerd-snapshotter: false` so `data-root` governs the whole image store. The probe reads the RUNNING daemons' `/proc/<pid>/fd` bolt-db handles (never `containerd config dump` — a config render proves nothing about the live daemon) and FAILs when the active store resolves off `/data` — the Docker-29 containerd-store regression that filled the bench box's 63G root LV to 92% |
 | `transit.pg.plaintext-rejected` (T-01) | PASS | WARP-233: `hostssl`-only `docker/postgres/pg_hba.conf` — plaintext TCP hits the terminal reject. On a FIPS-mode box (`DROPLET_FIPS_MODE=1`) the probe records SKIP: `pg_hba.fips.conf` deliberately tolerates plaintext+SCRAM on the private container bridge (P1011 decision A, WARP-318) |
 | `transit.pg.tls13` (T-02) | PASS | WARP-233: `ssl=on` + `ssl_min_protocol_version=TLSv1.3` with the WARP-236 internal-CA `db` bundle as the server cert |
 | `transit.pg.scram` (T-03) | PASS | WARP-233 pins `password_encryption=scram-sha-256` as an explicit server flag (was the PG16 default) |

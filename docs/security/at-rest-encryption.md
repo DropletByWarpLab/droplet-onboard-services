@@ -49,6 +49,7 @@ source of truth).
 | Postgres data dir | docker volume under `/data/docker` (LUKS data LV) |
 | Nextcloud data dir | docker volume under `/data/docker` |
 | file-indexer / brain pgvector | docker volume under `/data/docker` |
+| Docker image/layer store | classic store under `/data/docker`. **WARP-2102:** Docker ≥ 28's *containerd image store* roots at `/var/lib/containerd` and **ignores `data-root`**, so `daemon.json` pins `"features": {"containerd-snapshotter": false}`; `/var/lib/containerd` then holds runtime metadata only, never image content. Verified live by `rest.docker.store-root` (`droplet-verify-encryption.sh`) |
 | Brain chunk text (chat attachments) | **column-level** AES-256-GCM under per-document DEKs (WARP-242, below) — on top of the LUKS layer |
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |
 | `data/secrets` (audit signing key, doc-KEK keyfile) | `/data/droplet/secrets` (symlinked) |
@@ -229,9 +230,30 @@ Boxes flashed before WARP-232 used the whole-disk `layout: lvm` and have **no
 free VG extents** — `droplet-luks-provision.sh` exits 2 there with a clear
 message. Encrypted-at-rest for the existing fleet arrives via reflash (new
 image) or a manual migration. On boxes with an existing `/var/lib/docker`,
-`droplet-luks-provision.sh` leaves the docker data-root alone and prints the
-`--migrate-data` runbook (stop stack → `rsync -aHAX /var/lib/docker/
-/data/docker/` → `daemon.json` → start) rather than moving data unattended.
+`droplet-luks-provision.sh` never moves the store unattended: an existing
+`daemon.json` keeps its `data-root` (the `--migrate-data` runbook below is the
+operator path). Since WARP-2102 a provision re-run **does** merge
+`"features": {"containerd-snapshotter": false}` into an existing `daemon.json`
+(backing the file up first, validating the JSON after, and respecting an
+explicit operator value) — Docker ≥ 28's containerd image store roots at
+`/var/lib/containerd` and ignores `data-root` entirely, so without the pin
+every image lands back on the plain root LV no matter what `data-root` says.
+
+**Store-switch consequence (WARP-2102).** The classic and containerd image
+stores share nothing. A box that already ran Docker ≥ 28 with the containerd
+store has its images in `/var/lib/containerd`; after the pin lands and dockerd
+restarts, those images become *invisible* (not deleted) — `docker image ls`
+comes up empty until you re-pull, or `docker save` them before the restart and
+`docker load` after. Named volumes and container definitions live under
+`data-root` in both modes and are unaffected.
+
+**`--migrate-data` runbook:** stop the stack → `rsync -aHAX /var/lib/docker/
+/data/docker/` → write `daemon.json` (`"data-root": "/data/docker"` **plus**
+the `containerd-snapshotter: false` pin — both surfaces, or the image store
+escapes the LUKS boundary again) → start docker → re-pull any image the store
+switch left behind → once the stack is healthy, reclaim the plain-root copies
+(`/var/lib/docker`, and `/var/lib/containerd`'s content/snapshot stores) and
+confirm with `droplet-verify-encryption.sh --checks rest.docker.store-root`.
 
 ## Cross-references
 
