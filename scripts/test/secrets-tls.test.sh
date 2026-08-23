@@ -68,8 +68,12 @@ _run_test() {
 # stub reload_gateway_nginx, then run _generate_tls_cert. Echoed via a function
 # so each test gets a clean function table. Runs in a subshell so the sourced
 # definitions never leak between tests.
+#
+# WARP-2132: an optional second argument (space-separated IPv4s) is exported as
+# DROPLET_TLS_CURRENT_IPS — secrets.sh's test hook overriding the live
+# interface harvest — so IP-coverage behaviour is deterministic on any host.
 _run_generate_tls_cert() {
-  local sandbox="$1"
+  local sandbox="$1" current_ips="${2:-}"
   (
     set +e
     # shellcheck source=/dev/null
@@ -79,6 +83,7 @@ _run_generate_tls_cert() {
     # tls-reload.sh.
     reload_gateway_nginx() { return 0; }
     export REPO_ROOT="$sandbox"
+    [ -n "$current_ips" ] && export DROPLET_TLS_CURRENT_IPS="$current_ips"
     # shellcheck source=/dev/null
     source "$SECRETS_SH" >/dev/null 2>&1 || { echo "could not source secrets.sh" >&2; exit 91; }
     type _generate_tls_cert >/dev/null 2>&1 || { echo "_generate_tls_cert not defined" >&2; exit 92; }
@@ -111,6 +116,10 @@ _make_self_signed() {
 # leaf cert+key to <leaf_crt> <leaf_key>. Real openssl, no network.
 _make_ca_signed_leaf() {
   local workdir="$1" leaf_crt="$2" leaf_key="$3" leaf_days="${4:-90}"
+  # WARP-2132: optional SAN override so a test can mint a CA-signed leaf that
+  # ALSO satisfies _cert_has_all_required_sans (exercising the skip-guard's
+  # public-CA exemption rather than the preserve branch further down).
+  local san="${5:-DNS:d-deadbeef.devices.warp-lab.ai}"
   local ca_key="$workdir/ca.key" ca_crt="$workdir/ca.crt" csr="$workdir/leaf.csr"
   # CA
   openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
@@ -123,7 +132,7 @@ _make_ca_signed_leaf() {
   # Sign leaf with the CA (issuer != subject). Use a real extfile rather than
   # process substitution — mingw openssl can't open a `<(...)` FD path.
   local extcnf="$workdir/leaf-ext.cnf"
-  printf 'subjectAltName=DNS:d-deadbeef.devices.warp-lab.ai\n' > "$extcnf"
+  printf 'subjectAltName=%s\n' "$san" > "$extcnf"
   openssl x509 -req -in "$csr" \
     -CA "$ca_crt" -CAkey "$ca_key" -CAcreateserial \
     -days "$leaf_days" \
@@ -540,6 +549,159 @@ test_public_ca_broken_pair_preserved_but_warned() {
 }
 
 # =============================================================================
+# Test 8 (WARP-2132): self-signed cert with STALE IP SANs → re-issued with the
+# SAME key and a SAN SUPERSET; .bootstrap deliberately refreshed
+# =============================================================================
+#
+# The install-time cert freezes the secrets-time interface harvest into its IP
+# SANs. A box that changes networks then serves IP SANs for addresses it no
+# longer holds — browser warnings forever — and the old skip-guard (expiry +
+# DNS SANs + pair match only) passed the stale cert on every setup re-run.
+# The fix must re-issue REUSING the existing private key (pairings and
+# key-pinned clients survive) with a SAN superset (old IP SANs retained +
+# current added), and refresh the .bootstrap side-copy on THIS path only.
+test_stale_ip_sans_reissued_same_key_superset() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  # Installed: valid, DNS-SAN-complete, matched pair — but its only interface
+  # IP SAN is the OLD network's address.
+  local old_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,IP:10.0.0.99,IP:127.0.0.1"
+  _make_self_signed "$crt" "$key" "$old_san" 3650
+  # Production state: the bootstrap side-copy of that same pair exists.
+  cp "$crt" "$crt.bootstrap"; cp "$key" "$key.bootstrap"
+
+  local before_crt_sha before_key_sha before_pub
+  before_crt_sha="$(_sha "$crt")"; before_key_sha="$(_sha "$key")"
+  before_pub="$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null)"
+
+  # The box now lives on a different network.
+  if ! _run_generate_tls_cert "$sandbox" "192.168.77.5"; then
+    printf "    _generate_tls_cert returned non-zero on a stale-IP self-signed cert\n" >&2
+    return 1
+  fi
+
+  # Re-issued: bytes must have changed (the pre-fix skip-guard passed expiry +
+  # DNS SANs only, so the stale cert survived every re-run byte-identical).
+  if [ "$(_sha "$crt")" = "$before_crt_sha" ]; then
+    printf "    stale-IP cert was NOT re-issued — the skip-guard passed a cert missing the box's current IPs\n" >&2
+    return 1
+  fi
+
+  # KEY REUSE: same private key on disk, same public key in the new cert.
+  if [ "$(_sha "$key")" != "$before_key_sha" ]; then
+    printf "    droplet.key was replaced — the IP-stale path must REUSE the key (pairings/pinned clients)\n" >&2
+    return 1
+  fi
+  local after_pub
+  after_pub="$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null)"
+  if [ -z "$after_pub" ] || [ "$after_pub" != "$before_pub" ]; then
+    printf "    re-issued cert carries a DIFFERENT public key — must be -key reuse, never -newkey\n" >&2
+    return 1
+  fi
+
+  # SAN SUPERSET: current IP added, OLD IP + loopback + DNS names retained.
+  local san_text
+  san_text="$(openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null)"
+  local want
+  for want in 'IP Address:192.168.77.5' 'IP Address:10.0.0.99' 'IP Address:127.0.0.1' 'DNS:droplet.lan' 'DNS:droplet-ai.local'; do
+    if ! printf '%s' "$san_text" | grep -qF "$want"; then
+      printf "    re-issued SAN is not a superset — missing %s\n    got: %s\n" "$want" "$san_text" >&2
+      return 1
+    fi
+  done
+
+  # BOOTSTRAP REFRESH (this path only): the side-copy must now be the widened
+  # cert + the (unchanged) key, so the expired-restore path replays the widest
+  # cert ever issued instead of resurrecting the stale-IP one.
+  if [ "$(_sha "$crt.bootstrap")" != "$(_sha "$crt")" ]; then
+    printf "    droplet.crt.bootstrap was not refreshed with the re-issued cert\n" >&2
+    return 1
+  fi
+  if [ "$(_sha "$key.bootstrap")" != "$(_sha "$key")" ]; then
+    printf "    droplet.key.bootstrap no longer matches the (unchanged) droplet.key\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
+# Test 9 (WARP-2132): current IPs all covered → still skips (byte-identical)
+# =============================================================================
+test_covered_ips_still_skip() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  local full_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,IP:192.168.77.5,IP:127.0.0.1"
+  _make_self_signed "$crt" "$key" "$full_san" 3650
+
+  local before_crt_sha before_key_sha
+  before_crt_sha="$(_sha "$crt")"; before_key_sha="$(_sha "$key")"
+
+  if ! _run_generate_tls_cert "$sandbox" "192.168.77.5"; then
+    printf "    _generate_tls_cert returned non-zero on a fully-covering cert\n" >&2
+    return 1
+  fi
+
+  if [ "$(_sha "$crt")" != "$before_crt_sha" ] || [ "$(_sha "$key")" != "$before_key_sha" ]; then
+    printf "    a cert already covering every current IP was regenerated — skip-guard must still skip\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
+# Test 10 (WARP-2132 / ADR-023): public-CA leaf with stale/absent IP SANs →
+# untouched even by the IP-coverage trigger
+# =============================================================================
+#
+# A public-CA leaf carries no interface-IP SANs (the per-device FQDN is its
+# access path), so the IP-coverage check would always read it as "stale". The
+# exemption must fire BEFORE the IP check: setup never reshapes an HQ-issued
+# fullchain. This leaf is minted DNS-SAN-complete with a matching key so it
+# reaches the skip-guard branch (not the later preserve branch) — the exact
+# spot the WARP-2132 trigger was added.
+test_public_ca_leaf_ip_stale_untouched() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  local full_dns_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,DNS:d-deadbeef.devices.warp-lab.ai"
+  _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90 "$full_dns_san"
+
+  local before_crt_sha before_key_sha
+  before_crt_sha="$(_sha "$crt")"; before_key_sha="$(_sha "$key")"
+
+  if ! _run_generate_tls_cert "$sandbox" "192.168.77.5"; then
+    printf "    _generate_tls_cert returned non-zero on an IP-stale public-CA leaf\n" >&2
+    return 1
+  fi
+
+  if [ "$(_sha "$crt")" != "$before_crt_sha" ] || [ "$(_sha "$key")" != "$before_key_sha" ]; then
+    printf "    public-CA leaf was reshaped by the IP-coverage trigger — ADR-023 forbids touching it\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}secrets.sh TLS-clobber regression test suite${_RESET}\n"
@@ -566,6 +728,15 @@ _run_test "mismatched cert/key pair without bootstrap is regenerated as a matchi
 
 _run_test "public-CA leaf with a mismatched key is preserved but WARNED (WARP-595)" \
   test_public_ca_broken_pair_preserved_but_warned
+
+_run_test "stale-IP self-signed cert re-issued with the SAME key + SAN superset, bootstrap refreshed (WARP-2132)" \
+  test_stale_ip_sans_reissued_same_key_superset
+
+_run_test "cert already covering every current IP still skips, byte-identical (WARP-2132)" \
+  test_covered_ips_still_skip
+
+_run_test "public-CA leaf with stale/absent IP SANs stays untouched (WARP-2132 / ADR-023)" \
+  test_public_ca_leaf_ip_stale_untouched
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

@@ -14,6 +14,11 @@ on:
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
       # WARP-1829: the host_unit_staleness check delegates to this detector.
       - "scripts/host/droplet-host-units.sh"
+      # WARP-2132: the tls_cert_ips check delegates detection + re-issue to
+      # secrets.sh (and reloads via tls-reload.sh).
+      - "scripts/lib/secrets.sh"
+      - "scripts/lib/internal-ca.sh"
+      - "scripts/lib/tls-reload.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
@@ -26,6 +31,9 @@ on:
       - "scripts/host/etc-default/droplet-watchdog"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
       - "scripts/host/droplet-host-units.sh"
+      - "scripts/lib/secrets.sh"
+      - "scripts/lib/internal-ca.sh"
+      - "scripts/lib/tls-reload.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
