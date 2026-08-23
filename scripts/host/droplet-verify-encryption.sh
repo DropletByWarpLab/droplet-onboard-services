@@ -31,7 +31,7 @@
 # TEST HOOKS (env knobs, see below): DROPLET_VFY_OUTPUT_ROOT, _REPO_ROOT,
 #   _COMPOSE_PROJECT, _COMPOSE_FILE, _DATA_PATHS, _USB_GLOB, _MESH_TARGETS,
 #   _REDIS_TLS_PORT, _PCAP_SECONDS, _SIGNER_CONTAINER, _TPM_DIR, _CHECKS,
-#   _RAW_DEVICE.
+#   _RAW_DEVICE, _PROC_ROOT, _DATA_MOUNT.
 #
 # CLI: [--list] [--checks a,b,c] [--pcap-seconds N] [--verify-bundle DIR]
 # =============================================================================
@@ -57,6 +57,10 @@ VFY_SIGNER_CONTAINER="${DROPLET_VFY_SIGNER_CONTAINER:-droplet-device-identity-sv
 VFY_TPM_DIR="${DROPLET_VFY_TPM_DIR:-/var/lib/droplet/tpm}"
 VFY_CHECKS="${DROPLET_VFY_CHECKS:-all}"
 VFY_RAW_DEVICE="${DROPLET_VFY_RAW_DEVICE:-}"
+# WARP-2102 store-root probe: where /proc lives (test fixture seam) and the
+# encrypted mount every live image/layer store must resolve under.
+VFY_PROC_ROOT="${DROPLET_VFY_PROC_ROOT:-/proc}"
+VFY_DATA_MOUNT="${DROPLET_VFY_DATA_MOUNT:-/data}"
 
 # shellcheck source=droplet-verify-encryption-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/droplet-verify-encryption-lib.sh"
@@ -68,6 +72,7 @@ rest.luks.header|rest|WARP-232|T5.8|LUKS2 header with aes-xts + Argon2id keyslot
 rest.luks.tpm-token|rest|WARP-232|T5.8|TPM2 token enrolled in a LUKS keyslot
 rest.entropy|rest|WARP-232|T5.8|raw partition reads as ciphertext (entropy + magic scan)
 rest.mount-coverage|rest|WARP-232|T5.8|all data surfaces on encrypted devices
+rest.docker.store-root|rest|WARP-2102|T5.8|the RUNNING docker image store (incl. the containerd store) lives under /data
 rest.usb-luks|rest|WARP-232|T5.8|USB automount drives are LUKS-enrolled
 transit.pg.plaintext-rejected|transit|WARP-233|T5.8|psql with sslmode=disable is rejected
 transit.pg.tls13|transit|WARP-233|T1.2|Postgres negotiates TLSv1.3
@@ -243,6 +248,107 @@ probe_rest_mount_coverage() {
     vfy_record "$id" FAIL "plaintext-at-rest:${uncovered# }" "evidence/$id/mount-map.txt"
   else
     vfy_record "$id" PASS "all-paths-crypt-backed" "evidence/$id/mount-map.txt"
+  fi
+}
+
+# vfy_pids NAME — pids of a running process (pidof; empty when not running).
+vfy_pids() { pidof "$1" 2>/dev/null || true; }
+
+# vfy_open_store_dbs PID... — resolve every open fd of the given pids and print
+# the targets that end in .db (bolt databases stay open for the daemon's whole
+# lifetime). Reading /proc/<pid>/fd needs root; unreadable dirs yield nothing.
+vfy_open_store_dbs() {
+  local pid f t
+  for pid in "$@"; do
+    for f in "$VFY_PROC_ROOT/$pid/fd"/*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      t="$(readlink "$f" 2>/dev/null || true)"
+      case "$t" in *.db) printf '%s\n' "$t";; esac
+    done
+  done
+}
+
+# vfy_paths_outside PREFIX — filter stdin; print the lines NOT under PREFIX/.
+vfy_paths_outside() {
+  local prefix="$1" line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in "$prefix"/*) ;; *) printf '%s\n' "$line";; esac
+  done
+}
+
+probe_rest_docker_store_root() {
+  # WARP-2102: Docker >= 28 can serve images from the containerd image store
+  # (features.containerd-snapshotter), whose root (/var/lib/containerd)
+  # IGNORES daemon.json data-root — so a box can swear data-root=/data/docker
+  # while every image byte lands on the plain root LV (the bench box's 63G
+  # root hit 92% this way). Neither daemon.json nor `containerd config dump`
+  # is proof here: both only render configuration a daemon WOULD load
+  # (`containerd config dump` runs fine with the daemon stopped) and say
+  # nothing about which store the RUNNING daemon actually writes into — so
+  # this probe deliberately does NOT use `containerd config dump`. The honest
+  # evidence is the running processes' own open file handles: the store's
+  # bolt metadata database (io.containerd.metadata.v1.bolt/meta.db for the
+  # containerd store; the buildkit/volumes/network bolt DBs under data-root
+  # for the classic store) is held open for the daemon's lifetime, so
+  # /proc/<pid>/fd readlinks pin the store the daemon REALLY uses. Which
+  # store is active comes from `docker info` — the running daemon's own
+  # runtime report over the API (it errors when dockerd is down), not a
+  # config render.
+  local id="$1"
+  local out="$VFY_EVID/$id/open-store-dbs.txt" info="$VFY_EVID/$id/docker-info.txt"
+  local dockerd_pids containerd_pids dbs containerd_meta offdata dataroot_dbs
+  vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  vfy_have pidof || { vfy_record "$id" SKIP "pidof-not-on-path"; return; }
+  dockerd_pids="$(vfy_pids dockerd)"
+  containerd_pids="$(vfy_pids containerd)"
+  if [ -z "$dockerd_pids" ]; then
+    vfy_record "$id" SKIP "dockerd-not-running"
+    return
+  fi
+  # shellcheck disable=SC2086  # pid lists are intentionally word-split
+  dbs="$(vfy_open_store_dbs $dockerd_pids $containerd_pids | LC_ALL=C sort -u)"
+  printf '%s\n' "$dbs" > "$out"
+  if [ -z "$dbs" ]; then
+    vfy_record "$id" SKIP "no-open-store-dbs-resolvable (run as root so /proc/<pid>/fd is readable)" \
+      "evidence/$id/open-store-dbs.txt"
+    return
+  fi
+  docker info > "$info" 2>&1 || true
+  containerd_meta="$(printf '%s\n' "$dbs" | grep -F 'io.containerd.metadata.v1.bolt/meta.db' || true)"
+  if grep -q 'io\.containerd\.snapshotter' "$info" 2>/dev/null; then
+    # containerd image store ACTIVE — the meta.db containerd holds open IS the
+    # image store, and daemon.json data-root does not govern it.
+    if [ -z "$containerd_meta" ]; then
+      vfy_record "$id" SKIP "containerd-store-active-but-no-meta.db-fd-resolved" "$(vfy_evidence_csv "$id")"
+      return
+    fi
+    offdata="$(printf '%s\n' "$containerd_meta" | vfy_paths_outside "$VFY_DATA_MOUNT")"
+    if [ -n "$offdata" ]; then
+      vfy_record "$id" FAIL \
+        "containerd-image-store-off-$VFY_DATA_MOUNT:$(printf '%s' "$offdata" | tr '\n' ' ') (containerd-snapshotter active — data-root does NOT govern this store; WARP-2102)" \
+        "$(vfy_evidence_csv "$id")"
+    else
+      vfy_record "$id" PASS "containerd-image-store-under-$VFY_DATA_MOUNT" "$(vfy_evidence_csv "$id")"
+    fi
+    return
+  fi
+  # Classic store — data-root governs the image/layer store, and dockerd's own
+  # bolt DBs (buildkit, volumes, network) reveal the data-root it REALLY runs
+  # with. containerd's meta.db off /data is fine in this mode: with the
+  # snapshotter off it holds runtime metadata only, never image content.
+  dataroot_dbs="$(printf '%s\n' "$dbs" | grep -E '/(buildkit|volumes|network)/' || true)"
+  if [ -z "$dataroot_dbs" ]; then
+    vfy_record "$id" SKIP "no-data-root-dbs-resolved-from-dockerd-fds" "$(vfy_evidence_csv "$id")"
+    return
+  fi
+  offdata="$(printf '%s\n' "$dataroot_dbs" | vfy_paths_outside "$VFY_DATA_MOUNT")"
+  if [ -n "$offdata" ]; then
+    vfy_record "$id" FAIL \
+      "docker-data-root-off-$VFY_DATA_MOUNT:$(printf '%s' "$offdata" | tr '\n' ' ')" \
+      "$(vfy_evidence_csv "$id")"
+  else
+    vfy_record "$id" PASS "classic-store-data-root-under-$VFY_DATA_MOUNT" "$(vfy_evidence_csv "$id")"
   fi
 }
 

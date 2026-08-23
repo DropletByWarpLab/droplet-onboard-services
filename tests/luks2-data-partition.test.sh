@@ -165,11 +165,71 @@ grep -q 'RequiresMountsFor=/data' "$ETC/systemd/system/docker.service.d/droplet-
   && pass "docker drop-in written" || fail "docker drop-in missing"
 [ -z "$(ls -A "$RUNTIME" 2>/dev/null)" ] && pass "no temp keyfile left behind" || fail "keyfile residue in runtime dir"
 
+# WARP-2102: the freshly-written daemon.json must pin the containerd image
+# store OFF. Docker >= 28's containerd store roots at /var/lib/containerd and
+# IGNORES data-root — without the pin every image lands on the plain root LV
+# (the bench box's 63G root hit 92%) while /data/docker sits empty.
+DJ="$ETC/docker/daemon.json"
+[ -f "$DJ" ] && pass "daemon.json written on fresh provision" || fail "no daemon.json written"
+grep -q '"data-root": "/data/docker"' "$DJ" 2>/dev/null \
+  && pass "daemon.json data-root=/data/docker" || fail "daemon.json missing data-root=/data/docker"
+grep -q '"containerd-snapshotter": false' "$DJ" 2>/dev/null \
+  && pass "daemon.json pins containerd-snapshotter=false [WARP-2102]" \
+  || fail "daemon.json missing the containerd-snapshotter pin (WARP-2102) — images land on the plain root LV"
+PYBIN="$(command -v python3 || command -v python || true)"
+if [ -n "$PYBIN" ]; then
+  "$PYBIN" -c 'import json,sys; cfg=json.load(open(sys.argv[1])); assert cfg["data-root"]=="/data/docker" and cfg["features"]["containerd-snapshotter"] is False' "$DJ" 2>/dev/null \
+    && pass "daemon.json is valid JSON carrying both keys" || fail "daemon.json invalid JSON or wrong shape"
+fi
+
 # idempotency: second run with the mapper "active" exits 0 with no lvcreate.
 : > "$CMD_LOG"
 env "${luks_env[@]}" STUB_MAPPER_ACTIVE=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1 \
   && pass "re-run is a no-op when already provisioned" || fail "re-run not idempotent"
 grep -q 'lvcreate' "$CMD_LOG" && fail "re-run re-created the LV" || pass "re-run performed no destructive calls"
+grep -q '"containerd-snapshotter": false' "$DJ" 2>/dev/null \
+  && pass "re-run keeps the already-pinned daemon.json intact" || fail "re-run mangled daemon.json"
+
+# WARP-2102 merge drills: an EXISTING daemon.json (shipped box) must RECEIVE
+# the snapshotter pin on a provision re-run — the old early-return ("leaving
+# docker data-root alone") left the fleet unfixable here. The merge adds ONLY
+# the features key, preserves everything else, backs the file up, and never
+# corrupts what dockerd boots from.
+if [ -n "$PYBIN" ]; then
+  printf '{\n  "data-root": "/data/docker",\n  "dns": ["1.1.1.1"]\n}\n' > "$DJ"
+  rm -f "$DJ.warp2102-bak"
+  env "${luks_env[@]}" STUB_MAPPER_ACTIVE=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1 \
+    && pass "provision re-run succeeds over a pre-existing daemon.json" \
+    || fail "re-run errored on an existing daemon.json"
+  grep -q '"containerd-snapshotter": false' "$DJ" \
+    && pass "re-run MERGED the pin into the existing daemon.json [WARP-2102]" \
+    || fail "existing daemon.json never received the pin (WARP-2102 regression)"
+  grep -q '"dns"' "$DJ" && grep -q '"data-root": "/data/docker"' "$DJ" \
+    && pass "merge preserved the existing daemon.json keys" || fail "merge dropped existing keys"
+  "$PYBIN" -c 'import json,sys; json.load(open(sys.argv[1]))' "$DJ" 2>/dev/null \
+    && pass "merged daemon.json still parses" || fail "merge produced invalid JSON"
+  [ -f "$DJ.warp2102-bak" ] && pass "merge left a backup of the pre-merge file" || fail "no pre-merge backup written"
+
+  # An UNPARSEABLE daemon.json must be left EXACTLY as it was — a corrupted
+  # daemon.json takes dockerd down entirely.
+  printf 'this is not json {' > "$DJ"
+  env "${luks_env[@]}" STUB_MAPPER_ACTIVE=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1 \
+    && pass "re-run survives an unparseable daemon.json" || fail "re-run died on bad JSON"
+  [ "$(cat "$DJ")" = "this is not json {" ] \
+    && pass "unparseable daemon.json left byte-identical (never corrupted)" \
+    || fail "merge corrupted an unparseable daemon.json"
+
+  # An explicit operator containerd-snapshotter value is respected, not overridden.
+  printf '{\n  "features": { "containerd-snapshotter": true }\n}\n' > "$DJ"
+  env "${luks_env[@]}" STUB_MAPPER_ACTIVE=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1 || true
+  grep -q '"containerd-snapshotter": true' "$DJ" \
+    && pass "explicit operator snapshotter=true respected (warned, not overridden)" \
+    || fail "merge overrode an explicit operator choice"
+  # restore the canonical file for the drills that follow
+  printf '{\n  "data-root": "/data/docker",\n  "features": {\n    "containerd-snapshotter": false\n  }\n}\n' > "$DJ"
+else
+  skip "WARP-2102 merge drills (no python on harness PATH)"
+fi
 
 # no TPM + no override = refuse loudly (exit 2), create NOTHING.
 : > "$CMD_LOG"

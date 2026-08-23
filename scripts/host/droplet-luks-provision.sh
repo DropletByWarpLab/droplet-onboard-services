@@ -14,6 +14,9 @@
 #   /etc/crypttab                         tpm2-device=auto,luks,discard
 #   /etc/fstab                            /data ext4 (x-systemd.device-timeout)
 #   /etc/systemd/system/docker.service.d/droplet-data.conf   RequiresMountsFor=/data
+#   /etc/docker/daemon.json               data-root=/data/docker + the WARP-2102
+#                                         containerd-snapshotter=false pin (merged
+#                                         into an existing file on re-runs)
 #
 # See droplet-tpm-lib.sh for why systemd tooling (systemd-cryptenroll) and not
 # clevis / raw tpm2-tools / tpm2-pytss.
@@ -116,9 +119,14 @@ cmd_provision() {
   fi
   _require_tpm
 
-  # Idempotency: already unlocked + mounted → no-op.
+  # Idempotency: already unlocked + mounted → no storage work. The daemon.json
+  # check still runs (WARP-2102): the fresh-provision path below was the ONLY
+  # caller of _maybe_write_docker_data_root, so an already-provisioned box
+  # could never receive the containerd-snapshotter pin on a setup.sh re-run —
+  # exactly the fleet that needs it.
   if _mapper_active; then
-    log "$MAPPER already active / $DATA_MOUNT mounted — nothing to do"
+    log "$MAPPER already active / $DATA_MOUNT mounted — storage already provisioned"
+    _maybe_write_docker_data_root
     return 0
   fi
 
@@ -150,6 +158,7 @@ cmd_provision() {
       exit 2
     fi
     _mount_and_wire
+    _maybe_write_docker_data_root
     return 0
   fi
 
@@ -247,12 +256,97 @@ _mount_and_wire() {
 _maybe_write_docker_data_root() {
   local daemon_json="$ETC_DIR/docker/daemon.json"
   if [ -f "$daemon_json" ]; then
-    log "existing $daemon_json — leaving docker data-root alone (see --migrate-data runbook)"
+    _merge_containerd_snapshotter_pin "$daemon_json"
     return 0
   fi
   mkdir -p "$(dirname "$daemon_json")"
-  printf '{\n  "data-root": "/data/docker"\n}\n' > "$daemon_json"
-  log "wrote $daemon_json (docker data-root on the encrypted /data)"
+  # WARP-2102: data-root ALONE is not enough. Docker >= 28 can serve images
+  # from the containerd image store (features.containerd-snapshotter), whose
+  # root is /var/lib/containerd — daemon.json data-root does NOT govern it,
+  # so every image byte silently lands on the plain root LV (the bench box's
+  # 63G root hit 92%) while /data/docker sits empty. Pin the snapshotter OFF
+  # so the classic store — and with it data-root — governs the whole store.
+  printf '{\n  "data-root": "/data/docker",\n  "features": {\n    "containerd-snapshotter": false\n  }\n}\n' > "$daemon_json"
+  log "wrote $daemon_json (docker data-root on the encrypted /data; containerd image store pinned off — WARP-2102)"
+}
+
+# _merge_containerd_snapshotter_pin FILE — WARP-2102, the existing-file half.
+# The old early-return ("leaving docker data-root alone") meant a box whose
+# daemon.json predates this fix could NEVER receive the snapshotter pin here,
+# so a Docker >= 28 install kept writing images to /var/lib/containerd on the
+# plain root forever. Merge ONLY features.containerd-snapshotter=false, and
+# only when the key is absent:
+#   * data-root is never touched on an existing file — moving a live store is
+#     the operator-driven --migrate-data runbook (docs/security/
+#     at-rest-encryption.md), not an unattended provision re-run;
+#   * an explicit operator value (true or false) is respected — `true` gets a
+#     loud warning, because that store lives OUTSIDE the LUKS boundary;
+#   * the merge must never corrupt the file dockerd boots from: back it up
+#     first, rewrite via python3 json (the box's JSON tool — no jq host dep,
+#     same as droplet-collect-logs.sh), re-parse the rewrite before it
+#     replaces the live file, and restore the backup on any failure.
+_merge_containerd_snapshotter_pin() {
+  local daemon_json="$1" py backup verdict
+  py="$(command -v python3 || true)"
+  if [ -z "$py" ]; then
+    log "WARNING: existing $daemon_json but no python3 — cannot merge the containerd-snapshotter"
+    log "WARNING: pin (WARP-2102). Docker >= 28 may store images on the PLAIN root. Add manually:"
+    log "WARNING:   \"features\": { \"containerd-snapshotter\": false }"
+    return 0
+  fi
+  backup="${daemon_json}.warp2102-bak"
+  cp -p "$daemon_json" "$backup"
+  if verdict="$(DAEMON_JSON="$daemon_json" "$py" - <<'PYEOF'
+import json, os, sys
+path = os.environ["DAEMON_JSON"]
+with open(path) as fh:
+    cfg = json.load(fh)
+if not isinstance(cfg, dict):
+    raise SystemExit("daemon.json is not a JSON object")
+features = cfg.setdefault("features", {})
+if not isinstance(features, dict):
+    raise SystemExit("daemon.json features is not a JSON object")
+if "containerd-snapshotter" in features:
+    print("kept:%s" % json.dumps(features["containerd-snapshotter"]))
+    raise SystemExit(0)
+features["containerd-snapshotter"] = False
+tmp = path + ".warp2102-tmp"
+with open(tmp, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+    fh.write("\n")
+with open(tmp) as fh:  # the rewrite must re-parse before it replaces the live file
+    json.load(fh)
+os.replace(tmp, path)
+print("merged:%s" % json.dumps(cfg.get("data-root")))
+PYEOF
+  )"; then
+    case "$verdict" in
+      merged:*)
+        log "added features.containerd-snapshotter=false to existing $daemon_json (WARP-2102;"
+        log "  backup at $backup). Restart docker to apply. If this box already ran Docker >= 28"
+        log "  with the containerd store, existing images become INVISIBLE after the restart (the"
+        log "  classic and containerd stores share nothing) — re-pull, or docker save/load first."
+        if [ "$verdict" != 'merged:"/data/docker"' ]; then
+          log "NOTE: data-root in $daemon_json is not /data/docker — left alone (see --migrate-data runbook)"
+        fi
+        ;;
+      kept:false)
+        rm -f "$backup"
+        log "existing $daemon_json already pins containerd-snapshotter=false — nothing to do"
+        ;;
+      kept:*)
+        rm -f "$backup"
+        log "WARNING: $daemon_json explicitly sets containerd-snapshotter=${verdict#kept:} — respecting"
+        log "WARNING: the operator's choice, but the containerd image store IGNORES data-root: images"
+        log "WARNING: live on the PLAIN root LV, outside the LUKS boundary (WARP-2102)."
+        ;;
+    esac
+  else
+    cp -p "$backup" "$daemon_json" 2>/dev/null || true
+    log "WARNING: could not merge the containerd-snapshotter pin into $daemon_json (unparseable"
+    log "WARNING: JSON?) — file restored/left as it was (backup at $backup). Fix the JSON by hand,"
+    log "WARNING: then re-run provision (WARP-2102)."
+  fi
 }
 
 cmd_status() {

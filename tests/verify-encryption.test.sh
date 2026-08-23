@@ -40,7 +40,7 @@ grep -qE '^set -e' "$RUNNER" && fail "runner is set -e (must survive probe failu
 
 # The registry must cover the WARP-966 hop list, each id mapping to a ticket.
 for id in rest.luks.device rest.luks.header rest.luks.tpm-token rest.entropy \
-          rest.mount-coverage rest.usb-luks \
+          rest.mount-coverage rest.docker.store-root rest.usb-luks \
           transit.pg.plaintext-rejected transit.pg.tls13 transit.pg.scram \
           transit.redis.plaintext-refused transit.redis.tls \
           transit.mqtt.plaintext-closed transit.mqtt.mtls-required \
@@ -48,9 +48,16 @@ for id in rest.luks.device rest.luks.header rest.luks.tpm-token rest.entropy \
           transit.pcap.canary; do
   grep -q "$id" "$RUNNER" && pass "registry has $id" || fail "registry missing $id"
 done
-for t in WARP-232 WARP-233 WARP-234 WARP-235 WARP-236; do
+for t in WARP-232 WARP-233 WARP-234 WARP-235 WARP-236 WARP-2102; do
   grep -q "$t" "$RUNNER" && pass "registry maps to $t" || fail "no check maps to $t"
 done
+
+# WARP-2102: the store-root probe must resolve the RUNNING daemon's store via
+# /proc/<pid>/fd (pidof + readlink) — never by rendering configuration, which
+# says nothing about what the live daemon actually loaded.
+grep -q 'VFY_PROC_ROOT' "$RUNNER" && grep -q 'pidof' "$RUNNER" \
+  && pass "store-root probe resolves the RUNNING daemon via /proc/<pid>/fd" \
+  || fail "store-root probe does not use the /proc fd mechanism (WARP-2102)"
 
 # WARP-1062 (audit item A): the default mesh targets must be the hops WARP-236
 # mTLS actually protects — never the by-design-plain mcp-server:9090 /
@@ -223,7 +230,8 @@ import json,sys
 r = json.load(open(sys.argv[1]))
 ids = {c["id"] for c in r["checks"]}
 want = {"rest.luks.device","rest.luks.header","rest.luks.tpm-token","rest.entropy",
-        "rest.mount-coverage","rest.usb-luks","transit.pg.plaintext-rejected",
+        "rest.mount-coverage","rest.docker.store-root","rest.usb-luks",
+        "transit.pg.plaintext-rejected",
         "transit.pg.tls13","transit.pg.scram","transit.redis.plaintext-refused",
         "transit.redis.tls","transit.mqtt.plaintext-closed","transit.mqtt.mtls-required",
         "transit.mesh.plain-http-refused","transit.edge.tls-policy","transit.pcap.canary"}
@@ -236,10 +244,13 @@ by = {c["id"]: c for c in r["checks"]}
 assert by["transit.pg.plaintext-rejected"]["status"] == "SKIP"
 assert "docker" in by["transit.pg.plaintext-rejected"]["detail"]
 assert by["transit.pcap.canary"]["status"] == "SKIP"          # tcpdump missing
+# docker missing → the WARP-2102 store-root probe is a reasoned SKIP too
+assert by["rest.docker.store-root"]["status"] == "SKIP"
+assert "docker" in by["rest.docker.store-root"]["detail"]
 # no LUKS world → rest checks are posture FAILs (plaintext at rest is a finding)
 assert by["rest.mount-coverage"]["status"] == "FAIL"
 assert r["signing"]["status"] == "skipped"
-' "$bundle/report.json" && pass "status contract: all 16 checks, enum-only, SKIP has reason" \
+' "$bundle/report.json" && pass "status contract: all 17 checks, enum-only, SKIP has reason" \
   || fail "status contract violated"
 [ -f "$bundle/manifest.sha256" ] && pass "manifest written" || fail "manifest missing"
 grep -q 'report.json' "$bundle/manifest.sha256" && pass "manifest covers report.json" \
@@ -296,6 +307,9 @@ mk_stub lsblk 0 "$WORK/lsblk.json"
 head -c 4194304 /dev/urandom > "$WORK/dd.out"; mk_stub dd 0 "$WORK/dd.out"
 mk_stub tcpdump 0 /dev/null   # writes nothing; runner treats empty pcap as its own guard
 mk_stub openssl 0 "$FIX/sclient-tls13.txt"
+# pidof: no dockerd "running" in this world — the WARP-2102 store-root probe
+# must SKIP deterministically (a real dockerd on the CI host must not leak in).
+mk_stub pidof 1 /dev/null
 mkdir -p "$WORK/tpm"; printf 'FAKE-CERT\n' > "$WORK/tpm/device-id-cert.pem"
 
 set +e
@@ -410,6 +424,103 @@ printf 'tampered' >> "$b/report.md"
 PATH="$WORK/bin:/usr/bin:/bin" bash "$RUNNER" --verify-bundle "$b" > /dev/null 2>&1 \
   && fail "verify-bundle accepted a TAMPERED bundle" || pass "verify-bundle detects tampering"
 fi
+
+echo ""; echo "--- Runner: WARP-2102 docker image-store root (containerd store vs data-root) ---"
+# Docker >= 28's containerd image store roots at /var/lib/containerd and
+# IGNORES daemon.json data-root — the probe must read the RUNNING daemons'
+# /proc/<pid>/fd bolt-db handles (never a config render) and FAIL when the
+# active image store lives off the encrypted mount.
+rm -rf "$WORK/bin" "$WORK/out"; mkdir -p "$WORK/bin"
+# pidof stub: dockerd + containerd "running" with fixture pids.
+cat > "$WORK/bin/pidof" <<'EOF'
+#!/bin/sh
+case "$1" in dockerd) echo 4242;; containerd) echo 4300;; *) exit 1;; esac
+EOF
+chmod +x "$WORK/bin/pidof"
+# docker stub: `docker info` replays the running daemon's storage report.
+cat > "$WORK/bin/docker" <<EOF
+#!/bin/sh
+case "\$*" in
+  info*) cat "$WORK/docker-info.txt"; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$WORK/bin/docker"
+# /proc fixture: fd symlinks to the bolt DBs each daemon holds open. dockerd's
+# data-root DBs sit on the (fixture) /data; containerd's meta.db sits on the
+# (fixture) plain root LV — exactly the shipped-box layout.
+mkdir -p "$WORK/proc/4242/fd" "$WORK/proc/4300/fd" \
+         "$WORK/data/docker/buildkit" "$WORK/data/docker/volumes" \
+         "$WORK/rootlv/var/lib/containerd/io.containerd.metadata.v1.bolt"
+: > "$WORK/data/docker/buildkit/cache.db"
+: > "$WORK/data/docker/volumes/metadata.db"
+: > "$WORK/rootlv/var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db"
+ln -s "$WORK/data/docker/buildkit/cache.db"   "$WORK/proc/4242/fd/7"
+ln -s "$WORK/data/docker/volumes/metadata.db" "$WORK/proc/4242/fd/12"
+ln -s "$WORK/rootlv/var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db" "$WORK/proc/4300/fd/9"
+
+store_run() {  # docker-info fixture already staged; run just the store-root check
+  run_vfy DROPLET_VFY_CHECKS=rest.docker.store-root \
+    DROPLET_VFY_PROC_ROOT="$WORK/proc" DROPLET_VFY_DATA_MOUNT="$WORK/data" "$@"
+}
+store_status() {  # STATUS + DETAIL of the single check in the newest bundle
+  # Prints NONE|check-never-ran when the registry has no such check (so a
+  # pre-fix runner reads as a counted failure, not a suite crash).
+  "$PYBIN" -c '
+import json,sys
+r = json.load(open(sys.argv[1]))["checks"]
+print((r[0]["status"] + "|" + r[0].get("detail","")) if r else "NONE|check-never-ran")
+' "$(newest_bundle)/report.json"
+}
+
+# World A — classic store (snapshotter off): data-root DBs on /data → PASS,
+# and containerd's meta.db on the plain root must NOT false-positive (it holds
+# runtime metadata only in this mode).
+printf 'Storage Driver: overlay2\n Backing Filesystem: extfs\n' > "$WORK/docker-info.txt"
+set +e; store_run > "$WORK/run-storeA.log" 2>&1; rc=$?; set -e
+v="$(store_status)"
+[ "$rc" -eq 0 ] && pass "classic store on /data exits 0" || fail "classic-store world rc=$rc (want 0)"
+case "$v" in
+  PASS\|classic-store-data-root-under-*) pass "classic store on /data → PASS (containerd meta.db off-/data tolerated)";;
+  *) fail "classic-store world verdict wrong: $v";;
+esac
+
+# World B — the WARP-2102 defect: containerd store ACTIVE, meta.db on the
+# plain root LV. daemon.json may swear data-root=/data/docker; the probe must
+# FAIL from the live fd evidence.
+printf 'Storage Driver: overlayfs\n driver-type: io.containerd.snapshotter.v1\n' > "$WORK/docker-info.txt"
+set +e; store_run > "$WORK/run-storeB.log" 2>&1; rc=$?; set -e
+v="$(store_status)"
+[ "$rc" -eq 1 ] && pass "containerd store off /data exits 1 (release blocker)" \
+  || fail "defect world rc=$rc (want 1)"
+case "$v" in
+  FAIL\|containerd-image-store-off-*WARP-2102*) pass "containerd store off /data → FAIL naming the store + ticket";;
+  *) fail "defect world verdict wrong: $v";;
+esac
+
+# World B2 — containerd store active but rooted UNDER /data: the probe keys on
+# the resolved location, not merely on the mode → PASS.
+mkdir -p "$WORK/data/containerd/io.containerd.metadata.v1.bolt"
+: > "$WORK/data/containerd/io.containerd.metadata.v1.bolt/meta.db"
+rm -f "$WORK/proc/4300/fd/9"
+ln -s "$WORK/data/containerd/io.containerd.metadata.v1.bolt/meta.db" "$WORK/proc/4300/fd/9"
+set +e; store_run > "$WORK/run-storeB2.log" 2>&1; rc=$?; set -e
+v="$(store_status)"
+[ "$rc" -eq 0 ] && case "$v" in PASS\|containerd-image-store-under-*) true;; *) false;; esac \
+  && pass "containerd store under /data → PASS (location-keyed, not mode-keyed)" \
+  || fail "relocated-containerd world wrong: rc=$rc verdict=$v"
+
+# World C — dockerd not running: reasoned SKIP, never a guess.
+cat > "$WORK/bin/pidof" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$WORK/bin/pidof"
+set +e; store_run > "$WORK/run-storeC.log" 2>&1; rc=$?; set -e
+v="$(store_status)"
+[ "$rc" -eq 0 ] && case "$v" in SKIP\|dockerd-not-running*) true;; *) false;; esac \
+  && pass "dockerd down → SKIP dockerd-not-running (status contract)" \
+  || fail "docker-down world wrong: rc=$rc verdict=$v"
 
 echo ""; echo "--- Docs + CI wiring ---"
 RB="$REPO_ROOT/docs/security/encryption-verification.md"
