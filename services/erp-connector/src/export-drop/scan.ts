@@ -57,6 +57,10 @@ export interface FileDiagnostic {
     | "too-many-rows"
     | "unreadable"
     | "malformed-rows"
+    /** The claiming profile maps only part of the dataset's natural key, so
+     *  re-export dedup runs on the reduced identity (or, with none of it
+     *  mapped, not at all). Emitted once per dataset per scan. */
+    | "degraded-dedup"
     | "symlink";
   detail?: string;
   /** Present for `unrecognized`, which is the case an operator has to act on. */
@@ -328,6 +332,12 @@ export async function readExportBytes(path: string, maxBytes: number): Promise<B
  * So an accounting key is COMPOSITE: reference number plus counterparty, date
  * and amount. Two different documents differ in at least one of those; a true
  * re-export of the same document matches on all of them.
+ *
+ * A profile is not REQUIRED to map every key column (registration enforces
+ * only REQUIRED_CANONICAL). When it maps a subset, the dedup key degrades to
+ * that subset — fixed per dataset, never per file — and the scan announces it
+ * with a `degraded-dedup` diagnostic. See the key construction in
+ * `scanDropDirectory`.
  */
 const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   appointment: ["appt_id"],
@@ -457,6 +467,7 @@ export async function scanDropDirectory(
       generatedAt: number;
       unplaced: number;
       malformed: number;
+      degradedKeyWarned: boolean;
     }
   >();
 
@@ -505,6 +516,20 @@ export async function scanDropDirectory(
     }
 
     const { profile, dataset } = match.candidate;
+
+    // WARP-2107 (PR #1659 review) — the dedup key columns are fixed PER
+    // DATASET: the subset of NATURAL_KEY this profile maps at all. A profile
+    // may legally map only part of the key (registration enforces only
+    // REQUIRED_CANONICAL), and deriving the key from whatever a ROW happened
+    // to carry gave the same document a DIFFERENT key in every file — dedup
+    // silently off, so the connector's own normal case (yesterday's and
+    // today's copy of one report both in the drop) counted every row twice.
+    // Keying on the mapped subset keeps a true re-export collapsing; what an
+    // under-mapped profile loses is only the ability to tell apart two
+    // different documents that agree on the mapped columns — announced below.
+    const naturalKey = NATURAL_KEY[dataset.dataset];
+    const keyColumns = naturalKey.filter((column) => dataset.columns[column] !== undefined);
+
     const headerIndex = new Map<string, number>();
     table.headers.forEach((h, i) => {
       const key = normalizeHeader(h);
@@ -528,12 +553,31 @@ export async function scanDropDirectory(
         generatedAt: 0,
         unplaced: 0,
         malformed: 0,
+        degradedKeyWarned: false,
       };
       meta.set(dataset.dataset, info);
     }
     info.files.push(file.name);
     info.headers.push(...table.headers);
     info.generatedAt = Math.max(info.generatedAt, file.mtimeMs);
+
+    if (keyColumns.length < naturalKey.length && !info.degradedKeyWarned) {
+      info.degradedKeyWarned = true;
+      const missing = naturalKey.filter((column) => dataset.columns[column] === undefined);
+      diagnostics.push({
+        file: file.name,
+        reason: "degraded-dedup",
+        detail:
+          keyColumns.length > 0
+            ? `dataset "${dataset.dataset}": profile "${profile.vendor}" maps no ${missing.join(", ")} — ` +
+              `re-exports deduplicate on [${keyColumns.join(", ")}] alone, and two DIFFERENT documents ` +
+              `that agree on those columns will merge into one; map the missing column(s) to restore ` +
+              `the full identity`
+            : `dataset "${dataset.dataset}": profile "${profile.vendor}" maps none of its identity ` +
+              `columns (${missing.join(", ")}) — overlapping export files cannot be deduplicated and ` +
+              `every copy of a row counts; map ${missing.join(", ")} to enable dedup`,
+      });
+    }
 
     const malformedBefore = info.malformed;
     let truncated = false;
@@ -554,18 +598,22 @@ export async function scanDropDirectory(
       const { row, placed } = projectRow(dataset.dataset, dataset.columns, headerIndex, record);
       if (!placed) info.unplaced += 1;
 
-      // Fall back to a per-row key when ANY part of the natural key is absent.
-      // A PMS that only assigns an appointment id at check-in exports walk-ins
-      // with the id cell blank; keying those on one shared value would collapse
-      // them into a single row and silently drop the rest. `normalizeText`
-      // yields undefined for a blank cell (never ""), so this covers both "the
-      // profile maps no id column" and "the id cell is empty".
+      // Fall back to a per-row key when ANY MAPPED part of the key is absent
+      // from this row. A PMS that only assigns an appointment id at check-in
+      // exports walk-ins with the id cell blank; keying those on one shared
+      // value would collapse them into a single row and silently drop the
+      // rest. `normalizeText` yields undefined for a blank cell (never ""),
+      // so this covers both "the mapped header is not in this file" and "the
+      // cell is empty".
       //
-      // Requiring EVERY part is deliberate: a partial composite would key two
-      // different documents together precisely when the distinguishing column
-      // is the missing one. Falling back duplicates a row; collapsing loses it.
+      // Requiring EVERY mapped part is deliberate: a row-by-row partial
+      // composite would key two different documents together precisely when
+      // the distinguishing column is the missing one. Falling back duplicates
+      // a row; collapsing loses it. (A profile that maps NO key column at all
+      // lands every row here — the dedup-off case the degraded-dedup
+      // diagnostic above announces.)
       const parts: string[] = [];
-      for (const column of NATURAL_KEY[dataset.dataset]) {
+      for (const column of keyColumns) {
         const value = row[column];
         // Numbers count: `amount` is parsed money, not text, and it is one of
         // the columns that tells two same-numbered bills apart.
@@ -577,8 +625,12 @@ export async function scanDropDirectory(
         }
       }
       // A NUL cannot appear in a parsed cell, so no combination of values can
-      // forge another row's key by containing the separator.
-      const key = parts.length > 0 ? `k:${parts.join(" ")}` : `f:${file.name}#${index}`;
+      // forge another row's key by containing the separator. (The ESCAPE
+      // sequence, deliberately not a raw NUL byte in this file: a raw byte
+      // renders as a space or as nothing in review tooling, and one pass
+      // through anything that "cleans" text would silently swap the separator
+      // for something forgeable.)
+      const key = parts.length > 0 ? `k:${parts.join("\0")}` : `f:${file.name}#${index}`;
       bucket.set(key, row);
     }
     if (malformedBefore !== info.malformed) {

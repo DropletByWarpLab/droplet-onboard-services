@@ -100,6 +100,34 @@ const AP_AGING_CSV = [
   "",
 ].join("\n");
 
+/**
+ * An operator profile that is LEGAL while mapping only part of `bill`'s
+ * natural key: `issued_at` and `amount` are unmapped (only `bill_id` +
+ * `balance` are required at registration). Shared between the operator-profile
+ * tests and the dedup tests, because being legal AND under-mapped is exactly
+ * the combination the degraded-dedup path exists for.
+ */
+const ACME_BOOKS: ExportProfile = {
+  vendor: "acmebooks",
+  label: "Acme Books",
+  verified: true,
+  datasets: [
+    {
+      dataset: "bill",
+      required: ["Ref", "Outstanding"],
+      columns: { bill_id: "Ref", balance: "Outstanding", vendor_id: "Supplier", due_at: "Due" },
+    },
+  ],
+};
+
+/** A connector on the ACME_BOOKS operator profile. */
+function acme() {
+  return new ExportDropConnector(
+    { vendor: "acmebooks", root },
+    { now: () => NOW, profiles: [ACME_BOOKS], minRefreshMs: Number.POSITIVE_INFINITY },
+  );
+}
+
 // ── the vocabulary itself ───────────────────────────────────────────────────
 
 describe("the dataset vocabulary", () => {
@@ -430,19 +458,6 @@ describe("accounting money parsing", () => {
 // ── operator profiles reach across categories ───────────────────────────────
 
 describe("operator profiles", () => {
-  const ACME_BOOKS: ExportProfile = {
-    vendor: "acmebooks",
-    label: "Acme Books",
-    verified: true,
-    datasets: [
-      {
-        dataset: "bill",
-        required: ["Ref", "Outstanding"],
-        columns: { bill_id: "Ref", balance: "Outstanding", vendor_id: "Supplier", due_at: "Due" },
-      },
-    ],
-  };
-
   it("accepts an accounting dataset from an operator profile", () => {
     // Before WARP-2107 the DatasetName union was dental-only, so this threw at
     // registration and no on-site profile could map an accounting product.
@@ -548,6 +563,74 @@ describe("dedup cannot silently merge two different documents", () => {
     await c.connect();
     const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
     expect(rows).toHaveLength(2);
+  });
+
+  it("counts an under-mapped bill ONCE across overlapping exports", async () => {
+    // ACME_BOOKS legally maps neither `issued_at` nor `amount`, so no row of
+    // its `bill` dataset can ever build the FULL composite key. The fallback
+    // used to be filename-scoped (`f:<file>#<index>`), which turned dedup OFF
+    // for the whole dataset: the same bill sitting in yesterday's AND today's
+    // copy of the report — the exact overlap dedup exists for — was counted
+    // twice, and the payables total doubled. The key now degrades to the
+    // PROFILE-mapped subset of the natural key, which is the same for every
+    // row in every file, so a true re-export still collapses.
+    // Mutation: fall back to `f:${file.name}#${index}` when the profile maps
+    // only part of NATURAL_KEY → 2 rows and a doubled total → red.
+    const same = ["Ref,Supplier,Due,Outstanding", "S-1,Widget Ltd,2026-09-01,412.10", ""].join(
+      "\n",
+    );
+    await drop("outstanding-monday.csv", same, SETTLED - 60_000);
+    await drop("outstanding-tuesday.csv", same);
+    const c = acme();
+    await c.connect();
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].balance).toBe(412.1);
+    // The degradation is announced once per dataset, not once per file.
+    const degraded = (await c.status()).diagnostics.filter((d) => d.reason === "degraded-dedup");
+    expect(degraded).toHaveLength(1);
+  });
+
+  it("says OUT LOUD when a profile degrades the dedup key", async () => {
+    // The degraded key is a documented trade: two DIFFERENT documents that
+    // agree on the mapped subset will merge. That trade may only be made
+    // loudly — the operator authoring the profile is told which columns are
+    // missing, so mapping them is a to-do and not an archaeology project.
+    // Mutation: drop the degraded-dedup diagnostic push in scan.ts → red.
+    await drop(
+      "supplier-outstanding.csv",
+      ["Ref,Supplier,Due,Outstanding", "S-1,Widget Ltd,2026-09-01,412.10", ""].join("\n"),
+    );
+    const c = acme();
+    await c.connect();
+    const degraded = (await c.status()).diagnostics.filter((d) => d.reason === "degraded-dedup");
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0].detail).toContain('"bill"');
+    expect(degraded[0].detail).toContain("issued_at");
+    expect(degraded[0].detail).toContain("amount");
+  });
+
+  it("does not let a space inside a value forge another bill's key", async () => {
+    // The composite key parts are joined with "\0". Joined with " " instead,
+    // ["1001", "Acme Supply", …] and ["1001 Acme", "Supply", …] build the SAME
+    // key string, the later row overwrites the earlier one in the dedup map,
+    // and a bill's balance silently leaves the ledger. A NUL cannot appear in
+    // a parsed cell, so "\0" makes the join injective.
+    // Mutation: `parts.join(" ")` in scan.ts → 1 row, 600.00 total → red.
+    await drop(
+      "unpaid-bills.csv",
+      [
+        "Date,Num,Vendor,Due Date,Amount,Open Balance",
+        "2026-07-05,1001,Acme Supply,2026-08-04,850.25,850.25",
+        "2026-07-05,1001 Acme,Supply,2026-08-04,850.25,600.00",
+        "",
+      ].join("\n"),
+    );
+    const c = qb();
+    await c.connect();
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    expect(rows).toHaveLength(2);
+    expect(sumMoney(rows)).toBe(1450.25);
   });
 });
 
