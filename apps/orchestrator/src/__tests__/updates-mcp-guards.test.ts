@@ -116,6 +116,11 @@ describe("updates guards admit the MCP service principal on the two tool routes 
       degraded: false,
       settings: { ...DEFAULT_UPDATE_AGENT_SETTINGS },
       applyAvailable: false,
+      // WARP-2133 — the mocked config leaves DROPLET_OTA_GITHUB_TOKEN empty,
+      // so the release source reads as unprovisioned. Asserted here because
+      // this is an exact-payload check: a new /status field must be declared
+      // in the MCP contract too, not just the human one.
+      updateSourceAuthenticated: false,
     });
     // The handler actually ran its three DeviceUpdate reads.
     expect(prisma.deviceUpdate.findFirst).toHaveBeenCalledTimes(3);

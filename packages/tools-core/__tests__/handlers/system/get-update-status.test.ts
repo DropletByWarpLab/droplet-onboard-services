@@ -79,6 +79,7 @@ function fullPayload(overrides?: Record<string, unknown>): Record<string, unknow
     degraded: false,
     settings: SETTINGS,
     applyAvailable: true,
+    updateSourceAuthenticated: true,
     ...overrides,
   };
 }
@@ -152,12 +153,39 @@ describe("get_update_status", () => {
         },
         degraded: false,
         applyAvailable: true,
+        updateSourceAuthenticated: true,
         settings: {
           channel: "stable",
           autoApply: true,
           applyWindowCron: "0 3 * * *",
         },
       });
+    }
+  });
+
+  // WARP-2133 — the assistant must not repeat the dashboard's old lie: with
+  // no credential for the release source, "nothing pending" means this box
+  // cannot SEE releases, not that it is current.
+  it("reports updateSourceAuthenticated=false when the box has no release-source credential", async () => {
+    const get = statusResponse(
+      fullPayload({ pending: null, updateSourceAuthenticated: false }),
+    );
+    const res = await getUpdateStatus.handler({}, ctxWith(get, "owner"));
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as { updateSourceAuthenticated: boolean };
+      expect(data.updateSourceAuthenticated).toBe(false);
+    }
+  });
+
+  it("defaults updateSourceAuthenticated to false when the route omits it", async () => {
+    const payload = fullPayload();
+    delete payload.updateSourceAuthenticated;
+    const res = await getUpdateStatus.handler({}, ctxWith(statusResponse(payload), "owner"));
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as { updateSourceAuthenticated: boolean };
+      expect(data.updateSourceAuthenticated).toBe(false);
     }
   });
 
