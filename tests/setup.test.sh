@@ -1956,6 +1956,35 @@ else
   fail "drift guard has no CI gate — either devices hard-fail on drift or CI never does"
 fi
 
+# (7) WARP-2133: prepare_and_build must also provision DROPLET_OTA_APPLY_SCRIPT.
+# Empty made getApplyRunner() return null, so POST /api/updates/apply-now
+# answered 503 apply_unavailable on every real box — the shipped OTA apply path
+# had never once been reachable in production. The value has to be derived from
+# $REPO_ROOT (like DROPLET_HOST_ROOT beside it), never a hardcoded /opt/droplet
+# that breaks the moment the checkout lives elsewhere.
+P12_APPLY_UPSERT="$(printf '%s\n' "$P12_BUILD_BODY" \
+  | sed -n 's/^[[:space:]]*_upsert_env_kv[[:space:]]\{1,\}DROPLET_OTA_APPLY_SCRIPT[[:space:]]\{1,\}"\(.*\)"[[:space:]]*$/\1/p')"
+if [ "$P12_APPLY_UPSERT" = '$REPO_ROOT/scripts/lib/apply-update.sh' ]; then
+  pass "prepare_and_build upserts DROPLET_OTA_APPLY_SCRIPT from \$REPO_ROOT"
+else
+  fail "DROPLET_OTA_APPLY_SCRIPT is not upserted from \$REPO_ROOT (got '${P12_APPLY_UPSERT:-<absent>}') — apply-now stays 503 apply_unavailable, or a hardcoded path breaks a relocated checkout"
+fi
+
+# …and the value must be the container path docker-compose.yml mounts the
+# helper at. That mount target is ${DROPLET_HOST_ROOT:-/opt/droplet}/…, and
+# DROPLET_HOST_ROOT is upserted to $REPO_ROOT immediately above the apply
+# knob, so resolving it back to $REPO_ROOT must reproduce the upserted value
+# exactly — otherwise the orchestrator execs a path absent from its container.
+P12_APPLY_MOUNT="$(sed -n \
+  's|^[[:space:]]*-[[:space:]]*\.\./scripts/lib/apply-update\.sh:\(.*\):ro[[:space:]]*$|\1|p' \
+  "$COMPOSE_FILE_REAL" \
+  | sed 's|\${DROPLET_HOST_ROOT:-/opt/droplet}|$REPO_ROOT|')"
+if [ -n "$P12_APPLY_MOUNT" ] && [ "$P12_APPLY_MOUNT" = "$P12_APPLY_UPSERT" ]; then
+  pass "the upserted path matches the apply-update.sh mount target in docker-compose.yml"
+else
+  fail "DROPLET_OTA_APPLY_SCRIPT ('${P12_APPLY_UPSERT:-<absent>}') does not match the compose mount target ('${P12_APPLY_MOUNT:-<not found>}') — the orchestrator would exec a path that does not exist in its container"
+fi
+
 # =============================================================================
 # Results
 # =============================================================================

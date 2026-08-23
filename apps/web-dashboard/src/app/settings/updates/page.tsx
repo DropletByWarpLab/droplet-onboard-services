@@ -341,6 +341,35 @@ export default function UpdatesSettingsPage() {
               </div>
             )}
 
+            {/* ── Unprovisioned update source (WARP-2133) ──
+                Standing, not check-scoped: without a credential for the
+                releases feed every poll comes back empty, so the cards below
+                would otherwise read as "up to date" on a box that has never
+                been able to see a release. ── */}
+            {status.updateSourceAuthenticated === false && (
+              <div
+                role="alert"
+                className="card border border-system-red/40 bg-system-red/5"
+                style={{ padding: 16, marginBottom: 16 }}
+              >
+                <p
+                  className="text-system-red flex items-center gap-2"
+                  style={{ fontSize: 15, lineHeight: "20px" }}
+                >
+                  <AlertTriangle size={16} /> Update source not provisioned
+                </p>
+                <p
+                  className="mt-1"
+                  style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                >
+                  This box has no credential for the release feed, so it cannot
+                  discover releases at all. Nothing below means this box is up to
+                  date — it means this box cannot see whether it is. Contact
+                  support to provision the update source.
+                </p>
+              </div>
+            )}
+
             {/* ── Current release ── */}
             <Sect title="Current release" />
             <div className="card" style={{ padding: 16, marginBottom: 16 }}>

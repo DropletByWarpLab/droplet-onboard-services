@@ -13,6 +13,9 @@
  *   7. status-fetch failure: an EXPLICIT error state, no healthy-looking
  *      cards (the "fallback copy masks outages" defect class);
  *   8. settings save: the window time round-trips to the cron PUT.
+ *   9. unprovisioned update source (WARP-2133): the standing notice renders
+ *      and a source_unauthenticated check reads as a failure, never as
+ *      "up to date".
  *
  * ShellPage is mocked to a passthrough (trust-page test pattern) and the
  * api module is fully mocked — no network.
@@ -76,6 +79,7 @@ function statusPayload(overrides: Record<string, unknown> = {}) {
     degraded: false,
     settings: { channel: "stable", applyWindowCron: "0 3 * * *", autoApply: true },
     applyAvailable: true,
+    updateSourceAuthenticated: true,
     ...overrides,
   };
 }
@@ -236,6 +240,36 @@ describe("/settings/updates — degraded health banner", () => {
     expect(
       screen.getByText(/rolling back did not restore full health/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("/settings/updates — unprovisioned update source (WARP-2133)", () => {
+  it("renders a standing notice when the box has no credential for the feed", async () => {
+    getUpdatesStatus.mockResolvedValue(statusPayload({ updateSourceAuthenticated: false }));
+    render(<UpdatesSettingsPage />);
+    expect(await screen.findByText(/update source not provisioned/i)).toBeInTheDocument();
+    // The whole point: no "up to date" reading of an unseeable feed.
+    expect(
+      screen.getByText(/it means this box cannot see whether it is/i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render the notice when the update source is provisioned", async () => {
+    getUpdatesStatus.mockResolvedValue(statusPayload({ updateSourceAuthenticated: true }));
+    render(<UpdatesSettingsPage />);
+    await screen.findByRole("button", { name: /check now/i });
+    expect(screen.queryByText(/update source not provisioned/i)).not.toBeInTheDocument();
+  });
+
+  it("reports a source_unauthenticated check as a failure, never as up to date", async () => {
+    checkForUpdatesNow.mockResolvedValue({ outcome: "source_unauthenticated" });
+    render(<UpdatesSettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /check now/i }));
+    expect(
+      await screen.findByText(/the update source isn't provisioned on this box/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/nothing new/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no release has been published/i)).not.toBeInTheDocument();
   });
 });
 

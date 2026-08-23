@@ -4,7 +4,8 @@
  * Contract under test:
  *   - owner/admin gate across the WHOLE surface (reads included);
  *   - GET status: current committed / pending / lastVerdict rows, the
- *     degraded_health signal, settings, and applyAvailable honesty;
+ *     degraded_health signal, settings, applyAvailable honesty, and the
+ *     updateSourceAuthenticated release-source flag (WARP-2133);
  *   - GET history: newest-first slim rows (never manifestJson);
  *   - POST check-now: delegates to the poller and relays the typed
  *     outcome verbatim, audits the mutation;
@@ -49,6 +50,7 @@ import {
   saveUpdateAgentSettings,
   DEFAULT_UPDATE_AGENT_SETTINGS,
 } from "../services/update-agent/settings.js";
+import { config } from "../config.js";
 
 const GIT_SHA_A = "a".repeat(40);
 const GIT_SHA_B = "b".repeat(40);
@@ -310,6 +312,26 @@ describe("GET /api/updates/status", () => {
     const app = buildApp(createPrismaMock(), deps);
     const res = await request(app).get("/api/updates/status");
     expect(res.body.applyAvailable).toBe(true);
+  });
+
+  // WARP-2133: without a token the box polls the private releases repo
+  // unauthenticated, 404s, and can't see the feed at all — the flag is
+  // what lets the page say that instead of "up to date".
+  it("reports updateSourceAuthenticated=false without a releases token", async () => {
+    const app = buildApp(createPrismaMock(), createDepsMock());
+    const res = await request(app).get("/api/updates/status");
+    expect(res.body.updateSourceAuthenticated).toBe(false);
+  });
+
+  it("reports updateSourceAuthenticated=true when a releases token is provisioned", async () => {
+    config.DROPLET_OTA_GITHUB_TOKEN = "ghp_test";
+    try {
+      const app = buildApp(createPrismaMock(), createDepsMock());
+      const res = await request(app).get("/api/updates/status");
+      expect(res.body.updateSourceAuthenticated).toBe(true);
+    } finally {
+      config.DROPLET_OTA_GITHUB_TOKEN = "";
+    }
   });
 });
 

@@ -8,8 +8,9 @@
  *   GET  /api/updates/status     — current committed release, the pending/
  *                                  in-flight row, the last terminal verdict
  *                                  (incl. the degraded_health signal), the
- *                                  persisted settings, and whether apply is
- *                                  provisioned on this box.
+ *                                  persisted settings, whether apply is
+ *                                  provisioned on this box, and whether the
+ *                                  release source has a credential.
  *   GET  /api/updates/history    — newest-first DeviceUpdate rows (no
  *                                  manifestJson — the snapshot is apply
  *                                  material, not dashboard material).
@@ -234,6 +235,12 @@ export function createUpdatesRouter(
             lastVerdict.failureReason === "degraded_health",
           settings,
           applyAvailable: deps.getApplyRunner() !== null,
+          // WARP-2133: the releases repo is private, so an unauthenticated
+          // poll 404s and the poller read that as "no release" — the page
+          // swore a box was up to date when it had simply never been given
+          // a credential. Surfacing the credential lets the operator UI say
+          // "update source not provisioned" instead of "up to date".
+          updateSourceAuthenticated: config.DROPLET_OTA_GITHUB_TOKEN !== "",
         });
       } catch (err) {
         next(err);
