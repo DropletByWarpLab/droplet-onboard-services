@@ -13,6 +13,7 @@
  * PattersonPM.db exist (see connector.ts).
  */
 import { resolveTable, resolveColumn, type SchemaMap } from "./schema-map.js";
+import type { DatasetName } from "./export-drop/profiles.js";
 
 /**
  * Escape SQL `LIKE` metacharacters (`%`, `_`, and the escape char itself) in a
@@ -66,8 +67,12 @@ export interface BuiltStatement {
 export interface ReadQuery {
   name: string;
   description: string;
-  /** Logical tables this query depends on (for drift/coverage checks). */
-  dependsOnTables: string[];
+  /** Logical tables this query depends on (for drift/coverage checks).
+   *  Typed as the dataset-name union, not `string[]`: a typo here would
+   *  silently drop the query out of every capability filter (e.g.
+   *  `requiredRouteOps`), and the coverage tests that loop over those filter
+   *  results would pass vacuously over the missing entry. */
+  dependsOnTables: DatasetName[];
   exampleParams: Record<string, unknown>;
   build(map: SchemaMap, params: Record<string, unknown>): BuiltStatement;
 }

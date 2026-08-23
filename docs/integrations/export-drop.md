@@ -75,7 +75,9 @@ connect (no exported report in /data/erp-exports matched a "eaglesoft" profile;
 saw schedule.csv [Appointment ID | Appt Date/Time | Provider | Op | Status | Patient ID])
 ```
 
-That is everything needed to write the right profile, which is the next section. A profile that does not match declines the file — it never guesses at it — so a wrong built-in costs one edit and can never produce wrong rows.
+That is everything needed to write the right profile, which is the next section. A profile that does not match declines the file — it never guesses at it — so a built-in that fails to match costs one edit and no wrong rows.
+
+**That guarantee is narrower than it first appears, and the difference is why one built-in was withdrawn.** It covers a guess that MISSES. A guess that MATCHES THE WRONG COLUMN produces wrong rows, cleanly parsed and indistinguishable from right ones. The specific shape to watch for is a mapping whose column *kind* disagrees with its header *name* — a canonical `timestamp` column mapped to a header called `"… Date"`, for instance, since `parseExportTimestamp` accepts a date-only cell and returns midnight, and the schedule read is a `[from, to)` window filter. Every appointment of the day would land at `00:00` in arbitrary order. A built-in must not be able to fail that way; an operator profile, written against the file in front of them, can be checked.
 
 ---
 
@@ -147,7 +149,7 @@ Capability is not the same as presence. A profile declaring `bill` means *this v
 | Vendor | Provider key | Confirmed against a real export? |
 |---|---|---|
 | Eaglesoft (Patterson) | `eaglesoft-export` | **No** — shaped from the report columns the product presents |
-| Dentrix (Henry Schein) | `dentrix-export` | **No** — same |
+| Dentrix (Henry Schein) | `dentrix-export` | **Ships no profile.** Connectable, and the connection reports every unrecognised file with the headers it saw — but Droplet guesses no mapping. Henry Schein One's documented merge vocabulary has no appointment id and no operatory id, so the appointment dataset's required columns cannot honestly be satisfied, and its `Status` field is the *patient's* status rather than the appointment's. See `NAME_ONLY_VENDORS` in `profiles.ts`. One real export removes this caveat. |
 | Open Dental | `opendental-export` | **No** — modelled on Open Dental's published schema (`AptNum`, `AptDateTime`, `PatNum`, …) |
 | QuickBooks (Intuit) | `quickbooks-export` | **No** — shaped from the columns QuickBooks prints in *Open Invoices*, *Unpaid Bills Detail* and *A/P Aging Summary*. Desktop and Online emit the same report names and broadly the same headers, so one profile covers both products |
 | *(any other product)* | `generic-export` | n/a — ships no datasets; an operator profile supplies them |

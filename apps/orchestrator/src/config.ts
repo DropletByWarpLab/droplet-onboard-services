@@ -283,6 +283,20 @@ const envSchema = z.object({
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
 
+  // --- Microsoft 365 cloud connector (WARP-2115, ADR-041) ---
+  // The Entra application (client) id of Droplet's multi-tenant app. NOT a
+  // secret: a public-client id is designed to ship inside the client, and the
+  // delegated device-code/auth-code flows use no client secret at all — which
+  // also sidesteps the tenant app-management policies that increasingly block
+  // long-lived secrets. Empty default = the connector is simply unavailable
+  // (isM365Configured() is false); it never half-starts.
+  M365_CLIENT_ID: z.string().default(""),
+  // Entra login host. Overridable only so a national cloud (login.microsoftonline.us,
+  // login.chinacloudapi.cn) can be pointed at without a code change; the
+  // worldwide endpoint is correct for every commercial tenant. Whatever this
+  // resolves to must also be registered in docs/security/allowed-egress.yaml.
+  M365_AUTHORITY_HOST: z.string().default("https://login.microsoftonline.com"),
+
   // WARP-242: path to the doc-KEK master keyfile (raw 32 bytes, mode 0600,
   // minted by scripts/setup.sh as data/secrets/doc-kek.key and single-file
   // bind-mounted read-only). Deliberately a FILE and never an .env value:

@@ -459,6 +459,55 @@ entries:
     review_by: 2027-08-20
     code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
 
+  - id: ref-dentrix-ascend-spec
+    kind: reference
+    service: orchestrator
+    destination:
+      # NOT an egress destination. This host appears only inside a source
+      # COMMENT recording where the Dentrix Ascend OpenAPI specification was
+      # fetched from, and its sha256, so a future reader can tell whether the
+      # contract the connector was written against has moved. The box never
+      # opens a connection to it — the API and token endpoints are
+      # prod/test.hs1api.com, registered separately above.
+      hosts: [papidocs.hs1api.com]
+    purpose: documentation URL for the Dentrix Ascend OpenAPI spec, cited in a source comment for provenance — not a connection the box makes
+    ticket: WARP-2127
+    added: 2026-08-20
+    review_by: 2027-08-20
+    code_refs: [services/erp-connector/src/dentrix/ascend-connector.ts]
+
+  - id: dentrix-ascend-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [prod.hs1api.com, test.hs1api.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Dentrix Ascend connector (ADR-041) — reads the schedule, patients and
+      aged receivables of a dental practice whose organization the owner
+      explicitly connected, via Henry Schein One's documented Public API
+      (OpenAPI 3.0.0, spec version 186.0.9). CARRIES PHI: patient names, dates
+      of birth and appointment records, not merely financial totals. Both hosts
+      also serve the OAuth client-credentials token endpoint, so this one entry
+      covers auth and data for each; the token traffic alone would be
+      data_class none, and the higher classification is recorded because the
+      same host carries both. READ-ONLY: the connector refuses every write, and
+      nothing box-local is ever sent. Read-through — nothing is persisted, so no
+      synced PHI copy exists to encrypt (ADR-041 §4; the unimplemented
+      ErpEntityCache encryption is WARP-2028). test.hs1api.com is the sandbox,
+      required during vendor enrolment. Off until an organization is connected.
+      ⚠ NOT YET ENABLED FOR ANY CUSTOMER: Henry Schein One's Developer
+      Agreement is unpublished and its redistribution/sublicensing terms have
+      not been reviewed against a shipped on-premise appliance holding the API
+      key on customer hardware. See WARP-2127.
+    ticket: WARP-2127
+    added: 2026-08-20
+    review_by: 2027-08-20
+    code_refs: [services/erp-connector/src/dentrix/ascend-connector.ts]
+
   # ── dynamic (config-driven) destinations ────────────────────────────────
   - id: fleet-hq-issuance
     kind: egress

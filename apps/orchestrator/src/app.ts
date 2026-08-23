@@ -21,6 +21,7 @@ import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
@@ -302,6 +303,11 @@ export function createApp(
   // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
   app.use("/api", createIntegrationsRouter(prisma));
   app.use("/api", createErpRouter(prisma));
+  // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
+  // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.
+  // Every route is scoped to the requester's OWN link — no :userId parameter,
+  // because delegated authorization makes a person's mailbox connection theirs.
+  app.use("/api", createM365Router(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());

@@ -166,6 +166,7 @@ export {
   DATASETS,
   DATASET_CATEGORY,
   GENERIC_VENDOR,
+  NAME_ONLY_VENDORS,
   REQUIRED_CANONICAL,
   assertValidProfile,
   knownVendors,
@@ -241,3 +242,68 @@ export {
   type TokenPersister,
   type TokenResolver,
 } from "./quickbooks/online-connector.js";
+
+// WARP-2127 — Dentrix Ascend: the cloud dental PMS, read over Henry Schein
+// One's published Public API. This is the Dentrix surface that CAN be written
+// honestly — the on-premise Developer Program withholds its schema as policy,
+// so a connector for that one would invent every field reference (WARP-2126).
+export {
+  DentrixAscendConnector,
+  AscendAuthorizationError,
+  UnsafeAscendBaseUrlError,
+  assertSafeAscendBaseUrl,
+  blockedAscendTokenResolver,
+  ASCEND_ALLOWED_HOST_SUFFIX,
+  ASCEND_DATASETS,
+  ASCEND_PRODUCTION_BASE_URL,
+  ASCEND_SANDBOX_BASE_URL,
+  ASCEND_SPEC_VERSION,
+  ASCEND_TRACK_REMEDIATION,
+  DENTRIX_ASCEND_PROVIDER,
+  type AscendConnectionState,
+  type AscendStatus,
+  type AscendToken,
+  type AscendTokenResolver,
+  type DentrixAscendConfig,
+  type DentrixAscendDeps,
+} from "./dentrix/ascend-connector.js";
+
+// WARP-2108 — QuickBooks Desktop: the track where the practice's machine calls
+// US. Intuit's Web Connector polls outward, so data flows machine -> box with
+// no inbound socket into the customer's finance workstation and nothing leaving
+// the LAN. Free from Intuit: no SDK fee, no app review, no royalty.
+export {
+  QuickBooksDesktopConnector,
+  QbdSnapshotStore,
+  QbwcSession,
+  QBD_DATASETS,
+  QBD_TRACK_REMEDIATION,
+  QUICKBOOKS_DESKTOP_PROVIDER,
+  type AuthenticateResult,
+  type QbdSnapshot,
+  type QbdStatus,
+  type QbwcCredentials,
+  type QbwcSessionDeps,
+  type QuickBooksDesktopConfig,
+  type QuickBooksDesktopDeps,
+} from "./quickbooks/desktop-connector.js";
+
+export {
+  QBXML_STEPS,
+  QBXML_VERSION,
+  QbxmlStatusError,
+  buildRequest as buildQbxmlRequest,
+  parseResponse as parseQbxmlResponse,
+  type QbxmlStep,
+} from "./quickbooks/qbxml.js";
+
+export {
+  DEFAULT_XML_LIMITS,
+  XmlError,
+  decodeEntities,
+  escapeXml,
+  parseXml,
+  textAt,
+  type XmlElement,
+  type XmlLimits,
+} from "./quickbooks/xml.js";

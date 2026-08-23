@@ -48,19 +48,44 @@
 #      scanning all 13 requirements directories; the list sits on the pip
 #      group below, annotated per package.
 #
-#   3. NOT SOLVED HERE: `>=` floor constraints. Most Python deps are pinned as
-#      floors (`pypdf>=4.0`), so Dependabot raises a PR whenever the floor can
-#      be raised — individually, outside any group, and a floor widening can
-#      cross majors without being labelled one. The 2026-07-30 batch was ten
-#      such PRs, including `pypdf >=4.0 → >=6.14.2` (two majors) and
-#      `reportlab >=4.0 → >=5.0.0`. Rule 2 does NOT prevent these: they are
-#      not group PRs. Fixing it means either pinning the Python services
-#      properly or adding per-package major `ignore` entries — a decision, not
-#      a config tweak. See ENGINEERING.md §3.2.
+#   3. `>=` floor constraints defeat an `update-types` ignore. Most Python deps
+#      are pinned as floors (`pypdf>=4.0`), so Dependabot raises a PR whenever
+#      the floor can be raised — individually, outside any group, and a floor
+#      widening is NOT labelled `version-update:semver-major` even when it
+#      crosses a major. The 2026-07-30 batch was ten such PRs, including
+#      `pypdf >=4.0 → >=6.14.2` (two majors) and `reportlab >=4.0 → >=5.0.0`.
+#
+#      2026-08-17 is when this stopped being theoretical: the rule-1 ignores on
+#      `huggingface-hub` and `transformers` did not fire, and Dependabot raised
+#      #1628 (`>=0.24,<1.0` → `>=1.27.0,<2.0`) and #1627 (`>=4.40,<5` →
+#      `>=5.15.0,<6`) straight back at ai-gateway. Both are the same dead chain
+#      as #1466/WARP-1857 — see the ai-gateway block below.
+#
+#      The fix for a floor is `versions:`, not `update-types:` — it matches on
+#      the TARGET version and so is blind to how Dependabot labelled the bump.
+#      But `ignore` is per-update-block, and ai-gateway's ceiling is NOT shared:
+#      voice-io pins `huggingface_hub==1.26.1` and legitimately wants 1.x. So
+#      ai-gateway is split into its own pip block below rather than poisoning
+#      the shared one. Split the service out; don't widen the ignore.
+#
+#      Still open for the OTHER twelve directories: a floor widening there can
+#      still cross a major silently. Pinning the Python services properly is the
+#      real fix and remains a decision, not a config tweak. See ENGINEERING.md §3.2.
+#
+#   4. `target-branch: "stage"` on EVERY block — WARP-1670's two-branch flow is
+#      `feature ──PR──▶ stage ──PR──▶ main`, and `branch-flow-guard` refuses any
+#      PR into `main` whose head is not `stage`. Dependabot defaults to the
+#      repository's DEFAULT branch, which is `main`, so without this every
+#      update PR is born unmergeable. On 2026-08-17 all 31 open Dependabot PRs
+#      were red on `only stage may merge into main` for exactly this reason —
+#      26 of them otherwise fully green. This is not cosmetic: a PR based on
+#      main cannot be rescued by a re-run, because re-running the guard replays
+#      the ORIGINAL event payload and still sees the old base.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: "/"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday
@@ -93,10 +118,50 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "zod"                     # #1167 (3.25 → 4.x)
         update-types: ["version-update:semver-major"]
+
+      # Rejected 2026-08-10 (#1461, WARP-1856) but never written down, so
+      # Dependabot re-raised the react-dom half as #1623 on 2026-08-17 — which
+      # fails loudly, because bumping react-dom alone leaves react at 18.3.1 and
+      # React refuses the mismatched pair at import time.
+      #
+      # The binding constraint is NOT react itself: `next@14.2.33` peers
+      # `react: ^18.2.0` and does not accept 19 at any version — React 19 needs
+      # Next 15. So this is a Next 14→15 migration (async `cookies()`/`headers()`/
+      # `params`/`searchParams`, fetch no longer cached by default) across all 12
+      # dashboard surfaces, plus ~218 typings errors. Schedule it; don't bump it.
+      # Delete these four entries together with the `next` major when it is.
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"               # must move in lockstep with react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "next"                    # the actual React 19 ceiling
+        update-types: ["version-update:semver-major"]
+
+      # #1622 (2026-08-17): typescript 5.9.3 → 7.0.2 reds 15 checks, starting
+      # with `TS2591: Cannot find name 'process'` — TS 7 changes lib/@types
+      # resolution and needs a coordinated @types/node bump. Nine workspaces
+      # share `typescript: ^5.4.5`, so this lands everywhere at once or nowhere.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+      # #1620 (2026-08-17): archiver 7 → 8 inlines archiver-utils and changes the
+      # export shape — `TS2349: This expression is not callable` at
+      # apps/orchestrator/src/routes/logs.ts:137 and
+      # apps/orchestrator/src/services/brain-memory.service.ts:216.
+      # A real (small) code migration, not a refresh.
+      - dependency-name: "archiver"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/archiver"         # ships with archiver
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: npm
     directory: "/tests"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday
@@ -107,9 +172,12 @@ updates:
         update-types: ["minor", "patch"]
     labels: ["dependencies"]
 
+  # The twelve pip directories that share one ignore policy. ai-gateway is
+  # deliberately NOT here — it has a ceiling none of the others do; see the
+  # block after this one.
   - package-ecosystem: pip
+    target-branch: "stage"
     directories:
-      - "/services/ai-gateway"
       - "/services/camera-discovery"
       - "/services/device-identity-svc"
       - "/services/email-indexer"
@@ -159,24 +227,70 @@ updates:
           - "python-pptx"              # 0.6.x → 1.0 (see #1355)
           - "onvif-zeep"               # 0.2.x — camera-discovery
           - "asyncpg"                  # 0.31.x — email-indexer
-          - "optimum-onnx"             # 0.1.x — ai-gateway
-          - "huggingface-hub"          # 0.24.x, capped <1.0
+          - "huggingface-hub"          # voice-io pins ==1.26.1; kept individual
           - "huggingface_hub"          # as spelled in requirements.txt
           - "sounddevice"              # 0.5.x — voice-io
           - "vosk"                     # 0.3.x — voice-io
           - "ragas"                    # 0.4.x — rag-eval
           - "langchain*"               # 0.2.x / 0.3.x family, capped <0.4
+    labels: ["dependencies"]
+
+  # ai-gateway alone. It is the only service carrying `optimum-onnx`, and that
+  # single package sets a hard ceiling the other twelve directories do not share
+  # — so its ignores live here rather than in the block above, where they would
+  # also suppress voice-io's perfectly good `huggingface_hub` 1.x updates
+  # (voice-io pins ==1.26.1; #1648 was a clean 1.26.1 → 1.27.0).
+  #
+  # THE CHAIN (re-derived from PyPI 2026-08-17, not from the old review):
+  #
+  #     optimum-onnx 0.1.0  →  transformers <4.58.0,>=4.36
+  #     transformers 4.x    →  huggingface-hub <1.0
+  #
+  # `optimum-onnx` still has exactly four published releases (0.0.1, 0.0.2,
+  # 0.0.3, 0.1.0) and 0.1.0 is the latest, so the ceiling is not a stale pin —
+  # it is the whole published history of the package. No edit to our own
+  # requirements can satisfy either bump; #1628 fails as a literal pip
+  # `ResolutionImpossible`. Same conclusion as #1466 / WARP-1857, reconfirmed.
+  #
+  # `versions:` NOT `update-types:` — these are `>=` floor widenings, which
+  # Dependabot does not label major, which is exactly why the previous
+  # `update-types` ignores let #1627 and #1628 through. See rule 3 above.
+  #
+  # RECHECK TRIGGER: an optimum-onnx release above 0.1.0 that lifts the
+  # transformers ceiling. Delete both entries then and let Dependabot re-raise.
+  - package-ecosystem: pip
+    directory: "/services/ai-gateway"
+    target-branch: "stage"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    groups:
+      pip-ai-gateway-minor-and-patch:
+        update-types: ["minor", "patch"]
+        # The 0.x direct deps in services/ai-gateway/requirements.txt, same
+        # rule as the shared block: a 0.x "minor" has no compatibility promise
+        # and a group PR is all-or-nothing.
+        exclude-patterns:
+          - "fastapi"                  # 0.141.x
+          - "uvicorn"                  # 0.52.x
+          - "httpx"                    # 0.28.x
+          - "optimum-onnx"             # 0.1.x — the ceiling itself
+          - "huggingface-hub"          # 0.24.x here, capped <1.0
+          - "huggingface_hub"          # as spelled in requirements.txt
     ignore:
-      # Reviewed and rejected as migrations, not refreshes (ai-gateway).
-      # Majors only — minor/patch and security updates still flow.
-      - dependency-name: "huggingface-hub"         # #1171 (<1.0 → >=1.24)
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "transformers"            # #1172 (<5 → >=5.14)
-        update-types: ["version-update:semver-major"]
+      - dependency-name: "huggingface-hub"         # #1171, #1466, #1628
+        versions: [">=1.0"]
+      - dependency-name: "huggingface_hub"         # as spelled in requirements.txt
+        versions: [">=1.0"]
+      - dependency-name: "transformers"            # #1172, #1627
+        versions: [">=5.0"]
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday

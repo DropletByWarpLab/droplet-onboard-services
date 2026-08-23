@@ -61,13 +61,6 @@ export function sortByKey<T extends Record<string, unknown>>(rows: T[], key: str
 }
 
 /**
- * Aggregate an Account-controller payload into the single AR-summary row the SQL
- * track produces: `{ account_count, total_balance }`. Aggregating client-side
- * (COUNT + SUM over the mapped balances) reproduces the SQL aggregate and keeps
- * the minimum-necessary contract — the connector returns the two numbers, never
- * the raw ledger rows. `route.fields` must map a `balance` key.
- */
-/**
  * Sum a column of money and return it as a currency figure.
  *
  * WARP-2107. Accumulating IEEE-754 doubles is exact for a handful of values and
@@ -131,6 +124,13 @@ export function sumMoneyWithGaps(
   return { total: roundCents(total), unaccounted };
 }
 
+/**
+ * Aggregate an Account-controller payload into the single AR-summary row the SQL
+ * track produces: `{ account_count, total_balance }`. Aggregating client-side
+ * (COUNT + SUM over the mapped balances) reproduces the SQL aggregate and keeps
+ * the minimum-necessary contract — the connector returns the two numbers, never
+ * the raw ledger rows. `route.fields` must map a `balance` key.
+ */
 export function aggregateArSummary(payload: unknown, route: RouteSpec): { account_count: number; total_balance: number } {
   const rows = mapRows(payload, route);
   return { account_count: rows.length, total_balance: sumMoney(rows) };

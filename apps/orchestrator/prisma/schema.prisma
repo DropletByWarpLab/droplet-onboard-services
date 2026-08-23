@@ -4950,3 +4950,98 @@ model WorkspaceLocation {
   @@unique([building, room])
   @@index([building])
 }
+
+// ---------------------------------------------------------------------------
+// Microsoft 365 cloud connector (WARP-2115, ADR-041)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of one person's Microsoft 365 link. Explicit column, never
+/// inferred from whether a token happens to be present — the repo's
+/// no-guessing-from-absence rule (cf. BrainMemoryItemStatus, WARP-218).
+/// NEEDS_RECONNECT in particular MUST be distinguishable from DISCONNECTED:
+/// they look identical from "is there a working token" but mean opposite
+/// things to the person reading the dashboard.
+enum M365ConnectionState {
+  /// No Microsoft account linked. The default, and where a disconnect returns.
+  DISCONNECTED
+  /// A sign-in is in flight and Microsoft is waiting for the person to approve
+  /// it on another device. Expires — see `pendingFlowExpiresAt`.
+  PENDING_CONSENT
+  /// Usable. A refresh token is held and the last refresh succeeded.
+  CONNECTED
+  /// Tokens exist but no longer work: the grant was revoked, an admin reset
+  /// the password, or the box sat powered off past the refresh window. This is
+  /// NOT an error — it is a normal, expected state that asks the person to
+  /// sign in again. Sync pauses; already-synced data is untouched.
+  NEEDS_RECONNECT
+  /// Something reconnecting will not fix — the app registration is rejected,
+  /// the tenant blocks the flow, config is wrong. `lastError` carries why.
+  ERROR
+}
+
+/// A customer's Microsoft 365 account connected to the box as a CLOUD
+/// CONNECTOR (ADR-041): outbound-only, owner-enabled, off until connected.
+///
+/// One row per Droplet user, because ADR-041 mandates DELEGATED authorization
+/// rather than application permissions — the box reads Microsoft as that
+/// person, so it can never see what they cannot. Application permissions would
+/// have granted "read every mailbox in the tenant".
+model M365Connection {
+  id String @id @default(uuid())
+
+  /// The Droplet user who owns this link. Unique: one Microsoft account per
+  /// person. Not an FK — matches how other per-user rows in this schema key
+  /// off the directory id without coupling deletes.
+  userId String @unique
+
+  state M365ConnectionState @default(DISCONNECTED)
+
+  /// Entra's stable account identifier (MSAL `homeAccountId`). Selects the
+  /// right account out of the cache when refreshing.
+  homeAccountId String?
+
+  /// The customer's Entra tenant id. Display and support, and it detects the
+  /// case where someone reconnects a DIFFERENT tenant than before.
+  tenantId String?
+
+  /// User principal name (e.g. `sam@practice.com`), shown in the dashboard so
+  /// the owner can see which account is connected. Not a secret.
+  accountUpn String?
+
+  /// `dcv1:` blob (column-crypto.service) of the MSAL token cache, which
+  /// CONTAINS THE REFRESH TOKEN — functionally a long-lived key to this
+  /// person's mail and files. AAD-bound to `userId`, so a blob copied onto
+  /// another row fails to decrypt rather than granting access. Never logged,
+  /// never returned by any route, purged on disconnect.
+  ///
+  /// The key derives from DEVICE_SECRET_KEY, which setup.sh regenerates on a
+  /// factory reset — so a wipe crypto-shreds every stored token even if the
+  /// database rows survive.
+  tokenCacheEnc String?
+
+  /// Scopes Microsoft actually granted, space-separated as returned. May be
+  /// narrower than requested; the sync engine reads this to decide which
+  /// workloads it is allowed to attempt.
+  grantedScopes String?
+
+  /// When the in-flight sign-in stops being valid. Microsoft expires a device
+  /// code in ~15 minutes. A PENDING_CONSENT row past this is swept back to
+  /// DISCONNECTED — an orchestrator restart drops the in-memory flow, and
+  /// without this the row would sit "pending" forever.
+  pendingFlowExpiresAt DateTime?
+
+  /// First successful connect. Kept across a NEEDS_RECONNECT round-trip so the
+  /// UI can say how long this account has been linked.
+  connectedAt     DateTime?
+  lastRefreshOkAt DateTime?
+
+  /// Operator-facing reason for ERROR / NEEDS_RECONNECT. Must never carry a
+  /// token, code, or raw bearer material — only Entra's error identifier and a
+  /// plain-language sentence.
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([state])
+}
