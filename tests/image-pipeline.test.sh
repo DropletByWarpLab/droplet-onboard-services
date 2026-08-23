@@ -584,6 +584,24 @@ else
   fi
 fi
 
+echo "--- WARP-2101: autoinstall seed ships the TPM2 userspace (tss2 libs) ---"
+if [ ! -f "$UD" ]; then
+  fail "scripts/image/autoinstall/user-data not present (WARP-2101 seed checks)"
+else
+  # systemd-cryptenroll dlopens all three tss2 libraries at runtime; without
+  # them a box with HEALTHY TPM hardware reports "TPM2 support is not
+  # installed" and the first-boot LUKS provisioning cannot seal the data LV
+  # (WARP-2101). setup.sh installs Docker but never these — they must ship in
+  # the seed.
+  for pkg in libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-rc0t64; do
+    if grep -qF -- "- $pkg" "$UD"; then
+      pass "seed packages include $pkg"
+    else
+      fail "seed packages missing $pkg — cryptenroll dies 'TPM2 support is not installed' on healthy TPM hardware (WARP-2101)"
+    fi
+  done
+fi
+
 # =============================================================================
 # Results
 # =============================================================================

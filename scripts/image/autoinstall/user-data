@@ -86,6 +86,15 @@ autoinstall:
     # grub-efi-amd64 already depends on it on a UEFI install, but the skip
     # logic must key off EFI-vars presence, never off a missing binary. Tiny.
     - efibootmgr
+    # TPM2 userspace (WARP-2101): systemd-cryptenroll dlopens all three tss2
+    # libraries at runtime. Without them it reports "TPM2 support is not
+    # installed" on HEALTHY TPM hardware, and the first-boot LUKS provisioning
+    # (scripts/host/droplet-luks-provision.sh, setup.sh Phase 1.5) cannot seal
+    # the data LV — worst case aborting mid-provision with a container that
+    # has zero usable keyslots. Ubuntu 24.04 (noble) package names.
+    - libtss2-esys-3.0.2-0t64
+    - libtss2-mu-4.0.1-0t64
+    - libtss2-rc0t64
 
   # Keep the installed system current at install time.
   updates: security

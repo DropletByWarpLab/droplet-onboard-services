@@ -37,6 +37,16 @@ droplet_tpm_present() {
   [ -e "${DROPLET_TPM_DEVICE:-/dev/tpm0}" ]
 }
 
+# droplet_tpm_userspace_ok — is the TPM2 USERSPACE usable, not just the chip?
+# /dev/tpm0 proves the hardware; systemd-cryptenroll additionally dlopens the
+# tss2 stack (libtss2-esys/-mu/-rc) at runtime and fails "TPM2 support is not
+# installed" when those packages are missing (WARP-2101 — the install seed
+# didn't ship them). `--tpm2-device=list` exercises exactly that dlopen path
+# without touching any LUKS device, so its exit code is the real probe.
+droplet_tpm_userspace_ok() {
+  "$(droplet_tpm_cryptenroll)" --tpm2-device=list >/dev/null 2>&1
+}
+
 droplet_tpm_systemd_creds() { printf '%s' "${DROPLET_SYSTEMD_CREDS_BIN:-systemd-creds}"; }
 droplet_tpm_cryptsetup()    { printf '%s' "${DROPLET_CRYPTSETUP_BIN:-cryptsetup}"; }
 droplet_tpm_cryptenroll()   { printf '%s' "${DROPLET_CRYPTENROLL_BIN:-systemd-cryptenroll}"; }
