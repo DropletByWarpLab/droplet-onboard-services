@@ -8,12 +8,13 @@ import { isConfirmationResponse, passThroughConfirmation } from "../../confirmat
  * 403s every call. The orchestrator target auto-injects the service-principal
  * bearer; the write route admits `_service:mcp` (requireRoleOrMcpService).
  *
- * Envelope change: `switch_wan_detect` is a Tier-2 op in the orchestrator's
- * safety tier (config/network-safety-rules.ts), so the proxy answers 202 with
- * a confirmation envelope — NOT the raw 200 the switch service returned. Pass
- * that through as `confirmation_required` (the switch service, which owns no
- * safety tier, never did). On an allowed (Tier-1) path the raw detection body
- * is forwarded unchanged, so `data` stays stable.
+ * Envelope: `switch_wan_detect` is Tier 1 in the orchestrator's safety tier
+ * (config/network-safety-rules.ts — WARP-2125 dropped it below Tier 2 because
+ * detection is a pure read that writes nothing), so the allowed path answers
+ * a direct 200 and the raw detection body is forwarded unchanged. The
+ * `isConfirmationResponse` passthrough below is kept as defensive handling:
+ * if the operation ever gets confirm-gated again, the tool surfaces
+ * `confirmation_required` instead of mistaking the envelope for detection data.
  */
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const res = await ctx.http.orchestrator.post("/api/switch/wan/detect", undefined);
@@ -34,8 +35,11 @@ const inputSchema = { type: "object", properties: {}, additionalProperties: fals
 const tool: Tool = {
   name: "detect_wan_port",
   description:
-    "Auto-detect which switch port is the WAN uplink to the router. Checks SFP ports first, then copper ports with active links. Mutates persisted state.",
+    "Auto-detect which switch port is the WAN uplink to the router. Checks SFP ports first, then copper ports with active links. Read-only: reports the detected port, changes nothing.",
   inputSchema,
+  // Deliberately UNCHANGED by WARP-2125 (which corrected the description and
+  // the orchestrator's tier): flipping this alters the orchestrator's derived
+  // WRITE_TOOLS gating and is a separate decision — flagged as a follow-up.
   requiresWrite: true,
   requiresConfirmation: false,
   handler,

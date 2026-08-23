@@ -36,9 +36,11 @@ describe("detect_wan_port", () => {
     expect(ctx.http.switchSvc.get).not.toHaveBeenCalled();
   });
 
-  // WARP-1462: switch_wan_detect is a Tier-2 op in the orchestrator's safety
-  // tier, so the proxy answers 202 with a confirmation envelope — surface it as
-  // confirmation_required rather than mistaking the envelope for detection data.
+  // WARP-2125: switch_wan_detect is Tier 1 in the orchestrator's safety tier
+  // now (a pure read auto-executes — the allowed path is the direct 200 above),
+  // but the handler KEEPS the confirmation passthrough as defensive handling:
+  // if the operation ever gets confirm-gated again, the tool must surface
+  // confirmation_required rather than mistake the envelope for detection data.
   it("returns confirmation_required when the orchestrator answers 202", async () => {
     const post = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ reason: "WAN detection requires confirmation" }), { status: 202 }),
