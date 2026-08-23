@@ -260,3 +260,40 @@ async def test_eligible_pulled_stays_exact_under_ollama(
 
     resp = await client.get("/models/eligible")
     assert resp.json()["models"][0]["pulled"] is False
+
+
+async def test_eligible_pulled_true_when_installed_under_pull_tag(
+    client, respx_mock, manifest_path
+):
+    """`pulled` is true for an entry the daemon inventories under its PULL_TAG.
+
+    The pull itself ships the registry identifier — main.py calls
+    `runtime.pull(entry.pull_tag)` — so for any entry that pins a quantization
+    the daemon inventories the weights under `pull_tag`, never under the
+    catalog `name`. Matching `name` alone therefore reports an INSTALLED
+    pinned entry `pulled: false` forever, the orchestrator's `already_pulled`
+    409 guard never trips, and every re-click is a full re-download. A model
+    could also plausibly have been pulled historically under either
+    identifier, so BOTH are matched against the daemon's inventory (PR #53
+    review). No other test combines `name != pull_tag` with a non-empty
+    inventory: the one distinct-identifier fixture above mocks `/api/tags`
+    empty, so `pulled` is false under either comparison.
+    """
+    import vram
+    vram._cached_gb = 16
+
+    manifest_path.write_text(json.dumps({
+        "models": [
+            {"name": "test-model:7b", "pull_tag": "test-model:7b-q4_K_M",
+             "format": "gguf", "quantization": "Q4_K_M", "min_vram_gb": 4},
+        ]
+    }))
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(
+            200, json={"models": [{"name": "test-model:7b-q4_K_M"}]}
+        )
+    )
+
+    resp = await client.get("/models/eligible")
+    assert resp.status_code == 200
+    assert resp.json()["models"][0]["pulled"] is True

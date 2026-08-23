@@ -59,7 +59,19 @@ async def build_eligible(
                 "pull_tag": m.pull_tag,
                 "class": m.cls,
                 "min_vram_gb": m.min_vram_gb,
-                "pulled": runtime.comparable_id(m.name) in available,
+                # PR #53 review: match BOTH identifiers, not just `name`. The
+                # pull ships the registry identifier (main.py calls
+                # `runtime.pull(entry.pull_tag)`), so a quantization-pinned
+                # entry is inventoried by the daemon under `pull_tag` — a
+                # name-only test reports it `pulled: false` forever and the
+                # orchestrator's `already_pulled` 409 guard never trips (full
+                # re-download on every re-click). A model could also plausibly
+                # have been pulled historically under either identifier, so
+                # membership of either counts as installed.
+                "pulled": (
+                    runtime.comparable_id(m.name) in available
+                    or runtime.comparable_id(m.pull_tag) in available
+                ),
                 "default": m.default,
                 # WARP-1111: catalog metadata for the fleet-console / dashboard
                 # role pickers. Additive — existing callers that only read the

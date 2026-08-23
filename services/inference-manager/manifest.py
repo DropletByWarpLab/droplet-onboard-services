@@ -79,6 +79,34 @@ class ManifestEntry(BaseModel):
             self.display_name = self.name
         return self
 
+    @model_validator(mode="after")
+    def _oci_carries_a_namespace(self) -> "ManifestEntry":
+        # PR #54 review (WARP-2130): a slash-less `oci` is never served, it is
+        # MANGLED. `runtime/dmr.py::to_runtime_id` branches on `"/" in
+        # candidate`, so a typo like `"glm-4.7-flash:reap-q4_K_M"` (the `ai/`
+        # namespace forgotten) falls into the bare-Ollama-id path, derives
+        # `ai/<repo>` and DROPS the tag — the daemon then resolves `latest`
+        # instead of the pinned quantization, which is the precise silent
+        # failure this field exists to prevent. Refuse the typo at load time.
+        #
+        # Blank/whitespace stays loadable on purpose: `preferred_id` treats it
+        # as undeclared, and rejecting it would let a compose-style `${VAR:-}`
+        # expansion invalidate a manifest push (the never-brick rationale
+        # above). Note the resilient runtime loader still degrades to
+        # last-known-good on this error, exactly as for any other invalid
+        # manifest — this refusal is loud, not brick-shaped.
+        declared = (self.oci or "").strip()
+        if declared and "/" not in declared:
+            raise ValueError(
+                f"entry {self.name!r}: oci={self.oci!r} has no namespace "
+                "separator — an OCI reference must look like "
+                "'namespace/repository[:tag]', e.g. "
+                "'ai/glm-4.7-flash:reap-q4_K_M'. Without the namespace it "
+                "would be treated as a bare Ollama id and its tag silently "
+                "dropped, un-pinning the quantization."
+            )
+        return self
+
 
 class Manifest(BaseModel):
     models: list[ManifestEntry]

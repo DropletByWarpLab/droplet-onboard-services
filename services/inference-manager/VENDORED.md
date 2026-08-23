@@ -31,16 +31,34 @@ another repo. Three ways to close that gap were considered; vendoring won:
 |---|---|
 | Upstream repo | `DropletByWarpLab/droplet-local-LLM` |
 | Upstream path | `services/inference-manager/` |
-| `origin/main` at time of vendoring | `fab4471d24579d52e3ea1069240e30cb290f0e58` |
-| Plus PR #53 (WARP-2129) | `f746a995022f58e5d99468f24222fb0988349835` |
-| Plus PR #54 (WARP-2130) | `2f35429933e40f6f8ec0a0718ad7512d6a15dc87` |
-| Effective source tree | `7072640abeef6f9fcd148ebbb45b66f0d95fca55` (clean merge of the three, zero conflicts) |
+| `origin/main` last synced | `cc2391117695615382a2d722d1269224068be0ef` (2026-08-22) |
+| Includes PR #53 (WARP-2129) | merged as `ef770eb` |
+| Includes PR #54 (WARP-2130) | merged as `cc23911` |
 
-**Both PRs were open when this was vendored.** Taking plain `main` was not an
-option: it carries two known identifier defects — `/models/eligible` omitting
-`pull_tag`, and `pulled` computed without the runtime adapter so every entry
-reads `pulled: false` on a DMR box — and it lacks the `oci` manifest field
-entirely. **If either PR changes before it merges, refresh this copy.**
+**Sync history.** The initial vendoring (2026-08-21) took `main` at `fab4471d`
+plus the then-open heads of PR #53 (`f746a995`) and PR #54 (`2f354299`),
+because plain `main` carried two known identifier defects and lacked the `oci`
+manifest field. Both PRs have since **merged with additional review fixes**,
+picked up by a refresh on 2026-08-22 (the WARP-2131 / PR #1668 review cycle):
+
+- `eligible.py` — `pulled` matches BOTH `comparable_id(name)` and
+  `comparable_id(pull_tag)` against the daemon's inventory, so a
+  quantization-pinned entry that was pulled under its `pull_tag` no longer
+  reads `pulled: false` forever (#53 review).
+- `manifest.py` — `_oci_carries_a_namespace` validator refuses a slash-less
+  non-blank `oci` at load, before `to_runtime_id` can silently drop its tag
+  (#54 review).
+- `main.py` — `POST /models/pull` tracks every spelling of the model
+  (`{body.model, entry.name, entry.pull_tag, wire_model}`) in the
+  `LoadingTracker`, with symmetric removal; `_pull_streaming` takes the same
+  key set via a new `loading_keys` parameter and releases it through one
+  `_release()` closure at its three removal points (#54 review).
+- The corresponding upstream tests were vendored where the tested surface
+  exists here (`test_eligible.py`, `test_manifest.py`, `test_lifecycle.py`);
+  upstream's `docs/model-management.md` tag-pin note was not, since that doc
+  is not vendored. Two upstream comments that cross-reference `sync_manifest`
+  (a route deleted here) were minimally reworded in `main.py` and
+  `test_lifecycle.py`; no behavioural drift.
 
 ## What was removed, and why
 

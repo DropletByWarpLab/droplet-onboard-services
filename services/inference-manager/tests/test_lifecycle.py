@@ -320,3 +320,104 @@ async def test_pull_on_ollama_ignores_a_declared_oci(
     assert json.loads(pull_route.calls.last.request.content)["name"] == (
         "glm-4.7-flash:31b"
     )
+
+
+# ── WARP-2130 (PR #54 review): /models/pull tracks EVERY spelling ─────────
+#
+# The chat pre-flight guard (chat_proxy) 503s on an EXACT string match of
+# what a chat request names. Upstream's sync_manifest (not vendored here —
+# see VENDORED.md) already tracks {name, pull_tag, wire id} for precisely
+# that reason; the single-model pull path must widen identically, or a pull
+# addressed by one spelling leaves a concurrent chat naming another spelling
+# unguarded on a cold model.
+
+_GLM_MANIFEST = {
+    "models": [
+        # pull_tag deliberately differs from name, so all THREE spellings of
+        # this entry are distinct strings and the assertion below can tell
+        # "widened" from "happened to coincide".
+        {"name": "glm-4.7-flash:31b", "pull_tag": "glm-4.7-flash:31b-q4",
+         "oci": "ai/glm-4.7-flash:reap-q4_K_M", "format": "gguf",
+         "quantization": "Q4_K_M", "min_vram_gb": 0},
+    ]
+}
+
+_GLM_SPELLINGS = [
+    "ai/glm-4.7-flash:reap-q4_K_M",  # the DMR wire id
+    "glm-4.7-flash:31b",             # the manifest name (what the caller used)
+    "glm-4.7-flash:31b-q4",          # the registry pull_tag
+]
+
+
+async def test_pull_tracks_every_spelling_while_in_flight(
+    client, respx_mock, manifest_path, monkeypatch, loading_tracker
+):
+    """Mid-pull, the tracker holds the caller's id, the manifest name, the
+    pull_tag AND the wire id; after a successful pull, none of them."""
+    import main
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    manifest_path.write_text(json.dumps(_GLM_MANIFEST))
+
+    seen: list[list[str]] = []
+
+    async def _capture_pull(_):
+        seen.append(await loading_tracker.list())
+        return Response(200, json={"status": "success"})
+
+    respx_mock.post("http://mock-ollama:11434/api/pull").mock(side_effect=_capture_pull)
+
+    resp = await client.post("/models/pull", json={"model": "glm-4.7-flash:31b"})
+    assert resp.status_code == 200
+    # Every spelling present mid-pull (sorted by tracker.list()).
+    assert seen == [_GLM_SPELLINGS]
+    # And NONE left afterwards — an asymmetric remove would 503 chats for the
+    # leaked spellings forever.
+    assert await loading_tracker.list() == []
+
+
+async def test_pull_failure_clears_every_tracked_spelling(
+    client, respx_mock, manifest_path, monkeypatch, loading_tracker
+):
+    """The failure path removes the SAME widened set it added."""
+    import main
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    manifest_path.write_text(json.dumps(_GLM_MANIFEST))
+
+    respx_mock.post("http://mock-ollama:11434/api/pull").mock(
+        return_value=Response(500, text="registry exploded")
+    )
+
+    resp = await client.post("/models/pull", json={"model": "glm-4.7-flash:31b"})
+    assert resp.status_code == 500
+    assert await loading_tracker.list() == []
+
+
+async def test_pull_stream_tracks_and_clears_every_spelling(
+    client, respx_mock, manifest_path, monkeypatch, loading_tracker
+):
+    """The streaming path adds and removes the same widened set too — its
+    removal lives in the response generator's `finally`, a separate code path
+    from the blocking route's, so it gets its own regression guard."""
+    import main
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    manifest_path.write_text(json.dumps(_GLM_MANIFEST))
+
+    seen: list[list[str]] = []
+
+    async def _capture_pull(_):
+        seen.append(await loading_tracker.list())
+        return Response(
+            200,
+            content=b'{"status": "pulling manifest"}\n{"status": "success"}\n',
+            headers={"content-type": "application/x-ndjson"},
+        )
+
+    respx_mock.post("http://mock-ollama:11434/api/pull").mock(side_effect=_capture_pull)
+
+    resp = await client.post(
+        "/models/pull?stream=true", json={"model": "glm-4.7-flash:31b"}
+    )
+    assert resp.status_code == 200
+    assert len(resp.text.strip().splitlines()) == 2
+    assert seen == [_GLM_SPELLINGS]
+    assert await loading_tracker.list() == []

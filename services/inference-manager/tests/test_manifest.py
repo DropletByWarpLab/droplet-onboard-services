@@ -390,3 +390,51 @@ def test_shipped_manifest_pins_glm_to_the_build_that_fits(tmp_path: Path):
     # The default must still be the incumbent, and there must be exactly one.
     assert manifest.default_entry() is not None
     assert manifest.default_entry().name == "gpt-oss:20b"
+
+
+def _entry_with_oci(oci: str) -> str:
+    return json.dumps({
+        "models": [
+            {"name": "glm-4.7-flash:31b", "pull_tag": "glm-4.7-flash:31b",
+             "oci": oci, "format": "gguf",
+             "quantization": "Q4_K_M", "min_vram_gb": 4},
+        ]
+    })
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_oci_blank_still_loads_as_undeclared(tmp_path: Path, blank: str):
+    """Blank/whitespace stays LOADABLE — `preferred_id` reads it as undeclared
+    (its parametrized fallback test covers exactly these values), and refusing
+    it would let a compose-style `${VAR:-}` expansion brick a manifest push.
+    The shape validation below applies only to a value that is actually set."""
+    from manifest import load_manifest
+
+    p = tmp_path / "m.json"
+    p.write_text(_entry_with_oci(blank))
+    assert load_manifest(p).models[0].oci == blank
+
+
+@pytest.mark.parametrize("malformed", [
+    # The exact typo the field invites: forgetting the `ai/` namespace.
+    "glm-4.7-flash:reap-q4_K_M",
+    "glm-4.7-flash",
+])
+def test_oci_without_a_namespace_is_refused_at_load(tmp_path: Path, malformed: str):
+    """PR #54 review (WARP-2130): a slash-less `oci` is never served, it is
+    MANGLED — `runtime/dmr.py::to_runtime_id` branches on `"/" in candidate`,
+    so a value missing its namespace falls into the bare-Ollama-id path,
+    derives `ai/<repo>` and DROPS the tag. The daemon then resolves `latest`
+    (17.05 GiB for GLM) instead of the pinned quant (13.14 GiB) — the precise
+    silent failure the field exists to prevent. Refuse it at load, loudly.
+
+    Note this makes the strict loader raise; the resilient runtime loader
+    degrades to last-known-good exactly as for any other invalid manifest."""
+    from pydantic import ValidationError
+
+    from manifest import load_manifest
+
+    p = tmp_path / "m.json"
+    p.write_text(_entry_with_oci(malformed))
+    with pytest.raises(ValidationError, match=r"namespace/repository\[:tag\]"):
+        load_manifest(p)

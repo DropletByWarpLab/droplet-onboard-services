@@ -298,6 +298,7 @@ async def _pull_streaming(
     tracker: "LoadingTracker",
     *,
     wire_model: str | None = None,
+    loading_keys: set[str] | None = None,
 ) -> StreamingResponse:
     """Proxy the runtime's NDJSON pull-progress stream to the caller (WARP-1111 §7.1).
 
@@ -312,9 +313,17 @@ async def _pull_streaming(
     The runtime is passed in rather than re-resolved so the caller's 503 guard
     remains the single readiness check.
     """
-    # WARP-2130: `model` is the CALLER's identifier and stays the tracker key —
-    # the chat pre-flight guard is keyed on what a chat request names, not on
-    # what we ask the registry for. `wire_model` is what goes to the daemon.
+    # WARP-2130: `model` is the CALLER's identifier; `wire_model` is what goes
+    # to the daemon. `loading_keys` is EVERY spelling the caller registered in
+    # the tracker before handing off (PR #54 review) — removal here must cover
+    # exactly that set, because an asymmetric remove would leak the other
+    # spellings and leave the chat pre-flight 503ing them forever.
+    keys = loading_keys if loading_keys is not None else {model}
+
+    async def _release() -> None:
+        for key in keys:
+            await tracker.remove(key)
+
     try:
         upstream = await runtime.open_pull_stream(wire_model or model)
     except Exception as e:
@@ -322,7 +331,7 @@ async def _pull_streaming(
         # refused, DNS, etc.) — nothing was streamed, so map it to the same
         # 502 the non-streaming path uses rather than leaking as a bare 500,
         # and clear the tracker (there's no generator `finally` to do it here).
-        await tracker.remove(model)
+        await _release()
         raise HTTPException(status_code=502, detail=str(e))
 
     if upstream.status_code != 200:
@@ -331,7 +340,7 @@ async def _pull_streaming(
         # streamed yet").
         text = await upstream.aread()
         await upstream.aclose()
-        await tracker.remove(model)
+        await _release()
         raise HTTPException(status_code=upstream.status_code, detail=text.decode(errors="replace"))
 
     async def _gen():
@@ -349,7 +358,7 @@ async def _pull_streaming(
             yield json.dumps({"status": "error", "error": str(e)}) + "\n"
         finally:
             await upstream.aclose()
-            await tracker.remove(model)
+            await _release()
 
     return StreamingResponse(_gen(), media_type="application/x-ndjson", status_code=200)
 
@@ -404,15 +413,32 @@ async def pull_model(body: PullRequest, request: Request, stream: bool = False):
         )
 
     tracker: LoadingTracker = app.state.loading_tracker
-    await tracker.add(body.model)
+    # PR #54 review (WARP-2130): the chat pre-flight guard (chat_proxy) 503s
+    # only on an EXACT match of what a chat request names, so the pull must
+    # be tracked under every spelling that addresses the model being fetched:
+    # the caller's, the manifest name, the registry pull_tag and the wire
+    # identifier. Tracking only `body.model` would let a concurrent chat
+    # naming the DMR wire id slip past the guard onto the model mid-download.
+    # An unlisted model has no manifest spellings, so it contributes the
+    # caller's id and the wire id (identical, on Ollama). Sets dedupe
+    # whatever coincides.
+    loading_keys = (
+        {body.model, entry.name, entry.pull_tag, wire_model}
+        if entry
+        else {body.model, wire_model}
+    )
+    for key in loading_keys:
+        await tracker.add(key)
     logger.info("pulling_model", model=body.model)
 
     want_stream = stream or "application/x-ndjson" in (request.headers.get("accept") or "")
     if want_stream:
-        # _pull_streaming owns tracker.remove() in its generator's `finally` —
-        # the streamed response outlives this function's own try/finally.
+        # _pull_streaming owns tracker removal in its generator's `finally` —
+        # the streamed response outlives this function's own try/finally. It
+        # is handed the SAME key set so add and remove stay symmetric.
         return await _pull_streaming(
-            runtime, body.model, tracker, wire_model=wire_model
+            runtime, body.model, tracker,
+            wire_model=wire_model, loading_keys=loading_keys,
         )
 
     try:
@@ -435,4 +461,7 @@ async def pull_model(body: PullRequest, request: Request, stream: bool = False):
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
     finally:
-        await tracker.remove(body.model)
+        # The exact set added above — asymmetry here would leak keys and
+        # permanently 503 chats for the leaked spellings (PR #54 review).
+        for key in loading_keys:
+            await tracker.remove(key)
