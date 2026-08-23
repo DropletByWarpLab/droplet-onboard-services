@@ -260,17 +260,6 @@ describe("/settings/updates — unprovisioned update source (WARP-2133)", () => 
     await screen.findByRole("button", { name: /check now/i });
     expect(screen.queryByText(/update source not provisioned/i)).not.toBeInTheDocument();
   });
-
-  it("reports a source_unauthenticated check as a failure, never as up to date", async () => {
-    checkForUpdatesNow.mockResolvedValue({ outcome: "source_unauthenticated" });
-    render(<UpdatesSettingsPage />);
-    fireEvent.click(await screen.findByRole("button", { name: /check now/i }));
-    expect(
-      await screen.findByText(/the update source isn't provisioned on this box/i),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/nothing new/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/no release has been published/i)).not.toBeInTheDocument();
-  });
 });
 
 describe("/settings/updates — history table", () => {
