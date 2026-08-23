@@ -82,6 +82,10 @@ autoinstall:
     - curl
     - ca-certificates
     - openssl
+    # WARP-2143: guaranteed present for the boot-order late-command below.
+    # grub-efi-amd64 already depends on it on a UEFI install, but the skip
+    # logic must key off EFI-vars presence, never off a missing binary. Tiny.
+    - efibootmgr
 
   # Keep the installed system current at install time.
   updates: security
@@ -147,3 +151,64 @@ autoinstall:
     # into a remote root credential (ADR-020 §D6).
     - |
       curtin in-target --target=/target -- bash -c 'echo "droplet ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/droplet-firstboot && chmod 440 /etc/sudoers.d/droplet-firstboot'
+    # WARP-2143: install media boots once — no manual stick-pull. Firmware
+    # defaults (bench: ASRock B650I) put UEFI USB ahead of the internal disk,
+    # so the customer runbook needed a "pull the stick when it reboots" step —
+    # the ONE manual act in an otherwise unattended install. By the time
+    # late-commands run, curtin has installed the bootloader, so the target's
+    # "ubuntu" UEFI entry (grub-install's default label) exists: rebuild
+    # BootOrder as <ubuntu>,<remaining entries in their existing relative
+    # order> and apply it with efibootmgr -o. The post-install reboot — and
+    # every later boot — then lands on the internal disk even with the stick
+    # still inserted.
+    #
+    # DELIBERATELY NON-FATAL (unlike the clone step above): a boot-order nit
+    # must never abort an otherwise good install. But non-fatal is not silent
+    # (review #501) — every skip path logs:
+    #   - no /sys/firmware/efi           -> BIOS/CSM boot; BootOrder does not apply
+    #   - efivarfs unmountable in chroot -> cannot touch EFI vars; firmware keeps its order
+    #   - no "ubuntu" entry / no BootOrder variable -> log and leave firmware alone
+    #   - ubuntu already first           -> idempotent no-op (safe on re-install)
+    # Duplicate "ubuntu" labels: first match wins; later duplicates drop out of
+    # the rebuilt order (harmless de-dupe, the entries themselves are untouched).
+    - |
+      curtin in-target --target=/target -- bash -c '
+        set -u
+        log() { echo "droplet-boot-order: $1"; }
+        if [ ! -d /sys/firmware/efi ]; then
+          log "SKIP: no EFI firmware interface (BIOS/CSM boot) - BootOrder does not apply"
+          exit 0
+        fi
+        if ! mountpoint -q /sys/firmware/efi/efivars 2>/dev/null; then
+          mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null \
+            || { log "SKIP: EFI variables not reachable from the install chroot - leaving BootOrder to the firmware"; exit 0; }
+        fi
+        if ! command -v efibootmgr >/dev/null 2>&1; then
+          log "SKIP: efibootmgr not installed on the target - cannot assert BootOrder"
+          exit 0
+        fi
+        vars="$(efibootmgr 2>&1)" \
+          || { log "SKIP: efibootmgr could not read EFI variables: $vars"; exit 0; }
+        entry="$(printf "%s\n" "$vars" | sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\)[* ] ubuntu\([[:space:]].*\)\{0,1\}\$/\1/p" | head -n1)"
+        if [ -z "$entry" ]; then
+          log "SKIP: no ubuntu boot entry found - leaving BootOrder untouched"
+          exit 0
+        fi
+        order="$(printf "%s\n" "$vars" | sed -n "s/^BootOrder: //p" | head -n1)"
+        if [ -z "$order" ]; then
+          log "SKIP: firmware reports no BootOrder variable - not inventing one"
+          exit 0
+        fi
+        if [ "${order%%,*}" = "$entry" ]; then
+          log "OK: ubuntu entry Boot$entry is already first in BootOrder ($order)"
+          exit 0
+        fi
+        rest="$(printf "%s\n" "$order" | tr "," "\n" | grep -ivx "$entry" | paste -sd, -)"
+        new_order="$entry${rest:+,$rest}"
+        if efibootmgr -o "$new_order" >/dev/null; then
+          log "OK: BootOrder set to $new_order (ubuntu first; was $order) - install media can stay inserted"
+        else
+          log "WARNING: could not apply BootOrder $new_order - install continues; the stick may still boot first"
+        fi
+        exit 0
+      ' || echo "droplet-boot-order: WARNING: boot-order assertion errored unexpectedly; install continues (WARP-2143 is deliberately non-fatal)" >&2
