@@ -68,7 +68,10 @@ vi.mock("../services/switch-aggregation.service.js", () => ({
 }));
 
 import { createSwitchRouter } from "../routes/switch.js";
-import { classifyNetworkCommand } from "../config/network-safety-rules.js";
+import {
+  classifyNetworkCommand,
+  NETWORK_RATE_LIMIT_PER_ENTITY,
+} from "../config/network-safety-rules.js";
 import { detectWanPort } from "../services/switch.client.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -140,6 +143,61 @@ describe("POST /api/switch/wan/detect", () => {
         tier: 1,
         confirmed: true,
         blocked: false,
+      }),
+    });
+  });
+});
+
+/**
+ * The one deliberate behavior change of WARP-2125 beyond the tier drop: the
+ * Tier-1 branch runs `checkRateLimit` (5/min per entity), which the old Tier-2
+ * mint path never did. Pin the refusal so a later refactor of the limiter or
+ * of `safetyResponse` can't silently change its status or un-audit it.
+ *
+ * The limiter's window state is module-global in network-safety.service and
+ * the tests above have already recorded hits against
+ * `switch.switch_wan_detect`, so this test does not pin WHICH attempt trips —
+ * it pins the contract: a burst can never exceed the budget, every pre-429
+ * answer is a 200, the driver never runs on the blocked call, and the refusal
+ * is audited. KEEP THIS DESCRIBE LAST IN THE FILE: it saturates the entity's
+ * budget, so any detect POST added after it would answer 429 for up to 60s.
+ */
+describe("Tier-1 rate limit on POST /api/switch/wan/detect (WARP-2125 behavior change)", () => {
+  it("a burst answers 429 within the 5/min budget — blocked, audited, driver not called", async () => {
+    const prisma = createPrismaMock();
+    const app = buildFullApp(prisma);
+
+    let blocked: request.Response | undefined;
+    let okCount = 0;
+    for (let i = 0; i < NETWORK_RATE_LIMIT_PER_ENTITY + 1; i++) {
+      const res = await request(app).post("/api/switch/wan/detect").send({});
+      if (res.status === 429) {
+        blocked = res;
+        break;
+      }
+      expect(res.status).toBe(200);
+      okCount += 1;
+    }
+
+    // The cap above allows NETWORK_RATE_LIMIT_PER_ENTITY successes even on a
+    // clean window, so no 429 here means the Tier-1 limiter is not running.
+    expect(blocked, "expected the per-entity rate limiter to refuse the burst").toBeDefined();
+    expect(blocked!.body).toMatchObject({ blocked: true, tier: 1 });
+    // Per-entity keying: the reason names the entity, not a global bucket.
+    expect(blocked!.body.error).toContain("Rate limit exceeded");
+    expect(blocked!.body.error).toContain("switch.switch_wan_detect");
+
+    // The refusal short-circuits BEFORE the hardware boundary...
+    expect(mockDetectWan).toHaveBeenCalledTimes(okCount);
+    // ...and still lands in the audit log as a blocked Tier-1 attempt.
+    expect(prisma.commandAuditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        entityId: "switch.switch_wan_detect",
+        service: "switch_wan_detect",
+        tier: 1,
+        confirmed: false,
+        blocked: true,
+        reason: "Rate limit exceeded",
       }),
     });
   });
