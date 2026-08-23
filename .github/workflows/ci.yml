@@ -157,10 +157,10 @@ jobs:
               - "services/erp-connector/**"
             ai-gateway:
               - "services/ai-gateway/**"
+              - "proto/**"
             # WARP-2131: the vendored model-catalog sidecar.
             inference-manager:
               - "services/inference-manager/**"
-              - "proto/**"
             routing:
               - "services/routing/**"
             switch:
