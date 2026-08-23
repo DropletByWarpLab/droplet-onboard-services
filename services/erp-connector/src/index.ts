@@ -211,3 +211,43 @@ export {
 // WARP-2107 — money aggregation shared by every track, so a total is a currency
 // figure rather than an accumulation of doubles.
 export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";
+
+// WARP-2108 — QuickBooks Desktop: the track where the practice's machine calls
+// US. Intuit's Web Connector polls outward, so data flows machine -> box with
+// no inbound socket into the customer's finance workstation and nothing leaving
+// the LAN. Free from Intuit: no SDK fee, no app review, no royalty.
+export {
+  QuickBooksDesktopConnector,
+  QbdSnapshotStore,
+  QbwcSession,
+  QBD_DATASETS,
+  QBD_TRACK_REMEDIATION,
+  QUICKBOOKS_DESKTOP_PROVIDER,
+  type AuthenticateResult,
+  type QbdSnapshot,
+  type QbdStatus,
+  type QbwcCredentials,
+  type QbwcSessionDeps,
+  type QuickBooksDesktopConfig,
+  type QuickBooksDesktopDeps,
+} from "./quickbooks/desktop-connector.js";
+
+export {
+  QBXML_STEPS,
+  QBXML_VERSION,
+  QbxmlStatusError,
+  buildRequest as buildQbxmlRequest,
+  parseResponse as parseQbxmlResponse,
+  type QbxmlStep,
+} from "./quickbooks/qbxml.js";
+
+export {
+  DEFAULT_XML_LIMITS,
+  XmlError,
+  decodeEntities,
+  escapeXml,
+  parseXml,
+  textAt,
+  type XmlElement,
+  type XmlLimits,
+} from "./quickbooks/xml.js";
