@@ -46,6 +46,15 @@ CRYPTSETUP="$(droplet_tpm_cryptsetup)"
 CRYPTENROLL="$(droplet_tpm_cryptenroll)"
 SYSTEMD_CRYPTSETUP="${DROPLET_SYSTEMD_CRYPTSETUP_BIN:-/usr/lib/systemd/systemd-cryptsetup}"
 
+# WARP-2100: hard bound (seconds) on each unlock attempt. droplet-firstboot
+# runs this script unattended; an attach that queues an ask-password prompt
+# otherwise blocks forever (see _attach_unlock). The hermetic harness shrinks
+# this; scripts/lib/luks.sh forwards it across the sudo boundary.
+UNLOCK_TIMEOUT="${DROPLET_LUKS_UNLOCK_TIMEOUT:-30}"
+# Where systemd queues pending ask-password prompts (diagnostic surface only;
+# seam so the harness can point it at a tmp dir).
+ASK_PASSWORD_DIR="${DROPLET_ASK_PASSWORD_DIR:-/run/systemd/ask-password}"
+
 # LV_DEV / MAPPER_DEV are the production LVM/dm paths; the hermetic harness
 # overrides them (DROPLET_LUKS_LV_DEV / DROPLET_LUKS_MAPPER_DEV) to point at tmp
 # nodes so the existing-LUKS re-run branch (finding 5) can be driven without a
@@ -92,6 +101,50 @@ _unlock_verified() {
   [ -e "$MAPPER_DEV" ]
 }
 
+# _attach_unlock — WARP-2100: try the TPM attach, then the plain-keyslot open,
+# without EVER blocking on an interactive prompt. droplet-firstboot hung
+# forever here: a failed TPM unseal made systemd-cryptsetup queue an
+# ask-password prompt no one on a headless appliance can answer. Three guards,
+# all needed:
+#   headless=true,tries=1  crypttab-style options in the attach OPTIONS
+#                          argument (same slot as tpm2-device=auto):
+#                          headless= stops the ask-password agent prompt being
+#                          queued at all — the agent protocol is socket-based
+#                          (/run/systemd/ask-password), so closing stdin alone
+#                          would NOT stop it;
+#   timeout                hard outer bound, in case a prompt still slips
+#                          through (an older systemd warns on unknown crypttab
+#                          options and continues);
+#   </dev/null             the bare `cryptsetup open` fallback reads the
+#                          passphrase from stdin — give it EOF instead of the
+#                          inherited firstboot console.
+# A failed/timed-out unlock still falls through (|| true) exactly as before:
+# the callers (_unlock_verified refusal / blkid+mkfs) decide what an un-opened
+# mapper means.
+_attach_unlock() {
+  timeout "$UNLOCK_TIMEOUT" "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - \
+      tpm2-device=auto,headless=true,tries=1 </dev/null 2>/dev/null \
+    || timeout "$UNLOCK_TIMEOUT" "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" \
+      </dev/null 2>/dev/null \
+    || true
+}
+
+# _report_pending_prompts — WARP-2100 diagnostic: after a failed unlock,
+# surface any ask-password prompt left queued (the smoking gun for "the unlock
+# wanted a passphrase nobody on a headless appliance can type").
+_report_pending_prompts() {
+  local pending
+  pending="$(ls "$ASK_PASSWORD_DIR" 2>/dev/null | tr '\n' ' ' || true)"
+  case "$pending" in
+    *[![:space:]]*)
+      err "pending systemd ask-password prompt(s) queued: $pending"
+      err "— the unlock asked for an interactive passphrase; this box is"
+      err "headless, so nothing can answer it (inspect with"
+      err "systemd-tty-ask-password-agent --list). (WARP-2100)"
+      ;;
+  esac
+}
+
 _has_free_extents() {
   local free
   free="$("$VGS" --noheadings -o vg_free_count "$VG" 2>/dev/null | tr -d ' ' || echo 0)"
@@ -135,9 +188,9 @@ cmd_provision() {
   # for a container we can't open, so /data just stays absent → docker gate).
   if [ -e "$LV_DEV" ] && "$CRYPTSETUP" isLuks "$LV_DEV" 2>/dev/null; then
     log "existing LUKS container at $LV_DEV — opening (no re-format)"
-    "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - tpm2-device=auto 2>/dev/null \
-      || "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" 2>/dev/null || true
+    _attach_unlock
     if ! _unlock_verified; then
+      _report_pending_prompts
       err "existing LUKS container at $LV_DEV has NO working unlock path — it"
       err "did not open via the TPM token or any keyslot. This is the classic"
       err "power-cut-mid-provision state (luksFormat completed but no keyslot"
@@ -199,8 +252,7 @@ cmd_provision() {
   rm -f "$keyfile"
 
   log "opening $MAPPER and formatting the filesystem"
-  "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - tpm2-device=auto 2>/dev/null \
-    || "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" 2>/dev/null || true
+  _attach_unlock
   if ! blkid -o value -s TYPE "$MAPPER_DEV" 2>/dev/null | grep -q ext4; then
     "$MKFS" -L droplet-data "$MAPPER_DEV"
   fi
@@ -219,8 +271,10 @@ _mount_and_wire() {
   # crypttab: auto-unlock via the TPM2 header token. `nofail` so a PCR mismatch
   # (TPM refuses to release the key) does NOT fail the cryptsetup unit hard and
   # cascade into local-fs.target; the device-timeout bounds the wait.
+  # `headless=true` (WARP-2100) so a failed unseal at boot NEVER queues an
+  # ask-password passphrase prompt on a box with no console operator.
   _append_if_absent "$CRYPTTAB" "$MAPPER" \
-    "$MAPPER $LV_DEV none tpm2-device=auto,luks,discard,nofail,x-systemd.device-timeout=30s"
+    "$MAPPER $LV_DEV none tpm2-device=auto,luks,discard,nofail,headless=true,x-systemd.device-timeout=30s"
   # fstab: mount /data with `nofail` + a bounded device timeout. `nofail` is the
   # crux of finding 3: WITHOUT it, a locked /data (PCR mismatch on a headless
   # box) makes the mount a HARD requirement of local-fs.target → local-fs fails
