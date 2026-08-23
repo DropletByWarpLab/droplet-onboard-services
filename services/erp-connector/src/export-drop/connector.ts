@@ -308,7 +308,20 @@ export class ExportDropConnector implements Connector {
         this.config.vendor === GENERIC_VENDOR
           ? `vendor "${GENERIC_VENDOR}" has no built-in profiles — supply one via ERP_EXPORT_DROP_PROFILES`
           : `no profile is registered for vendor "${this.config.vendor}"`;
-      throw this.blocked("connect", hint);
+      // SCAN FIRST, then block. Shipping no profile for a vendor is only
+      // defensible because the operator gets told what the files actually look
+      // like — that is what lets them author the right mapping on site, from
+      // the export in front of them. Throwing before the scan withheld exactly
+      // that, leaving "no profile is registered" and nothing to act on. The
+      // scan is bounded and read-only, so doing it here costs one directory
+      // pass and buys the whole discovery path.
+      const seen = await this.refresh().catch(() => null);
+      const sample = (seen?.diagnostics ?? [])
+        .filter((d) => d.reason === "unrecognized")
+        .slice(0, 3)
+        .map((d) => `${d.file} [${(d.headers ?? []).join(" | ")}]`)
+        .join("; ");
+      throw this.blocked("connect", sample ? `${hint}; saw ${sample}` : hint);
     }
 
     const snapshot = await this.refresh();

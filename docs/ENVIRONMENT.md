@@ -151,6 +151,8 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `OLLAMA_CPUS` | Ollama CPU ceiling (default `4.0`) |
 | `WHISPER_MEM_LIMIT` | Wyoming Whisper STT mem ceiling (default `1g`) — small.en model is ~470 MB |
 | (other `*_MEM_LIMIT` / `*_CPUS`) | Per-service overrides for every container. See [`ADR-021-container-resource-limits.md`](ADR-021-container-resource-limits.md) for the full list and RAM budget. |
+| `M365_CLIENT_ID` | Entra application (client) id of Droplet's multi-tenant app, enabling the **Microsoft 365 cloud connector** ([ADR-041](ADR-041-cloud-connector-class.md), WARP-2115). **Not a secret** — a public-client id is designed to ship inside the client, and the delegated device-code / auth-code flows use **no client secret at all**. **Empty (the default) keeps the connector switched off**: the dashboard reports Microsoft 365 as unavailable and `POST /api/m365/connect` answers `503`. Never a half-started state. |
+| `M365_AUTHORITY_HOST` | Entra login host for the M365 connector (default `https://login.microsoftonline.com`, correct for every commercial tenant). A knob only so a national cloud could be targeted without a code change — not supported today, and any replacement host must first be registered in [`docs/security/allowed-egress.yaml`](security/allowed-egress.yaml) or egress is denied by default. |
 
 ## FIPS 140-3 policy
 

@@ -166,6 +166,7 @@ export {
   DATASETS,
   DATASET_CATEGORY,
   GENERIC_VENDOR,
+  NAME_ONLY_VENDORS,
   REQUIRED_CANONICAL,
   assertValidProfile,
   knownVendors,
@@ -210,7 +211,6 @@ export {
 // WARP-2107 — money aggregation shared by every track, so a total is a currency
 // figure rather than an accumulation of doubles.
 export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";
-
 
 // WARP-2108 — QuickBooks Desktop: the track where the practice's machine calls
 // US. Intuit's Web Connector polls outward, so data flows machine -> box with

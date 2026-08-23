@@ -749,7 +749,16 @@ describe("WARP-836 — POST /api/models/:name/benchmark", () => {
 
 // ── WARP-1827 — pull-from-catalog: GET /models/catalog + POST /models/:name/pull ──
 
-/** The sidecar's eligible catalog: one model installed, one available. */
+/**
+ * The sidecar's eligible catalog: one model installed, one available.
+ *
+ * WARP-2129 — `class` and `capabilities` use the manifest's real vocabulary.
+ * `"flagship"` is not a value `ManifestEntry.cls`
+ * (`Literal["fast","balanced","smart"]`) can hold, and `"chat"` is a role, not
+ * a capability. Nothing asserts on either field; they are corrected so the
+ * fixture stops standing in as a spec for a payload shape the sidecar cannot
+ * produce.
+ */
 function eligibleCatalog() {
   return {
     detected_vram_gb: 16,
@@ -757,27 +766,27 @@ function eligibleCatalog() {
       {
         name: "gpt-oss:20b",
         pull_tag: "gpt-oss:20b",
-        min_vram_gb: 13,
-        class: "flagship",
+        min_vram_gb: 14,
+        class: "smart",
         default: true,
         display_name: "GPT-OSS 20B",
         maker: "OpenAI",
         description: "A strong general model.",
-        capabilities: ["chat", "tools"],
+        capabilities: ["tools", "thinking"],
         roles: ["chat"],
-        disk_gb: 14,
+        disk_gb: 13.8,
         pulled: true,
       },
       {
         name: "qwen3:14b",
         pull_tag: "qwen3:14b",
         min_vram_gb: 12,
-        class: "flagship",
+        class: "balanced",
         default: false,
         display_name: "Qwen3 14B",
         maker: "Alibaba",
         description: "A capable multilingual model.",
-        capabilities: ["chat"],
+        capabilities: ["tools"],
         roles: ["chat"],
         disk_gb: 9,
         pulled: false,
@@ -802,11 +811,11 @@ function eligibleCatalog() {
 function divergentCatalog() {
   const base = {
     min_vram_gb: 12,
-    class: "flagship",
+    class: "balanced",
     default: false,
     maker: "Alibaba",
     description: "A capable multilingual model.",
-    capabilities: ["chat"],
+    capabilities: ["tools"],
     roles: ["chat"],
     disk_gb: 9,
   };

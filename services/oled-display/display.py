@@ -114,6 +114,23 @@ def _safe_inset() -> Tuple[int, int]:
         return 0, 0
 
 
+def _letterbox_band() -> Optional[int]:
+    """Band height when this panel is letterboxed, else None.
+
+    Diagnostic only — the render path asks layout_wide directly. This is what
+    makes the difference between "my screen has black edges" and "my panel is
+    broken" visible on /health without standing in front of the box.
+
+    Fails CLOSED for the same reason as _safe_inset: geometry must never take
+    the display service down.
+    """
+    try:
+        import layout_wide
+        return layout_wide.band_height(WIDTH, HEIGHT)
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
 def _safe_canvas(bg) -> Image.Image:
     """Blank canvas for a 480x320-authored screen: the panel minus the bezel."""
     ix, iy = _safe_inset()
@@ -2125,7 +2142,13 @@ class TFTDisplay:
         the combined System screen rather than rendering something cramped."""
         import layout_wide
         if not layout_wide.is_wide():
-            return self.render_system(now=now)
+            # A monitor gets the same band treatment as the System
+            # screen rather than being bounced to it — the debug screen is the
+            # one you want ON a bench monitor. Falls through to render_system
+            # on a genuinely small panel, as before.
+            boxed = layout_wide.render_letterboxed(
+                self, layout_wide.render_debug, now=now)
+            return boxed if boxed is not None else self.render_system(now=now)
         return layout_wide.render_debug(self, now=now)
 
     def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
@@ -2142,6 +2165,16 @@ class TFTDisplay:
         import layout_wide
         if layout_wide.is_wide():
             return layout_wide.render_status(self, now=now)
+        # A panel that is neither a bar nor a 480x320 TFT — i.e.
+        # the HDMI monitor someone plugs into the box, whose geometry setup.sh
+        # writes straight into LCD_WIDTH/LCD_HEIGHT. The 480-authored body
+        # below paints ~1.6% of a 1080p screen, so a wide-enough panel gets
+        # the real bar layout letterboxed into a band instead. Returns None on
+        # anything else, including the 480x320 TFT, which falls through.
+        boxed = layout_wide.render_letterboxed(
+            self, layout_wide.render_status, now=now)
+        if boxed is not None:
+            return boxed
         if now is None:
             now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
         img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
@@ -3598,6 +3631,9 @@ class TFTDisplay:
             # LCD_WIDTH/LCD_HEIGHT disagrees with the hardware, fb.py letterboxes
             # rather than stretching — and this is where you see that.
             "resolution": f"{WIDTH}x{HEIGHT}",
+            # Non-null when this panel is too square for the bar
+            # layout and the frame is a centred band of this height.
+            "letterbox_band": _letterbox_band(),
             "panel": (None if self._fb is None else {
                 "width": self._fb.width,
                 "height": self._fb.height,

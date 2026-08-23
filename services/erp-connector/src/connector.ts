@@ -32,6 +32,7 @@ import {
   type CatalogQuerySet,
 } from "./introspection.js";
 import type { CatalogDialect } from "./version-detect.js";
+import type { DatasetName } from "./export-drop/profiles.js";
 import { getReadQuery, type BuiltStatement } from "./read-queries.js";
 import { getWriteCommand } from "./write-commands.js";
 
@@ -213,7 +214,7 @@ export interface EaglesoftConnectorDeps {
  * transports — if one grew a dataset the other did not, that would be a bug in
  * one of them, not a capability difference.
  */
-export const PRACTICE_DATASETS: readonly string[] = ["appointment", "patient", "account"];
+export const PRACTICE_DATASETS: readonly DatasetName[] = ["appointment", "patient", "account"];
 
 export class EaglesoftConnector implements Connector {
   readonly provider = "eaglesoft";
