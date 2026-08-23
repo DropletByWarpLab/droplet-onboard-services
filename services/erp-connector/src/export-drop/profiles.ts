@@ -274,6 +274,8 @@ export function assertValidProfile(profile: ExportProfile): void {
  * a wrong guess here costs an operator one edit — it can never produce wrong
  * rows.
  *
+ * Dentrix is deliberately NOT here — see {@link NAME_ONLY_VENDORS}.
+ *
  * The `opendental` mapping is modelled on Open Dental's published schema
  * (`appointment.AptNum` / `AptDateTime` / `AptStatus`, `patient.PatNum` /
  * `FName` / `LName`), which is documented publicly; the other two are shaped
@@ -306,35 +308,6 @@ export const BUILT_IN_PROFILES: readonly ExportProfile[] = [
         dataset: "account",
         required: ["Account ID", "Balance"],
         columns: { account_id: "Account ID", balance: "Balance" },
-      },
-    ],
-  },
-  {
-    vendor: "dentrix",
-    label: "Dentrix (Henry Schein)",
-    verified: false,
-    datasets: [
-      {
-        dataset: "appointment",
-        required: ["Appt ID", "Appt Date"],
-        columns: {
-          appt_id: "Appt ID",
-          appt_time: "Appt Date",
-          provider_id: "Provider",
-          operatory_id: "Operatory",
-          status: "Status",
-          patient_id: "Patient ID",
-        },
-      },
-      {
-        dataset: "patient",
-        required: ["Patient ID", "Last Name"],
-        columns: { patient_id: "Patient ID", first_name: "First Name", last_name: "Last Name" },
-      },
-      {
-        dataset: "account",
-        required: ["Guarantor ID", "Balance"],
-        columns: { account_id: "Guarantor ID", balance: "Balance" },
       },
     ],
   },
@@ -439,10 +412,51 @@ export const BUILT_IN_PROFILES: readonly ExportProfile[] = [
  */
 export const GENERIC_VENDOR = "generic";
 
+/**
+ * Vendors that are CONNECTABLE but that we ship no mapping for.
+ *
+ * A name-only vendor is not the same as an unsupported one. `dentrix-export`
+ * stays a valid provider key, the connect flow still works, and the scanner
+ * still reports every unrecognised file **together with the headers it actually
+ * had** — which is exactly what an operator needs to author the real profile on
+ * site. What it does not do is guess.
+ *
+ * ## Why Dentrix is here rather than carrying a built-in
+ *
+ * It had one, shaped from the field names Dentrix documents. It was removed
+ * because it could produce silently wrong rows, which every other built-in
+ * cannot:
+ *
+ *  * It mapped the canonical **timestamp** column `appt_time` to a header named
+ *    `"Appt Date"` — the only built-in whose column KIND disagreed with its
+ *    header NAME (Eaglesoft maps `"Appointment Time"`, Open Dental
+ *    `"AptDateTime"`). `parseExportTimestamp` accepts a date-only cell and
+ *    returns midnight, and the schedule read is a `[from, to)` window filter —
+ *    so a real Dentrix export printing a date-only column under that header
+ *    would be CLAIMED, parse cleanly, and put every appointment of the day at
+ *    00:00 in arbitrary order. Verified against this code, not argued.
+ *  * Henry Schein One's documented merge vocabulary carries no appointment
+ *    identifier and no operatory identifier at all, so `REQUIRED_CANONICAL
+ *    .appointment` (`appt_id` + `appt_time`) cannot honestly be satisfied.
+ *  * The `Status` field in that vocabulary is the PATIENT status, not the
+ *    appointment's. Mapping canonical `status` to it would match a real file
+ *    and carry the wrong meaning silently.
+ *
+ * A profile that fails to match costs an operator one edit. A profile that
+ * matches the WRONG column costs them wrong numbers they have no reason to
+ * doubt. Nobody has seen a real Dentrix export — that is the whole premise of
+ * `verified: false` — and where the guess could be wrong in that second way, it
+ * does not ship.
+ *
+ * Remove Dentrix from this list the day someone puts a real export in front of
+ * it. That is the only thing needed, and it costs nothing.
+ */
+export const NAME_ONLY_VENDORS: readonly string[] = ["dentrix"];
+
 /** Every vendor this track can be configured for, built-ins plus the generic
  *  escape hatch. Used to validate a provider key before a connection is saved. */
 export function knownVendors(extra: readonly ExportProfile[] = []): string[] {
-  const vendors = new Set<string>([GENERIC_VENDOR]);
+  const vendors = new Set<string>([GENERIC_VENDOR, ...NAME_ONLY_VENDORS]);
   for (const p of BUILT_IN_PROFILES) vendors.add(p.vendor);
   for (const p of extra) vendors.add(p.vendor);
   return [...vendors].sort();

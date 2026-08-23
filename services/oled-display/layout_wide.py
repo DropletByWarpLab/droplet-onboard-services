@@ -21,8 +21,10 @@ colours, no new font face. See the design brief §4 for why.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import threading
 from typing import Any, List, Optional, Tuple
 
 from PIL import Image, ImageDraw
@@ -48,6 +50,142 @@ WIDE_ASPECT_THRESHOLD = 3.0
 def is_wide() -> bool:
     d = _d()
     return d.HEIGHT > 0 and (d.WIDTH / d.HEIGHT) >= WIDE_ASPECT_THRESHOLD
+
+
+# --- Letterbox: a panel that is not bar-shaped at all ---------------------
+# THE HDMI MONITOR.
+#
+# `is_wide()` above splits panels in two, and until now the FALSE branch meant
+# "the 480x320 TFT". It does not. `setup.sh` writes LCD_WIDTH/LCD_HEIGHT from
+# whatever framebuffer it finds, so plugging a normal monitor into a box makes
+# 1920x1080 the panel geometry — and that falls through to display.py's
+# `render_system` body, which is authored against hardcoded 480-wide
+# coordinates and paints 1.59% of the pixels.
+#
+# The fix is NOT a lower threshold and NOT a scale factor:
+#
+#   * Stretching the bar layout over 1080px of height leaves substantive
+#     content ending at y=660 with four full-height hairlines beside it,
+#     because the density tier is DATA-bound, not space-bound. `extra_rows`
+#     computes `(H - 328) // 24` = 31 rows at 1080px, against roughly five
+#     rows of content that actually exists. Height cannot be absorbed by a
+#     tier whose content is finite.
+#   * A real 16:9 surface would be a third layout module, for a shape no
+#     customer sees. Both shipping panels are bars; a box with a monitor
+#     attached can serve the dashboard on :443, which is why the panel exists
+#     at all — a rack bar cannot run a browser.
+#
+# So a monitor is a SUPPORTED but not DESIGNED-FOR shape, and it gets the
+# honest answer: render the real bar layout at the monitor's full width, in a
+# band whose aspect stays inside the range the layout is authored for, and
+# centre it. Black above and below reads as deliberate letterboxing — the way
+# a film letterboxes on a TV — where a stretched layout reads as a fault.
+#
+# Only the WIDTH is used in full, because width is the one thing a monitor
+# genuinely offers this layout. The vertical surplus is the part it has no
+# content for, so that is the axis that gets banded.
+#
+# Note the safe-area inset still applies inside the band. That is a property
+# of the rack bar's bezel, not of a monitor, so those 30px are pure margin
+# here — harmless, and it keeps the band's internals identical to a real bar
+# panel, which is the whole point of rendering the same layout.
+
+# Below this width the bar layout does not degrade, it COLLAPSES: at 480 the
+# fixed 220px action rail plus margins leave 120px for four cells, and
+# `netstore` resolves to a ZERO-width span. The 480x320 TFT must keep its own
+# body, so this floor is what keeps it out of here rather than an aspect test.
+MIN_BAR_WIDTH = int(os.environ.get("PANEL_MIN_BAR_WIDTH", "1024"))
+# Aspect to aim the band at. 4.0 sits between the two real panels (5.09 and
+# 3.20) and lands 1920 on a 480px band — the tall tier, with room for band D.
+BAND_TARGET_ASPECT = float(os.environ.get("PANEL_BAND_ASPECT", "4.0"))
+# Prefer at least the height of the shipped 1280x400 panel when the aspect
+# ceiling allows it, so a band inherits that panel's PROVEN tall tier rather
+# than a compact strip floating in a large screen.
+BAND_PREFERRED_H = 400
+BAND_MIN_H = 280            # the reference rack bar's height; the floor below
+                            # which geom() warns the row runs into the foot rule
+
+
+def band_height(width: int, height: int) -> Optional[int]:
+    """Height of the bar-shaped band to render for a non-bar panel.
+
+    Returns None when this panel is not a letterbox case at all — it is
+    natively wide (render it directly) or too narrow for the bar layout to
+    survive (keep the 480x320 body). Callers treat None as "not mine".
+
+    The band is clamped so `width / band >= WIDE_ASPECT_THRESHOLD` BY
+    CONSTRUCTION: whatever comes back is a shape `is_wide()` would accept, so
+    the layout is never asked to render outside the range it claims.
+    """
+    if width <= 0 or height <= 0:
+        return None
+    if (width / height) >= WIDE_ASPECT_THRESHOLD:
+        return None                     # natively wide — no band needed
+    if width < MIN_BAR_WIDTH:
+        return None                     # the layout would collapse
+    ceiling = min(height, int(width / WIDE_ASPECT_THRESHOLD))
+    if ceiling < BAND_MIN_H:
+        # Unreachable while MIN_BAR_WIDTH >= 3 * BAND_MIN_H, but a floor that
+        # silently inverts is worse than one that declines.
+        return None
+    target = max(BAND_PREFERRED_H, int(round(width / BAND_TARGET_ASPECT)))
+    return max(BAND_MIN_H, min(ceiling, target))
+
+
+_GEOMETRY_LOCK = threading.RLock()
+
+# The REAL panel geometry while a band is being rendered, else None. A renderer
+# inside the swap sees the band in display.WIDTH/HEIGHT — which is the point —
+# but the debug screen's job is to state what the box actually is, and a screen
+# you consult to diagnose black bars must not be one of the things lying to
+# you. This is how it gets at the truth without unwinding the swap.
+_TRUE_PANEL: Optional[Tuple[int, int]] = None
+
+
+@contextlib.contextmanager
+def _panel_geometry(width: int, height: int):
+    """Render as though the panel were `width`x`height`.
+
+    display.WIDTH/HEIGHT are module globals read (never cached) inside every
+    renderer and by `geom()`, so a scoped swap is how the bar layout gets
+    composed at band size without threading an origin through every cell.
+    Serialised and restored in a `finally`: leaking a band geometry back into
+    the module would mis-render every subsequent frame on the real panel.
+    """
+    global _TRUE_PANEL
+    d = _d()
+    with _GEOMETRY_LOCK:
+        prev = (d.WIDTH, d.HEIGHT)
+        prev_true = _TRUE_PANEL
+        d.WIDTH, d.HEIGHT = width, height
+        _TRUE_PANEL = prev
+        try:
+            yield
+        finally:
+            d.WIDTH, d.HEIGHT = prev
+            _TRUE_PANEL = prev_true
+
+
+def render_letterboxed(disp, render, *args, **kwargs):
+    """Draw `render` into a band and centre it on a non-bar panel.
+
+    Returns None when this panel is not a letterbox case, so the caller falls
+    through to its own body. Deciding here rather than at each call site keeps
+    one decision point — two would drift.
+
+    The composite is `disp._fit_panel`, deliberately: it already centres a
+    smaller canvas in the panel frame AND translates the touch regions by the
+    same offset, which the renderers record in canvas coordinates. Doing the
+    paste here with a second copy of that translation is exactly the drift its
+    docstring warns about.
+    """
+    d = _d()
+    band = band_height(d.WIDTH, d.HEIGHT)
+    if band is None:
+        return None
+    with _panel_geometry(d.WIDTH, band):
+        img = render(disp, *args, **kwargs)
+    return disp._fit_panel(img, d.V3_BG)
 
 
 # ---------------------------------------------------------------------------
@@ -1154,6 +1292,27 @@ def _bind_cell_regions(disp) -> None:
 # Reached by tapping the device label in the chrome rail — a small, deliberate
 # target rather than a prominent button, because the LIVE screen is what
 # belongs on a rack front.
+def _panel_readout(status: dict) -> str:
+    """The PANEL row on the debug screen.
+
+    Prefers the framebuffer's own geometry, falls back to the module globals —
+    but reads them through `_TRUE_PANEL` when a band is being rendered, so this
+    row reports the monitor rather than the band drawn on it. When the two
+    differ it says BOTH: "the panel is 1920x1080 and I am painting 480 of it"
+    is the whole answer to "why is most of my screen black".
+    """
+    d = _d()
+    if status.get("panel"):
+        panel = (status["panel"]["width"], status["panel"]["height"])
+    elif _TRUE_PANEL is not None:
+        panel = _TRUE_PANEL
+    else:
+        panel = (d.WIDTH, d.HEIGHT)
+    if _TRUE_PANEL is not None:
+        return "{}×{} · band {}".format(panel[0], panel[1], d.HEIGHT)
+    return "{}×{}".format(*panel)
+
+
 def render_debug(disp, now=None) -> Image.Image:
     d = _d()
     g = geom()
@@ -1191,9 +1350,7 @@ def render_debug(disp, now=None) -> Image.Image:
     d._v3_text(draw, ssh_text, x, g.by(78), font=ssh_font, fill=d.V3_TEXT)
     rows = (
         ("HOST", str(v.get("hostname", "-"))),
-        ("PANEL", "{}×{}".format(*(
-            (status["panel"]["width"], status["panel"]["height"])
-            if status.get("panel") else (d.WIDTH, d.HEIGHT)))),
+        ("PANEL", _panel_readout(status)),
         ("KEYBOARD", "Ctrl+Alt+F2 for a clean VT"),
     )
     for i, (k, val) in enumerate(rows):

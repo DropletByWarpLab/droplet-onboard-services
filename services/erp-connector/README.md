@@ -10,7 +10,7 @@ Full architecture and safety contract:
 [`docs/integrations/eaglesoft.md`](../../docs/integrations/eaglesoft.md)
 (the in-repo provider reference; the original `EAGLESOFT-INTEGRATION-ARCHITECTURE-BRIEF.md`
 build spec this README implements §5–§12 of is an unpublished working doc, not in-repo). The design is provider-agnostic: OpenDental
-(MySQL), Dentrix, and generic ODBC ERPs slot in later behind the same
+(MySQL) and generic ODBC ERPs slot in later behind the same
 `Connector` interface.
 
 > ## ⚠ Status: the driver bridge ships; the SAP client is operator-supplied
