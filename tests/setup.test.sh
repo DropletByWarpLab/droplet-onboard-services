@@ -43,6 +43,25 @@ else
   fail "compose.sh psql missing -w flag — password prompt possible if PGPASSWORD unset"
 fi
 
+# WARP-2133: setup must provision DROPLET_OTA_APPLY_SCRIPT alongside the
+# DROPLET_HOST_ROOT upsert. Empty (the config.ts default) leaves the OTA
+# apply runner null forever, so /api/updates/apply-now answers 503
+# apply_unavailable on every freshly provisioned box. The WARP-1669 mount
+# makes $REPO_ROOT/scripts/lib/apply-update.sh the same absolute path on
+# the host and inside the orchestrator container.
+if grep -qE '_upsert_env_kv +DROPLET_OTA_APPLY_SCRIPT +"\$REPO_ROOT/scripts/lib/apply-update\.sh"' "$COMPOSE_LIB"; then
+  pass "compose.sh upserts DROPLET_OTA_APPLY_SCRIPT to the WARP-1669 dual-frame path"
+else
+  fail "compose.sh never upserts DROPLET_OTA_APPLY_SCRIPT — fresh boxes keep the empty default and apply-now 503s forever (WARP-2133)"
+fi
+
+# The path that upsert writes must actually exist in the repo.
+if [ -f "$REPO_ROOT_REAL/scripts/lib/apply-update.sh" ]; then
+  pass "scripts/lib/apply-update.sh exists at the upserted path"
+else
+  fail "scripts/lib/apply-update.sh missing — DROPLET_OTA_APPLY_SCRIPT would point at nothing"
+fi
+
 # =============================================================================
 # Phase 2: generate_env unit tests (no Docker)
 # =============================================================================

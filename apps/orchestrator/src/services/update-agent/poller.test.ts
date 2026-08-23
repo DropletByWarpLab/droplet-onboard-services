@@ -394,16 +394,39 @@ describe("checkForUpdate (WARP-538)", () => {
     );
   });
 
-  it("treats 404 (no release published) as a quiet no_release", async () => {
+  it("treats an AUTHENTICATED 404 (no release published) as a quiet no_release", async () => {
+    served = null;
+    const prisma = createPrismaStub();
+    const logger = createLoggerSpy();
+
+    // With a token the 404 is trustworthy: the box can see the repo, and
+    // the repo genuinely has no release yet.
+    const res = await checkForUpdate({ ...opts(prisma, logger), githubToken: "test-token" });
+
+    expect(res.outcome).toBe("no_release");
+    expect(prisma.deviceUpdate._rows()).toHaveLength(0);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("reports source_unauthenticated — not no_release — on a 404 with NO token (WARP-2133)", async () => {
+    // GitHub answers 404 for a private repo's releases endpoint whether or
+    // not releases exist when the request carries no credentials. A fresh
+    // box without DROPLET_OTA_GITHUB_TOKEN therefore cannot distinguish
+    // "no release" from "no access" — reporting no_release painted the
+    // unprovisioned box as up to date, silently, forever.
     served = null;
     const prisma = createPrismaStub();
     const logger = createLoggerSpy();
 
     const res = await checkForUpdate(opts(prisma, logger));
 
-    expect(res.outcome).toBe("no_release");
+    expect(res.outcome).toBe("source_unauthenticated");
     expect(prisma.deviceUpdate._rows()).toHaveLength(0);
-    expect(logger.warn).not.toHaveBeenCalled();
+    // Warn-worthy: this is a provisioning gap, not every-15-minute chatter.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.source_unauthenticated" }),
+      expect.any(String),
+    );
   });
 
   it("reports a release missing its manifest assets as fetch_failed", async () => {
@@ -564,6 +587,26 @@ describe("checkForUpdate — channel-aware discovery (WARP-1670)", () => {
     expect(res.outcome).toBe("no_release");
     expect(prisma.deviceUpdate._rows()).toHaveLength(0);
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("reports source_unauthenticated on a LIST-endpoint 404 with no token (WARP-2133)", async () => {
+    // Same unprovisioned-box honesty as the stable path: a private repo's
+    // releases list 404s without credentials, so a token-less stage box
+    // must say "cannot see the source", not "feed unreachable, retry".
+    const prisma = prismaOnChannel("stage");
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate({
+      ...opts(prisma, logger),
+      releasesListUrl: `${baseUrl}/missing`,
+    });
+
+    expect(res.outcome).toBe("source_unauthenticated");
+    expect(prisma.deviceUpdate._rows()).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.source_unauthenticated" }),
+      expect.any(String),
+    );
   });
 
   it("reports fetch_failed — not no_release — when no list endpoint can be derived", async () => {

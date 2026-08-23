@@ -7453,6 +7453,12 @@ export interface UpdatesStatus {
 
 export type CheckNowOutcome =
   | "no_release"
+  /**
+   * WARP-2133 — the release feed 404'd and the box has no credentials
+   * for it, so "no release" cannot be distinguished from "no access".
+   * Rendered as a provisioning gap, never as up-to-date.
+   */
+  | "source_unauthenticated"
   | "fetch_failed"
   | "verify_failed"
   | "channel_mismatch"

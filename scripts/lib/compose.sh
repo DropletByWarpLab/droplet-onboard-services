@@ -147,6 +147,26 @@ prepare_and_build() {
   # compose interpolates, through the docker/.env symlink created just above.
   _upsert_env_kv DROPLET_HOST_ROOT "$REPO_ROOT"
 
+  # --- Provision the OTA apply helper path (WARP-2133) ---
+  # DROPLET_OTA_APPLY_SCRIPT empty (the config.ts default) leaves the
+  # orchestrator's apply runner null, so /api/updates/apply-now answers 503
+  # apply_unavailable forever — nothing else ever set it, so every freshly
+  # provisioned box shipped with OTA apply permanently disabled. The helper
+  # is bind-mounted into the orchestrator at its own host path (the WARP-1669
+  # mount in docker/docker-compose.yml), so this REPO_ROOT-derived absolute
+  # path is valid in both the host and container frames. Upserted on every
+  # run for the same reason as DROPLET_HOST_ROOT above: the value is derived
+  # from where the checkout actually is. NOTE: DROPLET_OTA_GITHUB_TOKEN is
+  # deliberately NOT provisioned here — fleet credentials are a separate
+  # decision; without one the poller reports source_unauthenticated.
+  if [ -f "$REPO_ROOT/scripts/lib/apply-update.sh" ]; then
+    _upsert_env_kv DROPLET_OTA_APPLY_SCRIPT "$REPO_ROOT/scripts/lib/apply-update.sh"
+  else
+    # Fail safe: never point the runner at a missing file — apply stays
+    # honestly disabled and the gap is named in the setup log.
+    log_warn "scripts/lib/apply-update.sh not found under $REPO_ROOT — leaving DROPLET_OTA_APPLY_SCRIPT unset (OTA apply stays disabled)"
+  fi
+
   # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
   local images=(

@@ -125,6 +125,25 @@ describe("/settings/updates — current release card", () => {
     fireEvent.click(await screen.findByRole("button", { name: /check now/i }));
     expect(await screen.findByText(/check failed/i)).toBeInTheDocument();
   });
+
+  it("says the update source is not provisioned — never 'up to date' (WARP-2133)", async () => {
+    // A fresh box with no release-feed credentials gets a 404 it cannot
+    // interpret; the poller reports source_unauthenticated and this page
+    // must render it as a provisioning gap, not as "no updates, all good".
+    checkForUpdatesNow.mockResolvedValue({
+      outcome: "source_unauthenticated",
+      detail: "releases latest endpoint returned 404 with no DROPLET_OTA_GITHUB_TOKEN configured",
+    });
+    render(<UpdatesSettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /check now/i }));
+    expect(
+      await screen.findByText(/update source not provisioned/i),
+    ).toBeInTheDocument();
+    // And it must not read as a healthy no-release answer.
+    expect(
+      screen.queryByText(/no release has been published yet/i),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("/settings/updates — pending banner", () => {
