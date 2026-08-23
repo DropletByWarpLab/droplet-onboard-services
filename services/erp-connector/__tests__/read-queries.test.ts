@@ -51,6 +51,44 @@ const TABLES: IntrospectedTable[] = [
       { name: "aging_bucket", type: "integer" },
     ],
   },
+  // WARP-2107 — the accounting datasets. No shipping practice-management track
+  // serves these (the connectors refuse them via `servesDatasets`), but the
+  // registry is the single definition of what each read MEANS, so its SQL is
+  // still built and asserted here against a schema that has the tables.
+  {
+    name: "invoice",
+    owner: "dba",
+    columns: [
+      { name: "invoice_id", type: "integer" },
+      { name: "issued_at", type: "timestamp" },
+      { name: "due_at", type: "timestamp" },
+      { name: "customer_id", type: "integer" },
+      { name: "amount", type: "numeric" },
+      { name: "balance", type: "numeric" },
+      { name: "status", type: "varchar" },
+    ],
+  },
+  {
+    name: "bill",
+    owner: "dba",
+    columns: [
+      { name: "bill_id", type: "integer" },
+      { name: "issued_at", type: "timestamp" },
+      { name: "due_at", type: "timestamp" },
+      { name: "vendor_id", type: "integer" },
+      { name: "amount", type: "numeric" },
+      { name: "balance", type: "numeric" },
+      { name: "status", type: "varchar" },
+    ],
+  },
+  {
+    name: "ap_summary",
+    owner: "dba",
+    columns: [
+      { name: "vendor_id", type: "integer" },
+      { name: "balance", type: "numeric" },
+    ],
+  },
 ];
 
 const map = buildSchemaMap(TABLES);
@@ -59,7 +97,17 @@ describe("read-query registry", () => {
   it("registers the read queries", () => {
     const names = READ_QUERIES.map((q) => q.name).sort();
     expect(names).toEqual(
-      ["get_ar_summary", "get_schedule_today", "find_patient", "get_patient", "get_recall_due"].sort(),
+      [
+        "get_ar_summary",
+        "get_schedule_today",
+        "find_patient",
+        "get_patient",
+        "get_recall_due",
+        // WARP-2107 — accounting
+        "get_open_invoices",
+        "get_open_bills",
+        "get_ap_summary",
+      ].sort(),
     );
   });
 

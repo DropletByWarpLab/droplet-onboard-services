@@ -20,7 +20,13 @@
  * never faking a connection. The full HTTP/auth/mapping machinery is real and
  * unit-tested against a mocked fetch, so wiring it live is config, not code.
  */
-import { ConnectorBlockedError, type Connector, type IntrospectionResult } from "./connector.js";
+import {
+  ConnectorBlockedError,
+  PRACTICE_DATASETS,
+  assertDatasetsServed,
+  type Connector,
+  type IntrospectionResult,
+} from "./connector.js";
 import { getReadQuery } from "./read-queries.js";
 import { getWriteCommand, assertTargetAllowed } from "./write-commands.js";
 import {
@@ -98,6 +104,10 @@ export interface EaglesoftApiDeps {
 
 export class EaglesoftApiConnector implements Connector {
   readonly provider = "eaglesoft-api";
+  /** Same product as the SQL track, reached by a different transport — so the
+   *  same datasets. A capability difference between the two would be a bug in
+   *  one of them, not a fact about Eaglesoft (WARP-2107). */
+  readonly servesDatasets = PRACTICE_DATASETS;
 
   private token: string | null = null;
   private schema: IntrospectionResult | null = null;
@@ -178,7 +188,11 @@ export class EaglesoftApiConnector implements Connector {
     // Validate the query name against the shared registry FIRST — an unknown
     // name throws UnknownReadQueryError exactly as on the SQL track (before any
     // blocked/route error), so callers get the same validation behaviour.
-    getReadQuery(name);
+    const query = getReadQuery(name);
+    // Capability before connection state: "this track has no bills" is true
+    // whether or not the box is currently authenticated, and reporting it as a
+    // blocked connection would send an installer chasing credentials.
+    assertDatasetsServed(this.provider, this.servesDatasets, name, query.dependsOnTables);
     if (!this.token || !this.schema) {
       throw new ConnectorBlockedError("runRead (connect required first)", API_TRACK_REMEDIATION);
     }

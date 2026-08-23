@@ -83,6 +83,15 @@ export function deriveEmailIndexKey(): Buffer { return hkdf(deviceIkm(), "email-
 /** Column key for User.email at rest (whole-column logical key — derived,
  *  not a stored DEK: no per-user shred story, and sync read/write paths). */
 export function deriveEmailColumnKey(): Buffer { return hkdf(deviceIkm(), "user-email-column"); }
+/** WARP-2115 / ADR-041 — column key for M365Connection.tokenCacheEnc, which
+ *  holds an MSAL cache containing a refresh token (a long-lived key to the
+ *  customer's mailbox and files). Its own `info` label so compromise of the
+ *  email column key does not extend to stored cloud credentials. Rides the
+ *  DEVICE_SECRET_KEY ikm deliberately: setup.sh regenerates that on a factory
+ *  reset, which crypto-shreds every stored token even if the rows survive —
+ *  and unlike User.email, a token need NOT survive a disaster restore, because
+ *  the person can simply sign in again. */
+export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m365-token-cache"); }
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {

@@ -34,6 +34,7 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   ConnectorBlockedError,
+  DatasetNotServedError,
   WRITE_COMMANDS,
   exportProviders,
   scheduleDayBounds,
@@ -317,6 +318,20 @@ export function createErpService(
       const rows = await connector.runRead(name, params);
       return { connected: true, rows };
     } catch (err) {
+      // WARP-2107 — a capability gap is NOT a fault, and must not be reported
+      // as one. This connection works perfectly and will never have that data:
+      // a QuickBooks company has no appointments, a Dentrix export has no
+      // vendor bills. Nothing an installer does changes that, so it gets its
+      // own reason rather than the generic ERROR, and it is deliberately NOT
+      // logged at error level — an operator chasing red logs would find a
+      // healthy connection answering a question it was never asked to.
+      //
+      // `connected` stays TRUE here, which is the whole point: the alternative
+      // (false + rows: []) is indistinguishable from "no invoices", which is a
+      // confident false statement about money.
+      if (err instanceof DatasetNotServedError) {
+        return { connected: true, reason: "DATASET_NOT_SERVED", rows: [] };
+      }
       if (err instanceof ConnectorBlockedError) {
         return { connected: false, reason: "ERP_NOT_CONNECTED", rows: [] };
       }
