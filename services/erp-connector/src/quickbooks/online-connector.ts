@@ -392,6 +392,36 @@ export interface QboStatus {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_REAUTH_WARNING_DAYS = 14;
 
+/**
+ * Hard ceiling on pages one read may fetch: 50 pages × 1,000 rows = 50,000
+ * rows for any dataset this connector serves.
+ *
+ * Defensible because every served read is an OPEN-items read — open invoices,
+ * open bills, payables aggregated from open bills — and a small business with
+ * 50,000 simultaneously-open documents is not a small business; the realistic
+ * count is hundreds. The ceiling exists because the only backstop behind it is
+ * the shared {@link CallBudget} (5,000 calls/period, FLEET protection): without
+ * a per-read bound, one endpoint that never returns a short page burns the
+ * entire period's budget inside a single `get_open_bills` call. 50 caps the
+ * worst single read at 1% of the period budget while leaving two orders of
+ * magnitude of headroom over any plausible open-items ledger.
+ */
+export const QBO_MAX_PAGES = 50;
+
+/**
+ * Wall-clock budget for one whole read (all pages), measured from `pull()`
+ * entry on the connector's clock (`Date.now()` in production).
+ *
+ * The page ceiling bounds CALLS, not TIME: an endpoint dripping distinct pages
+ * just inside the 15s per-request timeout could otherwise hold a read — and
+ * the budget and tokens behind it — open for ~12 minutes. Five minutes is
+ * generous (a healthy full-ceiling read is seconds per page, well under a
+ * minute total) yet finite; an Intuit endpoint still paging after five minutes
+ * is degraded, and continuing to spend metered calls on it is exactly the
+ * fleet harm the budget exists to prevent.
+ */
+export const QBO_MAX_READ_WALL_MS = 5 * 60_000;
+
 export class QuickBooksOnlineConnector implements Connector {
   readonly provider = QUICKBOOKS_ONLINE_PROVIDER;
   readonly servesDatasets = QBO_DATASETS;
@@ -654,21 +684,73 @@ export class QuickBooksOnlineConnector implements Connector {
    * read registry exists to prevent. Metering is per CALL, not per row, so
    * paging costs the same as filtering for any small business; revisit with a
    * measured call count if a large company proves otherwise.
+   *
+   * Bounded three ways, because the loop's only natural exit is a short page
+   * and the only backstop behind it is the fleet-shared {@link CallBudget}:
+   * a page-count ceiling ({@link QBO_MAX_PAGES}), a no-progress guard (an
+   * endpoint that ignores STARTPOSITION serves the identical full window
+   * forever, so the short-page exit can never fire), and a whole-read
+   * wall-clock deadline ({@link QBO_MAX_READ_WALL_MS}). Each aborts as
+   * {@link ConnectorBlockedError} — a fault to report, never QuotaExhausted,
+   * which would tell the owner nothing is broken and to wait a month.
    */
   private async pull(op: string, entity: string): Promise<Record<string, unknown>[]> {
     const PAGE = 1000;
     const rows: Record<string, unknown>[] = [];
     let start = 1;
+    const startedAt = this.now();
+    let lastFullPageFingerprint: string | null = null;
 
-    for (;;) {
+    for (let pages = 1; ; pages += 1) {
+      // Both bounds are checked BEFORE the next request, so a read that is
+      // already over costs no further network and no further metered calls.
+      if (pages > QBO_MAX_PAGES) {
+        throw new ConnectorBlockedError(
+          `${op} stopped after ${QBO_MAX_PAGES} pages (${QBO_MAX_PAGES * PAGE} rows)`,
+          "the endpoint kept returning full pages; aborting rather than burning the " +
+            "fleet's metered-call budget on one read. If a real company holds more open " +
+            "documents than this, raise QBO_MAX_PAGES deliberately (WARP-2109) — do not " +
+            "let a single read run open-ended.",
+        );
+      }
+      if (this.now() - startedAt > QBO_MAX_READ_WALL_MS) {
+        throw new ConnectorBlockedError(
+          `${op} exceeded its ${QBO_MAX_READ_WALL_MS / 60_000}-minute wall-clock budget`,
+          "no healthy company read pages for this long; aborting rather than pinning " +
+            "the connection and its metered-call budget open. Retry later — an endpoint " +
+            "that is persistently this slow is an Intuit-side fault to report, not one " +
+            "more page away from finishing.",
+        );
+      }
+
       const body = await this.query(
         op,
         `SELECT * FROM ${entity} STARTPOSITION ${start} MAXRESULTS ${PAGE}`,
       );
       const qr = (body.QueryResponse ?? {}) as Record<string, unknown>;
       const page = (qr[entity] ?? []) as Record<string, unknown>[];
+      if (page.length < PAGE) {
+        rows.push(...page);
+        return rows;
+      }
+
+      // A full page must prove the window MOVED before the loop is trusted
+      // with another metered call. Two byte-identical full pages in a row
+      // means STARTPOSITION is being ignored, and every further page would be
+      // the same one.
+      const fingerprint = JSON.stringify(page);
+      if (fingerprint === lastFullPageFingerprint) {
+        throw new ConnectorBlockedError(
+          `${op} aborted: pagination is not advancing`,
+          "Intuit returned the identical full page twice in a row, so STARTPOSITION is " +
+            "being ignored and the read can never complete. Looping would spend the " +
+            "whole call budget on one read — retry later, and report the endpoint if " +
+            "this persists.",
+        );
+      }
+      lastFullPageFingerprint = fingerprint;
+
       rows.push(...page);
-      if (page.length < PAGE) return rows;
       start += PAGE;
     }
   }

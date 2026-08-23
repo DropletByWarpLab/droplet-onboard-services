@@ -14,6 +14,7 @@ import { describe, it, expect } from "vitest";
 import {
   CallBudget,
   QBO_DATASETS,
+  QBO_MAX_PAGES,
   QBO_MINOR_VERSION,
   QuickBooksOnlineConnector,
   QuotaExhaustedError,
@@ -399,6 +400,107 @@ describe("reads", () => {
     expect(rows).toHaveLength(1001);
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain(encodeURIComponent("STARTPOSITION 1001"));
+  });
+});
+
+// ── pagination cannot run away ──────────────────────────────────────────────
+
+describe("pagination cannot run away", () => {
+  /**
+   * A full, DISTINCT page per call — models an endpoint with endless rows.
+   * Distinct on purpose: an endpoint replaying one page trips the no-progress
+   * guard first, and these tests must reach the guards behind it.
+   */
+  function endlessBills(onCall?: () => void) {
+    const calls: string[] = [];
+    let n = 0;
+    const impl = async (url: string) => {
+      calls.push(url);
+      onCall?.();
+      const base = n * 1000;
+      n += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          QueryResponse: {
+            Bill: Array.from({ length: 1000 }, (_, i) => ({
+              Id: String(base + i),
+              DocNumber: `B-${base + i}`,
+              VendorRef: { name: "Acme" },
+              Balance: 1,
+            })),
+          },
+        }),
+      } as unknown as Response;
+    };
+    return { impl, calls };
+  }
+
+  it("stops at the page ceiling when the endpoint never returns a short page", async () => {
+    // The shared CallBudget (5,000 calls/period) is FLEET protection; without
+    // a per-read ceiling, one endpoint that never returns a short page burns
+    // the entire period's budget inside a single get_open_bills call. Ceiling
+    // breach is ConnectorBlocked — a fault — and must NOT be QuotaExhausted,
+    // which tells the user nothing is broken and to wait a month.
+    // Mutation: remove the QBO_MAX_PAGES check → the loop runs to the budget
+    // (5,000 calls, QuotaExhaustedError) → red on every assertion here.
+    const { impl, calls } = endlessBills();
+    const c = new QuickBooksOnlineConnector(
+      { realmId: "9130350", credentialsSecretRef: "r" },
+      { fetchImpl: impl, now: () => NOW, resolveTokens: async () => tokens() },
+    );
+    const err = await c.runRead("get_open_bills", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect(err).not.toBeInstanceOf(QuotaExhaustedError);
+    expect((err as Error).message).toMatch(/pages/);
+    expect(calls).toHaveLength(QBO_MAX_PAGES);
+  });
+
+  it("throws after one repeated page instead of looping on a stuck STARTPOSITION", async () => {
+    // An endpoint that ignores STARTPOSITION serves the same full window
+    // forever: page.length never dips below PAGE, so the short-page exit can
+    // never fire. Two identical full pages in a row is proof of no progress —
+    // abort on the second, not at the ceiling.
+    // Mutation: drop the fingerprint comparison → the read pages to the
+    // ceiling (QBO_MAX_PAGES calls, not 2) → red.
+    const full = {
+      QueryResponse: {
+        Bill: Array.from({ length: 1000 }, (_, i) => ({
+          Id: String(i),
+          DocNumber: `B-${i}`,
+          VendorRef: { name: "Acme" },
+          Balance: 1,
+        })),
+      },
+    };
+    const { c, calls } = qbo({ pages: [full] });
+    const err = await c.runRead("get_open_bills", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect((err as Error).message).toMatch(/advanc/);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("gives up when a read exceeds its wall-clock budget", async () => {
+    // The ceiling and the no-progress guard bound CALLS; this bounds TIME, so
+    // an endpoint dripping slow-but-distinct pages cannot pin a read (and the
+    // budget and tokens behind it) open indefinitely. The clock is injected:
+    // each page here costs two minutes against the five-minute budget, so the
+    // deadline trips before the fourth query is issued.
+    // Mutation: drop the deadline check → the read pages on to the ceiling
+    // (QBO_MAX_PAGES calls, not 3) → red.
+    let t = NOW;
+    const { impl, calls } = endlessBills(() => {
+      t += 2 * 60_000;
+    });
+    const c = new QuickBooksOnlineConnector(
+      { realmId: "9130350", credentialsSecretRef: "r" },
+      { fetchImpl: impl, now: () => t, resolveTokens: async () => tokens() },
+    );
+    const err = await c.runRead("get_open_bills", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect((err as Error).message).toMatch(/wall-clock/);
+    expect(calls).toHaveLength(3);
   });
 });
 
