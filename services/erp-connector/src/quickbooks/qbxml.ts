@@ -79,11 +79,15 @@ function sumFields(row: XmlElement, fields: readonly string[]): number | undefin
   return total === undefined ? undefined : roundCents(total);
 }
 
-/** Money as QuickBooks prints it in qbXML: a plain decimal string. */
+/** Money as QuickBooks prints it in qbXML: a plain decimal string, with
+ *  thousands separators tolerated. The gate keeps that sentence true — bare
+ *  `Number()` also accepted hex ("0x10") and exponent ("1e3") forms
+ *  QuickBooks never prints, reading malformed data as a plausible amount. */
 function money(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
-  const n = Number(raw.replace(/,/g, ""));
-  return Number.isFinite(n) ? n : undefined;
+  const plain = raw.replace(/,/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(plain)) return undefined;
+  return Number(plain);
 }
 
 /** qbXML dates are `YYYY-MM-DD`; the canonical form is a full ISO instant, and

@@ -140,6 +140,16 @@ describe("the XML reader refuses what it does not understand", () => {
     expect(() => parseXml("<r><a/><a/><a/></r>", { maxElements: 2 })).toThrow(/element/);
   });
 
+  it("the byte ceiling counts UTF-8 bytes, not UTF-16 code units", () => {
+    // "€" is one code unit but three UTF-8 bytes. Measured with `.length`, a
+    // document a third the ceiling's name promised sailed under it — the cap
+    // mirrors the export track's per-file ceiling, and files are bytes.
+    // Mutation: measure with `.length` → 407 code units pass a 1000-byte cap
+    // → parses → red.
+    const doc = `<A>${"€".repeat(400)}</A>`; // 407 code units, 1207 UTF-8 bytes
+    expect(() => parseXml(doc, { maxBytes: 1000 })).toThrow(/byte ceiling/);
+  });
+
   it("keeps CDATA literal", () => {
     // A report writer uses CDATA precisely so a name with an ampersand is not
     // re-interpreted. Mutation: decode entities inside CDATA → red.
@@ -203,6 +213,48 @@ describe("the XML reader refuses what it does not understand", () => {
     expect(() => parseXml(many, { maxAttributes: 100 })).not.toThrow();
   });
 
+  it(
+    "stops scanning attributes AT the ceiling, not after the whole element",
+    () => {
+      // The test above cannot see WHERE the ceiling is enforced: 50 attributes
+      // against a cap of 10 refuse identically whether the check runs inside
+      // the scan loop or after the element has been fully scanned. This one
+      // can. Two million attributes on one element against the same cap of 10:
+      // the check-at-return implementation walks, entity-decodes and
+      // materializes all two million before consulting the ceiling — seconds
+      // of event-loop stall and hundreds of MiB of heap, posted by the
+      // practice-LAN machine this file's docblock names as attacker-adjacent —
+      // while the in-loop check bounds the decode-and-materialize work at ten
+      // attributes. Finding the tag's end still walks the tag once, so the
+      // refusal is a few hundred allocation-free milliseconds, not instant.
+      // Mutation: move the ceiling check back to the call site → same
+      // XmlError, but only after the full scan → the wall bound goes red.
+      const doc =
+        "<A " + Array.from({ length: 2_000_000 }, (_, i) => `a${i}="x"`).join(" ") + "/>";
+      const started = performance.now();
+      expect(() => parseXml(doc, { maxAttributes: 10 })).toThrow(/attribute ceiling/);
+      const elapsed = performance.now() - started;
+      // Generous for a slow CI runner: measured ~350 ms with the in-loop
+      // check against ~9200 ms with the check-at-return version.
+      expect(elapsed).toBeLessThan(1500);
+    },
+    30_000,
+  );
+
+  it("the attribute ceiling is document-wide, not per-element", () => {
+    // Six attributes on each of two elements is twelve for the document.
+    // Threading the ceiling into the scan must not quietly change it into a
+    // per-element cap. Mutation: reset the running count per element (pass 0
+    // for the already-consumed count) → 6 < 10 on each element → parses → red.
+    const twoElements = (n: number) => {
+      const attrs = (p: string) =>
+        Array.from({ length: n }, (_, i) => `${p}${i}="0"`).join(" ");
+      return `<A ${attrs("a")}><B ${attrs("b")}/></A>`;
+    };
+    expect(() => parseXml(twoElements(6), { maxAttributes: 10 })).toThrow(/attribute ceiling/);
+    expect(() => parseXml(twoElements(6), { maxAttributes: 12 })).not.toThrow();
+  });
+
   it("reads attributes, nesting and self-closing tags", () => {
     const el = parseXml(`<r s="0" m="ok"><c><d>7</d></c><e/></r>`);
     expect(el.attributes).toEqual({ s: "0", m: "ok" });
@@ -257,6 +309,28 @@ describe("qbXML", () => {
     // The readable name, not the ListID — "who do we owe" is useless as an id.
     // Mutation: prefer ListID → "80000001" → red.
     expect(invoices[0].customer_id).toBe("Northside Clinic");
+  });
+
+  it("reads money as the plain decimal QuickBooks prints, not everything Number() takes", () => {
+    // `Number()` also accepts hex and exponent notation. QuickBooks never
+    // prints them, so an envelope carrying "0x10" is malformed data — and it
+    // was being read as sixteen dollars rather than left unread. Thousands
+    // separators stay tolerated: they are the one decoration QuickBooks does
+    // print. Mutation: fall back to bare Number() → amount 16, balance 1000
+    // → red; strip the comma handling → BILL-C's amount undefined → red.
+    const rs = `<QBXML><QBXMLMsgsRs><BillQueryRs requestID="9" statusCode="0" statusSeverity="Info">
+      <BillRet><TxnID>H1</TxnID><RefNumber>BILL-H</RefNumber>
+        <AmountDue>0x10</AmountDue><OpenAmount>1e3</OpenAmount></BillRet>
+      <BillRet><TxnID>C1</TxnID><RefNumber>BILL-C</RefNumber>
+        <AmountDue>1,234.50</AmountDue><OpenAmount>1,234.50</OpenAmount></BillRet>
+    </BillQueryRs></QBXMLMsgsRs></QBXML>`;
+    const rows = parseResponse("bill", rs);
+    const hex = rows.find((r) => r.bill_id === "BILL-H")!;
+    expect(hex.amount).toBeUndefined();
+    expect(hex.balance).toBeUndefined();
+    const comma = rows.find((r) => r.bill_id === "BILL-C")!;
+    expect(comma.amount).toBe(1234.5);
+    expect(comma.balance).toBe(1234.5);
   });
 
   it("treats 'no matching records' as a real empty answer", () => {
@@ -369,6 +443,26 @@ describe("the Web Connector session", () => {
     expect(s.receiveResponseXML(t, "<QBXML><unclosed>" + "x".repeat(200))).toBe(-1);
     expect(s.getLastError(t)).toMatch(/ceiling/);
     expect(s.getLastError(t)).not.toMatch(/unclosed/);
+  });
+
+  it("the response ceiling counts UTF-8 bytes, not UTF-16 code units", () => {
+    // The same unit bug one layer up: the session's own pre-parse cap
+    // measured code units. This response is under the cap in code units,
+    // over it in bytes, and malformed — so a correctly measured ceiling
+    // refuses it as the ceiling, while a code-unit ceiling lets the parser
+    // run and report the unclosed element instead.
+    // Mutation: measure with `.length` → getLastError reports a parse
+    // failure instead of the ceiling → red.
+    const store = new QbdSnapshotStore();
+    const s = new QbwcSession(CREDS, store, {
+      now: () => NOW,
+      newTicket: () => "T",
+      maxResponseBytes: 1000,
+    });
+    const [t] = s.authenticate(CREDS.username, CREDS.password);
+    // 407 code units, 1207 UTF-8 bytes.
+    expect(s.receiveResponseXML(t, "<QBXML>" + "€".repeat(400))).toBe(-1);
+    expect(s.getLastError(t)).toMatch(/ceiling/);
   });
 
   it("an aborted session cannot resume and publish", () => {

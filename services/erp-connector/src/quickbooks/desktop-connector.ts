@@ -270,7 +270,9 @@ export class QbwcSession {
     // outlives `commit()` so the Web Connector can wind down through
     // `closeConnection`; that is not licence to replay a financial snapshot.
     if (this.completed) return 100;
-    if (response.length > this.maxResponseBytes) {
+    // UTF-8 bytes, not UTF-16 code units — the same unit the reader's own
+    // ceiling and the export track's per-file ceiling measure.
+    if (Buffer.byteLength(response, "utf8") > this.maxResponseBytes) {
       this.lastError = `response exceeds the ${this.maxResponseBytes}-byte ceiling`;
       this.abort();
       return -1;

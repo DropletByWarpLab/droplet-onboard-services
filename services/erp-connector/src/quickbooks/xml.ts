@@ -130,11 +130,23 @@ export function decodeEntities(text: string): string {
  * posture is that unrecognised input stops instead of travelling. The regex
  * this replaces silently ignored anything it could not match, which is how a
  * dropped attribute went unnoticed.
+ *
+ * The document-wide attribute ceiling is enforced HERE, inside the loop,
+ * before each attribute is scanned; `consumed` carries what earlier elements
+ * already used, so the cap stays a property of the document rather than of
+ * one element. Checked only at the call site, after this function returned,
+ * the ceiling was a fence around a field that had already burned: one element
+ * carrying millions of attributes was fully walked, entity-decoded and
+ * materialized before the count was ever read — seconds of event-loop stall
+ * and over a GiB of heap from a single posted envelope, the same denial of
+ * service the linear scanner itself was written to close.
  */
 function scanAttributes(
   body: string,
   from: number,
   out: Record<string, string>,
+  consumed: number,
+  maxAttributes: number,
   fail: (msg: string) => never,
 ): number {
   let k = from;
@@ -144,6 +156,13 @@ function scanAttributes(
   while (k < body.length) {
     while (k < body.length && isSpace(body[k])) k += 1;
     if (k >= body.length) break;
+
+    // Something non-space follows: another attribute is about to be scanned.
+    // Refuse now if it would take the document past the ceiling, so the work
+    // done is bounded by the limit rather than by the input.
+    if (consumed + count >= maxAttributes) {
+      throw new XmlError(`document exceeds the ${maxAttributes}-attribute ceiling`);
+    }
 
     if (!/[A-Za-z_]/.test(body[k])) {
       fail(`unexpected "${body[k]}" where an attribute name was expected`);
@@ -182,7 +201,11 @@ function scanAttributes(
 export function parseXml(source: string, limits: Partial<XmlLimits> = {}): XmlElement {
   const lim = { ...DEFAULT_XML_LIMITS, ...limits };
 
-  if (source.length > lim.maxBytes) {
+  // Measured in UTF-8 bytes, which is what the option's name promises and
+  // what the export track's per-file ceiling (deliberately mirrored here)
+  // measures. `.length` counted UTF-16 code units and let a document up to
+  // three times the ceiling through.
+  if (Buffer.byteLength(source, "utf8") > lim.maxBytes) {
     throw new XmlError(`document exceeds the ${lim.maxBytes}-byte ceiling`);
   }
   // Checked on the raw source before any scanning: the point is that a DTD is
@@ -319,10 +342,11 @@ export function parseXml(source: string, limits: Partial<XmlLimits> = {}): XmlEl
       //
       // A hand-written scanner is O(n) with no backtracking at all — a
       // property of the algorithm rather than of the input.
-      attrCount += scanAttributes(body, spaceAt, attributes, fail);
-      if (attrCount > lim.maxAttributes) {
-        throw new XmlError(`document exceeds the ${lim.maxAttributes}-attribute ceiling`);
-      }
+      //
+      // The attribute ceiling is enforced INSIDE the scan, not on its return
+      // value: the running document-wide count goes in, and the scanner
+      // throws before processing the attribute that would exceed the cap.
+      attrCount += scanAttributes(body, spaceAt, attributes, attrCount, lim.maxAttributes, fail);
     }
 
     const el: XmlElement = { name, attributes, children: [], text: "" };
