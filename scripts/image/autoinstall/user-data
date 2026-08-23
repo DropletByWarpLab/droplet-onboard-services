@@ -113,7 +113,7 @@ autoinstall:
       curtin in-target --target=/target -- bash -c '
         for attempt in 1 2 3; do
           rm -rf /home/droplet/edge-platform
-          git clone --depth 1 https://github.com/DropletByWarpLab/droplet-onboard-services.git /home/droplet/edge-platform && break
+          git clone --depth 1 --branch install/bench-reimage-20260822 https://github.com/DropletByWarpLab/droplet-onboard-services.git /home/droplet/edge-platform && break
           echo "droplet: clone attempt $attempt failed; retrying in 5s" >&2
           sleep 5
         done
