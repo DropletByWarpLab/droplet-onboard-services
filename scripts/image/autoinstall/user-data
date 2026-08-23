@@ -119,6 +119,10 @@ autoinstall:
     # on the FIRST real boot, then disables itself. setup.sh is the single
     # source of provisioning truth (ADR-020 §D1) — no second copy of the
     # install logic here.
+    # WARP-2100: TimeoutStartSec is GENEROUS but FINITE (first boot
+    # legitimately pulls images for many minutes) — never 0/infinity, which
+    # let a queued cryptsetup ask-password prompt wedge first boot forever;
+    # StandardInput=null so no child inherits a promptable console stdin.
     - |
       curtin in-target --target=/target -- bash -c 'cat > /etc/systemd/system/droplet-firstboot.service <<UNIT
       [Unit]
@@ -134,7 +138,8 @@ autoinstall:
       ExecStart=/bin/bash -lc "./scripts/setup.sh --single-box --systemd"
       ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done && sudo rm -f /etc/sudoers.d/droplet-firstboot"
       RemainAfterExit=yes
-      TimeoutStartSec=0
+      TimeoutStartSec=45min
+      StandardInput=null
 
       [Install]
       WantedBy=multi-user.target

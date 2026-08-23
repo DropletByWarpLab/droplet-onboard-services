@@ -556,6 +556,35 @@ else
 fi
 
 # =============================================================================
+# WARP-2100: the firstboot unit must be BOUNDED and PROMPT-PROOF. With
+# TimeoutStartSec=0 (= infinity for Type=oneshot) a provisioning step that
+# blocks — the cryptsetup ask-password hang — wedges first boot FOREVER with
+# no error surfaced. The bound must be generous (first boot legitimately pulls
+# images for many minutes) but finite; and StandardInput=null so no child
+# inherits a console stdin it could sit reading a passphrase from.
+# =============================================================================
+echo "--- WARP-2100: firstboot unit is bounded + prompt-proof ---"
+if [ ! -f "$UD" ]; then
+  fail "scripts/image/autoinstall/user-data not present (WARP-2100 firstboot checks)"
+else
+  if grep -qE '^[[:space:]]*TimeoutStartSec=0[[:space:]]*$' "$UD"; then
+    fail "firstboot unit has TimeoutStartSec=0 (unbounded — the WARP-2100 forever-hang)"
+  else
+    pass "firstboot unit no longer disables its start timeout"
+  fi
+  if grep -qE '^[[:space:]]*TimeoutStartSec=[1-9][0-9]*(s|min|h)?[[:space:]]*$' "$UD"; then
+    pass "firstboot unit carries a finite TimeoutStartSec bound"
+  else
+    fail "firstboot unit has no finite TimeoutStartSec:" "$(grep 'TimeoutStartSec' "$UD" || echo '<missing>')"
+  fi
+  if grep -qE '^[[:space:]]*StandardInput=null[[:space:]]*$' "$UD"; then
+    pass "firstboot unit runs with StandardInput=null"
+  else
+    fail "firstboot unit lacks StandardInput=null (children inherit a promptable stdin)"
+  fi
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
