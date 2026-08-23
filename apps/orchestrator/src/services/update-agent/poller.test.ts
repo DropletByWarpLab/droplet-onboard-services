@@ -30,6 +30,11 @@
  *     the trust decision;
  *   - a box that cannot derive a list endpoint reports the
  *     misconfiguration instead of pretending there is no release.
+ *
+ * AC under test (WARP-2133 — a 404 has two readings):
+ *   - a tokenless 404 reports `source_unauthenticated`, never
+ *     `no_release`, and writes no row;
+ *   - a 404 WITH a token stays the quiet `no_release`.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import http from "node:http";
@@ -394,12 +399,35 @@ describe("checkForUpdate (WARP-538)", () => {
     );
   });
 
-  it("treats 404 (no release published) as a quiet no_release", async () => {
+  it("reports a tokenless 404 as source_unauthenticated, not no_release", async () => {
+    // WARP-2133 — the releases repo is private, so unauthenticated a 404 is
+    // indistinguishable from "nothing published". Reporting no_release here
+    // is what told operators an unprovisioned box was up to date forever.
     served = null;
     const prisma = createPrismaStub();
     const logger = createLoggerSpy();
 
     const res = await checkForUpdate(opts(prisma, logger));
+
+    expect(res.outcome).toBe("source_unauthenticated");
+    expect(prisma.deviceUpdate._rows()).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.source_unauthenticated" }),
+      expect.any(String),
+    );
+  });
+
+  it("treats a 404 WITH a token as a quiet no_release", async () => {
+    // The fake server ignores credentials, so the token only selects the
+    // branch: authenticated, a 404 really is an observation.
+    served = null;
+    const prisma = createPrismaStub();
+    const logger = createLoggerSpy();
+
+    const res = await checkForUpdate({
+      ...opts(prisma, logger),
+      githubToken: "ghp-TEST-ONLY",
+    });
 
     expect(res.outcome).toBe("no_release");
     expect(prisma.deviceUpdate._rows()).toHaveLength(0);

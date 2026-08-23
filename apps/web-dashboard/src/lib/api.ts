@@ -7449,6 +7449,8 @@ export interface UpdatesStatus {
   settings: UpdateAgentSettings;
   /** False on boxes without the host compose socket — apply-now is disabled. */
   applyAvailable: boolean;
+  /** False without a releases-source credential — releases can't be discovered (WARP-2133). */
+  updateSourceAuthenticated: boolean;
 }
 
 export type CheckNowOutcome =
@@ -7457,6 +7459,7 @@ export type CheckNowOutcome =
   | "verify_failed"
   | "channel_mismatch"
   | "already_known"
+  | "source_unauthenticated"
   | "pending_created";
 
 export interface CheckNowResult {

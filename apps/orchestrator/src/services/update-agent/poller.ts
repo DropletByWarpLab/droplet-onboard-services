@@ -11,6 +11,10 @@
  *      channel lists releases and takes the newest tagged
  *      `ota-<channel>-*`, because `latest` deliberately skips the
  *      prereleases that non-stable channels publish as.
+ *      A 404 from `latest` only means "nothing published" when the box
+ *      HAS a token: the releases repo is private, so an unauthenticated
+ *      GET 404s identically. Tokenless, that reads as
+ *      `source_unauthenticated` (WARP-2133).
  *   2. Download the `release.json` + `release.json.sig` assets to a
  *      temp dir.
  *   3. Run the full WARP-537 trust chain (`verifyAndParseRelease`):
@@ -128,6 +132,7 @@ export function channelTagPrefix(channel: string): string {
 
 export type CheckForUpdateResult =
   | { outcome: "no_release" }
+  | { outcome: "source_unauthenticated" }
   | { outcome: "fetch_failed"; detail: string }
   | { outcome: "verify_failed"; failureReason: UpdateFailureReason; detail: string }
   | { outcome: "channel_mismatch"; releaseChannel: string; deviceChannel: string }
@@ -186,7 +191,21 @@ export async function checkForUpdate(
     try {
       const res = await fetchImpl(opts.releasesLatestUrl, { headers });
       if (res.status === 404) {
-        // No release published yet — normal on a fresh repo, debug only.
+        // WARP-2133 — two readings of one 404. The releases repo is
+        // private, so an unauthenticated GET 404s exactly like a repo with
+        // nothing published; reporting `no_release` made a box that was
+        // never provisioned a token tell its operator it was up to date,
+        // forever. Without a credential "no release" is unknowable, not
+        // observed, so say the source is not provisioned instead.
+        if (!opts.githubToken) {
+          log.warn(
+            { event: "update.source_unauthenticated" },
+            "OTA update source not provisioned: no GitHub token, releases endpoint returned 404",
+          );
+          return { outcome: "source_unauthenticated" };
+        }
+        // Authenticated: the 404 IS the observation — nothing published
+        // yet. Normal on a fresh repo, debug only.
         log.debug?.({ event: "update.no_release" }, "no OTA release published yet");
         return { outcome: "no_release" };
       }

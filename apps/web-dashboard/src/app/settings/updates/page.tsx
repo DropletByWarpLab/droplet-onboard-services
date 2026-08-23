@@ -108,6 +108,13 @@ function checkOutcomeCopy(result: CheckNowResult): { ok: boolean; text: string }
         ok: false,
         text: "The latest release is for a different channel than this box follows.",
       };
+    case "source_unauthenticated":
+      // WARP-2133: a 404 from a private feed with no credential. Reporting
+      // this as "no release" is what let unprovisioned boxes look current.
+      return {
+        ok: false,
+        text: "Check failed: the update source isn't provisioned on this box, so releases can't be seen at all. This is not the same as being up to date.",
+      };
     case "verify_failed":
       return {
         ok: false,
@@ -329,6 +336,35 @@ export default function UpdatesSettingsPage() {
                     : ""}
                   . Some services may be down. Check the Health page and consider
                   contacting support — this state does not clear itself.
+                </p>
+              </div>
+            )}
+
+            {/* ── Unprovisioned update source (WARP-2133) ──
+                Standing, not check-scoped: without a credential for the
+                releases feed every poll comes back empty, so the cards below
+                would otherwise read as "up to date" on a box that has never
+                been able to see a release. ── */}
+            {status.updateSourceAuthenticated === false && (
+              <div
+                role="alert"
+                className="card border border-system-red/40 bg-system-red/5"
+                style={{ padding: 16, marginBottom: 16 }}
+              >
+                <p
+                  className="text-system-red flex items-center gap-2"
+                  style={{ fontSize: 15, lineHeight: "20px" }}
+                >
+                  <AlertTriangle size={16} /> Update source not provisioned
+                </p>
+                <p
+                  className="mt-1"
+                  style={{ fontSize: 13, lineHeight: "18px", color: "var(--text-muted)" }}
+                >
+                  This box has no credential for the release feed, so it cannot
+                  discover releases at all. Nothing below means this box is up to
+                  date — it means this box cannot see whether it is. Contact
+                  support to provision the update source.
                 </p>
               </div>
             )}

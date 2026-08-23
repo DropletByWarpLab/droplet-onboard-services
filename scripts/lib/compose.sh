@@ -147,6 +147,25 @@ prepare_and_build() {
   # compose interpolates, through the docker/.env symlink created just above.
   _upsert_env_kv DROPLET_HOST_ROOT "$REPO_ROOT"
 
+  # --- Provision the OTA apply helper's path (WARP-2133) ---
+  # The value is the path the helper is mounted at INSIDE the orchestrator
+  # container: docker-compose.yml binds ../scripts/lib/apply-update.sh at
+  # ${DROPLET_HOST_ROOT:-/opt/droplet}/scripts/lib/apply-update.sh, and
+  # DROPLET_HOST_ROOT is $REPO_ROOT (line above) — so deriving both from
+  # $REPO_ROOT keeps the two consistent by construction instead of hardcoding
+  # /opt/droplet for a checkout that may live anywhere.
+  #
+  # Nothing in the install path used to write this at all: empty made
+  # getApplyRunner() return null, so POST /api/updates/apply-now answered 503
+  # apply_unavailable and the shipped OTA apply path had never once been
+  # reachable on a real box. .github/workflows/ota-e2e.yml already hard-fails
+  # its preflight on an empty value — that guard was asserting a state nothing
+  # produced.
+  #
+  # Upserted every run for the same reason as DROPLET_HOST_ROOT: it is derived
+  # from where the checkout actually is, so moving the repo must update it.
+  _upsert_env_kv DROPLET_OTA_APPLY_SCRIPT "$REPO_ROOT/scripts/lib/apply-update.sh"
+
   # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
   local images=(

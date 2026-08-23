@@ -23,6 +23,8 @@ export const UPDATE_EVENTS = {
   "update.check_started": "poller",
   /** debug — no OTA release published yet (fresh repo; normal). */
   "update.no_release": "poller",
+  /** warn — releases endpoint 404'd with no token: source not provisioned (WARP-2133). */
+  "update.source_unauthenticated": "poller",
   /** warn — the releases endpoint/asset fetch failed (transient). */
   "update.check_failed": "poller",
   /** warn — cosign REFUSED the manifest signature. No row written. */
