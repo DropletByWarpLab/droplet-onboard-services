@@ -50,7 +50,8 @@ reset_work() {
   rm -rf "${WORK:?}/state" "${WORK:?}/pci" "${WORK:?}/usb" "${WORK:?}/bin" \
          "${WORK:?}/docker" "${WORK:?}/klog" "${WORK:?}/rescan" \
          "${WORK:?}/daemon.json" "${WORK:?}/host_units_exit" \
-         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log"
+         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log" \
+         "${WORK:?}/repo"
   mkdir -p "$WORK/bin" "$WORK/docker"
   : > "$WORK/klog"
 }
@@ -131,9 +132,15 @@ run_wd() {
       DROPLET_WATCHDOG_XVF_COOLDOWN_S=0 \
       DROPLET_WATCHDOG_DOCKER_DAEMON_JSON="$WORK/daemon.json" \
       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
+      DROPLET_WATCHDOG_TLS_STACK_UNIT="$WORK/droplet.service" \
       "$@" \
       bash "$WATCHDOG" 2>&1
 }
+# ^ DROPLET_WATCHDOG_TLS_STACK_UNIT is pinned into the sandbox (the file does
+# not exist unless a test writes it) so a run on a REAL box can never resolve
+# /etc/systemd/system/droplet.service and re-issue the box's live TLS cert
+# from inside the test suite. tls_cert_ips tests opt in explicitly via
+# DROPLET_WATCHDOG_TLS_REPO_ROOT.
 
 # WARP-1829 droplet-host-units stub: logs its invocation, prints
 # $WORK/host_units_out, exits with $WORK/host_units_exit (default 0).
@@ -215,7 +222,7 @@ else
 fi
 
 all_present=1
-for c in wifi voice_dsp docker_dns container_crashloop host_unit_staleness; do
+for c in wifi voice_dsp docker_dns container_crashloop host_unit_staleness tls_cert_ips; do
   s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
   case "$s" in
     ok|healed|heal_failed|escalated|not_applicable) : ;;
@@ -723,6 +730,163 @@ if [ "$(wd_field host_unit_staleness status)" = "not_applicable" ]; then
   pass "a detector that cannot run reports not_applicable, not a fake verdict"
 else
   fail "expected not_applicable for a broken detector, got $(wd_field host_unit_staleness status)"
+fi
+
+# =============================================================================
+# Phase 9: tls_cert_ips (WARP-2132)
+# =============================================================================
+echo "--- Phase 9: tls_cert_ips (WARP-2132) ---"
+
+# On Git-Bash/MSYS the `-subj "/CN=..."` in secrets.sh's re-issue path gets
+# path-mangled unless excluded from arg conversion (same guard as
+# scripts/test/secrets-tls.test.sh). Unset/ignored on real Linux.
+export MSYS2_ARG_CONV_EXCL='/CN='
+
+TLS_FULL_DNS="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan"
+
+# Fake checkout: the REAL secrets.sh + the libs it pulls in, and a certs dir.
+# The check sources secrets.sh from the resolved checkout, so this exercises
+# the production harvest/compare/re-issue code, not a stub.
+mk_tls_repo() {
+  mkdir -p "$WORK/repo/scripts/lib" "$WORK/repo/docker/certs"
+  cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh" \
+     "$REPO_ROOT_REAL/scripts/lib/internal-ca.sh" \
+     "$REPO_ROOT_REAL/scripts/lib/tls-reload.sh" \
+     "$WORK/repo/scripts/lib/"
+}
+
+mk_tls_cert() { # <san>
+  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+    -keyout "$WORK/repo/docker/certs/droplet.key" \
+    -out "$WORK/repo/docker/certs/droplet.crt" \
+    -subj "/CN=Droplet Edge Device" \
+    -addext "subjectAltName=$1" 2>/dev/null
+}
+
+tls_crt() { printf '%s' "$WORK/repo/docker/certs/droplet.crt"; }
+tls_sha() { openssl dgst -sha256 "$(tls_crt)" 2>/dev/null | awk '{print $NF}'; }
+
+# --- checkout unresolvable → not_applicable, never a fabricated verdict ------
+reset_work
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "not_applicable" ]; then
+  pass "tls_cert_ips: not_applicable when no checkout root can be resolved"
+else
+  fail "expected not_applicable with no checkout, got $(wd_field tls_cert_ips status)"
+fi
+
+# --- cert covers every current IP → ok ---------------------------------------
+reset_work
+mk_tls_repo
+mk_tls_cert "$TLS_FULL_DNS,IP:10.0.0.5,IP:127.0.0.1"
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="10.0.0.5" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "ok" ]; then
+  pass "tls_cert_ips: ok when the cert's IP SANs cover every current IP"
+else
+  fail "expected ok on a covering cert, got $(wd_field tls_cert_ips status): $(wd_field tls_cert_ips message)"
+fi
+
+# --- stale IPs: debounce first, re-issue on the 2nd stable pass --------------
+reset_work
+mk_tls_repo
+mk_tls_cert "$TLS_FULL_DNS,IP:10.0.0.5,IP:127.0.0.1"
+tls_before_sha="$(tls_sha)"
+tls_before_pub="$(openssl x509 -in "$(tls_crt)" -noout -pubkey 2>/dev/null)"
+
+# Run 1: mismatch observed → debounce, do NOT touch the cert yet (a box mid-
+# DHCP renegotiation must not mint certs for a transient address).
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="192.168.77.5" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "ok" ] \
+   && [ "$(tls_sha)" = "$tls_before_sha" ]; then
+  pass "tls_cert_ips: first stale sighting only debounces (cert untouched)"
+else
+  fail "first sighting: status=$(wd_field tls_cert_ips status), cert changed=$([ "$(tls_sha)" != "$tls_before_sha" ] && echo yes || echo no)"
+fi
+case "$(wd_field tls_cert_ips message)" in
+  *debounc*) pass "tls_cert_ips: debounce message says a re-issue is pending" ;;
+  *) fail "debounce message unexpected: $(wd_field tls_cert_ips message)" ;;
+esac
+
+# Run 2 with a DIFFERENT address set: still moving → keep debouncing.
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="192.168.88.9" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "ok" ] \
+   && [ "$(tls_sha)" = "$tls_before_sha" ]; then
+  pass "tls_cert_ips: a still-moving address set keeps debouncing (no re-issue)"
+else
+  fail "moving set: status=$(wd_field tls_cert_ips status), cert changed=$([ "$(tls_sha)" != "$tls_before_sha" ] && echo yes || echo no)"
+fi
+
+# Run 3, same set as run 2: stable for 2 consecutive passes → re-issue.
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="192.168.88.9" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "healed" ]; then
+  pass "tls_cert_ips: 2nd consecutive stable stale pass re-issues (healed)"
+else
+  fail "expected healed on the stable 2nd pass, got $(wd_field tls_cert_ips status): $(wd_field tls_cert_ips message)"
+fi
+tls_san="$(openssl x509 -in "$(tls_crt)" -noout -ext subjectAltName 2>/dev/null)"
+if printf '%s' "$tls_san" | grep -qF 'IP Address:192.168.88.9' \
+   && printf '%s' "$tls_san" | grep -qF 'IP Address:10.0.0.5'; then
+  pass "tls_cert_ips: re-issued SAN is a superset (new IP added, old retained)"
+else
+  fail "re-issued SAN not a superset: $tls_san"
+fi
+tls_after_pub="$(openssl x509 -in "$(tls_crt)" -noout -pubkey 2>/dev/null)"
+if [ -n "$tls_after_pub" ] && [ "$tls_after_pub" = "$tls_before_pub" ]; then
+  pass "tls_cert_ips: re-issue reused the private key (same public key)"
+else
+  fail "re-issue changed the keypair — pairings/pinned clients would break"
+fi
+if grep -q 'tls_cert_ips' "$WORK/state/heal.log" 2>/dev/null; then
+  pass "tls_cert_ips: the re-issue is logged to heal.log"
+else
+  fail "no tls_cert_ips heal.log entry: $(cat "$WORK/state/heal.log" 2>/dev/null)"
+fi
+
+# Run 4: the widened cert now covers → ok, debounce state cleared.
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="192.168.88.9" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "ok" ]; then
+  pass "tls_cert_ips: converges to ok after the re-issue"
+else
+  fail "expected ok after re-issue, got $(wd_field tls_cert_ips status)"
+fi
+
+# --- public-CA leaf (ADR-023): reported ok, never touched --------------------
+reset_work
+mk_tls_repo
+mkdir -p "$WORK/ca"
+openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+  -keyout "$WORK/ca/ca.key" -out "$WORK/ca/ca.crt" \
+  -subj "/CN=Droplet Test Root CA" 2>/dev/null
+openssl req -nodes -newkey rsa:2048 \
+  -keyout "$WORK/repo/docker/certs/droplet.key" -out "$WORK/ca/leaf.csr" \
+  -subj "/CN=d-deadbeef.devices.warp-lab.ai" 2>/dev/null
+printf 'subjectAltName=DNS:d-deadbeef.devices.warp-lab.ai\n' > "$WORK/ca/ext.cnf"
+openssl x509 -req -in "$WORK/ca/leaf.csr" \
+  -CA "$WORK/ca/ca.crt" -CAkey "$WORK/ca/ca.key" -CAcreateserial \
+  -days 90 -extfile "$WORK/ca/ext.cnf" \
+  -out "$WORK/repo/docker/certs/droplet.crt" 2>/dev/null
+tls_ca_sha="$(tls_sha)"
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="192.168.77.5" >/dev/null || true
+run_wd DROPLET_WATCHDOG_CHECKS="tls_cert_ips" \
+       DROPLET_WATCHDOG_TLS_REPO_ROOT="$WORK/repo" \
+       DROPLET_TLS_CURRENT_IPS="192.168.77.5" >/dev/null || true
+if [ "$(wd_field tls_cert_ips status)" = "ok" ] \
+   && [ "$(tls_sha)" = "$tls_ca_sha" ]; then
+  pass "tls_cert_ips: public-CA leaf is ok and byte-identical after two passes (ADR-023)"
+else
+  fail "public-CA leaf: status=$(wd_field tls_cert_ips status), cert changed=$([ "$(tls_sha)" != "$tls_ca_sha" ] && echo yes || echo no)"
 fi
 
 # =============================================================================

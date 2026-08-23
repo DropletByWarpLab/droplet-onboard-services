@@ -1600,6 +1600,63 @@ _cert_has_all_required_sans() {
   return 0
 }
 
+# WARP-2132: the ONE source of truth for "which IPv4 addresses must this box's
+# cert cover" — used by BOTH the SAN builder in _generate_tls_cert and the
+# coverage check _cert_covers_current_ips, so the two can never drift apart.
+# Deliberately the exact expression the SAN builder always used: every
+# non-loopback global-scope IPv4, docker0/br-*/wg* addresses included (they are
+# global-scope, have always landed in the SAN, and excluding them here while
+# the builder emits them would make a freshly-minted cert read as stale).
+# Test hook: DROPLET_TLS_CURRENT_IPS (space-separated) overrides the harvest so
+# IP-coverage behaviour is deterministic off-box.
+_current_global_ipv4s() {
+  if [ -n "${DROPLET_TLS_CURRENT_IPS:-}" ]; then
+    local _ip
+    for _ip in ${DROPLET_TLS_CURRENT_IPS}; do
+      printf '%s\n' "$_ip"
+    done
+    return 0
+  fi
+  ip -4 addr show scope global 2>/dev/null \
+    | grep -oP 'inet \K[\d.]+' 2>/dev/null || \
+    ifconfig 2>/dev/null \
+    | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+    | grep -v '^127\.'
+  return 0
+}
+
+# WARP-2132: every IP SAN of the given cert, one per line (mirrors the DNS
+# extraction in _cert_has_all_required_sans; `openssl x509 -ext subjectAltName`
+# prints these as `IP Address:192.168.50.197`).
+_cert_ip_sans() {
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null \
+    | grep -oE 'IP Address:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+    | sed 's/^IP Address://'
+  return 0
+}
+
+# WARP-2132: does the installed cert's SAN cover every CURRENT global IPv4 on
+# the box? The install-time cert freezes the secrets-time harvest into its IP
+# SANs; a box that changes networks then serves IP SANs for addresses it no
+# longer holds and every browser warns forever — and the skip-guard (expiry +
+# DNS SANs + pair match only) passed that stale cert on every re-run. Current
+# addresses come from _current_global_ipv4s — the SAME harvest the SAN builder
+# uses. Returns 0 when every current IP is present as an IP SAN (vacuously
+# true when the harvest is empty — a box with no addresses must not churn).
+_cert_covers_current_ips() {
+  local cert_file="$1"
+  local ip_list
+  ip_list="$(_cert_ip_sans "$cert_file")"
+  local ip
+  for ip in $(_current_global_ipv4s); do
+    if ! printf '%s\n' "$ip_list" | grep -qxF "$ip"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 # ADR-023 PR-2: detect whether the installed leaf is a PUBLIC-CA cert (an
 # LE / ZeroSSL / Google Trust Services fullchain the box-side tls-issuance cron
 # installed) rather than our own self-signed bootstrap cert.
@@ -1669,8 +1726,15 @@ _tls_pair_matches() {
 # — the exact bytes clients import via trust-droplet-cert. Idempotent: never
 # overwrite an existing .bootstrap (the first self-signed cert ever generated is
 # the one clients trust; a later regeneration must not move the trust anchor).
+#
+# WARP-2132 exception: an explicit `--refresh` third argument overwrites the
+# side-copy. ONLY the IP-stale re-issue path passes it — that path reuses the
+# SAME keypair (the trust anchor's public key does not move) and only widens
+# the SAN, and the expired-restore path above must replay the WIDEST cert ever
+# issued, not resurrect one pinned to a network the box has left. The default
+# never-overwrite behaviour is unchanged for every other caller.
 _write_tls_bootstrap_copy() {
-  local cert_file="$1" key_file="$2"
+  local cert_file="$1" key_file="$2" mode="${3:-}"
   local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
 
   if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
@@ -1681,16 +1745,111 @@ _write_tls_bootstrap_copy() {
   # one file present; the next run writes the missing half without touching the
   # already-written one, rather than skipping both (OR guard) or overwriting the
   # existing one (AND guard with fallthrough).
-  if [ ! -f "$boot_cert" ]; then
+  if [ ! -f "$boot_cert" ] || [ "$mode" = "--refresh" ]; then
     cp "$cert_file" "$boot_cert"
     chmod 644 "$boot_cert"
     log_info "  Saved trust-anchor bootstrap cert: $boot_cert"
   fi
-  if [ ! -f "$boot_key" ]; then
+  if [ ! -f "$boot_key" ] || [ "$mode" = "--refresh" ]; then
     cp "$key_file" "$boot_key"
     chmod 600 "$boot_key"
     log_info "  Saved trust-anchor bootstrap key: $boot_key"
   fi
+}
+
+# WARP-2132: re-issue the SELF-SIGNED cert when the box's interface IPs have
+# moved out from under it. The install-time cert freezes the secrets-time IP
+# harvest into its SANs; a box that changes networks then serves IP SANs for
+# addresses it no longer holds and browsers warn forever — with no regen
+# trigger anywhere. Three deliberate properties:
+#   * KEY REUSE — `openssl req -x509 -key`, never -newkey: pairings,
+#     key-pinned clients, and every client that imported the bootstrap cert
+#     (same subject, same public key) survive the re-issue.
+#   * SAN SUPERSET — every SAN the outgoing cert vouched for is RETAINED and
+#     the current generation set (required DNS names, hostname, public FQDN,
+#     current IPs) is ADDED, so a client still dialing an old address keeps a
+#     name-matching cert. Duplicates are harmless to openssl; an exact-match
+#     dedup keeps the logged SAN line readable.
+#   * BOOTSTRAP REFRESH — the .bootstrap side-copy is deliberately refreshed
+#     on THIS path only (same keypair, wider SAN — the trust anchor's key does
+#     not move); see _write_tls_bootstrap_copy's --refresh note.
+# Public-CA leaves NEVER reach this function — the caller gates on
+# _cert_is_public_ca_leaf first (ADR-023: setup never reshapes an HQ-issued
+# fullchain; LE leaves carry no IP SANs and the per-device FQDN is their
+# access path).
+_regen_tls_cert_for_current_ips() {
+  local cert_file="$1" key_file="$2"
+
+  log_warn "TLS certificate does not cover the box's current interface IPs — re-issuing with the SAME key (WARP-2132)"
+
+  # Union: the outgoing cert's SANs first (typed tokens, IP Address → IP so
+  # they are valid subjectAltName syntax again), then the current set.
+  local entries
+  entries="$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null \
+             | grep -oE '(DNS:[^,[:space:]]+|IP Address:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)' \
+             | sed 's/^IP Address:/IP:/')"
+  local dns
+  for dns in "${_REQUIRED_DNS_SANS[@]}"; do
+    entries="$entries
+DNS:$dns"
+  done
+  local hn
+  hn=$(hostname 2>/dev/null || echo "droplet")
+  entries="$entries
+DNS:$hn
+DNS:${hn}.local"
+  local public_fqdn="${DROPLET_PUBLIC_FQDN:-}"
+  if [ -n "$public_fqdn" ]; then
+    entries="$entries
+DNS:$public_fqdn"
+  fi
+  local ip
+  for ip in $(_current_global_ipv4s); do
+    entries="$entries
+IP:$ip"
+  done
+  entries="$entries
+IP:127.0.0.1"
+
+  # Order-preserving exact dedup.
+  local san="" entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case ",$san," in *",$entry,"*) continue ;; esac
+    san="${san:+$san,}$entry"
+  done <<< "$entries"
+
+  # Same atomic-write discipline as the -newkey path (WARP-595): temp file +
+  # rename. Only the CERT moves — the key is untouched by design, so there is
+  # no two-rename window: a crash here leaves either the old or the new cert,
+  # both matching the existing key.
+  if ! openssl req -x509 -new -nodes -key "$key_file" \
+    -days 3650 \
+    -out "$cert_file.tmp" \
+    -subj "/CN=Droplet Edge Device" \
+    -addext "subjectAltName=$san" \
+    2>/dev/null; then
+    rm -f "$cert_file.tmp"
+    log_warn "could not re-issue the TLS certificate with the existing key — keeping the current cert"
+    return 1
+  fi
+  chmod 644 "$cert_file.tmp"
+  mv "$cert_file.tmp" "$cert_file"
+
+  log_success "TLS certificate re-issued for the current IPs (key unchanged):"
+  log_info "  Cert: $cert_file"
+  log_info "  SANs: $san"
+
+  # Deliberate refresh — same keypair, superset SAN (see header).
+  _write_tls_bootstrap_copy "$cert_file" "$key_file" --refresh
+
+  # Same shared reload helper as every other cert-writing path (ADR-023 C2).
+  if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+    # shellcheck source=tls-reload.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+  fi
+  reload_gateway_nginx || true
+  return 0
 }
 
 _generate_tls_cert() {
@@ -1698,10 +1857,11 @@ _generate_tls_cert() {
   local cert_file="$cert_dir/droplet.crt"
   local key_file="$cert_dir/droplet.key"
 
-  # Skip only if the cert is both still valid AND covers every required DNS
-  # name. A SAN-complete check was added after the local-DNS feature landed;
-  # without it, installs upgrading from an older setup still served a cert
-  # without droplet-ai.lan / droplet.local etc. in the SAN, forcing a
+  # Skip only if the cert is still valid AND covers every required DNS name
+  # AND (self-signed only) covers every current interface IP. The SAN-complete
+  # check was added after the local-DNS feature landed; without it, installs
+  # upgrading from an older setup still served a cert without
+  # droplet-ai.lan / droplet.local etc. in the SAN, forcing a
   # hostname-mismatch error even after the user trusted the cert.
   if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
     # WARP-595: the skip-guard must also verify the KEY belongs to the cert —
@@ -1710,8 +1870,20 @@ _generate_tls_cert() {
     if openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
        && _cert_has_all_required_sans "$cert_file" \
        && _tls_pair_matches "$cert_file" "$key_file"; then
-      log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
-      return 0
+      # WARP-2132: expiry + DNS SANs + pair match is NOT enough for a
+      # SELF-SIGNED cert — its IP SANs freeze the install-time harvest, so a
+      # box that changed networks kept skipping here and served stale IP SANs
+      # forever (no other regen trigger existed). Public-CA leaves are exempt:
+      # setup never reshapes an HQ-issued fullchain (ADR-023), and LE leaves
+      # carry no IP SANs — the per-device FQDN is their access path.
+      if _cert_is_public_ca_leaf "$cert_file" || _cert_covers_current_ips "$cert_file"; then
+        log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
+        return 0
+      fi
+      # Valid, DNS-complete, matched — but self-signed and missing at least
+      # one CURRENT interface IP: re-issue with the same key + SAN superset.
+      _regen_tls_cert_for_current_ips "$cert_file" "$key_file"
+      return $?
     fi
 
     # ADR-023 PR-2 — NEVER CLOBBER A PUBLIC-CA LEAF.
@@ -1817,14 +1989,11 @@ _generate_tls_cert() {
     log_info "  Including per-device FQDN in SAN: $public_fqdn"
   fi
 
-  # Add all non-loopback IPv4 addresses
+  # Add all non-loopback IPv4 addresses. ONE shared harvest
+  # (_current_global_ipv4s) feeds both this SAN builder and the WARP-2132
+  # coverage check _cert_covers_current_ips, so the two can never drift.
   local ip
-  for ip in $(ip -4 addr show scope global 2>/dev/null \
-              | grep -oP 'inet \K[\d.]+' 2>/dev/null || \
-              ifconfig 2>/dev/null \
-              | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-              | grep -v '^127\.'); do
+  for ip in $(_current_global_ipv4s); do
     san="$san,IP:$ip"
   done
   # Always include loopback

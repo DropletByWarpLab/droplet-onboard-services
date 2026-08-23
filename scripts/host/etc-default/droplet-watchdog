@@ -10,7 +10,7 @@
 
 # Which checks run on this box (space-separated). Anything not listed reports
 # an explicit not_applicable in status.json — never silently absent.
-#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop"
+#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness tls_cert_ips"
 
 # Escalation: consecutive heal failures before a check goes `escalated`
 # (CRITICAL log + suspended heals), and how many runs between suspended
@@ -38,3 +38,9 @@
 # episode into /var/lib/droplet/watchdog/diagnostics/.
 #DROPLET_WATCHDOG_CRASHLOOP_THRESHOLD=3
 #DROPLET_WATCHDOG_LOG_TAIL=200
+
+# WARP-2132 TLS cert-follows-IPs: checkout root of droplet-onboard-services.
+# Default: parsed from the rendered stack unit's `EnvironmentFile=<repo>/.env`
+# line, so it normally needs no override.
+#DROPLET_WATCHDOG_TLS_REPO_ROOT=
+#DROPLET_WATCHDOG_TLS_STACK_UNIT=/etc/systemd/system/droplet.service

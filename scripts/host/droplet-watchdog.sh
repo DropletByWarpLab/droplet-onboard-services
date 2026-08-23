@@ -40,6 +40,16 @@
 #                        device-bridge owns the panel feed and the console
 #                        handback, so a supervisor able to restart it on its
 #                        own cadence is the thundering herd, not the fix.
+#   tls_cert_ips         The self-signed TLS cert froze the install-time
+#                        interface IPs into its SANs; a box that changed
+#                        networks serves IP SANs for addresses it no longer
+#                        holds and browsers warn forever (WARP-2132).
+#                        Detection + heal delegate to secrets.sh's own
+#                        helpers (_cert_covers_current_ips /
+#                        _generate_tls_cert — key REUSE, SAN superset),
+#                        debounced to 2 consecutive runs observing the SAME
+#                        uncovered address set. A public-CA leaf (ADR-023)
+#                        is ok and never touched.
 #
 # Status contract (architecture-guard rule: explicit enums, never inferred
 # from absence): every known check ALWAYS appears in
@@ -80,7 +90,12 @@
 #   DROPLET_WATCHDOG_XVF_HOST            xvf_host stub
 #   DROPLET_WATCHDOG_DOCKER_DAEMON_JSON  daemon.json fixture
 #   DROPLET_WATCHDOG_HOST_UNITS_BIN      droplet-host-units stub
-#   (docker is resolved via PATH, so a stub earlier on PATH intercepts it)
+#   DROPLET_WATCHDOG_TLS_REPO_ROOT       checkout root for tls_cert_ips
+#   DROPLET_WATCHDOG_TLS_STACK_UNIT      rendered stack unit to parse the
+#                                        checkout root from (default
+#                                        /etc/systemd/system/droplet.service)
+#   (docker is resolved via PATH, so a stub earlier on PATH intercepts it;
+#    DROPLET_TLS_CURRENT_IPS — secrets.sh's own hook — pins the IP harvest)
 # =============================================================================
 # Deliberately NOT `set -e`: a supervisor must survive any single probe
 # failing and still write status for every check. Errors are handled per call.
@@ -88,7 +103,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness tls_cert_ips}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -120,7 +135,14 @@ WD_LOG_TAIL="${DROPLET_WATCHDOG_LOG_TAIL:-200}"
 # absent, so the check is safe on any shape.
 WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-host-units}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness"
+# WARP-2132 — TLS cert-follows-IPs. No host-specific default for the checkout
+# root: when unset it is parsed from the rendered stack unit's
+# `EnvironmentFile=<repo>/.env` line (render_systemd_unit writes the real
+# path at install time). Override for tests / non-standard installs.
+WD_TLS_REPO_ROOT="${DROPLET_WATCHDOG_TLS_REPO_ROOT:-}"
+WD_TLS_STACK_UNIT="${DROPLET_WATCHDOG_TLS_STACK_UNIT:-/etc/systemd/system/droplet.service}"
+
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness tls_cert_ips"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -589,6 +611,147 @@ wd_check_host_unit_staleness() {
   units="$(printf '%s\n' "$out" | awk '$1 == "STALE" || $1 == "FAILED" { print $2 }' | tr '\n' ' ')"
   CHECK_OUTCOME=heal_failed
   CHECK_MESSAGE="host units running code older than the tree: ${units:-<see detail>}— the process started before its own sources were last modified, so a merged fix is inert in it. Fix: sudo $WD_HOST_UNITS_BIN refresh (detail: $WD_HOST_UNITS_BIN check)"
+  return 0
+}
+
+# --- tls_cert_ips ------------------------------------------------------------
+# WARP-2132. The self-signed TLS cert freezes the secrets-time interface IPs
+# into its SANs; a box that changes networks then serves IP SANs for addresses
+# it no longer holds and every browser warns forever — and until WARP-2132
+# nothing re-triggered generation (setup's skip-guard checked expiry + DNS
+# SANs only). This check compares the served cert's IP SANs against the box's
+# CURRENT global IPv4s using secrets.sh's OWN helpers (one harvest/compare
+# implementation, nothing to drift), debounced to TWO consecutive runs
+# observing the SAME uncovered address set — a box mid-DHCP renegotiation must
+# not mint certs for a transient address. The heal calls
+# secrets.sh::_generate_tls_cert (the narrowest entry point setup.sh itself
+# uses, via materialize_artifacts): its WARP-2132 path REUSES the private key,
+# emits a SAN SUPERSET, refreshes the .bootstrap side-copy, and hot-reloads
+# the gateway nginx through the shared tls-reload.sh helper. A public-CA leaf
+# (ADR-023) is reported ok and never touched.
+
+wd_tls_repo_root() {
+  if [ -n "$WD_TLS_REPO_ROOT" ]; then
+    printf '%s' "$WD_TLS_REPO_ROOT"
+    return 0
+  fi
+  local line
+  line="$(grep -m1 '^EnvironmentFile=' "$WD_TLS_STACK_UNIT" 2>/dev/null)" || return 1
+  line="${line#EnvironmentFile=}"
+  line="${line#-}"
+  case "$line" in
+    */.env) printf '%s' "${line%/.env}"; return 0 ;;
+  esac
+  return 1
+}
+
+# Probe verdict on stdout: `public_ca`, `covered`, or `stale <sorted current
+# ips>`. Runs secrets.sh's helpers in a throwaway subshell — sourcing it only
+# defines functions, and the subshell keeps this supervisor's env clean.
+wd_tls_probe() { # <repo_root> <cert>
+  local repo="$1" cert="$2"
+  (
+    REPO_ROOT="$repo"
+    export REPO_ROOT
+    # shellcheck source=/dev/null
+    . "$repo/scripts/lib/secrets.sh" >/dev/null 2>&1 || exit 5
+    if _cert_is_public_ca_leaf "$cert"; then printf 'public_ca'; exit 0; fi
+    if _cert_covers_current_ips "$cert"; then printf 'covered'; exit 0; fi
+    printf 'stale %s' "$(_current_global_ipv4s | sort | tr '\n' ' ')"
+  ) 2>/dev/null
+}
+
+wd_check_tls_cert_ips() {
+  local repo
+  if ! repo="$(wd_tls_repo_root)" || [ -z "$repo" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="cannot resolve the checkout root (no EnvironmentFile= line in $WD_TLS_STACK_UNIT; set DROPLET_WATCHDOG_TLS_REPO_ROOT)"
+    return 0
+  fi
+  local cert="$repo/docker/certs/droplet.crt" key="$repo/docker/certs/droplet.key"
+  local secrets_lib="$repo/scripts/lib/secrets.sh"
+  if [ ! -f "$secrets_lib" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="no scripts/lib/secrets.sh under $repo — not a droplet checkout"
+    return 0
+  fi
+  if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="no TLS pair under $repo/docker/certs yet (setup.sh generates it)"
+    return 0
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="openssl not on PATH — cannot inspect the served cert"
+    return 0
+  fi
+
+  local probe
+  probe="$(wd_tls_probe "$repo" "$cert")"
+  case "$probe" in
+    public_ca)
+      wd_state_set tls_cert_ips.pending_ips ""
+      CHECK_OUTCOME=ok
+      CHECK_MESSAGE="public-CA leaf installed (ADR-023) — no IP SANs expected; the per-device FQDN is the access path"
+      return 0
+      ;;
+    covered)
+      wd_state_set tls_cert_ips.pending_ips ""
+      CHECK_OUTCOME=ok
+      CHECK_MESSAGE="cert IP SANs cover every current global IPv4"
+      return 0
+      ;;
+    stale\ ?*)
+      ;;
+    *)
+      # The probe itself failed (unreadable checkout, unparseable cert being
+      # replaced mid-write, …). Not evidence of staleness — say so and re-probe
+      # next run instead of inventing a verdict.
+      CHECK_OUTCOME=not_applicable
+      CHECK_MESSAGE="could not evaluate cert IP coverage (secrets.sh probe under $repo returned '${probe:-nothing}')"
+      return 0
+      ;;
+  esac
+
+  local current_ips pending
+  current_ips="${probe#stale }"
+  pending="$(wd_state_get tls_cert_ips.pending_ips '')"
+  if [ "$pending" != "$current_ips" ]; then
+    # First sighting of THIS address set (or the set is still moving):
+    # remember it and wait one more run before touching the cert.
+    wd_state_set tls_cert_ips.pending_ips "$current_ips"
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="cert is missing current IPs [${current_ips% }] in its SANs — debouncing (re-issue next run if the address set is stable)"
+    return 0
+  fi
+
+  # Same uncovered set on two consecutive runs — re-issue. tls-reload.sh is
+  # sourced FIRST, exactly as setup.sh orders it, so _generate_tls_cert finds
+  # the real reload_gateway_nginx (hot nginx reload on a running gateway) and
+  # the log_* shims tls-reload.sh defines for standalone callers.
+  wd_log_heal tls_cert_ips "re-issuing TLS cert for current IPs [${current_ips% }] via secrets.sh::_generate_tls_cert (key reuse, SAN superset)"
+  local regen_rc=0
+  (
+    REPO_ROOT="$repo"
+    export REPO_ROOT
+    # shellcheck source=/dev/null
+    . "$repo/scripts/lib/tls-reload.sh" >/dev/null 2>&1 || exit 5
+    # shellcheck source=/dev/null
+    . "$secrets_lib" >/dev/null 2>&1 || exit 5
+    _generate_tls_cert
+  ) >/dev/null 2>&1 || regen_rc=$?
+
+  probe="$(wd_tls_probe "$repo" "$cert")"
+  if [ "$regen_rc" = 0 ] && [ "$probe" = "covered" ]; then
+    wd_state_set tls_cert_ips.pending_ips ""
+    wd_log_heal tls_cert_ips "re-issue succeeded — cert now covers [${current_ips% }]"
+    CHECK_OUTCOME=healed
+    CHECK_MESSAGE="re-issued the self-signed cert (same key, SAN superset) — now covers [${current_ips% }]; gateway nginx reloaded"
+  else
+    wd_log_heal tls_cert_ips "re-issue did not converge (rc=$regen_rc, post-probe: ${probe:-empty})"
+    CHECK_OUTCOME=heal_failed
+    CHECK_MESSAGE="cert re-issue did not converge (regen rc=$regen_rc, post-probe: ${probe:-empty}) — run scripts/setup.sh --sync-secrets and inspect $repo/docker/certs"
+  fi
   return 0
 }
 
