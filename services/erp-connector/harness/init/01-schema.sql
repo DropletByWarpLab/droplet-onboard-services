@@ -95,6 +95,51 @@ CREATE TABLE dba.recall (
   recall_type   varchar(30)
 );
 
+-- =============================================================================
+-- WARP-2107 — accounting tables (NOT part of Eaglesoft's PattersonPM)
+-- =============================================================================
+--
+-- Eaglesoft has no accounts-payable ledger and never will; these tables do not
+-- claim otherwise. They exist because this harness is the proving ground for
+-- the WHOLE read registry, not for one provider — `harness-postgres-drift`
+-- builds every registered read against this schema, so the accounting reads
+-- need a lane here that can actually fail. The shapes mirror the canonical
+-- columns in export-drop/profiles.ts so a drift in either is caught.
+--
+-- The connectors that ship today refuse these reads up front via
+-- `servesDatasets`; that refusal is asserted in the connector suites, not here.
+--
+-- No real data: vendors and customers below are fictional.
+
+-- Customer invoices — money owed TO the business (accounts receivable).
+CREATE TABLE dba.invoice (
+  invoice_id    integer PRIMARY KEY,
+  issued_at     timestamp,
+  due_at        timestamp,
+  customer_id   integer,
+  amount        numeric(12,2),
+  balance       numeric(12,2),
+  status        varchar(30)
+);
+
+-- Vendor bills — money owed BY the business (accounts payable). This is the
+-- half WARP-1991 records as having no data source anywhere in the product.
+CREATE TABLE dba.bill (
+  bill_id       integer PRIMARY KEY,
+  issued_at     timestamp,
+  due_at        timestamp,
+  vendor_id     integer,
+  amount        numeric(12,2),
+  balance       numeric(12,2),
+  status        varchar(30)
+);
+
+-- Pre-aggregated payables by vendor — the AP mirror of `account`.
+CREATE TABLE dba.ap_summary (
+  vendor_id     integer PRIMARY KEY,
+  balance       numeric(12,2)
+);
+
 -- Watermark trigger: bump last_modified on every UPDATE (mimics the SQL
 -- Anywhere DEFAULT TIMESTAMP column the connector discovers + guards on).
 CREATE OR REPLACE FUNCTION dba.touch_last_modified() RETURNS trigger AS $$

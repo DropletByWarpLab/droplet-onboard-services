@@ -85,6 +85,9 @@ export {
 export {
   EaglesoftConnector,
   ConnectorBlockedError,
+  DatasetNotServedError,
+  PRACTICE_DATASETS,
+  assertDatasetsServed,
   SQL_TRACK_REMEDIATION,
   fingerprintTables,
   type Connector,
@@ -159,8 +162,11 @@ export {
 export {
   BUILT_IN_PROFILES,
   CANONICAL_COLUMNS,
+  COLUMN_KIND,
   DATASETS,
+  DATASET_CATEGORY,
   GENERIC_VENDOR,
+  NAME_ONLY_VENDORS,
   REQUIRED_CANONICAL,
   assertValidProfile,
   knownVendors,
@@ -201,3 +207,7 @@ export {
   parseExportTimestamp,
   parseMoney,
 } from "./export-drop/values.js";
+
+// WARP-2107 — money aggregation shared by every track, so a total is a currency
+// figure rather than an accumulation of doubles.
+export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";

@@ -13,6 +13,7 @@
  * PattersonPM.db exist (see connector.ts).
  */
 import { resolveTable, resolveColumn, type SchemaMap } from "./schema-map.js";
+import type { DatasetName } from "./export-drop/profiles.js";
 
 /**
  * Escape SQL `LIKE` metacharacters (`%`, `_`, and the escape char itself) in a
@@ -66,8 +67,12 @@ export interface BuiltStatement {
 export interface ReadQuery {
   name: string;
   description: string;
-  /** Logical tables this query depends on (for drift/coverage checks). */
-  dependsOnTables: string[];
+  /** Logical tables this query depends on (for drift/coverage checks).
+   *  Typed as the dataset-name union, not `string[]`: a typo here would
+   *  silently drop the query out of every capability filter (e.g.
+   *  `requiredRouteOps`), and the coverage tests that loop over those filter
+   *  results would pass vacuously over the missing entry. */
+  dependsOnTables: DatasetName[];
   exampleParams: Record<string, unknown>;
   build(map: SchemaMap, params: Record<string, unknown>): BuiltStatement;
 }
@@ -172,12 +177,95 @@ const getRecallDue: ReadQuery = {
   },
 };
 
+// ── WARP-2107 — accounting reads ────────────────────────────────────────────
+//
+// These depend on datasets no practice-management track serves, which is the
+// whole reason `Connector.servesDatasets` exists (see connector.ts): a track is
+// asked only for datasets it has declared, and asking for one it has not is a
+// typed refusal rather than a resolve failure deep in a build.
+//
+// The SQL here is written even though no shipping track executes it. The
+// registry is the single definition of what a read MEANS, and a future
+// accounting provider with a real database must inherit that definition rather
+// than invent a second one.
+
+const getOpenInvoices: ReadQuery = {
+  name: "get_open_invoices",
+  description: "Unpaid/partly-paid customer invoices — money owed TO the business — oldest due first.",
+  dependsOnTables: ["invoice"],
+  exampleParams: {},
+  build(map) {
+    const invoice = resolveTable(map, "invoice");
+    const invoiceId = resolveColumn(map, "invoice", "invoice_id");
+    const issuedAt = resolveColumn(map, "invoice", "issued_at");
+    const dueAt = resolveColumn(map, "invoice", "due_at");
+    const customerId = resolveColumn(map, "invoice", "customer_id");
+    const amount = resolveColumn(map, "invoice", "amount");
+    const balance = resolveColumn(map, "invoice", "balance");
+    const status = resolveColumn(map, "invoice", "status");
+    // "Open" is a non-zero balance, not a status string: status vocabularies
+    // differ per product ("Open"/"Overdue"/"Partial"/"Sent"), and every one of
+    // them agrees that money is outstanding when the balance is not zero.
+    const sql =
+      `SELECT ${invoiceId}, ${issuedAt}, ${dueAt}, ${customerId}, ${amount}, ${balance}, ${status} ` +
+      `FROM ${invoice} ` +
+      `WHERE ${balance} <> 0 ` +
+      `ORDER BY ${dueAt}, ${invoiceId}`;
+    return { sql, params: [] };
+  },
+};
+
+const getOpenBills: ReadQuery = {
+  name: "get_open_bills",
+  description: "Unpaid/partly-paid vendor bills — money owed BY the business — oldest due first.",
+  dependsOnTables: ["bill"],
+  exampleParams: {},
+  build(map) {
+    const bill = resolveTable(map, "bill");
+    const billId = resolveColumn(map, "bill", "bill_id");
+    const issuedAt = resolveColumn(map, "bill", "issued_at");
+    const dueAt = resolveColumn(map, "bill", "due_at");
+    const vendorId = resolveColumn(map, "bill", "vendor_id");
+    const amount = resolveColumn(map, "bill", "amount");
+    const balance = resolveColumn(map, "bill", "balance");
+    const status = resolveColumn(map, "bill", "status");
+    const sql =
+      `SELECT ${billId}, ${issuedAt}, ${dueAt}, ${vendorId}, ${amount}, ${balance}, ${status} ` +
+      `FROM ${bill} ` +
+      `WHERE ${balance} <> 0 ` +
+      `ORDER BY ${dueAt}, ${billId}`;
+    return { sql, params: [] };
+  },
+};
+
+const getApSummary: ReadQuery = {
+  name: "get_ap_summary",
+  description: "Accounts-payable summary: total owed and vendor count, aggregated in SQL.",
+  dependsOnTables: ["ap_summary"],
+  exampleParams: {},
+  build(map) {
+    const table = resolveTable(map, "ap_summary");
+    const vendorId = resolveColumn(map, "ap_summary", "vendor_id");
+    const balance = resolveColumn(map, "ap_summary", "balance");
+    // Mirrors get_ar_summary exactly, including aggregating in SQL rather than
+    // shipping rows to Node (brief §10.1).
+    const sql =
+      `SELECT COUNT(${vendorId}) AS vendor_count, ` +
+      `SUM(${balance}) AS total_balance ` +
+      `FROM ${table}`;
+    return { sql, params: [] };
+  },
+};
+
 export const READ_QUERIES: readonly ReadQuery[] = [
   getScheduleToday,
   findPatient,
   getArSummary,
   getPatient,
   getRecallDue,
+  getOpenInvoices,
+  getOpenBills,
+  getApSummary,
 ];
 
 const BY_NAME: ReadonlyMap<string, ReadQuery> = new Map(READ_QUERIES.map((q) => [q.name, q]));
