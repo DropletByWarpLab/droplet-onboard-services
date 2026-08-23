@@ -18,9 +18,12 @@
  *   1. **Only ever dials out.** No port, no webhook, no inbound path.
  *   2. **Ships off; owner consent is the enabling event.** With no tokens
  *      resolved the connector blocks honestly rather than half-authenticating.
- *   3. **Every destination registered.** `quickbooks.api.intuit.com` and
- *      `oauth.platform.intuit.com` are in `docs/security/allowed-egress.yaml`
- *      as `user-content-on-request` and `none` respectively.
+ *   3. **Every destination registered.** `quickbooks.api.intuit.com`,
+ *      `sandbox-quickbooks.api.intuit.com` and `oauth.platform.intuit.com` are
+ *      in `docs/security/allowed-egress.yaml` — the two API hosts as
+ *      `user-content-on-request`, the OAuth endpoint as `none`. The `baseUrl`
+ *      guard ({@link QBO_ALLOWED_API_HOSTS}) accepts exactly the two API
+ *      hosts, so nothing the registry has not screened is dialable.
  *   4. **Persistence.** ADR-041 §4 says cloud connectors persist and that
  *      synced content must be encrypted at rest — and warns that the encryption
  *      `ErpEntityCache` promises is NOT implemented (WARP-2028). This track
@@ -95,6 +98,16 @@ export const QBO_TRACK_REMEDIATION =
 export const QBO_PRODUCTION_BASE_URL = "https://quickbooks.api.intuit.com";
 
 /**
+ * Intuit's sandbox API base — the pre-production twin of production, pointed
+ * at by an operator-configured `baseUrl` to validate a connection against a
+ * sandbox company before a live one is connected. Registered in
+ * `docs/security/allowed-egress.yaml` as `quickbooks-online-sandbox-api`;
+ * kept as a full-URL literal here ON PURPOSE, so the egress gate's scanner
+ * extracts the host and the registry entry stays load-bearing.
+ */
+export const QBO_SANDBOX_BASE_URL = "https://sandbox-quickbooks.api.intuit.com";
+
+/**
  * Minor version pin for the v3 API.
  *
  * Pinned rather than omitted on purpose: without it Intuit serves "the current
@@ -104,7 +117,8 @@ export const QBO_PRODUCTION_BASE_URL = "https://quickbooks.api.intuit.com";
 export const QBO_MINOR_VERSION = "75";
 
 /**
- * The only hosts this connector will send a bearer token to.
+ * The only hosts this connector will send a bearer token to — EXACTLY these,
+ * never a suffix match.
  *
  * The access token is a credential to the customer's whole company file, and it
  * travels in an `Authorization: Bearer` header on every request. `baseUrl` is
@@ -116,10 +130,21 @@ export const QBO_MINOR_VERSION = "75";
  *
  * ADR-041 §3 requires every destination be registered and screened. This is the
  * code-side half of that: the registry says which hosts are allowed, and this
- * refuses to talk to anything else even if a row says otherwise. Belt and
- * braces, because the failure mode is handing away a customer's books.
+ * refuses to talk to anything else even if a row says otherwise. The first cut
+ * matched any `*.intuit.com`, which broke that mirror in both directions — it
+ * would dial hosts the registry had never screened, and it blessed the sandbox
+ * host by suffix while `allowed-egress.yaml` did not name it at all. The set is
+ * derived from the two published base URLs so a third base URL cannot be added
+ * without its host becoming a repo literal the egress gate extracts and checks.
+ *
+ * Deliberately ABSENT: `oauth.platform.intuit.com`. It is registered egress,
+ * but it is a token endpoint the orchestrator's OAuth wiring dials — never a
+ * `baseUrl` this connector queries (see {@link QuickBooksOnlineConnector.refresh},
+ * which holds no token endpoint at all).
  */
-export const QBO_ALLOWED_HOST_SUFFIX = ".intuit.com";
+export const QBO_ALLOWED_API_HOSTS: ReadonlySet<string> = new Set(
+  [QBO_PRODUCTION_BASE_URL, QBO_SANDBOX_BASE_URL].map((u) => new URL(u).hostname),
+);
 
 /** Thrown when a connection names a destination this track will not dial. */
 export class UnsafeBaseUrlError extends Error {
@@ -133,9 +158,12 @@ export class UnsafeBaseUrlError extends Error {
 /**
  * Validate an operator-supplied API base, or throw.
  *
- * HTTPS only — a bearer token over http is the token given away — and an Intuit
- * host only. Rejects userinfo (`https://evil@quickbooks.api.intuit.com`), which
- * some HTTP clients resolve to a different authority than a reader expects.
+ * HTTPS only — a bearer token over http is the token given away — and exactly
+ * one of the registered QuickBooks API hosts ({@link QBO_ALLOWED_API_HOSTS}),
+ * on the registered port (443, which is also the https default and the only
+ * port `allowed-egress.yaml` declares for these hosts). Rejects userinfo
+ * (`https://evil@quickbooks.api.intuit.com`), which some HTTP clients resolve
+ * to a different authority than a reader expects.
  */
 export function assertSafeBaseUrl(raw: string): string {
   let url: URL;
@@ -151,8 +179,15 @@ export function assertSafeBaseUrl(raw: string): string {
     throw new UnsafeBaseUrlError("the URL carries userinfo");
   }
   const host = url.hostname.toLowerCase();
-  if (host !== "intuit.com" && !host.endsWith(QBO_ALLOWED_HOST_SUFFIX)) {
-    throw new UnsafeBaseUrlError(`"${host}" is not an Intuit host`);
+  if (!QBO_ALLOWED_API_HOSTS.has(host)) {
+    throw new UnsafeBaseUrlError(`"${host}" is not a registered QuickBooks API host`);
+  }
+  // The URL parser drops an explicit :443 (the https default), so any port
+  // left standing is one the egress registry does not declare.
+  if (url.port !== "" && url.port !== "443") {
+    throw new UnsafeBaseUrlError(
+      `port ${url.port} — the egress registry allows these hosts on 443 only`,
+    );
   }
   return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
 }
@@ -470,6 +505,11 @@ export class QuickBooksOnlineConnector implements Connector {
           Authorization: `Bearer ${tokens.accessToken}`,
           Accept: "application/json",
         },
+        // Never follow a 3xx: the fetch spec strips Authorization on
+        // cross-origin redirects, but the token's safety should not rest on
+        // every runtime implementing that correctly — this API has no
+        // legitimate redirect, so one is a fault, not a hop.
+        redirect: "error",
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {

@@ -412,6 +412,30 @@ entries:
     review_by: 2027-08-20
     code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
 
+  - id: quickbooks-online-sandbox-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [sandbox-quickbooks.api.intuit.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      QuickBooks Online connector (ADR-041) pointed at Intuit's SANDBOX
+      environment — the operator-configurable baseUrl used for pre-production
+      connection validation against a sandbox company before a live one is
+      connected. Same v3 REST query API, same read-only/metered/read-through
+      posture as quickbooks-online-api; carries that sandbox company's ledger
+      content in the response. The connector's baseUrl guard is an EXACT host
+      set mirroring this registry (this host plus the production one — never a
+      *.intuit.com suffix), so registering it here is what makes it dialable
+      at all.
+    ticket: WARP-2109
+    added: 2026-08-22
+    review_by: 2027-08-22
+    code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
+
   - id: quickbooks-online-oauth
     kind: egress
     service: orchestrator

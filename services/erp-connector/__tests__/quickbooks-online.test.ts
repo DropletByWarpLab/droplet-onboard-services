@@ -491,12 +491,63 @@ describe("the bearer token only ever goes to Intuit", () => {
   });
 
   it("is not fooled by a lookalike host", () => {
-    // Mutation: use `includes(".intuit.com")` instead of a suffix test → the
-    // first case passes → red.
+    // Mutation: use `includes(".intuit.com")` instead of the exact-host set →
+    // the first case passes → red.
     expect(() => assertSafeBaseUrl("https://quickbooks.api.intuit.com.evil.test")).toThrow(
       UnsafeBaseUrlError,
     );
     expect(() => assertSafeBaseUrl("https://notintuit.com")).toThrow(UnsafeBaseUrlError);
+  });
+
+  it("refuses every other Intuit host — the allowed set is exact, not a suffix", () => {
+    // The registry names exactly two API hosts a baseUrl may legally be. The
+    // old guard accepted any `*.intuit.com`, which made hosts the registry
+    // never screened reachable — the opposite of what its own docstring
+    // promised. Intuit's own oauth host is registered egress but is never a
+    // baseUrl: the token exchange lives with the orchestrator, not here.
+    // Mutation: restore `host.endsWith(".intuit.com")` → every host below is
+    // accepted → red.
+    const notBaseUrls = [
+      "evil.intuit.com",
+      "api.intuit.com",
+      "intuit.com",
+      "oauth.platform.intuit.com",
+    ];
+    for (const host of notBaseUrls) {
+      expect(() => assertSafeBaseUrl(`https://${host}`), host).toThrow(UnsafeBaseUrlError);
+    }
+  });
+
+  it("refuses an explicit port other than 443", () => {
+    // allowed-egress.yaml registers the Intuit hosts under ports: [443]; a
+    // baseUrl smuggling another port would make that record false.
+    // Mutation: drop the port check → the first case constructs → red.
+    expect(() => assertSafeBaseUrl("https://quickbooks.api.intuit.com:8443")).toThrow(
+      UnsafeBaseUrlError,
+    );
+    // :443 is https spelled out — the URL parser normalises it away.
+    expect(assertSafeBaseUrl("https://quickbooks.api.intuit.com:443")).toBe(
+      "https://quickbooks.api.intuit.com",
+    );
+  });
+
+  it("instructs fetch to fail on any redirect rather than follow it", async () => {
+    // A 3xx must never carry the Authorization header to a new location. The
+    // fetch spec strips it on cross-origin redirects, but the token's safety
+    // should not rest on every runtime implementing that correctly — this API
+    // has no legitimate redirect.
+    // Mutation: drop `redirect: "error"` from the init → red.
+    let init: Record<string, unknown> | undefined;
+    const impl = async (_url: string, i?: Record<string, unknown>) => {
+      init = i;
+      return { ok: true, status: 200, json: async () => BILL_PAGE } as unknown as Response;
+    };
+    const c = new QuickBooksOnlineConnector(
+      { realmId: "9130350", credentialsSecretRef: "r" },
+      { fetchImpl: impl, now: () => NOW, resolveTokens: async () => tokens() },
+    );
+    await c.runRead("get_open_bills", {});
+    expect(init?.redirect).toBe("error");
   });
 });
 
