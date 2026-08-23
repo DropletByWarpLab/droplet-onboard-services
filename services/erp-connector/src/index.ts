@@ -212,6 +212,37 @@ export {
 // figure rather than an accumulation of doubles.
 export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";
 
+// WARP-2109 — QuickBooks Online: the accounting REST track, and the only
+// connector that leaves the practice LAN. Read-only, metered, and inert until
+// an operator configures a company — see the module docstring for why the
+// budget guard is a v1 requirement rather than an optimisation.
+export {
+  QuickBooksOnlineConnector,
+  CallBudget,
+  QuotaExhaustedError,
+  ReauthorizationRequiredError,
+  blockedTokenResolver,
+  DEFAULT_CALL_CEILING,
+  QBO_DATASETS,
+  QBO_MAX_PAGES,
+  QBO_MAX_READ_WALL_MS,
+  QBO_MINOR_VERSION,
+  QBO_PRODUCTION_BASE_URL,
+  QBO_SANDBOX_BASE_URL,
+  QBO_TRACK_REMEDIATION,
+  QUICKBOOKS_ONLINE_PROVIDER,
+  QBO_ALLOWED_API_HOSTS,
+  UnsafeBaseUrlError,
+  assertSafeBaseUrl,
+  type CloudConnectionState,
+  type QboStatus,
+  type QboTokens,
+  type QuickBooksOnlineConfig,
+  type QuickBooksOnlineDeps,
+  type TokenPersister,
+  type TokenResolver,
+} from "./quickbooks/online-connector.js";
+
 // WARP-2127 — Dentrix Ascend: the cloud dental PMS, read over Henry Schein
 // One's published Public API. This is the Dentrix surface that CAN be written
 // honestly — the on-premise Developer Program withholds its schema as policy,
