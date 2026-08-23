@@ -187,7 +187,9 @@ export interface DentrixAscendConfig {
   baseUrl?: string;
   /** Pointer into the encrypted secret store — never a token. */
   credentialsSecretRef: string;
-  /** Page size for list reads. The API paginates by page/pageSize. */
+  /** Page size for list reads. The API paginates by page/pageSize. Must be an
+   *  integer >= 1 — validated at construction, because a smaller value makes
+   *  the pagination loop's short-page exit unreachable. */
   pageSize?: number;
 }
 
@@ -215,6 +217,26 @@ export interface AscendStatus {
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_PAGE_SIZE = 200;
+/**
+ * Hard ceiling on pages fetched by one list read. The loop's NORMAL exit is a
+ * short page; this bounds what happens when that exit never comes — a server
+ * that keeps returning full pages, whether misbehaving or malicious, must not
+ * turn a single `runRead` into unbounded outbound calls (the per-request
+ * timeout bounds one call, not how many are made).
+ *
+ * Sized from the largest honest result these reads can produce: a full day's
+ * schedule across a very large multi-location organization is a few thousand
+ * appointments, and a surname search is far smaller. 100 pages × the default
+ * 200-row page = 20,000 rows — several times that ceiling — so hitting the cap
+ * means the server is not converging, and the read THROWS rather than
+ * returning rows silently truncated at an arbitrary point.
+ *
+ * Deliberately NOT the QuickBooks track's CallBudget: Ascend's rate limits
+ * are per-endpoint and dynamic (429 is handled where it arrives), and there
+ * is no shared metered pool for a runaway read to exhaust — so a per-read
+ * page ceiling is the right shape here, not a cross-read budget.
+ */
+export const ASCEND_MAX_LIST_PAGES = 100;
 /** Refresh a minute early: a token expiring mid-flight surfaces as a 401 that
  *  looks like a revocation. */
 const TOKEN_SKEW_MS = 60_000;
@@ -249,7 +271,20 @@ export class DentrixAscendConnector implements Connector {
     // dial should fail to build, loudly, rather than look fine until the first
     // read ships a token.
     this.baseUrl = assertSafeAscendBaseUrl(config.baseUrl ?? ASCEND_PRODUCTION_BASE_URL);
-    this.pageSize = config.pageSize ?? DEFAULT_PAGE_SIZE;
+    const pageSize = config.pageSize ?? DEFAULT_PAGE_SIZE;
+    // Also at construction: the pagination loop's normal exit is
+    // `data.length < pageSize`, and with pageSize 0 that is `0 < 0` — false
+    // even for an EMPTY page, so the loop could never exit on its own and
+    // every list read would burn to the page cap. Refuse the config typo
+    // where it was made.
+    if (!Number.isInteger(pageSize) || pageSize < 1) {
+      throw new ConnectorBlockedError(
+        `construct (pageSize ${String(pageSize)} cannot terminate pagination)`,
+        "set pageSize to an integer >= 1, or omit it for the default of " +
+          `${DEFAULT_PAGE_SIZE} — a page size below 1 makes the short-page exit unreachable`,
+      );
+    }
+    this.pageSize = pageSize;
   }
 
   private blocked(op: string, detail?: string): ConnectorBlockedError {
@@ -330,19 +365,44 @@ export class DentrixAscendConnector implements Connector {
    * with `page`/`pageSize` query parameters. Stops on a short page — the vendor
    * documents `meta.pagination.total`, but trusting a count we did not compute
    * over a page we did receive is the wrong way round.
+   *
+   * The short page is the only exit the SERVER controls, so two bounds of our
+   * own apply on top of it: a full page opening with the exact row the
+   * previous page opened with means the `page` parameter is not being
+   * honoured and further requests would fetch the same rows forever; and
+   * `ASCEND_MAX_LIST_PAGES` (reasoning on the constant) stops a server that
+   * keeps producing novel full pages. Both throw — rows silently truncated at
+   * an arbitrary point would be worse than no rows at all.
    */
   private async list(op: string, path: string, filter: string): Promise<Record<string, unknown>[]> {
     const rows: Record<string, unknown>[] = [];
-    for (let page = 1; ; page += 1) {
+    let priorFirstRow: string | null = null;
+    for (let page = 1; page <= ASCEND_MAX_LIST_PAGES; page += 1) {
       const body = (await this.get(op, path, {
         filter,
         page: String(page),
         pageSize: String(this.pageSize),
       })) as Record<string, unknown>;
       const data = Array.isArray(body.data) ? (body.data as Record<string, unknown>[]) : [];
+      // Cheap no-progress fingerprint: a page's first row. An empty page never
+      // reaches the comparison — it returns as a short page below.
+      const firstRow = data.length > 0 ? JSON.stringify(data[0]) : null;
+      if (firstRow !== null && firstRow === priorFirstRow) {
+        throw this.blocked(
+          op,
+          "Dentrix Ascend returned the same page twice in a row — the server ignored the " +
+            "page parameter, so paging further would refetch identical rows without end",
+        );
+      }
+      priorFirstRow = firstRow;
       rows.push(...data);
       if (data.length < this.pageSize) return rows;
     }
+    throw this.blocked(
+      op,
+      `Dentrix Ascend was still returning full pages after ${ASCEND_MAX_LIST_PAGES} pages — ` +
+        "refusing to page further; this result is larger than any honest answer to this read",
+    );
   }
 
   async connect(): Promise<void> {
@@ -498,6 +558,13 @@ export class DentrixAscendConnector implements Connector {
             "no location id is configured — the aging-balance report requires filter=location.id==N",
           );
         }
+        // `page==1` is deliberately pinned — this read is SINGLE-SHOT. The
+        // report does not paginate like the list endpoints: its envelope is
+        // one rolled-up AgingBalanceReportV1 object, not the `data[]` +
+        // `meta.pagination` contract `list()` pages through, and its `page`
+        // term rides the filter grammar with no page size and no end-of-pages
+        // signal documented. A loop here would be a guessed termination
+        // contract, which this connector refuses everywhere else.
         const body = (await this.get(op, "/v1/agingbalances/report", {
           filter: `location.id==${locationId},page==1`,
         })) as Record<string, unknown>;

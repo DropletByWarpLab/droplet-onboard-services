@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   ASCEND_DATASETS,
+  ASCEND_MAX_LIST_PAGES,
   ASCEND_PRODUCTION_BASE_URL,
   ASCEND_SANDBOX_BASE_URL,
   ASCEND_SPEC_VERSION,
@@ -175,6 +176,29 @@ describe("construction", () => {
     expect(assertSafeAscendBaseUrl(ASCEND_SANDBOX_BASE_URL)).toBe(ASCEND_SANDBOX_BASE_URL);
     expect(assertSafeAscendBaseUrl(ASCEND_PRODUCTION_BASE_URL)).toBe(ASCEND_PRODUCTION_BASE_URL);
   });
+
+  it("refuses a pageSize that cannot terminate pagination", () => {
+    // The pagination loop's normal exit is `data.length < pageSize`. With
+    // pageSize 0 that is `0 < 0` — false even for an EMPTY page, so the loop
+    // could never exit on its own. Refused at construction, where the config
+    // typo is, rather than surfacing per read as a page-cap error.
+    // Mutation: drop the floor check -> constructing succeeds -> red.
+    for (const pageSize of [0, -1, Number.NaN, 1.5]) {
+      expect(
+        () =>
+          new DentrixAscendConnector({
+            organizationId: ORG,
+            credentialsSecretRef: "r",
+            pageSize,
+          }),
+        `pageSize ${pageSize} was accepted`,
+      ).toThrow(ConnectorBlockedError);
+    }
+    // And the refusal says what to do about it, not just that it happened.
+    expect(
+      () => new DentrixAscendConnector({ organizationId: ORG, credentialsSecretRef: "r", pageSize: 0 }),
+    ).toThrow(/integer/);
+  });
 });
 
 // ── the contract: real endpoints, real filters, real headers ────────────────
@@ -238,6 +262,60 @@ describe("requests match the published spec", () => {
     expect(rows).toHaveLength(3);
     expect(calls).toHaveLength(2);
     expect(new URL(calls[1].url).searchParams.get("page")).toBe("2");
+  });
+});
+
+// ── pagination is BOUNDED — one read can never dial without limit ──────────
+
+describe("pagination stays bounded", () => {
+  /** A distinct full page per index: ids never repeat, so only the page cap —
+   *  not the short-page exit and not the repeated-page guard — can stop the
+   *  loop. */
+  const distinctFullPage = (p: number) => ({
+    data: [
+      { id: p * 2, firstName: "A", lastName: "Zed" },
+      { id: p * 2 + 1, firstName: "B", lastName: "Zed" },
+    ],
+  });
+
+  it("gives up at the page cap instead of dialing forever", async () => {
+    // The loop's only NORMAL exit is a short page. A server that keeps
+    // returning full pages (misbehaving or malicious) must not turn one
+    // runRead into unbounded outbound calls.
+    //
+    // The stub deliberately EXHAUSTS: cap+2 full pages, then a short one. So
+    // the mutation (remove the cap) does not hang this test — the loop reaches
+    // the short page, RESOLVES with rows, and the instanceof assertion below
+    // fails immediately.
+    const pages = [
+      ...Array.from({ length: ASCEND_MAX_LIST_PAGES + 2 }, (_, p) => distinctFullPage(p)),
+      { data: [{ id: 999_999, firstName: "C", lastName: "Zed" }] },
+    ];
+    const { c, calls } = ascend({ pages, pageSize: 2 });
+    const err = await c.runRead("find_patient", { query: "zed" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect((err as Error).message).toContain(`${ASCEND_MAX_LIST_PAGES} pages`);
+    // The throw happened AT the cap: exactly cap requests went out, not cap+3.
+    // Mutation: check the cap after fetching instead of bounding the loop ->
+    // an extra request leaks -> red.
+    expect(calls).toHaveLength(ASCEND_MAX_LIST_PAGES);
+  });
+
+  it("detects a server that ignores the page parameter without burning the whole cap", async () => {
+    // Same page twice in a row means the `page` query parameter is not being
+    // honoured — every further request would fetch the same rows again. Two
+    // calls prove it; the cap's worth of calls would just be waste.
+    //
+    // The stub again exhausts (identical full pages, then a short one), so the
+    // mutation (remove the repeated-page guard) resolves fast with duplicated
+    // rows instead of hanging — and fails the instanceof and call-count
+    // asserts below.
+    const same = distinctFullPage(0);
+    const { c, calls } = ascend({ pages: [same, same, same, same, same, same, { data: [] }], pageSize: 2 });
+    const err = await c.runRead("find_patient", { query: "zed" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect((err as Error).message).toMatch(/page parameter/);
+    expect(calls).toHaveLength(2);
   });
 });
 
