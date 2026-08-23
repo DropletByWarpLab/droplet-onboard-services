@@ -101,8 +101,15 @@ const TIER_2_OPERATIONS = new Set([
   // Switch — PoE
   "switch_poe_enable",
   "switch_poe_disable",
-  // Switch — WAN detection
-  "switch_wan_detect",
+  // No `switch_wan_detect` entry on purpose (WARP-2125): WAN detection is a
+  // pure read — the driver walks get_ports() and answers {wan_port,
+  // confidence, reason} without touching switch state — so it is Tier 1 and
+  // POST /switch/wan/detect executes directly (still rate-limited + audited).
+  // As a Tier-2 op it minted a token /switch/command/confirm had no case for
+  // (the WARP-1984 mint-without-redeemer class; that dispatcher is typed
+  // around SwitchWriteResult, which a detection result is not), so confirming
+  // answered "Unknown operation" and detection could never complete. Pinned by
+  // switch-wan-detect.routes.test.ts + confirm-dispatcher-coverage.guard.
   // Switch — camera setup (bulk VLAN change)
   "switch_setup_cameras",
   // Switch — re-apply the managed provisioning layout (§7 POST /provision)
