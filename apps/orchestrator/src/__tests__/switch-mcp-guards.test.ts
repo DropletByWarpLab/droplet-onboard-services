@@ -5,7 +5,9 @@
  *   get_switch_ports   → GET  /api/switch/ports        (open read)
  *   get_switch_poe     → GET  /api/switch/poe          (open read)
  *   get_switch_vlans   → GET  /api/switch/vlans        (open read)
- *   detect_wan_port    → POST /api/switch/wan/detect   (Tier-2 write)
+ *   detect_wan_port    → POST /api/switch/wan/detect   (Tier-1 read since
+ *                        WARP-2125 — RBAC-guarded like the writes, but it
+ *                        executes directly instead of minting a confirmation)
  *   set_port_poe       → POST /api/switch/poe/:port/enable|disable (Tier-2 write)
  *   set_port_vlan      → POST /api/switch/vlans/:id/membership     (Tier-2 write)
  *   setup_camera_ports → POST /api/switch/setup/cameras            (Tier-2 write)
@@ -142,7 +144,6 @@ const WRITES: {
   body?: unknown;
   downstream: unknown;
 }[] = [
-  { label: "detect_wan_port → POST /api/switch/wan/detect", method: "post", path: "/api/switch/wan/detect", downstream: mockDetectWan },
   { label: "set_port_poe → POST /api/switch/poe/3/enable", method: "post", path: "/api/switch/poe/3/enable", downstream: mockEnablePoe },
   { label: "set_port_poe → POST /api/switch/poe/3/disable", method: "post", path: "/api/switch/poe/3/disable", downstream: mockDisablePoe },
   {
@@ -175,8 +176,34 @@ describe("switch write routes admit the MCP principal, reaching the Tier-2 safet
   }
 });
 
+// WARP-2125: detection is a Tier-1 read (pure — returns {wan_port, confidence,
+// reason}, writes nothing), so unlike the WRITES above the allowed path
+// executes directly: no 202, no token. The safety tier still runs (RBAC +
+// audit), which is what admission means for this route now.
+describe("detect_wan_port is Tier 1: the MCP principal reaches the safety layer and detection executes (WARP-1462/WARP-2125)", () => {
+  it("detect_wan_port → POST /api/switch/wan/detect: _service:mcp gets the detection body, no mint", async () => {
+    mockEvaluate.mockResolvedValue({ allowed: true, tier: 1 } as never);
+    const res = await request(buildApp(mcpPrincipal)).post("/api/switch/wan/detect").send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ wan_port: 9 });
+    expect(res.body.confirmationToken).toBeUndefined();
+    expect(mockDetectWan).toHaveBeenCalledOnce();
+    expect(mockEvaluate).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * The detect route rides the same human-RBAC loop as the writes: Tier 1
+ * changed WHAT an allowed call does (execute vs mint), not WHO may call it.
+ */
+const MCP_GUARDED = [
+  ...WRITES,
+  { label: "detect_wan_port → POST /api/switch/wan/detect", method: "post" as const, path: "/api/switch/wan/detect", downstream: mockDetectWan },
+];
+
 describe("switch write routes keep human RBAC unchanged (WARP-1462)", () => {
-  for (const w of WRITES) {
+  for (const w of MCP_GUARDED) {
     it(`${w.label}: owner reaches the safety tier (not 403)`, async () => {
       mockEvaluate.mockResolvedValue({
         requiresConfirmation: true, confirmationToken: "tok-owner", reason: "tier2", tier: 2,

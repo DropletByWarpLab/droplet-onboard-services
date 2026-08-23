@@ -101,8 +101,16 @@ const TIER_2_OPERATIONS = new Set([
   // Switch — PoE
   "switch_poe_enable",
   "switch_poe_disable",
-  // Switch — WAN detection
-  "switch_wan_detect",
+  // No WAN-detection entry on purpose (WARP-2125): `switch_wan_detect` is a
+  // pure read in every driver — the switch service's `detect_wan_port()` calls
+  // `get_ports()`, picks the linked SFP port (else the first linked copper)
+  // and returns `{wan_port, confidence, reason}`; no uci calls, no persisted
+  // state. Confirm-gating it minted a token the write dispatcher
+  // (POST /switch/command/confirm, typed around SwitchWriteResult) could never
+  // redeem, so detection answered "Unknown operation" forever — the WARP-2122
+  // class. A read has no blast radius to confirm; Tier 1 keeps RBAC + audit
+  // via evalSwitchCommand. Pinned by switch-wan-detect.routes.test.ts and
+  // confirm-dispatcher-coverage.guard.test.ts.
   // Switch — camera setup (bulk VLAN change)
   "switch_setup_cameras",
   // Switch — re-apply the managed provisioning layout (§7 POST /provision)

@@ -159,6 +159,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   recordActivityMock.mockResolvedValue(null);
   // Switch writes reach the Tier-2 safety layer → 202 mint (never executes).
+  // The uniform mint is fine even for the Tier-1 /switch/wan/detect read
+  // (WARP-2125): this suite asserts only ADMISSION (not 401/403), and the
+  // routes forward whatever verdict the mocked safety service returns —
+  // tier truth lives in switch-wan-detect.routes.test.ts, which runs the
+  // real safety service.
   vi.mocked(evaluateNetworkCommand).mockResolvedValue({
     requiresConfirmation: true, confirmationToken: "tok", reason: "tier2", tier: 2,
   } as never);

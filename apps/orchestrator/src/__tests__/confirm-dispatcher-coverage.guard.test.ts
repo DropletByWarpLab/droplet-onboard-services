@@ -92,15 +92,9 @@ const INLINE_CONFIRM_OPERATIONS = new Set([
  * exact match, so fixing an entry without deleting it here also fails: the list
  * can only shrink, and it is never evidence that the behaviour is acceptable.
  */
-const UNREDEEMABLE_TODAY = [
-  // POST /switch/wan/detect mints Tier-2 `switch_wan_detect`, but
-  // /switch/command/confirm has no case for it, so confirming answers
-  // "Unknown operation" and WAN detection can never complete. Found by this
-  // guard while fixing set_ssh_access; needs its own ticket, because the fix
-  // is not just a case — detectWanPort() returns a detection result, not the
-  // SwitchWriteResult that dispatcher is typed around, which raises the prior
-  // question of why a read-only detection is confirm-gated at all.
-  "switch_wan_detect",
+const UNREDEEMABLE_TODAY: string[] = [
+  // (empty — WARP-2125 cleared `switch_wan_detect` by dropping the read-only
+  // detection below Tier 2, so nothing mints a token nothing can redeem.)
 ];
 
 const QUOTES = new Set(['"', "'", "`"]);

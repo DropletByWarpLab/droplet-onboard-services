@@ -510,7 +510,11 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
   // --- WAN Detection ---
 
   // WARP-1462: admit `_service:mcp` so the detect_wan_port LLM tool reaches the
-  // Tier-2 safety layer (phantom-target fix). Human RBAC unchanged.
+  // safety layer (phantom-target fix). Human RBAC unchanged.
+  // WARP-2125: that layer is Tier 1 now, not Tier 2 — detection is a pure read
+  // (returns {wan_port, confidence, reason}, writes nothing), so it executes
+  // directly under the same RBAC + audit instead of minting a confirmation
+  // token the write dispatcher could never redeem.
   router.post("/switch/wan/detect", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const userId = requireUserId(req.user?.id);
