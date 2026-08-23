@@ -203,6 +203,19 @@ services:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-2131: the model-catalog sidecar. SET EXPLICITLY — this is not
+      # cosmetic. model-catalog.service.ts does NOT treat an unset value as
+      # "no manager"; it falls back to http://host.docker.internal:8002, and
+      # the orchestrator carries `extra_hosts: host.docker.internal:host-gateway`
+      # below. So "unset" resolves to the HOST's :8002 — which is exactly where
+      # a separately-deployed droplet-local-LLM compose project publishes, and
+      # that project points at the empty standby Ollama. Naming the in-compose
+      # service removes the fallback entirely.
+      - INFERENCE_MANAGER_URL=http://inference-manager:8002
+      # NOTE: INFERENCE_AUTH_TOKEN is deliberately NOT re-declared here. It
+      # arrives via `env_file: ../.env` above; re-declaring it as a ${...}
+      # substitution would resolve against docker/.env and shadow it with "" —
+      # the SERVICE_TOKEN_RAG_EVAL post-mortem further down this block.
       # WARP-1118 (§10): the orchestrator's request-size estimator
       # (context-budget.service.ts) budgets the assembled chat request against
       # this window before dispatch, PREVENTING (not merely detecting) the
@@ -1240,6 +1253,14 @@ services:
       - GRPC_PORT=50051
       # WARP-560: inbound service-auth bearer. The ai-gateway's
       # ServiceAuthMiddleware requires this on every /ai/* route (except
+      # WARP-2131: the appliance-limits + readiness probe target. Before this
+      # service existed on this shape the probe was skipped entirely, which
+      # ollama_local.py records as "the limits never size (outbound concurrency
+      # stuck at 1) and /ai/readiness is perpetually degraded". Naming it here
+      # sizes the limits from the real daemon and un-sticks readiness.
+      # No bearer needed: ai-gateway only calls /health, the one route
+      # auth.py exempts.
+      - INFERENCE_MANAGER_URL=http://inference-manager:8002
       # /ai/health). MUST equal the orchestrator's SERVICE_TOKEN_AI_GATEWAY env
       # (wired above to the same source). Empty = unauthenticated (dev only).
       # ADR-023 (C4): append https://${DROPLET_PUBLIC_FQDN} so the ai-gateway
@@ -2794,6 +2815,111 @@ services:
     mem_limit: ${DMR_MEM_LIMIT:-4g}
     cpus: ${DMR_CPUS:-4.0}
     pids_limit: ${DMR_PIDS_LIMIT:-2048}
+
+  # --- inference-manager (model catalog / lifecycle sidecar) ----------------
+  # WARP-2131. Vendored from droplet-local-LLM; see
+  # services/inference-manager/VENDORED.md for provenance and what was removed.
+  #
+  # This is what makes the Models page's "Available to install" section real.
+  # `GET /api/models/catalog` in the orchestrator proxies here; before this
+  # service existed on this shape the call had nothing to reach and the section
+  # silently never rendered (models/page.tsx guards on a non-empty list).
+  inference-manager:
+    build:
+      # Repo-root context, same as ai-gateway and file-indexer — the vendored
+      # Dockerfile's `COPY services/inference-manager/ .` needs it, and that
+      # copy is also what BAKES models/model-manifest.json into the image at
+      # /app/models/. Deliberately not a bind mount: upstream mounts the
+      # manifest as a single FILE, and a single-file bind mount breaks when
+      # git checks out a different branch under it — which this repo's deploy
+      # path does routinely.
+      context: ..
+      dockerfile: services/inference-manager/Dockerfile
+    container_name: droplet-inference-manager
+    profiles: ["dmr"]
+    restart: always
+    <<: *default-logging
+    # NO `ports:` — DELIBERATE, and the one place this diverges hardest from
+    # the upstream block, which publishes 8002 on every interface.
+    # `POST /models/pull` hands its identifier to the runtime, so this service
+    # is an arbitrary-registry-pull primitive exactly like DMR's own API — and
+    # the `dmr` service above is loopback-bound for precisely that reason
+    # (ADR-036 §6). The orchestrator reaches this over the compose network as
+    # http://inference-manager:8002; nothing off-box has any business here.
+    depends_on:
+      # Upstream waits on `ollama`, which is profile-gated OFF on a DMR box —
+      # copying that verbatim means this service never starts.
+      dmr:
+        condition: service_started
+    environment:
+      # The lifecycle client's base URL. Named OLLAMA_URL for historical
+      # reasons; on this shape it is a DMR pointer (see runtime/factory.py).
+      OLLAMA_URL: http://dmr:12434
+      MODEL_MANIFEST: /app/models/model-manifest.json
+      VRAM_RESERVE_GB: ${VRAM_RESERVE_GB:-2}
+      # INFERENCE_AUTH_TOKEN is NOT listed here on purpose — it arrives via
+      # `env_file: ../.env` below, and the vendored auth.py reads that exact
+      # name. A `${INFERENCE_AUTH_TOKEN}` substitution here would resolve
+      # against docker/.env instead and shadow the real value with "", which is
+      # PERMISSIVE mode rather than a failure. See services/inference-manager/auth.py.
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Where the DMR model volume is mounted below. disk.py runs
+      # shutil.disk_usage against this before every pull. Upstream points at
+      # `ollama-data`; on this box that volume was removed with the Ollama
+      # image, and it is the wrong store to size a DMR pull against anyway.
+      OLLAMA_DATA_PATH: /data/models
+      # Queue limits surfaced on /health.limits, which ai-gateway reads to size
+      # its outbound concurrency. Same defaults as the runtimes above; these
+      # MUST agree or /health reports limits the daemon does not run.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_MAX_QUEUE: ${OLLAMA_MAX_QUEUE:-16}
+    # BARE NAMES, not `VAR: ${VAR:-}` — load-bearing, and the difference is
+    # invisible until it bites. Listed bare, compose passes the variable
+    # through ONLY when the operator actually set it. Written as `${VAR:-}` it
+    # hands the process an EMPTY STRING on every box that configured nothing,
+    # which runtime/factory.py treats as a misconfiguration and logs at WARNING
+    # on every start — a permanent false alarm caused by nothing being wrong.
+    # INFERENCE_RUNTIME_URL must be set in the same edit as INFERENCE_RUNTIME=dmr:
+    # with the runtime flipped and the URL unset, resolve_base_url() falls back
+    # to OLLAMA_URL and the DMR adapter talks OCI-shaped ids at whatever is there.
+    env_file:
+      - ../.env
+    volumes:
+      # Read-only: the disk preflight only needs stat/traverse on the mount to
+      # read the filesystem's free-space counters, never the model blobs.
+      - dmr-models:/data/models:ro
+      # Read-only: vram.py reads
+      # /sys/class/drm/card*/device/mem_info_vram_total to size the VRAM gate,
+      # taking the MAX across cards so this box's 512 MiB iGPU cannot win over
+      # the 16 GB dGPU. Harmless when absent — detection falls back to
+      # /proc/meminfo.
+      - /sys/class/drm:/sys/class/drm:ro
+    # Hardening: a FastAPI sidecar running as non-root that reads its own code
+    # and makes outbound HTTP. It needs no capabilities and must not gain any.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    healthcheck:
+      # python3.12-slim carries no curl/wget; use the stdlib. /health is the
+      # one auth-exempt route (auth.py `_EXEMPT_PATHS`), so this probe works
+      # without the bearer token.
+      test:
+        - "CMD-SHELL"
+        - >-
+          python3 -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health',timeout=3).status==200 else 1)"
+          || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 30s
+    mem_limit: ${INFERENCE_MANAGER_MEM_LIMIT:-512m}
+    cpus: ${INFERENCE_MANAGER_CPUS:-1.0}
+    pids_limit: ${INFERENCE_MANAGER_PIDS_LIMIT:-512}
 
   # --- OpenWrt (router-in-container) ---------------------------------------
   # Hosts the Wi-Fi AP (after `droplet-openwrt-attach` moves the host's
