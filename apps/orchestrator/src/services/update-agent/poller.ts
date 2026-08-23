@@ -128,6 +128,15 @@ export function channelTagPrefix(channel: string): string {
 
 export type CheckForUpdateResult =
   | { outcome: "no_release" }
+  /**
+   * WARP-2133 — the releases endpoint 404'd and this box has NO
+   * DROPLET_OTA_GITHUB_TOKEN. GitHub answers 404 for a private repo
+   * whether or not releases exist when the request is unauthenticated,
+   * so a token-less box cannot distinguish "no release" from "no
+   * access". Distinct from no_release so nothing upstream paints an
+   * unprovisioned box as up to date.
+   */
+  | { outcome: "source_unauthenticated"; detail: string }
   | { outcome: "fetch_failed"; detail: string }
   | { outcome: "verify_failed"; failureReason: UpdateFailureReason; detail: string }
   | { outcome: "channel_mismatch"; releaseChannel: string; deviceChannel: string }
@@ -155,6 +164,30 @@ async function downloadAsset(
     throw new Error(`asset ${asset.name} download failed: HTTP ${res.status}`);
   }
   return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * WARP-2133 — shared honesty gate for a 404 from either releases
+ * endpoint. Unauthenticated, a private repo's releases endpoints 404
+ * regardless of whether releases exist, so without a token a 404 means
+ * "this box cannot see its update source", not "no release". Returns
+ * the typed outcome to relay, or null when the 404 is trustworthy
+ * (a token was sent — the repo is visible and genuinely empty).
+ */
+function unauthenticated404(
+  githubToken: string | undefined,
+  log: pino.Logger,
+  endpoint: "latest" | "list",
+): Extract<CheckForUpdateResult, { outcome: "source_unauthenticated" }> | null {
+  if (githubToken) return null;
+  const detail =
+    `releases ${endpoint} endpoint returned 404 with no DROPLET_OTA_GITHUB_TOKEN configured — ` +
+    "this box cannot see its update source, so no update would ever be found";
+  log.warn(
+    { event: "update.source_unauthenticated", detail },
+    "OTA update source is not provisioned on this box",
+  );
+  return { outcome: "source_unauthenticated", detail };
 }
 
 /**
@@ -186,7 +219,12 @@ export async function checkForUpdate(
     try {
       const res = await fetchImpl(opts.releasesLatestUrl, { headers });
       if (res.status === 404) {
-        // No release published yet — normal on a fresh repo, debug only.
+        // WARP-2133: without a token this 404 is "cannot see the source",
+        // not "no release" — say so loudly instead of implying up-to-date.
+        const unprovisioned = unauthenticated404(opts.githubToken, log, "latest");
+        if (unprovisioned) return unprovisioned;
+        // Authenticated 404: no release published yet — normal on a
+        // fresh repo, debug only.
         log.debug?.({ event: "update.no_release" }, "no OTA release published yet");
         return { outcome: "no_release" };
       }
@@ -214,6 +252,12 @@ export async function checkForUpdate(
     let listed: GithubLatestRelease[];
     try {
       const res = await fetchImpl(listUrl, { headers });
+      if (res.status === 404) {
+        // WARP-2133: same honesty gate as the stable path — a token-less
+        // 404 here is an unprovisioned source, not an unreachable feed.
+        const unprovisioned = unauthenticated404(opts.githubToken, log, "list");
+        if (unprovisioned) return unprovisioned;
+      }
       if (!res.ok) {
         const detail = `releases list endpoint returned HTTP ${res.status}`;
         log.warn({ event: "update.check_failed", detail }, "OTA release check failed");

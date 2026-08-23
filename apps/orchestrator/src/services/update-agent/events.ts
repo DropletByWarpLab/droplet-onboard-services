@@ -23,6 +23,14 @@ export const UPDATE_EVENTS = {
   "update.check_started": "poller",
   /** debug — no OTA release published yet (fresh repo; normal). */
   "update.no_release": "poller",
+  /**
+   * warn — WARP-2133: a releases endpoint 404'd with NO
+   * DROPLET_OTA_GITHUB_TOKEN configured. Unauthenticated, a private
+   * repo's releases endpoints 404 whether or not releases exist, so
+   * this box cannot see its update source at all — a provisioning gap,
+   * never to be read as "no release / up to date".
+   */
+  "update.source_unauthenticated": "poller",
   /** warn — the releases endpoint/asset fetch failed (transient). */
   "update.check_failed": "poller",
   /** warn — cosign REFUSED the manifest signature. No row written. */

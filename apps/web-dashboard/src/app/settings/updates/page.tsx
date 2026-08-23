@@ -108,6 +108,14 @@ function checkOutcomeCopy(result: CheckNowResult): { ok: boolean; text: string }
         ok: false,
         text: "The latest release is for a different channel than this box follows.",
       };
+    case "source_unauthenticated":
+      // WARP-2133: a token-less box gets a 404 it cannot interpret —
+      // "no release" and "no access" look identical. This must read as a
+      // provisioning gap, never as "no updates, all good".
+      return {
+        ok: false,
+        text: "Update source not provisioned — this box has no credentials for the release feed, so it can't tell whether updates exist.",
+      };
     case "verify_failed":
       return {
         ok: false,
