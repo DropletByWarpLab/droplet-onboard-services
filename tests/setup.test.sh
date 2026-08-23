@@ -1841,8 +1841,9 @@ echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml 
 # scripts/lib/compose.sh: rag-eval / web-fetch are appended at runtime only
 # when their profile (eval / web) is active; openwrt (single-box), ops-console
 # (ops) and fleet-agent (telemetry) are profile-gated services no default
-# provision pre-builds.
-BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent"
+# provision pre-builds. inference-manager (dmr) is appended the same way —
+# WARP-2131's model-catalog sidecar, built only on a box running that runtime.
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).

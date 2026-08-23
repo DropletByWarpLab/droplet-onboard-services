@@ -373,6 +373,16 @@ generate_env() {
   # the bearer is the second layer of defense. Rotates independently of
   # all other secrets so support can hand it off / revoke per-engagement.
   ops_token=$(openssl rand -hex 32)
+  # WARP-2131: bearer the orchestrator and ai-gateway present to the
+  # inference-manager sidecar. NOT optional in practice: auth.py treats an
+  # EMPTY AUTH_TOKEN as permissive mode — every caller accepted on every route
+  # except /health — and that service's POST /models/pull hands its identifier
+  # straight to the runtime, making it an arbitrary-registry-pull primitive.
+  # The service publishes no host port, so this is defence in depth behind the
+  # compose network boundary, not the only control. Compose wires all three
+  # ends (sidecar AUTH_TOKEN, orchestrator, ai-gateway) to
+  # ${INFERENCE_AUTH_TOKEN}.
+  inference_auth_token=$(openssl rand -hex 32)
   # WARP-339: shared bearer the mcp-server presents on outbound calls
   # back to the orchestrator's REST surface (matter, audit-log, etc.).
   # Same authMiddleware path as voice — distinct token so the two
@@ -662,6 +672,13 @@ SERVICE_TOKEN_AI_GATEWAY=$service_token_ai_gateway
 # API. Loopback-only bind + reverse tunnel is the first line of defense;
 # this bearer is the second. Rotate per support engagement if needed.
 OPS_TOKEN=$ops_token
+
+# --- inference-manager sidecar bearer (WARP-2131) ---
+# Presented by the orchestrator (model catalog + pulls) and the ai-gateway
+# (appliance /health limits probe) to inference-manager on :8002. An EMPTY
+# value is PERMISSIVE mode in that service's auth.py, not "no auth needed" —
+# compose refuses to start the sidecar without it.
+INFERENCE_AUTH_TOKEN=$inference_auth_token
 
 # --- MCP service bearer (mcp-server → orchestrator REST) ---
 # WARP-339. Same shape as SERVICE_TOKEN_VOICE: the mcp-server presents
@@ -989,6 +1006,10 @@ migrate_env() {
   # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
   # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
   _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
+  # WARP-2131 backfill: existing installs predate the inference-manager
+  # sidecar. Without this key its AUTH_TOKEN would expand empty, which is
+  # PERMISSIVE mode rather than a startup failure — so the gap would be silent.
+  _migrate_ensure_key INFERENCE_AUTH_TOKEN "$(openssl rand -hex 32)"
   # WARP-560 backfill: existing installs predate the ai-gateway inbound-auth
   # token. Minting it (and the compose wire on both ends) closes the gap where
   # /ai/chat, /ai/sessions/*, and /ai/keys/* were reachable with no auth.

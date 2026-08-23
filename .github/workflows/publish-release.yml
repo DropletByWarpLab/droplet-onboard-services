@@ -213,6 +213,7 @@ jobs:
             # portaudio/alsa import-time deps (mirrors voice-io-tests.yml)
             sysdeps: libportaudio2 alsa-utils
           - service: device-identity-svc
+          - service: inference-manager
             # tpm2-pytss builds against tss2-esapi headers
             # (mirrors device-identity-svc-tests.yml)
             sysdeps: libtss2-dev pkg-config

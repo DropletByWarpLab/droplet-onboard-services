@@ -51,12 +51,13 @@
  */
 import {
   ConnectorBlockedError,
+  assertDatasetsServed,
   type Connector,
   type IntrospectionResult,
 } from "../connector.js";
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
-import { sortByKey } from "../api-dto.js";
+import { sortByKey, sumMoney, sumMoneyWithGaps } from "../api-dto.js";
 import {
   GENERIC_VENDOR,
   knownVendors,
@@ -187,6 +188,22 @@ const DEFAULT_MIN_REFRESH_MS = 60_000;
 
 export class ExportDropConnector implements Connector {
   readonly provider: string;
+  /**
+   * Computed from the profiles in force, not hardcoded (WARP-2107).
+   *
+   * This track's capability genuinely is configuration: a `quickbooks-export`
+   * connection serves invoices and bills, a `dentrix-export` one serves
+   * appointments and patients, and an operator profile can introduce either at
+   * a site visit without a release. Hardcoding a list here would make the one
+   * track that adapts to the practice the one track that lies about it.
+   *
+   * Note what this is NOT: a claim that rows exist. A profile declaring `bill`
+   * means "this vendor's export can carry bills"; whether the practice actually
+   * dropped that report is a freshness question, and `rowsFor` answers it with
+   * a blocked error naming the missing report — which an operator can act on,
+   * unlike a capability, which they cannot.
+   */
+  readonly servesDatasets: readonly string[];
 
   private readonly profiles: ExportProfile[];
   private readonly now: () => number;
@@ -204,6 +221,9 @@ export class ExportDropConnector implements Connector {
   ) {
     this.provider = exportProviderFor(config.vendor);
     this.profiles = profilesForVendor(config.vendor, deps.profiles ?? []);
+    this.servesDatasets = [
+      ...new Set(this.profiles.flatMap((p) => p.datasets.map((d) => d.dataset))),
+    ].sort();
     this.now = deps.now ?? (() => Date.now());
     this.limits = { ...DEFAULT_SCAN_LIMITS, ...deps.limits };
     this.minRefreshMs = deps.minRefreshMs ?? DEFAULT_MIN_REFRESH_MS;
@@ -288,7 +308,20 @@ export class ExportDropConnector implements Connector {
         this.config.vendor === GENERIC_VENDOR
           ? `vendor "${GENERIC_VENDOR}" has no built-in profiles — supply one via ERP_EXPORT_DROP_PROFILES`
           : `no profile is registered for vendor "${this.config.vendor}"`;
-      throw this.blocked("connect", hint);
+      // SCAN FIRST, then block. Shipping no profile for a vendor is only
+      // defensible because the operator gets told what the files actually look
+      // like — that is what lets them author the right mapping on site, from
+      // the export in front of them. Throwing before the scan withheld exactly
+      // that, leaving "no profile is registered" and nothing to act on. The
+      // scan is bounded and read-only, so doing it here costs one directory
+      // pass and buys the whole discovery path.
+      const seen = await this.refresh().catch(() => null);
+      const sample = (seen?.diagnostics ?? [])
+        .filter((d) => d.reason === "unrecognized")
+        .slice(0, 3)
+        .map((d) => `${d.file} [${(d.headers ?? []).join(" | ")}]`)
+        .join("; ");
+      throw this.blocked("connect", sample ? `${hint}; saw ${sample}` : hint);
     }
 
     const snapshot = await this.refresh();
@@ -400,7 +433,28 @@ export class ExportDropConnector implements Connector {
     // Validate the query name against the shared registry FIRST, so an unknown
     // name is an UnknownReadQueryError regardless of connection state — the
     // same ordering both other tracks use.
-    getReadQuery(name);
+    const query = getReadQuery(name);
+    // A vendor with NO profile in force is not a vendor that "will never have
+    // that data" — it is a vendor nobody has mapped yet, which is a different
+    // statement and a fixable one. Without this, `servesDatasets` is empty and
+    // every read raised DatasetNotServedError, whose documented meaning is
+    // "this connection works perfectly and will never have that data". For
+    // `generic-export` — whose whole purpose is to be mapped by an operator on
+    // site — that was a confident false statement telling the installer to give
+    // up. Checked BEFORE the capability check, because it is the more specific
+    // and more actionable answer.
+    if (this.profiles.length === 0) {
+      throw this.blocked(
+        `runRead:${name}`,
+        this.config.vendor === GENERIC_VENDOR
+          ? `vendor "${GENERIC_VENDOR}" has no built-in profiles — supply one via ERP_EXPORT_DROP_PROFILES`
+          : `no profile is registered for vendor "${this.config.vendor}"`,
+      );
+    }
+    // Then capability, before touching the snapshot: a vendor whose profile has
+    // no `bill` concept is not missing a file, and must not be told to go run
+    // an export that does not exist for their product.
+    assertDatasetsServed(this.provider, this.servesDatasets, name, query.dependsOnTables);
     const snapshot = await this.currentSnapshot(`runRead:${name}`);
     const op = `runRead:${name}`;
 
@@ -443,12 +497,43 @@ export class ExportDropConnector implements Connector {
         // Reproduces the SQL aggregate — and `api-dto.aggregateArSummary`'s
         // client-side equivalent — exactly: COUNT over rows, SUM over the
         // finite balances, and never the raw ledger rows.
-        let total = 0;
-        for (const row of rows) {
+        return [{ account_count: rows.length, total_balance: sumMoney(rows) }];
+      }
+
+      // ── WARP-2107 — accounting ──────────────────────────────────────────
+      //
+      // Both list reads filter on a non-zero balance rather than on `status`,
+      // matching the SQL the registry defines. A part-paid invoice is still
+      // money owed, and status vocabularies differ per product while "the
+      // balance is not zero" does not.
+      //
+      // `undefined` is NOT zero here. A row whose balance cell failed to parse
+      // is money we cannot account for, and dropping it from an open-items list
+      // understates the total silently. It is kept and surfaces as an undefined
+      // balance the caller can see.
+      case "get_open_invoices": {
+        const rows = this.rowsFor(snapshot, "invoice", op).filter((row) => {
           const n = Number(row.balance);
-          if (Number.isFinite(n)) total += n;
-        }
-        return [{ account_count: rows.length, total_balance: total }];
+          return !Number.isFinite(n) || n !== 0;
+        });
+        return sortByKey(sortByKey(rows, "invoice_id"), "due_at");
+      }
+
+      case "get_open_bills": {
+        const rows = this.rowsFor(snapshot, "bill", op).filter((row) => {
+          const n = Number(row.balance);
+          return !Number.isFinite(n) || n !== 0;
+        });
+        return sortByKey(sortByKey(rows, "bill_id"), "due_at");
+      }
+
+      case "get_ap_summary": {
+        const rows = this.rowsFor(snapshot, "ap_summary", op);
+        // Same method as get_ar_summary — COUNT over rows, SUM over the
+        // balances, never the raw rows — plus the gap count, so a total that
+        // omits an unreadable balance says so instead of just being short.
+        const { total, unaccounted } = sumMoneyWithGaps(rows);
+        return [{ vendor_count: rows.length, total_balance: total, unaccounted_count: unaccounted }];
       }
 
       default:

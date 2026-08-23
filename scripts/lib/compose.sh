@@ -258,6 +258,14 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,erp,*) build_services+=(erp-sql-bridge) ;;
   esac
+  # dmr profile: inference-manager (WARP-2131, the model-catalog sidecar) is
+  # `["dmr"]`-profiled and has a `build:` section, so the same "No such image"
+  # failure at `up` applies. Same build-only-when-active idiom: a box still on
+  # the ollama runtime never starts it, and building a python image there is
+  # pure waste.
+  case ",${active_profiles}," in
+    *,dmr,*) build_services+=(inference-manager) ;;
+  esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
   # Deliberately NOT in build_services (accounted for here, not built):
@@ -266,6 +274,8 @@ prepare_and_build() {
   #                 (WARP-1436 screened ambient-data fetcher)
   #   erp-sql-bridge — appended above only when the erp profile is active
   #                 (WARP-1106 direct-SQL ERP bridge)
+  #   inference-manager — appended above only when the dmr profile is active
+  #                 (WARP-2131 model-catalog sidecar)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned
@@ -287,7 +297,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then

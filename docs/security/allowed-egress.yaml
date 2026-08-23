@@ -386,6 +386,128 @@ entries:
     review_by: 2027-08-19
     code_refs: [docs/ADR-041-cloud-connector-class.md]
 
+  - id: quickbooks-online-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [quickbooks.api.intuit.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      QuickBooks Online connector (ADR-041) — reads the invoices, bills and
+      payables of a company the owner explicitly connected, via Intuit's v3
+      REST query API. Carries that financial content in the response.
+      READ-ONLY: the connector refuses every write, and nothing box-local is
+      ever sent. Unlike the M365 connector this track does NOT persist what it
+      reads — an accounting ledger is answered read-through, so no synced copy
+      exists to encrypt (ADR-041 §4 requires encryption at rest for a cloud
+      connector that persists; this one deliberately does not become the first
+      writer of the unencrypted ErpEntityCache, per WARP-2028). Off until the
+      owner connects a company. Metered by Intuit: reads are the charged half,
+      so the connector enforces a per-connection call ceiling.
+    ticket: WARP-2109
+    added: 2026-08-20
+    review_by: 2027-08-20
+    code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
+
+  - id: quickbooks-online-sandbox-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [sandbox-quickbooks.api.intuit.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      QuickBooks Online connector (ADR-041) pointed at Intuit's SANDBOX
+      environment — the operator-configurable baseUrl used for pre-production
+      connection validation against a sandbox company before a live one is
+      connected. Same v3 REST query API, same read-only/metered/read-through
+      posture as quickbooks-online-api; carries that sandbox company's ledger
+      content in the response. The connector's baseUrl guard is an EXACT host
+      set mirroring this registry (this host plus the production one — never a
+      *.intuit.com suffix), so registering it here is what makes it dialable
+      at all.
+    ticket: WARP-2109
+    added: 2026-08-22
+    review_by: 2027-08-22
+    code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
+
+  - id: quickbooks-online-oauth
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [oauth.platform.intuit.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Intuit OAuth 2.0 token endpoint for the QuickBooks Online connector
+      (ADR-041) — authorization-code exchange and refresh-token rotation.
+      Carries OAuth protocol traffic only: no ledger content, no box-local
+      content. Registered ahead of its caller: the connector in WARP-2109
+      deliberately does NOT hold the client secret and blocks rather than
+      refreshing, so the exchange lands with the orchestrator wiring. Intuit
+      ROTATES the refresh token on every use, so this path is exercised
+      routinely and not only at connect time.
+    ticket: WARP-2109
+    added: 2026-08-20
+    review_by: 2027-08-20
+    code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
+
+  - id: ref-dentrix-ascend-spec
+    kind: reference
+    service: orchestrator
+    destination:
+      # NOT an egress destination. This host appears only inside a source
+      # COMMENT recording where the Dentrix Ascend OpenAPI specification was
+      # fetched from, and its sha256, so a future reader can tell whether the
+      # contract the connector was written against has moved. The box never
+      # opens a connection to it — the API and token endpoints are
+      # prod/test.hs1api.com, registered separately above.
+      hosts: [papidocs.hs1api.com]
+    purpose: documentation URL for the Dentrix Ascend OpenAPI spec, cited in a source comment for provenance — not a connection the box makes
+    ticket: WARP-2127
+    added: 2026-08-20
+    review_by: 2027-08-20
+    code_refs: [services/erp-connector/src/dentrix/ascend-connector.ts]
+
+  - id: dentrix-ascend-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [prod.hs1api.com, test.hs1api.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Dentrix Ascend connector (ADR-041) — reads the schedule, patients and
+      aged receivables of a dental practice whose organization the owner
+      explicitly connected, via Henry Schein One's documented Public API
+      (OpenAPI 3.0.0, spec version 186.0.9). CARRIES PHI: patient names, dates
+      of birth and appointment records, not merely financial totals. Both hosts
+      also serve the OAuth client-credentials token endpoint, so this one entry
+      covers auth and data for each; the token traffic alone would be
+      data_class none, and the higher classification is recorded because the
+      same host carries both. READ-ONLY: the connector refuses every write, and
+      nothing box-local is ever sent. Read-through — nothing is persisted, so no
+      synced PHI copy exists to encrypt (ADR-041 §4; the unimplemented
+      ErpEntityCache encryption is WARP-2028). test.hs1api.com is the sandbox,
+      required during vendor enrolment. Off until an organization is connected.
+      ⚠ NOT YET ENABLED FOR ANY CUSTOMER: Henry Schein One's Developer
+      Agreement is unpublished and its redistribution/sublicensing terms have
+      not been reviewed against a shipped on-premise appliance holding the API
+      key on customer hardware. See WARP-2127.
+    ticket: WARP-2127
+    added: 2026-08-20
+    review_by: 2027-08-20
+    code_refs: [services/erp-connector/src/dentrix/ascend-connector.ts]
+
   # ── dynamic (config-driven) destinations ────────────────────────────────
   - id: fleet-hq-issuance
     kind: egress

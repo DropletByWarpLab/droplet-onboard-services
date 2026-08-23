@@ -85,6 +85,9 @@ export {
 export {
   EaglesoftConnector,
   ConnectorBlockedError,
+  DatasetNotServedError,
+  PRACTICE_DATASETS,
+  assertDatasetsServed,
   SQL_TRACK_REMEDIATION,
   fingerprintTables,
   type Connector,
@@ -159,8 +162,11 @@ export {
 export {
   BUILT_IN_PROFILES,
   CANONICAL_COLUMNS,
+  COLUMN_KIND,
   DATASETS,
+  DATASET_CATEGORY,
   GENERIC_VENDOR,
+  NAME_ONLY_VENDORS,
   REQUIRED_CANONICAL,
   assertValidProfile,
   knownVendors,
@@ -201,3 +207,103 @@ export {
   parseExportTimestamp,
   parseMoney,
 } from "./export-drop/values.js";
+
+// WARP-2107 — money aggregation shared by every track, so a total is a currency
+// figure rather than an accumulation of doubles.
+export { roundCents, sumMoney, sumMoneyWithGaps } from "./api-dto.js";
+
+// WARP-2109 — QuickBooks Online: the accounting REST track, and the only
+// connector that leaves the practice LAN. Read-only, metered, and inert until
+// an operator configures a company — see the module docstring for why the
+// budget guard is a v1 requirement rather than an optimisation.
+export {
+  QuickBooksOnlineConnector,
+  CallBudget,
+  QuotaExhaustedError,
+  ReauthorizationRequiredError,
+  blockedTokenResolver,
+  DEFAULT_CALL_CEILING,
+  QBO_DATASETS,
+  QBO_MAX_PAGES,
+  QBO_MAX_READ_WALL_MS,
+  QBO_MINOR_VERSION,
+  QBO_PRODUCTION_BASE_URL,
+  QBO_SANDBOX_BASE_URL,
+  QBO_TRACK_REMEDIATION,
+  QUICKBOOKS_ONLINE_PROVIDER,
+  QBO_ALLOWED_API_HOSTS,
+  UnsafeBaseUrlError,
+  assertSafeBaseUrl,
+  type CloudConnectionState,
+  type QboStatus,
+  type QboTokens,
+  type QuickBooksOnlineConfig,
+  type QuickBooksOnlineDeps,
+  type TokenPersister,
+  type TokenResolver,
+} from "./quickbooks/online-connector.js";
+
+// WARP-2127 — Dentrix Ascend: the cloud dental PMS, read over Henry Schein
+// One's published Public API. This is the Dentrix surface that CAN be written
+// honestly — the on-premise Developer Program withholds its schema as policy,
+// so a connector for that one would invent every field reference (WARP-2126).
+export {
+  DentrixAscendConnector,
+  AscendAuthorizationError,
+  UnsafeAscendBaseUrlError,
+  assertSafeAscendBaseUrl,
+  blockedAscendTokenResolver,
+  ASCEND_ALLOWED_HOST_SUFFIX,
+  ASCEND_DATASETS,
+  ASCEND_PRODUCTION_BASE_URL,
+  ASCEND_SANDBOX_BASE_URL,
+  ASCEND_SPEC_VERSION,
+  ASCEND_TRACK_REMEDIATION,
+  DENTRIX_ASCEND_PROVIDER,
+  type AscendConnectionState,
+  type AscendStatus,
+  type AscendToken,
+  type AscendTokenResolver,
+  type DentrixAscendConfig,
+  type DentrixAscendDeps,
+} from "./dentrix/ascend-connector.js";
+
+// WARP-2108 — QuickBooks Desktop: the track where the practice's machine calls
+// US. Intuit's Web Connector polls outward, so data flows machine -> box with
+// no inbound socket into the customer's finance workstation and nothing leaving
+// the LAN. Free from Intuit: no SDK fee, no app review, no royalty.
+export {
+  QuickBooksDesktopConnector,
+  QbdSnapshotStore,
+  QbwcSession,
+  QBD_DATASETS,
+  QBD_TRACK_REMEDIATION,
+  QUICKBOOKS_DESKTOP_PROVIDER,
+  type AuthenticateResult,
+  type QbdSnapshot,
+  type QbdStatus,
+  type QbwcCredentials,
+  type QbwcSessionDeps,
+  type QuickBooksDesktopConfig,
+  type QuickBooksDesktopDeps,
+} from "./quickbooks/desktop-connector.js";
+
+export {
+  QBXML_STEPS,
+  QBXML_VERSION,
+  QbxmlStatusError,
+  buildRequest as buildQbxmlRequest,
+  parseResponse as parseQbxmlResponse,
+  type QbxmlStep,
+} from "./quickbooks/qbxml.js";
+
+export {
+  DEFAULT_XML_LIMITS,
+  XmlError,
+  decodeEntities,
+  escapeXml,
+  parseXml,
+  textAt,
+  type XmlElement,
+  type XmlLimits,
+} from "./quickbooks/xml.js";

@@ -64,7 +64,7 @@ ERP_EXPORT_DROP_ROOT=/data/erp-exports
 
 The first is the **host** path compose bind-mounts (read-only) at `/data/erp-exports`; the second is the **container** path the orchestrator reads. Leaving `ERP_EXPORT_DROP_ROOT` empty is what keeps the track off: the mount can exist while nothing reads it.
 
-Then connect the integration with the provider key for the practice's product — `eaglesoft-export`, `dentrix-export`, `opendental-export`, or `generic-export`.
+Then connect the integration with the provider key for the practice's product — `eaglesoft-export`, `dentrix-export`, `opendental-export`, `quickbooks-export`, or `generic-export`.
 
 ### 3.3 The first connect will probably fail, and that is the useful part
 
@@ -75,7 +75,9 @@ connect (no exported report in /data/erp-exports matched a "eaglesoft" profile;
 saw schedule.csv [Appointment ID | Appt Date/Time | Provider | Op | Status | Patient ID])
 ```
 
-That is everything needed to write the right profile, which is the next section. A profile that does not match declines the file — it never guesses at it — so a wrong built-in costs one edit and can never produce wrong rows.
+That is everything needed to write the right profile, which is the next section. A profile that does not match declines the file — it never guesses at it — so a built-in that fails to match costs one edit and no wrong rows.
+
+**That guarantee is narrower than it first appears, and the difference is why one built-in was withdrawn.** It covers a guess that MISSES. A guess that MATCHES THE WRONG COLUMN produces wrong rows, cleanly parsed and indistinguishable from right ones. The specific shape to watch for is a mapping whose column *kind* disagrees with its header *name* — a canonical `timestamp` column mapped to a header called `"… Date"`, for instance, since `parseExportTimestamp` accepts a date-only cell and returns midnight, and the schedule read is a `[from, to)` window filter. Every appointment of the day would land at `00:00` in arbitrary order. A built-in must not be able to fail that way; an operator profile, written against the file in front of them, can be checked.
 
 ---
 
@@ -119,16 +121,37 @@ A profile maps one product's exported column headers onto the canonical row shap
 | `appointment` | `appt_id`, `appt_time`, `provider_id`, `operatory_id`, `status`, `patient_id` | `appt_id`, `appt_time` |
 | `patient` | `patient_id`, `first_name`, `last_name` | `patient_id`, `last_name` |
 | `account` | `account_id`, `balance` | `balance` |
+| `invoice` | `invoice_id`, `issued_at`, `due_at`, `customer_id`, `amount`, `balance`, `status` | `invoice_id`, `balance` |
+| `bill` | `bill_id`, `issued_at`, `due_at`, `vendor_id`, `amount`, `balance`, `status` | `bill_id`, `balance` |
+| `ap_summary` | `vendor_id`, `balance` | `balance` |
 
 A canonical column a profile does not map is present-and-undefined on every row, exactly as a NULL column is on the SQL track. A consumer cannot tell the three tracks apart by probing for a key.
+
+Each canonical column also declares how its cell is **parsed** (`COLUMN_KIND` in `profiles.ts`: text, money, or timestamp). That declaration travels with the column rather than living as a list of special-cased names in the scanner, and it is asserted complete at module load — a canonical column with no declared kind is a startup failure, not a column that silently parses as text. A money column read as text would serialize an amount as the string `"1,234.56"` and make every aggregate over it wrong.
+
+### Row-shape parity across tracks, and what changed
+
+The original rule was that `runRead` returns **byte-identical row shapes to the SQL and REST tracks for all five named reads**. That rule is what stops three transports quietly diverging, and it still holds — but WARP-2107 had to say what it means once the registry carries reads no practice-management track can answer. `EaglesoftConnector` cannot serve a profit-and-loss statement; there is no schema behind it and never will be.
+
+Two options were on the table. **Per-dataset parity** — "identical *where both tracks serve the dataset*" — is the cheap one, but it turns a flat invariant into a conditional one that nobody can check at a glance. **Per-track capability declaration** is what shipped: every connector declares `servesDatasets`, and a read whose `dependsOnTables` are not all declared is refused with a typed `DatasetNotServedError` before any I/O.
+
+That was the right trade because it makes "this track cannot answer that" a **first-class, testable state** rather than an absence:
+
+* `DatasetNotServedError` means *this connection works perfectly and will never have that data*. A QuickBooks connection has no appointments; a Dentrix connection has no vendor bills. Neither is a fault and neither is fixed by anything an installer can do.
+* `ConnectorBlockedError` means *this connection is not working, and here is what would fix it* — including "the practice has not dropped that report yet", which **is** actionable.
+
+The rejected third option was returning an empty array. `[]` from `get_open_bills` reads as "you owe nobody anything" — a confident false statement about money that no caller can distinguish from a genuinely clear payables ledger.
+
+Capability is not the same as presence. A profile declaring `bill` means *this vendor's export can carry bills*; whether the practice actually ran that report is a freshness question, answered by a blocked error naming the missing report.
 
 ### Built-in profiles
 
 | Vendor | Provider key | Confirmed against a real export? |
 |---|---|---|
 | Eaglesoft (Patterson) | `eaglesoft-export` | **No** — shaped from the report columns the product presents |
-| Dentrix (Henry Schein) | `dentrix-export` | **No** — same |
+| Dentrix (Henry Schein) | `dentrix-export` | **Ships no profile.** Connectable, and the connection reports every unrecognised file with the headers it saw — but Droplet guesses no mapping. Henry Schein One's documented merge vocabulary has no appointment id and no operatory id, so the appointment dataset's required columns cannot honestly be satisfied, and its `Status` field is the *patient's* status rather than the appointment's. See `NAME_ONLY_VENDORS` in `profiles.ts`. One real export removes this caveat. |
 | Open Dental | `opendental-export` | **No** — modelled on Open Dental's published schema (`AptNum`, `AptDateTime`, `PatNum`, …) |
+| QuickBooks (Intuit) | `quickbooks-export` | **No** — shaped from the columns QuickBooks prints in *Open Invoices*, *Unpaid Bills Detail* and *A/P Aging Summary*. Desktop and Online emit the same report names and broadly the same headers, so one profile covers both products |
 | *(any other product)* | `generic-export` | n/a — ships no datasets; an operator profile supplies them |
 
 Every built-in is marked `verified: false` in code and surfaced as `usingUnverifiedProfiles` on the connector's status. That is not hedging: an unconfirmed mapping is exactly the thing to check on day one, and hiding it would be the only way it could hurt.
@@ -137,7 +160,7 @@ Every built-in is marked `verified: false` in code and surfaced as `usingUnverif
 
 ## 5. What the reads do
 
-The same five named reads as the other tracks, returning the same row shapes.
+The same named reads as the other tracks, returning the same row shapes. Five are practice-management (`get_schedule_today`, `find_patient`, `get_patient`, `get_recall_due`, `get_ar_summary`); three are accounting and were added by WARP-2107 (`get_open_invoices`, `get_open_bills`, `get_ap_summary`). Which of them a given connection serves depends on its profile — see the capability section above.
 
 | Read | Behaviour on this track |
 |---|---|
