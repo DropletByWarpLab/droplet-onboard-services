@@ -170,6 +170,18 @@ autoinstall:
         date +%s > /var/lib/droplet-ssh-access/install-mode
         chmod 0644 /var/lib/droplet-ssh-access/install-mode
       '
+    # BENCH-ONLY (this branch never merges): plant the lab fleet key so the
+    # WARP-2142 install-mode window is actually ENTERABLE on the bench — the
+    # seed deliberately bakes no key (ADR-020 §D6), and an open window nobody
+    # holds a key to is no rescue path at all.
+    - |
+      curtin in-target --target=/target -- bash -c '
+        mkdir -p /home/droplet/.ssh
+        echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMbcQl7AXJsHYpSBJiJwXFfgtPWv8QvhCPirXIJmBXM/ claude-droplet-pi-20260728" > /home/droplet/.ssh/authorized_keys
+        chmod 0700 /home/droplet/.ssh
+        chmod 0600 /home/droplet/.ssh/authorized_keys
+        chown -R droplet:droplet /home/droplet/.ssh
+      '
     # ...and make sure sshd actually comes up on the very first boot: none of
     # the WARP-1984 machinery (path unit + applier + boot reset) exists until
     # setup.sh installs it mid-provision, so standing systemd enablement in
