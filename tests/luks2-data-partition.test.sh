@@ -287,7 +287,7 @@ fi
 echo ""
 echo "--- EXECUTING drill: secrets relocation onto the encrypted /data ---"
 RWORK="$(mktemp -d -t relocdrill-XXXXXXXX)"
-trap 'rm -rf "${WORK:-}" "${RWORK:-}" "${PWORK:-}" "${SWORK:-}"' EXIT
+trap 'rm -rf "${WORK:-}" "${RWORK:-}" "${PWORK:-}" "${SWORK:-}" "${UWORK:-}"' EXIT
 RSTUB="$RWORK/bin"; RREPO="$RWORK/repo"; RDATA="$RWORK/data"
 mkdir -p "$RSTUB" "$RREPO/data/secrets" "$RDATA"
 # sudo stub: strip leading VAR=val assignments, exec the rest as the test user.
@@ -481,6 +481,129 @@ STUB
     pass "no crypttab/fstab wired for the unopenable container [finding 5]"
   else
     fail "provision wrote boot config for a container it could not open (finding 5)"
+  fi
+fi
+
+# =============================================================================
+# EXECUTING drill: FRESH provision refuses a missing TPM2 USERSPACE — and
+# self-heals via apt when it can (WARP-2101)
+#
+# /dev/tpm0 proves the CHIP; systemd-cryptenroll additionally dlopens the tss2
+# userspace (libtss2-esys/-mu/-rc) at runtime. The install seed never shipped
+# those, so on a box with healthy TPM hardware cryptenroll died "TPM2 support
+# is not installed" AFTER luksFormat and BEFORE any keyslot enroll (set -e) —
+# stranding the exact zero-keyslot container the finding-5 re-run branch
+# refuses. The fix preflights the userspace (cryptenroll --tpm2-device=list)
+# BEFORE creating anything, attempts the repo's apt self-install pattern
+# (backup.sh restic precedent), and aborts pre-format when still unusable.
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: missing TPM2 userspace fails BEFORE luksFormat [WARP-2101] ---"
+if [ -x "$LUKS_SCRIPT" ]; then
+  UWORK="$(mktemp -d -t tpm2usr-XXXXXXXX)"
+  USTUB="$UWORK/bin"; UETC="$UWORK/etc"
+  mkdir -p "$USTUB" "$UETC"
+  UCMD="$UWORK/cmd.log"; : > "$UCMD"
+  for t in lvcreate mkfs.ext4 mount cryptsetup systemd-cryptsetup; do
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\n' "$t" "$UCMD" > "$USTUB/$t"; chmod +x "$USTUB/$t"
+  done
+  printf '#!/usr/bin/env bash\nprintf "vgs %%s\\n" "$*" >> "%s"\nprintf "512\\n"\n' "$UCMD" > "$USTUB/vgs"; chmod +x "$USTUB/vgs"
+  printf '#!/usr/bin/env bash\nprintf "findmnt %%s\\n" "$*" >> "%s"\nexit 1\n' "$UCMD" > "$USTUB/findmnt"; chmod +x "$USTUB/findmnt"
+  printf '#!/usr/bin/env bash\nprintf "blkid %%s\\n" "$*" >> "%s"\nexit 2\n' "$UCMD" > "$USTUB/blkid"; chmod +x "$USTUB/blkid"
+  # cryptenroll: EVERY --tpm2-device call (list AND auto) fails with the real
+  # "TPM2 support is not installed" until the apt stub drops the
+  # tss2-installed flag — exactly how a missing userspace behaves on the box.
+  cat > "$USTUB/systemd-cryptenroll" <<STUB
+#!/usr/bin/env bash
+printf 'systemd-cryptenroll %s\n' "\$*" >> "$UCMD"
+for a in "\$@"; do
+  case "\$a" in
+    --tpm2-device=*)
+      if [ ! -e "$UWORK/tss2-installed" ]; then
+        echo "TPM2 support is not installed." >&2
+        exit 1
+      fi ;;
+    --recovery-key)
+      printf 'aaaaa-bbbbb-ccccc-ddddd\n'; exit 0 ;;
+  esac
+done
+exit 0
+STUB
+  chmod +x "$USTUB/systemd-cryptenroll"
+  # apt-get: logs every call; "installs" the userspace only when
+  # STUB_APT_HEALS=1. Always exits 0 — proving the script re-checks
+  # cryptenroll instead of trusting apt's exit code.
+  cat > "$USTUB/apt-get" <<STUB
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >> "$UCMD"
+if [ "\${STUB_APT_HEALS:-0}" = "1" ]; then
+  case " \$* " in *" install "*) : > "$UWORK/tss2-installed" ;; esac
+fi
+exit 0
+STUB
+  chmod +x "$USTUB/apt-get"
+
+  uenv=(
+    "PATH=$USTUB:$PATH"
+    DROPLET_LUKS_SKIP_OS_GATE=1
+    DROPLET_LUKS_VG=ubuntu-vg DROPLET_LUKS_LV=droplet-data
+    DROPLET_LUKS_MAPPER=droplet-data-crypt DROPLET_DATA_MOUNT=/data
+    DROPLET_ETC_DIR="$UETC" DROPLET_LUKS_RUNTIME_DIR="$UWORK/run"
+    DROPLET_TPM_DEVICE="$USTUB/cryptsetup"  # TPM CHIP "present"; the USERSPACE is what's missing
+    DROPLET_LVCREATE_BIN="$USTUB/lvcreate" DROPLET_VGS_BIN="$USTUB/vgs"
+    DROPLET_MKFS_BIN="$USTUB/mkfs.ext4" DROPLET_MOUNT_BIN="$USTUB/mount"
+    DROPLET_CRYPTSETUP_BIN="$USTUB/cryptsetup"
+    DROPLET_CRYPTENROLL_BIN="$USTUB/systemd-cryptenroll"
+    DROPLET_SYSTEMD_CRYPTSETUP_BIN="$USTUB/systemd-cryptsetup"
+    DROPLET_APT_GET_BIN="$USTUB/apt-get"
+    CMD_LOG="$UCMD"
+  )
+
+  # (1) userspace missing + apt cannot supply it → refuse BEFORE luksFormat.
+  : > "$UCMD"
+  urc=0
+  uout="$(env "${uenv[@]}" "$LUKS_SCRIPT" provision 2>&1)" || urc=$?
+  if [ "$urc" -eq 2 ]; then
+    pass "missing TPM2 userspace refuses with exit 2 (precondition) [WARP-2101]"
+  else
+    fail "missing TPM2 userspace: wrong exit code ($urc) — cryptenroll died AFTER luksFormat, not in a preflight"
+  fi
+  if grep -q 'luksFormat' "$UCMD" || grep -q 'lvcreate' "$UCMD"; then
+    fail "provision touched LVM/LUKS despite an unusable TPM2 userspace — the zero-keyslot stranded container [WARP-2101]"
+  else
+    pass "no LV created, no luksFormat run — abort lands BEFORE any container exists"
+  fi
+  if ! grep -q 'droplet-data-crypt' "$UETC/crypttab" 2>/dev/null && [ ! -s "$UETC/fstab" ]; then
+    pass "no crypttab/fstab wired on the userspace refusal"
+  else
+    fail "boot config written despite the userspace refusal"
+  fi
+  grep -qE 'apt-get .*install .*libtss2-rc0t64' "$UCMD" \
+    && pass "self-heal attempted (apt-get install libtss2-*) before refusing" \
+    || fail "no apt self-install attempt (backup.sh restic pattern) before the refusal"
+  printf '%s' "$uout" | grep -qi 'TPM2 userspace' \
+    && pass "refusal message names the TPM2 userspace (distinct from the no-chip error)" \
+    || fail "refusal message does not name the TPM2 userspace: $(printf '%s' "$uout" | tail -2 | tr '\n' ' ')"
+
+  # (2) apt CAN supply it → provision self-heals and completes the full flow.
+  : > "$UCMD"; rm -f "$UWORK/tss2-installed"
+  if env "${uenv[@]}" STUB_APT_HEALS=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1; then
+    pass "provision self-heals via apt and completes [WARP-2101]"
+  else
+    fail "provision did not complete after the apt self-install healed the userspace"
+  fi
+  grep -qE 'cryptsetup luksFormat --type luks2' "$UCMD" && pass "healed run formats the container" || fail "healed run never formatted"
+  grep -qE 'systemd-cryptenroll .*--tpm2-device=auto' "$UCMD" && pass "healed run enrolls the TPM keyslot" || fail "healed run never TPM-enrolled"
+
+  # (3) enroll ORDER: the recovery keyslot must land BEFORE the TPM keyslot,
+  # so an abort inside the TPM enroll can never strand a container whose only
+  # keyslot is the tmpfs install keyfile that vanishes on reboot (WARP-2101).
+  rec_line="$(grep -nE 'systemd-cryptenroll .*--recovery-key' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  tpm_line="$(grep -nE 'systemd-cryptenroll .*--tpm2-device=auto' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  if [ -n "$rec_line" ] && [ -n "$tpm_line" ] && [ "$rec_line" -lt "$tpm_line" ]; then
+    pass "recovery keyslot enrolled BEFORE the TPM keyslot (abort-safe order) [WARP-2101]"
+  else
+    fail "TPM keyslot enrolled before the recovery keyslot (rec=${rec_line:-none} tpm=${tpm_line:-none}) — a TPM-enroll abort strands the container"
   fi
 fi
 
