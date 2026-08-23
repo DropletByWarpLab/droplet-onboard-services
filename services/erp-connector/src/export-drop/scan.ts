@@ -32,6 +32,7 @@ import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.
 import { decodeExportBytes, DelimitedLimitError, parseDelimited } from "./csv.js";
 import {
   CANONICAL_COLUMNS,
+  COLUMN_KIND,
   matchDataset,
   normalizeHeader,
   type DatasetName,
@@ -56,6 +57,10 @@ export interface FileDiagnostic {
     | "too-many-rows"
     | "unreadable"
     | "malformed-rows"
+    /** The claiming profile maps only part of the dataset's natural key, so
+     *  re-export dedup runs on the reduced identity (or, with none of it
+     *  mapped, not at all). Emitted once per dataset per scan. */
+    | "degraded-dedup"
     | "symlink";
   detail?: string;
   /** Present for `unrecognized`, which is the case an operator has to act on. */
@@ -309,11 +314,58 @@ export async function readExportBytes(path: string, maxBytes: number): Promise<B
   }
 }
 
-/** The column whose value identifies a row for dedup across re-exports. */
-const NATURAL_KEY: Readonly<Record<DatasetName, string>> = {
-  appointment: "appt_id",
-  patient: "patient_id",
-  account: "account_id",
+/**
+ * The columns whose values TOGETHER identify a row for dedup across re-exports.
+ *
+ * Dedup exists so yesterday's and today's copies of the same report, both
+ * sitting in the drop, do not double every row. It is therefore only safe to
+ * key on something that genuinely identifies a document.
+ *
+ * ⚠ For the practice datasets one column does: `appt_id` and `patient_id` are
+ * primary keys in a PMS. **For the accounting datasets they are not.**
+ * QuickBooks does not enforce uniqueness on invoice or bill reference numbers,
+ * and the shipped profile maps `bill_id` onto the report's `Num` column — so
+ * keying on it alone silently collapses two genuinely different bills that
+ * happen to share a Ref No., and the earlier one's money disappears. A payables
+ * total that is quietly too small is the worst failure this file can produce.
+ *
+ * So an accounting key is COMPOSITE: reference number plus counterparty, date
+ * and amount. Two different documents differ in at least one of those; a true
+ * re-export of the same document matches on all of them.
+ *
+ * A profile is not REQUIRED to map every key column (registration enforces
+ * only REQUIRED_CANONICAL). When it maps a subset, the dedup key degrades to
+ * that subset — fixed per dataset, never per file — and the scan announces it
+ * with a `degraded-dedup` diagnostic. See the key construction in
+ * `scanDropDirectory`.
+ */
+const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
+  appointment: ["appt_id"],
+  patient: ["patient_id"],
+  account: ["account_id"],
+  // WARP-2107 — accounting. See the ⚠ above for why these are composite.
+  invoice: ["invoice_id", "customer_id", "issued_at", "amount"],
+  bill: ["bill_id", "vendor_id", "issued_at", "amount"],
+  // `ap_summary` is already one aggregated row per vendor, so the vendor IS the
+  // identity: re-exporting must replace the vendor's row, not accumulate a
+  // second one and double its balance.
+  ap_summary: ["vendor_id"],
+};
+
+/**
+ * The timestamp column a row cannot be USED without, per dataset.
+ *
+ * Only `appointment` has one: the schedule read is a time-window filter, so an
+ * appointment whose time will not parse cannot be placed on a day and is
+ * counted as unplaced rather than silently dropped into the wrong window.
+ *
+ * The accounting datasets deliberately have none. A bill whose `due_at` cell is
+ * blank or unparseable is still a real bill with a real balance, and every
+ * accounting read here aggregates or lists by balance — refusing the row would
+ * understate what the business owes, which is the more dangerous error.
+ */
+const PLACEMENT_COLUMN: Readonly<Partial<Record<DatasetName, string>>> = {
+  appointment: "appt_time",
 };
 
 /**
@@ -340,22 +392,33 @@ function projectRow(
     const idx = header === undefined ? undefined : headerIndex.get(normalizeHeader(header));
     const raw = idx === undefined ? undefined : record[idx];
 
-    if (canonical === "appt_time") {
-      const iso = parseExportTimestamp(raw);
-      // Only a mapped-but-unparseable cell counts as unplaced. `appt_time` is
-      // a required mapping, so in practice this is always the parse failing.
-      if (iso === undefined && header !== undefined) placed = false;
-      row[canonical] = iso;
-      continue;
+    // WARP-2107: the parse kind travels with the column (COLUMN_KIND) instead
+    // of being a list of special-cased names here. With money and dates now on
+    // four datasets, a name-branch in this file would be a second list to keep
+    // in step with the column list in profiles.ts — and the failure mode of
+    // them disagreeing is an amount silently read as text, which serializes as
+    // "1,234.56" and makes every aggregate over it wrong.
+    switch (COLUMN_KIND[canonical]) {
+      case "timestamp": {
+        const iso = parseExportTimestamp(raw);
+        // Only a mapped-but-unparseable cell counts as unplaced. `appt_time` is
+        // a required mapping, so in practice this is always the parse failing.
+        if (iso === undefined && header !== undefined && canonical === PLACEMENT_COLUMN[dataset]) {
+          placed = false;
+        }
+        row[canonical] = iso;
+        break;
+      }
+      case "money":
+        row[canonical] = parseMoney(raw);
+        break;
+      default:
+        row[canonical] = normalizeText(raw);
+        break;
     }
-    if (canonical === "balance") {
-      row[canonical] = parseMoney(raw);
-      continue;
-    }
-    row[canonical] = normalizeText(raw);
   }
 
-  return { row, placed: dataset === "appointment" ? placed : true };
+  return { row, placed };
 }
 
 /**
@@ -404,6 +467,7 @@ export async function scanDropDirectory(
       generatedAt: number;
       unplaced: number;
       malformed: number;
+      degradedKeyWarned: boolean;
     }
   >();
 
@@ -452,6 +516,20 @@ export async function scanDropDirectory(
     }
 
     const { profile, dataset } = match.candidate;
+
+    // WARP-2107 (PR #1659 review) — the dedup key columns are fixed PER
+    // DATASET: the subset of NATURAL_KEY this profile maps at all. A profile
+    // may legally map only part of the key (registration enforces only
+    // REQUIRED_CANONICAL), and deriving the key from whatever a ROW happened
+    // to carry gave the same document a DIFFERENT key in every file — dedup
+    // silently off, so the connector's own normal case (yesterday's and
+    // today's copy of one report both in the drop) counted every row twice.
+    // Keying on the mapped subset keeps a true re-export collapsing; what an
+    // under-mapped profile loses is only the ability to tell apart two
+    // different documents that agree on the mapped columns — announced below.
+    const naturalKey = NATURAL_KEY[dataset.dataset];
+    const keyColumns = naturalKey.filter((column) => dataset.columns[column] !== undefined);
+
     const headerIndex = new Map<string, number>();
     table.headers.forEach((h, i) => {
       const key = normalizeHeader(h);
@@ -475,12 +553,31 @@ export async function scanDropDirectory(
         generatedAt: 0,
         unplaced: 0,
         malformed: 0,
+        degradedKeyWarned: false,
       };
       meta.set(dataset.dataset, info);
     }
     info.files.push(file.name);
     info.headers.push(...table.headers);
     info.generatedAt = Math.max(info.generatedAt, file.mtimeMs);
+
+    if (keyColumns.length < naturalKey.length && !info.degradedKeyWarned) {
+      info.degradedKeyWarned = true;
+      const missing = naturalKey.filter((column) => dataset.columns[column] === undefined);
+      diagnostics.push({
+        file: file.name,
+        reason: "degraded-dedup",
+        detail:
+          keyColumns.length > 0
+            ? `dataset "${dataset.dataset}": profile "${profile.vendor}" maps no ${missing.join(", ")} — ` +
+              `re-exports deduplicate on [${keyColumns.join(", ")}] alone, and two DIFFERENT documents ` +
+              `that agree on those columns will merge into one; map the missing column(s) to restore ` +
+              `the full identity`
+            : `dataset "${dataset.dataset}": profile "${profile.vendor}" maps none of its identity ` +
+              `columns (${missing.join(", ")}) — overlapping export files cannot be deduplicated and ` +
+              `every copy of a row counts; map ${missing.join(", ")} to enable dedup`,
+      });
+    }
 
     const malformedBefore = info.malformed;
     let truncated = false;
@@ -501,16 +598,39 @@ export async function scanDropDirectory(
       const { row, placed } = projectRow(dataset.dataset, dataset.columns, headerIndex, record);
       if (!placed) info.unplaced += 1;
 
-      const keyColumn = NATURAL_KEY[dataset.dataset];
-      const keyValue = row[keyColumn];
-      // Fall back to a per-row key when the natural key is absent. A PMS that
-      // only assigns an appointment id at check-in exports walk-ins with the id
-      // cell blank; keying those on one shared value would collapse them into a
-      // single row and silently drop the rest. `normalizeText` yields undefined
-      // for a blank cell (never ""), so this one condition covers both "the
-      // profile maps no id column" and "the id cell is empty".
-      const key =
-        typeof keyValue === "string" ? `k:${keyValue}` : `f:${file.name}#${index}`;
+      // Fall back to a per-row key when ANY MAPPED part of the key is absent
+      // from this row. A PMS that only assigns an appointment id at check-in
+      // exports walk-ins with the id cell blank; keying those on one shared
+      // value would collapse them into a single row and silently drop the
+      // rest. `normalizeText` yields undefined for a blank cell (never ""),
+      // so this covers both "the mapped header is not in this file" and "the
+      // cell is empty".
+      //
+      // Requiring EVERY mapped part is deliberate: a row-by-row partial
+      // composite would key two different documents together precisely when
+      // the distinguishing column is the missing one. Falling back duplicates
+      // a row; collapsing loses it. (A profile that maps NO key column at all
+      // lands every row here — the dedup-off case the degraded-dedup
+      // diagnostic above announces.)
+      const parts: string[] = [];
+      for (const column of keyColumns) {
+        const value = row[column];
+        // Numbers count: `amount` is parsed money, not text, and it is one of
+        // the columns that tells two same-numbered bills apart.
+        if (typeof value === "string") parts.push(value);
+        else if (typeof value === "number") parts.push(String(value));
+        else {
+          parts.length = 0;
+          break;
+        }
+      }
+      // A NUL cannot appear in a parsed cell, so no combination of values can
+      // forge another row's key by containing the separator. (The ESCAPE
+      // sequence, deliberately not a raw NUL byte in this file: a raw byte
+      // renders as a space or as nothing in review tooling, and one pass
+      // through anything that "cleans" text would silently swap the separator
+      // for something forgeable.)
+      const key = parts.length > 0 ? `k:${parts.join("\0")}` : `f:${file.name}#${index}`;
       bucket.set(key, row);
     }
     if (malformedBefore !== info.malformed) {

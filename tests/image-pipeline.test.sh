@@ -408,6 +408,68 @@ else
   fi
 fi
 
+# =============================================================================
+# (f) WARP-2142 — install-mode SSH window. The seed must plant an epoch-stamped
+#     marker in the installed target and enable ssh there, and — critically —
+#     the marker path must MATCH what droplet-ssh-access-boot-reset checks. A
+#     path typo between the two files would mean a window that silently never
+#     opens (or never closes); it must be a test failure here, not a field
+#     surprise.
+# =============================================================================
+echo "--- (f) WARP-2142 install-mode marker + first-boot ssh window ---"
+
+UD2="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+BOOT_RESET="$REPO_ROOT_REAL/scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset"
+SINGLE_BOX_LIB="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+
+if [ ! -f "$UD2" ] || [ ! -f "$BOOT_RESET" ]; then
+  fail "user-data or droplet-ssh-access-boot-reset missing — WARP-2142 checks cannot run"
+else
+  # The seed plants an epoch-stamped marker in the target.
+  if grep -qE 'date \+%s > /var/lib/[a-z-]+/install-mode' "$UD2"; then
+    pass "seed plants an epoch-stamped install-mode marker in the target"
+  else
+    fail "seed does not plant the install-mode marker (expected: date +%s > .../install-mode)"
+  fi
+
+  # ...and enables ssh in the target: on boot 1 none of the WARP-1984
+  # machinery exists yet (setup.sh installs it mid-provision), so standing
+  # enablement is the only thing that can open the window on the very first
+  # boot.
+  if grep -q 'systemctl enable ssh.service' "$UD2"; then
+    pass "seed enables ssh in the installed target (boot 1 is reachable)"
+  else
+    fail "seed does not enable ssh in the target — the very first boot would be unreachable"
+  fi
+
+  # THE CROSS-FILE CONTRACT: extract the marker path from BOTH files and
+  # compare. An extraction failure (either side renamed or reworded past the
+  # patterns here) is a failure too — never a silent skip.
+  ud_marker="$(grep -oE '/var/lib/[a-z-]+/install-mode' "$UD2" | sort -u)"
+  ud_marker_count="$(printf '%s\n' "$ud_marker" | grep -c . || true)"
+  br_dir="$(sed -n 's/.*DROPLET_SSH_ACCESS_DIR:-\([^}]*\)}.*/\1/p' "$BOOT_RESET" | head -1)"
+  br_base="$(sed -n 's/^INSTALL_MODE_FILE="\$STATE_DIR\/\([a-z-]*\)".*/\1/p' "$BOOT_RESET" | head -1)"
+  br_marker="${br_dir}/${br_base}"
+  if [ "$ud_marker_count" = "1" ] && [ -n "$br_dir" ] && [ -n "$br_base" ] \
+     && [ "$ud_marker" = "$br_marker" ]; then
+    pass "marker path agrees between user-data and boot-reset ($br_marker)"
+  else
+    fail "install-mode marker path MISMATCH or extraction failure" \
+         "user-data:  [${ud_marker:-<none>}] (unique paths: $ud_marker_count)" \
+         "boot-reset: [${br_marker}]"
+  fi
+
+  # The completion hook (single-box.sh, called from setup.sh's success tail)
+  # must remove the SAME path — a third spelling of it is a third chance for
+  # a typo, so pin it against the boot-reset-derived one.
+  if [ -n "$br_dir" ] && [ -n "$br_base" ] && [ -f "$SINGLE_BOX_LIB" ] \
+     && grep -q "$br_marker" "$SINGLE_BOX_LIB"; then
+    pass "completion hook (single-box.sh) removes the same marker path"
+  else
+    fail "single-box.sh completion hook does not reference $br_marker"
+  fi
+fi
+
 echo "--- WARP-232: autoinstall storage layout leaves VG space for the encrypted data LV ---"
 UD="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
 if [ ! -f "$UD" ]; then

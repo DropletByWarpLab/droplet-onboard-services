@@ -1,8 +1,8 @@
 #!/bin/sh
-# droplet-ssh-access-boot-reset — WARP-1984. Runs ONCE per boot, before
-# multi-user.target, from droplet-ssh-access-boot-reset.service. Installed by
-# scripts/lib/single-box.sh — never hand-placed on a box (architecture-guard
-# rule 20).
+# droplet-ssh-access-boot-reset — WARP-1984 + WARP-2142. Runs ONCE per boot,
+# before multi-user.target, from droplet-ssh-access-boot-reset.service.
+# Installed by scripts/lib/single-box.sh — never hand-placed on a box
+# (architecture-guard rule 20).
 #
 # WHY THIS EXISTS. The applier deliberately `start`s sshd without enabling it,
 # so sshd is down after every reboot — correct. But systemd's PathModified=
@@ -13,19 +13,39 @@
 # verbatim the failure the readback exists to prevent.
 #
 # THE FIX is to make every boot a REAL intent change: rewrite the intent to
-# `off` (the boot default — support access is a deliberate, current decision
-# and must not survive a reboot as a standing open door). The path unit,
-# already watching by the time this runs (After=droplet-ssh-access.path),
-# sees the modification and runs the applier, which stops sshd — a no-op
-# when it is already down — and records `state=off` truthfully. Reboot means
-# off, and the readback agrees with reality.
+# the boot default. The path unit, already watching by the time this runs
+# (After=droplet-ssh-access.path), sees the modification and runs the
+# applier, which acts on it and records `state` truthfully.
 #
-# DELIBERATELY NOT THE OTHER WAY ROUND: re-applying the STORED intent at boot
-# would turn "allow SSH while I troubleshoot" into standing access across
-# reboots. This script never reads the previous value and never calls
-# systemctl — writing one file is its whole job; acting on it stays the
-# applier's. The vitest guard (ssh-access.host-script.guard.test.ts) pins
-# both of those properties.
+# WHAT THE BOOT DEFAULT IS (WARP-2142). Two regimes, decided by one file:
+#
+#   * STEADY STATE — no install-mode marker: the default is `off`. Support
+#     access is a deliberate, current decision and must not survive a reboot
+#     as a standing open door; the dashboard toggle is the only thing that
+#     turns it on, every time.
+#   * INSTALL MODE — a FRESH marker at $STATE_DIR/install-mode (planted by
+#     the autoinstall seed, scripts/image/autoinstall/user-data; a single
+#     epoch-seconds line): the default is `on`. A box that is still being
+#     commissioned must come back REACHABLE after every reboot — the 2026-08
+#     commissioning dead-ends (WARP-2100/2122/2133) all reduced to a box
+#     mid-install that nobody could get into. setup.sh removes the marker
+#     the moment a provision succeeds; the 48-hour backstop below expires it
+#     on an abandoned box. Anything imperfect about the marker — absent,
+#     unreadable, empty, non-numeric, absurdly long, expired — falls through
+#     to `off`, and every falling-through path DELETES the marker so it can
+#     never be retried forever. Fail-open for commissioning, fail-closed for
+#     everything else.
+#
+# The marker lives in the ROOT-OWNED half of the state dir, deliberately NOT
+# under intent.d/: the container that may write intent must never be able to
+# mint or extend an install window.
+#
+# DELIBERATELY NOT RE-APPLYING THE STORED INTENT: that would turn "allow SSH
+# while I troubleshoot" into standing access across reboots. This script
+# never reads the previous intent value and never calls systemctl — deciding
+# between two fixed literals and writing one file is its whole job; acting on
+# it stays the applier's. The vitest guard
+# (ssh-access.host-script.guard.test.ts) pins all of those properties.
 set -eu
 
 STATE_DIR="${DROPLET_SSH_ACCESS_DIR:-/var/lib/droplet-ssh-access}"
@@ -33,6 +53,14 @@ STATE_DIR="${DROPLET_SSH_ACCESS_DIR:-/var/lib/droplet-ssh-access}"
 # the root-owned `state` and is bind-mounted read-only into the orchestrator.
 INTENT_DIR="$STATE_DIR/intent.d"
 INTENT_FILE="$INTENT_DIR/intent"
+# WARP-2142 — the install-mode marker (root-owned half; see header). The
+# path literal must agree with the autoinstall seed and setup.sh's completion
+# hook — tests/image-pipeline.test.sh and the vitest guard pin the agreement.
+INSTALL_MODE_FILE="$STATE_DIR/install-mode"
+# 48 hours, in seconds: the backstop for an abandoned box. A first boot that
+# never finishes provisioning stays reachable long enough to rescue; the
+# first boot after expiry slams the window shut for good.
+INSTALL_MODE_MAX_AGE=172800
 
 log() { logger -t droplet-ssh-access-boot-reset "$@" 2>/dev/null || echo "droplet-ssh-access-boot-reset: $*" >&2; }
 
@@ -41,17 +69,62 @@ log() { logger -t droplet-ssh-access-boot-reset "$@" 2>/dev/null || echo "drople
 # directory's mode or ownership.
 mkdir -p "$INTENT_DIR"
 
+# Decide this boot's stamp. Default off; a fresh marker flips it to on.
+boot_value="off"
+if [ -f "$INSTALL_MODE_FILE" ]; then
+  ts=""
+  # `read` is a builtin — this script still execs no parser on file contents
+  # (no sed/grep/awk). It takes the FIRST line only; a marker written without
+  # a trailing newline still assigns before read reports EOF, hence `|| true`.
+  read -r ts <"$INSTALL_MODE_FILE" 2>/dev/null || true
+  now="$(date +%s)"
+  case "$ts" in
+    ""|*[!0-9]*)
+      # Not an epoch timestamp. Same strict-parse posture as the applier:
+      # there is no code path from file contents to a command, and a marker
+      # that fails validation is refused AND removed.
+      rm -f "$INSTALL_MODE_FILE"
+      log "install-mode marker is not an epoch timestamp; removed it — resetting to off"
+      ;;
+    *)
+      # Digits only and bounded (12 digits outlives the hardware by
+      # millennia), so the arithmetic below can never be fed junk. A FUTURE
+      # stamp (installer clock ahead of a first boot with no RTC sync yet)
+      # counts as fresh: fail open for commissioning — the backstop still
+      # bounds the window once the clock passes stamp+48h.
+      if [ "${#ts}" -le 12 ] && [ "$now" -lt "$((ts + INSTALL_MODE_MAX_AGE))" ]; then
+        boot_value="on"
+        log "install mode: marker is fresh (stamped $ts) — stamping intent on so the box stays reachable while provisioning completes"
+      else
+        rm -f "$INSTALL_MODE_FILE"
+        log "install-mode marker expired (48h backstop); removed it — resetting to off"
+      fi
+      ;;
+  esac
+fi
+
 # Atomic replace, exactly like the orchestrator's write path: temp file in
 # the same directory, then rename, so the path watcher can never observe a
 # half-written file. World-readable (0644 under this umask) because the
 # orchestrator reads the intent back to distinguish pending from applied.
+# Two fixed literal blocks — the marker chooses BETWEEN them; nothing from
+# any file is ever interpolated into the stamped value.
 umask 022
 tmp="$INTENT_FILE.tmp"
-{
-  echo "# WARP-1984 — reset to off at boot by /usr/local/sbin/droplet-ssh-access-boot-reset."
-  echo "# SSH access never survives a reboot; the dashboard toggle is the only"
-  echo "# thing that turns it on, every time."
-  echo "DROPLET_SSH_ACCESS=off"
-} >"$tmp"
+if [ "$boot_value" = "on" ]; then
+  {
+    echo "# WARP-2142 — install mode: stamped on at boot by /usr/local/sbin/droplet-ssh-access-boot-reset"
+    echo "# because the install-mode marker is fresh. setup.sh removes the marker on a"
+    echo "# successful provision; the 48h backstop expires it on an abandoned box."
+    echo "DROPLET_SSH_ACCESS=on"
+  } >"$tmp"
+else
+  {
+    echo "# WARP-1984 — reset to off at boot by /usr/local/sbin/droplet-ssh-access-boot-reset."
+    echo "# SSH access never survives a reboot; the dashboard toggle is the only"
+    echo "# thing that turns it on, every time."
+    echo "DROPLET_SSH_ACCESS=off"
+  } >"$tmp"
+fi
 mv -f "$tmp" "$INTENT_FILE"
-log "intent reset to off for this boot"
+log "intent stamped $boot_value for this boot"
