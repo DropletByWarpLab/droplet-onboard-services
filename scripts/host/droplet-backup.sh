@@ -223,9 +223,32 @@ stage_volume nextcloud-data
 # .env (operator knob) > default off.
 INCLUDE_CAMERA="${DROPLET_BACKUP_INCLUDE_CAMERA:-}"
 [ -z "$INCLUDE_CAMERA" ] && INCLUDE_CAMERA="$(droplet_backup_dotenv_value DROPLET_BACKUP_INCLUDE_CAMERA)"
+# WARP-2136: footage lives EITHER in the `nvrdata` named volume OR at a host
+# path, depending on NVR_MEDIA_SOURCE. `stage_volume` can only reach the
+# volume, so on a redirected box the opt-in used to log "volume absent —
+# skipping" and produce a backup with no footage in it while still reporting
+# success. A bind path goes to restic DIRECTLY rather than through a staging
+# tar: recordings run to hundreds of GB, and re-tarring them every night to
+# copy bytes restic would have deduped anyway doubles the disk churn and the
+# window for no benefit.
+CAMERA_BIND_PATH=""
 if [ "${INCLUDE_CAMERA:-0}" = "1" ]; then
-  log_info "DROPLET_BACKUP_INCLUDE_CAMERA=1 — capturing camera footage (nvrdata)"
-  stage_volume nvrdata
+  _camera_media="$(droplet_backup_nvr_media_bind_path)"
+  if [ -n "$_camera_media" ]; then
+    if [ -d "$_camera_media" ]; then
+      log_info "DROPLET_BACKUP_INCLUDE_CAMERA=1 — capturing camera footage from $_camera_media (NVR_MEDIA_SOURCE bind mount)"
+      CAMERA_BIND_PATH="$_camera_media"
+    else
+      # Loud, not fatal: the rest of the backup is still worth taking, but
+      # the operator must not believe footage was captured.
+      log_warn "NVR_MEDIA_SOURCE=$_camera_media does not exist — camera footage NOT captured (is the recordings filesystem mounted?)"
+    fi
+    # No volume to stage on this shape; drop any tar from a pre-redirect run.
+    rm -f "$STAGING/volumes/nvrdata.tar"
+  else
+    log_info "DROPLET_BACKUP_INCLUDE_CAMERA=1 — capturing camera footage (nvrdata volume)"
+    stage_volume nvrdata
+  fi
 else
   rm -f "$STAGING/volumes/nvrdata.tar"
 fi
@@ -251,6 +274,13 @@ CONFIG_CANDIDATES=(
 for c in "${CONFIG_CANDIDATES[@]}"; do
   [ -e "$c" ] && BACKUP_PATHS+=("$c")
 done
+
+# WARP-2136: bind-mounted footage is a real host path, so restic takes it
+# directly (the volume shape went through $STAGING above). Added last so the
+# staged surfaces are captured even if this tree is huge.
+if [ -n "$CAMERA_BIND_PATH" ]; then
+  BACKUP_PATHS+=("$CAMERA_BIND_PATH")
+fi
 
 # --- Phase 4: restic backup --------------------------------------------------
 TAG="daily"

@@ -757,6 +757,57 @@ else
   fi
 fi
 
+# WARP-2136 — camera footage redirected OFF the named volume.
+#
+# The VOLUMES sweep above only reaches `nvrdata`. When NVR_MEDIA_SOURCE points
+# at a host path, the recordings are a directory tree instead, and whether the
+# wipe above already destroyed them depends entirely on WHERE that path is:
+# under /mnt/droplet, or on an md pool, the WARP-1988 sweep took it; on an
+# operator-provisioned partition mounted anywhere else (the `/mnt/cameras`
+# redirect docker-compose.yml documents) nothing touched it, and the previous
+# owner's recordings survive a "factory reset". That is data remanence.
+#
+# Deliberately NOT `rm -rf $NVR_MEDIA_SOURCE`: that value is operator-supplied
+# and a reset must never be one bad .env line away from erasing an unrelated
+# tree. Only Frigate's OWN media subdirectories are removed, by name, and the
+# parent is left in place. If none of them are present the path is reported as
+# retained rather than guessed at — loudly, because the operator is entitled to
+# know a wipe did not reach it.
+if [ -f "$REPO_ROOT/.env" ]; then
+  _nvr_media="$(grep -E '^NVR_MEDIA_SOURCE=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+else
+  _nvr_media=""
+fi
+case "$_nvr_media" in
+  # Only an absolute path is a bind mount; a bare word is a volume name and was
+  # handled by the sweep above. Refuse the shallow paths outright — a one-level
+  # target means a typo'd or empty-ish value, never a real recordings root.
+  /*/?*) : ;;
+  *) _nvr_media="" ;;
+esac
+if [ -n "$_nvr_media" ] && [ -d "$_nvr_media" ]; then
+  if [ "$KEEP_STORAGE" = "true" ]; then
+    log_info "Camera footage at $_nvr_media left in place — --keep-storage was passed."
+  else
+    _nvr_purged=0
+    for _sub in recordings clips exports; do
+      if [ -d "$_nvr_media/$_sub" ]; then
+        if rm -rf -- "$_nvr_media/$_sub" 2>/dev/null; then
+          log_success "Removed camera footage: $_nvr_media/$_sub"
+          _nvr_purged=$((_nvr_purged + 1))
+        else
+          log_warn "Could not remove $_nvr_media/$_sub — the previous owner's footage MAY REMAIN on this box"
+        fi
+      fi
+    done
+    if [ "$_nvr_purged" -eq 0 ]; then
+      log_warn "NVR_MEDIA_SOURCE=$_nvr_media exists but holds no recordings/, clips/ or exports/ — nothing was removed. If it holds footage in another layout it is RETAINED; wipe it by hand before this box changes owner."
+    fi
+  fi
+  unset _nvr_purged _sub
+fi
+unset _nvr_media
+
 log_divider
 
 # =============================================================================

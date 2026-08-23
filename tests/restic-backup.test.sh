@@ -119,6 +119,57 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
     || fail "backup has no camera opt-in flag"
   grep -q 'nvrdata' "$BACKUP_SCRIPT" \
     && pass "backup knows the nvrdata (camera) volume" || fail "backup does not reference nvrdata"
+  # WARP-2136: footage lives in the nvrdata VOLUME or at an NVR_MEDIA_SOURCE
+  # host path, and `stage_volume` can only reach the volume. A redirected box
+  # used to honour the opt-in and capture nothing.
+  grep -q 'droplet_backup_nvr_media_bind_path' "$BACKUP_SCRIPT" \
+    && pass "backup resolves the NVR_MEDIA_SOURCE bind path (WARP-2136)" \
+    || fail "backup only knows the nvrdata volume — redirected footage is silently skipped"
+  # The bind path must reach restic DIRECTLY. Routing hundreds of GB through
+  # the staging tar would double the nightly disk churn for bytes restic
+  # already dedups.
+  grep -q 'BACKUP_PATHS+=("$CAMERA_BIND_PATH")' "$BACKUP_SCRIPT" \
+    && pass "bind-mounted footage is added to the restic path set directly" \
+    || fail "bind-mounted footage never reaches the restic path set"
+  # A configured-but-absent path must be loud, not silent: the operator has
+  # opted in and would otherwise believe footage was captured.
+  grep -q 'does not exist — camera footage NOT captured' "$BACKUP_SCRIPT" \
+    && pass "an unmounted recordings path warns instead of passing silently" \
+    || fail "a missing NVR_MEDIA_SOURCE path is swallowed"
+
+  # --- Behavioural: the resolver itself (WARP-2136) --------------------------
+  # A grep proves the wiring exists; this proves it DISCRIMINATES. The whole
+  # fix turns on one question — volume name or host path — and getting it
+  # wrong in either direction is a silent data-loss bug: a volume name treated
+  # as a path backs up nothing, and a relative value treated as a bind archives
+  # the wrong tree (compose resolves it against the compose dir, not our cwd).
+  _nvr_sandbox="$(mktemp -d)"
+  mkdir -p "$_nvr_sandbox/docker"
+  : > "$_nvr_sandbox/docker/docker-compose.yml"
+  # value -> expected resolver output
+  _nvr_cases=(
+    "|"
+    "nvrdata|"
+    "relative/path|"
+    "/mnt/cameras|/mnt/cameras"
+    "/mnt/droplet/mass-storage-cadf51ee/cameras|/mnt/droplet/mass-storage-cadf51ee/cameras"
+    '"/mnt/cameras"|/mnt/cameras'
+  )
+  _nvr_resolver_ok=1
+  for _case in "${_nvr_cases[@]}"; do
+    _in="${_case%%|*}"; _want="${_case#*|}"
+    printf 'NVR_MEDIA_SOURCE=%s\n' "$_in" > "$_nvr_sandbox/.env"
+    _got="$(DROPLET_REPO_ROOT="$_nvr_sandbox" bash -c \
+      'source "$1"; droplet_backup_nvr_media_bind_path' _ "$LIB_SCRIPT" 2>/dev/null || true)"
+    if [ "$_got" != "$_want" ]; then
+      _nvr_resolver_ok=0
+      info "NVR_MEDIA_SOURCE=[$_in] resolved to [$_got], expected [$_want]"
+    fi
+  done
+  rm -rf "$_nvr_sandbox"
+  [ "$_nvr_resolver_ok" -eq 1 ] \
+    && pass "bind-path resolver: absolute=bind, volume-name/relative/empty=volume" \
+    || fail "the NVR_MEDIA_SOURCE resolver misclassifies a value (WARP-2136)"
   # Retention policy: 7 daily / 4 weekly / 6 monthly.
   grep -q -- '--keep-daily' "$BACKUP_SCRIPT" && grep -q -- '--keep-weekly' "$BACKUP_SCRIPT" \
     && grep -q -- '--keep-monthly' "$BACKUP_SCRIPT" \

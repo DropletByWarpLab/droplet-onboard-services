@@ -199,10 +199,46 @@ fi
 CAPTURED+=("postgres:main")
 
 # --- Phase 2: Data volumes -----------------------------------------------
+# WARP-2136: `nvrdata` is only where footage lives when NVR_MEDIA_SOURCE
+# selects the named volume. Redirected to a host path (storage-pool bind or a
+# dedicated partition) there is no such volume, so this loop recorded an EMPTY
+# marker and moved on — and because factory-reset.sh takes THIS backup as its
+# pre-wipe safety net, a reset could report "safety backup complete" and then
+# destroy the only copy of the recordings. Resolve the bind path and tar it
+# from the host instead; the path is already on this filesystem, so no sibling
+# container is needed.
+CAMERA_BIND_PATH=""
+if [ -f "$REPO_ROOT/scripts/host/droplet-backup-lib.sh" ]; then
+  # Exported, not prefixed onto `source`: an assignment-prefixed builtin does
+  # not reliably scope to a sourced file, and the lib resolves the checkout
+  # root lazily inside the resolver. The lib only defines functions (its log_*
+  # block is guarded on `declare -F`), so this cannot clobber ours above.
+  export DROPLET_REPO_ROOT="$REPO_ROOT"
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/scripts/host/droplet-backup-lib.sh"
+  CAMERA_BIND_PATH="$(droplet_backup_nvr_media_bind_path)"
+fi
+
 for vol in "${DATA_VOLUMES[@]}"; do
   full="${PROJECT}_${vol}"
   dest="$WORK_DIR/volumes/$vol"
   mkdir -p "$dest"
+  if [ "$vol" = "nvrdata" ] && [ -n "$CAMERA_BIND_PATH" ]; then
+    if [ ! -d "$CAMERA_BIND_PATH" ]; then
+      log_warn "NVR_MEDIA_SOURCE=$CAMERA_BIND_PATH does not exist — camera footage NOT captured (recordings filesystem unmounted?)"
+      printf 'nvr-media-source-absent-at-backup-time\n' > "$dest/EMPTY"
+      continue
+    fi
+    log_info "Snapshotting camera footage from $CAMERA_BIND_PATH (NVR_MEDIA_SOURCE bind mount)..."
+    if tar -cf "$dest/data.tar" -C "$CAMERA_BIND_PATH" . 2>/dev/null; then
+      log_success "camera footage archived ($(wc -c < "$dest/data.tar") bytes)"
+      CAPTURED+=("path:$CAMERA_BIND_PATH")
+    else
+      log_error "camera footage at $CAMERA_BIND_PATH could not be archived — aborting (refusing a partial backup)"
+      exit 1
+    fi
+    continue
+  fi
   # GUARD: `docker run -v <name>:/data` AUTO-CREATES the named volume if it does
   # not exist, which would silently tar an empty volume and mask a typo'd name
   # (the WARP-570 review blocker). Only snapshot volumes that genuinely exist;

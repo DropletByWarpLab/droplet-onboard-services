@@ -83,6 +83,37 @@ droplet_backup_dotenv_value() {
   { grep -E "^${key}=" "$env_file" 2>/dev/null || true; } | head -n 1 | cut -d= -f2-
 }
 
+# =============================================================================
+# droplet_backup_nvr_media_bind_path — echoes the Frigate media source ONLY
+# when it is a host bind path; empty when the recordings live in the default
+# `nvrdata` named volume.
+#
+# WARP-2136. docker-compose.yml mounts `${NVR_MEDIA_SOURCE:-nvrdata}` into
+# frigate, so that one knob selects between two physically different places:
+# a Docker named volume, or a directory on the host (a storage-pool bind or a
+# dedicated NVMe partition — the redirect the compose comment documents).
+# Every caller that stages "the camera footage" has to branch on which,
+# because `docker run -v <name>:/data` cannot reach a host path: a box with
+# footage redirected to a path has NO `nvrdata` volume, so the volume-only
+# staging path captured nothing while still reporting the opt-in honoured.
+#
+# Compose treats a value containing no `/` as a volume name, so the leading
+# slash is the discriminator. A relative path is deliberately NOT treated as
+# a bind: compose would resolve it against the compose file's directory, not
+# the caller's cwd, so honouring it here would archive the wrong tree.
+# =============================================================================
+droplet_backup_nvr_media_bind_path() {
+  local v
+  v="$(droplet_backup_dotenv_value NVR_MEDIA_SOURCE)"
+  # \042 = double quote, \047 = single quote — octal keeps this readable
+  # instead of a nested-quoting puzzle.
+  v="$(printf '%s' "$v" | tr -d '\042\047')"
+  case "$v" in
+    /*) printf '%s' "$v" ;;
+    *)  return 0 ;;
+  esac
+}
+
 # hex-encode a string's bytes (portable: od is in coreutils + busybox).
 _droplet_backup_str_to_hex() {
   printf '%s' "$1" | od -An -v -t x1 | tr -d ' \n'

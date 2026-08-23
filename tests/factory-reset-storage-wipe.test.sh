@@ -573,6 +573,99 @@ echo "--- Phase 8: the confirmation prompt names the step-3 drives ---"
 ) >/dev/null 2>&1 && pass "declining the prompt runs no mutating command" \
                  || fail "the prompt's discovery pass touched a device"
 
+
+# --- Phase 7: camera footage redirected off the named volume (WARP-2136) -----
+#
+# Defect: the reset's volume sweep only reaches `nvrdata`. With
+# NVR_MEDIA_SOURCE pointed at a host path, footage is a directory tree, and if
+# that path is not under /mnt/droplet and not on an md pool then NOTHING in the
+# reset touched it — the previous owner's recordings survived a factory reset.
+#
+# The purge block is deliberately narrow (Frigate's own subdirectories by name,
+# never `rm -rf $NVR_MEDIA_SOURCE`), because that value is operator-supplied.
+# These tests pin BOTH halves of that: it removes the footage, and it cannot be
+# talked into removing anything else.
+echo ""
+echo "--- Phase 9: redirected camera footage (WARP-2136) ---"
+
+# Own scratch dir: $TMP belongs to make_fixture's md/disk fixtures, and every
+# earlier phase runs in a subshell, so it is not ours to reuse here.
+NVR_TMP="$(mktemp -d)"
+trap 'rm -rf "$NVR_TMP"' EXIT
+
+# Exercise the shipped block itself, not a copy, so drift fails here.
+NVR_BLOCK="$NVR_TMP/nvr-block.sh"
+awk '/^# WARP-2136 — camera footage redirected OFF the named volume\.$/,/^unset _nvr_media$/' \
+  "$RESET" > "$NVR_BLOCK"
+[ -s "$NVR_BLOCK" ] \
+  && pass "the WARP-2136 purge block is extractable from factory-reset.sh" \
+  || fail "could not extract the WARP-2136 purge block — test cannot run"
+
+# $1 = NVR_MEDIA_SOURCE value, $2 = KEEP_STORAGE; echoes the block's output.
+run_nvr_block() {
+  local media="$1" keep="$2" root="$NVR_TMP/nvr-repo"
+  mkdir -p "$root"
+  printf 'NVR_MEDIA_SOURCE=%s\n' "$media" > "$root/.env"
+  REPO_ROOT="$root" KEEP_STORAGE="$keep" NVR_BLOCK="$NVR_BLOCK" bash -c '
+    set -uo pipefail
+    log_info() { printf "INFO %s\n" "$*"; }
+    log_warn() { printf "WARN %s\n" "$*"; }
+    log_success() { printf "OK %s\n" "$*"; }
+    source "$NVR_BLOCK"
+  ' 2>&1
+}
+
+# A Frigate media root plus a file that is NOT Frigate's to delete.
+make_media() {
+  local d="$1"
+  rm -rf "$d"
+  mkdir -p "$d/recordings/2026-08" "$d/clips" "$d/exports" "$d/operator-notes"
+  echo footage > "$d/recordings/2026-08/a.mp4"
+  echo keep    > "$d/operator-notes/README.txt"
+}
+
+make_media "$NVR_TMP/media"
+run_nvr_block "$NVR_TMP/media" false >/dev/null 2>&1
+if [ ! -d "$NVR_TMP/media/recordings" ] && [ ! -d "$NVR_TMP/media/clips" ] && [ ! -d "$NVR_TMP/media/exports" ]; then
+  pass "a default reset removes recordings/, clips/ and exports/ from the bind path"
+else
+  fail "redirected camera footage SURVIVED a factory reset (data remanence)"
+fi
+[ -f "$NVR_TMP/media/operator-notes/README.txt" ] \
+  && pass "the purge is bounded — a non-Frigate directory beside it is untouched" \
+  || fail "the purge deleted something outside Frigate's own subdirectories"
+[ -d "$NVR_TMP/media" ] \
+  && pass "the media root itself is left in place (the mountpoint survives)" \
+  || fail "the purge removed the mountpoint instead of its contents"
+
+make_media "$NVR_TMP/media-keep"
+run_nvr_block "$NVR_TMP/media-keep" true >/dev/null 2>&1
+[ -f "$NVR_TMP/media-keep/recordings/2026-08/a.mp4" ] \
+  && pass "--keep-storage keeps redirected footage (reset-in-place contract)" \
+  || fail "--keep-storage destroyed the owner's footage"
+
+# A path that is not a Frigate layout must be REPORTED, never guessed at.
+rm -rf "$NVR_TMP/media-odd"; mkdir -p "$NVR_TMP/media-odd/some-other-tree"
+echo x > "$NVR_TMP/media-odd/some-other-tree/f"
+out="$(run_nvr_block "$NVR_TMP/media-odd" false)"
+if [ -f "$NVR_TMP/media-odd/some-other-tree/f" ] && printf '%s' "$out" | grep -q "RETAINED"; then
+  pass "an unrecognised layout is left alone AND reported as retained"
+else
+  fail "an unrecognised media layout was silently deleted or silently ignored"
+fi
+
+# Shapes that must be inert: the named-volume default, an unset knob, and the
+# shallow/absolute values a typo'd .env would produce. `/` and `/mnt` reaching
+# `rm -rf` would be catastrophic, so they are pinned explicitly.
+nvr_inert=0
+for bad in "" "nvrdata" "/" "/mnt" "/mnt/" "relative/path"; do
+  out="$(run_nvr_block "$bad" false)"
+  [ -z "$out" ] || { nvr_inert=1; echo "      unexpected output for [$bad]: $out"; }
+done
+[ "$nvr_inert" -eq 0 ] \
+  && pass "volume-name, empty, relative and shallow-absolute values are inert" \
+  || fail "a non-bind or dangerously shallow NVR_MEDIA_SOURCE was acted on"
+
 # --- Summary -----------------------------------------------------------------
 echo ""
 echo "  ------------------------------------------------"
