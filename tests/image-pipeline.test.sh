@@ -430,6 +430,69 @@ else
   fi
 fi
 
+echo "--- WARP-2143: boot-order assertion — installed disk boots first, stick can stay in ---"
+UD2143="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+if [ ! -f "$UD2143" ]; then
+  fail "scripts/image/autoinstall/user-data not present (WARP-2143 boot-order checks)"
+else
+  # efibootmgr must be guaranteed on the target: grub-efi-amd64 pulls it in on
+  # a UEFI install, but the late-command's skip logic must be driven by EFI-vars
+  # presence, never by a missing binary — so the seed declares it explicitly.
+  if grep -qE '^[[:space:]]*-[[:space:]]*efibootmgr[[:space:]]*$' "$UD2143"; then
+    pass "efibootmgr declared in the autoinstall packages list"
+  else
+    fail "efibootmgr not in the autoinstall packages list — boot-order step depends on grub side-effects"
+  fi
+
+  # The late-command itself: must read the EFI boot entries and APPLY a new
+  # BootOrder (efibootmgr -o), not just print one.
+  if grep -q 'efibootmgr -o' "$UD2143" && grep -q 'BootOrder' "$UD2143"; then
+    pass "late-command asserts BootOrder via efibootmgr -o"
+  else
+    fail "no late-command applies a BootOrder with efibootmgr -o — reboot still lands on the stick"
+  fi
+
+  # Graceful degradation (deliberately NON-fatal, unlike the clone step): a
+  # BIOS/CSM boot has no EFI vars — the block must detect /sys/firmware/efi
+  # and log a SKIP rather than fail the install.
+  if grep -q '/sys/firmware/efi' "$UD2143" \
+     && grep -q 'SKIP: no EFI firmware interface' "$UD2143"; then
+    pass "BIOS/CSM boot skips gracefully with a logged note (never fails the install)"
+  else
+    fail "no logged BIOS/CSM skip path — a legacy-boot install would fail or skip silently"
+  fi
+
+  # Entry-not-found must also log + skip, never fail.
+  if grep -qE 'SKIP: no .?ubuntu.? boot entry' "$UD2143"; then
+    pass "missing ubuntu boot entry skips with a logged note"
+  else
+    fail "no logged skip for a missing ubuntu boot entry"
+  fi
+
+  # Idempotence: when the ubuntu entry is already first, the block must say so
+  # and exit without rewriting EFI vars (harmless on re-install).
+  if grep -q 'already first' "$UD2143"; then
+    pass "idempotent: logs and exits early when the ubuntu entry is already first"
+  else
+    fail "no already-first early exit — block rewrites EFI vars on every install"
+  fi
+
+  # review-#501 discipline: the step is non-fatal BY DESIGN, but every swallow
+  # must log. The outer guard must be a logged warning, and no bare '|| true'
+  # may appear outside comments anywhere in the seed.
+  if grep -q 'droplet-boot-order: WARNING' "$UD2143"; then
+    pass "outer failure guard logs a warning instead of swallowing silently"
+  else
+    fail "boot-order block has no logged outer failure guard (silent swallow or fatal-by-accident)"
+  fi
+  stray_true="$(grep -n '|| true' "$UD2143" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [ -z "$stray_true" ]; then
+    pass "no bare '|| true' outside comments in the autoinstall seed"
+  else
+    fail "bare '|| true' swallows a failure in the seed (review #501):" "$stray_true"
+  fi
+fi
+
 # =============================================================================
 # Results
 # =============================================================================
