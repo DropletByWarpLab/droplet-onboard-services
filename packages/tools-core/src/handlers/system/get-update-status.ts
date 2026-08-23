@@ -59,6 +59,7 @@ interface StatusPayload {
     autoApply?: boolean;
   } | null;
   applyAvailable?: boolean;
+  updateSourceAuthenticated?: boolean;
 }
 
 /** Prisma's DeviceUpdateStatus enum → a phase the user understands. */
@@ -199,6 +200,11 @@ async function handler(
       // restore a healthy previous state.
       degraded: payload.degraded === true,
       applyAvailable: payload.applyAvailable === true,
+      // WARP-2133: false ⇒ this box has no credential for the release
+      // source, so "no pending update" means it CANNOT SEE releases, not
+      // that it is current. Without this the assistant repeats the same
+      // lie the dashboard used to tell.
+      updateSourceAuthenticated: payload.updateSourceAuthenticated === true,
       settings: settings
         ? {
             channel: settings.channel,
