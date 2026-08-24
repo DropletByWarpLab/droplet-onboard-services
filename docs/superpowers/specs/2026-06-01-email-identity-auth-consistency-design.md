@@ -183,8 +183,8 @@ drift that caused this bug becomes unrepresentable.
   owner row, so setup correctly 409s there going forward.
 - `User.username` is `NOT NULL` — `deriveUserId` must always return a non-empty value (the
   `user` fallback guarantees this).
-- **Operational flag for Romain:** the habitual test password `Warplab123!` is 11 chars and
-  fails the new min-12 rule; use e.g. `Warplab1234!` (12 chars, 4 classes) for new accounts.
+- **Operational flag for Romain:** the habitual test password `TestPass11!` is 11 chars and
+  fails the new min-12 rule; use e.g. `TestPass123!` (12 chars, 4 classes) for new accounts.
   The seeded admin default in personal prefs should be bumped to match.
 
 ## Open questions

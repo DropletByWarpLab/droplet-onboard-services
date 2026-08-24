@@ -2,8 +2,8 @@
 
 The prober writes its RTSP URL into Frigate, whose bundled ffmpeg does NOT
 percent-decode userinfo before authenticating. ``quote(pw, safe="")`` escaped
-every character outside the RFC 3986 *unreserved* set, so `Droplet123!` was
-stored as `Droplet123%21` and went on the wire that way: the camera answered
+every character outside the RFC 3986 *unreserved* set, so `T3stCamPw!` was
+stored as `T3stCamPw%21` and went on the wire that way: the camera answered
 401, ffmpeg retried, and the Hanwha locked the account after ~5 attempts.
 
 The bug survived every existing test because the prober's own verifier reads
@@ -21,7 +21,7 @@ import pytest
 
 import rtsp_prober
 
-USER, PW = "admin", "Droplet123!"
+USER, PW = "admin", "T3stCamPw!"
 PATH = "/profile2/media.smp"
 
 

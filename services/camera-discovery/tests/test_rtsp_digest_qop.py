@@ -24,7 +24,7 @@ import pytest
 
 import rtsp_prober
 
-USER, PW, REALM = "admin", "Droplet123!", "iPOLiS"
+USER, PW, REALM = "admin", "T3stCamPw!", "iPOLiS"
 
 
 def _md5(s: str) -> str:

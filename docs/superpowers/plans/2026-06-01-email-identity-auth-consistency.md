@@ -1323,7 +1323,7 @@ The appliance at `192.168.1.87` already has an owner row, so setup now correctly
 # On the appliance (ssh droplet@192.168.1.87):
 ./scripts/factory-reset.sh
 # then deploy this branch's build and walk the wizard in a browser:
-#   - Setup: enter a work email + a 12+ char password (e.g. Warplab1234!) → expect success
+#   - Setup: enter a work email + a 12+ char password (e.g. TestPass123!) → expect success
 #   - Sign out, sign in with the SAME email + password → expect success
 #   - Confirm the derived Nextcloud account exists
 ```
@@ -1339,7 +1339,7 @@ git commit -m "test(auth): align suites with email-identity + 12-char/3-class pa
 
 ## Notes for the implementer
 
-- **Romain's test password `Warplab123!` (11 chars) now fails the min-12 rule.** Use `Warplab1234!` (12 chars, 4 classes) for any manual/live testing.
+- **Romain's test password `TestPass11!` (11 chars) now fails the min-12 rule.** Use `TestPass123!` (12 chars, 4 classes) for any manual/live testing.
 - The orchestrator imports use `.js` extensions (NodeNext). Bare package specifiers (`@droplet/auth-policy`) need no extension; internal package imports (`./password.js`) do.
 - Do **not** add any `MATTER_*` env var (unrelated, but a repo-wide footgun — see CLAUDE.md).
 - If the Next `transpilePackages` route causes a dashboard build issue, the spec's Approach B fallback applies: keep `@droplet/auth-policy` for the orchestrator, re-declare `PASSWORD_RULES` locally in the dashboard, and add a test asserting the two arrays match. Behavior is identical.

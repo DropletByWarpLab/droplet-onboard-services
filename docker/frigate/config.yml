@@ -94,8 +94,8 @@ cameras: {}
   # The password comes from FRIGATE_CAMERA_FRONT_DOOR_PASSWORD via Frigate's
   # str.format substitution (frigate/config/env.py): the env value is dropped
   # into the URL VERBATIM, with NO URL-encoding. Store the **raw** password
-  # in .env — e.g. `FRIGATE_CAMERA_FRONT_DOOR_PASSWORD=Droplet123!`, not
-  # `Droplet123%21`. The bundled ffmpeg does not URL-decode userinfo
+  # in .env — e.g. `FRIGATE_CAMERA_FRONT_DOOR_PASSWORD=T3stCamPw!`, not
+  # `T3stCamPw%21`. The bundled ffmpeg does not URL-decode userinfo
   # before authenticating, so percent-escapes go on the wire literally and
   # the camera returns 401, then locks the account after ~5 retries.
   #

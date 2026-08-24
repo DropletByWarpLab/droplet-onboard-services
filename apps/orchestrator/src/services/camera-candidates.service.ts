@@ -98,7 +98,7 @@ interface DiscoveryRecord {
  * Strip `user:pass@` from an RTSP URL.
  *
  * Deliberately a regex on the authority segment rather than `new URL()`:
- * discovery emits percent-encoded credentials (`admin:Droplet123%21@…`) and we
+ * discovery emits percent-encoded credentials (`admin:T3stCamPw%21@…`) and we
  * must not risk a parser normalising or re-encoding the rest of the URL — the
  * value is shown to an operator, and the path is vendor-specific and literal
  * (`/profile2/media.smp`). The userinfo class excludes `/` so a path segment
