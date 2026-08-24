@@ -48,12 +48,15 @@ REPO_ROOT="$WORK" . "$REPO_ROOT/scripts/lib/internal-ca.sh"
 
 internal_ca_ensure
 for svc in broker orchestrator file-indexer; do internal_ca_issue "$svc"; done
-# CLIENT containers read their keys via plain bind mounts under a non-root
-# uid, so those need to be world-readable in this scratch tree. The BROKER
-# key is DELIBERATELY left 0600 and owned by the test user — the exact
-# post-relocation state that crash-looped a fresh install (WARP-2154). The
-# broker staying up below is the regression proof that the staging wrapper
-# repairs ownership in-container.
+# The MOSQ client containers run as container root (--entrypoint "", no
+# --user), and root reads 0600 bind mounts on a stock daemon regardless of
+# ownership — these chmods only matter under rootless/userns daemons, where
+# the mapped uid is unprivileged. Keep them for that robustness, but NEVER
+# add the broker key to this list: it is DELIBERATELY left 0600 and owned
+# by the test user — the exact post-relocation state that crash-looped a
+# fresh install (WARP-2154) — and a world-readable broker key would keep
+# the broker up even without the staging wrapper, disarming the regression
+# proof below.
 chmod 644 "$WORK"/data/secrets/service-tls/orchestrator/key.pem \
           "$WORK"/data/secrets/service-tls/file-indexer/key.pem
 

@@ -88,10 +88,16 @@ for stanza in \
   grep -qF "$stanza" "$C"  || fail "compose: broker staging stanza missing: $stanza"
   grep -qF "$stanza" "$IT" || fail "integration-test wrapper drifted from compose: $stanza"
 done
+# A continuation line indented past the folded block's 8-space indent makes
+# YAML preserve the newline, so the sh -c payload splits and dies on the
+# '&&'-led second line (broker crash-loops) — while every -qF stanza pin
+# above stays green, because grep matches the bytes wherever they sit.
+grep -qE '^ {10,}&& (install|exec) ' "$C" \
+  && fail "compose: staging stanza over-indented — folded sh -c payload would split"
 grep -q 'chmod 644 "$key"' "$REPO_ROOT/scripts/lib/internal-ca.sh" \
   && fail "internal-ca.sh: world-readable key fallback is back (WARP-2154)"
-grep -q '1883' "$REPO_ROOT/scripts/lib/internal-ca.sh" \
-  && fail "internal-ca.sh: broker uid special-case is back (WARP-2154 — ownership is staged in-container by compose)"
+grep -qE 'chown.*1883|1883:1883' "$REPO_ROOT/scripts/lib/internal-ca.sh" \
+  && fail "internal-ca.sh: broker uid ownership special-case is back (WARP-2154 — ownership is staged in-container by compose)"
 
 # 4b. compose: every MQTT client mounts its own bundle (CN = service name)
 for svc in orchestrator file-indexer email-indexer camera-discovery frigate; do
