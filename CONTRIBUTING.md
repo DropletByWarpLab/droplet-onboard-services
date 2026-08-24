@@ -20,6 +20,13 @@ Promoting is an ordinary PR (`stage` → `main`), reviewed like any other.
 Hotfixes take the same route: skipping `stage` means shipping every box a
 build that has never run on one.
 
+Your PR must carry the WARP key it implements in its **title** —
+`WARP-123: …` or `fix(scope): … (WARP-123)`. That is a required check
+(`title carries a WARP key`); genuinely ticketless maintenance opts out
+with `[no-ticket]`. Keys you merely *reference* go in the body, never the
+title. The full list of gates that must go green, and the rule for adding
+one, is [`docs/ci-required-checks.md`](docs/ci-required-checks.md).
+
 Releases are published by dispatching `publish-release.yml` from the
 branch you want to ship — the workflow derives the channel from the ref
 and refuses to run from anywhere else. See the "Branching and releases"
