@@ -206,8 +206,13 @@ on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
    ```
    Expect `AP radio detected — phy=<phyN> iface=<name>` matching the card the box
    actually has (`ls /sys/class/ieee80211` + `iw dev` to cross-check). A
-   `no wireless phy/iface resolved` WARN means the card isn't seen — **stop and
-   check the hardware** (seated? `lspci | grep -i net`?); pin `DROPLET_AP_PHY` /
+   `no wireless phy/iface resolved` WARN (followed by the WARP-2150
+   `skipping AP bring-up` line — the attach no longer limps into nft/hostapd
+   with an empty iface) means the iface could not be mapped. **Check `iw`
+   first**: `command -v iw || sudo apt-get install -y iw` (the 2026-08-24 fresh
+   install shipped without it — `iw: command not found` at the netns move —
+   which is WARP-2150; `setup.sh` now ensures it). Only then suspect hardware
+   (seated? `lspci | grep -i net`?); pin `DROPLET_AP_PHY` /
    `DROPLET_AP_IFACE` in `/etc/default/droplet-openwrt-attach` only if the card
    is present but enumerates oddly.
 
