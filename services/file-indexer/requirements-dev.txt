@@ -1,7 +1,7 @@
 -r requirements.txt
 pytest==9.1.1
 # WARP-201: used to regenerate the test PDF fixture
-reportlab>=5.0.0
+reportlab>=5.0.1
 # WARP-208 — frame OCR perceptual-hash dedup (also pinned in requirements.txt).
 imagehash==4.3.2
 
