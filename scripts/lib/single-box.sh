@@ -1316,21 +1316,65 @@ EOF
   # the gateway still can't be read (a genuine Docker fault) — never silently
   # leave the unreachable host.docker.internal default in place.
   local bridge_net="droplet_default" bridge_gw=""
-  # Create the bridge if absent so the gateway is derivable at Phase-4 time.
+  # WARP-2148: on a FRESH install this code runs seconds after dockerd's very
+  # first startup, and the daemon's network controller can still be
+  # initializing — the create silently no-ops/fails, the inspect returns an
+  # empty gateway, and the loud refusal below aborted the whole first boot.
+  # Live bench evidence (2026-08-24, three consecutive failed installs): the
+  # IDENTICAL create+inspect succeeded instantly ten minutes later (gateway
+  # 172.18.0.1). Deterministic on fresh installs, not a fluke. So: bounded
+  # retry. Each attempt (a) re-ensures the network exists — the create's
+  # stderr is LOGGED now, never discarded (an "already exists" complaint is
+  # expected and tolerated; anything else is the daemon telling us why the
+  # race is live) — then (b) inspects for the gateway. First non-empty
+  # gateway wins. On exhaustion the pre-existing loud refusal fires exactly
+  # as before — the guard is correct and stays loud.
+  # Tunables (env seam so the unit test can shrink them; defaults ride out
+  # the observed race with margin):
+  #   DROPLET_NET_GATEWAY_RETRIES  attempts before giving up  (default 6)
+  #   DROPLET_NET_GATEWAY_DELAY    seconds between attempts   (default 2)
+  local _gw_retries="${DROPLET_NET_GATEWAY_RETRIES:-6}"
+  local _gw_delay="${DROPLET_NET_GATEWAY_DELAY:-2}"
+  local _gw_attempt=1 _gw_create_err="" _gw_precreate_logged=0
   # `|| true` on each docker call: under `set -euo pipefail` a non-zero exit
   # inside this function would abort setup silently (no inherited ERR trap); we
   # validate the derived value explicitly below and fail loud with context.
-  if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
-    docker network create \
-      --label com.docker.compose.network=default \
-      --label com.docker.compose.project=droplet \
-      "$bridge_net" >/dev/null 2>&1 || true
-    log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
-  fi
-  bridge_gw=$(docker network inspect "$bridge_net" \
-    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-  # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
-  bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+  while :; do
+    # (a) Ensure the bridge exists so the gateway is derivable at Phase-4 time
+    # (compose adopts a pre-created default-labeled bridge on `up`).
+    if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
+      _gw_create_err=$(docker network create \
+        --label com.docker.compose.network=default \
+        --label com.docker.compose.project=droplet \
+        "$bridge_net" 2>&1 >/dev/null) || true
+      if [ -n "$_gw_create_err" ]; then
+        case "$_gw_create_err" in
+          *"already exists"*)
+            log_info "docker network create $bridge_net: already exists (fine — adopting it): $_gw_create_err" ;;
+          *)
+            log_info "docker network create $bridge_net (attempt ${_gw_attempt}/${_gw_retries}) stderr: $_gw_create_err" ;;
+        esac
+      fi
+      if [ "$_gw_precreate_logged" = 0 ]; then
+        log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
+        _gw_precreate_logged=1
+      fi
+    fi
+    # (b) Read back the gateway Docker's IPAM assigned.
+    bridge_gw=$(docker network inspect "$bridge_net" \
+      -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
+    bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+    if [ -n "$bridge_gw" ]; then
+      break
+    fi
+    if [ "$_gw_attempt" -ge "$_gw_retries" ]; then
+      break
+    fi
+    log_info "configure_single_box_env: $bridge_net gateway not derivable yet (attempt ${_gw_attempt}/${_gw_retries} — dockerd's network controller may still be initializing on first boot, WARP-2148); retrying in ${_gw_delay}s."
+    sleep "$_gw_delay"
+    _gw_attempt=$((_gw_attempt + 1))
+  done
   if [ -z "$bridge_gw" ]; then
     # Fail loud — do NOT silently leave the unreachable host.docker.internal
     # default. An empty gateway here is the difference between a working router
