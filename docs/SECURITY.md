@@ -23,24 +23,61 @@ file.
 | `semgrep.yml` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
 | `hadolint.yml` | hadolint 2.14.0 | yes | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
 | `docker-build.yml` (Trivy step) | trivy-action 0.36.0, **DB pinned by digest** | yes (fixable HIGH/CRITICAL not in baseline) | every image the PR rebuilds | `.trivyignore` baseline + `.github/trivy-db-version` (see [Trivy determinism](#trivy-determinism)) |
-| `codeql.yml` | CodeQL (JS/TS + Python) | yes (new alerts, via ruleset code-scanning rule) — dormant until Code Security is enabled (D1, below) | code paths | GitHub per-PR alert diffing |
+| `codeql.yml` | CodeQL (JS/TS + Python + Actions) | no — advisory signal only (not a required check; no `code_scanning` ruleset rule exists — see [CodeQL ownership](#codeql)) | code paths + `.github/workflows/**` | GitHub per-PR alert diffing |
 | `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` |
 | `egress-gate.yml` | `scripts/check-egress-allowlist.py` | yes | outbound destinations | `docs/security/allowed-egress.yaml` (security review required) |
 | Dependabot | `.github/dependabot.yml` | n/a (opens fix PRs) | npm ×2, pip ×13, actions | grouped weekly, limits per ecosystem |
 
-### CodeQL is gated on GitHub Code Security (decision D1) {#codeql}
+### CodeQL ownership: this repo runs advanced setup only (WARP-2167) {#codeql}
 
-On this private repo, uploading CodeQL results requires **GitHub Code
-Security** (GHAS — per-committer billing, org-admin enablement). Until it is
-enabled, `codeql.yml`'s preflight job probes the code-scanning API and
-**skips** the analyze matrix (skipped, not red — the run's step summary says
-why). The moment an admin runs
+GitHub allows exactly **one** owner of code scanning per repo. This repo uses
+the **advanced** workflow (`.github/workflows/codeql.yml`), and GitHub’s CodeQL
+**default setup** must stay off. Verify with:
 
-    gh api -X PATCH repos/DropletByWarpLab/droplet-onboard-services \
-      -f 'security_and_analysis[advanced_security][status]=enabled'
+    gh api repos/DropletByWarpLab/droplet-onboard-services/code-scanning/default-setup
+    # -> {"state":"not-configured", ...}
 
-the next run analyzes and uploads without any workflow change. Every other
-scanner in this document works regardless of D1.
+If default setup is ever re-enabled, every upload from `codeql.yml` is rejected
+— *"CodeQL analyses from advanced configurations cannot be processed when
+the default setup is enabled"* — and the lane goes permanently red while its
+results are silently discarded. That happened on 2026-08-24 and is what
+WARP-2167 fixed.
+
+**The trap.** This repo is attached to the org-level *"GitHub recommended"* code
+security configuration, which sets `code_scanning_default_setup=enabled`.
+Applying or re-applying that configuration here turns default setup back on and
+re-breaks the lane. Its `enforcement` is `unenforced`, so the repo-level
+override wins until someone re-applies it. Re-disable with:
+
+    gh api -X PATCH repos/DropletByWarpLab/droplet-onboard-services/code-scanning/default-setup -f state=not-configured
+
+That call touches code scanning only — secret scanning, push protection,
+Dependabot alerts, dependency graph, and private vulnerability reporting all
+stay enabled (verified after the 2026-08-24 flip).
+
+**Why advanced and not default setup.** Every PR here targets `stage`; `main`
+moves only via a promotion PR. Default setup runs on the default branch, PRs
+targeting it, and a weekly cron — it never scans a `stage` PR, so handing it
+ownership would mean no code scanning at review time. Advanced setup also
+carries `.github/codeql/codeql-config.yml`, whose `paths-ignore` keeps test
+fixtures, mocks and docs out of the results.
+
+**Languages.** `javascript-typescript`, `python`, and `actions`. The `actions`
+job exists because default setup was covering it; dropping default setup
+without it would have silently ended GitHub Actions scanning.
+
+**Not merge-blocking.** These checks are advisory. They are not in the
+`required_status_checks` of either ruleset ("Main Protection" 14884851 /
+"Stage Protection" 20877684), and neither ruleset carries a `code_scanning`
+rule. An earlier version of this document claimed CodeQL blocked merges "via
+ruleset code-scanning rule"; that rule was never wired. Findings land in the
+Security tab and on the PR. Turning on real enforcement is a separate decision
+— deliberately not part of WARP-2167.
+
+Decision D1 (GHAS per-committer billing gating uploads on a *private* repo) no
+longer applies: this repo is public, so code scanning is free. The preflight
+probe that implemented D1 has been removed — it was what silently armed the
+failing jobs the moment default setup flipped code scanning on.
 
 ## When a gate fails your PR
 
