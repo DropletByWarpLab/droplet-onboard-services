@@ -339,7 +339,10 @@ for badmark in \
   "\$(touch $PWNED2)" \
   "\`touch $PWNED2\`" \
   "" \
-  "12345678901234567890123"; do
+  "12345678901234567890123" \
+  "0123456789" \
+  "0000000000" \
+  "007"; do
   setup
   printf '%s\n' "$badmark" >"$DROPLET_SSH_ACCESS_DIR/install-mode"
   /bin/sh "$RESET" >/dev/null 2>&1

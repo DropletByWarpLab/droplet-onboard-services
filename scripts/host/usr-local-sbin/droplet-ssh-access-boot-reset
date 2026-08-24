@@ -79,16 +79,29 @@ if [ -f "$INSTALL_MODE_FILE" ]; then
   read -r ts <"$INSTALL_MODE_FILE" 2>/dev/null || true
   now="$(date +%s)"
   case "$ts" in
-    ""|*[!0-9]*)
+    ""|*[!0-9]*|0?*)
       # Not an epoch timestamp. Same strict-parse posture as the applier:
       # there is no code path from file contents to a command, and a marker
       # that fails validation is refused AND removed.
+      #
+      # A LEADING ZERO is refused here rather than normalised away: POSIX
+      # arithmetic reads `0123` as octal, so a digits-only marker like
+      # `0123456789` is an invalid octal constant and `$((ts + ...))` is a
+      # FATAL error under dash (the appliance's /bin/sh) — it would kill this
+      # script before the intent write below, leaving the previous boot's
+      # intent in place. That is precisely the stale-intent-survives-a-reboot
+      # failure this reset exists to prevent, so the parse must reject the
+      # value before any arithmetic sees it. `10#$ts` is NOT the fix: that is
+      # a bash/ksh extension which dash rejects outright, for every marker.
+      # `date +%s` has never emitted a leading zero and will not for
+      # millennia, so nothing legitimate is turned away.
       rm -f "$INSTALL_MODE_FILE"
       log "install-mode marker is not an epoch timestamp; removed it — resetting to off"
       ;;
     *)
-      # Digits only and bounded (12 digits outlives the hardware by
-      # millennia), so the arithmetic below can never be fed junk. A FUTURE
+      # Digits only, no leading zero, and bounded (12 digits outlives the
+      # hardware by millennia), so the arithmetic below is always a valid
+      # decimal constant and can never be fed junk. A FUTURE
       # stamp (installer clock ahead of a first boot with no RTC sync yet)
       # counts as fresh: fail open for commissioning — the backstop still
       # bounds the window once the clock passes stamp+48h.
