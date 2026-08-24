@@ -36,6 +36,15 @@ class _FakeDriver:
         self.plan_only = plan_only
         self.writes: list[tuple] = []
 
+    # -- reads --
+
+    async def get_ports(self) -> list[dict]:
+        """WARP-2165: /setup/cameras derives its port banks from the device
+        when the request omits them, so the stand-in has to be able to answer.
+        Reports a 10HP (copper 1-8, SFP 9-10) — the layout these tests assumed
+        back when it was a schema default."""
+        return [{"port": n, "is_sfp": n >= 9} for n in range(1, 11)]
+
     # -- writes returning None (like the real driver) --
 
     async def set_port_enabled(self, port: int, enabled: bool) -> None:

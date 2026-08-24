@@ -47,6 +47,7 @@ from drivers.base import (
     SwitchAPIError,
     InvalidPortError,
     PoweredMemberError,
+    ProtectedPortError,
 )
 from provisioner import ProvisionConfig, reconcile_switch
 import provision_state
@@ -342,6 +343,15 @@ def handle_switch_error(exc: SwitchError):
         raise HTTPException(
             status_code=409,
             detail={"code": "PORT_POWERS_MEMBER", "message": str(exc)},
+        )
+    if isinstance(exc, ProtectedPortError):
+        # 409 like its powered-member neighbour: well-formed request, refused
+        # because of what that port IS in this rack. Typed separately so the
+        # dashboard can say "that's your uplink" rather than offering a force
+        # path that does not exist for it (WARP-2165).
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "PORT_IS_PROTECTED", "message": str(exc)},
         )
     if isinstance(exc, InvalidPortError):
         raise HTTPException(status_code=400, detail=str(exc))
@@ -763,6 +773,39 @@ async def setup_cameras(req: CameraSetupRequest):
     """
     driver = get_driver()
     try:
+        # Step 0 (WARP-2165): resolve empty port lists from the DEVICE. The
+        # old schema defaults were a GS1900-10HP's literal banks, so on an 8HP
+        # the trunk pointed at two ports that do not exist. Deriving here keeps
+        # the one-click path working on whatever hardware a unit ships with.
+        camera_ports = list(req.camera_ports)
+        uplink_ports = list(req.uplink_ports)
+        if not camera_ports or not uplink_ports:
+            ports = await driver.get_ports()
+            protected = build_provision_config().protected_port
+            if not uplink_ports:
+                uplink_ports = [p["port"] for p in ports if p.get("is_sfp")]
+                if not uplink_ports:
+                    # Guessing a copper trunk could move the appliance's own
+                    # uplink onto the camera VLAN. Refuse instead.
+                    raise InvalidPortError(
+                        "This switch has no SFP uplink ports, so there is no "
+                        "safe default trunk for the camera VLAN. Pass "
+                        "uplink_ports explicitly."
+                    )
+            if not camera_ports:
+                camera_ports = [
+                    p["port"] for p in ports
+                    if not p.get("is_sfp")
+                    and p["port"] != protected
+                    and p["port"] not in uplink_ports
+                ]
+                if not camera_ports:
+                    raise InvalidPortError(
+                        "No switch ports are available for cameras once the "
+                        "uplink and protected port are excluded. Pass "
+                        "camera_ports explicitly."
+                    )
+
         # Step 1: Create VLAN
         try:
             await driver.create_vlan(req.vlan_id, "cameras")
@@ -775,17 +818,17 @@ async def setup_cameras(req: CameraSetupRequest):
 
         # Step 2: Set port membership
         membership = []
-        for port in req.camera_ports:
+        for port in camera_ports:
             membership.append({"port": port, "tagged": False, "member": True})
-        for port in req.uplink_ports:
+        for port in uplink_ports:
             membership.append({"port": port, "tagged": True, "member": True})
 
         membership_result = await driver.set_vlan_membership(req.vlan_id, membership)
         logger.info(
             "Camera VLAN %d: %d camera ports + %d uplink ports",
             req.vlan_id,
-            len(req.camera_ports),
-            len(req.uplink_ports),
+            len(camera_ports),
+            len(uplink_ports),
         )
 
         # WARP-1176 (PYNET-001): prefer the driver's own returned dry_run
@@ -800,19 +843,19 @@ async def setup_cameras(req: CameraSetupRequest):
             # Plan-only: the driver never wrote, so say so — don't claim
             # "configured" (mirrors the "planned"/dry-run write responses above).
             message = (
-                f"VLAN {req.vlan_id} planned (dry-run): ports {req.camera_ports} "
-                f"(untagged) + {req.uplink_ports} (tagged trunk) would be configured"
+                f"VLAN {req.vlan_id} planned (dry-run): ports {camera_ports} "
+                f"(untagged) + {uplink_ports} (tagged trunk) would be configured"
             )
         else:
             message = (
-                f"VLAN {req.vlan_id} configured: ports {req.camera_ports} "
-                f"(untagged) + {req.uplink_ports} (tagged trunk)"
+                f"VLAN {req.vlan_id} configured: ports {camera_ports} "
+                f"(untagged) + {uplink_ports} (tagged trunk)"
             )
         return CameraSetupResult(
             status="planned" if dry else "ok",
             vlan_id=req.vlan_id,
-            camera_ports=req.camera_ports,
-            uplink_ports=req.uplink_ports,
+            camera_ports=camera_ports,
+            uplink_ports=uplink_ports,
             message=message,
             dry_run=dry,
         )

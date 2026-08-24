@@ -32,7 +32,11 @@ const inputSchema = { type: "object", properties: {}, additionalProperties: fals
 const tool: Tool = {
   name: "get_switch_ports",
   description:
-    "Get the status of all ports on the managed PoE switch, including link state, speed, VLAN assignment, and PoE power delivery. The switch has 8 copper PoE ports (1-8) and 2 SFP uplinks (9-10).",
+    // WARP-2165: this used to assert "8 copper PoE ports (1-8) and 2 SFP " +
+    // "uplinks (9-10)" — the layout of one variant. State no port inventory
+    // here at all: the response IS the inventory, so it stays correct on
+    // whatever hardware a unit ships with.
+    "Get the status of all ports on the managed PoE switch, including link state, speed, VLAN assignment, and PoE power delivery. Port count and layout vary by switch model — read them from the response rather than assuming a fixed set; each port reports whether it is an SFP/optical port.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
