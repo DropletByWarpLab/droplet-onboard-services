@@ -593,9 +593,87 @@ else
   fail "missing 'Replaced existing single-box block in .env' log line on a replace run"
 fi
 
-# Fail-loud guard: with NO droplet_default network resolvable, the function must
-# exit non-zero rather than silently leaving the unreachable host.docker.internal
-# default in place. Stub a docker that returns an empty gateway and confirm.
+# --- WARP-2148: first-boot gateway-derivation race (bounded retry) ----------
+# On a FRESH install configure_single_box_env runs seconds after dockerd's very
+# first startup. Live bench evidence (2026-08-24, three consecutive failed
+# installs): `docker network create` silently no-ops/fails while the daemon's
+# network controller is still initializing, `network inspect` returns an empty
+# gateway, and the (correct) fail-loud guard kills the whole first boot — while
+# the IDENTICAL create+inspect succeeds instantly ten minutes later. The fix
+# rides the race out: up to DROPLET_NET_GATEWAY_RETRIES attempts,
+# DROPLET_NET_GATEWAY_DELAY seconds apart, each attempt (a) re-ensuring the
+# network exists (create stderr LOGGED, never discarded) then (b) inspecting
+# for the gateway. Stub a docker that emulates the initializing daemon via a
+# call-count file: `network create` fails with the daemon error, `network
+# inspect` knows nothing for the first 4 calls, and call 5+ answers like a
+# settled daemon.
+SB_GW_CALLS="$TMP_ROOT/sb-gw-inspect-calls"
+rm -f "$SB_GW_CALLS"
+cat > "$SB_STUB_BIN/docker" <<EOF
+#!/usr/bin/env bash
+# First-boot race stub: dockerd's network controller "settles" on inspect call 5.
+COUNT_FILE="$SB_GW_CALLS"
+if [ "\$1" = "network" ] && [ "\$2" = "inspect" ]; then
+  n=0
+  [ -f "\$COUNT_FILE" ] && n=\$(cat "\$COUNT_FILE")
+  n=\$((n + 1))
+  printf '%s' "\$n" > "\$COUNT_FILE"
+  if [ "\$n" -ge 5 ]; then
+    printf '%s\n' "$SB_FAKE_GW"
+    exit 0
+  fi
+  echo "Error: No such network: droplet_default" >&2
+  exit 1
+fi
+if [ "\$1" = "network" ] && [ "\$2" = "create" ]; then
+  echo "Error response from daemon: network controller is not initialized" >&2
+  exit 1
+fi
+exit 0
+EOF
+chmod +x "$SB_STUB_BIN/docker"
+
+# 4 attempts, 0s apart: the gateway appears on inspect call 5 = attempt 3 (an
+# unsettled attempt burns two inspect calls — existence probe + gateway read),
+# so the retry must succeed with attempts to spare, and the run stays instant.
+# Unfixed code has NO retry: it burns calls 1-2 on its single attempt, derives
+# nothing, and dies on the loud refusal — exactly the bench failure.
+SB_RACE_OUT=$(DROPLET_NET_GATEWAY_RETRIES=4 DROPLET_NET_GATEWAY_DELAY=0 configure_single_box_env 2>&1) \
+  && SB_RACE_RC=0 || SB_RACE_RC=$?
+if [ "$SB_RACE_RC" = "0" ]; then
+  pass "configure_single_box_env rides out the first-boot race (gateway on inspect call 5, retries=4)"
+else
+  fail "configure_single_box_env died on the first-boot race despite retries (rc=$SB_RACE_RC) — unfixed code fails here on its only attempt"
+fi
+
+# The late-derived gateway is what got pinned (not a stale or empty value).
+ROUTING_URL_RACE=$( { grep -E '^ROUTING_SERVICE_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$ROUTING_URL_RACE" = "http://${SB_FAKE_GW}:8080" ]; then
+  pass "race run pinned ROUTING_SERVICE_URL to the late-derived gateway"
+else
+  fail "race run left ROUTING_SERVICE_URL='${ROUTING_URL_RACE}' (expected http://${SB_FAKE_GW}:8080)"
+fi
+
+# A future bench log must SHOW the race being ridden out: one info line per retry.
+if printf '%s' "$SB_RACE_OUT" | grep -q "retrying in"; then
+  pass "race run logs each retry (a bench log shows the race being ridden out)"
+else
+  fail "race run logged no retry line — a future bench log would look like a clean first try"
+fi
+
+# The create's stderr is LOGGED, not discarded — the daemon said WHY it raced.
+if printf '%s' "$SB_RACE_OUT" | grep -q "network controller is not initialized"; then
+  pass "docker network create stderr is logged (not discarded)"
+else
+  fail "docker network create stderr was discarded — the daemon's reason for the race is invisible"
+fi
+
+# Fail-loud guard (retry exhaustion): with NO droplet_default gateway EVER
+# derivable, the function must retry, exhaust, and exit non-zero with the EXACT
+# pre-existing loud refusal rather than silently leaving the unreachable
+# host.docker.internal default in place. The guard saved the bench boxes from
+# a silently broken .env — the retry must not soften it. Retries/delay shrunk
+# via the env seam so the suite stays fast.
 cat > "$SB_STUB_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 # Empty-gateway stub: inspection returns nothing (network absent/misconfigured).
@@ -606,10 +684,26 @@ fi
 exit 0
 EOF
 chmod +x "$SB_STUB_BIN/docker"
-if configure_single_box_env >/dev/null 2>&1; then
+SB_EXHAUST_OUT=$(DROPLET_NET_GATEWAY_RETRIES=3 DROPLET_NET_GATEWAY_DELAY=0 configure_single_box_env 2>&1) \
+  && SB_EXHAUST_RC=0 || SB_EXHAUST_RC=$?
+if [ "$SB_EXHAUST_RC" = "0" ]; then
   fail "configure_single_box_env must FAIL when the droplet_default gateway can't be derived (it returned success)"
 else
   pass "configure_single_box_env fails loud when the droplet_default gateway can't be derived"
+fi
+
+# The refusal text is the exact pre-existing loud guard, not a softened variant.
+if printf '%s' "$SB_EXHAUST_OUT" | grep -qF "could not derive the droplet_default bridge gateway"; then
+  pass "exhaustion still fires the exact loud refusal (guard not softened)"
+else
+  fail "the loud refusal text is missing or changed after retry exhaustion"
+fi
+
+# It exhausted the bounded retry first (retry lines logged), not a first-shot abort.
+if printf '%s' "$SB_EXHAUST_OUT" | grep -q "attempt 2/3"; then
+  pass "refusal fired only after the bounded retry was exhausted (attempt 2/3 logged)"
+else
+  fail "no retry attempts logged before the refusal — the retry loop never engaged"
 fi
 
 # Restore PATH so Phase 4+ uses the real environment, not the docker stub.
