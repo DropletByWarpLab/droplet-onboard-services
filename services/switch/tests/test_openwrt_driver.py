@@ -78,7 +78,17 @@ class FakeUbus:
             },
             "lan2": {"up": True, "carrier": False, "speed": "-1F"},
             "lan3": {"up": True, "carrier": True, "speed": "100H"},
+            # WARP-2165: netifd lists every port the unit HAS, linked or not —
+            # verified on the live 8HP, where all of lan1-8 appear with
+            # `carrier: false` on the empty ones. This fake previously named
+            # only lan1/2/3/9 and still asserted a 10-port switch, because the
+            # driver manufactured the rest from `range(1, PORT_MAX + 1)`. The
+            # port list now comes from this dict, so the dict has to be honest:
+            # a 10HP reports all ten.
+            **{f"lan{n}": {"up": True, "carrier": False, "speed": "-1F"}
+               for n in range(4, 9)},
             "lan9": {"up": True, "carrier": True, "speed": "1000F"},
+            "lan10": {"up": True, "carrier": False, "speed": "-1F"},
             "switch": {"up": True, "macaddr": "70:49:a2:77:64:1a"},
         }
         self.poe_ports = {
@@ -278,7 +288,7 @@ class TestReads:
         assert ports[3]["duplex"] == "half"
         assert ports[9]["is_sfp"] is True
         assert ports[10]["is_sfp"] is True
-        assert ports[10]["link_up"] is False  # absent from netifd → down
+        assert ports[10]["link_up"] is False  # netifd reports it with no carrier
 
     @pytest.mark.asyncio
     async def test_get_ports_carries_netifd_byte_counters(self):

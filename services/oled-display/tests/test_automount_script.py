@@ -104,6 +104,14 @@ exit 0
     "logger": "printf 'logger %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 0\n",
     # lsblk: PKNAME of the boot partition -> its disk; PKNAME of a whole disk
     # -> empty; SIZE -> big enough to pass the 100 MiB guard.
+    # WARP-2151: the NAME,TYPE case answers the inverse-tree walk
+    # (-rnso NAME,TYPE <node>) the boot-disk guard resolves physical disks
+    # with. It models the two shipped topologies — LVM mapper -> PV partition
+    # -> disk, and plain partition -> disk. md nodes resolve to their member
+    # disks (never the OS disk), preserving the WARP-1361 pool posture.
+    # WARP-2152: the FSTYPE,LABEL case lists a whole disk's content for the
+    # install-media check; $STUB_ISO_DISK marks one disk as the DROPLET
+    # install stick (hybrid-ISO signature + ESP + 'writable' persistence).
     "lsblk": r"""
 printf 'lsblk %s\n' "$*" >> "$CMD_LOG"
 case " $* " in
@@ -115,15 +123,45 @@ case " $* " in
       *) : ;;
     esac
     exit 0 ;;
+  *" NAME,TYPE "*)
+    dev="$(basename "${@: -1}")"
+    case "$dev" in
+      *--vg-*) printf '%s lvm\nnvme0n1p3 part\nnvme0n1 disk\n' "$dev" ;;
+      nvme*p[0-9]*) printf '%s part\n%s disk\n' "$dev" "${dev%p*}" ;;
+      nvme*) printf '%s disk\n' "$dev" ;;
+      md*) printf '%s raid1\nsdy1 part\nsdy disk\nsdz1 part\nsdz disk\n' "$dev" ;;
+      sd*[0-9]) printf '%s part\n%s disk\n' "$dev" "$(printf '%s' "$dev" | sed 's/[0-9]*$//')" ;;
+      sd*) printf '%s disk\n' "$dev" ;;
+      *) : ;;
+    esac
+    exit 0 ;;
+  *" FSTYPE,LABEL "*)
+    dev="$(basename "${@: -1}")"
+    if [ -n "${STUB_ISO_DISK:-}" ] && [ "$dev" = "$STUB_ISO_DISK" ]; then
+      printf 'iso9660 DROPLET_0_2_2_1\niso9660 DROPLET_0_2_2_1\nvfat ESP\next4 writable\n'
+    fi
+    exit 0 ;;
   *" SIZE "*) printf '2000000000000\n'; exit 0 ;;
 esac
 exit 0
 """,
     # findmnt: root fs lives on the NVMe OS disk; nothing else is mounted.
+    # WARP-2151 seams: $STUB_ROOT_SRC overrides the root SOURCE (default is
+    # the plain nvme0n1p2 root the older tests model; the LVM tests point it
+    # at the mapper node), and `--source <dev>` queries answer
+    # $STUB_DEV_TARGET when set (a device the OS already mounted somewhere).
     "findmnt": r"""
 printf 'findmnt %s\n' "$*" >> "$CMD_LOG"
-last=; for a in "$@"; do last="$a"; done
-if [ "$last" = "/" ]; then printf '/dev/nvme0n1p2\n'; exit 0; fi
+last=; has_source=0
+for a in "$@"; do
+  [ "$a" = "--source" ] && has_source=1
+  last="$a"
+done
+if [ "$has_source" = 1 ]; then
+  if [ -n "${STUB_DEV_TARGET:-}" ]; then printf '%s\n' "$STUB_DEV_TARGET"; exit 0; fi
+  exit 1
+fi
+if [ "$last" = "/" ]; then printf '%s\n' "${STUB_ROOT_SRC:-/dev/nvme0n1p2}"; exit 0; fi
 exit 1
 """,
     "mountpoint": "printf 'mountpoint %s\\n' \"$*\" >> \"$CMD_LOG\"\nexit 1\n",
@@ -259,6 +297,119 @@ def test_signatureless_disk_still_skips(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert not any(c.startswith("mount ") for c in cmds), cmds
     assert "no filesystem signature" in logged, logged
+
+
+class TestBootDiskGuard:
+    """WARP-2151 — the boot-sibling guard must survive a dm/LVM-stacked root.
+
+    Live failure (192.168.9.195, first boot of the 0.2.2.1 media,
+    2026-08-24): root is /dev/mapper/ubuntu--vg-ubuntu--lv, and PKNAME of
+    that mapper node is the PV *partition* (nvme0n1p3), so the old one-hop
+    sibling comparisons matched nothing — droplet-automount unmounted /boot
+    and /boot/efi and re-adopted both as user drives. Kernel + GRUB updates
+    then write to the stale rootfs /boot directory (the same divergence
+    found on the customer-site box 2026-08-13)."""
+
+    LVM_ROOT = {"STUB_ROOT_SRC": "/dev/mapper/ubuntu--vg-ubuntu--lv"}
+
+    @pytest.mark.parametrize(
+        "device,fs",
+        [
+            ("/dev/nvme0n1p1", "vfat"),   # the ESP (1 GiB on this media)
+            ("/dev/nvme0n1p2", "ext4"),   # /boot
+        ],
+    )
+    def test_lvm_root_boot_partitions_skip(self, device, fs, tmp_path):
+        proc, cmds, logged, _mj, _sd = _run_add(
+            device, fs, tmp_path, extra_env=self.LVM_ROOT)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("mount ") for c in cmds), cmds
+        assert "sibling of boot device" in logged, logged
+
+    def test_plain_root_sibling_still_skips(self, tmp_path):
+        # Regression pin for the non-LVM shape the old one-hop PKNAME guard
+        # did cover: root directly on nvme0n1p2, adding the ESP.
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/nvme0n1p1", "vfat", tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("mount ") for c in cmds), cmds
+        assert "sibling of boot device" in logged, logged
+
+    def test_lvm_root_other_disk_still_mounts(self, tmp_path):
+        # Control: the disk-set walk must not go over-broad — a data drive
+        # on a different physical disk still mounts on an LVM-root box.
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdb1", "ext4", tmp_path, extra_env=self.LVM_ROOT)
+        assert proc.returncode == 0, proc.stderr
+        assert any(c.startswith("mount ") for c in cmds), cmds
+
+
+class TestRelocateGuard:
+    """WARP-2151, second seam: the relocate step must never steal a mount
+    the OS put somewhere else. On the live box it logged "already mounted at
+    /boot; unmounting to relocate" and took the boot fs out from under the
+    running system."""
+
+    def test_system_mount_is_never_relocated(self, tmp_path):
+        # A device already mounted OUTSIDE $MOUNT_BASE (fstab: /boot,
+        # /boot/efi, a pool pinned at /mnt/nvr, an operator mount) is
+        # system-managed: skip the device, no umount, no mount.
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/sdb1", "ext4", tmp_path,
+            extra_env={"STUB_DEV_TARGET": "/boot"})
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("umount ") for c in cmds), cmds
+        assert not any(c.startswith("mount ") for c in cmds), cmds
+        assert "not relocating" in logged, logged
+
+    def test_stale_automount_path_still_relocates(self, tmp_path):
+        # Control: the case the relocate exists for — the same device left
+        # mounted at a stale tail under $MOUNT_BASE (re-enumerated /dev/sdX,
+        # desktop udisks) — must keep relocating to the derived path.
+        stale = _posix(tmp_path / "mnt" / "stale-00000000")
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/sdb1", "ext4", tmp_path,
+            extra_env={"STUB_DEV_TARGET": stale})
+        assert proc.returncode == 0, proc.stderr
+        assert any(c.startswith("umount ") for c in cmds), cmds
+        assert any(c.startswith("mount ") for c in cmds), cmds
+        assert "unmounting to relocate" in logged, logged
+
+
+class TestInstallMediaGuard:
+    """WARP-2152 — the live install stick is not user storage. It stays
+    plugged in (WARP-2143 flips boot priority instead of demanding a pull),
+    so every boot delivers add events for the hybrid-ISO disk node, its ESP
+    and its 'writable' persistence partition. The live box surfaced that
+    partition as a ~55 GB USB drive and carried a failed
+    droplet-automount@sda unit on every boot."""
+
+    ISO = {"STUB_ISO_DISK": "sda"}
+
+    def test_install_stick_partition_skips(self, tmp_path):
+        # sda3 — ext4, label 'writable', ~55 GB — must never be adopted.
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/sda3", "ext4", tmp_path, extra_env=self.ISO)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("mount ") for c in cmds), cmds
+        assert "install medium" in logged, logged
+
+    def test_install_stick_whole_disk_skips_cleanly(self, tmp_path):
+        # The whole-disk node is the one that FAILED live (iso9660 is
+        # mountable, the mount hit EBUSY, the unit went red every boot).
+        # Must be exit 0 with no mount attempted.
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/sda", "iso9660", tmp_path, extra_env=self.ISO)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("mount ") for c in cmds), cmds
+        assert "install medium" in logged, logged
+
+    def test_ordinary_usb_partition_still_mounts(self, tmp_path):
+        # Control: without the DROPLET_* iso9660 signature on its disk, a
+        # USB data partition keeps mounting.
+        proc, cmds, _l, _mj, _sd = _run_add("/dev/sdb1", "ext4", tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert any(c.startswith("mount ") for c in cmds), cmds
 
 
 class TestLuksAutomount:

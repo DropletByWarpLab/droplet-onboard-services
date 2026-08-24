@@ -65,10 +65,20 @@ run_pg_tests() {
   # The key is minted per run, never committed: the suite encrypts and decrypts
   # within one process, so a stable value buys nothing and a literal here would
   # be a key checked into the repo.
+  #
+  # --no-file-parallelism: the pg files share ONE database, and
+  # rbac-v2-guard-rails.pg.test.ts asserts a BOX-WIDE invariant (rail 5 — "is
+  # any ACTIVE operator left") that no per-suite prefix can scope. Run in
+  # parallel forks, another suite's in-flight ACTIVE admin/owner rows
+  # (tx-isolation, team-chat*) are live COMMITTED rows that rbac counts as
+  # foreign operators, turning its last-operator refusals into false failures.
+  # Serializing the files keeps each suite's operators off the DB while any
+  # other pg suite runs. Keep in lockstep with the pg-integration job in
+  # .github/workflows/orchestrator-tests.yml.
   RUN_PG_INTEGRATION=1 \
   AUTH_ENABLED=false \
   DEVICE_SECRET_KEY="$(openssl rand -base64 32)" \
-    npm run -w @droplet/orchestrator test -- pg.test
+    npm run -w @droplet/orchestrator test -- pg.test --no-file-parallelism
 }
 
 # ---------------------------------------------------------------------------

@@ -1512,10 +1512,12 @@ EOF
 # `--sync-secrets` run never dirties the checkout (the parity is pinned by
 # tests/mosquitto-conf.test.sh).
 #
-# WARP-185 lineage: the runtime mosquitto uid is 1883, so the broker's TLS
-# private key gets the same readability treatment the old passwd file needed —
-# internal_ca_issue (scripts/lib/internal-ca.sh) chowns key.pem to 1883 or
-# falls back to 0644 inside the 0700 data/secrets tree.
+# WARP-185 lineage → WARP-2154: mosquitto drops to its own uid (1883) before
+# loading TLS material, so the broker container stages key/cert/CA + the ACL
+# with mosquitto-uid ownership at start (docker-compose.yml broker command —
+# the db/cache pattern). Host-side the bundle stays 0600 install-user-owned;
+# the old issuance-time chown was silently undone by relocate_secrets_to_data
+# and its chmod-644 fallback world-read the key.
 _write_mosquitto_conf() {
   local conf_file="$REPO_ROOT/docker/mosquitto.conf"
 

@@ -16,7 +16,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+# A present-but-stopped Docker Desktop leaves `docker info` blocking on the
+# named pipe for minutes instead of failing fast (seen on Windows during the
+# WARP-2154 QA pass) — probe under a timeout where one exists (GNU coreutils;
+# absent on stock macOS, where a downed daemon already fails fast).
+_docker_probe() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 docker info >/dev/null 2>&1
+  else
+    docker info >/dev/null 2>&1
+  fi
+}
+if ! command -v docker >/dev/null 2>&1 || ! _docker_probe; then
   echo "SKIP: docker unavailable — run on a machine with a Docker daemon"
   exit 0
 fi
@@ -37,9 +48,17 @@ REPO_ROOT="$WORK" . "$REPO_ROOT/scripts/lib/internal-ca.sh"
 
 internal_ca_ensure
 for svc in broker orchestrator file-indexer; do internal_ca_issue "$svc"; done
-# The scratch broker runs as uid 1883 and the client containers as another
-# uid; host-side 0600 keys would be unreadable through the bind mounts.
-chmod 644 "$WORK"/data/secrets/service-tls/*/key.pem
+# The MOSQ client containers run as container root (--entrypoint "", no
+# --user), and root reads 0600 bind mounts on a stock daemon regardless of
+# ownership — these chmods only matter under rootless/userns daemons, where
+# the mapped uid is unprivileged. Keep them for that robustness, but NEVER
+# add the broker key to this list: it is DELIBERATELY left 0600 and owned
+# by the test user — the exact post-relocation state that crash-looped a
+# fresh install (WARP-2154) — and a world-readable broker key would keep
+# the broker up even without the staging wrapper, disarming the regression
+# proof below.
+chmod 644 "$WORK"/data/secrets/service-tls/orchestrator/key.pem \
+          "$WORK"/data/secrets/service-tls/file-indexer/key.pem
 
 # A rogue CA minting a syntactically-valid "file-indexer" cert — must be
 # rejected by the broker (trust = OUR CA, not any CA).
@@ -54,16 +73,34 @@ SERVICE_TLS_DIR="$WORK/data/secrets/service-tls"
 docker network create "$NET" >/dev/null
 # --network-alias broker keeps the client-side hostname on the cert's SAN
 # (DNS:broker) without colliding with a real compose stack's container name.
+#
+# WARP-2154: run the broker EXACTLY the way compose does — bundle + ACL on
+# staging mounts (/certs-src, /acl-src), re-owned for the mosquitto uid by
+# the wrapper before the stock entrypoint execs. This wrapper mirrors
+# docker-compose.yml's broker command; every staging stanza of BOTH copies
+# is pinned by tests/mosquitto-conf.test.sh, so they cannot drift apart
+# silently.
 docker run -d --name "$BROKER" --network "$NET" --network-alias broker \
   -v "$REPO_ROOT/docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
-  -v "$REPO_ROOT/docker/mosquitto.acl:/mosquitto/config/droplet.acl:ro" \
-  -v "$WORK/data/secrets/service-tls/broker:/mosquitto/config/tls:ro" \
-  eclipse-mosquitto:2 >/dev/null
+  -v "$REPO_ROOT/docker/mosquitto.acl:/acl-src/droplet.acl:ro" \
+  -v "$WORK/data/secrets/service-tls/broker:/certs-src:ro" \
+  eclipse-mosquitto:2 sh -c \
+  'install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls && install -o mosquitto -g mosquitto -m 644 /certs-src/ca.pem /mosquitto/config/tls/ca.pem && install -o mosquitto -g mosquitto -m 644 /certs-src/cert.pem /mosquitto/config/tls/cert.pem && install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem && install -o mosquitto -g mosquitto -m 640 /acl-src/droplet.acl /mosquitto/config/droplet.acl && exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf' \
+  >/dev/null
 sleep 2
 docker ps --format '{{.Names}}' | grep -q "$BROKER" || {
   docker logs "$BROKER" >&2 || true
-  fail "scratch broker did not stay up (config rejected?)"
+  fail "scratch broker did not stay up despite a 0600 test-user-owned host key (WARP-2154 staging wrapper broken?)"
 }
+
+# WARP-2154: staged material must be mosquitto-owned with tight modes —
+# key 0600, ACL 0640 (not world-readable → no mosquitto acl_file warning).
+docker exec "$BROKER" stat -c '%u %a %n' \
+  /mosquitto/config/tls/key.pem /mosquitto/config/droplet.acl > "$WORK/staged.txt"
+grep -q '^1883 600 /mosquitto/config/tls/key.pem$' "$WORK/staged.txt" \
+  || fail "staged key.pem not mosquitto-owned 0600: $(cat "$WORK/staged.txt")"
+grep -q '^1883 640 /mosquitto/config/droplet.acl$' "$WORK/staged.txt" \
+  || fail "staged droplet.acl not mosquitto-owned 0640: $(cat "$WORK/staged.txt")"
 
 MOSQ() {
   docker run --rm --network "$NET" \
