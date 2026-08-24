@@ -285,14 +285,14 @@ def test_health_reports_no_band_on_a_panel_that_has_none(monkeypatch,
 # ---------------------------------------------------------------------------
 # The debug screen must not lie about the panel it is drawn on
 # ---------------------------------------------------------------------------
-def test_debug_panel_row_reports_the_monitor_not_the_band(monkeypatch,
-                                                          sim_display):
-    """Regression on a defect this change INTRODUCED before it was caught: the
-    debug screen renders inside the geometry swap, so its PANEL row read the
-    band and announced "1920×480" on a 1920x1080 monitor. The one screen whose
-    job is to state what the box actually is must not be among the things
-    lying to you — and "why is most of my screen black" is exactly the
-    question someone opens it to answer."""
+def test_debug_screen_states_no_geometry_at_all(monkeypatch, sim_display):
+    """WARP-2149 stripped the debug screen down to the console door, which
+    retires a whole class of defect: its PANEL row once read the geometry
+    swap's band and announced "1920×480" on a 1920x1080 monitor. Nothing on
+    the debug glass states geometry any more, so nothing on it can mis-state
+    geometry either — /display/status (`resolution` + `letterbox_band`, pinned
+    above) is the single place that truth lives now. This spy keeps a
+    well-meaning readout from creeping back."""
     _panel(monkeypatch, MON_W, MON_H)
     seen = []
     real = display_module._v3_text
@@ -304,27 +304,8 @@ def test_debug_panel_row_reports_the_monitor_not_the_band(monkeypatch,
     monkeypatch.setattr(display_module, "_v3_text", spy)
     _fill(sim_display).render_debug()
 
-    assert f"{MON_W}×{MON_H} · band 480" in seen, \
-        f"PANEL row did not state the true geometry; drew {seen[:12]}"
-    assert f"{MON_W}×480" not in seen, "PANEL row reported the band as the panel"
-
-
-def test_panel_readout_prefers_the_framebuffers_own_geometry(monkeypatch):
-    """On the fb backend the framebuffer knows its real size, and that beats
-    the module globals. The band is still disclosed alongside it."""
-    _panel(monkeypatch, MON_W, 480)
-    monkeypatch.setattr(lw, "_TRUE_PANEL", (MON_W, MON_H))
-    status = {"panel": {"width": MON_W, "height": MON_H}}
-    assert lw._panel_readout(status) == f"{MON_W}×{MON_H} · band 480"
-
-
-def test_panel_readout_is_unchanged_off_the_letterbox_path(monkeypatch):
-    _panel(monkeypatch, REF_W, REF_H)
-    assert lw._TRUE_PANEL is None
-    assert lw._panel_readout({}) == f"{REF_W}×{REF_H}"
-
-
-def test_true_panel_is_cleared_after_the_render(monkeypatch, sim_display):
-    _panel(monkeypatch, MON_W, MON_H)
-    _fill(sim_display).render_system()
-    assert lw._TRUE_PANEL is None
+    leaks = [t for t in seen
+             if "×" in t or str(MON_W) in t or str(MON_H) in t or "band" in t]
+    assert not leaks, (
+        f"the debug screen drew geometry again: {leaks} — that readout was "
+        f"removed in WARP-2149; /display/status is where geometry belongs")
