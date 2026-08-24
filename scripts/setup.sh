@@ -686,6 +686,21 @@ main() {
     log_info "Removed $(basename "$_stale") (stale .env staging copy)"
   done
 
+  # --- WARP-2142: close the install-mode SSH window ------------------------
+  # Reaching this line IS the success signal: `set -e` means a provision that
+  # failed anywhere above never gets here, and the install-mode marker the
+  # autoinstall seed planted then SURVIVES — the box stays reachable over SSH
+  # for rescue until the boot reset's 48h backstop expires it. On success the
+  # box closes its own window: marker removed, ssh disabled back to the
+  # WARP-1984 start-not-enable posture, intent re-asserted off (the applier
+  # stops sshd via the path unit). A no-op whenever no marker is present —
+  # i.e. on every manual re-run of a shipped box. Non-fatal by the WARP-1309
+  # convention (never flip a green provision to a reported failure at the
+  # last step): the hook removes the marker FIRST, so even a partial close
+  # is finished by the next boot's reset.
+  close_install_mode_ssh_window \
+    || log_warn "install-mode SSH window close had issues — the next reboot closes it (the boot reset stamps off once the marker is gone)"
+
   # --- Done ---
   # Lock is released by the EXIT trap set right after _acquire_lock.
 

@@ -549,6 +549,78 @@ EOF
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net -u droplet-watchdog"
 }
 
+# ----------------------------------------------------------------------------
+# WARP-2142 — close the install-mode SSH window on a SUCCESSFUL provision.
+#
+# The autoinstall seed (scripts/image/autoinstall/user-data) plants an
+# epoch-stamped marker at /var/lib/droplet-ssh-access/install-mode and enables
+# ssh in the installed target, so a factory-fresh box is reachable over the
+# LAN from its very first boot; while that marker is fresh (<48h) the
+# WARP-1984 boot reset stamps intent=on at every boot instead of off. That is
+# the fail-OPEN half — a box that hangs or dies mid-provision stays rescuable
+# over SSH (the WARP-2100 dead-end: a wedged first boot, no console, no way
+# in).
+#
+# This hook is the fail-CLOSED half. setup.sh calls it from its success tail,
+# which only a provision that ran to completion ever reaches (`set -e` — a
+# failed provision dies earlier and LEAVES the marker; the 48h backstop then
+# expires it on an abandoned box). Gated on the marker, so it is a no-op on
+# every box that is not mid-install: a manual re-run on a shipped box has no
+# marker and nothing here fires — in particular a live WARP-1984 owner-toggle
+# session is never touched. A manual rescue re-run INSIDE the window that
+# succeeds is every bit as much "provisioning completed" and closes it too.
+#
+# Deliberately NOT in the droplet-firstboot unit's ExecStartPost: that unit
+# definition is frozen into shipped ISOs (iterating it needs a new ISO, while
+# setup.sh is cloned fresh at install time), and it would close the window on
+# the firstboot path only.
+#
+# The marker path literal must agree with the seed and the boot reset —
+# tests/image-pipeline.test.sh and the vitest guard pin the agreement.
+# ----------------------------------------------------------------------------
+close_install_mode_ssh_window() {
+  if [ "$(uname)" != "Linux" ]; then
+    return 0
+  fi
+  local marker="/var/lib/droplet-ssh-access/install-mode"
+  if [ ! -f "$marker" ]; then
+    return 0
+  fi
+
+  log_info "Provisioning complete — closing the install-mode SSH window (WARP-2142)..."
+
+  # Order matters, fail-closed: the marker goes FIRST. Even if every step
+  # after this line fails, the next boot's reset finds no marker and stamps
+  # off as usual.
+  sudo rm -f "$marker"
+
+  # Undo the seed's standing enablement — steady state is WARP-1984's
+  # start-not-enable: the dashboard toggle is the only thing that opens SSH,
+  # every time, and it never survives a reboot. Both unit names (Debian/
+  # Ubuntu `ssh`, most others `sshd`) and both activation forms (service +
+  # socket), mirroring the applier's own resolution and socket handling;
+  # `|| true` because most boxes carry only one of each.
+  sudo systemctl disable ssh.service ssh.socket >/dev/null 2>&1 || true
+  sudo systemctl disable sshd.service sshd.socket >/dev/null 2>&1 || true
+
+  # Re-assert intent=off the way the boot reset does: atomic tmp+rename into
+  # the watched path, so droplet-ssh-access.path (enabled --now earlier in
+  # this very provision) fires and the APPLIER stops sshd and records
+  # state=off. Acting on intent stays the applier's job — nothing here
+  # touches the droplet-ssh-access units themselves.
+  sudo sh -c 'umask 022
+    mkdir -p /var/lib/droplet-ssh-access/intent.d
+    tmp="/var/lib/droplet-ssh-access/intent.d/intent.tmp"
+    {
+      echo "# WARP-2142 — install window closed: provisioning completed successfully."
+      echo "# From here the WARP-1984 owner toggle is the only thing that opens SSH."
+      echo "DROPLET_SSH_ACCESS=off"
+    } >"$tmp"
+    mv -f "$tmp" "${tmp%.tmp}"'
+
+  log_success "Install-mode SSH window closed (marker removed; ssh back to owner-toggle-only)"
+}
+
 # WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND
 # its ubus answering — not merely `.State.Running`. `.State.Running` flips true
 # the instant PID 1 starts, seconds before procd/ubus are up; on a freshly

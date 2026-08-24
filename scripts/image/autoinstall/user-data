@@ -140,6 +140,40 @@ autoinstall:
       WantedBy=multi-user.target
       UNIT'
     - curtin in-target --target=/target -- systemctl enable droplet-firstboot.service
+    # WARP-2142 — install-mode SSH window. Fail-open for commissioning,
+    # fail-closed for production. The marker is a single epoch-seconds line in
+    # the ROOT-owned half of the WARP-1984 state dir (never intent.d/ — the
+    # orchestrator container must not be able to mint or extend a window).
+    # While it is fresh (<48h) droplet-ssh-access-boot-reset stamps the SSH
+    # intent ON at every boot instead of off, so a box that hangs or fails
+    # mid-provision stays reachable over the LAN for rescue (the WARP-2100
+    # dead-end: a wedged first boot with no console and no way in). setup.sh
+    # removes the marker the moment a provision SUCCEEDS; the 48h backstop
+    # expires it on an abandoned box. Key-only (allow-pw: false above) and
+    # LAN-side only — nothing here touches the firewall or the WAN edge.
+    # The path literal must match droplet-ssh-access-boot-reset and
+    # setup.sh's completion hook: tests/image-pipeline.test.sh and the vitest
+    # guard (ssh-access.host-script.guard.test.ts) pin the agreement.
+    - |
+      curtin in-target --target=/target -- bash -c '
+        mkdir -p /var/lib/droplet-ssh-access
+        date +%s > /var/lib/droplet-ssh-access/install-mode
+        chmod 0644 /var/lib/droplet-ssh-access/install-mode
+      '
+    # ...and make sure sshd actually comes up on the very first boot: none of
+    # the WARP-1984 machinery (path unit + applier + boot reset) exists until
+    # setup.sh installs it mid-provision, so standing systemd enablement in
+    # the target is the only thing that can open the window on boot 1. Kept
+    # conditional so a base image that already enables ssh (service or
+    # socket activation) is left on its own mechanism rather than
+    # double-enabled. setup.sh's completion hook disables both again on a
+    # successful provision — steady state returns to WARP-1984's
+    # start-not-enable, owner-toggle-only regime.
+    - |
+      curtin in-target --target=/target -- bash -c '
+        systemctl is-enabled ssh.service ssh.socket 2>/dev/null | grep -qx enabled \
+          || systemctl enable ssh.service
+      '
     # Passwordless sudo for the firstboot unit's setup.sh (setup.sh installs
     # Docker + systemd units). PROVISIONING-WINDOW ONLY: the firstboot unit's
     # ExecStartPost deletes this drop-in right after it stamps .firstboot-done
