@@ -175,6 +175,30 @@ install_single_box_host_integration() {
     /usr/local/sbin/droplet-openwrt-watch
   log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net + droplet-openwrt-watch"
 
+  # --- WARP-2150: iw is a hard prerequisite of droplet-openwrt-attach --------
+  # detect_ap_radio maps the wireless phy to its netdev via `iw dev`, and the
+  # attach moves the phy into the container netns via `iw phy ... set netns`.
+  # Ubuntu Server does not ship iw, and nothing else here installed it: the
+  # first validated fresh install (2026-08-24) hit `iw: command not found`,
+  # the iface resolved empty, and the AP never came up. Ensure it at setup time
+  # so re-runs heal existing boxes too. Best-effort apt with one update+retry
+  # (restic precedent in lib/backup.sh): a transient failure must not abort
+  # setup — the attach now skips AP bring-up with a loud, actionable message
+  # when the iface stays unresolved, and a setup.sh re-run self-heals.
+  if ! command -v iw >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iw; then
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iw || true
+      fi
+    fi
+    if command -v iw >/dev/null 2>&1; then
+      log_success "Installed iw (wireless phy/iface control for droplet-openwrt-attach)"
+    else
+      log_warn "iw still missing — droplet-openwrt-attach will SKIP AP bring-up (no Wi-Fi AP) until 'sudo apt-get install -y iw' succeeds and the unit restarts"
+    fi
+  fi
+
   # --- /etc/default/ envs -------------------------------------------------
   # droplet-host-net is committed as-is (no secrets). Copy directly.
   sudo install -m 0644 "$host_src/etc-default/droplet-host-net" \
