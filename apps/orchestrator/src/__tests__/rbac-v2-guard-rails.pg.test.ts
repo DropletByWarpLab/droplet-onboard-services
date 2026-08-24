@@ -50,9 +50,13 @@
  * (200 where 409 is expected) — the worst failure mode a guard-rail suite can
  * have. `expectNoForeignOperators()` therefore asserts the premise explicitly
  * before those cases, so the day it breaks the suite says WHY instead of
- * quietly going green. Today nothing else creates operator rows: no migration
- * inserts a User, and the other pg suites create role-less (`family`-default)
- * users.
+ * quietly going green. Other pg suites DO now create ACTIVE operator rows
+ * (tx-isolation, team-chat, team-chat-meetings), so two things hold the
+ * premise rather than luck: the pg lane runs --no-file-parallelism (see
+ * scripts/test-orchestrator-pg.sh and the pg-integration job), so no other
+ * suite's rows are live while this one runs; and every other operator-creating
+ * suite deletes its rows in an afterAll, so none persist into this suite. No
+ * migration inserts a User.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import request from "supertest";
