@@ -16,7 +16,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+# A present-but-stopped Docker Desktop leaves `docker info` blocking on the
+# named pipe for minutes instead of failing fast (seen on Windows during the
+# WARP-2154 QA pass) — probe under a timeout where one exists (GNU coreutils;
+# absent on stock macOS, where a downed daemon already fails fast).
+_docker_probe() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 docker info >/dev/null 2>&1
+  else
+    docker info >/dev/null 2>&1
+  fi
+}
+if ! command -v docker >/dev/null 2>&1 || ! _docker_probe; then
   echo "SKIP: docker unavailable — run on a machine with a Docker daemon"
   exit 0
 fi
@@ -63,8 +74,9 @@ docker network create "$NET" >/dev/null
 # WARP-2154: run the broker EXACTLY the way compose does — bundle + ACL on
 # staging mounts (/certs-src, /acl-src), re-owned for the mosquitto uid by
 # the wrapper before the stock entrypoint execs. This wrapper mirrors
-# docker-compose.yml's broker command; the compose copy is byte-pinned by
-# tests/mosquitto-conf.test.sh.
+# docker-compose.yml's broker command; every staging stanza of BOTH copies
+# is pinned by tests/mosquitto-conf.test.sh, so they cannot drift apart
+# silently.
 docker run -d --name "$BROKER" --network "$NET" --network-alias broker \
   -v "$REPO_ROOT/docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
   -v "$REPO_ROOT/docker/mosquitto.acl:/acl-src/droplet.acl:ro" \

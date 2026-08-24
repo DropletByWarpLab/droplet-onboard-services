@@ -386,7 +386,8 @@ probe_transit_mqtt_mtls_required() {
   local out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   vfy_container_running broker || { vfy_record "$id" SKIP "container-not-running:broker"; return; }
-  # WARP-235 mounts the broker bundle at /mosquitto/config/tls (ca.pem).
+  # WARP-235/WARP-2154: the broker stages its bundle to /mosquitto/config/tls
+  # at container start (ca.pem) — the path is the staged copy, not a mount.
   ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/config/tls/ca.pem}"
   vfy_compose exec -T broker mosquitto_pub -h broker -p 8883 --cafile "$ca" \
     -t droplet/verify/canary -m probe > "$out" 2>&1

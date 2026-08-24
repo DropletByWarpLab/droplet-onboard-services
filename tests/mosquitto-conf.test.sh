@@ -67,20 +67,27 @@ grep -q '127.0.0.1:8883:8883' "$C" || fail "compose: loopback 8883 publish"
 grep -q './mosquitto.acl:/acl-src/droplet.acl:ro' "$C" || fail "compose: acl staging mount"
 grep -q 'service-tls/broker:/certs-src:ro' "$C" || fail "compose: broker tls staging mount"
 grep -q ':/mosquitto/config/tls' "$C" && fail "compose: broker bundle mounted directly at the config path (WARP-2154)"
-grep -q 'mosquitto.acl:/mosquitto/config/droplet.acl' "$C" && fail "compose: ACL mounted directly at the config path (WARP-2154)"
+grep -q ':/mosquitto/config/droplet.acl' "$C" && fail "compose: ACL mounted directly at the config path (WARP-2154)"
 grep -q 'mosquitto_passwd_dir' "$C" && fail "compose: passwd_dir mount still present"
 
 # 4c. WARP-2154: the broker command stages the bundle + ACL with mosquitto-uid
 #     ownership as container-root, then execs the stock entrypoint (the
 #     WARP-233 db / WARP-234 cache pattern) — and the issuance lib carries no
 #     broker ownership fix-ups (relocation undid them) nor the world-readable
-#     key fallback.
-grep -q 'install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem' "$C" \
-  || fail "compose: broker does not stage key.pem 0600 mosquitto-owned"
-grep -q 'install -o mosquitto -g mosquitto -m 640 /acl-src/droplet.acl /mosquitto/config/droplet.acl' "$C" \
-  || fail "compose: broker does not stage droplet.acl 0640 mosquitto-owned"
-grep -q 'exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf' "$C" \
-  || fail "compose: broker staging wrapper must exec the stock entrypoint"
+#     key fallback. Every staging stanza is pinned in BOTH the compose command
+#     and the integration test's inline copy of it, so the two cannot drift
+#     apart silently.
+IT="$REPO_ROOT/tests/mqtt-mtls.integration.test.sh"
+for stanza in \
+  'install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls' \
+  'install -o mosquitto -g mosquitto -m 644 /certs-src/ca.pem /mosquitto/config/tls/ca.pem' \
+  'install -o mosquitto -g mosquitto -m 644 /certs-src/cert.pem /mosquitto/config/tls/cert.pem' \
+  'install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem' \
+  'install -o mosquitto -g mosquitto -m 640 /acl-src/droplet.acl /mosquitto/config/droplet.acl' \
+  'exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf'; do
+  grep -qF "$stanza" "$C"  || fail "compose: broker staging stanza missing: $stanza"
+  grep -qF "$stanza" "$IT" || fail "integration-test wrapper drifted from compose: $stanza"
+done
 grep -q 'chmod 644 "$key"' "$REPO_ROOT/scripts/lib/internal-ca.sh" \
   && fail "internal-ca.sh: world-readable key fallback is back (WARP-2154)"
 grep -q '1883' "$REPO_ROOT/scripts/lib/internal-ca.sh" \
