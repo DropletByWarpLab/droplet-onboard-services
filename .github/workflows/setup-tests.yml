@@ -14,6 +14,11 @@ on:
       - "tests/usb-luks-enroll.test.sh"
       # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
       - "tests/mosquitto-conf.test.sh"
+      # WARP-2154: mosquitto-conf.test.sh greps the integration test's inline
+      # staging wrapper (anti-drift), so edits to that file must trigger this
+      # lane too — otherwise a wrapper-only edit lands unchecked and the pin
+      # detonates on the next unrelated scripts/** PR
+      - "tests/mqtt-mtls.integration.test.sh"
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
@@ -48,6 +53,11 @@ on:
       - "tests/usb-luks-enroll.test.sh"
       # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
       - "tests/mosquitto-conf.test.sh"
+      # WARP-2154: mosquitto-conf.test.sh greps the integration test's inline
+      # staging wrapper (anti-drift), so edits to that file must trigger this
+      # lane too — otherwise a wrapper-only edit lands unchecked and the pin
+      # detonates on the next unrelated scripts/** PR
+      - "tests/mqtt-mtls.integration.test.sh"
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"

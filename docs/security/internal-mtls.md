@@ -229,10 +229,17 @@ IDX-06 replay path). Emergency revocation is the same CA rebuild as HTTP
 with the new `ca.pem` — proven by the rogue-CA and cert-removal probes in
 `tests/mqtt-mtls.integration.test.sh`.
 
-**Broker key permissions (WARP-185 lineage):** mosquitto runs as uid 1883, so
-`internal_ca_issue broker` chowns `key.pem` to 1883 or falls back to 0644
-inside the 0700 `data/secrets` tree — the same readability constraint that
-shaped the old passwd-file handling.
+**Broker key permissions (WARP-185 lineage → WARP-2154):** mosquitto runs as
+uid 1883 and drops privileges *before* loading TLS material, so the broker
+container stages `key.pem`/`cert.pem`/`ca.pem` and the ACL with
+`mosquitto:mosquitto` ownership at start (`docker-compose.yml` broker
+`command`, mirroring the WARP-233 db / WARP-234 cache wrappers; the bundle is
+mounted at `/certs-src`, the ACL at `/acl-src`). Host-side the bundle stays
+0600, install-user-owned. The previous approach — `internal_ca_issue broker`
+chowning `key.pem` to 1883 with a 0644 fallback — was silently undone on
+every fresh install by `relocate_secrets_to_data`'s tree-wide `chown -R`
+(crash-looping the broker), and the fallback left the private key
+world-readable whenever passwordless sudo was absent.
 
 ## Runbook
 
