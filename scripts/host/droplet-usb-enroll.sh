@@ -130,16 +130,32 @@ _require_tpm() {
 }
 
 # Refuse to touch the boot device (same guard as droplet-automount.sh).
+# WARP-2151: compare PHYSICAL DISK SETS by walking lsblk's inverse tree —
+# one PKNAME hop returns the PV *partition* on an LVM root, so the old
+# comparisons never matched the ESP/boot partitions and enroll would have
+# luksFormatted the live /boot on request.
+_phys_disks_of() { # $1=node
+  # `|| true`: under set -e/pipefail an unresolvable node must yield an
+  # empty set, not abort — the caller decides what empty means.
+  lsblk -rnso NAME,TYPE "$1" 2>/dev/null | awk '$2 == "disk" { print $1 }' | sort -u || true
+}
+
 _guard_not_rootfs() { # $1=device
-  local dev="$1" boot_src boot_parent dev_base dev_parent
+  local dev="$1" boot_src boot_disks dev_disks _d
   boot_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-  boot_parent="$(lsblk -no PKNAME "$boot_src" 2>/dev/null || true)"
-  dev_base="$(basename "$dev")"
-  dev_parent="$(lsblk -no PKNAME "$dev" 2>/dev/null || true)"
-  if [ "$dev" = "$boot_src" ] || [ "$dev_base" = "$boot_parent" ] \
-     || { [ -n "$dev_parent" ] && [ "$dev_parent" = "$boot_parent" ]; }; then
+  boot_disks="$(_phys_disks_of "$boot_src")"
+  dev_disks="$(_phys_disks_of "$dev")"
+  if [ "$dev" = "$boot_src" ]; then
     err "$dev holds / is a sibling of the boot device — refusing to enroll it."
     exit 2
+  fi
+  if [ -n "$boot_disks" ]; then
+    for _d in $dev_disks; do
+      if printf '%s\n' "$boot_disks" | grep -qxF "$_d"; then
+        err "$dev holds / is a sibling of the boot device — refusing to enroll it."
+        exit 2
+      fi
+    done
   fi
 }
 
