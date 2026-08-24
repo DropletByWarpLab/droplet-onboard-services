@@ -1,0 +1,39 @@
+# The autoinstall seed clones this repo UNAUTHENTICATED (ADR-020: no secrets in
+# the media, byte-identical ISOs). That makes public visibility a LOAD-BEARING
+# property: the moment this repo goes private, every fresh install on every
+# shipped USB stick dies at "FATAL: droplet platform clone failed during
+# autoinstall" — which happened live on the bench 2026-08-24 (see WARP ticket).
+# A visibility flip is one click in the repo settings and produces zero alerts,
+# so this guard makes it scream: an anonymous-reachability probe on a schedule,
+# filing a P0 issue the first time it fails.
+name: install-path-visibility-guard
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+permissions:
+  issues: write
+jobs:
+  anonymous-clone:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the installer's exact dependency (anonymous clone)
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://github.com/${{ github.repository }}")
+          echo "anonymous HTML status: $code"
+          # Protocol-level check with credentials explicitly disabled — the
+          # HTML page can 200 while git access is broken, and vice versa.
+          GIT_TERMINAL_PROMPT=0 git -c credential.helper= ls-remote --heads \
+            "https://github.com/${{ github.repository }}.git" > /dev/null
+          test "$code" = "200"
+      - name: File a P0 issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list -R "${{ github.repository }}" --state open \
+            --search "install-path visibility guard in:title" --json number --jq length | grep -qv '^0$' && exit 0
+          gh issue create -R "${{ github.repository }}" \
+            --title "P0: install-path visibility guard FAILED — repo not anonymously clonable" \
+            --body "The scheduled anonymous-clone probe failed. The autoinstall seed clones this repo unauthenticated (ADR-020), so while this condition holds EVERY fresh install from EVERY shipped USB stick dies at: FATAL: droplet platform clone failed during autoinstall. Restore public visibility, or ship the authenticated-install design first. This bit for real on 2026-08-24 — see the WARP incident ticket." || true
