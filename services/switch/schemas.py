@@ -113,10 +113,19 @@ class SetPortPoeRequest(BaseModel):
 
 
 class CameraSetupRequest(BaseModel):
-    """One-click camera VLAN setup on the switch."""
+    """One-click camera VLAN setup on the switch.
+
+    WARP-2165: the port defaults used to be the literals [1..8] and [9, 10] —
+    the copper bank and SFP cage of a GS1900-10HP. That is a property of one
+    variant, not of the fleet, so an 8HP got a trunk of two ports it does not
+    have. Both now default to EMPTY, which the endpoint reads as "derive from
+    the device": uplinks = the unit's SFP ports, cameras = the remaining
+    copper ports minus the protected uplink. Callers that know better still
+    pass explicit lists.
+    """
     vlan_id: int = Field(default=100, ge=2, le=4094)
-    camera_ports: list[int] = Field(default=[1, 2, 3, 4, 5, 6, 7, 8])
-    uplink_ports: list[int] = Field(default=[9, 10])
+    camera_ports: list[int] = Field(default_factory=list)
+    uplink_ports: list[int] = Field(default_factory=list)
 
 
 class CameraSetupResult(BaseModel):

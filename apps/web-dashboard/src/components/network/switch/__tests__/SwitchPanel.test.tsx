@@ -131,17 +131,27 @@ describe("SwitchPanel — states", () => {
     expect(screen.getByText(/SM8TAT2SA/)).toBeInTheDocument();
     expect(screen.getByText(/auto-managed/i)).toBeInTheDocument();
     expect(screen.getByText("19.7 W")).toBeInTheDocument();
+    // WARP-2165: the model line counts the ports the switch reports. This
+    // fixture is two copper ports and no optical bank, so it must not claim
+    // the "8-port + 2 SFP" GS1900-10HP layout that used to be hardcoded here.
+    expect(screen.getByText(/2-port · firmware/)).toBeInTheDocument();
+    expect(screen.queryByText(/\+ \d+ SFP/)).not.toBeInTheDocument();
   });
 });
 
 describe("SwitchPanel — layout toggle (interactive)", () => {
   it("defaults to the faceplate and swaps to the port table", () => {
     render(<SwitchPanel />);
-    // faceplate legend present by default
-    expect(screen.getByText(/copper 1–8 · SFP 9–10/)).toBeInTheDocument();
+    // WARP-2165: the legend describes the ports actually present. This
+    // fixture is ports 4 and 7, both copper — it used to assert
+    // "copper 1-8 - SFP 9-10" purely because that string was hardcoded,
+    // which meant the assertion held no matter what the data said.
+    // (Bank-by-bank legend cases live in Faceplate.test.tsx — a bare /SFP/
+    // query here also matches the panel header's model line.)
+    expect(screen.getByText(/copper 4–7/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /port table/i }));
     // table header column appears; faceplate legend gone
-    expect(screen.queryByText(/copper 1–8 · SFP 9–10/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/copper 4–7/)).not.toBeInTheDocument();
   });
 });
 

@@ -63,6 +63,23 @@ class PoweredMemberError(SwitchError):
     pass
 
 
+class ProtectedPortError(SwitchError):
+    """Refused: this is the port the appliance reaches the router through.
+
+    ``SWITCH_PROTECTED_PORT`` names the uplink/trunk. Cutting it severs the
+    box from the fabric — including from the very request asking for the cut,
+    so nothing is left that could undo it.
+
+    Deliberately NOT overridable by ``force``, unlike
+    :class:`PoweredMemberError`. Darkening an AP is a choice an operator may
+    legitimately make; darkening the uplink has no outcome in which honouring
+    the request was correct. The orchestrator already blocks this at Tier 3,
+    but a guard is only real where the write happens — anything holding the
+    service token reaches this driver directly (WARP-2165).
+    """
+    pass
+
+
 # --- Abstract Driver ---
 
 class SwitchDriver(ABC):

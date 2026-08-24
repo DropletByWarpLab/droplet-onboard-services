@@ -537,8 +537,55 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       // the raw, possibly-undefined body fields — auditing one thing, doing
       // another.
       const resolvedVlanId = vlan_id || 100;
-      const resolvedCameraPorts = camera_ports || [1, 2, 3, 4, 5, 6, 7, 8];
-      const resolvedUplinkPorts = uplink_ports || [9, 10];
+      // WARP-2165: these defaults used to be the literals [1..8] and [9, 10] —
+      // the copper bank and SFP cage of a GS1900-10HP. The fleet also runs the
+      // 8HP, which has no optical ports at all, so the uplink default trunked
+      // two ports that do not exist and the camera default swept in the
+      // appliance's own uplink. Ask the switch instead, so this keeps working
+      // on whatever hardware a unit ships with.
+      //
+      // Resolution happens HERE, before the safety-tier eval, because the
+      // values audited must be the values executed (WARP-559): resolving after
+      // the audit means auditing one thing and doing another.
+      const needsDerivedPorts =
+        !Array.isArray(camera_ports) || camera_ports.length === 0 ||
+        !Array.isArray(uplink_ports) || uplink_ports.length === 0;
+      const portStatus = needsDerivedPorts ? await switchClient.fetchPortStatus() : [];
+
+      let resolvedUplinkPorts: number[];
+      if (Array.isArray(uplink_ports) && uplink_ports.length > 0) {
+        resolvedUplinkPorts = uplink_ports;
+      } else {
+        resolvedUplinkPorts = portStatus.filter((p) => p.is_sfp).map((p) => p.port);
+        if (resolvedUplinkPorts.length === 0) {
+          // No optical bank to trunk, and guessing a copper port could move
+          // the appliance's own link onto the camera VLAN. Refuse, don't guess.
+          return res.status(400).json({
+            error:
+              "This switch has no SFP uplink ports, so there is no safe default " +
+              "trunk to put the camera VLAN on. Pass uplink_ports explicitly.",
+            code: "NO_DEFAULT_UPLINK_PORTS",
+          });
+        }
+      }
+
+      let resolvedCameraPorts: number[];
+      if (Array.isArray(camera_ports) && camera_ports.length > 0) {
+        resolvedCameraPorts = camera_ports;
+      } else {
+        // Every copper port that isn't the uplink and isn't protected.
+        resolvedCameraPorts = portStatus
+          .filter((p) => !p.is_sfp && !isProtectedPort(p.port) && !resolvedUplinkPorts.includes(p.port))
+          .map((p) => p.port);
+        if (resolvedCameraPorts.length === 0) {
+          return res.status(400).json({
+            error:
+              "No switch ports are available for cameras once the uplink and " +
+              "protected port are excluded. Pass camera_ports explicitly.",
+            code: "NO_DEFAULT_CAMERA_PORTS",
+          });
+        }
+      }
       const result = await evalSwitchCommand(
         prisma, "switch_setup_cameras",
         { vlan_id: resolvedVlanId, camera_ports: resolvedCameraPorts, uplink_ports: resolvedUplinkPorts },
