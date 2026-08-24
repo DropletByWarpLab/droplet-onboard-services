@@ -10,7 +10,7 @@
 #   data/secrets/internal-ca/ca.key            0600, NEVER mounted anywhere
 #   data/secrets/internal-ca/ca.pem            CA cert, 10 years
 #   data/secrets/service-tls/<svc>/cert.pem    90 days, EKU serverAuth+clientAuth
-#   data/secrets/service-tls/<svc>/key.pem     0600 (broker: uid-1883 note below)
+#   data/secrets/service-tls/<svc>/key.pem     0600, install-user-owned — always
 #   data/secrets/service-tls/<svc>/ca.pem      copy of CA cert (single-mount bundles)
 # =============================================================================
 
@@ -122,15 +122,17 @@ internal_ca_issue() {
   chmod 644 "$cert"
   cp "$INTERNAL_CA_DIR/ca.pem" "$dir/ca.pem"
 
-  if [ "$service" = "broker" ]; then
-    # Mosquitto runs as uid 1883 in eclipse-mosquitto:2 (the WARP-185 pwfile
-    # lesson — a 0600 host-user-owned file crash-loops the broker). Try to
-    # hand the key to uid 1883; else fall back to 0640/0644 inside the 0700
-    # data/secrets tree, which is the actual host-side boundary.
-    chown 1883:1883 "$key" 2>/dev/null \
-      || { command -v sudo >/dev/null 2>&1 && sudo -n chown 1883:1883 "$key" 2>/dev/null; } \
-      || chmod 644 "$key"
-  fi
+  # WARP-2154: NO per-service ownership fix-ups here — every key stays 0600,
+  # install-user-owned. The broker (whose in-container mosquitto uid differs
+  # from the install user) once got a `chown || sudo -n chown || chmod 644`
+  # chain at this point, but relocate_secrets_to_data (scripts/lib/luks.sh)
+  # re-owns the whole relocated secrets tree to the install user AFTER
+  # issuance — the chown was silently undone and a fresh single-box install
+  # crash-looped the broker — and the chmod 644 arm world-read the private
+  # key whenever passwordless sudo was absent. Containers whose runtime uid
+  # can't read a 0600 install-user file stage their bundle with in-container
+  # ownership at start instead (docker-compose.yml broker/db/cache command
+  # wrappers), which survives relocation, re-runs, and renewals alike.
   log_success "Issued internal cert for '$service' (${INTERNAL_CERT_DAYS}d, SAN: $san)"
 }
 

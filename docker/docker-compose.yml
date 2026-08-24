@@ -1202,14 +1202,37 @@ services:
       # pre-WARP-235 latent bug where camera-discovery (network_mode: host)
       # could never reach the unpublished broker at localhost:1883.
       - "127.0.0.1:8883:8883"
+    # WARP-2154: mosquitto drops to its unprivileged uid BEFORE loading TLS
+    # material, and the host-side bundle is install-user-owned 0600 — on a
+    # fresh install relocate_secrets_to_data (scripts/lib/luks.sh) chown -Rs
+    # the whole secrets tree to the install user, so mounting the bundle
+    # directly at the config path crash-looped the broker with "Unable to
+    # load server key file ... Permission denied". Stage key/cert/CA + the
+    # ACL with mosquitto-uid ownership as container-root, then exec the
+    # stock entrypoint — the WARP-233 db / WARP-234 cache pattern. The ACL
+    # copy (0640, mosquitto-owned) also clears mosquitto's world-readable /
+    # wrong-owner acl_file warnings (2.x warns; future versions refuse).
+    command:
+      - "sh"
+      - "-c"
+      - >-
+        install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls
+        && install -o mosquitto -g mosquitto -m 644 /certs-src/ca.pem /mosquitto/config/tls/ca.pem
+        && install -o mosquitto -g mosquitto -m 644 /certs-src/cert.pem /mosquitto/config/tls/cert.pem
+        && install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem
+        && install -o mosquitto -g mosquitto -m 640 /acl-src/droplet.acl /mosquitto/config/droplet.acl
+        && exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf
     volumes:
       # WARP-235: single mTLS listener — client identity is the cert CN
       # (use_identity_as_username), per-CN topic grants in mosquitto.acl,
       # server bundle issued by the WARP-236 internal CA. The shared-password
-      # file mount is retired.
+      # file mount is retired. WARP-2154: the bundle and the ACL land on
+      # STAGING paths (/certs-src, /acl-src) and the command above copies
+      # them to the paths mosquitto.conf names — mounting either directly at
+      # its final path reintroduces the ownership crash loop.
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto.acl:/mosquitto/config/droplet.acl:ro
-      - ../data/secrets/service-tls/broker:/mosquitto/config/tls:ro
+      - ./mosquitto.acl:/acl-src/droplet.acl:ro
+      - ../data/secrets/service-tls/broker:/certs-src:ro
     restart: always
     <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
