@@ -277,7 +277,13 @@ jobs:
         run: |
           set -euo pipefail
           export DEVICE_SECRET_KEY="$(openssl rand -base64 32)"
-          npm run -w @droplet/orchestrator test -- pg.test
+          # --no-file-parallelism: the pg files share one DB and
+          # rbac-v2-guard-rails.pg.test.ts asserts a BOX-WIDE invariant (rail 5)
+          # that no per-suite prefix can scope. In parallel forks another suite's
+          # in-flight ACTIVE operator rows (tx-isolation, team-chat*) count as
+          # foreign operators and fail its last-operator premise. Serialize the
+          # files. Keep in lockstep with scripts/test-orchestrator-pg.sh.
+          npm run -w @droplet/orchestrator test -- pg.test --no-file-parallelism
 
       # WARP-1542. `migrate deploy` never reads schema.prisma and the client
       # generator never reads the migrations, so the two can diverge silently
