@@ -675,7 +675,7 @@ def _hostapd_conf_creds_or_error():
 # Every source hostapd_wifi_credentials() reads is a *config* read — the env,
 # a persisted file, hostapd.conf. Its docstring says those are "coherent with
 # what hostapd serves", but nothing enforced it, and on droplet-sys they had
-# drifted three ways at once: the bridge env said `Warp`/`Droplet123!`, the
+# drifted three ways at once: the bridge env said `Warp`/`T3stCamPw!`, the
 # container's hostapd.conf said `Droplet-AI`, and the household AP was
 # beaconing `Warp` under a different passphrase entirely. The panel published
 # the env's pair, so the QR named a real network with the wrong password and

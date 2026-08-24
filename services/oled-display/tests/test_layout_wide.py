@@ -1136,7 +1136,7 @@ def test_network_tile_ignores_creds_the_bridge_refused(populated):
     refusal. Rendering the ssid alongside it would put the stale name back."""
     populated._v3["wifi"]["ssid"] = ""
     populated._v3["wifi_join"] = {
-        "ok": False, "ssid": "Warp", "key": "Droplet123!",
+        "ok": False, "ssid": "Warp", "key": "T3stCamPw!",
         "error": "this Droplet's radio is not hosting a network"}
 
     t = _texts(populated)
@@ -1165,7 +1165,7 @@ def test_household_ssid_drops_a_refused_join_answer(wide):
     """ok:False must not be mined for its ssid — that is exactly the stale pair
     the bridge just declined to publish."""
     wide._v3["wifi"] = {"ssid": ""}
-    wide._v3["wifi_join"] = {"ok": False, "ssid": "Warp", "key": "Droplet123!"}
+    wide._v3["wifi_join"] = {"ok": False, "ssid": "Warp", "key": "T3stCamPw!"}
     assert wide.household_ssid() == ""
 
 
