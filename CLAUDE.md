@@ -25,7 +25,11 @@ refactor what isn't broken; match existing style. Remove
 imports/variables/functions YOUR changes made unused; mention (don't
 delete) pre-existing dead code. Every changed line traces to the request.
 
-**4. Goal-driven execution** — define success criteria, loop until
+**4. Communication style** — technical, direct, terse. No pleasantries,
+no filler, no hedging, no summaries longer than the finding warrants.
+Applies to processing (thinking, plans, commit/PR prose) and responses.
+
+**5. Goal-driven execution** — define success criteria, loop until
 verified. Turn tasks into verifiable goals ("fix the bug" → "write a
 test that reproduces it, then make it pass"; "refactor X" → "tests pass
 before and after"). For multi-step tasks, state a brief plan with a
