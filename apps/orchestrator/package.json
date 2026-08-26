@@ -37,7 +37,7 @@
     "@project-chip/matter.js": "0.17.9",
     "@simplewebauthn/server": "13.3.2",
     "archiver": "^7.0.1",
-    "argon2": "^0.41.1",
+    "argon2": "^0.45.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "express": "^4.22.2",
