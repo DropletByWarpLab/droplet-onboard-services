@@ -1489,7 +1489,52 @@ fi
 #
 # LIVE-APPLY IS STEFAN-GATED: applying on .87 also needs the compose port
 # removed (done) + `systemctl restart droplet-openwrt-attach`. Code + tests only.
-if command -v nft >/dev/null 2>&1; then
+#
+# WARP-2183 — SHAPE GATE. Every rule below exists ONLY to compensate for wg0
+# living in a container behind docker-proxy. On the edge-router shape the tunnel
+# terminates on the RB5009 itself: there is no docker-proxy rewriting the source
+# port, no container IP to DNAT to, and no Docker FORWARD DROP to punch through.
+# Installing them there is not merely redundant — rule (a) would hijack inbound
+# udp/51820 arriving on the box's uplink and redirect it into a container whose
+# wg0 holds no peers, silently blackholing a tunnel the router was serving.
+#
+# The shape signal is the one WARP-1980 already established and tests: an
+# OPENWRT_HOST naming a NON-loopback host means an operator pointed this box at
+# a real external router. Empty or loopback means the bundled container. Same
+# case list as configure_single_box_env() in scripts/lib/single-box.sh — keep
+# them in step; a box that is behind a router but still says 127.0.0.1 has a
+# broken .env, and the WARP-1980 guard is what keeps that from happening.
+OVERLAY_NAT_ENV_FILE="${DROPLET_OVERLAY_NAT_ENV_FILE:-${REPO_ENV_FILE:-/home/droplet/edge-platform/.env}}"
+overlay_wg_host_nat_applies() {
+  _ownh="${OPENWRT_HOST:-}"
+  if [ -z "$_ownh" ] && [ -f "$OVERLAY_NAT_ENV_FILE" ]; then
+    _ownh="$(grep -m1 '^OPENWRT_HOST=' "$OVERLAY_NAT_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  fi
+  case "$_ownh" in
+    ''|127.0.0.1|localhost|::1) return 0 ;;   # bundled container — wg0 is here
+    *) return 1 ;;                            # external edge router — wg0 is there
+  esac
+}
+if ! overlay_wg_host_nat_applies; then
+  # Tear down any table a PREVIOUS attach installed while this box was still on
+  # the container shape. Leaving it behind would keep hijacking udp/51820 after
+  # the retarget, which is exactly the silent failure this gate exists to stop.
+  if command -v nft >/dev/null 2>&1 && nft list table ip droplet_overlay_nat >/dev/null 2>&1; then
+    nft delete table ip droplet_overlay_nat &&       echo "droplet-openwrt-attach: removed stale host WG overlay NAT (box is behind an external edge router)"
+  fi
+  # The DOCKER-USER accept cannot redirect anything on its own — the nft table
+  # above is the half that hijacks. It is still stale over-permission, so drop
+  # it too, best-effort: DOCKER-USER is not ours to flush, and the container may
+  # not be running to resolve an IP, so a miss here is not an error.
+  if command -v iptables >/dev/null 2>&1 && iptables -S DOCKER-USER >/dev/null 2>&1; then
+    _stale_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt 2>/dev/null) || true
+    _stale_if=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)
+    if [ -n "$_stale_ip" ] && [ -n "$_stale_if" ]; then
+      while iptables -D DOCKER-USER -i "$_stale_if" -d "$_stale_ip" -p udp --dport 51820 -j ACCEPT 2>/dev/null; do :; done
+    fi
+  fi
+  echo "droplet-openwrt-attach: skipping host WG overlay NAT — box is behind an external edge router (OPENWRT_HOST is not loopback); WireGuard terminates on the router, not in droplet-openwrt (WARP-2183)"
+elif command -v nft >/dev/null 2>&1; then
   # Resolve the openwrt container IP with the SAME validated retry idiom the
   # GATEWAY_IP DNAT resolution uses above — reject empty / 0.0.0.0 / multi-net
   # concatenations, since a garbage DNAT target makes the whole `nft add` fail.
