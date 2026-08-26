@@ -16,6 +16,13 @@ Verified 2026-08-24 against the live rulesets and against real PR heads
 
 ### `Stage Protection` — ruleset id 20877684, `refs/heads/stage`
 
+> **STALE as of 2026-08-26 (WARP-2187).** `stage` was deleted deliberately and
+> `branch-flow-guard` retired with it, but this ruleset is **still active** and
+> still targets `refs/heads/stage`. It now guards a ref that cannot exist, so it
+> gates nothing. Deleting a ruleset is a repo-admin action rather than a file
+> change, so it is tracked on WARP-2187 rather than done here. The contexts below
+> are recorded as they stand, not as a recommendation.
+
 | required context | emitted by | reports on every PR? |
 | --- | --- | --- |
 | `ci-summary` | `ci.yml`, job `ci-summary` | yes — `if: always()`, `needs` every leg, fails unless all legs pass. Designed to be the one always-reporting check (WARP-1007). |
@@ -29,9 +36,17 @@ Verified 2026-08-24 against the live rulesets and against real PR heads
 | `ci-summary` | `ci.yml` | yes |
 | `egress-gate` | `egress-gate.yml` | yes |
 
-`main` only ever receives promotion PRs whose head is `stage`. The title lint
-exempts those by design (`head.ref in (stage, main)`), so requiring it here
-would add a context that always passes trivially — deliberately not listed.
+Until 2026-08-26 `main` only ever received promotion PRs whose head was
+`stage`, and the title lint exempts those by design (`head.ref in (stage,
+main)`) — so requiring it here would have added a context that always passed
+trivially, and it was deliberately not listed.
+
+**That reasoning expired with the branch (WARP-2187).** `main` now receives
+feature PRs directly, and those are exactly the PRs the title lint is meant to
+catch — so `title carries a WARP key` is currently a gate that RUNS on every
+feature PR into `main` and is REQUIRED on none of them. The job qualifies under
+the rule below (unfiltered `pull_request:`, no checkout), so adding it to `Main
+Protection` is safe whenever someone with admin decides to. Open on WARP-2187.
 
 ## The rule for adding a required context
 
