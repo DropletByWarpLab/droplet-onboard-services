@@ -30,20 +30,31 @@
 import { Agent } from "undici";
 import { config } from "../config.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
+import { deriveErpCloudTokenKey, encryptColumn, decryptColumn } from "./column-crypto.service.js";
 import { readFileSync } from "node:fs";
 import {
   EaglesoftConnector,
   EaglesoftApiConnector,
   ExportDropConnector,
+  QuickBooksOnlineConnector,
+  DentrixAscendConnector,
+  CallBudget,
+  ConnectorBlockedError,
+  QBO_TRACK_REMEDIATION,
   DEFAULT_PORT,
   DEFAULT_DATABASE_NAME,
   DEFAULT_API_HTTPS_PORT,
+  DEFAULT_CALL_CEILING,
+  QUICKBOOKS_ONLINE_PROVIDER,
+  DENTRIX_ASCEND_PROVIDER,
   exportProviders,
   parseProfileJson,
   vendorFromExportProvider,
   type Connector,
   type EaglesoftApiRouteMap,
   type ExportProfile,
+  type QboTokens,
+  type AscendToken,
 } from "@droplet/erp-connector";
 
 /** The flagship direct-SQL provider (framework provider #1). */
@@ -60,7 +71,29 @@ export const EAGLESOFT_API_PROVIDER = "eaglesoft-api";
  * {@link isKnownErpProvider}, which covers both, rather than testing membership
  * here.
  */
-export const KNOWN_ERP_PROVIDERS: readonly string[] = [EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER];
+export const KNOWN_ERP_PROVIDERS: readonly string[] = [
+  EAGLESOFT_PROVIDER,
+  EAGLESOFT_API_PROVIDER,
+  // WARP-2137 — the ADR-041 cloud tracks. They reach a vendor SaaS rather than
+  // a box on the practice LAN, so `host` is unused and the account is named by
+  // `providerConfig` instead. Both connectors shipped with their packages
+  // (WARP-2109 / WARP-2127) but had no key mapped here, which made
+  // `validateProvider` reject them and left them unreachable from the API.
+  QUICKBOOKS_ONLINE_PROVIDER,
+  DENTRIX_ASCEND_PROVIDER,
+];
+
+/** The cloud tracks, which take their account identity from `providerConfig`
+ *  and their credentials from `providerTokensEnc` rather than from the LAN
+ *  columns. Used to decide whether a row needs cloud material resolved. */
+export const CLOUD_ERP_PROVIDERS: readonly string[] = [
+  QUICKBOOKS_ONLINE_PROVIDER,
+  DENTRIX_ASCEND_PROVIDER,
+];
+
+export function isCloudErpProvider(provider: string): boolean {
+  return CLOUD_ERP_PROVIDERS.includes(provider);
+}
 
 /**
  * Operator-authored export profiles, read fresh on every call.
@@ -114,6 +147,27 @@ export interface ConnectorSelector {
   apiRouteMap?: EaglesoftApiRouteMap;
   /** PEM of the CA to trust for this box. Absent → system trust store. */
   apiCaCert?: string;
+
+  // --- Cloud-track material (ignored by every LAN provider) ----------------
+
+  /** The connection row's id. Identity for the shared call budget and the AAD
+   *  the token blob is sealed against — absent means neither can be used, which
+   *  is why `test()` (which has no row yet) never reaches a metered read. */
+  connectionId?: string;
+  /** Validated per-provider connection facts from `providerConfig`. Absent →
+   *  the connector is constructed blocked, never with a guessed identifier. */
+  providerConfig?: ProviderConfig;
+  /** Resolve/persist hooks for the track's OAuth tokens. Absent → the
+   *  connector keeps its own blocked resolver and degrades honestly. */
+  cloudTokens?: CloudTokenAccess;
+}
+
+/** Read/rotate the cloud track's tokens. `persist` exists because Intuit
+ *  rotates the refresh token on every use — see `providerTokensEnc`. */
+export interface CloudTokenAccess {
+  resolveQbo?: () => Promise<QboTokens>;
+  persistQbo?: (tokens: QboTokens) => Promise<void>;
+  resolveAscend?: () => Promise<AscendToken>;
 }
 
 /** The credential triple the REST track authenticates with. */
@@ -199,6 +253,235 @@ export function apiMaterialFromRow(row: ApiConnectionRow): Pick<
   };
 }
 
+// ---------------------------------------------------------------------------
+// WARP-2137 — cloud-track connection material.
+// ---------------------------------------------------------------------------
+
+/** The validated shape of `IntegrationConnection.providerConfig`, discriminated
+ *  by the row's provider. A cloud track cannot address an account without it. */
+export type ProviderConfig =
+  | { provider: typeof QUICKBOOKS_ONLINE_PROVIDER; realmId: string; baseUrl?: string; callCeiling?: number }
+  | {
+      provider: typeof DENTRIX_ASCEND_PROVIDER;
+      organizationId: string;
+      locationId?: string;
+      baseUrl?: string;
+    };
+
+function optionalString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() !== "" ? v : undefined;
+}
+
+/**
+ * Narrow a persisted `providerConfig` for `provider`.
+ *
+ * Structural check, not a cast — the same rule `parseRouteMap` follows, and for
+ * the same reason: a row written by an older build, by hand, or for a different
+ * provider must not be handed to a connector as though it were a contract.
+ *
+ * Returns undefined when the value is absent, malformed, or missing the
+ * identifier the track cannot work without (`realmId` / `organizationId`). The
+ * factory reads undefined as "not configured" and constructs the connector in
+ * its blocked state, so the connection degrades to ERP_NOT_CONNECTED instead of
+ * calling Intuit with an empty company id and collecting an opaque 4xx.
+ *
+ * `callCeiling` is accepted only as a positive integer: a zero or negative
+ * ceiling would either block every read or, read as falsy, silently restore the
+ * default — both worse than ignoring a nonsense value and using the default
+ * deliberately.
+ */
+export function parseProviderConfig(provider: string, value: unknown): ProviderConfig | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+
+  if (provider === QUICKBOOKS_ONLINE_PROVIDER) {
+    const realmId = optionalString(v.realmId);
+    if (!realmId) return undefined;
+    const rawCeiling = v.callCeiling;
+    const callCeiling =
+      typeof rawCeiling === "number" && Number.isInteger(rawCeiling) && rawCeiling > 0
+        ? rawCeiling
+        : undefined;
+    return {
+      provider: QUICKBOOKS_ONLINE_PROVIDER,
+      realmId,
+      baseUrl: optionalString(v.baseUrl),
+      callCeiling,
+    };
+  }
+
+  if (provider === DENTRIX_ASCEND_PROVIDER) {
+    const organizationId = optionalString(v.organizationId);
+    if (!organizationId) return undefined;
+    return {
+      provider: DENTRIX_ASCEND_PROVIDER,
+      organizationId,
+      // Optional by design: without a location the connector still serves the
+      // schedule and patients and refuses only the AR read, which is more
+      // useful than refusing the whole connection.
+      locationId: optionalString(v.locationId),
+      baseUrl: optionalString(v.baseUrl),
+    };
+  }
+
+  return undefined;
+}
+
+/** Encrypt a cloud track's tokens for `providerTokensEnc`. AAD-bound to the
+ *  connection id so a blob on the wrong row fails closed. */
+export function encodeCloudTokens(connectionId: string, tokens: unknown): string {
+  return encryptColumn(deriveErpCloudTokenKey(), JSON.stringify(tokens), connectionId);
+}
+
+/**
+ * Decrypt a stored cloud-token blob.
+ *
+ * Returns undefined rather than throwing on every failure path — absent,
+ * undecryptable (DEVICE_SECRET_KEY rotated by a factory reset), sealed against
+ * a different row, or not JSON. Same honest-degradation contract as
+ * `decodeApiCredentials`: undefined leaves the connector's own blocked resolver
+ * in place instead of throwing out of a read handler.
+ */
+function decodeCloudTokens(connectionId: string, enc: string | null | undefined): unknown {
+  if (!enc) return undefined;
+  try {
+    return JSON.parse(decryptColumn(deriveErpCloudTokenKey(), enc, connectionId));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Narrow a decoded blob to QuickBooks Online's token quadruple. */
+export function parseQboTokens(value: unknown): QboTokens | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt } = value as Record<
+    string,
+    unknown
+  >;
+  if (typeof accessToken !== "string" || typeof refreshToken !== "string") return undefined;
+  if (typeof accessExpiresAt !== "number" || typeof refreshExpiresAt !== "number") return undefined;
+  return { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt };
+}
+
+/** Narrow a decoded blob to Dentrix Ascend's bearer token. */
+export function parseAscendToken(value: unknown): AscendToken | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { accessToken, expiresAt } = value as Record<string, unknown>;
+  if (typeof accessToken !== "string" || typeof expiresAt !== "number") return undefined;
+  return { accessToken, expiresAt };
+}
+
+/** The cloud-track columns, as they come off an IntegrationConnection row. */
+export interface CloudConnectionRow {
+  id: string;
+  provider: string;
+  providerConfig?: unknown;
+  providerTokensEnc?: string | null;
+}
+
+/**
+ * The per-connection metered-call budget, kept OUTSIDE the connector.
+ *
+ * WARP-2137 finding #2, and the reason this module owns a module-level map:
+ * `erp.service` builds and closes a connector per read ("one handshake per
+ * read"). A `CallBudget` constructed inside the factory would therefore be born
+ * fresh on every read, and QuickBooks Online's ceiling — the thing standing
+ * between one box and the whole fleet's metered Intuit allowance — would reset
+ * before it could ever be reached. Keying it by connection id makes the ceiling
+ * mean what its name says: per connection, across reads, for the life of the
+ * process.
+ *
+ * Rebuilt when the configured ceiling changes so an operator lowering it takes
+ * effect without a restart; the spend resets in that case, which is the honest
+ * reading of "a new ceiling was chosen deliberately".
+ */
+const callBudgets = new Map<string, { budget: CallBudget; ceiling: number }>();
+
+export function sharedCallBudget(
+  connectionId: string,
+  ceiling: number,
+  now: () => number = () => Date.now(),
+): CallBudget {
+  const existing = callBudgets.get(connectionId);
+  if (existing && existing.ceiling === ceiling) return existing.budget;
+  const budget = new CallBudget(ceiling, now);
+  callBudgets.set(connectionId, { budget, ceiling });
+  return budget;
+}
+
+/** Drop a connection's budget — call when the connection is deleted, so a
+ *  reused id cannot inherit a stranger's spend. Also the test seam. */
+export function forgetCallBudget(connectionId: string): void {
+  callBudgets.delete(connectionId);
+}
+
+/** Test seam: clear every budget between cases. */
+export function __resetCallBudgetsForTest(): void {
+  callBudgets.clear();
+}
+
+/**
+ * Map a persisted row's cloud columns onto the selector fields the factory
+ * consumes. Validation failures collapse to undefined — "not configured".
+ */
+export function cloudMaterialFromRow(
+  row: CloudConnectionRow,
+): Pick<ConnectorSelector, "connectionId" | "providerConfig" | "cloudTokens"> {
+  const providerConfig = parseProviderConfig(row.provider, row.providerConfig);
+  const decoded = decodeCloudTokens(row.id, row.providerTokensEnc);
+
+  if (row.provider === QUICKBOOKS_ONLINE_PROVIDER) {
+    const tokens = parseQboTokens(decoded);
+    return {
+      connectionId: row.id,
+      providerConfig,
+      cloudTokens: tokens
+        ? {
+            resolveQbo: async () => tokens,
+            // Intuit rotates the refresh token on every use. Writing it back is
+            // not bookkeeping: skip it and the NEXT refresh replays a superseded
+            // token, which Intuit rejects, and the connection is stranded until
+            // a human re-consents.
+            persistQbo: async (next: QboTokens) => {
+              await persistCloudTokens(row.id, next);
+            },
+          }
+        : undefined,
+    };
+  }
+
+  if (row.provider === DENTRIX_ASCEND_PROVIDER) {
+    const token = parseAscendToken(decoded);
+    return {
+      connectionId: row.id,
+      providerConfig,
+      cloudTokens: token ? { resolveAscend: async () => token } : undefined,
+    };
+  }
+
+  return { connectionId: row.id, providerConfig: undefined, cloudTokens: undefined };
+}
+
+/**
+ * Write rotated tokens back to the row.
+ *
+ * Injected rather than imported so this module keeps its "build a connector"
+ * job and does not take a Prisma dependency; `erp.service` supplies the real
+ * writer at startup. Unset in a unit test, the persister is a no-op, which is
+ * correct for a test that never rotates a real token.
+ */
+type CloudTokenWriter = (connectionId: string, blob: string) => Promise<void>;
+let cloudTokenWriter: CloudTokenWriter | null = null;
+
+export function setCloudTokenWriter(writer: CloudTokenWriter | null): void {
+  cloudTokenWriter = writer;
+}
+
+async function persistCloudTokens(connectionId: string, tokens: unknown): Promise<void> {
+  if (!cloudTokenWriter) return;
+  await cloudTokenWriter(connectionId, encodeCloudTokens(connectionId, tokens));
+}
+
 /**
  * Build an undici dispatcher that trusts `caPem` — how the connector is given
  * TLS trust for a box whose certificate chains to a private CA (Patterson's
@@ -239,6 +522,64 @@ export function connectorForProvider(sel: ConnectorSelector): Connector {
         // every export connection looking for a folder that does not exist.
       },
       { profiles, configError: error ?? undefined },
+    );
+  }
+
+  // WARP-2137 — the ADR-041 cloud tracks. Both run IN-PROCESS, not in the
+  // erp-sql-bridge sidecar: that sidecar exists to isolate a NATIVE driver, and
+  // an HTTPS API needs none (ADR-041, and the eaglesoft-api precedent above).
+  //
+  // Each is constructed from `providerConfig` and, when present, a resolver
+  // over the decrypted token blob. An absent config or absent tokens leaves the
+  // connector's own blocked resolver in place — the same honest-degradation
+  // rule the REST track follows — so a half-configured connection reports
+  // ERP_NOT_CONNECTED rather than reaching a vendor with a missing identifier.
+  if (sel.provider === QUICKBOOKS_ONLINE_PROVIDER) {
+    const cfg = sel.providerConfig?.provider === QUICKBOOKS_ONLINE_PROVIDER ? sel.providerConfig : undefined;
+    const ceiling = cfg?.callCeiling ?? DEFAULT_CALL_CEILING;
+    // Unlike DentrixAscendConnector, QuickBooksOnlineConnector does NOT
+    // validate its realm id — an empty one builds fine and produces the URL
+    // `/v3/company//query`, so an unconfigured row would spend a METERED call
+    // asking Intuit about a company that does not exist. Refuse here, where the
+    // row is known to be unconfigured, and refuse as a ConnectorBlockedError so
+    // the read degrades to ERP_NOT_CONNECTED like every other absent-material
+    // path rather than surfacing as a fault.
+    if (!cfg?.realmId) {
+      throw new ConnectorBlockedError(
+        "construct (no QuickBooks company id configured)",
+        QBO_TRACK_REMEDIATION,
+      );
+    }
+    return new QuickBooksOnlineConnector(
+      {
+        realmId: cfg.realmId,
+        baseUrl: cfg.baseUrl,
+        credentialsSecretRef: sel.secretRef ?? "",
+        callCeiling: ceiling,
+      },
+      {
+        resolveTokens: sel.cloudTokens?.resolveQbo,
+        persistTokens: sel.cloudTokens?.persistQbo,
+        // The budget must OUTLIVE this connector — see sharedCallBudget. With
+        // no connection id (the `test()` path, which has no row yet) there is
+        // no identity to key a shared budget by, so none is injected and the
+        // connector falls back to its own per-instance one. That path performs
+        // a validation handshake, not a metered read loop.
+        budget: sel.connectionId ? sharedCallBudget(sel.connectionId, ceiling) : undefined,
+      },
+    );
+  }
+
+  if (sel.provider === DENTRIX_ASCEND_PROVIDER) {
+    const cfg = sel.providerConfig?.provider === DENTRIX_ASCEND_PROVIDER ? sel.providerConfig : undefined;
+    return new DentrixAscendConnector(
+      {
+        organizationId: cfg?.organizationId ?? "",
+        locationId: cfg?.locationId,
+        baseUrl: cfg?.baseUrl,
+        credentialsSecretRef: sel.secretRef ?? "",
+      },
+      { resolveToken: sel.cloudTokens?.resolveAscend },
     );
   }
 

@@ -728,7 +728,28 @@ export class QuickBooksOnlineConnector implements Connector {
         `SELECT * FROM ${entity} STARTPOSITION ${start} MAXRESULTS ${PAGE}`,
       );
       const qr = (body.QueryResponse ?? {}) as Record<string, unknown>;
-      const page = (qr[entity] ?? []) as Record<string, unknown>[];
+      // WARP-2137 — the entity key must be an ARRAY or absent. Intuit returning
+      // an object (or a string, or a number) here is a contract break, and the
+      // unguarded cast turned it into a bare TypeError from the spread below:
+      // `page.length` is undefined, `undefined < PAGE` is false, and
+      // `rows.push(...page)` then throws "not iterable" from deep inside the
+      // pagination loop. That surfaces as a generic 500 rather than the honest
+      // blocked degradation, and the message names neither the entity nor the
+      // shape. Absent stays absent — an empty result is `{}` with no key at
+      // all, which is a legitimate "no rows", not a fault.
+      // `!= null` deliberately, matching the `?? []` this replaced: an absent
+      // key AND an explicit null both mean "no rows" and must stay harmless.
+      // Only a present, non-nullish, non-array value is a contract break.
+      const raw = qr[entity];
+      if (raw != null && !Array.isArray(raw)) {
+        throw new ConnectorBlockedError(
+          `${op} returned a non-array QueryResponse.${entity} (${typeof raw})`,
+          "Intuit's response did not match the documented v3 query contract, which " +
+            "returns the entity as an array. Refusing to interpret it rather than " +
+            "guessing at a shape — report the response if this persists.",
+        );
+      }
+      const page = (raw ?? []) as Record<string, unknown>[];
       if (page.length < PAGE) {
         rows.push(...page);
         return rows;

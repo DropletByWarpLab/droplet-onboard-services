@@ -4363,6 +4363,38 @@ model IntegrationConnection {
   /// use the system trust store. Certificate verification is never disabled.
   apiCaCert String?
 
+  // --- Cloud-track (ADR-041) connection material ---------------------------
+  // WARP-2137. The columns above describe a box on the practice LAN; a cloud
+  // track has no host to reach and instead needs the vendor's own identifiers.
+  // Both are nullable and ignored by every LAN track.
+
+  /// Provider-specific connection facts the Eaglesoft-shaped columns cannot
+  /// express: `quickbooks-online` needs `{ realmId }` (Intuit's company id) and
+  /// `dentrix-ascend` needs `{ organizationId, locationId? }`; both accept an
+  /// optional `baseUrl` so a sandbox company can be pointed at the sandbox host
+  /// without a release. Deliberately NOT reusing `databaseName` or `host` for
+  /// these — borrowing a LAN column would collide with its own default and make
+  /// a misconfigured row indistinguishable from a mistyped one.
+  ///
+  /// Structurally validated per provider on read (`parseProviderConfig`), never
+  /// cast: a row written by an older build must degrade to "not configured",
+  /// which blocks the connector honestly, rather than reaching the vendor with
+  /// a missing identifier and collecting an opaque 4xx.
+  providerConfig Json?
+
+  /// The cloud track's OAuth tokens, encrypted with `column-crypto`'s
+  /// `deriveErpCloudTokenKey()` and AAD-bound to this row's `id`, so a blob
+  /// moved to another connection fails closed instead of authenticating as the
+  /// wrong company.
+  ///
+  /// Distinct from `apiCredentialsEnc`, which holds Eaglesoft's static
+  /// {integrationKey,userId,password} triple under the older `encryptSecret`:
+  /// these are ROTATING bearer/refresh tokens with a different lifecycle, and
+  /// Intuit rotates the refresh token on every use — the connector's
+  /// `persistTokens` writes the new one back here, and failing to do so strands
+  /// the connection at the next refresh.
+  providerTokensEnc String?
+
   @@index([provider, status])
 }
 
