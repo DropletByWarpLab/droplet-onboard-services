@@ -1,6 +1,6 @@
-"""WARP-1641 — geometry dispatch + the panel's debug / recovery screen.
+"""WARP-1641 / WARP-2149 — geometry dispatch + the panel's debug screen.
 
-Two things under test:
+Three things under test:
 
 1. `render_system` hands off to the wide layout on a bar panel, and does NOT
    on a 480x320 one. The 480x320 body is authored against hardcoded
@@ -8,11 +8,17 @@ Two things under test:
    52px apart at height 320 and collide at 280), so this is a correctness
    dispatch, not a cosmetic one.
 
-2. The console handback. Claiming the panel takes the operator's physical
-   console away; this screen is the way back. Its button is two-tap because a
-   single stray touch must not swap what is on the rack's front panel, and the
-   whole path has to survive the bridge being unreachable — the caller is a
-   person standing at a rack with no other way in.
+2. The way in and out (WARP-2149). Entry is a DOUBLE tap on the brand
+   lockup: a single stray touch must not flip the rack's front panel, and
+   the old single-tap entry turned a natural double-tap into enter-then-
+   immediately-exit (tap 2 fired the same lockup's debug_back). BACK goes
+   to STANDBY, the panel's resting state — it used to go to HOME, the
+   480-authored tile grid, a broken surface on a wide panel.
+
+3. The console handback. The screen's ONE control opens a login console in
+   a single tap (the double-tap gate on the way in is the stray-touch guard
+   now), and the whole path has to survive the bridge being unreachable —
+   the caller is a person standing at a rack with no other way in.
 """
 
 from __future__ import annotations
@@ -70,17 +76,73 @@ def test_debug_mode_constant_and_dispatch(wide):
     assert wide._current_image.size == (PANEL_W, PANEL_H)
 
 
-# --- reaching the screen ----------------------------------------------------
+# --- reaching the screen: the double-tap gate (WARP-2149) -------------------
+
+def _region(disp, name):
+    return next(r for r in disp._touch_regions if r.name == name)
+
 
 def test_status_screen_exposes_a_debug_target(wide):
     lw.render_status(wide)
     assert "debug_enter" in {r.name for r in wide._touch_regions}
 
 
+def test_a_single_tap_on_the_lockup_does_nothing(wide):
+    """The stray touch (or a sleeve) that used to flip the rack's front panel
+    to the recovery screen now does nothing at all."""
+    lw.render_status(wide)
+    enter = _region(wide, "debug_enter")
+    assert wide.handle_touch(enter.x + 2, enter.y + 2) == "debug_enter"
+    assert wide._current_mode != TFTDisplay.DEBUG
+
+
+def test_a_double_tap_enters_debug(wide):
+    lw.render_status(wide)
+    enter = _region(wide, "debug_enter")
+    wide.handle_touch(enter.x + 2, enter.y + 2)
+    wide.handle_touch(enter.x + 2, enter.y + 2)
+    assert wide._current_mode == TFTDisplay.DEBUG
+
+
+def test_the_gate_survives_a_re_render_between_taps(wide):
+    """Touch regions are rebuilt on every render and the live screens repaint
+    every ~1s, so a gate stored on the region would be wiped between the two
+    taps. It lives on the display object; prove a re-render doesn't reset it."""
+    lw.render_status(wide)
+    enter = _region(wide, "debug_enter")
+    wide.handle_touch(enter.x + 2, enter.y + 2)
+    lw.render_status(wide)
+    assert wide.handle_touch(enter.x + 2, enter.y + 2) == "debug_enter"
+    assert wide._current_mode == TFTDisplay.DEBUG
+
+
+def test_a_slow_second_tap_re_arms_instead_of_entering(wide):
+    wide._tap_debug_enter()
+    wide._debug_enter_at -= display_module.DEBUG_DOUBLE_TAP_SECONDS + 0.05
+    wide._tap_debug_enter()
+    assert wide._current_mode != TFTDisplay.DEBUG, \
+        "two taps a sip-of-coffee apart are two stray taps, not a gesture"
+    # ...but that late tap re-armed: one more inside the window enters.
+    wide._tap_debug_enter()
+    assert wide._current_mode == TFTDisplay.DEBUG
+
+
+# --- the screen itself: a door, not a dashboard (WARP-2149) -----------------
+
 def test_debug_screen_has_back_and_console_targets(wide):
     lw.render_debug(wide)
     names = {r.name for r in wide._touch_regions}
     assert {"debug_back", "console_return"} <= names
+
+
+def test_the_debug_screen_offers_nothing_but_console_and_back(wide):
+    """The WARP-1641 build buried the console button under four columns of
+    readouts and a dashboard QR rail. The rebuilt screen has exactly two
+    things to tap; anything a third target offers belongs on the dashboard
+    or in the console itself, not here."""
+    lw.render_debug(wide)
+    assert {r.name for r in wide._touch_regions} == {"debug_back",
+                                                     "console_return"}
 
 
 def test_debug_targets_are_hittable(wide):
@@ -90,10 +152,6 @@ def test_debug_targets_are_hittable(wide):
 
 
 # --- WARP-1801: the way out is the way in -----------------------------------
-
-def _region(disp, name):
-    return next(r for r in disp._touch_regions if r.name == name)
-
 
 def _resolve(disp, x, y):
     """Which region a tap at (x,y) would hit — same first-match order as
@@ -126,9 +184,23 @@ def test_every_pixel_that_enters_debug_also_leaves_it(wide):
         f"{len(dead)} px of the debug_enter span do not leave the debug "
         f"screen: {dead[:8]}{'...' if len(dead) > 8 else ''}")
 
-    # And it really does navigate, not just match a region.
+    # And it really does navigate — to STANDBY, the panel's resting state,
+    # not to the legacy HOME grid (WARP-2149).
     assert wide.handle_touch(enter.x + 2, enter.y + 2) == "debug_back"
-    assert wide._current_mode == TFTDisplay.HOME
+    assert wide._current_mode == TFTDisplay.STANDBY
+
+
+def test_back_ignores_the_tail_of_the_entry_gesture(wide):
+    """A sloppy triple-tap must not enter and immediately leave — that bounce
+    (enter on tap 1, exit to the wrong screen on tap 2) is the exact defect
+    the double-tap gate exists to close."""
+    wide._go_debug()
+    wide._tap_debug_back()
+    assert wide._current_mode == TFTDisplay.DEBUG
+    # Past the gesture window it is a deliberate press, and it leaves.
+    wide._debug_opened_at -= display_module.DEBUG_DOUBLE_TAP_SECONDS + 0.05
+    wide._tap_debug_back()
+    assert wide._current_mode == TFTDisplay.STANDBY
 
 
 def test_the_back_chip_stays_visible(wide):
@@ -146,12 +218,15 @@ def test_the_back_chip_stays_visible(wide):
     assert _region(wide, "debug_back").w == lw.LOCKUP_W > cw
 
 
-def test_the_widened_back_target_does_not_swallow_console_return(wide):
+def test_the_widened_back_target_does_not_swallow_console_open(wide):
     lw.render_debug(wide)
     back, console = _region(wide, "debug_back"), _region(wide, "console_return")
-    assert back.x + back.w <= console.x, (
-        "the back target must not overlap RETURN CONSOLE TO PANEL — that "
-        "button swaps what is physically on the rack's front")
+    disjoint = (back.x + back.w <= console.x or console.x + console.w <= back.x
+                or back.y + back.h <= console.y
+                or console.y + console.h <= back.y)
+    assert disjoint, (
+        "the back target must not overlap OPEN CONSOLE — that button swaps "
+        "what is physically on the rack's front")
     # And the console button must still answer where it is drawn.
     assert wide.handle_touch(console.x + console.w // 2,
                              console.y + console.h // 2) == "console_return"
@@ -165,50 +240,26 @@ def test_a_missed_tap_is_logged(wide, caplog):
     assert "Tap MISS at (700,260)" in caplog.text
 
 
-# --- the two-tap confirm ----------------------------------------------------
+# --- the single-tap console (WARP-2149) -------------------------------------
 
-def test_first_tap_only_arms(wide, monkeypatch):
-    called = []
-    monkeypatch.setattr(wide, "return_console",
-                        lambda **kw: called.append(1) or {"ok": True})
-    wide._tap_return_console()
-    assert called == [], "a single tap must not swap the panel"
-    assert wide._console_confirm_active()
-
-
-def test_second_tap_commits(wide, monkeypatch):
-    monkeypatch.setattr(wide, "return_console", lambda **kw: {"ok": True})
-    wide._tap_return_console()
-    wide._tap_return_console()
-    assert not wide._console_confirm_active()
-    assert "Console returned" in wide._console_last_result
-
-
-def test_confirm_expires(wide, monkeypatch):
+def test_one_tap_opens_the_console(wide, monkeypatch):
+    """No arm/confirm dance: entry already took a deliberate double tap, and
+    "select console, nothing happens, select it again" is exactly how the
+    two-tap confirm read at the rack."""
     calls = []
     monkeypatch.setattr(wide, "return_console",
                         lambda **kw: calls.append(1) or {"ok": True})
-    wide._tap_return_console()
-    wide._console_confirm_until = 0.0          # simulate the window lapsing
-    wide._tap_return_console()
-    assert calls == [], "an expired arm must re-arm, not fire"
-    assert wide._console_confirm_active()
+    wide._tap_console()
+    assert calls == [1]
+    assert "login prompt" in wide._console_last_result
 
 
-def test_leaving_the_screen_disarms(wide, monkeypatch):
+def test_reentry_clears_a_stale_result(wide, monkeypatch):
     monkeypatch.setattr(wide, "return_console", lambda **kw: {"ok": True})
-    wide._tap_return_console()
-    wide._go_home()
-    assert not wide._console_confirm_active()
-
-
-def test_armed_state_is_visible(wide):
-    """If the button is armed, the screen has to say so — otherwise the second
-    tap is a surprise."""
-    wide._tap_return_console()
-    img = lw.render_debug(wide)
-    assert img.size == (PANEL_W, PANEL_H)
-    assert wide._console_confirm_active()
+    wide._tap_console()
+    assert wide._console_last_result
+    wide._go_debug()
+    assert wide._console_last_result == ""
 
 
 # --- failure surfacing ------------------------------------------------------
@@ -216,8 +267,7 @@ def test_armed_state_is_visible(wide):
 def test_bridge_failure_is_reported_not_swallowed(wide, monkeypatch):
     monkeypatch.setattr(wide, "return_console",
                         lambda **kw: {"ok": False, "error": "Access denied"})
-    wide._tap_return_console()
-    wide._tap_return_console()
+    wide._tap_console()
     assert "Access denied" in wide._console_last_result
     lw.render_debug(wide)          # and it renders
 
@@ -263,7 +313,9 @@ def test_return_console_posts_to_the_bridge(wide, monkeypatch):
 def test_screen_states_the_keyboard_limitation(wide):
     """The panel's touchscreen is HID with no keyboard keys — it cannot type
     into the prompt it summons. Anyone relying on this in an outage needs to
-    know that before they rely on it."""
+    know that before they rely on it. WARP-2149 stripped the screen's
+    readouts, but these two facts stay: they are the button's own caption,
+    not information about the box."""
     src = (lw.__file__ and open(lw.__file__, encoding="utf-8").read())
     assert "cannot type" in src
     assert "Ctrl+Alt+F2" in src

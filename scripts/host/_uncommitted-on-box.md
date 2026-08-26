@@ -10,7 +10,7 @@ the Phase 0 capture) should resolve each one.
 
 ```diff
 @@ -83,4 +83,21 @@ objects:
- # `Droplet123!`, not `Droplet123%21` — because the bundled ffmpeg
+ # `T3stCamPw!`, not `T3stCamPw%21` — because the bundled ffmpeg
  # does not URL-decode userinfo and the camera returns 401 + locks the
  # account after ~5 retries on percent-escapes.
 -cameras: {}
@@ -38,7 +38,7 @@ Why not commit:
 - Hardcoded camera IP `192.168.20.176` is environment-specific (this
   box's br-lan DHCP pool) — not a portable default.
 - No credentials in the URL — the comment block right above says creds
-  should be raw `Droplet123!`, but the URL has neither user nor password.
+  should be raw `T3stCamPw!`, but the URL has neither user nor password.
   Either auth-less RTSP works on this camera or the entry would fail at
   runtime.
 - `version: 0.17-0` at the bottom is a Frigate schema-version pin

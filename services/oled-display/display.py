@@ -293,10 +293,13 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 # old logo -> stats carousel for headless demos.
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 
-# WARP-1641 — how long the debug screen's "return console" button stays armed
-# after the first tap. Long enough to be a deliberate second press, short
-# enough that walking away disarms it.
-CONSOLE_CONFIRM_SECONDS = float(os.environ.get("CONSOLE_CONFIRM_SECONDS", "4"))
+# WARP-2149 — the debug screen opens on a DOUBLE tap of the brand lockup.
+# This window is how close together the two taps must land. It is also the
+# grace during which the debug screen's BACK ignores the tail of the entry
+# gesture, so a sloppy triple-tap doesn't enter and immediately leave — the
+# exact bounce the old single-tap entry had (tap 2 fired debug_back).
+DEBUG_DOUBLE_TAP_SECONDS = float(
+    os.environ.get("DEBUG_DOUBLE_TAP_SECONDS", "0.8"))
 
 # WARP-1782 — the rail's second QR face: the Wi-Fi join code.
 #
@@ -884,8 +887,10 @@ class TFTDisplay:
         # WARP-1640 — set by _init_device() when DISPLAY_BACKEND=fb; stays None
         # on every other backend so _push()'s check is a plain identity test.
         self._fb = None
-        # WARP-1641 — debug screen's two-tap console handback.
-        self._console_confirm_until: float = 0.0
+        # WARP-2149 — double-tap gate on the way into the debug screen, and
+        # the moment it opened (BACK ignores taps inside the entry window).
+        self._debug_enter_at: float = 0.0
+        self._debug_opened_at: float = 0.0
         self._console_last_result: str = ""
         # WARP-1782 — the rail's Wi-Fi QR face is a DEADLINE, not a flag. The
         # revert is then a property of the clock rather than of something
@@ -3128,8 +3133,6 @@ class TFTDisplay:
     # ----- Navigation helpers (bound to touch regions) ------------------
 
     def _go_home(self):
-        self._console_confirm_until = 0.0
-        self._console_last_result = ""
         self._set_mode(self.HOME, pause_cycle=False)
 
     # --- WARP-1782: the rail's two QR faces ---------------------------------
@@ -3251,36 +3254,68 @@ class TFTDisplay:
             logger.info("rail Wi-Fi face unavailable — no scannable payload")
         self._render_current()
 
-    # --- WARP-1641: the panel's debug / recovery screen ---------------------
+    # --- WARP-1641 / WARP-2149: the panel's debug / recovery screen ---------
+
+    def _tap_debug_enter(self):
+        """Double-tap gate on the brand lockup — the way into the debug screen.
+
+        WARP-2149. Entry used to be a single tap, which had two failure
+        modes: a stray touch (or a sleeve) flipped the rack's front panel to
+        the recovery screen, and a natural DOUBLE tap entered on tap 1 and
+        then fired the same lockup's debug_back on tap 2 — dumping the user
+        on the legacy HOME grid. Requiring two deliberate taps inside
+        DEBUG_DOUBLE_TAP_SECONDS closes both: a single tap now does nothing
+        at all, and the double tap is the entry gesture rather than an
+        accident.
+        """
+        now = time.time()
+        if now - self._debug_enter_at <= DEBUG_DOUBLE_TAP_SECONDS:
+            self._debug_enter_at = 0.0
+            self._go_debug()
+        else:
+            self._debug_enter_at = now
 
     def _go_debug(self):
-        self._console_confirm_until = 0.0
         self._console_last_result = ""
+        self._debug_opened_at = time.time()
         self._set_mode(self.DEBUG)
 
-    def _console_confirm_active(self) -> bool:
-        return time.time() < self._console_confirm_until
+    def _tap_debug_back(self):
+        """BACK on the debug screen → STANDBY, the panel's resting state.
 
-    def _tap_return_console(self):
-        """Two-tap confirm on "return console to panel".
-
-        This swaps what is physically on the rack's front panel, so a single
-        stray touch (or a sleeve) must not do it. First tap arms for
-        CONSOLE_CONFIRM_SECONDS; a second tap inside that window commits.
+        It used to go to HOME — the 480-authored tile grid, which on a wide
+        panel is a broken surface full of legacy controls. The grace window
+        keeps the tail of the entry gesture (a sloppy triple-tap) from
+        entering and immediately leaving, which is exactly the bounce the
+        double-tap gate exists to close.
         """
-        if not self._console_confirm_active():
-            self._console_confirm_until = time.time() + CONSOLE_CONFIRM_SECONDS
+        if time.time() - self._debug_opened_at <= DEBUG_DOUBLE_TAP_SECONDS:
             return
-        self._console_confirm_until = 0.0
+        self._go_standby()
+
+    def _go_standby(self):
+        self._set_mode(self.STANDBY)
+
+    def _tap_console(self):
+        """The debug screen's one control: put a login console on the panel.
+
+        A single deliberate tap — no arm/confirm. The double-tap gate on the
+        way IN is the stray-touch guard now (WARP-2149); the old two-tap
+        confirm on top of it read as "I selected console and nothing
+        happened". Mis-fires self-heal: the hold expires and the deadman
+        reclaims the panel (WARP-1639).
+        """
         res = self.return_console()
         if res.get("ok"):
             # The console is taking the panel over as we speak; there is
             # nothing left to render to. Say so anyway — the frame may still
             # land before fbcon repaints.
-            self._console_last_result = "Console returned. Panel is now a login prompt."
+            self._console_last_result = "Console is live. Panel shows a login prompt."
         else:
-            self._console_last_result = "Could not return the console: {}".format(
+            self._console_last_result = "Could not open the console: {}".format(
                 str(res.get("error", "unknown"))[:60])
+        with self._lock:
+            self._render_current_locked()
 
     def return_console(self, timeout: float = 30.0) -> dict:
         """Ask device-bridge to hand the panel back to the kernel console.
@@ -3916,10 +3951,11 @@ class TFTDisplay:
 
             # Live re-render of time-sensitive screens (incl. the py-v3 idle
             # clock + combined System screen so the preview stays current).
-            # DEBUG is in the list because its confirm button is time-boxed:
-            # without a re-render the "TAP AGAIN TO CONFIRM" state would stay
-            # on screen after it had already expired, and the next tap would
-            # arm rather than commit — which reads as the button not working.
+            # DEBUG stays in the list even though nothing on it is time-boxed
+            # any more (WARP-2149 dropped the confirm countdown): when the
+            # deadman reclaims the panel after a console hold, this ≤1s
+            # repaint is what takes the glass back from the stale login
+            # prompt — the reclaim happens host-side and never tells us.
             live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS,
                                            self.IDLE, self.SYSTEM, self.DEBUG))
             if live and (now - last_full_render) > 1.0:

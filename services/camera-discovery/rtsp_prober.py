@@ -31,7 +31,7 @@ RTSP_PORTS = [554, 8554, 8080]
 # matters because the consumer of this URL is Frigate's bundled ffmpeg, and ffmpeg
 # does NOT percent-decode userinfo before authenticating — whatever we write goes
 # on the wire literally. Encoding a legal character (quote(pw, safe="") turning
-# `Droplet123!` into `Droplet123%21`) therefore sends the wrong password: the
+# `T3stCamPw!` into `T3stCamPw%21`) therefore sends the wrong password: the
 # camera answers 401, ffmpeg retries, and a Hanwha locks the account after ~5
 # attempts. docker/frigate/config.yml carries the same warning for hand-written
 # camera entries. (WARP-1873)

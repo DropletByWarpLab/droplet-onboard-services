@@ -117,4 +117,4 @@ TPM/volume adaptations. See the macOS section above.)
 This caught us once on `FRIGATE_CAMERA_*_PASSWORD` — `.env` had the right
 value but Frigate's container still had the stale one. `scripts/test-security.sh`
 now also blocks URL-encoded camera passwords (Frigate ffmpeg doesn't decode
-percent-escapes; store raw `Droplet123!`, not `Droplet123%21`).
+percent-escapes; store raw `T3stCamPw!`, not `T3stCamPw%21`).

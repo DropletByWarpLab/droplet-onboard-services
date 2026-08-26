@@ -105,9 +105,28 @@ def create_driver() -> SwitchDriver:
                 "reports 'disconnected' until then."
             )
 
+        # WARP-2165: the uplink guard belongs in the layer that performs the
+        # write, not only in the orchestrator route above it. Same env var and
+        # same meaning as the provisioner's (main.py `build_provision_config`);
+        # 0/unset = nothing protected. Parsed leniently so a malformed value
+        # can't take the service down — but logged, because silently reading
+        # "8x" as "unprotected" is the failure this guard exists to prevent.
+        raw_protected = os.environ.get("SWITCH_PROTECTED_PORT", "0").strip()
+        try:
+            protected_port = int(raw_protected or "0")
+        except ValueError:
+            protected_port = 0
+            logger.warning(
+                "SWITCH_PROTECTED_PORT=%r is not an integer — treating the "
+                "uplink as UNPROTECTED. Fix this: writes can now cut it.",
+                raw_protected,
+            )
+
         logger.info(
-            "Creating OpenWrt switch driver for %s:%d (user: %s, writes: %s)",
+            "Creating OpenWrt switch driver for %s:%d (user: %s, writes: %s, "
+            "protected port: %s)",
             host, port, username, "PLAN-ONLY" if plan_only else "LIVE",
+            protected_port or "none",
         )
         return OpenWrtSwitchDriver(
             host=host,
@@ -115,6 +134,7 @@ def create_driver() -> SwitchDriver:
             username=username,
             password=password,
             plan_only=plan_only,
+            protected_port=protected_port,
         )
 
     # Future: custom ASIC driver

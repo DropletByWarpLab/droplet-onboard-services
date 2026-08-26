@@ -384,6 +384,42 @@ EOF
 detect_ap_radio
 # <<< detect_ap_radio (WARP-826)
 
+# WARP-2150: decide ONCE whether the AP phase may run at all. The first
+# validated fresh install (2026-08-24) shipped a host without iw(8): line 449
+# died with `iw: command not found`, detect_ap_radio resolved iface='' (its iw
+# map was empty), and the attach then LIMPED ON into the AP phase — emitting
+# nft rules with an empty iifname ("Empty string is not allowed"), `ip link set
+# "" up` ("Device \"\" does not exist"), and three doomed hostapd retries,
+# before failing the unit with a misleading "AP/package prerequisites" message.
+# An empty AP_IFACE can never produce a working AP, so gate the whole AP phase
+# on it here and say WHY in one actionable line. AP_ATTACH is exported into the
+# container body (docker exec -e) where the AP-phase blocks honor it; every
+# non-AP duty (eth0 unbridge, package install, root pw, rpcd ACL, WG overlay
+# NAT, routing recovery) still runs.
+#
+# Unit semantics — succeed-degraded, deliberately: nothing in the fleet gates
+# on this unit's failure (no Requires=/OnFailure= anywhere in scripts/host; the
+# only consumer is provision_single_box_openwrt, which merely log_warns), so
+# failing here buys no automation — and a hard fail would poison the WARP-843
+# reapply path on a box whose radio already lives in the container netns (the
+# host then resolves iface='' while the AP is healthily up). The WARP-826b
+# fail-loud doctrine stays intact for the case where the AP SHOULD start and
+# hostapd actually fails; here we deliberately never start it and say why.
+# >>> ap_attach_gate (WARP-2150)
+AP_ATTACH=1
+if [ -z "$AP_IFACE" ]; then
+  AP_ATTACH=0
+  if ! command -v iw >/dev/null 2>&1; then
+    _ap_skip_why="the host has no iw(8) installed, so the phy cannot be mapped to its netdev — run: sudo apt-get install -y iw (setup.sh now ensures it)"
+  elif [ -z "$AP_PHY" ]; then
+    _ap_skip_why="no wireless phy visible on the host (no card seated, or the radio already lives in the container netns)"
+  else
+    _ap_skip_why="phy ${AP_PHY} exposes no netdev to bind"
+  fi
+  echo "droplet-openwrt-attach: WARN: wireless iface unresolved — skipping AP bring-up (${_ap_skip_why}); no nft/hostapd will be attempted with an empty iface. Fix the cause or pin DROPLET_AP_PHY/DROPLET_AP_IFACE in /etc/default/droplet-openwrt-attach, then: systemctl restart droplet-openwrt-attach"
+fi
+# <<< ap_attach_gate (WARP-2150)
+
 # Guest BSS surfaces as its own netdev derived from the AP iface (e.g.
 # wlp14s0_g) now that detect_ap_radio has filled AP_IFACE. The short "_g" suffix
 # keeps it <=15 chars (IFNAMSIZ). Empty AP_IFACE (no radio) yields a harmless
@@ -446,7 +482,17 @@ fi
 # from a prior attach run). Phy choice driven by $AP_PHY so the operator
 # picks which radio carries the customer AP — e.g. mt7921e/phy0 for full
 # 22 dBm and Wi-Fi 6, vs iwlwifi/phy1 capped at 3 dBm in AP mode.
-[ -e "/sys/class/ieee80211/$AP_PHY" ] && iw phy "$AP_PHY" set netns "$PID"
+# WARP-2150: only when the AP phase is live (a phy moved with no netdev
+# resolved would just strand the radio), and only through a guarded iw — the
+# bare invocation was the live `line 449: iw: command not found` crash on the
+# first validated fresh install.
+if [ "$AP_ATTACH" = 1 ] && [ -e "/sys/class/ieee80211/$AP_PHY" ]; then
+  if command -v iw >/dev/null 2>&1; then
+    iw phy "$AP_PHY" set netns "$PID"
+  else
+    echo "droplet-openwrt-attach: WARN: iw(8) not installed on the host — cannot move $AP_PHY into the container netns (AP bring-up will fail); run: sudo apt-get install -y iw" >&2
+  fi
+fi
 
 # WARP-1364: bridge the main-BSS AP into the host's br-lan so Wi-Fi clients
 # share L2 with the host netns. ADR-022 (matter-controller host sidecar)
@@ -500,6 +546,7 @@ docker exec -i \
   -e GATEWAY_IP="$GATEWAY_IP" \
   -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
   -e AP_IFACE="$AP_IFACE" -e AP_BRIDGE="$AP_BRIDGE" \
+  -e AP_ATTACH="$AP_ATTACH" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
   -e PUBLIC_FQDN="$PUBLIC_FQDN" \
   -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK="$GUEST_PSK" \
@@ -1052,7 +1099,10 @@ ETHWD
   # WARP-1364: the AP-iface DNAT is ROUTED-mode only. In bridged mode client
   # packets to 192.168.20.1 terminate on the HOST (docker-proxy publishes
   # :443/:80 on 0.0.0.0) without ever entering this netns at L3.
-  if [ "${AP_BRIDGE:-0}" != 1 ]; then
+  # WARP-2150: and only when the host resolved a wireless iface — an empty
+  # AP_IFACE renders iifname "" and nft rejects the whole rule (Empty string
+  # is not allowed), which is exactly the fresh-install journal noise.
+  if [ "${AP_ATTACH:-1}" = 1 ] && [ "${AP_BRIDGE:-0}" != 1 ]; then
     nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
     nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
   fi
@@ -1068,6 +1118,17 @@ ETHWD
   nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
   nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
   # ----------------------------------------------------------------------
+
+  # WARP-2150: the whole AP phase — hostapd conf + start + watchdog, dnsmasq-ap,
+  # br-ap, the AP-iface L3/link-up, guest BSS L3 — is meaningless with an empty
+  # AP_IFACE and used to grind through empty-iface errors plus three doomed
+  # hostapd retries before failing the unit with a misleading package message.
+  # The host decides AP_ATTACH once (see ap_attach_gate there); default 1 so an
+  # unset env keeps the historical path. Interior deliberately NOT re-indented
+  # (same style as the AP_BRIDGE routed/bridged blocks below). NB: NO
+  # APOSTROPHES anywhere in this gated region (single-quoted docker exec body).
+  # >>> ap_phase_gate (WARP-2150)
+  if [ "${AP_ATTACH:-1}" = 1 ]; then
 
   # Stop procd dnsmasq so our manual one can bind 192.168.20.1
   /etc/init.d/dnsmasq stop 2>/dev/null
@@ -1389,6 +1450,11 @@ DNSMASQGUEST
     rm -f /etc/dnsmasq-guest.conf 2>/dev/null
   fi
   # ---------------------------------------------------------------------
+
+  else
+    echo "droplet-openwrt-attach: AP bring-up skipped inside the container — wireless iface unresolved on the host (see the WARP-2150 skip message in the attach log; is iw installed on the host?)"
+  fi
+  # <<< ap_phase_gate (WARP-2150)
 
   # Final pass — re-run bootstrap_net AFTER everything else in this docker
   # exec block has run. Procd / hostapd / dnsmasq init can race against

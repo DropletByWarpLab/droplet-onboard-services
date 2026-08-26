@@ -175,6 +175,30 @@ install_single_box_host_integration() {
     /usr/local/sbin/droplet-openwrt-watch
   log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net + droplet-openwrt-watch"
 
+  # --- WARP-2150: iw is a hard prerequisite of droplet-openwrt-attach --------
+  # detect_ap_radio maps the wireless phy to its netdev via `iw dev`, and the
+  # attach moves the phy into the container netns via `iw phy ... set netns`.
+  # Ubuntu Server does not ship iw, and nothing else here installed it: the
+  # first validated fresh install (2026-08-24) hit `iw: command not found`,
+  # the iface resolved empty, and the AP never came up. Ensure it at setup time
+  # so re-runs heal existing boxes too. Best-effort apt with one update+retry
+  # (restic precedent in lib/backup.sh): a transient failure must not abort
+  # setup — the attach now skips AP bring-up with a loud, actionable message
+  # when the iface stays unresolved, and a setup.sh re-run self-heals.
+  if ! command -v iw >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iw; then
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iw || true
+      fi
+    fi
+    if command -v iw >/dev/null 2>&1; then
+      log_success "Installed iw (wireless phy/iface control for droplet-openwrt-attach)"
+    else
+      log_warn "iw still missing — droplet-openwrt-attach will SKIP AP bring-up (no Wi-Fi AP) until 'sudo apt-get install -y iw' succeeds and the unit restarts"
+    fi
+  fi
+
   # --- /etc/default/ envs -------------------------------------------------
   # droplet-host-net is committed as-is (no secrets). Copy directly.
   sudo install -m 0644 "$host_src/etc-default/droplet-host-net" \
@@ -523,6 +547,78 @@ EOF
   log_info "  Self-heal:   droplet-watchdog.timer (status: /var/lib/droplet/watchdog/status.json)"
   log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net -u droplet-watchdog"
+}
+
+# ----------------------------------------------------------------------------
+# WARP-2142 — close the install-mode SSH window on a SUCCESSFUL provision.
+#
+# The autoinstall seed (scripts/image/autoinstall/user-data) plants an
+# epoch-stamped marker at /var/lib/droplet-ssh-access/install-mode and enables
+# ssh in the installed target, so a factory-fresh box is reachable over the
+# LAN from its very first boot; while that marker is fresh (<48h) the
+# WARP-1984 boot reset stamps intent=on at every boot instead of off. That is
+# the fail-OPEN half — a box that hangs or dies mid-provision stays rescuable
+# over SSH (the WARP-2100 dead-end: a wedged first boot, no console, no way
+# in).
+#
+# This hook is the fail-CLOSED half. setup.sh calls it from its success tail,
+# which only a provision that ran to completion ever reaches (`set -e` — a
+# failed provision dies earlier and LEAVES the marker; the 48h backstop then
+# expires it on an abandoned box). Gated on the marker, so it is a no-op on
+# every box that is not mid-install: a manual re-run on a shipped box has no
+# marker and nothing here fires — in particular a live WARP-1984 owner-toggle
+# session is never touched. A manual rescue re-run INSIDE the window that
+# succeeds is every bit as much "provisioning completed" and closes it too.
+#
+# Deliberately NOT in the droplet-firstboot unit's ExecStartPost: that unit
+# definition is frozen into shipped ISOs (iterating it needs a new ISO, while
+# setup.sh is cloned fresh at install time), and it would close the window on
+# the firstboot path only.
+#
+# The marker path literal must agree with the seed and the boot reset —
+# tests/image-pipeline.test.sh and the vitest guard pin the agreement.
+# ----------------------------------------------------------------------------
+close_install_mode_ssh_window() {
+  if [ "$(uname)" != "Linux" ]; then
+    return 0
+  fi
+  local marker="/var/lib/droplet-ssh-access/install-mode"
+  if [ ! -f "$marker" ]; then
+    return 0
+  fi
+
+  log_info "Provisioning complete — closing the install-mode SSH window (WARP-2142)..."
+
+  # Order matters, fail-closed: the marker goes FIRST. Even if every step
+  # after this line fails, the next boot's reset finds no marker and stamps
+  # off as usual.
+  sudo rm -f "$marker"
+
+  # Undo the seed's standing enablement — steady state is WARP-1984's
+  # start-not-enable: the dashboard toggle is the only thing that opens SSH,
+  # every time, and it never survives a reboot. Both unit names (Debian/
+  # Ubuntu `ssh`, most others `sshd`) and both activation forms (service +
+  # socket), mirroring the applier's own resolution and socket handling;
+  # `|| true` because most boxes carry only one of each.
+  sudo systemctl disable ssh.service ssh.socket >/dev/null 2>&1 || true
+  sudo systemctl disable sshd.service sshd.socket >/dev/null 2>&1 || true
+
+  # Re-assert intent=off the way the boot reset does: atomic tmp+rename into
+  # the watched path, so droplet-ssh-access.path (enabled --now earlier in
+  # this very provision) fires and the APPLIER stops sshd and records
+  # state=off. Acting on intent stays the applier's job — nothing here
+  # touches the droplet-ssh-access units themselves.
+  sudo sh -c 'umask 022
+    mkdir -p /var/lib/droplet-ssh-access/intent.d
+    tmp="/var/lib/droplet-ssh-access/intent.d/intent.tmp"
+    {
+      echo "# WARP-2142 — install window closed: provisioning completed successfully."
+      echo "# From here the WARP-1984 owner toggle is the only thing that opens SSH."
+      echo "DROPLET_SSH_ACCESS=off"
+    } >"$tmp"
+    mv -f "$tmp" "${tmp%.tmp}"'
+
+  log_success "Install-mode SSH window closed (marker removed; ssh back to owner-toggle-only)"
 }
 
 # WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND
@@ -1316,21 +1412,65 @@ EOF
   # the gateway still can't be read (a genuine Docker fault) — never silently
   # leave the unreachable host.docker.internal default in place.
   local bridge_net="droplet_default" bridge_gw=""
-  # Create the bridge if absent so the gateway is derivable at Phase-4 time.
+  # WARP-2148: on a FRESH install this code runs seconds after dockerd's very
+  # first startup, and the daemon's network controller can still be
+  # initializing — the create silently no-ops/fails, the inspect returns an
+  # empty gateway, and the loud refusal below aborted the whole first boot.
+  # Live bench evidence (2026-08-24, three consecutive failed installs): the
+  # IDENTICAL create+inspect succeeded instantly ten minutes later (gateway
+  # 172.18.0.1). Deterministic on fresh installs, not a fluke. So: bounded
+  # retry. Each attempt (a) re-ensures the network exists — the create's
+  # stderr is LOGGED now, never discarded (an "already exists" complaint is
+  # expected and tolerated; anything else is the daemon telling us why the
+  # race is live) — then (b) inspects for the gateway. First non-empty
+  # gateway wins. On exhaustion the pre-existing loud refusal fires exactly
+  # as before — the guard is correct and stays loud.
+  # Tunables (env seam so the unit test can shrink them; defaults ride out
+  # the observed race with margin):
+  #   DROPLET_NET_GATEWAY_RETRIES  attempts before giving up  (default 6)
+  #   DROPLET_NET_GATEWAY_DELAY    seconds between attempts   (default 2)
+  local _gw_retries="${DROPLET_NET_GATEWAY_RETRIES:-6}"
+  local _gw_delay="${DROPLET_NET_GATEWAY_DELAY:-2}"
+  local _gw_attempt=1 _gw_create_err="" _gw_precreate_logged=0
   # `|| true` on each docker call: under `set -euo pipefail` a non-zero exit
   # inside this function would abort setup silently (no inherited ERR trap); we
   # validate the derived value explicitly below and fail loud with context.
-  if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
-    docker network create \
-      --label com.docker.compose.network=default \
-      --label com.docker.compose.project=droplet \
-      "$bridge_net" >/dev/null 2>&1 || true
-    log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
-  fi
-  bridge_gw=$(docker network inspect "$bridge_net" \
-    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-  # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
-  bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+  while :; do
+    # (a) Ensure the bridge exists so the gateway is derivable at Phase-4 time
+    # (compose adopts a pre-created default-labeled bridge on `up`).
+    if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
+      _gw_create_err=$(docker network create \
+        --label com.docker.compose.network=default \
+        --label com.docker.compose.project=droplet \
+        "$bridge_net" 2>&1 >/dev/null) || true
+      if [ -n "$_gw_create_err" ]; then
+        case "$_gw_create_err" in
+          *"already exists"*)
+            log_info "docker network create $bridge_net: already exists (fine — adopting it): $_gw_create_err" ;;
+          *)
+            log_info "docker network create $bridge_net (attempt ${_gw_attempt}/${_gw_retries}) stderr: $_gw_create_err" ;;
+        esac
+      fi
+      if [ "$_gw_precreate_logged" = 0 ]; then
+        log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
+        _gw_precreate_logged=1
+      fi
+    fi
+    # (b) Read back the gateway Docker's IPAM assigned.
+    bridge_gw=$(docker network inspect "$bridge_net" \
+      -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
+    bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+    if [ -n "$bridge_gw" ]; then
+      break
+    fi
+    if [ "$_gw_attempt" -ge "$_gw_retries" ]; then
+      break
+    fi
+    log_info "configure_single_box_env: $bridge_net gateway not derivable yet (attempt ${_gw_attempt}/${_gw_retries} — dockerd's network controller may still be initializing on first boot, WARP-2148); retrying in ${_gw_delay}s."
+    sleep "$_gw_delay"
+    _gw_attempt=$((_gw_attempt + 1))
+  done
   if [ -z "$bridge_gw" ]; then
     # Fail loud — do NOT silently leave the unreachable host.docker.internal
     # default. An empty gateway here is the difference between a working router

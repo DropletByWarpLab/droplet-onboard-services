@@ -134,12 +134,12 @@ def band_height(width: int, height: int) -> Optional[int]:
 
 _GEOMETRY_LOCK = threading.RLock()
 
-# The REAL panel geometry while a band is being rendered, else None. A renderer
-# inside the swap sees the band in display.WIDTH/HEIGHT — which is the point —
-# but the debug screen's job is to state what the box actually is, and a screen
-# you consult to diagnose black bars must not be one of the things lying to
-# you. This is how it gets at the truth without unwinding the swap.
-_TRUE_PANEL: Optional[Tuple[int, int]] = None
+# WARP-2149 removed the debug screen's PANEL row, and with it _TRUE_PANEL —
+# the "real geometry while a band is being rendered" side-channel that row
+# read. The truth about a letterboxed panel now lives ONLY on
+# /display/status (`resolution` is the monitor, `letterbox_band` the band);
+# nothing on the glass states geometry any more, so nothing on the glass can
+# lie about it either.
 
 
 @contextlib.contextmanager
@@ -152,18 +152,14 @@ def _panel_geometry(width: int, height: int):
     Serialised and restored in a `finally`: leaking a band geometry back into
     the module would mis-render every subsequent frame on the real panel.
     """
-    global _TRUE_PANEL
     d = _d()
     with _GEOMETRY_LOCK:
         prev = (d.WIDTH, d.HEIGHT)
-        prev_true = _TRUE_PANEL
         d.WIDTH, d.HEIGHT = width, height
-        _TRUE_PANEL = prev
         try:
             yield
         finally:
             d.WIDTH, d.HEIGHT = prev
-            _TRUE_PANEL = prev_true
 
 
 def render_letterboxed(disp, render, *args, **kwargs):
@@ -691,6 +687,11 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
 # exactly how the gap opened, twice (WARP-1641's x=124, then WARP-1644's
 # g.left + 96). Anchoring to g.left keeps a future inset change from
 # reopening it.
+#
+# WARP-2149 — the way in is a DOUBLE tap (display._tap_debug_enter); the way
+# out is a single tap back to STANDBY (display._tap_debug_back). Same span,
+# different tap counts: a shared span is what makes the double-tap land — both
+# taps hit the same target whichever screen is up when the second one arrives.
 LOCKUP_W, LOCKUP_H = 256, 46
 
 
@@ -725,7 +726,11 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     # Unlabelled is the design intent. Smaller than the thing you aim at is
     # not. WARP-1801 moved the span into _lockup_region so the way out of the
     # debug screen is the same physical place as the way in.
-    _lockup_region(disp, "debug_enter", disp._go_debug)
+    #
+    # WARP-2149 — entry takes a DOUBLE tap now. The gate lives on the display
+    # object, not here: regions are rebuilt on every render, so per-region
+    # state would be wiped between the two taps by the 1s live re-render.
+    _lockup_region(disp, "debug_enter", disp._tap_debug_enter)
 
     label, fill, ink = _pill_style(state)
     pf = d._get_font(10, weight="bold")
@@ -1285,139 +1290,73 @@ def _bind_cell_regions(disp) -> None:
 # DEBUG / RECOVERY screen
 # ---------------------------------------------------------------------------
 # Claiming the panel takes the operator's physical console away, so the panel
-# owes them a way back. This screen is that way back, and it is deliberately
-# useful even when you never press the button: most of the time what you
-# actually need is the address and the state, not a shell.
+# owes them a way back. This screen is that way back — and nothing else.
 #
-# Reached by tapping the device label in the chrome rail — a small, deliberate
-# target rather than a prominent button, because the LIVE screen is what
-# belongs on a rack front.
-def _panel_readout(status: dict) -> str:
-    """The PANEL row on the debug screen.
-
-    Prefers the framebuffer's own geometry, falls back to the module globals —
-    but reads them through `_TRUE_PANEL` when a band is being rendered, so this
-    row reports the monitor rather than the band drawn on it. When the two
-    differ it says BOTH: "the panel is 1920x1080 and I am painting 480 of it"
-    is the whole answer to "why is most of my screen black".
-    """
-    d = _d()
-    if status.get("panel"):
-        panel = (status["panel"]["width"], status["panel"]["height"])
-    elif _TRUE_PANEL is not None:
-        panel = _TRUE_PANEL
-    else:
-        panel = (d.WIDTH, d.HEIGHT)
-    if _TRUE_PANEL is not None:
-        return "{}×{} · band {}".format(panel[0], panel[1], d.HEIGHT)
-    return "{}×{}".format(*panel)
-
-
+# WARP-2149 rebuilt it as a door, not a dashboard. The WARP-1641 build filled
+# four columns with readouts (ssh / host / panel geometry / service state) and
+# hung a dashboard QR on the rail; every one of those is available in better
+# form elsewhere (the dashboard, /display/status, the console itself), and
+# together they buried the one control this screen exists for. What is left:
+# the CONSOLE button, the way back to STANDBY, and the two facts you need at
+# the moment of pressing — the touchscreen cannot type, and the hold expires
+# on its own. Reached by DOUBLE-tapping the brand lockup on the live screen
+# (display._tap_debug_enter).
 def render_debug(disp, now=None) -> Image.Image:
+    # `now` is renderer-signature parity (render_letterboxed passes it
+    # through); this screen deliberately has no clock to consume it.
     d = _d()
     g = geom()
-    if now is None:
-        now = d._dt_datetime.now(d._TZ) if d._TZ else d._dt_datetime.now()
 
     img = Image.new("RGB", (d.WIDTH, d.HEIGHT), d.V3_BG)
     draw = ImageDraw.Draw(img)
     with disp._touch_regions_lock:
         disp._touch_regions = []
 
-    v = disp._v3
-    status = disp.get_status()
-
-    # ---- chrome ----
+    # ---- chrome: identity + the way out, nothing else ----------------------
     d.draw_droplet_mark(draw, g.left, g.top + 12, 22,
                         primary=d.V3_ORANGE, highlight=d.V3_ACCENT_INK)
     d._v3_text(draw, "DEBUG · RECOVERY", g.left + 30, g.top + 16,
                font=d._get_font(9, weight="bold"), fill=d.V3_ORANGE, tracking=2)
     _back_button(disp, draw)
-    clk = disp._fmt_clock_parts(now)["str"]
-    d._v3_text(draw, clk, g.content_r, g.top + 10,
-               font=d._get_font(20, weight="heavy"),
-               fill=d.V3_LABEL2, anchor="ra")
-    draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
-    for dx in g.dividers[:2]:
-        draw.rectangle([dx, g.band_b_top, dx, g.band_b_bot], fill=d.V3_SEP)
+    draw.rectangle([g.left, g.band_a_rule, g.right, g.band_a_rule],
+                   fill=d.V3_SEP)
 
-    # ---- C1: how to reach this box ----
-    x, w = g.cells["reach"]
-    _eyebrow(draw, "GET IN", x)
-    ip = str(v.get("ip", "-"))
-    ssh_font, ssh_text = _fit_text(draw, f"ssh droplet@{ip}", w, 26,
-                                   weight="bold")
-    d._v3_text(draw, ssh_text, x, g.by(78), font=ssh_font, fill=d.V3_TEXT)
-    rows = (
-        ("HOST", str(v.get("hostname", "-"))),
-        ("PANEL", _panel_readout(status)),
-        ("KEYBOARD", "Ctrl+Alt+F2 for a clean VT"),
-    )
-    for i, (k, val) in enumerate(rows):
-        y = g.by(122) + i * 34
-        _eyebrow(draw, k, x, y)
-        d._v3_text(draw, val, x, y + 12, font=d._get_font(14), fill=d.V3_LABEL2)
+    # ---- the button, centred in everything under the rule ------------------
+    # No rail, no cells: the full safe width belongs to the one control.
+    avail = g.bottom - g.band_a_rule
+    bw = min(560, g.right - g.left)
+    bh = 96 if avail >= 240 else 72
+    cx = (g.left + g.right) // 2
 
-    # ---- C2: what the service thinks it is doing ----
-    x2, _ = g.cells["health"]
-    _eyebrow(draw, "SERVICE STATE", x2)
-    state_rows = (
-        ("BACKEND", str(status.get("backend", "?"))),
-        ("TOUCH", str(getattr(getattr(disp, "_touch_source", None),
-                              "_backend", "none"))),
-        ("MODE", str(status.get("mode", "?"))),
-        ("UPTIME", str(v.get("uptime", "-"))),
-    )
-    for i, (k, val) in enumerate(state_rows):
-        # Start BELOW the section eyebrow — sharing y=62 with it stacks two
-        # tracked labels on the same baseline and both become unreadable.
-        y = g.by(84) + i * 36
-        _eyebrow(draw, k, x2, y)
-        d._v3_text(draw, val, x2, y + 12, font=d._get_font(18, weight="bold"),
-                   fill=d.V3_TEXT)
+    note_font = d._get_font(11)
+    note = disp._console_last_result or (
+        "The panel's touchscreen cannot type — you need a USB keyboard to "
+        "use the prompt. Ctrl+Alt+F2 for a clean VT.")
+    lines = _wrap(draw, note, note_font, bw)[:2]
+    block_h = bh + 16 + len(lines) * 15 + 15
+    top = g.band_a_rule + max(8, (avail - block_h) // 2)
 
-    # ---- C3+C4: the button ----
-    x3, _ = g.cells["services"]
-    bw = g.content_r - x3
-    _eyebrow(draw, "CONSOLE", x3, fill=d.V3_ORANGE)
-
-    armed = disp._console_confirm_active()
-    if armed:
-        label, sub = "TAP AGAIN TO CONFIRM", "the status screen will be replaced"
-        fill, ink = d.V3_ORANGE_SUBTLE, d.V3_ORANGE
-    else:
-        label, sub = "RETURN CONSOLE TO PANEL", "shows a login prompt here"
-        fill, ink = d.V3_SURFACE2, d.V3_LABEL2
-    # Two-tap confirm, not a single press: this swaps what is on the rack's
-    # front panel, and a stray touch (or a sleeve) should not do that.
-    d._rrect(draw, x3, g.by(74), bw, 64, 12, fill=fill, outline=d.V3_SEP2,
-             width=1)
-    d._v3_text(draw, label, x3 + bw // 2, g.by(92),
-               font=d._get_font(15, weight="heavy"), fill=ink, anchor="ma")
-    d._v3_text(draw, sub, x3 + bw // 2, g.by(114), font=d._get_font(11),
-               fill=d.V3_LABEL3, anchor="ma")
+    bx = cx - bw // 2
+    d._rrect(draw, bx, top, bw, bh, 14, fill=d.V3_ORANGE_SUBTLE,
+             outline=d.V3_ORANGE, width=1)
+    ly = top + bh // 2 - 18
+    d._v3_text(draw, "OPEN CONSOLE", cx, ly,
+               font=d._get_font(18, weight="heavy"), fill=d.V3_ORANGE,
+               anchor="ma", tracking=1.2)
+    d._v3_text(draw, "shows a login prompt on this panel", cx, ly + 26,
+               font=d._get_font(11), fill=d.V3_LABEL2, anchor="ma")
     with disp._touch_regions_lock:
         disp._touch_regions.append(d.TouchRegion(
-            "console_return", x3, g.by(74), bw, 64, disp._tap_return_console))
+            "console_return", bx, top, bw, bh, disp._tap_console))
 
-    note = disp._console_last_result or (
-        "The panel's touchscreen cannot type — it is HID with no keyboard "
-        "keys. You still need a USB keyboard to use the prompt.")
-    note_font = d._get_font(11)
-    lines = _wrap(draw, note, note_font, bw)
-    for i, line in enumerate(lines[:3]):
-        d._v3_text(draw, line, x3, g.by(150) + i * 15, font=note_font,
-                   fill=d.V3_LABEL3)
-    d._v3_text(draw, "Returns automatically if this service stops answering.",
-               x3, g.by(150) + min(len(lines), 3) * 15 + 6, font=note_font,
-               fill=d.V3_LABEL4)
-
-    _render_foot(disp, draw, v)
-    render_rail(disp, draw, img,
-                payload=f"https://{v.get('public_host') or v.get('hostname') or 'droplet'}/dashboard",
-                caption="DASHBOARD",
-                headline="Full detail",
-                fallback=str(v.get("ip", "-")))
+    y = top + bh + 16
+    for line in lines:
+        d._v3_text(draw, line, cx, y, font=note_font, fill=d.V3_LABEL3,
+                   anchor="ma")
+        y += 15
+    d._v3_text(draw, "Returns to the status screen on its own when the "
+               "console hold expires.", cx, y, font=note_font,
+               fill=d.V3_LABEL4, anchor="ma")
     return img
 
 
@@ -1432,7 +1371,9 @@ def _back_button(disp, draw) -> None:
     # WARP-1801 — the hit box is the whole lockup, not just this chip. The chip
     # stays as the affordance; what changes is how much of the corner accepts
     # the tap. See _lockup_region for why the two must be the same span.
-    _lockup_region(disp, "debug_back", disp._go_home)
+    # WARP-2149 — BACK goes to STANDBY, the panel's resting state, not to the
+    # legacy 480-authored HOME grid.
+    _lockup_region(disp, "debug_back", disp._tap_debug_back)
 
 
 def render_claim(disp, code: str, setup_url: str,

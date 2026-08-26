@@ -1098,7 +1098,7 @@ The exact `\"userId\"` value must match an existing user — adjust if your dev 
 
 - [ ] **Step 2.5: Log in as the test user**
 
-Open the dashboard in your browser. Log in with username `romain` / password `Warplab123!` (the test admin credentials Romain uses for manual verification).
+Open the dashboard in your browser. Log in with username `romain` / password `TestPass11!` (the test admin credentials Romain uses for manual verification).
 
 - [ ] **Step 3: Open the seeded conversation**
 

@@ -80,7 +80,7 @@ const HANWHA = {
   hostname: "XNV-C8083R-E43022502AFD",
   manufacturer: "Hanwha",
   model: "XNV-C8083R",
-  rtsp_url: "rtsp://admin:Droplet123%21@192.168.9.219:554/profile2/media.smp",
+  rtsp_url: "rtsp://admin:T3stCamPw%21@192.168.9.219:554/profile2/media.smp",
   status: "needs_setup",
   detection_method: "rtsp_default_credentials",
 };
@@ -92,7 +92,7 @@ beforeEach(() => {
 describe("redactRtspCredentials", () => {
   it("strips embedded credentials and reports that they existed", () => {
     expect(
-      redactRtspCredentials("rtsp://admin:Droplet123%21@192.168.9.219:554/profile2/media.smp"),
+      redactRtspCredentials("rtsp://admin:T3stCamPw%21@192.168.9.219:554/profile2/media.smp"),
     ).toEqual({
       rtspUrl: "rtsp://192.168.9.219:554/profile2/media.smp",
       hasCredentials: true,
@@ -168,7 +168,7 @@ describe("getCameraCandidates", () => {
     expect(cam.hasCredentials).toBe(true);
     expect(cam.source).toBe("live");
     // The whole point of the redaction: no password reaches a browser client.
-    expect(JSON.stringify(cam)).not.toContain("Droplet123");
+    expect(JSON.stringify(cam)).not.toContain("T3stCamPw");
   });
 
   it("names a leaseless camera from its IP", async () => {

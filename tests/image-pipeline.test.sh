@@ -408,6 +408,68 @@ else
   fi
 fi
 
+# =============================================================================
+# (f) WARP-2142 — install-mode SSH window. The seed must plant an epoch-stamped
+#     marker in the installed target and enable ssh there, and — critically —
+#     the marker path must MATCH what droplet-ssh-access-boot-reset checks. A
+#     path typo between the two files would mean a window that silently never
+#     opens (or never closes); it must be a test failure here, not a field
+#     surprise.
+# =============================================================================
+echo "--- (f) WARP-2142 install-mode marker + first-boot ssh window ---"
+
+UD2="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+BOOT_RESET="$REPO_ROOT_REAL/scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset"
+SINGLE_BOX_LIB="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+
+if [ ! -f "$UD2" ] || [ ! -f "$BOOT_RESET" ]; then
+  fail "user-data or droplet-ssh-access-boot-reset missing — WARP-2142 checks cannot run"
+else
+  # The seed plants an epoch-stamped marker in the target.
+  if grep -qE 'date \+%s > /var/lib/[a-z-]+/install-mode' "$UD2"; then
+    pass "seed plants an epoch-stamped install-mode marker in the target"
+  else
+    fail "seed does not plant the install-mode marker (expected: date +%s > .../install-mode)"
+  fi
+
+  # ...and enables ssh in the target: on boot 1 none of the WARP-1984
+  # machinery exists yet (setup.sh installs it mid-provision), so standing
+  # enablement is the only thing that can open the window on the very first
+  # boot.
+  if grep -q 'systemctl enable ssh.service' "$UD2"; then
+    pass "seed enables ssh in the installed target (boot 1 is reachable)"
+  else
+    fail "seed does not enable ssh in the target — the very first boot would be unreachable"
+  fi
+
+  # THE CROSS-FILE CONTRACT: extract the marker path from BOTH files and
+  # compare. An extraction failure (either side renamed or reworded past the
+  # patterns here) is a failure too — never a silent skip.
+  ud_marker="$(grep -oE '/var/lib/[a-z-]+/install-mode' "$UD2" | sort -u)"
+  ud_marker_count="$(printf '%s\n' "$ud_marker" | grep -c . || true)"
+  br_dir="$(sed -n 's/.*DROPLET_SSH_ACCESS_DIR:-\([^}]*\)}.*/\1/p' "$BOOT_RESET" | head -1)"
+  br_base="$(sed -n 's/^INSTALL_MODE_FILE="\$STATE_DIR\/\([a-z-]*\)".*/\1/p' "$BOOT_RESET" | head -1)"
+  br_marker="${br_dir}/${br_base}"
+  if [ "$ud_marker_count" = "1" ] && [ -n "$br_dir" ] && [ -n "$br_base" ] \
+     && [ "$ud_marker" = "$br_marker" ]; then
+    pass "marker path agrees between user-data and boot-reset ($br_marker)"
+  else
+    fail "install-mode marker path MISMATCH or extraction failure" \
+         "user-data:  [${ud_marker:-<none>}] (unique paths: $ud_marker_count)" \
+         "boot-reset: [${br_marker}]"
+  fi
+
+  # The completion hook (single-box.sh, called from setup.sh's success tail)
+  # must remove the SAME path — a third spelling of it is a third chance for
+  # a typo, so pin it against the boot-reset-derived one.
+  if [ -n "$br_dir" ] && [ -n "$br_base" ] && [ -f "$SINGLE_BOX_LIB" ] \
+     && grep -q "$br_marker" "$SINGLE_BOX_LIB"; then
+    pass "completion hook (single-box.sh) removes the same marker path"
+  else
+    fail "single-box.sh completion hook does not reference $br_marker"
+  fi
+fi
+
 echo "--- WARP-232: autoinstall storage layout leaves VG space for the encrypted data LV ---"
 UD="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
 if [ ! -f "$UD" ]; then
@@ -427,6 +489,69 @@ else
     pass "user-data is valid YAML"
   else
     fail "user-data YAML broken"
+  fi
+fi
+
+echo "--- WARP-2143: boot-order assertion — installed disk boots first, stick can stay in ---"
+UD2143="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+if [ ! -f "$UD2143" ]; then
+  fail "scripts/image/autoinstall/user-data not present (WARP-2143 boot-order checks)"
+else
+  # efibootmgr must be guaranteed on the target: grub-efi-amd64 pulls it in on
+  # a UEFI install, but the late-command's skip logic must be driven by EFI-vars
+  # presence, never by a missing binary — so the seed declares it explicitly.
+  if grep -qE '^[[:space:]]*-[[:space:]]*efibootmgr[[:space:]]*$' "$UD2143"; then
+    pass "efibootmgr declared in the autoinstall packages list"
+  else
+    fail "efibootmgr not in the autoinstall packages list — boot-order step depends on grub side-effects"
+  fi
+
+  # The late-command itself: must read the EFI boot entries and APPLY a new
+  # BootOrder (efibootmgr -o), not just print one.
+  if grep -q 'efibootmgr -o' "$UD2143" && grep -q 'BootOrder' "$UD2143"; then
+    pass "late-command asserts BootOrder via efibootmgr -o"
+  else
+    fail "no late-command applies a BootOrder with efibootmgr -o — reboot still lands on the stick"
+  fi
+
+  # Graceful degradation (deliberately NON-fatal, unlike the clone step): a
+  # BIOS/CSM boot has no EFI vars — the block must detect /sys/firmware/efi
+  # and log a SKIP rather than fail the install.
+  if grep -q '/sys/firmware/efi' "$UD2143" \
+     && grep -q 'SKIP: no EFI firmware interface' "$UD2143"; then
+    pass "BIOS/CSM boot skips gracefully with a logged note (never fails the install)"
+  else
+    fail "no logged BIOS/CSM skip path — a legacy-boot install would fail or skip silently"
+  fi
+
+  # Entry-not-found must also log + skip, never fail.
+  if grep -qE 'SKIP: no .?ubuntu.? boot entry' "$UD2143"; then
+    pass "missing ubuntu boot entry skips with a logged note"
+  else
+    fail "no logged skip for a missing ubuntu boot entry"
+  fi
+
+  # Idempotence: when the ubuntu entry is already first, the block must say so
+  # and exit without rewriting EFI vars (harmless on re-install).
+  if grep -q 'already first' "$UD2143"; then
+    pass "idempotent: logs and exits early when the ubuntu entry is already first"
+  else
+    fail "no already-first early exit — block rewrites EFI vars on every install"
+  fi
+
+  # review-#501 discipline: the step is non-fatal BY DESIGN, but every swallow
+  # must log. The outer guard must be a logged warning, and no bare '|| true'
+  # may appear outside comments anywhere in the seed.
+  if grep -q 'droplet-boot-order: WARNING' "$UD2143"; then
+    pass "outer failure guard logs a warning instead of swallowing silently"
+  else
+    fail "boot-order block has no logged outer failure guard (silent swallow or fatal-by-accident)"
+  fi
+  stray_true="$(grep -n '|| true' "$UD2143" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [ -z "$stray_true" ]; then
+    pass "no bare '|| true' outside comments in the autoinstall seed"
+  else
+    fail "bare '|| true' swallows a failure in the seed (review #501):" "$stray_true"
   fi
 fi
 

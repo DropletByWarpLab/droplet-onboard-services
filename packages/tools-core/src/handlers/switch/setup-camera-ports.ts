@@ -24,7 +24,10 @@ const inputSchema = {
     uplink_ports: {
       type: "array",
       items: { type: "integer" },
-      description: "Trunk/uplink ports (default: [9,10]).",
+      description:
+        "Trunk/uplink ports. Omit to let the switch derive them from the " +
+        "hardware — port layout varies by switch model, so do not assume a " +
+        "fixed pair.",
     },
   },
   additionalProperties: false,

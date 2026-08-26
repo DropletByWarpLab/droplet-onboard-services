@@ -161,7 +161,7 @@ fi
 # ~5 retries the firmware locks the admin account (HTTP 490 Account Blocked)
 # for several minutes. We've shipped this exact mistake in production once
 # already (see the front_door comment in docker/frigate/config.yml); guard
-# against it before another fresh `.env` ships with `Droplet123%21`.
+# against it before another fresh `.env` ships with `T3stCamPw%21`.
 ENV_FILE="$REPO_ROOT/.env"
 if [ -f "$ENV_FILE" ]; then
   encoded_pw_violations=$(grep -E '^FRIGATE_CAMERA_[A-Z0-9_]+_PASSWORD=' "$ENV_FILE" | grep -E '%[0-9A-Fa-f]{2}' || true)
@@ -171,7 +171,7 @@ if [ -f "$ENV_FILE" ]; then
     fail ".env: FRIGATE_CAMERA_*_PASSWORD contains URL-encoded chars (%XX)"
     printf "${_RED}%s${_RESET}\n" "$encoded_pw_violations" >&2
     printf "    Frigate substitutes env vars verbatim. Store the RAW password —\n" >&2
-    printf "    e.g. \`Droplet123!\` not \`Droplet123%%21\` — and recreate Frigate\n" >&2
+    printf "    e.g. \`T3stCamPw!\` not \`T3stCamPw%%21\` — and recreate Frigate\n" >&2
     printf "    with \`docker compose up -d --force-recreate frigate\` so it picks\n" >&2
     printf "    up the new env (\`docker restart\` keeps the old env baked in).\n\n" >&2
   fi

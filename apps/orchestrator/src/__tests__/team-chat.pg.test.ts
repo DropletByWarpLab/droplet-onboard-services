@@ -97,21 +97,17 @@ describe.skipIf(!RUN)("team chat — real Postgres (WARP-1683)", () => {
     await prisma.$connect();
   });
 
-  afterAll(async () => {
-    await prisma.$disconnect();
-  });
-
   const PREFIX = "warp1683-";
   const OURS = { startsWith: PREFIX } as const;
   /** Reserved ncFileId range for this suite's registry fixtures. */
   const NC_FILE_DEPT = 168_301;
   const NC_FILE_DEPT_2 = 168_302;
 
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    // FK-ordered, prefix-scoped cleanup. Threads are addressed through our
-    // users' participant rows (participants/messages cascade with the
-    // thread); sessions are username-keyed so the prefix scopes them.
+  // FK-ordered, prefix-scoped cleanup. Threads are addressed through our
+  // users' participant rows (participants/messages cascade with the thread);
+  // sessions are username-keyed so the prefix scopes them. Never an unscoped
+  // deleteMany, never a TRUNCATE (the access-role.pg.test.ts rule).
+  async function cleanupOurRows() {
     const ourUsers = await prisma.user.findMany({
       where: { username: OURS },
       select: { id: true },
@@ -131,6 +127,22 @@ describe.skipIf(!RUN)("team chat — real Postgres (WARP-1683)", () => {
     });
     await prisma.department.deleteMany({ where: { slug: OURS } });
     await prisma.user.deleteMany({ where: { username: OURS } });
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await cleanupOurRows();
+  });
+
+  // Clean at end-of-suite too, not just before each test. rail 5 in
+  // rbac-v2-guard-rails.pg.test.ts counts operators BOX-WIDE, so an ACTIVE
+  // admin/owner this suite leaves on the shared DB (mallory, owner) reads as a
+  // foreign operator there and fails its last-operator premise. beforeEach
+  // alone leaves the final test's rows behind; the pg lane also runs
+  // --no-file-parallelism so no two suites' operators are ever live at once.
+  afterAll(async () => {
+    await cleanupOurRows();
+    await prisma.$disconnect();
   });
 
   // ── fixtures ─────────────────────────────────────────────────────

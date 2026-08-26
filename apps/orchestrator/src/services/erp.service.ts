@@ -35,6 +35,11 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   ConnectorBlockedError,
   DatasetNotServedError,
+  QuotaExhaustedError,
+  ReauthorizationRequiredError,
+  AscendAuthorizationError,
+  UnsafeBaseUrlError,
+  UnsafeAscendBaseUrlError,
   WRITE_COMMANDS,
   exportProviders,
   scheduleDayBounds,
@@ -44,8 +49,10 @@ import { createLogger } from "../lib/logger.js";
 import { ErpError } from "./erp-error.js";
 import {
   apiMaterialFromRow,
+  cloudMaterialFromRow,
   connectorForProvider,
   loadOperatorExportProfiles,
+  setCloudTokenWriter,
   EAGLESOFT_API_PROVIDER,
   EAGLESOFT_PROVIDER,
 } from "./erp-provider.js";
@@ -158,6 +165,11 @@ function defaultConnectorFor(conn: ConnRow): Connector {
   // undecryptable resolves to undefined, which leaves the connector blocked and
   // routes to the honest ERP_NOT_CONNECTED path — never a half-configured
   // connection that authenticates with empty strings.
+  // WARP-2137 — `cloudMaterialFromRow` does the same for the ADR-041 cloud
+  // tracks: it validates `providerConfig` structurally and decrypts
+  // `providerTokensEnc` (AAD-bound to the row id). Same contract — anything
+  // absent, malformed, or sealed against another row resolves to undefined and
+  // the connector stays blocked.
   return connectorForProvider({
     provider: conn.provider,
     host: conn.host ?? "",
@@ -165,7 +177,50 @@ function defaultConnectorFor(conn: ConnRow): Connector {
     databaseName: conn.databaseName ?? undefined,
     secretRef: conn.secretRef ?? undefined,
     ...apiMaterialFromRow(conn),
+    ...cloudMaterialFromRow(conn),
   });
+}
+
+/**
+ * The cloud-track states that are outcomes, not faults (WARP-2137 finding #1).
+ *
+ * Returned with `connected: true`, which is the point: the connection is intact
+ * and correctly configured. Collapsing either into ERROR — or into
+ * ERP_NOT_CONNECTED — would tell the owner to go re-check a connection that has
+ * nothing wrong with it, and would hide the one thing they can actually act on.
+ *
+ *  • QUOTA_EXHAUSTED — this period's metered Intuit allowance is spent. Nothing
+ *    is broken, no data is lost, and reads resume next period. There is no user
+ *    action, so presenting it as a failure would be a lie that costs a support
+ *    call.
+ *  • REAUTHORIZE_REQUIRED — the grant is dead (refresh token lapsed, consent
+ *    withdrawn, vendor enablement pulled). Retrying can NEVER fix it; only a
+ *    person re-consenting can. The opposite of the above, and the reason they
+ *    are two states rather than one "degraded".
+ */
+function cloudReasonFor(err: unknown): "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED" | null {
+  if (err instanceof QuotaExhaustedError) return "QUOTA_EXHAUSTED";
+  if (err instanceof ReauthorizationRequiredError) return "REAUTHORIZE_REQUIRED";
+  if (err instanceof AscendAuthorizationError) return "REAUTHORIZE_REQUIRED";
+  return null;
+}
+
+/**
+ * Classify an error thrown while BUILDING a connector.
+ *
+ * A refused base URL is a configuration mistake on the row, not a transport
+ * fault — the box never dialled anything. It degrades to ERP_NOT_CONNECTED so
+ * the owner is told the connection needs fixing, and it is logged at error
+ * level because, unlike a spent quota, somebody does have to act.
+ */
+function reasonForConnectorError(err: unknown, phase: string): string {
+  if (err instanceof ConnectorBlockedError) return "ERP_NOT_CONNECTED";
+  if (err instanceof UnsafeBaseUrlError || err instanceof UnsafeAscendBaseUrlError) {
+    logger.error({ err, phase }, "erp connection names a destination we refuse to dial");
+    return "ERP_NOT_CONNECTED";
+  }
+  logger.error({ err, phase }, "erp connector construction failed");
+  return "ERROR";
 }
 
 export interface ErpService {
@@ -193,6 +248,24 @@ export function createErpService(
   deps: ErpServiceDeps = {},
 ): ErpService {
   const connectorFor = deps.connectorFor ?? defaultConnectorFor;
+
+  // WARP-2137 — give the provider factory a way to write rotated tokens back.
+  // Intuit issues a NEW refresh token on every refresh and invalidates the old
+  // one, so a connector that refreshes without persisting strands the
+  // connection at the NEXT refresh — hours later, looking unrelated to the
+  // read that actually caused it.
+  //
+  // Registered here rather than imported into erp-provider so that module keeps
+  // its single job (build a connector) and takes no Prisma dependency. The
+  // write is `updateMany` scoped to the row id: a connection deleted between
+  // the refresh and this write matches nothing and is a no-op, rather than
+  // recreating a token row for a connection the owner just disconnected.
+  setCloudTokenWriter(async (connectionId, blob) => {
+    await prisma.integrationConnection.updateMany({
+      where: { id: connectionId },
+      data: { providerTokensEnc: blob },
+    });
+  });
 
   function rowForProvider(provider: string): Promise<ConnRow | null> {
     return prisma.integrationConnection.findFirst({
@@ -302,7 +375,18 @@ export function createErpService(
     params: Record<string, unknown>,
   ): Promise<{ connected: boolean; reason?: string; rows: unknown[] }> {
     if (!conn) return { connected: false, reason: "NOT_CONFIGURED", rows: [] };
-    const connector = connectorFor(conn);
+    // WARP-2137 — construction is INSIDE the try. It can throw: a cloud row
+    // naming a base URL we refuse to send a token to throws UnsafeBaseUrlError,
+    // an Ascend row with no Organization-ID (or an unusable pageSize) throws
+    // ConnectorBlockedError at construction, and a QuickBooks row with no
+    // company id is refused by the factory. Built outside, every one of those
+    // escaped this handler as an unhandled 500 rather than degrading honestly.
+    let connector: Connector;
+    try {
+      connector = connectorFor(conn);
+    } catch (err) {
+      return { connected: false, reason: reasonForConnectorError(err, "construct"), rows: [] };
+    }
     try {
       // Establish the session BEFORE reading. The REST track runs the
       // Authenticate handshake here and pins the route-map fingerprint; the SQL
@@ -334,6 +418,19 @@ export function createErpService(
       }
       if (err instanceof ConnectorBlockedError) {
         return { connected: false, reason: "ERP_NOT_CONNECTED", rows: [] };
+      }
+      // WARP-2137 — the two cloud-track outcomes that are NOT faults and must
+      // not collapse into the generic ERROR branch. Each needs its own
+      // owner-facing state, because the actions they call for are opposite:
+      // one resolves itself next period, the other never resolves without a
+      // person.
+      const cloudReason = cloudReasonFor(err);
+      if (cloudReason) {
+        // Deliberately not logged at error level, for the same reason
+        // DATASET_NOT_SERVED is not: an operator scanning red logs would find a
+        // connection that is working exactly as designed.
+        logger.info({ query: name, reason: cloudReason }, "erp read stopped by connection state");
+        return { connected: true, reason: cloudReason, rows: [] };
       }
       logger.error({ err, query: name }, "erp read failed");
       return { connected: false, reason: "ERROR", rows: [] };
@@ -459,34 +556,62 @@ export function createErpService(
       // Apply inside the connector's own transaction (brief §11.1 step 3). The
       // connector manages its connection; in this slice applyWrite is stubbed
       // and rejects blocked → we record FAILED, never a fake APPLIED.
-      const connector = connectorFor(conn as ConnRow);
       let status: "APPLIED" | "FAILED" = "FAILED";
       let discrepancy: Prisma.InputJsonValue | null = null;
+
+      // WARP-2137 — same construction hazard as the read path, with a worse
+      // consequence here: built outside the try, a misconfigured cloud row
+      // threw out of `confirmWriteRequest` entirely, so the request row never
+      // reached a terminal status and the caller got a 500 instead of the
+      // FAILED it is designed to record. A connector that cannot be built is
+      // just an apply that did not happen.
+      let connector: Connector | null = null;
       try {
-        // Same reason as the read path: the connector needs a live session
-        // before it can apply anything.
-        await connector.connect();
-        await connector.applyWrite(
-          existing.command,
-          existing.params as Record<string, unknown>,
-        );
-        // A verify-read (brief §11.1 step 4) lands with the live path; a clean
-        // apply maps to APPLIED here.
-        status = "APPLIED";
+        connector = connectorFor(conn as ConnRow);
       } catch (err) {
         if (err instanceof ConnectorBlockedError) {
           logger.info(
             { requestId: id },
-            "write apply blocked (DB-independent slice) — recorded FAILED, never fake APPLIED",
+            "write apply blocked at construction — recorded FAILED, never fake APPLIED",
           );
         } else {
-          logger.error({ err, requestId: id }, "write apply failed");
+          // Not a discrepancy in the data sense; the apply never started. The
+          // message is kept because an operator debugging a refused base URL
+          // needs to see which row named it.
+          reasonForConnectorError(err, "confirm-write");
           discrepancy = {
             message: err instanceof Error ? err.message : String(err),
           };
         }
-      } finally {
-        await connector.close().catch(() => {});
+      }
+
+      if (connector) {
+        try {
+          // Same reason as the read path: the connector needs a live session
+          // before it can apply anything.
+          await connector.connect();
+          await connector.applyWrite(
+            existing.command,
+            existing.params as Record<string, unknown>,
+          );
+          // A verify-read (brief §11.1 step 4) lands with the live path; a clean
+          // apply maps to APPLIED here.
+          status = "APPLIED";
+        } catch (err) {
+          if (err instanceof ConnectorBlockedError) {
+            logger.info(
+              { requestId: id },
+              "write apply blocked (DB-independent slice) — recorded FAILED, never fake APPLIED",
+            );
+          } else {
+            logger.error({ err, requestId: id }, "write apply failed");
+            discrepancy = {
+              message: err instanceof Error ? err.message : String(err),
+            };
+          }
+        } finally {
+          await connector.close().catch(() => {});
+        }
       }
 
       const updated = await prisma.erpWriteRequest.update({

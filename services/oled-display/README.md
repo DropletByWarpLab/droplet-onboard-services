@@ -223,7 +223,7 @@ the pairing QR blank. Set `DROPLET_AP_MODE=hostapd` in
 # /etc/droplet/device-bridge.env (single-box)
 DROPLET_AP_MODE=hostapd
 DROPLET_AP_SSID=Droplet          # or omit to read /etc/hostapd.conf
-DROPLET_AP_PSK=Droplet123!
+DROPLET_AP_PSK=T3stCamPw!
 ```
 
 **Rotation is always disabled in hostapd mode** (there's no UCI to push a
