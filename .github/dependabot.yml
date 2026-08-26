@@ -72,19 +72,20 @@
 #      still cross a major silently. Pinning the Python services properly is the
 #      real fix and remains a decision, not a config tweak. See ENGINEERING.md §3.2.
 #
-#   4. NO `target-branch` — Dependabot targets the repository DEFAULT branch,
-#      which is `main`, and that is now the only long-lived branch. Every block
-#      used to pin `target-branch: "stage"` because WARP-1670 refused any PR
-#      into `main` whose head was not `stage`. `stage` was deleted on purpose
-#      (WARP-2187) and `branch-flow-guard` retired with it, so the pin now
-#      names a ref that does not exist. Do not reintroduce it without also
-#      recreating the branch: a Dependabot PR aimed at a missing base cannot
-#      be rescued by a re-run.
-#
+#   4. `target-branch: "stage"` on EVERY block — WARP-1670's two-branch flow is
+#      `feature ──PR──▶ stage ──PR──▶ main`, and `branch-flow-guard` refuses any
+#      PR into `main` whose head is not `stage`. Dependabot defaults to the
+#      repository's DEFAULT branch, which is `main`, so without this every
+#      update PR is born unmergeable. On 2026-08-17 all 31 open Dependabot PRs
+#      were red on `only stage may merge into main` for exactly this reason —
+#      26 of them otherwise fully green. This is not cosmetic: a PR based on
+#      main cannot be rescued by a re-run, because re-running the guard replays
+#      the ORIGINAL event payload and still sees the old base.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: "/"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday
@@ -160,6 +161,7 @@ updates:
 
   - package-ecosystem: npm
     directory: "/tests"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday
@@ -174,6 +176,7 @@ updates:
   # deliberately NOT here — it has a ceiling none of the others do; see the
   # block after this one.
   - package-ecosystem: pip
+    target-branch: "stage"
     directories:
       - "/services/camera-discovery"
       - "/services/device-identity-svc"
@@ -257,6 +260,7 @@ updates:
   # transformers ceiling. Delete both entries then and let Dependabot re-raise.
   - package-ecosystem: pip
     directory: "/services/ai-gateway"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday
@@ -286,6 +290,7 @@ updates:
 
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: "stage"
     schedule:
       interval: weekly
       day: monday
