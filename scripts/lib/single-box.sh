@@ -372,6 +372,22 @@ EOF
   sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
     /etc/avahi/services/droplet.service
 
+  # --- hardware watchdog (WARP-2192) --------------------------------------
+  # The floor beneath every userspace recovery path: if the KERNEL wedges,
+  # droplet-watchdog.service below cannot run either (it is a systemd timer),
+  # and only the FCH's own timer gets the box back.
+  #
+  # Two halves, and either one missing makes it a silent no-op: systemd never
+  # loads watchdog drivers itself (so /dev/watchdog would not exist), and
+  # RuntimeWatchdogSec is off by default (so PID1 would never pet it).
+  sudo install -d -m 0755 /etc/modules-load.d
+  sudo install -m 0644 "$host_src/etc-modules-load.d/droplet-watchdog-hw.conf" \
+    /etc/modules-load.d/droplet-watchdog-hw.conf
+  sudo install -d -m 0755 /etc/systemd/system.conf.d
+  sudo install -m 0644 "$host_src/etc-systemd-system.conf.d/droplet-watchdog.conf" \
+    /etc/systemd/system.conf.d/droplet-watchdog.conf
+  log_success "Installed the hardware watchdog config (sp5100_tco + RuntimeWatchdogSec)"
+
   # --- unified self-heal watchdog (WARP-1002) ------------------------------
   # One timer-driven supervisor for the proven-heal wedge states (Wi-Fi PCI
   # death via the WARP-869 helper, XVF3800 voice-DSP wedge, docker DNS,
@@ -507,6 +523,15 @@ EOF
   # --- Activate ----------------------------------------------------------
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
+  # WARP-2192: bring the hardware watchdog up on THIS run rather than waiting
+  # for the next boot. `modprobe` because modules-load.d only fires at boot;
+  # `daemon-reexec` because system.conf is read by PID1 at startup — a plain
+  # daemon-reload leaves RuntimeWatchdogSec inert while the file on disk looks
+  # correct. Both tolerate boards with no usable TCO timer (the driver logs
+  # "Watchdog hardware is disabled" and no device appears), so neither is
+  # allowed to fail a provision.
+  sudo modprobe sp5100_tco >/dev/null 2>&1 || true
+  sudo systemctl daemon-reexec >/dev/null 2>&1 || true
   # WARP-1680: enabled (not --now) — it is a boot-time recovery path, and
   # running it mid-setup on a healthy box would only log a no-op.
   sudo systemctl enable droplet-net-selfheal.service >/dev/null 2>&1
