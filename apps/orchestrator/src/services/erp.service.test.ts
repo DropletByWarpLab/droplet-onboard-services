@@ -14,7 +14,13 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createErpService } from "./erp.service.js";
-import { ConnectorBlockedError } from "@droplet/erp-connector";
+import {
+  ConnectorBlockedError,
+  QuotaExhaustedError,
+  ReauthorizationRequiredError,
+  AscendAuthorizationError,
+  UnsafeBaseUrlError,
+} from "@droplet/erp-connector";
 
 type ConnRow = {
   id: string;
@@ -490,6 +496,153 @@ describe("erp.service (WARP-1137, DB-independent)", () => {
       ).resolves.toMatchObject({ status: "PENDING_CONFIRMATION" });
     });
   });
+
+  // WARP-2137 — the cloud tracks introduce outcomes that are NOT faults, plus a
+  // construction step that can throw. Before this ticket both collapsed into
+  // the generic ERROR branch (or escaped as a 500), which told the owner to go
+  // fix a connection that had nothing wrong with it.
+  describe("cloud-track states are outcomes, not faults", () => {
+    it("reports QUOTA_EXHAUSTED as a CONNECTED state — nothing is broken and there is no user action", async () => {
+      build({
+        connector: makeBlockedConnector({
+          // A cloud connection that is CONNECTED — the whole point of these
+          // states is that the session is fine and the read still stops.
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw new QuotaExhaustedError(5000, 5000);
+          }),
+        }),
+      });
+      const res = await svc.getArSummary(OWNER);
+      expect(res.reason).toBe("QUOTA_EXHAUSTED");
+      // The important half: the connection is intact. Reporting it as
+      // disconnected would send somebody to re-authorize a healthy grant.
+      expect(res.connected).toBe(true);
+    });
+
+    it("reports REAUTHORIZE_REQUIRED for a lapsed QuickBooks refresh token", async () => {
+      build({
+        connector: makeBlockedConnector({
+          // A cloud connection that is CONNECTED — the whole point of these
+          // states is that the session is fine and the read still stops.
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw new ReauthorizationRequiredError("the refresh token has expired");
+          }),
+        }),
+      });
+      const res = await svc.getArSummary(OWNER);
+      expect(res.reason).toBe("REAUTHORIZE_REQUIRED");
+      expect(res.connected).toBe(true);
+    });
+
+    it("maps the Dentrix authorization error to the SAME state — one vocabulary across cloud tracks", async () => {
+      build({
+        connector: makeBlockedConnector({
+          // A cloud connection that is CONNECTED — the whole point of these
+          // states is that the session is fine and the read still stops.
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw new AscendAuthorizationError("vendor enablement withdrawn");
+          }),
+        }),
+      });
+      const res = await svc.getSchedule({ date: "2026-08-26" }, OWNER);
+      expect(res.reason).toBe("REAUTHORIZE_REQUIRED");
+    });
+
+    it("keeps the two states DISTINCT — a spent quota must not read as a dead grant", async () => {
+      build({
+        connector: makeBlockedConnector({
+          // A cloud connection that is CONNECTED — the whole point of these
+          // states is that the session is fine and the read still stops.
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw new QuotaExhaustedError(10, 10);
+          }),
+        }),
+      });
+      const quota = await svc.getArSummary(OWNER);
+      build({
+        connector: makeBlockedConnector({
+          // A cloud connection that is CONNECTED — the whole point of these
+          // states is that the session is fine and the read still stops.
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw new ReauthorizationRequiredError("expired");
+          }),
+        }),
+      });
+      const reauth = await svc.getArSummary(OWNER);
+      // One resolves itself next period; the other never resolves without a
+      // person. Collapsing them would hide the only actionable one.
+      expect(quota.reason).not.toBe(reauth.reason);
+    });
+
+    it("still audits a read that stopped on a cloud state", async () => {
+      build({
+        connector: makeBlockedConnector({
+          // A cloud connection that is CONNECTED — the whole point of these
+          // states is that the session is fine and the read still stops.
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw new QuotaExhaustedError(1, 1);
+          }),
+        }),
+      });
+      await svc.getArSummary(OWNER);
+      expect(mock._state.auditLog.at(-1)!.action).toBe("read:ar-summary");
+    });
+  });
+
+  describe("connector construction failures degrade instead of throwing", () => {
+    function buildThrowing(err: Error, o?: { writeEnabled?: boolean }) {
+      mock = makePrismaMock({ writeEnabled: o?.writeEnabled });
+      svc = createErpService(mock.prisma, {
+        connectorFor: () => {
+          throw err;
+        },
+      });
+    }
+
+    it("a row naming a destination we refuse to dial degrades to ERP_NOT_CONNECTED, not a 500", async () => {
+      buildThrowing(new UnsafeBaseUrlError("host is not an allowed Intuit host"));
+      const res = await svc.getArSummary(OWNER);
+      expect(res.connected).toBe(false);
+      expect(res.reason).toBe("ERP_NOT_CONNECTED");
+    });
+
+    it("a blocked construction (no Organization-ID) degrades the same way", async () => {
+      buildThrowing(new ConnectorBlockedError("construct (no Organization-ID configured)"));
+      const res = await svc.getSchedule({ date: "2026-08-26" }, OWNER);
+      expect(res.connected).toBe(false);
+      expect(res.reason).toBe("ERP_NOT_CONNECTED");
+    });
+
+    it("an unexpected construction error is still contained as ERROR", async () => {
+      buildThrowing(new TypeError("boom"));
+      const res = await svc.getArSummary(OWNER);
+      expect(res.connected).toBe(false);
+      expect(res.reason).toBe("ERROR");
+    });
+
+    it("confirmWriteRequest records FAILED rather than throwing when the connector cannot be built", async () => {
+      // The worse half of the same defect: built outside the try, this threw
+      // out of the route entirely and left the request row short of a terminal
+      // status, so the caller got a 500 instead of the FAILED it records.
+      buildThrowing(new UnsafeBaseUrlError("refusing that host"), { writeEnabled: true });
+      const req = await svc.createWriteRequest(
+        {
+          command: "reschedule_appointment",
+          params: { appt_id: "a1", last_modified: "t0", appt_time: "t1" },
+        },
+        OWNER,
+      );
+      const done = await svc.confirmWriteRequest(req.id, OWNER);
+      expect(done.status).toBe("FAILED");
+    });
+  });
+
 });
 
 /**

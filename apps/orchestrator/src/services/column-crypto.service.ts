@@ -92,6 +92,15 @@ export function deriveEmailColumnKey(): Buffer { return hkdf(deviceIkm(), "user-
  *  and unlike User.email, a token need NOT survive a disaster restore, because
  *  the person can simply sign in again. */
 export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m365-token-cache"); }
+/** WARP-2137 / ADR-041 — column key for
+ *  `IntegrationConnection.providerTokensEnc`, which holds the OAuth tokens of a
+ *  cloud ERP track (QuickBooks Online's rotating refresh token, Dentrix
+ *  Ascend's bearer). Separate `info` from the M365 label even though both are
+ *  cloud tokens: they are different vendors with different blast radii, and one
+ *  compromised key must not open the other. Same DEVICE_SECRET_KEY ikm and
+ *  therefore the same factory-reset shred story — an owner who resets the box
+ *  reconnects the company, which is the correct outcome for a financial grant. */
+export function deriveErpCloudTokenKey(): Buffer { return hkdf(deviceIkm(), "erp-cloud-token"); }
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {
