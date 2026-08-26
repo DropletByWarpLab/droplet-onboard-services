@@ -7,6 +7,10 @@
 # systemd path units (WARP-843: droplet-openwrt-attach.path) parse on the
 # appliance like .service files — same CRLF hazard, same pin.
 *.path text eol=lf
+# systemd timer units (WARP-2190: droplet-power-restore.timer) parse the same
+# way — and a trailing CR lands INSIDE the value, so `Unit=foo.service\r`
+# silently resolves to no such unit. Same hazard, same pin.
+*.timer text eol=lf
 *.py text eol=lf
 Dockerfile text eol=lf
 *.yml text eol=lf
@@ -17,6 +21,11 @@ Dockerfile text eol=lf
 # doesn't catch them — pin explicitly so a Windows checkout never ships
 # CRLF and breaks the shebang (203/EXEC) on the appliance.
 scripts/host/usr-local-sbin/* text eol=lf
+
+# Extensionless /etc/default tuning files. systemd's EnvironmentFile= keeps a
+# trailing CR as part of the VALUE, so `FOO=1800\r` reaches the service as
+# "1800\r" and every int() parse of it fails on a Windows-checked-out box.
+scripts/host/etc-default/* text eol=lf
 
 # WARP-663 / ADR-020 — extensionless CLI dispatcher (sibling of droplet-admin).
 # Same shebang-CRLF hazard as the host executables above; pin to LF so a

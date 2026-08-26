@@ -1,0 +1,16 @@
+[Unit]
+Description=Refresh Droplet power-loss auto-restart policy (re-arm RTC backstop)
+Documentation=https://github.com/DropletByWarpLab/droplet-onboard-services/blob/main/scripts/host/README.md
+
+[Timer]
+# The RTC alarm is consumed once it fires, so it has to be pushed forward
+# continuously. This interval must stay well under
+# DROPLET_POWER_RESTORE_RTC_HORIZON_SEC (default 1800s) so that an alarm is
+# always pending - that pending alarm is the whole backstop.
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=droplet-power-restore.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+# Tuning for /usr/local/sbin/droplet-power-restore (WARP-2190).
+# Installed once by setup.sh and never clobbered afterwards, so operator edits
+# here survive a re-provision.
+
+# Worst-case dark time before the RTC backstop powers the box on, in seconds.
+# droplet-power-restore.timer refreshes every 10 min, so keep this comfortably
+# above that or there will be windows with no alarm pending.
+#
+# Set to 0 to disable the RTC backstop and rely on the FCH AC-loss bit alone -
+# e.g. on a box that must STAY off when someone deliberately shuts it down.
+DROPLET_POWER_RESTORE_RTC_HORIZON_SEC=1800
