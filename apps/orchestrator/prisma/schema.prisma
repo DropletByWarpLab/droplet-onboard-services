@@ -5077,3 +5077,75 @@ model M365Connection {
 
   @@index([state])
 }
+
+/// Per-resource sync state for the Microsoft 365 connector (WARP-2118).
+/// Explicit column, never inferred from whether `deltaLink` happens to be
+/// null — IDLE-with-no-token (never synced) and RESYNC_REQUIRED (token died,
+/// must re-enumerate) both have a null link and mean different things.
+enum M365SyncState {
+  /// Never run, or finished cleanly and waiting for its next tick.
+  IDLE
+  /// A run is in progress. Guards against two ticks overlapping on one cursor.
+  SYNCING
+  /// Throttled or wobbling. `nextAttemptAt` says when to try again.
+  BACKOFF
+  /// The delta token is dead (410 Gone / syncStateNotFound). The next run
+  /// re-enumerates from scratch. A normal transition, not a failure.
+  RESYNC_REQUIRED
+  /// Broken in a way retrying will not fix. Needs a person to look.
+  FAILED
+}
+
+/// One delta cursor per (person, workload, resource).
+///
+/// The grain matters: **mail delta is a per-folder operation**, so a mailbox
+/// with ten folders has ten cursors, not one. Drives, calendars and contact
+/// folders are likewise addressed individually. Getting this wrong means
+/// either losing changes or re-downloading a mailbox on every tick.
+model M365DeltaCursor {
+  id String @id @default(uuid())
+
+  /// The Droplet user whose connection this cursor syncs under. Matches
+  /// M365Connection.userId; delegated auth means every read is scoped to them.
+  userId String
+
+  /// `mail` | `calendar` | `contacts` | `files`.
+  workload String
+
+  /// The specific resource inside that workload — a mail folder id, a drive
+  /// id, a calendar id. Never a path: Graph is explicit that drive items must
+  /// be tracked by id, since a rename would silently orphan a path-keyed row.
+  resourceId String
+
+  /// The FULL `@odata.deltaLink`, stored opaquely and replayed verbatim. It
+  /// encodes `$select` and other request state, so rebuilding it by hand
+  /// silently changes what the next sync asks for — a bug that presents as
+  /// missing data rather than as a bad URL. Null = nothing synced yet, or a
+  /// resync is pending (see `state`, which is what actually distinguishes them).
+  deltaLink String?
+
+  state M365SyncState @default(IDLE)
+
+  /// Drives the exponential backoff. Reset to 0 on every success.
+  consecutiveFailures Int @default(0)
+
+  /// Earliest time the scheduler may try this cursor again. Set from
+  /// Microsoft's `Retry-After` when it sends one — obeyed exactly, because
+  /// throttled requests still count against the tenant's budget.
+  nextAttemptAt DateTime?
+
+  lastSyncedAt DateTime?
+
+  /// Redacted, human-readable reason for BACKOFF / FAILED. Never a token,
+  /// and never a raw delta link (which carries a token of its own).
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One cursor per resource per person — the upsert key.
+  @@unique([userId, workload, resourceId])
+  /// The scheduler's claim query: "what is due now".
+  @@index([state, nextAttemptAt])
+  @@index([userId])
+}
