@@ -147,6 +147,13 @@ jobs:
               # user-data edit must re-run this leg pre-merge, or a path typo
               # ships as a window that silently never opens.
               - "scripts/image/autoinstall/user-data"
+              # The /downloads staging tools. The orchestrator re-hashes these
+              # artifacts against catalog.json before serving a byte, so the
+              # generator and the stager are part of this service's contract
+              # even though they run on the host — a stager that picks the
+              # wrong `primary` is served faithfully and is still wrong.
+              - "scripts/app-downloads/**"
+              - "tests/app-downloads-stage.test.sh"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -390,6 +397,17 @@ jobs:
       - name: Test @droplet/orchestrator
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
+
+      # The staging half of /downloads. The orchestrator's own suite covers the
+      # serving half (parse, digest, refuse); this covers the script that puts
+      # an installer there in the first place — including the silent failure
+      # neither half would catch on its own, where a leftover installer from
+      # last release stays `primary` and the download button keeps handing out
+      # the older build with a catalog that parses and a digest that verifies.
+      # Runs on the orchestrator leg because that service owns the surface.
+      - name: App-download staging script
+        if: matrix.suite == 'orchestrator'
+        run: bash tests/app-downloads-stage.test.sh
 
       # WARP-1984: the SSH toggle's host half. The orchestrator's vitest guard
       # reads these artefacts as TEXT (it can prove `iptables` never appears);
