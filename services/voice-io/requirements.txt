@@ -6,7 +6,7 @@ sounddevice==0.5.5        # PortAudio binding — preferred over PyAudio for cle
 # unresolvable against the scipy pin below.
 numpy==2.5.1
 fastapi==0.141.1          # Control surface
-uvicorn[standard]==0.52.1 # ASGI server for FastAPI
+uvicorn[standard]==0.52.4 # ASGI server for FastAPI
 pydantic==2.13.4           # Schemas
 httpx==0.28.1             # Async HTTP client for orchestrator/LLM proxying (used in subsequent commits)
 python-multipart==0.0.32  # FastAPI form-upload support (mic-test endpoint accepts audio uploads)
