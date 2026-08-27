@@ -157,6 +157,28 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/archiver"         # ships with archiver
         update-types: ["version-update:semver-major"]
+
+      # #1746 (2026-08-26): @types/node 20.19.37 -> 26.2.0 reds ci-summary,
+      # docker-build, `build orchestrator`, `node / orchestrator` and
+      # fips-stack. Typings must track the RUNTIME, and this repo is Node 20
+      # everywhere it declares one: root package.json `engines.node: "20.x"`,
+      # `.nvmrc` = 20, and every ci.yml `node-version: "20"`. A major past 20
+      # describes APIs the shipped runtime does not have. Lift this WITH the
+      # runtime bump, never before it -- and note the `typescript` entry above
+      # already records that TS 7 needs @types/node to move in the same change,
+      # so these two come off the list together.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+      # #1748 (2026-08-26): tailwindcss 3.4.19 -> 4.3.3 reds ci-summary,
+      # docker-build, `build web-dashboard` and `node / web-dashboard`. v4 is a
+      # rewrite rather than a refresh -- CSS-first config replaces
+      # tailwind.config.*, the PostCSS plugin splits out into
+      # @tailwindcss/postcss, and the `@tailwind` directives are gone. That is a
+      # deliberate migration across the dashboard surfaces, on its own ticket;
+      # a config-only bump cannot build.
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: npm
