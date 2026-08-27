@@ -50,7 +50,10 @@ reset_work() {
   rm -rf "${WORK:?}/state" "${WORK:?}/pci" "${WORK:?}/usb" "${WORK:?}/bin" \
          "${WORK:?}/docker" "${WORK:?}/klog" "${WORK:?}/rescan" \
          "${WORK:?}/daemon.json" "${WORK:?}/host_units_exit" \
-         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log"
+         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log" \
+         "${WORK:?}/relay_check_exit" "${WORK:?}/relay_check_exit2" \
+         "${WORK:?}/relay_check_n" "${WORK:?}/relay_repair_exit" \
+         "${WORK:?}/relay.log"
   mkdir -p "$WORK/bin" "$WORK/docker"
   : > "$WORK/klog"
 }
@@ -131,8 +134,36 @@ run_wd() {
       DROPLET_WATCHDOG_XVF_COOLDOWN_S=0 \
       DROPLET_WATCHDOG_DOCKER_DAEMON_JSON="$WORK/daemon.json" \
       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
+      DROPLET_WATCHDOG_RELAY_DNS_BIN="$WORK/bin/droplet-relay-dns" \
       "$@" \
       bash "$WATCHDOG" 2>&1
+}
+
+# WARP-2189 droplet-relay-dns stub. Exit codes come from fixtures:
+#   $WORK/relay_check_exit    exit for `check`   (default 0)
+#   $WORK/relay_check_exit2   exit for the SECOND and later `check` calls —
+#                             i.e. the independent re-check after a repair
+#   $WORK/relay_repair_exit   exit for `repair`  (default 0)
+mk_relay_dns_stub() {
+  cat > "$WORK/bin/droplet-relay-dns" <<EOF
+#!/bin/sh
+printf 'droplet-relay-dns %s\n' "\$*" >> "$WORK/relay.log"
+case "\$1" in
+  check)
+    n=\$(cat "$WORK/relay_check_n" 2>/dev/null || echo 0)
+    n=\$((n + 1)); echo "\$n" > "$WORK/relay_check_n"
+    echo "droplet-relay-dns: origin verdict"
+    if [ "\$n" -ge 2 ] && [ -f "$WORK/relay_check_exit2" ]; then
+      exit \$(cat "$WORK/relay_check_exit2")
+    fi
+    exit \$(cat "$WORK/relay_check_exit" 2>/dev/null || echo 0) ;;
+  repair)
+    echo "droplet-relay-dns: repair verdict"
+    exit \$(cat "$WORK/relay_repair_exit" 2>/dev/null || echo 0) ;;
+esac
+exit 0
+EOF
+  chmod +x "$WORK/bin/droplet-relay-dns"
 }
 
 # WARP-1829 droplet-host-units stub: logs its invocation, prints
@@ -723,6 +754,133 @@ if [ "$(wd_field host_unit_staleness status)" = "not_applicable" ]; then
   pass "a detector that cannot run reports not_applicable, not a fake verdict"
 else
   fail "expected not_applicable for a broken detector, got $(wd_field host_unit_staleness status)"
+fi
+
+# =============================================================================
+# Phase 9: relay_dns (WARP-2189)
+# =============================================================================
+echo "--- Phase 9: relay_dns ---"
+
+RD_ONLY='DROPLET_WATCHDOG_CHECKS=relay_dns'
+
+reset_work
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: not_applicable when droplet-relay-dns is absent"
+else
+  fail "expected not_applicable without the helper, got $(wd_field relay_dns status)"
+fi
+
+# Healthy origin: report ok and — the part that matters on a 3-minute timer —
+# never invoke repair, so a healthy box never restarts its DNS plane.
+reset_work
+mk_relay_dns_stub
+echo 0 > "$WORK/relay_check_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "ok" ]; then
+  pass "relay_dns: ok when the origin answers"
+else
+  fail "expected ok for a healthy origin, got $(wd_field relay_dns status)"
+fi
+if grep -q repair "$WORK/relay.log"; then
+  fail "relay_dns invoked repair on a healthy origin"
+else
+  pass "relay_dns: never invokes repair when the origin is healthy"
+fi
+
+# No split-horizon FQDN / address not on this host — a shape fact, not a fault.
+reset_work
+mk_relay_dns_stub
+echo 3 > "$WORK/relay_check_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: helper exit 3 → not_applicable (no FQDN to serve on this shape)"
+else
+  fail "expected not_applicable for helper exit 3, got $(wd_field relay_dns status)"
+fi
+
+# The heal path.
+reset_work
+mk_relay_dns_stub
+echo 1 > "$WORK/relay_check_exit"
+echo 0 > "$WORK/relay_check_exit2"
+echo 0 > "$WORK/relay_repair_exit"
+rd_out="$(run_wd "$RD_ONLY")"
+if [ "$(wd_field relay_dns status)" = "healed" ]; then
+  pass "relay_dns: broken origin is repaired → healed"
+else
+  fail "expected healed after a successful repair, got $(wd_field relay_dns status)"
+fi
+if grep -q 'repair' "$WORK/relay.log"; then
+  pass "relay_dns: delegates the heal to droplet-relay-dns repair"
+else
+  fail "relay_dns did not invoke the helper's repair"
+fi
+if grep -q 'relay_dns' "$WORK/state/heal.log" 2>/dev/null; then
+  pass "relay_dns: heal recorded in heal.log"
+else
+  fail "relay_dns heal not recorded in heal.log"
+fi
+
+# A repair that does not take must not be reported as healed.
+reset_work
+mk_relay_dns_stub
+echo 1 > "$WORK/relay_check_exit"
+echo 1 > "$WORK/relay_repair_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "heal_failed" ]; then
+  pass "relay_dns: failed repair → heal_failed"
+else
+  fail "expected heal_failed for a failed repair, got $(wd_field relay_dns status)"
+fi
+case "$(wd_field relay_dns message)" in
+  *"off-site access"*) pass "relay_dns: the message says what the operator has lost" ;;
+  *) fail "message does not explain the impact: $(wd_field relay_dns message)" ;;
+esac
+
+# A repair that CLAIMS success but leaves the origin dead is the dangerous
+# case — the independent re-check is what catches it.
+reset_work
+mk_relay_dns_stub
+echo 1 > "$WORK/relay_check_exit"
+echo 1 > "$WORK/relay_check_exit2"
+echo 0 > "$WORK/relay_repair_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "heal_failed" ]; then
+  pass "relay_dns: repair reporting success but leaving the origin dead → heal_failed"
+else
+  fail "a lying repair was accepted as $(wd_field relay_dns status)"
+fi
+
+# Persistent failure escalates rather than retry-storming a DNS restart.
+rd_out="$(run_wd "$RD_ONLY")"
+if [ "$(wd_field relay_dns status)" = "escalated" ] \
+   && printf '%s\n' "$rd_out" | grep -q 'CRITICAL'; then
+  pass "relay_dns: a persistently broken origin escalates to CRITICAL"
+else
+  fail "no escalation on the second failure: $(wd_field relay_dns status)"
+fi
+
+# An undocumented exit code is not a verdict.
+reset_work
+mk_relay_dns_stub
+echo 2 > "$WORK/relay_check_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: a detector that cannot run reports not_applicable, not a fake verdict"
+else
+  fail "expected not_applicable for helper exit 2, got $(wd_field relay_dns status)"
+fi
+
+# Every known check must always be present in status.json.
+reset_work
+mk_relay_dns_stub
+echo 0 > "$WORK/relay_check_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="wifi" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: reports not_applicable when disabled — never silently absent"
+else
+  fail "relay_dns missing/wrong when disabled: $(wd_field relay_dns status)"
 fi
 
 # =============================================================================

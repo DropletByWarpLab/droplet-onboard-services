@@ -276,9 +276,27 @@ EOF
   sudo install -d -m 0755 /etc/droplet
 
   # --- /etc/droplet-host-net/ -----------------------------------------
+  # NOTE: this install is unconditional, so it OVERWRITES the live conf on
+  # every setup run. Anything a box needs beyond the static baseline has to be
+  # re-generated afterwards, not hand-edited here — see droplet-relay-dns
+  # below, and setup_local_dns() (scripts/lib/local-dns.sh), which runs later
+  # in the same pass and re-applies both managed blocks.
   sudo install -d -m 0755 /etc/droplet-host-net
   sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
     /etc/droplet-host-net/lan-dhcp.conf
+
+  # --- relay DNS origin (WARP-2189) ---------------------------------------
+  # The template above names ONE listen-address (the .20.1 LAN leg) and
+  # dnsmasq runs with bind-interfaces, so nothing binds any other leg. On a
+  # box reached over the ADR-025 cloudflared relay the connector dials
+  # DROPLET_PUBLIC_FQDN_IP:53 for every off-site lookup, and when that address
+  # is a different leg the dial gets connection refused — a healthy tunnel
+  # that cannot resolve the box's own name. Twice this was fixed by hand and
+  # twice the install above wiped it. This helper owns the pairing "answer for
+  # a name at an address => listen on that address" and is invoked from
+  # setup_local_dns() (setup time) and droplet-watchdog (runtime self-heal).
+  sudo install -m 0755 "$host_src/droplet-relay-dns.sh" \
+    /usr/local/sbin/droplet-relay-dns
 
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
