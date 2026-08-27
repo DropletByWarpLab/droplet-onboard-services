@@ -334,9 +334,16 @@ beforeEach(() => {
   (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
 });
 
+// The whole BRAIN_ROOT is torn down after EVERY test, and `seedItem` rebuilds
+// the per-item directories the next one needs. That is one recursive delete per
+// test, which on Windows (slow unlink + AV scanning) does not reliably fit
+// vitest's default 10s hook budget once the suite is this long — WARP-2207
+// took it from 10 tests to 18 and started tripping it intermittently. The work
+// is genuinely slow, not stuck, so give the hook room rather than trading away
+// the per-test isolation that rm-ing the root buys.
 afterEach(async () => {
   await rm(brainRoot, { recursive: true, force: true });
-});
+}, 60_000);
 
 /**
  * Seed an item directly: db row + on-disk original bytes. Avoids going
