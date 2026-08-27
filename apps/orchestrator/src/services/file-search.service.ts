@@ -27,7 +27,6 @@ import type { PrismaClient } from "@prisma/client";
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
 
 import { createLogger } from "../lib/logger.js";
-import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import { decryptColumn, isEncryptedColumn } from "./column-crypto.service.js";
 import { getDeksByIds } from "./document-key.service.js";
 
@@ -335,19 +334,44 @@ export function hnswEfSearchFor(limit: number): number {
 /**
  * WARP-2193 — the transaction the vector arm's SELECT runs in.
  *
- * REPEATABLE READ because `lib/prisma-tx.ts` requires every call site to name
- * its isolation level rather than inherit Postgres' READ COMMITTED by
- * accident. There is exactly one read in here, so the snapshot semantics are
- * moot either way; naming it is the point.
+ * ## No isolation level, deliberately
  *
- * `timeout` and `maxWait` are set only to PRESERVE the pre-WARP-2193
- * behaviour, not because the query is expected to be slow. Before this
- * change the SELECT was a bare `$queryRawUnsafe` with no cap; Prisma's
+ * `lib/prisma-tx.ts` exports two levels and says every call site should name
+ * one. Neither describes this transaction, and it is worth being exact about
+ * why rather than picking the nearest:
+ *
+ *   - the serializable one is for CHECK-THEN-WRITE mutations. This writes
+ *     nothing at all.
+ *   - the repeatable-read one is for MULTI-STATEMENT READS that compose one
+ *     answer, where a commit landing between two of them yields a view that
+ *     never existed. There is exactly ONE read in here.
+ *
+ * With a single statement, READ COMMITTED and REPEATABLE READ take the same
+ * snapshot and are indistinguishable. This transaction exists ONLY to give
+ * `SET LOCAL` a scope — SET LOCAL outside a transaction block is a no-op, see
+ * `searchByVector` — not to protect an invariant. Naming a level would assert
+ * a guarantee that is not load-bearing, and it would pull four suites into
+ * the WARP-1570 seam gate, one of which (`department-security.suite.test.ts`)
+ * mocks this module out entirely and can never reach this code path.
+ *
+ * The two constants are described rather than spelled out on purpose: that
+ * gate (`__tests__/prisma-tx-seam-adoption.test.ts`) derives its scope by
+ * matching those identifiers ANYWHERE in a module's text, so writing them
+ * here — in the comment explaining why they do NOT apply — would put this
+ * module in scope on the strength of a comment. Go read `lib/prisma-tx.ts`;
+ * it is short and it is the one home for both.
+ *
+ * If a second read ever joins this transaction, that changes: take the
+ * repeatable-read constant then, and migrate the suites the gate names.
+ *
+ * ## Why the explicit timeouts
+ *
+ * They PRESERVE the pre-WARP-2193 behaviour rather than change it. The SELECT
+ * used to be a bare `$queryRawUnsafe` with no cap at all; Prisma's
  * interactive-transaction defaults (maxWait 2s, timeout 5s) would have turned
  * a slow-but-succeeding search on a large corpus into a P2028 abort.
  */
 const VECTOR_SEARCH_TX = {
-  ...REPEATABLE_READ_TX,
   maxWait: 5_000,
   timeout: 30_000,
 } as const;
