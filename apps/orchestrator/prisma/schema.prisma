@@ -1006,6 +1006,23 @@ model FileContentChunk {
   text        String // Raw text of this chunk
   // pgvector column — 384 dims for all-MiniLM-L6-v2.
   // Prisma doesn't support vector natively; use Unsupported + raw SQL.
+  //
+  // WARP-2193 — the ANN index on this column is RAW SQL ONLY:
+  // "FileContentChunk_embedding_hnsw_idx", USING hnsw (embedding
+  // vector_cosine_ops), created in
+  // 20260826120000_warp_2193_hnsw_vector_index. It cannot be declared below
+  // with @@index, because Prisma has no way to express an index on an
+  // Unsupported() column.
+  //
+  // Which means: `prisma migrate dev` reads it as DRIFT and will emit a
+  // `DROP INDEX "FileContentChunk_embedding_hnsw_idx";` at the top of the
+  // next generated migration, whatever that migration is about. DELETE THAT
+  // LINE. This exact drift already ate the index once —
+  // 20260425220000_add_camera_audit_snapshot_tables opens with a generated
+  // drop of the IVFFlat index this replaced, nothing recreated it, and the
+  // vector arm ran on sequential scans for four months without a single
+  // failing test. src/__tests__/vector-index-migration.guard.test.ts replays
+  // the migration chain so it cannot happen silently a third time.
   embedding   Unsupported("vector(384)")
   indexedAt   DateTime                   @default(now())
   source      FileContentSource          @default(nextcloud)
