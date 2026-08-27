@@ -70,6 +70,7 @@ from typing import Any, Callable, Iterable, Iterator, Optional
 import numpy as np
 
 from voice.activity import ActivityReporter
+from voice.audio_io import negotiate_capture_rate, resample_int16
 from voice.llm import LLMClient, LLMUnavailable, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.text_chunk import SentenceChunker
@@ -344,6 +345,28 @@ DEFAULT_INPUT_GAIN = 1.0
 DEFAULT_RECOVER_BACKOFF_INITIAL_S = 0.5  # first retry delay after a disconnect
 DEFAULT_RECOVER_BACKOFF_MAX_S = 5.0      # cap — a missing mic retries every 5 s
 
+# Capture-rate negotiation (WARP-2213).
+#
+# The wake detector and the STT hand-off both require int16 mono at
+# EXACTLY WAKE_SAMPLE_RATE (16 kHz). Most capture hardware does not offer
+# 16 kHz at all: the appliance's onboard Realtek ALC897 advertises
+# {44100, 48000, 96000} and the ReSpeaker XVF3800 runs its USB audio
+# interface at 48 kHz. Opening such a device at 16 kHz fails with
+# PortAudio -9997 (paInvalidSampleRate) on EVERY attempt, so the
+# self-heal loop above re-opens forever and the box never hears anything
+# — an all-green appliance that is permanently deaf.
+#
+# So: ask the device what it accepts, open at the best rate it DOES
+# support, and polyphase-resample each block down to 16 kHz before the
+# detector sees it. WAKE_SAMPLE_RATE stays FIRST, so a device that
+# genuinely supports 16 kHz (the ReSpeaker USB 4-Mic Array does) keeps
+# the existing zero-resample path untouched.
+#
+# Every candidate divides WAKE_FRAME_SAMPLES exactly (1280 * rate / 16000
+# is a whole number for all of them), so one read always yields exactly
+# one detector frame — no carry buffer, no drift, no partial frames.
+CAPTURE_RATE_CANDIDATES = (WAKE_SAMPLE_RATE, 48000, 32000, 44100, 96000)
+
 # Input-level tracking + flatline watchdog (WARP-1037).
 #
 # The ReSpeaker XVF3800's XMOS DSP has a known wedge mode (continuous
@@ -577,6 +600,10 @@ class WakePipeline:
         self._recover_backoff_max_s = max(
             self._recover_backoff_initial_s, recover_backoff_max_s,
         )
+        # Device-failure log de-dup latch (see _note_recover_failure).
+        # Touched only from the capture worker thread.
+        self._recover_last_reason: Optional[str] = None
+        self._recover_repeat_count = 0
         # Hook to refresh PortAudio's cached device list before
         # re-resolving. Defaults to sd._terminate()+sd._initialize();
         # injectable for tests / alternate bindings.
@@ -1613,10 +1640,7 @@ class WakePipeline:
             except _DeviceError as exc:
                 if self._shutdown.is_set():
                     return
-                logger.warning(
-                    "wake pipeline: recoverable audio-device error (%s) — "
-                    "re-resolving + reopening", exc,
-                )
+                self._note_recover_failure(exc)
                 self._set_state("no_mic")
                 # Refresh PortAudio's cached device list, then re-resolve
                 # the (possibly shifted) input index BEFORE the next open.
@@ -1680,25 +1704,38 @@ class WakePipeline:
         except Exception:
             in_channels = 1
 
+        # Capture at a rate the device actually accepts, then resample to
+        # WAKE_SAMPLE_RATE below. See CAPTURE_RATE_CANDIDATES.
+        open_rate = self._resolve_capture_rate(sd, in_channels)
+        read_frames = WAKE_FRAME_SAMPLES * open_rate // WAKE_SAMPLE_RATE
+
         try:
             stream_cm = sd.InputStream(
-                samplerate=WAKE_SAMPLE_RATE,
+                samplerate=open_rate,
                 channels=in_channels,
                 dtype="int16",
                 device=self._input_device_index,
-                blocksize=WAKE_FRAME_SAMPLES,
+                blocksize=read_frames,
             )
         except device_errors as exc:
             raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
 
         with stream_cm as stream:
             logger.info(
-                "wake pipeline: listening on device %s (%d ch), model=%s, threshold=%.2f",
+                "wake pipeline: listening on device %s (%d ch @ %d Hz%s), "
+                "model=%s, threshold=%.2f",
                 self._input_device_index,
                 in_channels,
+                open_rate,
+                "" if open_rate == WAKE_SAMPLE_RATE
+                else f" → {WAKE_SAMPLE_RATE} Hz",
                 self._detector.model_name,
                 self._threshold,
             )
+            # A successful open clears the de-dup latch so a device that
+            # recovers and then fails AGAIN logs at WARNING again rather
+            # than being swallowed as a repeat.
+            self._recover_last_reason = None
             # New capture session (fresh open or post-recovery reopen):
             # restart the flatline clock so stale pre-disconnect
             # timestamps can't instantly flag a recovered stream.
@@ -1710,7 +1747,7 @@ class WakePipeline:
                 # re-enumeration mid-stream becomes a recoverable
                 # _DeviceError. _on_frame() runs outside this scope.
                 try:
-                    frames, overflowed = stream.read(WAKE_FRAME_SAMPLES)
+                    frames, overflowed = stream.read(read_frames)
                 except device_errors as exc:
                     raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
                 if overflowed:
@@ -1730,6 +1767,10 @@ class WakePipeline:
                         mono = np.ascontiguousarray(frames[:, 0])
                 else:
                     mono = frames.reshape(-1)
+                # Downmix FIRST, then resample: one channel through the
+                # polyphase filter instead of two, for identical output.
+                if open_rate != WAKE_SAMPLE_RATE:
+                    mono = resample_int16(mono, open_rate, WAKE_SAMPLE_RATE)
                 # The RAW mono frame goes to _on_frame; the digital input
                 # gain is applied THERE, after level tracking, so
                 # input_rms_dbfs stays in the same pre-gain domain as
@@ -1737,6 +1778,72 @@ class WakePipeline:
                 # (WARP-1055 — a gained RMS compared against a raw floor
                 # read as permanent noise drift on the dashboard).
                 self._on_frame(mono)
+
+    # How many consecutive IDENTICAL device failures pass before the
+    # supervisor restates the reason. At the 5 s backoff cap that is about
+    # one line an hour instead of ~690.
+    _RECOVER_RESTATE_EVERY = 720
+
+    def _resolve_capture_rate(self, sd: Any, in_channels: int) -> int:
+        """Pick a capture rate this device actually accepts.
+
+        Returns the first entry in CAPTURE_RATE_CANDIDATES that
+        `check_input_settings` accepts for this device + channel count.
+        WAKE_SAMPLE_RATE is first, so a 16 kHz-capable mic is opened
+        exactly as before and never resampled.
+
+        When the binding exposes no `check_input_settings` — the fake
+        `sd` the tests inject — this returns WAKE_SAMPLE_RATE, preserving
+        the pre-negotiation behaviour for those callers rather than
+        inventing a probe the fake cannot answer.
+
+        Raises `_DeviceError` when the device accepts nothing, which the
+        supervisor treats as recoverable: it parks in no_mic and retries,
+        and a re-plugged device may well accept one next time.
+        """
+        rate = negotiate_capture_rate(
+            self._input_device_index,
+            WAKE_SAMPLE_RATE,
+            in_channels,
+            sd=sd,
+            candidates=CAPTURE_RATE_CANDIDATES,
+        )
+        if rate is None:
+            raise _DeviceError(
+                f"device {self._input_device_index} accepted none of "
+                f"{CAPTURE_RATE_CANDIDATES} at {in_channels} ch",
+            )
+        return rate
+
+    def _note_recover_failure(self, exc: Exception) -> None:
+        """Log a failed recovery attempt without flooding the log.
+
+        The retry CADENCE is deliberately untouched — a hot-plugged
+        ReSpeaker must still be picked up within the backoff cap. Only the
+        LOGGING is de-duplicated: a changed reason logs at WARNING, an
+        unchanged one is restated every `_RECOVER_RESTATE_EVERY` attempts.
+
+        A box with no usable mic was emitting ~690 identical WARNING lines
+        an hour. That rotated the container's 10 MB json-file log about
+        once a day, so the spam was destroying the diagnostic history of
+        every other event in it (WARP-2213).
+        """
+        reason = str(exc) or exc.__class__.__name__
+        if reason != self._recover_last_reason:
+            self._recover_last_reason = reason
+            self._recover_repeat_count = 0
+            logger.warning(
+                "wake pipeline: recoverable audio-device error (%s) — "
+                "re-resolving + reopening", reason,
+            )
+            return
+        self._recover_repeat_count += 1
+        if self._recover_repeat_count % self._RECOVER_RESTATE_EVERY == 0:
+            logger.info(
+                "wake pipeline: same audio-device error unresolved after "
+                "%d attempts (%s)",
+                self._recover_repeat_count, reason,
+            )
 
     def _refresh_audio_enumeration(self, sd: Any) -> None:
         """Drop PortAudio's cached device list so a re-enumerated mic

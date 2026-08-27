@@ -9,7 +9,7 @@ isn't loadable or no device is wired — callers translate that to a
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -32,6 +32,77 @@ def _require_sd() -> None:
         )
 
 
+# Capture-rate negotiation (WARP-2213).
+#
+# Most capture hardware does not offer 16 kHz: the appliance's onboard
+# ALC897 advertises {44100, 48000, 96000} and the ReSpeaker XVF3800 runs
+# its USB interface at 48 kHz. Opening at an unsupported rate fails with
+# PortAudio -9997, so every capture path must ask the device what it
+# accepts and resample, rather than assume.
+#
+# The caller's desired rate is always probed FIRST, so hardware that does
+# support it is opened exactly as before and never resampled.
+CAPTURE_RATE_CANDIDATES = (16000, 48000, 32000, 44100, 96000)
+
+
+def negotiate_capture_rate(
+    device: Optional[int],
+    desired_rate: int,
+    channels: int,
+    sd: Any = None,
+    candidates: tuple[int, ...] = CAPTURE_RATE_CANDIDATES,
+) -> Optional[int]:
+    """Return a capture rate `device` accepts, preferring `desired_rate`.
+
+    Returns None when the device accepts none of them — the caller
+    decides whether that is fatal or recoverable.
+
+    A binding without `check_input_settings` (the fake `sd` injected by
+    the pipeline tests) yields `desired_rate` unchanged, preserving the
+    pre-negotiation behaviour rather than inventing a probe it cannot
+    answer.
+    """
+    sd = sd if sd is not None else _sd
+    check = getattr(sd, "check_input_settings", None)
+    if not callable(check):
+        return desired_rate
+    ordered = (desired_rate,) + tuple(
+        r for r in candidates if r != desired_rate
+    )
+    for rate in ordered:
+        try:
+            check(
+                device=device, samplerate=rate,
+                channels=channels, dtype="int16",
+            )
+        except Exception:
+            continue
+        return rate
+    return None
+
+
+def negotiate_capture_channels(
+    device: Optional[int], desired_channels: int, sd: Any = None,
+) -> int:
+    """Channel count to OPEN with, which may exceed what the caller wants.
+
+    Many USB mic arrays — notably the ReSpeaker XVF3800 — expose ONLY a
+    2-channel capture interface (no mono altset) and hand back digital
+    SILENCE when opened as mono on the raw hw device. voice/pipeline.py
+    already opens such a device at its native count and downmixes; this
+    applies the same rule to the one-shot capture paths (/audio/*, mic
+    calibration, speaker enrolment), which were still opening mono and
+    would have recorded silence from the array.
+    """
+    sd = sd if sd is not None else _sd
+    try:
+        info = sd.query_devices(device)
+        native = int(info.get("max_input_channels") or 1)
+    except Exception:
+        return desired_channels
+    return max(1, min(2, max(desired_channels, native)))
+
+
 def record(
     duration_s: float,
     samplerate: int,
@@ -47,16 +118,39 @@ def record(
     _require_sd()
     if device is None:
         raise AudioUnavailable("no input device resolved")
-    samples = int(duration_s * samplerate)
+
+    # Open at something the device actually supports (WARP-2213), then
+    # convert back to exactly what the caller asked for. Callers are
+    # unchanged: they still get `channels` channels at `samplerate`.
+    open_channels = negotiate_capture_channels(device, channels)
+    open_rate = negotiate_capture_rate(device, samplerate, open_channels)
+    if open_rate is None:
+        raise AudioUnavailable(
+            f"device {device} supports none of {CAPTURE_RATE_CANDIDATES} Hz "
+            f"at {open_channels} ch",
+        )
+
+    samples = int(duration_s * open_rate)
     logger.debug(
-        "recording %.2fs @ %d Hz / %d ch from device %s",
-        duration_s, samplerate, channels, device,
+        "recording %.2fs @ %d Hz / %d ch from device %s "
+        "(caller asked %d Hz / %d ch)",
+        duration_s, open_rate, open_channels, device, samplerate, channels,
     )
     data = _sd.rec(
-        samples, samplerate=samplerate, channels=channels,
+        samples, samplerate=open_rate, channels=open_channels,
         dtype="int16", device=device,
     )
     _sd.wait()
+
+    # Downmix BEFORE resampling — one channel through the polyphase
+    # filter instead of several, for identical output.
+    if data.ndim > 1 and data.shape[1] > channels:
+        if channels == 1:
+            data = data.mean(axis=1).astype(np.int16).reshape(-1, 1)
+        else:
+            data = np.ascontiguousarray(data[:, :channels])
+    if open_rate != samplerate:
+        data = resample_int16(data, open_rate, samplerate)
     return data
 
 
@@ -101,14 +195,14 @@ def play(
             "playback: device %s rejects %d Hz (%s); resampling to %d Hz",
             device, samplerate, exc, target_rate,
         )
-        play_audio = _resample_int16(audio, samplerate, target_rate)
+        play_audio = resample_int16(audio, samplerate, target_rate)
         play_rate = target_rate
 
     _sd.play(play_audio, samplerate=play_rate, device=device)
     _sd.wait()
 
 
-def _resample_int16(
+def resample_int16(
     audio: np.ndarray, src_rate: int, dst_rate: int,
 ) -> np.ndarray:
     """Resample int16 PCM from src_rate to dst_rate via scipy's
@@ -129,6 +223,11 @@ def _resample_int16(
     # Clamp to int16 range and convert back.
     np.clip(resampled, -1.0, 1.0, out=resampled)
     return (resampled * 32767.0).astype(np.int16)
+
+
+# Back-compat alias: this helper was private until the wake path needed it
+# too (capture-rate negotiation in voice/pipeline.py).
+_resample_int16 = resample_int16
 
 
 def test_tone(
