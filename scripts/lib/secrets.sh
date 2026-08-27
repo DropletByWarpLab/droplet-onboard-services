@@ -831,6 +831,26 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 # macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
 # Add "full" by hand if you want the hardware-facing services.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
+
+# --- NVR recordings target (WARP-2099) ---
+# Where Frigate writes 24/7 camera footage. Written EXPLICITLY on every
+# provisioning path -- never merely absent -- so .env always STATES where
+# footage goes. Absence is what made this invisible: the compose seam is
+# \`\${NVR_MEDIA_SOURCE:-nvrdata}\`, and \`:-\` absorbs an unset variable with
+# no error, so a box silently recorded to the boot disk while a 2x2 TB
+# RAID1 sat empty.
+#
+#   nvrdata          the compose-declared named volume -- on the BOOT DISK.
+#                    Correct default: a fresh box has no pool to point at,
+#                    and auto-adopting whichever array it happens to find is
+#                    the same silent behaviour that hid this for a month.
+#   /absolute/path   a bind mount -- point this at a mounted storage pool
+#                    (e.g. /mnt/droplet/<pool>/nvr) once one exists.
+#
+# Change it with scripts/host/droplet-set-nvr-media.sh, which validates the
+# target and recreates frigate. Editing this line by hand does NOT move a
+# running container. See docs/ENVIRONMENT.md.
+NVR_MEDIA_SOURCE=nvrdata
 EOF
 
   mv "$env_tmp" "$env_write_target"
@@ -949,6 +969,13 @@ migrate_env() {
   [ "$(uname)" = "Linux" ] && smb_enabled_default=1
   _migrate_ensure_key SMB_PASSWORD "$(_gen_password 20)"
   _migrate_ensure_key SMB_ENABLED "$smb_enabled_default"
+  # WARP-2099 backfill: existing installs predate the NVR recordings-target
+  # key entirely, so their .env is silent about where camera footage goes.
+  # Backfill the honest CURRENT behaviour (`nvrdata` = the boot-disk named
+  # volume) rather than a pool we went looking for: only-when-missing means
+  # an operator who already pointed this at an array keeps their value, and
+  # nobody's footage relocates behind their back on a routine setup re-run.
+  _migrate_ensure_key NVR_MEDIA_SOURCE nvrdata
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
