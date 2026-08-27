@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { X, Download, FileText, Pencil } from "lucide-react";
 import { getDownloadUrl, getPreviewUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
@@ -19,6 +19,18 @@ interface PreviewPaneProps {
    * editable Office MIME (no dead buttons).
    */
   onEdit?: () => void;
+  /**
+   * WARP-2204 — how the pane is hosted. Defaults to "modal", which is the
+   * shipping behaviour every existing call site relies on.
+   *
+   * "docked" renders the SAME header and body with the modal chrome removed —
+   * no backdrop, no fixed positioning, no z-index — so a surface that owns its
+   * own layout (the chat file rail) can host the previewer beside its content
+   * instead of over it. Dismissal belongs to that host in docked mode, which is
+   * why Escape is not bound: in a rail, Escape closes the rail's drawer, and a
+   * previewer that also claimed it would close the wrong thing.
+   */
+  mode?: "modal" | "docked";
 }
 
 const TEXT_EXTS = new Set([
@@ -53,9 +65,15 @@ function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "te
 }
 
 /**
- * Full-bleed preview modal supporting images, PDFs, video, audio, and text.
- * Videos and audio stream directly from the file endpoint. PDFs use a native
- * <object> tag with the browser's PDF viewer — no external JS lib.
+ * File previewer supporting images, PDFs, video, audio, text and Office
+ * documents. Videos and audio stream directly from the file endpoint. PDFs use
+ * a native <object> tag with the browser's PDF viewer — no external JS lib.
+ *
+ * WARP-2204: hosted either as a full-bleed modal (the default, and what the
+ * Files page uses) or DOCKED inside a host that owns its own layout. The two
+ * differ only in chrome — the header and every body branch are shared, because
+ * docking is a decision about where the previewer sits, not about what it can
+ * show.
  *
  * Every embedded tag loads `getPreviewUrl`, NOT `getDownloadUrl`. The download
  * URL answers with `Content-Disposition: attachment`, and a browser honours that
@@ -64,7 +82,14 @@ function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "te
  * bytes served inline. The Download button still uses the attachment URL, which
  * is the one place that behaviour is wanted.
  */
-export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPaneProps) {
+export function PreviewPane({
+  file,
+  onClose,
+  onDownload,
+  onEdit,
+  mode = "modal",
+}: PreviewPaneProps) {
+  const docked = mode === "docked";
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   // WARP-882: the Edit affordance is gated on engine readiness. We only probe
@@ -87,13 +112,18 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
   const editable = !!onEdit && isEditableOfficeFile(file);
   const kind = getKind(file);
 
+  // WARP-2204: Escape belongs to whatever is modal, and a docked pane is not.
+  // Binding it here in docked mode would fight the host for the keystroke — in
+  // the chat file rail, Escape closes the rail's drawer. The listener is not
+  // merely ignored in docked mode, it is never registered.
   useEffect(() => {
+    if (docked) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [onClose]);
+  }, [onClose, docked]);
 
   useEffect(() => {
     if (!editable) {
@@ -133,16 +163,29 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
 
   const previewUrl = getPreviewUrl(file.path);
 
-  return (
+  // WARP-2204: the body branches used to hard-code `calc(90vh-64px)` — the
+  // modal's own geometry (90vh card, 64px header) baked into every embed. A
+  // docked pane has no relationship to the viewport; it fills whatever the host
+  // gives it. Routing that one measurement through a custom property lets both
+  // modes share the body verbatim: modal keeps the exact value it always had,
+  // docked resolves to the host's height.
+  const cardStyle = {
+    padding: 0,
+    borderRadius: "var(--radius-card)",
+    "--preview-body-h": docked ? "100%" : "calc(90vh - 64px)",
+  } as CSSProperties;
+
+  const card = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6"
-      onClick={onClose}
+      className={
+        docked
+          ? "card w-full h-full flex flex-col overflow-hidden"
+          : "card max-w-5xl max-h-[90vh] w-full flex flex-col overflow-hidden shadow-2xl"
+      }
+      style={cardStyle}
+      // Only meaningful under the modal backdrop, whose click closes the pane.
+      onClick={docked ? undefined : (e) => e.stopPropagation()}
     >
-      <div
-        className="card max-w-5xl max-h-[90vh] w-full flex flex-col overflow-hidden shadow-2xl"
-        style={{ padding: 0, borderRadius: "var(--radius-card)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
         {/* Header */}
         <div
           className="flex items-center justify-between px-4 py-3 flex-shrink-0"
@@ -213,7 +256,8 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
               <img
                 src={getThumbnailUrl(file.path, 1024, 1024)}
                 alt={file.name}
-                className="max-w-full max-h-[calc(90vh-64px)] object-contain"
+                className="max-w-full object-contain"
+                style={{ maxHeight: "var(--preview-body-h)" }}
                 onError={(e) => {
                   // Fall back to the raw file bytes if the thumbnail API 404s
                   (e.target as HTMLImageElement).src = previewUrl;
@@ -226,7 +270,8 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             <object
               data={`${previewUrl}#toolbar=0`}
               type="application/pdf"
-              className="w-full h-[calc(90vh-64px)]"
+              className="w-full"
+              style={{ height: "var(--preview-body-h)" }}
             >
               <div
                 className="flex flex-col items-center justify-center h-full gap-3 p-8"
@@ -246,7 +291,8 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
               <video
                 src={previewUrl}
                 controls
-                className="max-w-full max-h-[calc(90vh-64px)]"
+                className="max-w-full"
+                style={{ maxHeight: "var(--preview-body-h)" }}
               />
             </div>
           )}
@@ -314,7 +360,8 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
               <img
                 src={getThumbnailUrl(file.path, 1024, 1024)}
                 alt={`Preview of ${file.name}`}
-                className="max-w-full max-h-[calc(90vh-64px)] object-contain"
+                className="max-w-full object-contain"
+                style={{ maxHeight: "var(--preview-body-h)" }}
                 onError={() => setFailedThumbPath(file.path)}
               />
             </div>
@@ -333,7 +380,17 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             </div>
           )}
         </div>
-      </div>
+    </div>
+  );
+
+  if (docked) return card;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6"
+      onClick={onClose}
+    >
+      {card}
     </div>
   );
 }
