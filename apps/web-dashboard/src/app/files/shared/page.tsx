@@ -1,7 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { AlertTriangle, Share2, Globe, User, Users, ExternalLink, type LucideIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  Share2,
+  Globe,
+  User,
+  Users,
+  ExternalLink,
+  type LucideIcon,
+} from "lucide-react";
 import { useSharedWithMe, useSharedByMe } from "@/lib/hooks/useShares";
 import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";

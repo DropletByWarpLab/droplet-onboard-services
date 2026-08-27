@@ -83,14 +83,31 @@ export const FILES_ROUTE_HEADERS: Record<string, FilesRouteHeader> = {
 /** Routes whose `ShellPage` the layout renders. */
 export const LAYOUT_OWNED = Object.keys(FILES_ROUTE_HEADERS);
 
-/**
- * Routes under `/files` that still render their own `ShellPage`. Exported so
- * the layout and its test agree on the exception list rather than each
- * hard-coding it.
- */
+/** Routes under `/files` that render their own `ShellPage`, by design. */
 export const SELF_OWNED = ["/files", "/files/devices"] as const;
 
 /** The header for a pathname, or `null` when the page owns its own chrome. */
 export function headerForPath(pathname: string): FilesRouteHeader | null {
   return FILES_ROUTE_HEADERS[pathname] ?? null;
+}
+
+/**
+ * Who renders the `ShellPage` for this route.
+ *
+ * `"unknown"` is deliberately distinct from `"page"`. Both make the layout pass
+ * children through, so they behave identically — but they mean opposite things,
+ * and collapsing them is how this goes wrong later: the five layout-owned pages
+ * no longer carry a `ShellPage` of their own, so a sixth static sub-route added
+ * without an entry in `FILES_ROUTE_HEADERS` renders with **no title, no icon and
+ * no sub-line, and no error**. Naming the case is what lets the dev warning in
+ * `layout.tsx` fire on it.
+ *
+ * `SELF_OWNED` is load-bearing here, not decorative — this is the function that
+ * reads it, and it is the reason a new route is `"unknown"` rather than silently
+ * assumed to bring its own chrome.
+ */
+export function routeOwnership(pathname: string): "layout" | "page" | "unknown" {
+  if (pathname in FILES_ROUTE_HEADERS) return "layout";
+  if ((SELF_OWNED as readonly string[]).includes(pathname)) return "page";
+  return "unknown";
 }

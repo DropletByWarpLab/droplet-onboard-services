@@ -7,9 +7,5 @@ import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
  *  summary plus a card per mounted volume, driven by the real
  *  /api/storage/drives data. */
 export default function DrivesPage() {
-  return (
-    <>
-      <DrivesPanel />
-    </>
-  );
+  return <DrivesPanel />;
 }

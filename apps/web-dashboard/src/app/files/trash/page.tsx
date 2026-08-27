@@ -46,22 +46,20 @@ export default function TrashPage() {
     }
   };
 
+  // WARP-1555: `error` decides between "we couldn't load your trash"
+  // (retryable), "trash isn't available on this Droplet" (backend 501) and the
+  // genuine "Trash is empty".
   return (
-    <>
-      {/* WARP-1555: `error` decides between "we couldn't load your trash"
-          (retryable), "trash isn't available on this Droplet" (backend 501)
-          and the genuine "Trash is empty". */}
-      <TrashView
-        items={items}
-        isLoading={isLoading}
-        error={error}
-        onRetry={() => refresh()}
-        spaceLabel={(item) => attribution.label(item.originalLocation)}
-        locationLabel={(item) => attribution.folderLocation(item.originalLocation)}
-        onRestore={handleRestore}
-        onDeleteForever={handleDeleteForever}
-        onEmpty={handleEmpty}
-      />
-    </>
+    <TrashView
+      items={items}
+      isLoading={isLoading}
+      error={error}
+      onRetry={() => refresh()}
+      spaceLabel={(item) => attribution.label(item.originalLocation)}
+      locationLabel={(item) => attribution.folderLocation(item.originalLocation)}
+      onRestore={handleRestore}
+      onDeleteForever={handleDeleteForever}
+      onEmpty={handleEmpty}
+    />
   );
 }

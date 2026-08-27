@@ -24,6 +24,7 @@ import {
   LAYOUT_OWNED,
   SELF_OWNED,
   headerForPath,
+  routeOwnership,
 } from "./files-routes";
 
 // fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..." on
@@ -103,6 +104,28 @@ describe("WARP-1548 — the route header map", () => {
     // segment down; passing children through is the safe failure.
     expect(headerForPath("/files/something-new")).toBeNull();
   });
+
+  it("distinguishes an unknown route from a deliberately self-owned one", () => {
+    // Both pass children through, so behaviour alone can't tell them apart —
+    // but they mean opposite things. Collapsing them is how a sixth static
+    // sub-route ends up rendering with no header and no error.
+    expect(routeOwnership("/files/trash")).toBe("layout");
+    expect(routeOwnership("/files")).toBe("page");
+    expect(routeOwnership("/files/devices")).toBe("page");
+    expect(routeOwnership("/files/something-new")).toBe("unknown");
+  });
+
+  it("keeps SELF_OWNED load-bearing, not decorative", () => {
+    // Guards the finding that these constants were exported but read only by
+    // this test: routeOwnership is the runtime consumer, so a route dropped
+    // from SELF_OWNED changes its classification here.
+    for (const route of SELF_OWNED) {
+      expect(routeOwnership(route)).toBe("page");
+    }
+    for (const route of LAYOUT_OWNED) {
+      expect(routeOwnership(route)).toBe("layout");
+    }
+  });
 });
 
 describe("WARP-1548 — the layout renders", () => {
@@ -148,5 +171,34 @@ describe("WARP-1548 — the layout renders", () => {
     // its own on a route whose page already brings some.
     expect(container.querySelector(".droplet-shell")).toBeNull();
     expect(container.querySelector(".page-top")).toBeNull();
+  });
+
+  it("warns in dev on an unrecognised route, and still renders children", () => {
+    // The whole point of naming the "unknown" case: without a ShellPage of its
+    // own, a new sub-route would otherwise render headerless and silent.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockPathname.mockReturnValue("/files/something-new");
+    render(
+      <FilesLayout>
+        <p>new route</p>
+      </FilesLayout>
+    );
+    expect(screen.getByText("new route")).toBeInTheDocument();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("No header registered for \"/files/something-new\"")
+    );
+    warn.mockRestore();
+  });
+
+  it("does not warn on a deliberately self-owned route", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockPathname.mockReturnValue("/files");
+    render(
+      <FilesLayout>
+        <p>page owns its shell</p>
+      </FilesLayout>
+    );
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

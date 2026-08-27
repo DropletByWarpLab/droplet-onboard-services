@@ -27,7 +27,7 @@
 import { usePathname } from "next/navigation";
 import { Clock, HardDrive, Share2, Star, Trash2, type LucideIcon } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
-import { headerForPath, type FilesRouteIcon } from "./files-routes";
+import { headerForPath, routeOwnership, type FilesRouteIcon } from "./files-routes";
 
 const ICONS: Record<FilesRouteIcon, LucideIcon> = {
   drives: HardDrive,
@@ -38,12 +38,27 @@ const ICONS: Record<FilesRouteIcon, LucideIcon> = {
 };
 
 export default function FilesLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const header = headerForPath(pathname ?? "");
+  const pathname = usePathname() ?? "";
+  const ownership = routeOwnership(pathname);
+  const header = headerForPath(pathname);
 
-  // `/files` and `/files/devices` — the page brings its own ShellPage. Passing
-  // children straight through is what keeps this a no-op for them; wrapping
-  // them here would double-render the whole shell.
+  // An unrecognised route under /files renders with no header at all — and
+  // because the five layout-owned pages no longer carry a ShellPage of their
+  // own, that failure is invisible rather than loud. Passing children through
+  // is still the right runtime behaviour (a route that brings its own shell
+  // must keep working, and throwing here would take the whole segment down),
+  // so the warning is what makes the gap findable. Dev only: this is a
+  // developer mistake, never something a user can cause.
+  if (ownership === "unknown" && process.env.NODE_ENV !== "production") {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[files/layout] No header registered for "${pathname}". Add it to ` +
+        `FILES_ROUTE_HEADERS, or to SELF_OWNED if the page renders its own ShellPage.`
+    );
+  }
+
+  // `/files` and `/files/devices` bring their own ShellPage; wrapping them here
+  // would double-render the whole shell.
   if (!header) return <>{children}</>;
 
   const Icon = ICONS[header.icon];
