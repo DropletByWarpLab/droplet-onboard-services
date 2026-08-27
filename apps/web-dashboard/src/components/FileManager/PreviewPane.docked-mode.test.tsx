@@ -226,4 +226,99 @@ describe("PreviewPane — docked mode (WARP-2204)", () => {
       expect(onDownload).toHaveBeenCalledTimes(1);
     });
   });
+
+  /**
+   * WARP-2205 — a chat attachment is a BrainMemoryItem addressed by `itemId`,
+   * not a files-tree path, so its bytes come from a different ENDPOINT. The
+   * host supplies the URLs; PreviewPane must use them verbatim and never fall
+   * back to deriving `/api/files/download?path=` from the synthetic name.
+   */
+  describe("source override — bytes that are not in the files tree", () => {
+    const brainSource = {
+      previewUrl: "/api/files/brain/bmi-1/download?disposition=inline",
+      downloadUrl: "/api/files/brain/bmi-1/download",
+    };
+
+    it("embeds a PDF from the supplied preview URL, not a path-derived one", () => {
+      const { container } = render(
+        <PreviewPane
+          file={makeFile({ name: "dropped.pdf", path: "dropped.pdf" })}
+          onClose={() => {}}
+          onDownload={() => {}}
+          mode="docked"
+          source={brainSource}
+        />,
+      );
+      const object = container.querySelector("object");
+      expect(object?.getAttribute("data")).toContain("/api/files/brain/bmi-1/download");
+      expect(object?.getAttribute("data")).toContain("disposition=inline");
+      expect(object?.getAttribute("data")).not.toContain("/api/files/download?path=");
+    });
+
+    it("renders an image straight from the preview bytes when no thumbnail exists", () => {
+      const { container } = render(
+        <PreviewPane
+          file={makeFile({
+            name: "photo.png",
+            path: "photo.png",
+            mimeType: "image/png",
+          })}
+          onClose={() => {}}
+          onDownload={() => {}}
+          mode="docked"
+          source={brainSource}
+        />,
+      );
+      const img = container.querySelector("img");
+      expect(img?.getAttribute("src")).toBe(brainSource.previewUrl);
+      expect(img?.getAttribute("src")).not.toContain("/api/files/thumbnail");
+    });
+
+    // The brain has no page-image service. Firing a request that is known to
+    // 404 and waiting for its onError would paint a broken frame first, so the
+    // office branch degrades straight to the honest empty state.
+    it("degrades an Office document to the empty state instead of a doomed thumbnail", () => {
+      const { container } = render(
+        <PreviewPane
+          file={makeFile({
+            name: "quote.docx",
+            path: "quote.docx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          })}
+          onClose={() => {}}
+          onDownload={() => {}}
+          mode="docked"
+          source={brainSource}
+        />,
+      );
+      expect(container.querySelector("img")).toBeNull();
+      expect(screen.getByText("No preview available")).toBeTruthy();
+    });
+
+    it("still derives from the path when no source is supplied", () => {
+      const { container } = render(
+        <PreviewPane file={makeFile()} onClose={() => {}} onDownload={() => {}} />,
+      );
+      const object = container.querySelector("object");
+      expect(object?.getAttribute("data")).toContain("/api/files/download?path=");
+      expect(object?.getAttribute("data")).not.toContain("/brain/");
+    });
+  });
+
+  describe("regression guard for the shared header", () => {
+    it("fires onDownload from the docked header (source variant)", () => {
+      const onDownload = vi.fn();
+      render(
+        <PreviewPane
+          file={makeFile()}
+          onClose={() => {}}
+          onDownload={onDownload}
+          mode="docked"
+        />,
+      );
+      fireEvent.click(screen.getByLabelText("Download"));
+      expect(onDownload).toHaveBeenCalledTimes(1);
+    });
+  });
 });

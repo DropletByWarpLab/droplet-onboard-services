@@ -31,6 +31,24 @@ interface PreviewPaneProps {
    * previewer that also claimed it would close the wrong thing.
    */
   mode?: "modal" | "docked";
+  /**
+   * WARP-2205 — where the bytes come from, when they are not in the files tree.
+   *
+   * A files-tree entry derives every URL from `file.path`. A CHAT ATTACHMENT
+   * has no path at all: it is a BrainMemoryItem addressed by `itemId`, served
+   * from /api/files/brain/:itemId/download. That is a different endpoint, not
+   * a different path, so a host holding one supplies the URLs itself.
+   *
+   * `thumbnailUrl` is optional because the brain has no page-image service.
+   * Without it an image still renders (straight from the preview bytes), and
+   * an Office document falls to the honest "No preview available" state rather
+   * than firing a request that is known to 404.
+   */
+  source?: {
+    previewUrl: string;
+    downloadUrl: string;
+    thumbnailUrl?: string;
+  };
 }
 
 const TEXT_EXTS = new Set([
@@ -88,6 +106,7 @@ export function PreviewPane({
   onDownload,
   onEdit,
   mode = "modal",
+  source,
 }: PreviewPaneProps) {
   const docked = mode === "docked";
   const [textContent, setTextContent] = useState<string | null>(null);
@@ -148,7 +167,7 @@ export function PreviewPane({
     setTextContent(null);
     setTextError(null);
     let cancelled = false;
-    authFetch(getDownloadUrl(file.path))
+    authFetch(source?.downloadUrl ?? getDownloadUrl(file.path))
       .then((res) => res.text())
       .then((text) => {
         if (!cancelled) setTextContent(text.slice(0, 20_000));
@@ -159,9 +178,17 @@ export function PreviewPane({
     return () => {
       cancelled = true;
     };
-  }, [file.path, kind]);
+  }, [file.path, kind, source?.downloadUrl]);
 
-  const previewUrl = getPreviewUrl(file.path);
+  const previewUrl = source?.previewUrl ?? getPreviewUrl(file.path);
+  // A host that supplies `source` but no thumbnail has no page-image service
+  // behind it (the brain does not). Images fall back to the preview bytes,
+  // which render fine; Office documents have nothing to fall back TO, so the
+  // office branch degrades to the empty state instead of firing a doomed
+  // request and waiting for its onError.
+  const thumbnailUrl = source
+    ? source.thumbnailUrl
+    : getThumbnailUrl(file.path, 1024, 1024);
 
   // WARP-2204: the body branches used to hard-code `calc(90vh-64px)` — the
   // modal's own geometry (90vh card, 64px header) baked into every embed. A
@@ -254,7 +281,7 @@ export function PreviewPane({
             <div className="flex items-center justify-center min-h-full p-4">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={getThumbnailUrl(file.path, 1024, 1024)}
+                src={thumbnailUrl ?? previewUrl}
                 alt={file.name}
                 className="max-w-full object-contain"
                 style={{ maxHeight: "var(--preview-body-h)" }}
@@ -354,11 +381,11 @@ export function PreviewPane({
               right tag rather than an iframe: it ignores Content-Disposition
               (the trap that broke the PDF branch), needs no editing session,
               and cannot execute anything the document carries. */}
-          {kind === "office" && !officeThumbFailed && (
+          {kind === "office" && !officeThumbFailed && thumbnailUrl && (
             <div className="flex items-center justify-center min-h-full p-4">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={getThumbnailUrl(file.path, 1024, 1024)}
+                src={thumbnailUrl}
                 alt={`Preview of ${file.name}`}
                 className="max-w-full object-contain"
                 style={{ maxHeight: "var(--preview-body-h)" }}
@@ -367,7 +394,8 @@ export function PreviewPane({
             </div>
           )}
 
-          {(kind === "other" || (kind === "office" && officeThumbFailed)) && (
+          {(kind === "other" ||
+            (kind === "office" && (officeThumbFailed || !thumbnailUrl))) && (
             <div className="empty">
               <div className="ei">
                 <FileText size={22} />
