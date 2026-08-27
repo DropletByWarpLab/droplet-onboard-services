@@ -916,3 +916,13 @@
     font-size: 16px !important;
   }
 }
+
+/* WARP-1548 — Files places rail, Libraries group.
+   The row's resting colour is set inline (the design-token ratchet forbids the
+   legacy `text-label-*` utilities in new files, and a new file is not
+   grandfathered), so hover cannot be a Tailwind `hover:` utility on the same
+   property — the inline style would win. One rule, here, keeps the library rows
+   feeling like their sibling sub-nav links instead of going inert on hover. */
+.files-rail-row:hover:not(.is-active) {
+  color: var(--text) !important;
+}
