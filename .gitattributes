@@ -27,6 +27,12 @@ scripts/host/usr-local-sbin/* text eol=lf
 # "1800\r" and every int() parse of it fails on a Windows-checked-out box.
 scripts/host/etc-default/* text eol=lf
 
+# Netplan drop-ins copied to /etc/netplan on the box. The *.yaml rule above does
+# NOT match `70-eth.yaml.example` -- its final extension is `.example` -- so this
+# file is otherwise unpinned, and a Windows checkout would hand an operator a
+# CRLF netplan file to copy onto an appliance.
+scripts/host/etc-netplan/* text eol=lf
+
 # WARP-663 / ADR-020 — extensionless CLI dispatcher (sibling of droplet-admin).
 # Same shebang-CRLF hazard as the host executables above; pin to LF so a
 # Windows checkout never ships CRLF and breaks the shebang on the appliance.
