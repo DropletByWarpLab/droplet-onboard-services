@@ -128,49 +128,48 @@ rationale, measured costs, and the cost-estimation formula:
 
 ## Branching and releases (read before opening a PR)
 
-**One long-lived branch: `main`.** Open every PR against it.
+Two long-lived branches, and **feature branches never target `main`**:
 
-The two-branch `feature -> stage -> main` flow that WARP-1670 built is
-retired. `stage` was deleted deliberately (WARP-2187) and the
-`branch-flow-guard` workflow that enforced it is gone. If you find a doc,
-config or comment still telling you to target `stage`, it is stale --
-`stage` cannot be created casually, because a ruleset and the OTA channel
-machinery below still reference it.
+```
+feature branch ──PR──▶ stage ──PR──▶ main
+                        │              │
+                   channel: stage  channel: stable
+                   (prerelease)     (--latest)
+```
 
-**What was lost with it:** stage bought a soak -- a subset of real boxes ran
-a build before the whole fleet did. Nothing replaces that today, so a merge
-to `main` reaches every box on the stable channel once a release is
-published. Treat "is this releasable?" as a question you answer at review
-time, not one the branch structure answers for you. A real replacement is a
-canary-fleet or release-tagging mechanism, not a branch.
+- **Open every PR against `stage`.** `main` only ever receives merges
+  from `stage`. If you catch yourself opening a feature PR against
+  `main`, that is the mistake — retarget it.
+- **A promotion is its own PR:** `stage` → `main`, reviewed like any
+  other.
+- **Hotfixes take the same path.** A fix that skips `stage` ships to
+  every box without ever having run on one. If a hotfix is genuinely
+  too urgent for the stage soak, that is Romain's call to make
+  explicitly, not an agent's to assume.
 
-`main` publishes the `stable` OTA channel. A box subscribes to exactly one
-channel (`update-agent.settings.channel` on the orchestrator,
-`DROPLET_UPDATE_CHANNEL` for fleet-agent). Consequences worth knowing before
-you touch any of this:
+Each branch publishes its own OTA release channel, and a box subscribes
+to exactly one (`update-agent.settings.channel` on the orchestrator,
+`DROPLET_UPDATE_CHANNEL` for fleet-agent). Consequences worth knowing
+before you touch any of this:
 
 - The channel is **derived from the dispatch ref** in
-  `publish-release.yml`, never passed in.
-- Stable releases publish with `--latest`. `/releases/latest` skips
-  prereleases, and that endpoint is what stable boxes poll.
-- A release's tag (`ota-<channel>-...`) is only a discovery *hint*. The
+  `publish-release.yml`, never passed in. Dispatching from anything but
+  `main` or `stage` fails immediately, by design.
+- Stage releases publish as GitHub **prereleases**. That is load-bearing:
+  `/releases/latest` skips prereleases, and that endpoint is what stable
+  boxes poll. Removing `--prerelease` would ship stage builds to the
+  whole fleet.
+- A release's tag (`ota-<channel>-…`) is only a discovery *hint*. The
   channel that decides anything is the one inside the cosign-signed
   manifest. Never move a trust decision onto the tag.
 - Adding a channel is a four-file change, all of which must agree:
   `ALLOWED_CHANNELS` (`scripts/release/gen-release-manifest.py`),
   `RELEASE_CHANNELS` (`update-agent/settings.ts`), the discovery rule in
   both pollers, and the cosign identity alternation in
-  `scripts/lib/apply-update.sh` -- an enumerated `(main|stage)` on purpose.
-  Never widen it to a wildcard.
-- **`stage` is still enumerated in that alternation and still mapped in
-  `publish-release.yml`.** Those paths are now unreachable rather than
-  wrong. Whether the stage *channel* retires with the stage *branch* is an
-  open decision on WARP-2187 -- until it is made, do not prune them
-  piecemeal, and do not point a box at the `stage` channel: it has no
-  releases.
+  `scripts/lib/apply-update.sh` — which is an enumerated `(main|stage)`
+  on purpose. Never widen it to a wildcard.
 
-History and original rationale: WARP-1670; retirement: WARP-2187;
-device-side trust model: `docs/SECURITY.md`.
+Full rationale: WARP-1670; device-side trust model: `docs/SECURITY.md`.
 
 ## LLM tool calling
 
