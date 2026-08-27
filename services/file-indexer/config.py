@@ -51,9 +51,16 @@ DOC_KEK_PATH = os.environ.get("DOC_KEK_PATH", "/data/secrets/doc-kek.key")
 # CHUNK_SIZE_TOKENS is 512 — the embedder dropped the back half of every
 # full-size chunk. `bge-small-en-v1.5` is MIT, has a 512-token window and the
 # same 384 dimensions, so `FileContentChunk.embedding` stays `vector(384)` and
-# its index is untouched. Changing this value REQUIRES a full corpus re-embed:
-# see docs/RAG_RE_EMBED_RUNBOOK.md. Vectors from two different
-# models are not comparable even at equal width.
+# its index is untouched.
+#
+# Changing this value REQUIRES a full corpus re-embed — vectors from two
+# different models are not comparable even at equal width. That is NOT
+# automatic and no migration performs it: `corpus_state.py` compares this
+# value against the model recorded for the existing corpus at startup and
+# REFUSES to write new chunks when they disagree, so a box that skips the
+# re-embed stops indexing loudly instead of silently mixing vector spaces.
+# Recovery is `scripts/rag-re-embed.sh`; full procedure in
+# docs/RAG_RE_EMBED_RUNBOOK.md.
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-small-en-v1.5")
 
 # Chunking params. CHUNK_SIZE_TOKENS is the WHOLE per-chunk embedder budget —

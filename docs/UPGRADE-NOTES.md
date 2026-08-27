@@ -12,34 +12,39 @@ checklist rather than a story.
 
 ---
 
-## WARP-2196 — embedder swap MiniLM→bge (destructive; full re-embed)
+## WARP-2196 — embedder swap MiniLM→bge (operator-gated re-embed)
 
 **Background.** `EMBEDDING_MODEL` moves to `bge-small-en-v1.5`. Both models
 are 384-dim, so `FileContentChunk.embedding` and its index are unchanged —
-which is precisely why the vectors must ALL be recomputed: Postgres compares
+which is precisely why every vector must be recomputed: Postgres compares
 MiniLM and bge vectors happily and the result is noise.
 
-**Required order — the migration cannot finish this on its own:**
+**No migration ships with this.** Deploying deletes nothing. The file-indexer
+records which model built the corpus (`WorkspaceSetting` key
+`ai.embedding.corpusModel`) and, on a mismatch, logs `REFUSING TO INDEX` and
+**blocks chunk writes while continuing to serve reads**. A box that never runs
+the re-embed keeps its self-consistent MiniLM corpus and stops indexing,
+loudly. It never mixes two vector spaces.
 
-1. Unset `EMBEDDING_MODEL` in `.env` if it still pins `all-MiniLM-L6-v2`.
-   That id is no longer in the gateway's EmbedText allow-list and now fails
-   the chunk-budget guard; indexing fails loudly rather than writing
-   incomparable vectors.
-2. Deploy. `20260827000000_warp_2196_bge_re_embed` runs on orchestrator boot
-   and DELETEs every `FileContentChunk` and every `FileIndexStatus` row.
-3. **Recreate the file-indexer** (`up -d --force-recreate --no-deps
-   file-indexer`). The reconcile only runs at process start, so nothing is
-   re-indexed until you do this.
-4. **Replay brain uploads.** `source='brain'` chunks have no reconcile path
-   at all; without the replay every chat attachment vanishes from retrieval.
+**Required order:**
 
-Deploying without steps 3-4 leaves the corpus EMPTY, not stale — search
-returns nothing. Both deletes are required together: chunks alone leaves the
-`ready`/mtime short-circuit refusing to refill them; status rows alone leaves
-MiniLM vectors in place.
+1. Unset `EMBEDDING_MODEL` in `.env` if it still pins `all-MiniLM-L6-v2` —
+   that id is no longer in the gateway's EmbedText allow-list and now fails
+   the chunk-budget guard.
+2. Deploy. The box enters read-only indexing and stays there safely until
+   your maintenance window. Rollback up to this point is free.
+3. `./scripts/rag-re-embed.sh` — deletes `FileContentChunk` +
+   `FileIndexStatus` in one transaction. Interactive confirm; `--dry-run` to
+   preview; safe to re-run.
+4. **Recreate the file-indexer** (`up -d --force-recreate --no-deps
+   file-indexer`). It stamps the new marker, unblocks writes and re-indexes.
+   Nothing rebuilds until you do this.
+5. **Replay brain uploads.** `source='brain'` chunks have no reconcile path;
+   step 4 does not touch them. Skipping this silently removes every chat
+   attachment from search while the file still shows in the UI.
 
-**Idempotency.** Both statements re-run to zero rows. Prisma applies the
-migration once; forcing a replay after the rebuild wipes it again.
+Take your own `pg_dump` before step 3 if you want a rollback point — no
+migration runs, so `migrate-and-start.sh` takes no automatic snapshot.
 
 **Full procedure, verification and rollback:** `docs/RAG_RE_EMBED_RUNBOOK.md`.
 

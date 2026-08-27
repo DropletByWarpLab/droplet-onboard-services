@@ -23,11 +23,13 @@ failed silently:
    embedding half-chunks for months.
 
 Both registered models emit 384 dimensions, which is why WARP-2196 is a
-re-embed rather than a migration: ``FileContentChunk.embedding`` stays
+re-embed rather than a schema change: ``FileContentChunk.embedding`` stays
 ``vector(384)`` and its index is untouched. That dimensional coincidence is
 also the hazard — MiniLM and bge vectors live in *different* spaces, so cosine
-distance between them is noise that Postgres will happily compute. See
-``docs/RAG_RE_EMBED_RUNBOOK.md``.
+distance between them is noise that Postgres will happily compute, with no
+error and no way to tell the rows apart afterwards. ``corpus_state.py`` is the
+guard that keeps the two from ever meeting; ``scripts/rag-re-embed.sh`` is the
+operator's way through it. See ``docs/RAG_RE_EMBED_RUNBOOK.md``.
 """
 from __future__ import annotations
 

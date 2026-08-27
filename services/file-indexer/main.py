@@ -140,6 +140,26 @@ def main():
         logger.error("Cannot connect to PostgreSQL: %s", e)
         sys.exit(1)
 
+    # WARP-2196: establish whether this box is allowed to add to the corpus it
+    # already has. Runs BEFORE the brain-ingest subscription and the reconcile
+    # thread below, so no write path can start before the verdict is in.
+    #
+    # A mismatch blocks chunk WRITES and logs an actionable ERROR; it does not
+    # exit. The service stays up on purpose — reads keep working, the existing
+    # corpus keeps serving queries, and the operator runs the re-embed in a
+    # window of their choosing. Exiting would take search down entirely over a
+    # corpus that is still internally consistent.
+    try:
+        from corpus_state import VERDICT_BLOCKED, check_corpus_model
+
+        if check_corpus_model(get_conn()) == VERDICT_BLOCKED:
+            logger.error(
+                "file-indexer is running in READ-ONLY mode: no new chunks "
+                "will be written until the corpus is re-embedded."
+            )
+    except Exception:
+        logger.exception("corpus_state: startup check crashed")
+
     # WARP-203: subscribe to brain-memory uploads from the orchestrator.
     # Non-fatal if MQTT is unavailable — the subscriber is registered
     # locally and will queue if the broker comes online later.
