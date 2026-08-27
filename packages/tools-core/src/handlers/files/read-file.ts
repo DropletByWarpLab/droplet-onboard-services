@@ -64,6 +64,24 @@ function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
 }
 
+/**
+ * Not text — say so, and name the tool that CAN read it. WARP-2194:
+ * `read_document_text` reassembles the file-indexer's ordered extraction of
+ * the whole document; search_content answers a different question — the
+ * passages ranked most similar to a query, capped — and sending a "read this
+ * document" intent there is what produced reports built on the top few
+ * snippets. Still `ok: true`: an unreadable type is an answer, not a fault.
+ */
+function binaryRefusal(path: string, contentType: string): ToolResult {
+  return {
+    ok: true,
+    data: {
+      path,
+      error: `Binary file (type: ${contentType}), cannot read as text — use read_document_text for its extracted text.`,
+    },
+  };
+}
+
 /** Leading half of a surrogate pair — an astral codepoint in UTF-16. */
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
@@ -186,36 +204,27 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     };
   }
   const contentType = res.headers.get("content-type") ?? "";
-  // One read of the body serves every branch below, and `byteLength` is the
-  // file's real size on disk — not the re-encoded length of a decoded
-  // string, which differs the moment the source is not valid UTF-8.
-  const bytes = new Uint8Array(await res.arrayBuffer());
-
-  if (
+  const declaredText =
     contentType.includes("text") ||
     contentType.includes("json") ||
-    contentType.includes("xml")
-  ) {
-    return page(path, new TextDecoder("utf-8").decode(bytes), bytes.byteLength, offset);
-  }
+    contentType.includes("xml");
   // WARP-1372: sniff only GENERIC/undeclared types — a specifically
   // declared binary type (image/png, application/pdf) is trusted as-is.
   const undeclared = contentType === "" || contentType.includes("octet-stream");
-  if (undeclared && sniffIsText(bytes)) {
-    return page(path, new TextDecoder("utf-8").decode(bytes), bytes.byteLength, offset);
-  }
-  // WARP-2194: name the tool that CAN read this. `read_document_text`
-  // reassembles the file-indexer's ordered extraction of the whole
-  // document; search_content answers a different question — the passages
-  // ranked most similar to a query — and sending "read this document"
-  // there is what produced reports built on the top few snippets.
-  return {
-    ok: true,
-    data: {
-      path,
-      error: `Binary file (type: ${contentType}), cannot read as text — use read_document_text for its extracted text.`,
-    },
-  };
+
+  // Refuse a DECLARED binary before the body is ever read. `read_file` takes
+  // an arbitrary model-supplied path and the download route streams whatever
+  // it is asked for with no size cap, so buffering the body of a video or a
+  // disk image just to discard it a few lines later is an OOM waiting for
+  // the first large file — paid on a request that cannot succeed anyway.
+  if (!declaredText && !undeclared) return binaryRefusal(path, contentType);
+
+  // ONE read, on the only two branches that can serve text. `byteLength` is
+  // the file's real size on disk — not the re-encoded length of a decoded
+  // string, which differs the moment the source is not valid UTF-8.
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (!declaredText && !sniffIsText(bytes)) return binaryRefusal(path, contentType);
+  return page(path, new TextDecoder("utf-8").decode(bytes), bytes.byteLength, offset);
 }
 
 const tool: Tool = {

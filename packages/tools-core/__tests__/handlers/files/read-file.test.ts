@@ -479,3 +479,75 @@ describe("read_file — binary redirect names read_document_text (WARP-2194)", (
     expect(d).not.toContain("search_content");
   });
 });
+
+// ── WARP-2194 (review finding): paging must not make the body read
+// unconditional. A DECLARED binary has always returned the refusal WITHOUT
+// the body ever being read — `arrayBuffer()` lived inside the undeclared/
+// sniff branch. Hoisting the read above the content-type branches downloads
+// and buffers an entire video into the tool host's heap purely to discard it
+// a few lines later, on a request that cannot succeed. There is no upstream
+// bound to fall back on: the orchestrator's GET /api/files/download pipes
+// `ncDownloadFile`'s stream through with no size cap, and `read_file` takes
+// an arbitrary model-supplied path. The cost is invisible in the response
+// shape, which is exactly why it needs an assertion.
+describe("read_file — never buffers a body it cannot use (WARP-2194)", () => {
+  /** A Response whose body reads are spies, so "was it downloaded?" is
+   *  observable rather than inferred from a payload that looks identical
+   *  either way. */
+  function spyingResponse(contentType: string, body = "") {
+    const encoded = new TextEncoder().encode(body);
+    // `.slice()` gives an exactly-sized buffer; a TextEncoder view's own
+    // buffer is not promised to be tight.
+    const arrayBuffer = vi.fn(async () => encoded.slice().buffer);
+    const text = vi.fn(async () => body);
+    return {
+      arrayBuffer,
+      text,
+      res: {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": contentType }),
+        arrayBuffer,
+        text,
+      } as unknown as Response,
+    };
+  }
+
+  for (const contentType of [
+    "application/pdf",
+    "video/mp4",
+    "image/png",
+    "application/zip",
+  ]) {
+    it(`refuses ${contentType} without downloading it`, async () => {
+      const { res, arrayBuffer, text } = spyingResponse(contentType, "x".repeat(64));
+      const get = vi.fn().mockResolvedValue(res);
+      const r = await readFile.handler({ path: "/Media/large" }, ctxWith(get));
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect((r.data as { error: string }).error).toContain(contentType);
+        expect((r.data as { error: string }).error).toContain("read_document_text");
+      }
+      expect(arrayBuffer, "declared binary must not be buffered").not.toHaveBeenCalled();
+      expect(text, "declared binary must not be buffered").not.toHaveBeenCalled();
+    });
+  }
+
+  it("reads the body exactly once on the declared-text path", async () => {
+    const { res, arrayBuffer } = spyingResponse("text/plain", "hello");
+    const get = vi.fn().mockResolvedValue(res);
+    const r = await readFile.handler({ path: "/notes/x.txt" }, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect((r.data as { content: string }).content).toBe("hello");
+    expect(arrayBuffer).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the body exactly once on the sniffed octet-stream path", async () => {
+    const { res, arrayBuffer } = spyingResponse("application/octet-stream", "# notes");
+    const get = vi.fn().mockResolvedValue(res);
+    const r = await readFile.handler({ path: "/notes/x.md" }, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect((r.data as { content: string }).content).toBe("# notes");
+    expect(arrayBuffer).toHaveBeenCalledTimes(1);
+  });
+});
