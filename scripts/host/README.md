@@ -53,6 +53,70 @@ sudo journalctl -u droplet-watchdog --no-pager -n 50
 bash tests/droplet-watchdog.test.sh
 ```
 
+## Power-loss auto-restart (WARP-2190)
+
+`usr-local-sbin/droplet-power-restore` makes the box power itself back on after
+mains is lost. Without it a box stays dark until somebody presses the button —
+measured at ~30 h on a real box, because the board's AC-loss policy was
+`always off` and nothing in provisioning ever set it.
+
+Installed by `setup.sh` (via `scripts/lib/single-box.sh`) to
+`/usr/local/sbin/droplet-power-restore`, enabled at boot by
+`droplet-power-restore.service` and refreshed every 10 min by
+`droplet-power-restore.timer`.
+
+| Mechanism | Covers | Recovery |
+|-----------|--------|----------|
+| AMD FCH `PwrFailShadow` (PM register `0x5B`, bits[1:0]) — the same hardware bit the BIOS *Restore on AC/Power Loss* option drives. Sits in the RTC/always-on power well, so it survives a full G3 | Mains returns after a cut | Immediate |
+| RTC wake alarm (`/sys/class/rtc/rtc0/wakealarm`) held 30 min ahead, re-armed by the timer | Board settled in S5 instead of G3; brownout latched the PSU off; someone pressed the button | ≤ the horizon |
+
+The two are deliberately independent — the alarm is armed even when the
+register write fails, because that is exactly when a backstop matters.
+
+**Why it re-runs every boot:** firmware rewrites `PM[0x5B]` from its own NVRAM
+copy at **every POST**, so a value set once by hand is stomped by the very next
+power cycle — the one that matters. The unit is what closes that loop.
+`droplet-power-restore.service` therefore has **no** `RemainAfterExit=yes`:
+systemd treats a timer trigger on an already-active unit as a no-op, so that
+one line would silently kill the refresh while the unit still looked healthy.
+
+⚠ **This does not replace the BIOS setting.** The bit is only re-applied once
+Linux is up, so a box that POSTs but fails to boot is unprotected against the
+*next* cut. Set `Restore on AC/Power Loss` → `Power On` in BIOS as well;
+firmware is the belt, this is the braces.
+
+**Safety.** The script writes a byte to a hardware register via `/dev/mem`, so
+it refuses to write at all unless it can first prove the window is mapped where
+it thinks: `PM[0x64]` (the spec-fixed ACPI PM-timer block address) must equal
+the `PM_TMR_BLK` the firmware published in the FADT — a value the script cannot
+influence, and which the kernel echoes as `ACPI: PM-Timer IO Port:`. It
+read-modify-writes so firmware-owned bits survive, and verifies bits[1:0]
+**only**: on real silicon bits[5:4] mirror bits[1:0], so the byte read back is
+legitimately not the byte written (observed: wrote `0x45`, read `0x55`).
+
+⚠ The legacy AMD PMIO index/data pair `0xCD6`/`0xCD7` is **dead on Zen 4** — it
+returns `0xFF` for every offset, which decodes as a plausible-looking
+`PwrFailShadow=11` ("previous state"). Use the ACPI MMIO window at
+`0xFED80300`, as this script does.
+
+`/etc/default/droplet-power-restore` (installed once from
+`etc-default/droplet-power-restore`, operator edits never clobbered) tunes
+`DROPLET_POWER_RESTORE_RTC_HORIZON_SEC`; set it to `0` to disable the RTC
+backstop and rely on the FCH bit alone — e.g. on a box that must stay off when
+someone deliberately shuts it down.
+
+```bash
+# Read-only: what is the box's current policy?
+sudo droplet-power-restore --status
+
+# Force a re-apply + inspect
+sudo systemctl start droplet-power-restore.service
+sudo journalctl -u droplet-power-restore --no-pager -n 20
+
+# Tests (no root, no hardware — fixture files stand in for /dev/mem)
+python3 -m pytest scripts/test/pytest/test_power_restore_script.py -v
+```
+
 ## Host-unit refresh (WARP-1829)
 
 Host units execute their source **straight out of the git working tree**:

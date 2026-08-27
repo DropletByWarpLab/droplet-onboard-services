@@ -1,0 +1,23 @@
+[Unit]
+Description=Droplet power-loss auto-restart policy (AC-loss power-on + RTC backstop)
+Documentation=https://github.com/DropletByWarpLab/droplet-onboard-services/blob/main/scripts/host/README.md
+# Re-applied on every boot on purpose: firmware rewrites the FCH
+# PwrFailShadow register from its own NVRAM copy at each POST, so a value set
+# once by hand is stomped by the very next power cycle - the one that matters.
+# This unit is what closes that loop.
+After=basic.target
+# /dev/mem plus the RTC sysfs node are all this needs - no network, no docker.
+ConditionPathExists=/dev/mem
+
+[Service]
+Type=oneshot
+# Deliberately NO RemainAfterExit: droplet-power-restore.timer re-triggers this
+# unit to push the RTC alarm forward, and systemd treats a trigger on an
+# already-active unit as a no-op - RemainAfterExit=yes would silently kill the
+# refresh while leaving the unit looking healthy.
+ExecStart=/usr/local/sbin/droplet-power-restore
+EnvironmentFile=-/etc/default/droplet-power-restore
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

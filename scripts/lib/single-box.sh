@@ -401,6 +401,28 @@ EOF
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
 
+  # --- power-loss auto-restart (WARP-2190) ---------------------------------
+  # A box that does not come back after a power cut is dark until someone
+  # presses the button. Measured: ~30 h down after an unclean loss, because the
+  # board's AC-loss policy was "always off" and nothing here ever set it.
+  #
+  # Sets the AMD FCH PwrFailShadow bit (the hardware bit the BIOS "Restore on
+  # AC/Power Loss" option drives) and keeps an RTC wake alarm armed as an
+  # independent backstop. Re-applied on EVERY boot by the unit, because
+  # firmware rewrites that register from its own NVRAM copy at each POST.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-power-restore" \
+    /usr/local/sbin/droplet-power-restore
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-power-restore.service" \
+    /etc/systemd/system/droplet-power-restore.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-power-restore.timer" \
+    /etc/systemd/system/droplet-power-restore.timer
+  # Per-box tuning file: install once, never clobber operator edits.
+  if [ ! -f /etc/default/droplet-power-restore ]; then
+    sudo install -m 0644 "$host_src/etc-default/droplet-power-restore" \
+      /etc/default/droplet-power-restore
+  fi
+  log_success "Installed /usr/local/sbin/droplet-power-restore (+ units)"
+
   # --- WARP-1829 host-unit refresh ----------------------------------------
   # Host units execute their source out of the git working tree
   # (droplet-device-bridge.service runs `/usr/bin/python3
@@ -536,6 +558,15 @@ EOF
   # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
   # is a handful of read-only sysfs/docker probes every ~3 minutes.
   sudo systemctl enable --now droplet-watchdog.timer >/dev/null 2>&1
+  # WARP-2190: power-loss auto-restart. `enable` puts the policy back after
+  # every POST (firmware stomps the register); `--now` on the service applies
+  # it to THIS boot too, so a box provisioned today survives a cut tonight
+  # rather than waiting for its next reboot. The timer re-arms the RTC
+  # backstop. Both tolerate non-AMD/unmapped hardware: the script refuses to
+  # write and exits non-zero rather than guessing, so `|| true` keeps a
+  # provision on unsupported hardware from failing outright.
+  sudo systemctl enable --now droplet-power-restore.service >/dev/null 2>&1 || true
+  sudo systemctl enable --now droplet-power-restore.timer >/dev/null 2>&1 || true
   # WARP-268: runtime egress-audit collector. restart|| true so a missing
   # apt dep (conntrack/tcpdump/python3-yaml) doesn't fail the whole install;
   # the unit self-heals on the next setup.sh re-run once the deps land.
