@@ -489,7 +489,14 @@ def _fit_header(safe_filename: str, safe_entries: list[str], budget: int) -> str
     try:
         tokenizer = _get_measuring_tokenizer()
     except Exception as e:  # pragma: no cover - Hub/IO degradation path
-        logger.warning(
+        # semgrep's credential-disclosure rule keys off credential-ish words
+        # in the message text, and "tokenizer" contains "token". `e` here is
+        # the tokenizer-load failure, never a secret. The two sibling
+        # logger.warning calls in this file (chunk_text, chunk_indices) are
+        # the same shape and pass the same rule -- their messages just carry
+        # no such word -- which is what identifies this as a wording match
+        # rather than a real finding about passing the exception.
+        logger.warning(  # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
             "chunker: header tokenizer unavailable (%s); bounding the "
             "contextual header by characters instead.",
             e,
