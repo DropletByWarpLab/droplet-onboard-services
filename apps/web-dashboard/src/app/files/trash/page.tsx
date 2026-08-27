@@ -1,9 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { ArrowLeft, Trash2 } from "lucide-react";
 import { TrashView } from "@/components/FileManager/TrashView";
-import { ShellPage } from "@/components/shell/ShellPage";
 import { useTrash } from "@/lib/hooks/useTrash";
 import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
@@ -50,18 +47,7 @@ export default function TrashPage() {
   };
 
   return (
-    <ShellPage
-      icon={<Trash2 size={15} />}
-      label="Trash"
-      title="Trash"
-      sub="Deleted files and folders are kept here until you restore them or empty the trash."
-      actions={
-        <Link href="/files" className="btn ghost" aria-label="Back to files">
-          <ArrowLeft size={15} />
-          Files
-        </Link>
-      }
-    >
+    <>
       {/* WARP-1555: `error` decides between "we couldn't load your trash"
           (retryable), "trash isn't available on this Droplet" (backend 501)
           and the genuine "Trash is empty". */}
@@ -76,6 +62,6 @@ export default function TrashPage() {
         onDeleteForever={handleDeleteForever}
         onEmpty={handleEmpty}
       />
-    </ShellPage>
+    </>
   );
 }
