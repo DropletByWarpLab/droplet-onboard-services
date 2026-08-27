@@ -195,9 +195,11 @@ export interface BoundingRefusal {
  * ------------------------------------------------------------------ */
 
 /** Hard iteration bound on the reduction loop. */
-const MAX_REDUCTION_ITERATIONS = 12;
-/** Sites tried per iteration before the loop gives up on this pass. */
-const MAX_SITE_CANDIDATES = 6;
+const MAX_REDUCTION_ITERATIONS = 16;
+/** Sites fully evaluated per iteration. Each costs a short binary search. */
+const MAX_PROBES_PER_ITERATION = 4;
+/** Sites fully evaluated across the whole call. Bounds total work. */
+const MAX_PROBES_TOTAL = 32;
 /** Below this a string is not worth a `reduced[]` entry — reducing it grows. */
 const MIN_REDUCIBLE_STRING = 40;
 /** Deeper than this we stop looking for sites (and stop copying). */
@@ -250,6 +252,17 @@ function safeToolName(toolName: string): string {
  * — the character is destroyed, not merely shortened. `read_file` already
  * refuses to split one at its own page boundary; the bounding step must not
  * reintroduce the very defect the handler guards against.
+ *
+ * DEFENSIVE, and currently UNREACHABLE — stated plainly because a mutation
+ * test cannot kill it, and the next reader deserves to know why rather than
+ * deleting it as dead code. Two facts conspire. Well-formed `JSON.stringify`
+ * (ES2019) escapes a lone surrogate as `\udXXX`: six characters where the
+ * completed pair costs two. And `largestFitting` terminates on
+ * `fits(lo) && !fits(lo + 1)`. So for any cut that would strand a high
+ * surrogate, cutting ONE character further is both legal and strictly SHORTER
+ * — `fits(lo + 1)` holds and the search cannot stop there. The
+ * "escapes a lone surrogate" test pins the first fact; if an engine ever stops
+ * escaping, this guard becomes load-bearing again with no code change.
  */
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
@@ -660,23 +673,36 @@ function reduceToFit(
   const originalChars = text.length;
   const reductions: Reduction[] = [];
   const settled = new Set<string>();
+  let probes = 0;
 
   for (let iteration = 0; iteration < MAX_REDUCTION_ITERATIONS; iteration++) {
     const current = emit(root, reductions, toolName, originalChars);
     if (current.length <= MODEL_TOOL_RESULT_CAP_CHARS) return current;
 
     const reducedTree = applyReductions(root, reductions);
-    const candidates = findSites(reducedTree)
+    const sites = findSites(reducedTree)
       .filter((s) => !settled.has(pathKey(s.path)))
-      .sort((a, b) => b.weight - a.weight)
-      .slice(0, MAX_SITE_CANDIDATES);
-    if (candidates.length === 0) break;
+      .sort((a, b) => b.weight - a.weight);
+    if (sites.length === 0) break;
 
-    let applied = false;
-    for (const site of candidates) {
-      settled.add(pathKey(site.path));
+    let best: { proposal: Reduction; length: number } | null = null;
+    let probedHere = 0;
+    for (const site of sites) {
+      // A site can save at most its own serialized weight, so if cutting ALL
+      // of it still leaves us over the cap it cannot beat a candidate that
+      // already fits. Pruned WITHOUT a probe: on a 20,000-row payload this is
+      // the difference between one binary search and twenty thousand.
+      const couldFit = current.length - site.weight <= MODEL_TOOL_RESULT_CAP_CHARS;
+      if (best !== null && best.length <= MODEL_TOOL_RESULT_CAP_CHARS && !couldFit) continue;
+      if (probedHere >= MAX_PROBES_PER_ITERATION || probes >= MAX_PROBES_TOTAL) break;
+
+      probedHere++;
+      probes++;
       const original = readAtPath(reducedTree, site.path);
-      if (original === undefined) continue;
+      if (original === undefined) {
+        settled.add(pathKey(site.path));
+        continue;
+      }
 
       const build = (n: number): Reduction => {
         const { to } = reducedValue(site, original, n);
@@ -685,26 +711,75 @@ function reduceToFit(
       const lengthWith = (n: number): number =>
         emit(root, [...reductions, build(n)], toolName, originalChars).length;
 
-      const best = largestFitting(
+      const fitting = largestFitting(
         (n) => lengthWith(n) <= MODEL_TOOL_RESULT_CAP_CHARS,
         site.len - 1,
       );
-      const proposal = build(best ?? 0);
-      if (proposal.to >= site.len) continue;
+      const proposal = build(fitting ?? 0);
+      if (proposal.to >= site.len) {
+        settled.add(pathKey(site.path));
+        continue;
+      }
+      const length = lengthWith(proposal.to);
 
-      // B2 — STRICT progress. Each iteration also appends a `reduced[]` entry
-      // to the marker, so reducing a small site can NET-INCREASE the output.
-      // A site that does not strictly shrink the emitted payload is abandoned
-      // rather than applied, which is what makes the loop monotone and its
-      // termination independent of the refusal branch.
-      const after = emit(root, [...reductions, proposal], toolName, originalChars);
-      if (after.length >= current.length) continue;
+      // B2 — STRICT progress. Each applied reduction also appends a
+      // `reduced[]` entry to the marker, so reducing a SMALL site can
+      // net-INCREASE the output. A candidate that does not strictly shrink the
+      // emitted payload is never applied.
+      //
+      // Say plainly what this does and does not buy, because a mutation test
+      // cannot kill it. `current` is over the cap by definition here, so any
+      // candidate that FITS also strictly shrinks - which means this rule only
+      // ever rejects stepping stones, and a rejected stepping stone can never
+      // have been the largest site (a net-growing reduction saves less than
+      // its own marker entry, so its site is smaller than that entry, so every
+      // site is). A payload whose largest site is that small cannot be brought
+      // under the cap by ANY combination of reductions, and refuses either
+      // way. So this rule is provably OUTPUT-INVARIANT; what it buys is that
+      // the loop's progress argument holds without leaning on the iteration
+      // bound, and that `reduced[]` never advertises a cut that cost more than
+      // it saved. The `never records a reduction that did not shrink its site`
+      // test pins the observable half.
+      if (length >= current.length) {
+        settled.add(pathKey(site.path));
+        continue;
+      }
 
-      reductions.push(proposal);
-      applied = true;
-      break;
+      if (best === null) {
+        best = { proposal, length };
+        continue;
+      }
+      const bestFits = best.length <= MODEL_TOOL_RESULT_CAP_CHARS;
+      const thisFits = length <= MODEL_TOOL_RESULT_CAP_CHARS;
+      if (thisFits !== bestFits) {
+        if (thisFits) best = { proposal, length };
+      } else if (thisFits) {
+        // Both fit: prefer the one that DELIVERS MORE. Without this a payload
+        // shaped `{rows: ["<9000 chars>", "a"]}` reduces the ARRAY (the
+        // heaviest site) to zero elements and hands the model an empty list,
+        // when shortening the one dominant element would have delivered ~7,600
+        // characters of the thing it asked for.
+        if (length > best.length) best = { proposal, length };
+      } else if (length < best.length) {
+        // Neither fits: prefer the bigger step toward the cap.
+        best = { proposal, length };
+      }
     }
-    if (!applied) break;
+
+    if (best === null) {
+      // Nothing probed this pass could shrink the payload. Keep going only
+      // while unprobed sites remain and the budget allows — a REJECTED site is
+      // `settled`, so the next pass sees a strictly smaller candidate set and
+      // the loop still terminates.
+      if (probes >= MAX_PROBES_TOTAL || probedHere < MAX_PROBES_PER_ITERATION) break;
+      continue;
+    }
+    // Only the WINNER is settled. A site that merely lost this comparison has
+    // to stay eligible: `{a, b, c}` at 5 KB each needs all three, and settling
+    // the two losers on the pass that reduced `a` emptied the candidate set and
+    // refused a payload two reductions handle comfortably.
+    settled.add(pathKey(best.proposal.path));
+    reductions.push(best.proposal);
   }
 
   const final = emit(root, reductions, toolName, originalChars);

@@ -548,6 +548,21 @@ describe("WARP-2203 — multi-byte and astral characters at the cut boundary", (
     expect(Buffer.from(content, "utf8").toString("utf8")).toBe(content);
   });
 
+  it("never splits a pair AT ANY cut offset — swept, not sampled", async () => {
+    // A single astral payload proves nothing: whether the chosen cut lands
+    // between the halves depends on the PARITY of the offset the search picks,
+    // and one sample lands even half the time. Shifting an ASCII prefix by one
+    // character shifts the cut by one, so this sweep walks the boundary across
+    // both parities and the guard has to hold on every one of them.
+    for (let pad = 0; pad < 24; pad++) {
+      const wire = JSON.stringify({ p: "x".repeat(pad), content: "🙂".repeat(6000) });
+      const parsed = parses(await boundedToolMessage("read_file", wire)) as Record<string, unknown>;
+      const content = parsed.content as string;
+      expect(Buffer.from(content, "utf8").toString("utf8")).toBe(content);
+      expect(content.length % 2).toBe(0);
+    }
+  });
+
   it("stays under the cap when the payload is multi-byte", async () => {
     // The cap counts CHARACTERS; a CJK page is 3 bytes per character. The
     // measured quantity must still be the emitted string's length.
