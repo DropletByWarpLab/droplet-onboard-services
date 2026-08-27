@@ -206,7 +206,13 @@ export function PreviewPane({
     <div
       className={
         docked
-          ? "card w-full h-full flex flex-col overflow-hidden"
+          // `min-h-0` is the non-obvious half of the scroll contract. The body
+          // below is `flex-1 overflow-auto`, which only scrolls when its flex
+          // parent is height-bounded. Modal gets that bound from `max-h-[90vh]`;
+          // docked gets it from `h-full min-h-0` inside a bounded host. Without
+          // it, flexbox's `min-height: auto` lets intrinsic content size win and
+          // the chat shell's `overflow: hidden` CLIPS the pane instead.
+          ? "card w-full h-full min-h-0 flex flex-col overflow-hidden"
           : "card max-w-5xl max-h-[90vh] w-full flex flex-col overflow-hidden shadow-2xl"
       }
       style={cardStyle}
