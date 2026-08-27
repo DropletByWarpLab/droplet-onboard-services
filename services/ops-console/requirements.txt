@@ -1,7 +1,7 @@
 # ops-console runtime deps. Test deps in requirements-dev.txt (matches
 # the file-indexer / voice-io split convention).
 fastapi==0.141.1          # HTTP layer
-uvicorn[standard]==0.52.1 # ASGI server
+uvicorn[standard]==0.52.4 # ASGI server
 pydantic==2.13.4           # request/response schemas
 httpx==0.28.1             # fan-out probes to other services' /health
 docker==7.2.0             # docker SDK — container list/logs/restart
