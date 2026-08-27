@@ -11,6 +11,7 @@ import {
 } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
 import { canCallTool, filterToolsForRole } from "./rbac.js";
+import { describeThrown } from "./thrown-cause.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
@@ -160,7 +161,13 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
       result = {
         ok: false,
         status: "error",
-        error: { code: "HANDLER_THREW", message: err instanceof Error ? err.message : String(err) },
+        // WARP-1480 — `describeThrown` appends the CAUSE CHAIN. Taking only
+        // `err.message` collapsed every undici failure to the same two words
+        // ("fetch failed") and discarded the errno on `err.cause`, which is
+        // the one value that tells a reset socket from a DNS failure from a
+        // headers timeout. That loss is why `read_file`'s intermittent error
+        // was unattributable.
+        error: { code: "HANDLER_THREW", message: describeThrown(err) },
       };
     }
     return toolResultToContent(result);
