@@ -26,8 +26,12 @@ import type { PrismaClient } from "@prisma/client";
 
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
 
+import { createLogger } from "../lib/logger.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
 import { decryptColumn, isEncryptedColumn } from "./column-crypto.service.js";
 import { getDeksByIds } from "./document-key.service.js";
+
+const logger = createLogger("file-search");
 
 export type FileContentSource = "nextcloud" | "brain";
 
@@ -201,6 +205,37 @@ export interface SearchByVectorParams {
   since?: Date;
   /** WARP-437: optional case-sensitive substring match on `path` (SQL LIKE). */
   filenameContains?: string;
+  /**
+   * WARP-2193: optional observer for the candidate funnel. See
+   * {@link VectorCandidateStats} — the same numbers go out as a `debug`
+   * log line on every call, this is for callers that want to assert on
+   * them or feed them to the eval harness.
+   */
+  onCandidates?: (stats: VectorCandidateStats) => void;
+}
+
+/**
+ * WARP-2193 — how many candidates survived each stage of the vector arm.
+ *
+ * The arm fetches `limit` rows and then discards everything below
+ * `minSimilarity` in JS, so from outside "12 results" looks identical
+ * whether it came from 12 candidates or from 100. That makes a recall change
+ * unmeasurable, which is how the missing index went unnoticed for four
+ * months. These four counts are the whole funnel.
+ */
+export interface VectorCandidateStats {
+  /** Rows the SQL LIMIT asked for — `perArmK` when the caller is `searchHybrid`. */
+  requested: number;
+  /** Rows Postgres actually returned. Short of `requested` means the corpus ran out. */
+  returned: number;
+  /** Survivors of the client-side `minSimilarity` floor. */
+  aboveFloor: number;
+  /** Survivors after decrypt-on-read drops rows whose DEK is gone (WARP-242). */
+  readable: number;
+  /** The `hnsw.ef_search` this query ran under. */
+  efSearch: number;
+  /** The floor that produced `aboveFloor`, echoed so a log line stands alone. */
+  minSimilarity: number;
 }
 
 export interface SearchByLexicalParams {
@@ -253,6 +288,70 @@ interface RawSearchRow {
   metadata: Record<string, unknown> | null;
 }
 
+/**
+ * WARP-2193 — the floor for `hnsw.ef_search`.
+ *
+ * `ef_search` is the size of the dynamic candidate list pgvector's HNSW walk
+ * keeps as it descends the graph. Recall collapses when it is smaller than
+ * the number of rows the query asks for, because the walk has nowhere to hold
+ * them. pgvector's default is 40 and this arm asks for
+ * `SEARCH_HYBRID_DEFAULT_PER_ARM_K` (100) rows per call, so the default would
+ * quietly cap the vector arm at less than half the candidates it requested.
+ *
+ * 100 rather than 40 as a floor, matching the arm's own default budget: a
+ * caller asking for fewer rows still benefits from a wider walk, and the cost
+ * of a slightly larger candidate list on a corpus this size is noise.
+ */
+export const HNSW_EF_SEARCH_FLOOR = 100;
+
+/**
+ * pgvector rejects `hnsw.ef_search` above 1000 (`ERROR: 1001 is outside the
+ * valid range for parameter "hnsw.ef_search"`). Clamping here turns a caller
+ * asking for an absurd `limit` into a slightly-less-exhaustive search rather
+ * than a failed query.
+ */
+export const HNSW_EF_SEARCH_CEILING = 1000;
+
+/**
+ * WARP-2193 — size `hnsw.ef_search` off the caller's own row budget rather
+ * than hardcoding it. `limit` IS `perArmK` when the caller is `searchHybrid`,
+ * so raising `perArmK` widens the graph walk to match instead of silently
+ * asking for more rows than the walk can produce.
+ *
+ * Total function on purpose: the result is interpolated into SQL (see
+ * `searchByVector`), so it must be incapable of returning anything but an
+ * integer inside pgvector's range, for any input.
+ */
+export function hnswEfSearchFor(limit: number): number {
+  const wanted = Number.isFinite(limit)
+    ? Math.trunc(limit)
+    : HNSW_EF_SEARCH_FLOOR;
+  return Math.min(
+    HNSW_EF_SEARCH_CEILING,
+    Math.max(HNSW_EF_SEARCH_FLOOR, wanted),
+  );
+}
+
+/**
+ * WARP-2193 — the transaction the vector arm's SELECT runs in.
+ *
+ * REPEATABLE READ because `lib/prisma-tx.ts` requires every call site to name
+ * its isolation level rather than inherit Postgres' READ COMMITTED by
+ * accident. There is exactly one read in here, so the snapshot semantics are
+ * moot either way; naming it is the point.
+ *
+ * `timeout` and `maxWait` are set only to PRESERVE the pre-WARP-2193
+ * behaviour, not because the query is expected to be slow. Before this
+ * change the SELECT was a bare `$queryRawUnsafe` with no cap; Prisma's
+ * interactive-transaction defaults (maxWait 2s, timeout 5s) would have turned
+ * a slow-but-succeeding search on a large corpus into a P2028 abort.
+ */
+const VECTOR_SEARCH_TX = {
+  ...REPEATABLE_READ_TX,
+  maxWait: 5_000,
+  timeout: 30_000,
+} as const;
+
 export async function searchByVector(
   prisma: PrismaClient,
   params: SearchByVectorParams,
@@ -298,7 +397,24 @@ export async function searchByVector(
     ORDER BY embedding <=> '${vec}'::vector
     LIMIT $${limitParam}
   `;
-  const rows = await prisma.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
+  // WARP-2193 — the SELECT runs INSIDE an interactive transaction, and it has
+  // to. Postgres treats `SET LOCAL` outside a transaction block as a no-op: it
+  // emits a warning and moves on. Issued on the top-level client this
+  // statement would be accepted, discarded, and the graph walk would keep
+  // running at pgvector's default ef_search of 40 — the fix would read as
+  // landed and do nothing.
+  //
+  // SET LOCAL rather than SET, so the setting dies with the transaction and
+  // cannot leak onto the next borrower of this pooled connection.
+  //
+  // `efSearch` is interpolated because a GUC name/value is not a bindable
+  // parameter position; `hnswEfSearchFor` is total and returns an integer in
+  // [100, 1000] for every input, so nothing else can reach this string.
+  const efSearch = hnswEfSearchFor(params.limit);
+  const rows = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+    return tx.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
+  }, VECTOR_SEARCH_TX);
 
   const hits = rows
     .filter((r) => Number.isFinite(r.score) && r.score >= params.minSimilarity)
@@ -314,7 +430,28 @@ export async function searchByVector(
     }));
   // WARP-242: decrypt-on-read BEFORE fusion/rerank so every downstream
   // consumer (RRF, cross-encoder passages, LLM tool result) sees plaintext.
-  return decryptSnippets(prisma, hits);
+  //
+  // Deliberately OUTSIDE the transaction above: the DEK lookups and AES work
+  // have nothing to do with the snapshot, and holding a pooled connection
+  // through them would make the vector arm's connection cost proportional to
+  // how much of the corpus is encrypted.
+  const readable = await decryptSnippets(prisma, hits);
+
+  // WARP-2193 — the candidate funnel, so a recall change is measurable rather
+  // than assumed. `debug` level: silent at the default `info`, and the shape
+  // is stable enough to grep when someone turns it up.
+  const stats: VectorCandidateStats = {
+    requested: params.limit,
+    returned: rows.length,
+    aboveFloor: hits.length,
+    readable: readable.length,
+    efSearch,
+    minSimilarity: params.minSimilarity,
+  };
+  logger.debug(stats, "search.vector.candidates");
+  params.onCandidates?.(stats);
+
+  return readable;
 }
 
 /**

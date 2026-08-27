@@ -52,7 +52,7 @@ type FakePrisma = PrismaClient & {
 function buildFakePrisma(rowsByCall: unknown[][]): FakePrisma {
   const queryFn = vi.fn();
   for (const rows of rowsByCall) queryFn.mockResolvedValueOnce(rows);
-  const execFn = vi.fn(async () => 0);
+  const execFn = vi.fn(async (..._args: unknown[]) => 0);
   const journal: FakeStatement[] = [];
   const txClients: object[] = [];
 
