@@ -16,6 +16,14 @@ one channel. So `stage` is not a staging *server* — it is the build a
 subset of real boxes will install, ahead of everyone else. What lands on
 `stage` should be releasable; what lands on `main` should have soaked.
 
+**`stage` is permanent — never delete it, and never push straight to it.**
+Every commit reaches `stage` through a PR and reaches `main` through a
+promotion PR. Because a promotion PR's head *is* `stage`, the *Delete
+branch* button GitHub offers on the merged promote deletes the release
+channel itself — it has been clicked four times, and each time GitHub
+silently auto-closed every open PR based on `stage` (2, then 9, then 39),
+none of which can be reopened once the base ref is gone.
+
 Promoting is an ordinary PR (`stage` → `main`), reviewed like any other.
 Hotfixes take the same route: skipping `stage` means shipping every box a
 build that has never run on one.
