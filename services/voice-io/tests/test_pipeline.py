@@ -34,6 +34,7 @@ from typing import Any, Optional
 import numpy as np
 import pytest
 
+from voice import audio_io, pipeline as pipeline_module
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
     DEFAULT_FLATLINE_DBFS,
@@ -56,6 +57,7 @@ from voice.stt import MockSTT, STTUnavailable, StreamingSTT
 from voice.tts import MockTTS, SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
+    WAKE_SAMPLE_RATE,
     DisabledWakeWordDetector,
     MockWakeWordDetector,
     WakeEvent,
@@ -3668,3 +3670,71 @@ class TestRecoverFailureLogDeduplication:
             "a long-running identical failure must be restated so it does "
             "not become invisible forever"
         )
+        assert restates[0].levelno == _logging.WARNING, (
+            "the restatement carries the ONLY signal that a dead mic is "
+            "still dead — alerting keyed on level=WARNING must still see "
+            "it, so throttling it must not also demote it"
+        )
+
+
+class TestCaptureRateCandidatesAreShared:
+    """One tuple, one home. The wake loop and the one-shot record() paths
+    negotiating against DIFFERENT candidate lists is a silent desync: a
+    rate added for the ReSpeaker in one file would leave the other still
+    refusing the device."""
+
+    def test_pipeline_reuses_the_audio_io_tuple(self):
+        assert (
+            pipeline_module.CAPTURE_RATE_CANDIDATES
+            is audio_io.CAPTURE_RATE_CANDIDATES
+        )
+
+    def test_every_candidate_divides_a_wake_frame_exactly(self):
+        """The wake loop reads WAKE_FRAME_SAMPLES * rate / WAKE_SAMPLE_RATE
+        samples per block and resamples that to exactly one 1280-sample
+        frame — no carry buffer. A candidate that does not divide evenly
+        would introduce drift, and the tuple now lives in a module that
+        knows nothing about WAKE_FRAME_SAMPLES."""
+        for rate in audio_io.CAPTURE_RATE_CANDIDATES:
+            assert (WAKE_FRAME_SAMPLES * rate) % WAKE_SAMPLE_RATE == 0, (
+                f"{rate} Hz does not yield a whole number of "
+                f"{WAKE_SAMPLE_RATE} Hz frames"
+            )
+
+
+class TestResamplerBuiltOncePerStreamOpen:
+    """resample_int16 re-derives the ratio and re-designs a Kaiser FIR on
+    every call. In the wake loop that is once per ~80 ms block, forever,
+    on exactly the non-16 kHz hardware this path exists to serve. The rate
+    pair is fixed for the life of a capture session."""
+
+    def test_filter_is_not_redesigned_on_every_frame(self, monkeypatch):
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({48000}, ev, sessions=6)
+        det = _FrameRecordingDetector()
+        builds: list = []
+        real = pipeline_module.make_int16_resampler
+
+        def _counting(src_rate, dst_rate):
+            builds.append((src_rate, dst_rate))
+            return real(src_rate, dst_rate)
+
+        monkeypatch.setattr(
+            pipeline_module, "make_int16_resampler", _counting,
+        )
+        _run_rate_pipeline(sd, det, ev)
+        assert len(det.frames) >= 6, "the loop must have read real frames"
+        assert builds == [(48000, WAKE_SAMPLE_RATE)], (
+            f"expected ONE resampler build per stream-open, got {builds}"
+        )
+
+    def test_resampled_frames_match_the_uncached_helper(self):
+        """Caching the filter must not change a single sample."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({48000}, ev, sessions=2)
+        det = _FrameRecordingDetector()
+        _run_rate_pipeline(sd, det, ev)
+        assert det.frames
+        raw = (np.arange(WAKE_FRAME_SAMPLES * 3) % 64).astype(np.int16) * 200
+        expected = audio_io.resample_int16(raw, 48000, WAKE_SAMPLE_RATE)
+        assert np.array_equal(det.frames[0], expected)
