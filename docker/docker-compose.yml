@@ -1966,6 +1966,46 @@ services:
     cpus: ${WEB_FETCH_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+  # --- Document renderer (WARP-2211) ---
+  # Turns a document SPEC into .pdf / .docx / .xlsx bytes for the
+  # orchestrator's POST /api/files/render, which is what the
+  # create_pdf_report / create_word_document / create_spreadsheet LLM tools
+  # dispatch to. It exists because the writers are Python (python-docx,
+  # openpyxl, reportlab) and the orchestrator is TypeScript — and because the
+  # box's model can emit at most 4096 tokens, so it cannot produce document
+  # bytes itself at any plausible window.
+  #
+  # Stateless and CREDENTIAL-FREE: spec in, bytes out. No Nextcloud access, no
+  # user token, no outbound network. Auth, path validation and the upload all
+  # stay in the orchestrator, which is why this container can hold no storage
+  # access at all. Bridge-net, `expose:` only, no host ports — the orchestrator
+  # is the only caller (bearer service token, DOC_RENDER_SERVICE_TOKEN).
+  #
+  # NOT profile-gated: unlike the `docs` engine (2 GB of Collabora), the three
+  # writers are pure Python and cost ~150 MB, so document generation works on
+  # the small box too. That is deliberate — a report tool that silently
+  # disappears on a RAM-constrained box is the failure mode this avoids.
+  doc-render:
+    build:
+      context: ..
+      dockerfile: services/doc-render/Dockerfile
+    expose:
+      - "8020"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot
+      # gate + OpenSSL config to the literal OFF posture (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${DOC_RENDER_MEM_LIMIT:-384m}
+    cpus: ${DOC_RENDER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
   # --- ERP direct-SQL bridge (WARP-1106) ---
   # The DB-touching half of the direct-SQL Eaglesoft track: unixODBC + pyodbc
   # against a practice's SAP SQL Anywhere database. It exists because there is

@@ -164,6 +164,11 @@ const EXPECTED_TOOL_NAMES = [
   "restore_file_version",
   "share_file",
   "create_document",
+  // WARP-2211/2212 — document generation (a finished file), as opposed to
+  // create_document's empty seed.
+  "create_pdf_report",
+  "create_word_document",
+  "create_spreadsheet",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
 ];
@@ -319,6 +324,14 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("share_file")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("create_document")?.requiresWrite).toBe(true);
     expect(TOOLS.get("create_document")?.requiresConfirmation).toBe(false);
+    // WARP-2212 — the generators are plain writes too. They create a NEW file
+    // at a path the caller named, and POST /api/files/render refuses an
+    // existing one (409), so there is no overwrite for a confirmation to
+    // guard against.
+    for (const name of ["create_pdf_report", "create_word_document", "create_spreadsheet"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

@@ -195,6 +195,13 @@ jobs:
             device-identity-svc:
               - "services/device-identity-svc/**"
               - "proto/**"
+            # WARP-2211: the document renderer. Its suite round-trips every
+            # produced file through the reader a user's own application would
+            # use, which is the only thing that distinguishes a valid OOXML
+            # package from a broken one that still starts with "PK" — so it
+            # has to be a leg, not just a local run.
+            doc-render:
+              - "services/doc-render/**"
             # WARP-1988: the factory-reset bulk-storage wipe and the
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at
@@ -217,7 +224,7 @@ jobs:
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
             "voice-io","device-identity-svc","erp-sql-bridge",
-            "inference-manager"]
+            "inference-manager","doc-render"]
           ALL_STORAGE: '["storage"]'
         run: |
           set -eu

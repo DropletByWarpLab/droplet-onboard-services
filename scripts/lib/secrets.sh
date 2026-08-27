@@ -411,6 +411,15 @@ generate_env() {
   # container's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_RAG_EVAL}.
   # Without it every scheduled + ad-hoc RAGAS run 401s at the first query.
   service_token_rag_eval=$(openssl rand -hex 32)
+  # WARP-2211: bearer the orchestrator presents on POST /render to the
+  # services/doc-render container (the .pdf/.docx/.xlsx renderer behind
+  # POST /api/files/render). doc-render fails CLOSED — 503 on every
+  # non-/health route — when its side is empty, so an unminted token turns
+  # every "make me a report" request into a refusal rather than an open
+  # renderer. Minted here deliberately: WEB_FETCH_SERVICE_TOKEN was never
+  # added to this function, which is why /api/web/* fails closed on a box
+  # nobody hand-edited.
+  doc_render_service_token=$(openssl rand -hex 32)
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -711,6 +720,15 @@ SERVICE_TOKEN_EMAIL=$service_token_email
 # orchestrator + rag-eval together.
 SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 
+# --- Document renderer bearer (orchestrator → doc-render) ---
+# WARP-2211. The orchestrator presents this on POST /render to the
+# doc-render container, which turns a document spec into .pdf/.docx/.xlsx
+# bytes for POST /api/files/render. Both ends read the same .env key via
+# compose — rotate in lockstep and recreate orchestrator + doc-render
+# together. doc-render fails CLOSED (503 on every non-/health route) when
+# its side is empty.
+DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
+
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
 # service's apscheduler jobs present this token on POSTs to
@@ -976,6 +994,11 @@ migrate_env() {
   # an operator who already pointed this at an array keeps their value, and
   # nobody's footage relocates behind their back on a routine setup re-run.
   _migrate_ensure_key NVR_MEDIA_SOURCE nvrdata
+  # WARP-2211: an existing box has no DOC_RENDER_SERVICE_TOKEN, and
+  # doc-render fails closed without one — so every document request would
+  # refuse until someone hand-edited .env. Backfill is only-when-missing, so
+  # an operator who already set one keeps it.
+  _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
