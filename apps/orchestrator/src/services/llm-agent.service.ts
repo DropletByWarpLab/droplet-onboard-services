@@ -45,6 +45,10 @@ import {
   toolResultPayloadValue,
   type ToolResultPayload,
 } from "./tool-result-payload.js";
+import {
+  describeToolError,
+  newAgentTurnId,
+} from "./tool-error-diagnostics.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
   toolAllowedInScope,
@@ -1146,6 +1150,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     ),
   );
   const trace: AgentTraceEntry[] = [];
+  // WARP-1480 — turn-scoped correlation id for `agent_tool_error`. `thread_id`
+  // cannot serve: it needs conversationId + assistantMessageId + citationUserId
+  // to ALL be truthy (routes/llm.ts), so an ephemeral or service-token turn has
+  // none and its failures would be unjoinable.
+  const turnId = newAgentTurnId();
   // Copy so we don't mutate the caller's array.
   const messages: ChatMessage[] = [...req.messages];
   const emit = deps.onEvent ?? (() => {});
@@ -1963,6 +1972,29 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const payload = parseToolResultPayload(text);
       const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
+
+      // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
+      // streaming and non-streaming paths. Until now nothing in this repo had
+      // ever LOGGED a tool failure (`result.isError` was only ever read, below,
+      // to shape the SSE event and gate citation extraction), which is why
+      // `read_file`'s intermittent error burns the iteration budget
+      // unattributed. `confirmation_required` is excluded for free: mcp-server
+      // sets `isError` only for `status === "error"`.
+      if (result.isError) {
+        logger.warn(
+          describeToolError({
+            tool: call.function.name,
+            toolCallId: call.id,
+            turnId,
+            iter,
+            args,
+            payload,
+            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+            threadId: req.citationContext?.threadId,
+          }),
+          "agent_tool_error",
+        );
+      }
 
       // Translate the MCP envelope into an SSE tool_result event.
       // confirmation_required is NOT a hard error — surface ok=true so
