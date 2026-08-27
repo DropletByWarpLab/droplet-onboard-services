@@ -231,7 +231,16 @@ export function presetForClass(cls: QueryClass, query?: string): AdaptivePreset 
         searchOverrides: { rerankCandidates: 80 },
       };
     case "conversational":
-      return { searchOverrides: { minSimilarity: 0.5, perArmK: 50 } };
+      // WARP-2196: 0.5 -> 0.75. This floor's job is to sit ABOVE what
+      // chit-chat scores against the corpus so a conversational turn
+      // retrieves nothing. Under MiniLM the ceiling for the conversational
+      // eval queries was 0.200 and 0.5 cleared it 2.5x over; under
+      // bge-small-en-v1.5 that ceiling is 0.590, so 0.5 would have admitted
+      // 8 of the 10 conversational fixture queries — the gate inverted from
+      // "skip retrieval" to "retrieve almost always". 0.75 is the measured
+      // bge-equivalent of MiniLM's 0.5 by irrelevant-pair selectivity (1.3%
+      // vs 1.4%). See services/similarity-floors.test.ts.
+      return { searchOverrides: { minSimilarity: 0.75, perArmK: 50 } };
     case "navigational": {
       const token = query ? extractFilenameToken(query) : undefined;
       return token ? { filenameContains: token } : {};

@@ -1004,7 +1004,10 @@ model FileContentChunk {
   path        String // Human-readable path for display
   chunkIdx    Int // 0-based chunk index within the file
   text        String // Raw text of this chunk
-  // pgvector column — 384 dims for all-MiniLM-L6-v2.
+  // pgvector column — 384 dims for bge-small-en-v1.5 (WARP-2196; the
+  // pre-WARP-2196 all-MiniLM-L6-v2 was also 384, which is why the swap
+  // needed a re-embed rather than a column change — see
+  // docs/RAG_RE_EMBED_RUNBOOK.md).
   // Prisma doesn't support vector natively; use Unsupported + raw SQL.
   embedding   Unsupported("vector(384)")
   indexedAt   DateTime                   @default(now())

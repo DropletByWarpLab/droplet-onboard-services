@@ -159,7 +159,8 @@ accept OCR-only image handling.
   key simply misses and the Models card shows `—` until somebody re-measures.
 - **`.env` (`LLM_MODEL`, `VISION_MODEL`, `DEFAULT_MODEL`)** — operator-owned.
   The report tells you what each would become; the command never edits the file.
-- **Embeddings.** `EMBEDDING_MODEL` defaults to `all-MiniLM-L6-v2`
+- **Embeddings.** `EMBEDDING_MODEL` defaults to `bge-small-en-v1.5`
+  (WARP-2196; previously `all-MiniLM-L6-v2`)
   (`services/file-indexer/config.py:47`) and is served by ai-gateway's own
   sentence-transformers (`providers/embeddings.py:18`), never by Ollama. DMR
   does not serve it, **so no pgvector row needs re-embedding.** This is the

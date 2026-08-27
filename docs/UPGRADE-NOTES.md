@@ -12,6 +12,39 @@ checklist rather than a story.
 
 ---
 
+## WARP-2196 — embedder swap MiniLM→bge (destructive; full re-embed)
+
+**Background.** `EMBEDDING_MODEL` moves to `bge-small-en-v1.5`. Both models
+are 384-dim, so `FileContentChunk.embedding` and its index are unchanged —
+which is precisely why the vectors must ALL be recomputed: Postgres compares
+MiniLM and bge vectors happily and the result is noise.
+
+**Required order — the migration cannot finish this on its own:**
+
+1. Unset `EMBEDDING_MODEL` in `.env` if it still pins `all-MiniLM-L6-v2`.
+   That id is no longer in the gateway's EmbedText allow-list and now fails
+   the chunk-budget guard; indexing fails loudly rather than writing
+   incomparable vectors.
+2. Deploy. `20260827000000_warp_2196_bge_re_embed` runs on orchestrator boot
+   and DELETEs every `FileContentChunk` and every `FileIndexStatus` row.
+3. **Recreate the file-indexer** (`up -d --force-recreate --no-deps
+   file-indexer`). The reconcile only runs at process start, so nothing is
+   re-indexed until you do this.
+4. **Replay brain uploads.** `source='brain'` chunks have no reconcile path
+   at all; without the replay every chat attachment vanishes from retrieval.
+
+Deploying without steps 3-4 leaves the corpus EMPTY, not stale — search
+returns nothing. Both deletes are required together: chunks alone leaves the
+`ready`/mtime short-circuit refusing to refill them; status rows alone leaves
+MiniLM vectors in place.
+
+**Idempotency.** Both statements re-run to zero rows. Prisma applies the
+migration once; forcing a replay after the rebuild wipes it again.
+
+**Full procedure, verification and rollback:** `docs/RAG_RE_EMBED_RUNBOOK.md`.
+
+---
+
 ## WARP-493 — brain-memory username→UUID cutover (atomic; depends on WARP-485)
 
 **Background.** Brain-memory was the last pre-WARP-485 surface keyed by

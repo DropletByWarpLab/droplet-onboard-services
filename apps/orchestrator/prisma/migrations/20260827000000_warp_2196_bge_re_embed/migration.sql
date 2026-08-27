@@ -1,0 +1,68 @@
+-- WARP-2196 — force a full corpus re-embed after the all-MiniLM-L6-v2 ->
+-- bge-small-en-v1.5 swap.
+--
+-- NO SCHEMA CHANGE. `FileContentChunk.embedding` stays `vector(384)` and its
+-- index is untouched — both models are 384-dimensional. That coincidence is
+-- what makes this migration necessary rather than optional: Postgres will
+-- happily store, index and compare vectors from two DIFFERENT models in one
+-- column, and cosine distance across the two spaces is noise. There is no
+-- error, no warning, and no way to tell the two apart after the fact. Search
+-- would simply return wrong answers, confidently, forever.
+--
+-- WHY A DEPLOY ALONE HEALS NOTHING
+-- --------------------------------
+-- Shipping the new EMBEDDING_MODEL does not re-embed anything. Three separate
+-- mechanisms each independently prevent it:
+--
+--   1. `RECONCILE_RETRY_STATUSES = {"indexing", "failed"}`
+--      (services/file-indexer/watcher.py). A `ready` row is never retried.
+--      `skipped` is excluded too, except for the narrow WARP-1842/WARP-2056
+--      stale-verdict cases — and a model swap is not one of them.
+--   2. The mtime short-circuit right after it: for any row not in the retry
+--      set, `if os.path.getmtime(abs_path) <= updated_at: continue`. Files
+--      that have not changed on disk are never re-examined, and swapping the
+--      embedder changes no file's mtime.
+--   3. The reconcile runs ONCE, at file-indexer startup (main.py's
+--      `warp1140-reconcile` thread). There is no periodic rescan to fall back
+--      on.
+--
+-- So: deleting the chunks is not enough either — without also clearing
+-- FileIndexStatus, the reconcile looks at a `ready` row with an unchanged
+-- mtime and skips the file, leaving it permanently unindexed. Both DELETEs
+-- below are required, and so is restarting the file-indexer afterwards.
+--
+-- Deleting the status row rather than flipping it to 'failed' is deliberate:
+-- a missing row is the reconcile's "never seen this file" path, which indexes
+-- unconditionally, and it avoids parading an entire healthy corpus as failed
+-- in the dashboard while it rebuilds. `db.set_index_status` upserts, so the
+-- rows come back on their own.
+--
+-- BRAIN-SOURCED CHUNKS DO NOT SELF-HEAL. Rows with source='brain' come from
+-- BrainMemoryItem uploads, which are ingested from an MQTT event and have NO
+-- reconcile path at all. This migration deletes their chunks; only the runbook
+-- brings them back. `BrainMemoryItem.status` is deliberately left alone —
+-- flipping it to 'indexing' with nothing driving the indexing would pin the
+-- dashboard on a spinner that never resolves.
+--
+-- RUNBOOK: docs/RAG_RE_EMBED_RUNBOOK.md — read it before deploying.
+-- The file-indexer restart and the brain replay are operator steps; this
+-- migration cannot perform either.
+--
+-- RE-RUN SAFETY: both statements are idempotent (a second run deletes zero
+-- rows on an already-empty table). Prisma applies each migration exactly once
+-- via `_prisma_migrations`, so a normal boot cannot repeat it. Be aware that
+-- forcing a replay AFTER the corpus has been rebuilt WOULD wipe it again and
+-- require the same operator steps a second time. The pre-migration pg_dump
+-- taken by scripts/migrate-and-start.sh captures the old MiniLM vectors,
+-- which are not worth restoring — restoring them would reintroduce exactly
+-- the mixed-space corpus this migration exists to eliminate.
+
+-- Every existing vector was produced by all-MiniLM-L6-v2 and is not
+-- comparable to a bge vector. FileContentChunk is derived data, fully
+-- rebuildable from the source files; nothing here is a system of record.
+DELETE FROM "FileContentChunk";
+
+-- Clear the watcher's "already indexed, unchanged" memory so the startup
+-- reconcile treats every watched file as new. Without this the DELETE above
+-- leaves the corpus empty and the reconcile refuses to refill it.
+DELETE FROM "FileIndexStatus";

@@ -42,6 +42,22 @@ The contextual-header step (``format_chunk_with_header``) prepends the
 document / section path to each chunk *outside* the splitter, applied by
 ``brain_ingest``/``watcher``/``transcription_worker`` just before the
 embedder call, so this module stays purely about splitting.
+
+WARP-2191 closed the hole that arrangement left. The header is added AFTER
+the splitter has already spent the whole budget on body text, so it used to
+be pure overrun past the embedder's window — silently truncated, along with
+whatever body text it displaced. Now ``CHUNK_HEADER_BUDGET_TOKENS`` is
+withheld from the splitter's capacity (``_split_params``) and the header is
+bounded to that reservation (``_fit_header``), so body and header are
+budgeted against the same window and a chunk that fits at split time still
+fits once the header is on it.
+
+WARP-2196 made the embedder itself explicit. The tokenizer repo comes from
+``embedding_models``, not from prefixing the short model id, and
+``_build_splitter`` asserts the chunk budget fits the configured embedder's
+declared ``max_seq_length`` before it does anything else — the invariant that
+went unchecked while ``all-MiniLM-L6-v2`` (256-token window) was fed
+512-token chunks.
 """
 from __future__ import annotations
 
@@ -51,15 +67,38 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from anchor_schema import Anchor
-from config import CHUNK_OVERLAP_RATIO, CHUNK_SIZE_TOKENS, EMBEDDING_MODEL
+from config import (
+    CHUNK_HEADER_BUDGET_TOKENS,
+    CHUNK_OVERLAP_RATIO,
+    CHUNK_SIZE_TOKENS,
+    EMBEDDING_MODEL,
+)
+from embedding_models import (
+    ChunkBudgetError,
+    assert_chunk_budget_fits,
+    body_capacity,
+    tokenizer_repo,
+)
 from extractors.spans import Span
 
 logger = logging.getLogger(__name__)
 
-# Tokenizer ID — full HF repo path. The embedder model in config is the
-# short name (``all-MiniLM-L6-v2``); the tokenizer lives under the
-# canonical ``sentence-transformers/`` org on the Hub.
-_TOKENIZER_REPO = f"sentence-transformers/{EMBEDDING_MODEL}"
+
+def _tokenizer_repo() -> str:
+    """Fully-qualified Hub repo for the configured embedder's tokenizer.
+
+    WARP-2196: this used to be ``f"sentence-transformers/{EMBEDDING_MODEL}"``.
+    That prefix is correct for MiniLM and wrong for bge, which lives under
+    ``BAAI/`` — and the failure mode of a wrong org is a Hub 404 at chunk
+    time, not a compile error. The mapping is now data in
+    ``embedding_models``, and an unregistered id raises there rather than
+    resolving to a plausible-looking repo that does not exist.
+
+    Read through a function (not a module constant) so the model can be
+    swapped in tests without reimporting the module.
+    """
+    return tokenizer_repo(EMBEDDING_MODEL)
+
 
 # Module-level cached splitter. ``TextSplitter.from_huggingface_tokenizer``
 # does a model-config download on first call (~1 MB JSON, no model
@@ -70,36 +109,80 @@ _splitter = None  # type: ignore[var-annotated]
 _splitter_capacity: Optional[int] = None
 _splitter_overlap: Optional[int] = None
 
+# The measuring tokenizer is shared by the splitter (which sizes candidate
+# chunks with it) and ``format_chunk_with_header`` (which sizes the header
+# against its reserved allowance). Separate lock from ``_splitter_lock``:
+# ``_build_splitter`` runs while that one is held, and ``threading.Lock``
+# is not reentrant.
+_tokenizer_lock = threading.Lock()
+_measuring_tokenizer = None  # type: ignore[var-annotated]
+
+
+def _get_measuring_tokenizer():
+    """Return the cached HF tokenizer for the configured embedder.
+
+    Raises on Hub failure — callers decide whether that is fatal (the
+    splitter) or a degradation to be absorbed (header sizing).
+    """
+    global _measuring_tokenizer
+    with _tokenizer_lock:
+        if _measuring_tokenizer is None:
+            from tokenizers import Tokenizer  # noqa: PLC0415
+
+            tokenizer = Tokenizer.from_pretrained(_tokenizer_repo())
+
+            # WARP-2055 — the splitter measures a candidate chunk by asking
+            # this tokenizer how many tokens it holds, so the tokenizer MUST
+            # report a true count. `tokenizer.json` for all-MiniLM-L6-v2
+            # ships `truncation.max_length = 128`, which makes `encode()`
+            # return at most 128 ids for *any* input. The splitter therefore
+            # measured every candidate as <= 128 tokens, concluded it fit
+            # inside `capacity`, and never split: chunking silently became a
+            # no-op that emitted one chunk per Span regardless of length, and
+            # everything past the embedder's window in each Span was
+            # unreachable by search. Measured on the live corpus: a 462k-
+            # character spreadsheet produced exactly ONE chunk.
+            #
+            # bge-small-en-v1.5's `tokenizer.json` ships no truncation block
+            # at all (verified against the Hub artifact), so this is belt-and-
+            # braces for it — and stays because the next model may not be so
+            # well behaved.
+            #
+            # Disabling truncation here affects only the measuring tokenizer,
+            # not the embedder — the ai-gateway loads its own for the actual
+            # vectors.
+            tokenizer.no_truncation()
+            tokenizer.no_padding()
+            _measuring_tokenizer = tokenizer
+        return _measuring_tokenizer
+
 
 def _build_splitter(capacity: int, overlap: int):
     """Construct a ``TextSplitter`` keyed on the embedder tokenizer.
 
+    ``capacity`` is the BODY budget — ``CHUNK_SIZE_TOKENS`` minus the header
+    allowance — because the WARP-435 contextual header is prepended after
+    splitting and has to be paid for out of the same window.
+
     Kept separate so tests can monkeypatch the construction path
     without exercising the HF-Hub download.
     """
-    # Local imports keep module load cheap for callers that don't chunk
+    # WARP-2191 guard, enforced here rather than only in the test suite: a
+    # chunk budget wider than the embedder's window truncates every full-size
+    # chunk's vector, silently. Checked BEFORE the Hub call so a
+    # misconfiguration fails offline and instantly.
+    assert_chunk_budget_fits(
+        model_id=EMBEDDING_MODEL,
+        chunk_size=capacity + CHUNK_HEADER_BUDGET_TOKENS,
+        header_budget=CHUNK_HEADER_BUDGET_TOKENS,
+    )
+
+    # Local import keeps module load cheap for callers that don't chunk
     # (e.g. the brain-ingest worker imports chunker.py at startup but
     # only invokes chunking when an item actually lands).
     from semantic_text_splitter import TextSplitter  # noqa: PLC0415
-    from tokenizers import Tokenizer  # noqa: PLC0415
 
-    tokenizer = Tokenizer.from_pretrained(_TOKENIZER_REPO)
-
-    # WARP-2055 — the splitter measures a candidate chunk by asking this
-    # tokenizer how many tokens it holds, so the tokenizer MUST report a
-    # true count. `tokenizer.json` for all-MiniLM-L6-v2 ships
-    # `truncation.max_length = 128`, which makes `encode()` return at most
-    # 128 ids for *any* input. The splitter therefore measured every
-    # candidate as <= 128 tokens, concluded it fit inside `capacity`, and
-    # never split: chunking silently became a no-op that emitted one chunk
-    # per Span regardless of length, and everything past the embedder's
-    # window in each Span was unreachable by search. Measured on the live
-    # corpus: a 462k-character spreadsheet produced exactly ONE chunk.
-    #
-    # Disabling truncation here affects only the measuring tokenizer, not
-    # the embedder — the ai-gateway loads its own for the actual vectors.
-    tokenizer.no_truncation()
-    tokenizer.no_padding()
+    tokenizer = _get_measuring_tokenizer()
 
     return TextSplitter.from_huggingface_tokenizer(
         tokenizer, capacity=capacity, overlap=overlap
@@ -126,6 +209,37 @@ def _get_splitter(capacity: int, overlap: int):
         return _splitter
 
 
+def _split_params(
+    chunk_size: int, overlap_ratio: float, header_budget: Optional[int] = None
+) -> tuple[int, int]:
+    """Translate the per-chunk embedder budget into splitter arguments.
+
+    WARP-2191: ``chunk_size`` is the WHOLE budget for one chunk — body text
+    plus the contextual header. The splitter only ever sees body text, so it
+    gets the budget MINUS the header reservation. Before this, the header was
+    pure overrun: the splitter spent the full 512 and the header pushed the
+    result past the embedder's window, where it was silently truncated.
+
+    ``header_budget`` defaults to the configured reservation. It is a
+    parameter, not a constant read, because a caller that wants a specific
+    BODY capacity (tests that force aggressive splitting on short text) has to
+    be able to say ``header_budget=0`` and mean it. Clamping a large fixed
+    reservation down to fit a small ``chunk_size`` would be the same class of
+    silent adjustment this ticket exists to remove.
+
+    Overlap is a ratio of the BODY capacity, not of the full budget. Taking it
+    off the full budget could hand the splitter an overlap larger than the
+    capacity it was given.
+    """
+    reserved = CHUNK_HEADER_BUDGET_TOKENS if header_budget is None else header_budget
+    assert_chunk_budget_fits(
+        model_id=EMBEDDING_MODEL, chunk_size=chunk_size, header_budget=reserved
+    )
+    capacity = body_capacity(chunk_size, reserved)
+    overlap = max(0, int(capacity * overlap_ratio))
+    return capacity, overlap
+
+
 @dataclass(frozen=True)
 class Chunk:
     text: str
@@ -137,6 +251,7 @@ def chunk_text(
     text: str,
     chunk_size: int = CHUNK_SIZE_TOKENS,
     overlap_ratio: float = CHUNK_OVERLAP_RATIO,
+    header_budget: Optional[int] = None,
 ) -> list[str]:
     """Split ``text`` into sentence-aware chunks sized to the embedder.
 
@@ -159,18 +274,26 @@ def chunk_text(
     if not text or not text.strip():
         return []
 
-    overlap_tokens = max(0, int(chunk_size * overlap_ratio))
+    capacity, overlap_tokens = _split_params(
+        chunk_size, overlap_ratio, header_budget
+    )
 
     try:
-        splitter = _get_splitter(chunk_size, overlap_tokens)
+        splitter = _get_splitter(capacity, overlap_tokens)
         chunks = splitter.chunks(text)
+    except ChunkBudgetError:
+        # NOT a degradation case. The chunk budget overrunning the embedder's
+        # window is a misconfiguration, and falling back to word-split would
+        # paper over it with vectors that cover part of each chunk — exactly
+        # the silent failure WARP-2196 exists to end. Fail the row loudly.
+        raise
     except Exception as e:  # pragma: no cover - network/IO degradation path
         logger.warning(
             "chunker: semantic-text-splitter unavailable (%s); "
             "falling back to word-split. Quality may regress.",
             e,
         )
-        return _fallback_word_split(text, chunk_size, overlap_ratio)
+        return _fallback_word_split(text, capacity, overlap_ratio)
 
     # Defensive strip — semantic-text-splitter trims whitespace already
     # but we drop any empties just in case (e.g. all-whitespace tail).
@@ -181,6 +304,7 @@ def chunk_spans(
     spans: list[Span],
     chunk_size: int = CHUNK_SIZE_TOKENS,
     overlap_ratio: float = CHUNK_OVERLAP_RATIO,
+    header_budget: Optional[int] = None,
 ) -> list[Chunk]:
     """Chunk each span independently; chunks inherit their span's anchor.
 
@@ -194,7 +318,9 @@ def chunk_spans(
 
     out: list[Chunk] = []
     for span in spans:
-        for chunk_str in chunk_text(span.text, chunk_size, overlap_ratio):
+        for chunk_str in chunk_text(
+            span.text, chunk_size, overlap_ratio, header_budget
+        ):
             out.append(
                 Chunk(
                     text=chunk_str,
@@ -209,6 +335,7 @@ def chunk_text_with_offsets(
     text: str,
     chunk_size: int = CHUNK_SIZE_TOKENS,
     overlap_ratio: float = CHUNK_OVERLAP_RATIO,
+    header_budget: Optional[int] = None,
 ) -> list[tuple[int, str]]:
     """Sentence-aware chunker that also returns each chunk's start offset.
 
@@ -227,19 +354,23 @@ def chunk_text_with_offsets(
     if not text or not text.strip():
         return []
 
-    overlap_tokens = max(0, int(chunk_size * overlap_ratio))
+    capacity, overlap_tokens = _split_params(
+        chunk_size, overlap_ratio, header_budget
+    )
 
     try:
-        splitter = _get_splitter(chunk_size, overlap_tokens)
+        splitter = _get_splitter(capacity, overlap_tokens)
         # ``chunk_indices`` returns (byte_offset, chunk_str) pairs.
         pairs = list(splitter.chunk_indices(text))
+    except ChunkBudgetError:
+        raise  # see chunk_text — misconfiguration, not degradation.
     except Exception as e:  # pragma: no cover - degradation path
         logger.warning(
             "chunker: chunk_indices unavailable (%s); falling back to "
             "scan-reconstruction. Quality may regress.",
             e,
         )
-        chunks = _fallback_word_split(text, chunk_size, overlap_ratio)
+        chunks = _fallback_word_split(text, capacity, overlap_ratio)
         # Reconstruct offsets by sequential scan — accurate when chunks
         # are contiguous (legacy chunker emits non-overlapping windows
         # in word terms but our reconstruction is character-based).
@@ -330,8 +461,87 @@ def _sanitize_header_token(s: str, max_len: int = _HEADER_FILENAME_MAX) -> str:
     return cleaned
 
 
+def _compose_header(safe_filename: str, safe_entries: list[str]) -> str:
+    """Assemble the header from already-sanitized tokens."""
+    if safe_entries:
+        return f"Document: {safe_filename} / Section: {' > '.join(safe_entries)}"
+    return f"Document: {safe_filename}"
+
+
+def _fit_header(safe_filename: str, safe_entries: list[str], budget: int) -> str:
+    """Return the richest header that fits ``budget`` tokens.
+
+    WARP-2191. The sanitizer's per-token caps (256 chars for the filename, 80
+    per section entry) bound each PIECE but not the whole: section_path depth
+    is unbounded, and character caps are not token caps. Measured against the
+    bge tokenizer, a header legal under those caps — a 300-character CJK
+    filename plus three 100-character CJK entries — is 505 tokens, which alone
+    would consume a 512-token window and leave zero room for body text.
+
+    Shedding order is deliberate: breadcrumb depth goes first, from the tail,
+    because the deepest heading is the most disposable context; the document
+    name is what disambiguates the same sentence across two files and is only
+    trimmed when it alone overruns.
+
+    Truncation is exact — no ellipsis — matching ``_sanitize_header_token``'s
+    existing convention.
+    """
+    try:
+        tokenizer = _get_measuring_tokenizer()
+    except Exception as e:  # pragma: no cover - Hub/IO degradation path
+        logger.warning(
+            "chunker: header tokenizer unavailable (%s); bounding the "
+            "contextual header by characters instead.",
+            e,
+        )
+        tokenizer = None
+
+    if tokenizer is None:
+        # WordPiece never emits more than one token per character, so a
+        # character cap at the token budget can only under-spend it. The
+        # degraded path must not be the one that overruns.
+        entries = list(safe_entries)
+        header = _compose_header(safe_filename, entries)
+        while entries and len(header) > budget:
+            entries.pop()
+            header = _compose_header(safe_filename, entries)
+        return header[:budget]
+
+    def measure(s: str) -> int:
+        return len(tokenizer.encode(s).ids)
+
+    entries = list(safe_entries)
+    header = _compose_header(safe_filename, entries)
+    if measure(header) <= budget:
+        return header
+
+    while entries:
+        entries.pop()
+        header = _compose_header(safe_filename, entries)
+        if measure(header) <= budget:
+            return header
+
+    # The filename alone still overruns. Binary-search the longest prefix that
+    # fits. Only candidates that actually measured within budget are kept, so
+    # a non-monotonic tokenizer can cost richness but never correctness.
+    best: Optional[str] = None
+    lo, hi = 0, len(safe_filename)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = _compose_header(safe_filename[:mid].strip() or "(empty)", [])
+        if measure(candidate) <= budget:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best if best is not None else "Document:"
+
+
 def format_chunk_with_header(
-    chunk: str, filename: str, section_path: list[str]
+    chunk: str,
+    filename: str,
+    section_path: list[str],
+    budget_tokens: Optional[int] = None,
 ) -> str:
     """Prepend the WARP-435 contextual header to a chunk.
 
@@ -349,16 +559,19 @@ def format_chunk_with_header(
     every chunk carries at least the filename — that alone is a useful
     signal for the embedder when the same body sentence appears in
     multiple documents (cross-doc disambiguation).
+
+    WARP-2191: the header is then bounded to ``CHUNK_HEADER_BUDGET_TOKENS``,
+    the slice of the embedder window ``_split_params`` withheld from the
+    splitter for exactly this purpose. Header and body are budgeted against
+    the same window, so a chunk that fit at split time still fits once the
+    header is on it. ``budget_tokens`` overrides the reservation for tests.
     """
+    budget = CHUNK_HEADER_BUDGET_TOKENS if budget_tokens is None else budget_tokens
     safe_filename = _sanitize_header_token(filename, _HEADER_FILENAME_MAX)
-    if section_path:
-        safe_entries = [
-            _sanitize_header_token(s, _HEADER_SECTION_MAX) for s in section_path
-        ]
-        section_str = " > ".join(safe_entries)
-        header = f"Document: {safe_filename} / Section: {section_str}"
-    else:
-        header = f"Document: {safe_filename}"
+    safe_entries = [
+        _sanitize_header_token(s, _HEADER_SECTION_MAX) for s in section_path
+    ]
+    header = _fit_header(safe_filename, safe_entries, budget)
     return f"{header}\n\n{chunk}"
 
 

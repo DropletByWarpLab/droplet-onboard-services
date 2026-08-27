@@ -70,7 +70,7 @@ uvicorn>=0.52.1
 # (``TextSplitter.from_huggingface_tokenizer(tokenizer, capacity, overlap)``)
 # stabilised at 0.10 and we don't want a silent semantic-major bump.
 # ``tokenizers`` is its sibling — same HF Rust binding that loads the
-# all-MiniLM-L6-v2 tokenizer (the embedder's tokenizer) for capacity
+# bge-small-en-v1.5 tokenizer (the embedder's tokenizer) for capacity
 # accounting.
 semantic-text-splitter>=0.32.0,<0.33
 tokenizers>=0.23.1,<1.0
