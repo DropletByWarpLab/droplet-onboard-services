@@ -229,6 +229,12 @@ prepare_and_build() {
     oled-display
     # full profile (email ingestion — same drift fix as mcp-server above)
     email-indexer
+    # WARP-2211: the document renderer behind POST /api/files/render. NOT
+    # profile-gated — the three writers are pure Python (~150 MB), unlike the
+    # 2 GB Collabora `docs` engine — so it belongs in the unconditional list
+    # and must be pre-built here. Built lazily at first `up`, the first
+    # "make me a report" of a fresh box would stall behind an image build.
+    doc-render
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io

@@ -162,9 +162,9 @@ jobs:
           BUILDABLE: ${{ steps.compose.outputs.buildable }}
           KNOWN: >-
             ["ai-gateway","camera-discovery","device-identity-svc",
-            "email-indexer","file-indexer","gateway","matter-controller",
-            "mcp-server","orchestrator","rag-eval","routing","switch",
-            "web-dashboard"]
+            "doc-render","email-indexer","file-indexer","gateway",
+            "matter-controller","mcp-server","orchestrator","rag-eval",
+            "routing","switch","web-dashboard"]
         run: |
           set -eu
           if [ "$(jq -cS . <<<"$BUILDABLE")" != "$(jq -cS . <<<"$KNOWN")" ]; then
@@ -260,6 +260,9 @@ jobs:
               - *py-shared
               - "services/device-identity-svc/**"
               - "proto/**"
+            doc-render:
+              - *py-shared
+              - "services/doc-render/**"
             email-indexer:
               - *py-shared
               - "services/email-indexer/**"
