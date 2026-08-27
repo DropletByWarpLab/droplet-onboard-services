@@ -1436,6 +1436,23 @@ EOF
   # itself scan (iw scan -> Not supported -95); the graceful "scan unavailable"
   # UX is a separate dashboard ticket. This only wires the config so the radio
   # name is correct rather than the absent wlan0.
+  #
+  # WARP-2054 CONSEQUENCE, stated rather than left to be discovered: with
+  # DROPLET_AP_ONBOARD=0 (the default this ticket introduces) the onboard radio
+  # is soft-blocked and never moved into the openwrt netns, so the device named
+  # here does not exist in the container and the dashboard Wi-Fi scan/clients
+  # panel reads EMPTY on a default box. That is the designed state, not a fault:
+  # Wi-Fi is served by the external AP, and the routing SDK already treats an
+  # absent radio as data rather than an error (services/routing/tests/
+  # test_radio_detail.py). The panel is empty for the same reason a healthy box
+  # reports zero radios.
+  #
+  # The value is deliberately still written, and NOT blanked. Blanking is worse:
+  # _default_wifi_scan_device() in services/routing/droplet_openwrt_sdk.py
+  # coalesces unset-or-empty to the hardcoded "wlan0" last resort, so an empty
+  # value resolves to a name that is wrong on every shape -- the exact bug the
+  # paragraph above records fixing. Naming the real radio keeps the config
+  # honest for the DROPLET_AP_ONBOARD=1 dev path, where the device does appear.
   upsert_env DROPLET_WIFI_SCAN_DEVICE "${DROPLET_AP_IFACE:-wlp14s0}"
   # device-bridge pairing-QR source: the single-box AP is a host hostapd, not
   # a UCI router, so the bridge must read creds in hostapd mode (it defaults to
