@@ -39,11 +39,27 @@
  * The invariant that IS satisfiable: **no cursor may over-claim relative to
  * delivered content.** It is discharged three ways, in preference order:
  *
- *   1. RECOMPUTE the cursor from what was actually delivered (exact).
+ *   1. RECOMPUTE the cursor from what was actually delivered. Admissible only
+ *      under the conditions spelled out at the cursor pass, and only ONE of
+ *      the two branches is exact: the numeric branch VERIFIES
+ *      `cursor - preLength` against a base the producer itself published, so
+ *      the rewrite changes only the term that changed. The null branch is an
+ *      INFERENCE — a null cursor publishes no number to check — admitted only
+ *      when a published base and a published total corroborate it, and only
+ *      when exactly one base does. Do not read "recompute" as "exact"; read it
+ *      as "checked against the producer's own numbers, or not done at all".
  *   2. DELETE the cursor — and the whole accounting group around it, because a
  *      survivor can reconstruct the deleted cursor and the reconstruction is
  *      wrong (chunk indices are not dense; see `read-document-text.ts`).
  *   3. REFUSE, carrying zero bytes. Last resort, and logged.
+ *
+ * What Phase 1 does NOT deliver: `read_document_text` at its shipped
+ * `DEFAULT_MAX_CHARS = 12000` is now HONEST but still not RESUMABLE. The model
+ * receives ~7,300 characters and loses `start_chunk`/`next_chunk`/
+ * `chunks_returned`/`total_chunks` together, so resuming means re-calling from
+ * chunk 0 with a smaller `max_chars` rather than continuing. Only `read_file`
+ * pages to exhaustion through this step. Closing that gap is the Phase 2
+ * budget rail (or a `DEFAULT_MAX_CHARS` change), not this module.
  *
  * This is NOT the rejected "keep the producer's cursor beside a shortened
  * body" variant. Here the cursor is either arithmetically correct or absent.
@@ -166,6 +182,77 @@ export const PAGING_ACCOUNTING_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Keys whose value may serve as the BASE of a cursor - the "you asked to start
+ * here" number a producer publishes alongside its continuation token.
+ *
+ * A recompute rewrites `cursor := base + delivered`, so the base is the one
+ * term we are NOT allowed to guess. Requiring it to come from a paging-NAMED
+ * sibling is what stops the module inferring a base out of whatever arithmetic
+ * happens to close. A payload carrying two unrelated integers,
+ *
+ *   { content: "A"x9000, offset: 0, next_offset: null, a: 3000, b: 12000 }
+ *
+ * has `3000 + 9000 === 12000`, so an "any numeric sibling may be the base" rule
+ * infers base 3000 and hands the model a cursor 3,000 characters PAST the end
+ * of a body it just shortened - exactly the class of lie this module exists to
+ * remove. EXACT match, and a strict subset of PAGING_ACCOUNTING_KEYS.
+ *
+ * A bare literal 0 is NOT an allowed base: the producer has to have PUBLISHED
+ * the start it is counting from. Both live paging tools do (`read_file` always
+ * emits `offset`, `read_document_text` always emits `start_chunk`).
+ */
+export const CURSOR_BASE_KEYS: ReadonlySet<string> = new Set([
+  "offset",
+  "start_chunk",
+  "startChunk",
+]);
+
+/**
+ * Keys whose value may corroborate "the collection ends here" when a cursor is
+ * `null`. A null cursor publishes no number, so the base cannot be checked
+ * against it; the only remaining evidence is that `base + preLength` lands
+ * exactly on a total the producer itself published.
+ *
+ * `bytes_total` is deliberately ABSENT. `read_file` reports it beside
+ * `chars_total`, and on any non-ASCII file the two differ - a BYTE total
+ * cannot corroborate a CHARACTER cursor, and letting it try would make the
+ * inference silently wrong precisely on multi-byte documents.
+ */
+export const COLLECTION_TOTAL_KEYS: ReadonlySet<string> = new Set([
+  "chars_total",
+  "charsTotal",
+  "total_chunks",
+  "totalChunks",
+  "total",
+  "total_count",
+  "totalCount",
+  "count",
+  "length",
+]);
+
+/**
+ * A sibling body within this factor of the reduced one makes the level
+ * AMBIGUOUS, and an ambiguous cursor is deleted rather than recomputed.
+ *
+ * Shape alone cannot say WHICH body a cursor pages over, and the arithmetic
+ * can close over the wrong one exactly:
+ *
+ *   { content: "C"x3000, sidecar: "S"x9000, offset: 0, next_offset: 9000 }
+ *
+ * `next_offset - offset === sidecar.length`, so shortening `sidecar` "closes"
+ * and the model is told to resume at 4365 - skipping characters 3000-4364 of
+ * `content`, which it received IN FULL. Deleting on ambiguity is the fail-safe
+ * direction, and this factor only decides WHEN to fail safe.
+ *
+ * Calibrated against the one live shape that must keep recomputing: `read_file`
+ * pairs a `path` of a few dozen characters with a `content` of 10,000 - a ratio
+ * above 50 - so a competing body would have to exceed 1,250 characters before
+ * it disqualified a real page. The adversarial pair above sits at a ratio of 3.
+ */
+const BODY_AMBIGUITY_RATIO = 8;
+
+
+/**
  * Booleans that become a completeness CLAIM about a body we just cut.
  * `summarize_file` emits `truncated` to describe the input its summarizer saw;
  * beside a shortened summary the model reads it as "this summary is complete".
@@ -194,14 +281,40 @@ export interface BoundingRefusal {
  * terminate and the marker provably small (B2).
  * ------------------------------------------------------------------ */
 
-/** Hard iteration bound on the reduction loop. */
+/**
+ * Hard iteration bound on the reduction loop, and THE CONSTANT THAT BINDS.
+ *
+ * At most one reduction is applied per iteration, so this is also the maximum
+ * number of reductions a single result can receive: a payload needing a 17th
+ * is refused. Stated because the previous pairing lied - a 32-probe budget at
+ * 4 probes per iteration capped the loop at EIGHT applied reductions, so the
+ * iteration bound never bound, and a payload of 12 comparable large siblings
+ * refused while 11 succeeded, with nothing naming 8 as the real limit.
+ *
+ * Refusing carries ZERO characters, and this module's own honesty argument
+ * rejects refusal wherever content can be delivered instead - so the probe
+ * budget below is now sized so that this constant, and only this constant,
+ * decides where that cliff sits. No live registry tool emits 17 comparable
+ * large siblings; the bound exists to keep the work bounded, not to filter.
+ */
 const MAX_REDUCTION_ITERATIONS = 16;
 /** Sites fully evaluated per iteration. Each costs a short binary search. */
 const MAX_PROBES_PER_ITERATION = 4;
-/** Sites fully evaluated across the whole call. Bounds total work. */
-const MAX_PROBES_TOTAL = 32;
-/** Below this a string is not worth a `reduced[]` entry — reducing it grows. */
-const MIN_REDUCIBLE_STRING = 40;
+/**
+ * Sites fully evaluated across the whole call. Deliberately
+ * `MAX_REDUCTION_ITERATIONS * MAX_PROBES_PER_ITERATION`, so every iteration the
+ * loop is allowed to run can actually spend a full probe budget and this
+ * never becomes the binding constant behind the other one's back.
+ */
+const MAX_PROBES_TOTAL = MAX_REDUCTION_ITERATIONS * MAX_PROBES_PER_ITERATION;
+/**
+ * Below this a string is not worth a `reduced[]` entry — cutting it saves less
+ * than the ~45-55 characters the entry costs, so the reduction net-GROWS the
+ * payload. A work bound rather than an output guard (the strict-progress rule
+ * would reject such a candidate anyway), and it doubles as the threshold for
+ * "is this sibling big enough to be a competing BODY" in the cursor pass.
+ */
+export const MIN_REDUCIBLE_STRING = 40;
 /** Deeper than this we stop looking for sites (and stop copying). */
 const MAX_WALK_DEPTH = 12;
 /** Marker size bounds. */
@@ -263,6 +376,14 @@ function safeToolName(toolName: string): string {
  * — `fits(lo + 1)` holds and the search cannot stop there. The
  * "escapes a lone surrogate" test pins the first fact; if an engine ever stops
  * escaping, this guard becomes load-bearing again with no code change.
+ *
+ * `largestFitting` has a SECOND exit, `if (fits(max)) return max`, which does
+ * not consult `max + 1` — so the argument above does not cover it, and it
+ * needs its own. `max` is `site.len - 1`: a one-character cut. Its emitted
+ * length is `current - 1 + markerEntry`, the entry costs at least ~45
+ * characters, and `current` is over the cap by definition when a reduction is
+ * being chosen — so `fits(max)` is false for a string site and the exit is
+ * unreachable for exactly the case that matters here.
  */
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
@@ -445,10 +566,22 @@ function applyCursorPass(tree: unknown, reductions: readonly Reduction[]): Curso
     let obj: Record<string, unknown> = node;
     for (const k of Object.keys(node)) {
       const next = walk(node[k], [...path, k], depth + 1);
-      if (next !== node[k]) {
-        if (obj === node) obj = { ...node };
-        obj[k] = next;
+      if (next === node[k]) continue;
+      if (obj === node) obj = { ...node };
+      // A sub-object the sweep emptied is worse than no key at all: it reads
+      // as "this section exists and holds nothing", which is a claim, where
+      // the truth is "this section was removed". Drop the key with it.
+      if (
+        isPlainObject(next) &&
+        Object.keys(next).length === 0 &&
+        isPlainObject(node[k]) &&
+        Object.keys(node[k] as Record<string, unknown>).length > 0
+      ) {
+        delete obj[k];
+        removed.add(k);
+        continue;
       }
+      obj[k] = next;
     }
 
     // --- decisions, all read from the SAME pre-write snapshot ---------
@@ -456,47 +589,93 @@ function applyCursorPass(tree: unknown, reductions: readonly Reduction[]): Curso
     const levelReductions = reductions.filter(
       (r) => r.path.length === path.length + 1 && pathKey(r.path.slice(0, -1)) === pathKey(path),
     );
+    // Segment-wise, never a string prefix: `pathKey` would make `.groupsExtra`
+    // look like it sits under `.groups`.
+    const reducedAtOrUnder = reductions.some(
+      (r) => r.path.length >= path.length && path.every((seg, i) => r.path[i] === seg),
+    );
     const keys = Object.keys(obj);
-    const numericValues = new Set<number>();
-    for (const k of keys) {
-      const v = obj[k];
-      if (isFiniteNumber(v)) numericValues.add(v);
-    }
-
     const toDelete = new Set<string>();
     const toSet = new Map<string, number>();
 
-    // (1) Cursors. Recompute is ROOT-LEVEL and needs exactly one reduction at
-    //     this level; everything else is deleted. Deletion is depth-agnostic.
+    // (1) Cursors. RECOMPUTE is the preferred discharge, but only under the
+    //     conditions below; DELETION is the fallback and is depth-agnostic.
+    //
+    //     Say plainly what "sound" means here, because this is the one module
+    //     whose whole purpose is not lying to the model. The numeric branch is
+    //     a VERIFIED rewrite: the producer published both the cursor and the
+    //     base, `cursor - preLength === base` is checked against its own
+    //     numbers, and the only term that changes is the one that actually
+    //     changed. The null branch is an INFERENCE, not a verification - a null
+    //     cursor publishes no number to check against - so it is admitted only
+    //     when a published base AND a published total corroborate it, and only
+    //     when exactly one base does. Anything failing either test is deleted,
+    //     which can lose information but can never over-claim.
     const cursorKeysHere = keys.filter((k) => CURSOR_KEYS.has(k));
-    for (const k of cursorKeysHere) {
-      const v = obj[k];
-      if (isRoot && levelReductions.length === 1) {
-        const r = levelReductions[0];
-        if (isFiniteNumber(v)) {
-          // The identity `cursor = base + deliveredLength` held before the
-          // reduction, and delivered length is the only term that changed.
-          const base = v - r.from;
-          if (base === 0 || numericValues.has(base)) {
-            toSet.set(k, base + r.to);
-            continue;
-          }
-        } else if (v === null) {
-          // `null` means "exhausted" — the strongest over-claim there is once
-          // the body is cut. Its implied numeric value is `base + from`, and
-          // the base is identifiable when `base + from` equals a sibling total
-          // (the file/collection length). Unique or nothing.
-          const candidates = new Set<number>();
-          for (const b of [0, ...numericValues]) {
-            if (numericValues.has(b + r.from)) candidates.add(b);
-          }
-          if (candidates.size === 1) {
-            toSet.set(k, [...candidates][0] + r.to);
-            continue;
+    if (cursorKeysHere.length > 0) {
+      // Preconditions shared by both branches, evaluated once.
+      //
+      // Exactly ONE reduction at this level. Two make "which body did this
+      // cursor describe" unanswerable, and the whole rewrite turns on knowing.
+      //
+      // Both kinds qualify. An earlier draft restricted this to STRING
+      // reductions on the theory that only character offsets can close, but
+      // that is wrong in the useful direction: for an array-paged collection
+      // `cursor = base + deliveredRows` is exactly the producer's own
+      // semantics, and `r.from`/`r.to` are already in the reduced
+      // collection's own units, so the arithmetic check is unit-consistent
+      // either way. The genuinely un-closable case - `read_document_text`
+      // pairing a CHARACTER body with a sparse CHUNK cursor - is rejected by
+      // the arithmetic itself, not by a blanket kind test.
+      const r = isRoot && levelReductions.length === 1 ? levelReductions[0] : null;
+
+      // ... and the level must hold exactly ONE body big enough to be the
+      // thing the cursor pages over. See BODY_AMBIGUITY_RATIO: a comparable
+      // second body lets the arithmetic close over the WRONG one, exactly.
+      const reducedKey = r ? String(r.path[r.path.length - 1]) : null;
+      const unambiguousBody =
+        r !== null &&
+        keys.every((k) => {
+          if (k === reducedKey) return true;
+          const v = obj[k];
+          const isBody =
+            (typeof v === "string" && v.length >= MIN_REDUCIBLE_STRING) ||
+            (Array.isArray(v) && v.length >= 1);
+          if (!isBody) return true;
+          return estimateSize(v) * BODY_AMBIGUITY_RATIO < r.from;
+        });
+
+      const allowedBases = new Set<number>();
+      const totalValues = new Set<number>();
+      for (const k of keys) {
+        const v = obj[k];
+        if (!isFiniteNumber(v)) continue;
+        if (CURSOR_BASE_KEYS.has(k)) allowedBases.add(v);
+        if (COLLECTION_TOTAL_KEYS.has(k)) totalValues.add(v);
+      }
+
+      for (const k of cursorKeysHere) {
+        const v = obj[k];
+        if (r !== null && unambiguousBody) {
+          if (isFiniteNumber(v)) {
+            const base = v - r.from;
+            if (allowedBases.has(base)) {
+              toSet.set(k, base + r.to);
+              continue;
+            }
+          } else if (v === null) {
+            const candidates = new Set<number>();
+            for (const b of allowedBases) {
+              if (totalValues.has(b + r.from)) candidates.add(b);
+            }
+            if (candidates.size === 1) {
+              toSet.set(k, [...candidates][0] + r.to);
+              continue;
+            }
           }
         }
+        toDelete.add(k);
       }
-      toDelete.add(k);
     }
 
     // (2) B3 — delivered-count reconciliation. `count` is NOT "how many the
@@ -518,7 +697,13 @@ function applyCursorPass(tree: unknown, reductions: readonly Reduction[]): Curso
 
     // (3) B4 — the accounting group. A survivor reconstructs the cursor, and
     //     the reconstruction is wrong.
-    if (cursorKeysHere.some((k) => toDelete.has(k))) {
+    //
+    //     Gated on a reduction AT OR UNDER this level. Cursor deletion is
+    //     depth-agnostic, but the accounting group around a cursor is not:
+    //     without this gate, a `{ pagination: { nextCursor, total, limit,
+    //     page } }` sub-object that nothing touched lost three STILL-TRUE
+    //     numbers because a cursor beside them was swept.
+    if (reducedAtOrUnder && cursorKeysHere.some((k) => toDelete.has(k))) {
       for (const k of keys) {
         if (PAGING_ACCOUNTING_KEYS.has(k) || CURSOR_KEYS.has(k)) {
           toSet.delete(k);
@@ -527,8 +712,13 @@ function applyCursorPass(tree: unknown, reductions: readonly Reduction[]): Curso
       }
     }
 
-    // (4) Completeness flags cannot outlive the body they describe.
-    if (levelReductions.length > 0 || cursorKeysHere.some((k) => toDelete.has(k))) {
+    // (4) Completeness flags cannot outlive the body they describe — same
+    //     gate, for the same reason: `complete: true` on an untouched
+    //     sub-object is still true.
+    if (
+      reducedAtOrUnder &&
+      (levelReductions.length > 0 || cursorKeysHere.some((k) => toDelete.has(k)))
+    ) {
       for (const k of keys) {
         if (COMPLETENESS_KEYS.has(k) && typeof obj[k] === "boolean") toDelete.add(k);
       }

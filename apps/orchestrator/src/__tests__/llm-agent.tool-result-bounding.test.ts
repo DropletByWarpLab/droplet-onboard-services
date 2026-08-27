@@ -613,3 +613,44 @@ describe("WARP-2203 — refusal is a LAST resort, and it is logged", () => {
     expect(logged.filter((l) => l.msg === "agent_tool_result_refused")).toHaveLength(0);
   });
 });
+
+describe("WARP-2203 — the recompute cannot invent a base (QA counterexamples)", () => {
+  it("deletes rather than infer a base from integers that merely add up", async () => {
+    // Reproduced on the orchestrator path because that is where the lie would
+    // be told. Before the published-base rule this emitted
+    // `next_offset: 10379` beside 7,379 delivered characters — 3,000 past the
+    // end of the body the model was handed.
+    const wire = JSON.stringify({
+      path: "/a.md",
+      content: "A".repeat(9000),
+      offset: 0,
+      next_offset: null,
+      a: 3000,
+      b: 12000,
+    });
+    const out = await boundedToolMessage("read_file", wire);
+    const parsed = parses(out) as Record<string, unknown>;
+    expect(parsed).not.toHaveProperty("next_offset");
+    expect(out).not.toContain("10379");
+    expect(out.length).toBeLessThanOrEqual(CAP);
+  });
+
+  it("deletes rather than recompute when a second body could own the cursor", async () => {
+    // `next_offset - offset === sidecar.length`, so the arithmetic closes over
+    // the WRONG body. `content` was delivered in full; resuming at 4365 would
+    // have skipped characters 3000-4364 of it.
+    const wire = JSON.stringify({
+      path: "/a.md",
+      content: "C".repeat(3000),
+      sidecar: "S".repeat(9000),
+      offset: 0,
+      next_offset: 9000,
+      chars_total: 40000,
+    });
+    const out = await boundedToolMessage("read_file", wire);
+    const parsed = parses(out) as Record<string, unknown>;
+    expect(parsed).not.toHaveProperty("next_offset");
+    expect(parsed.content).toBe("C".repeat(3000));
+    expect(out).not.toContain("4365");
+  });
+});

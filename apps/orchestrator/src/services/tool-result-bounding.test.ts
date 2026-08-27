@@ -16,6 +16,9 @@ import {
   CONTROL_ENVELOPE_CAP_CHARS,
   TRUNCATION_MARKER_KEY,
   CURSOR_KEYS,
+  CURSOR_BASE_KEYS,
+  COLLECTION_TOTAL_KEYS,
+  MIN_REDUCIBLE_STRING,
   PAGING_ACCOUNTING_KEYS,
   COMPLETENESS_KEYS,
   type BoundingRefusal,
@@ -295,5 +298,322 @@ describe("control envelopes ride a static rail, not the reducer", () => {
     expect(boundControlEnvelopeForModel("y".repeat(CONTROL_ENVELOPE_CAP_CHARS + 500)).length).toBe(
       CONTROL_ENVELOPE_CAP_CHARS,
     );
+  });
+});
+
+function marker(wire: string, tool = "read_file"): Record<string, unknown> {
+  const parsed = JSON.parse(boundToolResultForModel(wire, tool)) as Record<string, unknown>;
+  return parsed[TRUNCATION_MARKER_KEY] as Record<string, unknown>;
+}
+
+function bounded(wire: string, tool = "read_file"): Record<string, unknown> {
+  return JSON.parse(boundToolResultForModel(wire, tool)) as Record<string, unknown>;
+}
+
+describe("a cursor is recomputed only from numbers the PRODUCER published", () => {
+  it("does not infer a base out of two unrelated integers that happen to add up", () => {
+    // The over-claim this rule exists to stop, verbatim. `3000 + 9000 === 12000`,
+    // so an "any numeric sibling may be the base" rule infers base 3000 and
+    // emits `next_offset: 10379` beside 7379 delivered characters — a cursor
+    // 3,000 characters past the end of a body the model just received in
+    // shortened form. Neither `a` nor `b` is paging-named, so there is nothing
+    // to corroborate a base and the cursor has to go.
+    const out = bounded(
+      JSON.stringify({
+        path: "/a.md",
+        content: "A".repeat(9000),
+        offset: 0,
+        next_offset: null,
+        a: 3000,
+        b: 12000,
+      }),
+    );
+    expect(out).not.toHaveProperty("next_offset");
+    expect(JSON.stringify(out)).not.toContain("10379");
+  });
+
+  it("refuses to recompute when a SECOND comparable body could own the cursor", () => {
+    // `next_offset - offset === sidecar.length`, so the arithmetic closes over
+    // `sidecar` exactly — while the cursor actually describes `content`, which
+    // the model received IN FULL. Recomputing here told it to resume at 4365,
+    // silently skipping characters 3000-4364.
+    const out = bounded(
+      JSON.stringify({
+        path: "/a.md",
+        content: "C".repeat(3000),
+        sidecar: "S".repeat(9000),
+        offset: 0,
+        next_offset: 9000,
+        chars_total: 40000,
+      }),
+    );
+    expect(out).not.toHaveProperty("next_offset");
+    expect(JSON.stringify(out)).not.toContain("4365");
+  });
+
+  it("requires the base to be PUBLISHED, not assumed to be zero", () => {
+    // Page-one `read_file` arithmetic with no `offset` field: the producer
+    // never said what this cursor counts from, so we do not get to decide.
+    const out = bounded(
+      JSON.stringify({ path: "/a.md", content: "A".repeat(10000), next_offset: 10000 }),
+    );
+    expect(out).not.toHaveProperty("next_offset");
+  });
+
+  it("recomputes when the base IS published", () => {
+    const out = bounded(
+      JSON.stringify({
+        path: "/a.md",
+        content: "A".repeat(10000),
+        offset: 0,
+        next_offset: 10000,
+        chars_total: 90000,
+      }),
+    );
+    expect(out.next_offset).toBe((out.content as string).length);
+  });
+
+  it("will not let a BYTE total corroborate a CHARACTER cursor", () => {
+    // `read_file` reports `bytes_total` beside `chars_total`, and on any
+    // non-ASCII file the two differ. Letting bytes corroborate would make the
+    // null-cursor inference silently wrong exactly on multi-byte documents —
+    // so it is excluded even here, where it would have "worked" because the
+    // body happens to be ASCII.
+    expect(COLLECTION_TOTAL_KEYS.has("bytes_total")).toBe(false);
+    const out = bounded(
+      JSON.stringify({
+        path: "/a.md",
+        content: "A".repeat(9000),
+        offset: 0,
+        next_offset: null,
+        bytes_total: 9000,
+      }),
+    );
+    expect(out).not.toHaveProperty("next_offset");
+  });
+
+  it("keeps CURSOR_BASE_KEYS a strict subset of the accounting group", () => {
+    // A base key IS paging accounting; if one were not, B4 would leave it
+    // behind after deleting the cursor it belongs to.
+    for (const k of CURSOR_BASE_KEYS) expect(PAGING_ACCOUNTING_KEYS.has(k)).toBe(true);
+    expect(CURSOR_BASE_KEYS.size).toBeLessThan(PAGING_ACCOUNTING_KEYS.size);
+  });
+});
+
+describe("the refusal cliff is where MAX_REDUCTION_ITERATIONS puts it", () => {
+  const siblings = (n: number): string => {
+    const obj: Record<string, string> = {};
+    for (let i = 0; i < n; i++) obj["k" + i] = String.fromCharCode(97 + i).repeat(2000);
+    return JSON.stringify(obj);
+  };
+
+  it("delivers content well past the old eight-reduction cap", () => {
+    // The probe budget used to cap the loop at EIGHT applied reductions while
+    // MAX_REDUCTION_ITERATIONS advertised sixteen, so twelve comparable
+    // siblings refused — zero characters — and eleven succeeded, with nothing
+    // in the source naming eight as the real limit.
+    for (const n of [9, 12, 16, 19]) {
+      expect(marker(siblings(n), "t").refused).toBeUndefined();
+    }
+  });
+
+  it("refuses beyond it, and says so rather than emitting a fragment", () => {
+    const m = marker(siblings(20), "t");
+    expect(m.refused).toBe(true);
+    expect(m.reason).toBe("irreducible");
+  });
+
+  it("handles sixteen sibling arrays of fifty rows", () => {
+    const obj: Record<string, unknown> = {};
+    for (let i = 0; i < 16; i++) {
+      obj["arr" + i] = Array.from({ length: 50 }, (_, j) => `row ${i}-${j} padding text`);
+    }
+    const wire = JSON.stringify(obj);
+    expect(wire.length).toBeGreaterThan(19000);
+    expect(marker(wire, "t").refused).toBeUndefined();
+  });
+});
+
+describe("the marker's own size bounds are real", () => {
+  it("caps `reduced` at six entries however many reductions were applied", () => {
+    const obj: Record<string, string> = {};
+    for (let i = 0; i < 14; i++) obj["k" + i] = String.fromCharCode(97 + i).repeat(1200);
+    const m = marker(JSON.stringify(obj), "t");
+    expect((m.reduced as unknown[]).length).toBeLessThanOrEqual(6);
+  });
+
+  it("caps `removed_keys` at twelve", () => {
+    const wire = JSON.stringify({
+      text: "T".repeat(12000),
+      next_offset: 5,
+      offset: 1,
+      start_chunk: 2,
+      chunks_returned: 3,
+      total_chunks: 4,
+      chars_total: 6,
+      bytes_total: 7,
+      count: 8,
+      total: 9,
+      total_count: 10,
+      returned: 11,
+      limit: 12,
+      page: 13,
+      per_page: 14,
+      page_size: 15,
+      truncated: false,
+      complete: true,
+    });
+    expect((marker(wire, "t").removed_keys as string[]).length).toBeLessThanOrEqual(12);
+  });
+
+  it("clips a removed key name at forty-eight characters", () => {
+    // B3 removes ANY sibling scalar that matched the pre-reduction length, so
+    // the removed NAME is producer-controlled and otherwise unbounded.
+    const longKey = "count_of_things_" + "z".repeat(120);
+    const wire = JSON.stringify({
+      items: Array.from({ length: 400 }, (_, i) => `item ${i} padding padding`),
+      [longKey]: 400,
+    });
+    const removed = marker(wire, "t").removed_keys as string[];
+    expect(removed.length).toBeGreaterThan(0);
+    for (const k of removed) expect(k.length).toBeLessThanOrEqual(48);
+  });
+
+  it("clips a reduction path at sixty characters", () => {
+    const wire = JSON.stringify({
+      an_outer_section_name_here: {
+        a_middle_section_name_here: {
+          an_inner_section_name_here: { the_actual_body_field_here: "B".repeat(12000) },
+        },
+      },
+    });
+    const reduced = marker(wire, "t").reduced as { at: string }[];
+    expect(reduced.length).toBeGreaterThan(0);
+    for (const r of reduced) expect(r.at.length).toBeLessThanOrEqual(60);
+  });
+});
+
+describe("the walk reaches real nesting depth", () => {
+  it("finds and reduces a body six levels down", () => {
+    const wire = JSON.stringify({ a: { b: { c: { d: { e: { f: "F".repeat(12000) } } } } } });
+    const out = bounded(wire, "t") as unknown as {
+      a: { b: { c: { d: { e: { f: string } } } } };
+    };
+    expect(out.a.b.c.d.e.f.length).toBeGreaterThan(1000);
+    expect(out.a.b.c.d.e.f.length).toBeLessThan(12000);
+  });
+
+  it("pins MIN_REDUCIBLE_STRING as a decision, not an accident", () => {
+    // Not mutation-killable: a shorter site is rejected by the strict-progress
+    // rule anyway, so this is a WORK bound. Pinned the way the 8000 cap is —
+    // because the number is a decision someone has to re-argue to change.
+    expect(MIN_REDUCIBLE_STRING).toBe(40);
+    const reduced = marker(JSON.stringify({ t: "T".repeat(20000) }), "t").reduced as {
+      from: number;
+    }[];
+    for (const r of reduced) expect(r.from).toBeGreaterThanOrEqual(MIN_REDUCIBLE_STRING);
+  });
+});
+
+describe("the nested sweep deletes no truths, and leaves no hollow sections", () => {
+  it("keeps still-true accounting in a sub-object nothing reduced", () => {
+    const out = bounded(
+      JSON.stringify({
+        body: "B".repeat(12000),
+        pagination: { nextCursor: "abc", total: 40, limit: 10, page: 1 },
+      }),
+      "t",
+    );
+    const pagination = out.pagination as Record<string, unknown>;
+    // The cursor goes — deletion is depth-agnostic and it may now point past
+    // what survived. `total`/`limit`/`page` describe a collection nothing
+    // touched, so removing them would be inventing a loss.
+    expect(pagination).not.toHaveProperty("nextCursor");
+    expect(pagination.total).toBe(40);
+    expect(pagination.limit).toBe(10);
+    expect(pagination.page).toBe(1);
+  });
+
+  it("drops a sub-object the sweep emptied rather than leaving `{}`", () => {
+    // `page_info: {}` reads as "this section exists and holds nothing", which
+    // is a claim. The truth is that the section was removed.
+    const wire = JSON.stringify({ body: "B".repeat(12000), page_info: { nextCursor: "abc" } });
+    expect(Object.prototype.hasOwnProperty.call(bounded(wire, "t"), "page_info")).toBe(false);
+    expect(marker(wire, "t").removed_keys).toContain("page_info");
+  });
+});
+
+describe("the remaining recompute conditions each carry weight", () => {
+  it("deletes a null cursor when TWO published bases both corroborate", () => {
+    // `offset + 9000 === chars_total` and `start_chunk + 9000 === total`, so
+    // two different published bases each "explain" the exhausted cursor and
+    // they disagree about where to resume. Unique or nothing — picking either
+    // one is a coin flip the model would read as fact.
+    const out = bounded(
+      JSON.stringify({
+        path: "/a.md",
+        content: "A".repeat(9000),
+        offset: 0,
+        start_chunk: 5,
+        next_offset: null,
+        chars_total: 9000,
+        total: 9005,
+      }),
+    );
+    expect(out).not.toHaveProperty("next_offset");
+  });
+
+  it("recomputes an ARRAY-paged cursor, in the collection's own units", () => {
+    // `cursor = base + deliveredRows` is the producer's own semantics for a
+    // row-paged collection, and `from`/`to` are already in rows — so this
+    // closes for exactly the same reason the character case does.
+    const rows = Array.from({ length: 300 }, (_, i) => `row ${i} with some padding text here`);
+    const out = bounded(
+      JSON.stringify({ rows, offset: 0, next_offset: 300, total: 5000 }),
+      "search_content",
+    );
+    const delivered = (out.rows as unknown[]).length;
+    expect(delivered).toBeGreaterThan(0);
+    expect(delivered).toBeLessThan(300);
+    expect(out.next_offset).toBe(delivered);
+  });
+
+  it("still refuses the chunk cursor over a character body", () => {
+    // The case a blanket "strings only" rule was standing in for: chunk
+    // indices are not dense, so no arithmetic over a shortened `text` yields a
+    // correct `next_chunk`. The base check rejects it on its own.
+    const out = bounded(
+      JSON.stringify({
+        type: "read_document_text",
+        path: "/d.pdf",
+        text: "T".repeat(12000),
+        start_chunk: 0,
+        next_chunk: 7,
+        total_chunks: 40,
+      }),
+      "read_document_text",
+    );
+    expect(out).not.toHaveProperty("next_chunk");
+  });
+});
+
+describe("`at or under this level` is a path relation, not a string prefix", () => {
+  it("does not treat `groupsExtra` as living under `groups`", () => {
+    // `pathKey` renders these as ".groups" and ".groupsExtra.body", and
+    // `".groupsExtra.body".startsWith(".groups")` is TRUE — so a string-prefix
+    // test would decide that reducing inside `groupsExtra` licensed stripping
+    // still-true accounting out of the untouched `groups`.
+    const out = bounded(
+      JSON.stringify({
+        groups: { nextCursor: "abc", total: 40, limit: 10, page: 1 },
+        groupsExtra: { body: "B".repeat(12000) },
+      }),
+      "t",
+    );
+    const groups = out.groups as Record<string, unknown>;
+    expect(groups).not.toHaveProperty("nextCursor");
+    expect(groups.total).toBe(40);
+    expect(groups.limit).toBe(10);
+    expect(groups.page).toBe(1);
   });
 });
