@@ -42,12 +42,71 @@ class Block:
     rows: list[list[str]] = field(default_factory=list)
 
 
-_HEADING = re.compile(r"^(#{1,3})\s+(.*)$")
-_BULLET = re.compile(r"^[-*]\s+(.*)$")
-_NUMBER = re.compile(r"^\d+[.)]\s+(.*)$")
-# A table separator: |---|:--:| etc. Its presence on line 2 is what promotes a
-# run of pipe rows to a table, matching how every Markdown dialect decides.
-_TABLE_SEP = re.compile(r"^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$")
+# ── Line prefixes, parsed WITHOUT regex ───────────────────────────────────
+#
+# These were regexes (`^[-*]\s+(.*)$` and friends) until CodeQL's
+# py/polynomial-redos flagged five of them. The pattern is subtle and worth
+# naming: `\s+` followed by `(.*)` is ambiguous — for an input like
+# "* " + " " * n the engine has n ways to split the run of spaces between the
+# two quantifiers, and tries all of them before failing. Body text reaches this
+# parser from a model that a user prompts, and the renderer runs under a CPU
+# limit, so a line that costs quadratic time is a denial-of-service lever.
+#
+# Hand-parsing is linear by construction, needs no lookahead, and is frankly
+# easier to read than the pattern it replaces. Each helper returns the content
+# after the marker, or None when the line is not that kind of line.
+
+
+def _strip_marker(line: str, marker_len: int) -> str | None:
+    """Content after a marker, requiring at least one space to separate it.
+
+    Returns None when the marker is not followed by whitespace — `#hashtag` is
+    prose, `# Heading` is a heading.
+    """
+    rest = line[marker_len:]
+    if not rest or not rest[0].isspace():
+        return None
+    return rest.lstrip()
+
+
+def _match_heading(line: str) -> tuple[int, str] | None:
+    level = 0
+    while level < len(line) and line[level] == "#":
+        level += 1
+        if level > 3:
+            return None
+    if level == 0:
+        return None
+    content = _strip_marker(line, level)
+    return None if content is None else (level, content)
+
+
+def _match_bullet(line: str) -> str | None:
+    if not line or line[0] not in "-*":
+        return None
+    return _strip_marker(line, 1)
+
+
+def _match_number(line: str) -> str | None:
+    i = 0
+    while i < len(line) and line[i].isdigit():
+        i += 1
+    if i == 0 or i >= len(line) or line[i] not in ".)":
+        return None
+    return _strip_marker(line, i + 1)
+
+
+def _is_table_separator(line: str) -> bool:
+    """True for a `|---|:--:|` row.
+
+    Also formerly a regex, and the worst of them: nested quantifiers around
+    an inner `\\s*` group. A single pass over the characters answers the same
+    question in linear time — the row must contain at least one dash and
+    nothing outside the separator alphabet.
+    """
+    if not line or "-" not in line:
+        return False
+    return all(ch in "|:- \t" for ch in line)
 
 
 def _split_row(line: str) -> list[str]:
@@ -90,18 +149,17 @@ def parse_blocks(source: str) -> list[Block]:
             i += 1
             continue
 
-        heading = _HEADING.match(stripped)
-        if heading:
+        heading = _match_heading(stripped)
+        if heading is not None:
             flush_paragraph()
-            blocks.append(
-                Block(kind="heading", level=len(heading.group(1)), text=heading.group(2).strip())
-            )
+            level, text = heading
+            blocks.append(Block(kind="heading", level=level, text=text))
             i += 1
             continue
 
         # A pipe table needs its separator on the very next line; without one,
         # a line containing "|" is just prose and is treated as such.
-        if "|" in stripped and i + 1 < len(lines) and _TABLE_SEP.match(lines[i + 1].strip()):
+        if "|" in stripped and i + 1 < len(lines) and _is_table_separator(lines[i + 1].strip()):
             flush_paragraph()
             header = _split_row(stripped)
             rows: list[list[str]] = []
@@ -112,30 +170,30 @@ def parse_blocks(source: str) -> list[Block]:
             blocks.append(Block(kind="table", header=header, rows=rows))
             continue
 
-        bullet = _BULLET.match(stripped)
-        if bullet:
+        bullet = _match_bullet(stripped)
+        if bullet is not None:
             flush_paragraph()
-            items = [bullet.group(1).strip()]
+            items = [bullet]
             i += 1
             while i < len(lines):
-                m = _BULLET.match(lines[i].strip())
-                if not m:
+                nxt = _match_bullet(lines[i].strip())
+                if nxt is None:
                     break
-                items.append(m.group(1).strip())
+                items.append(nxt)
                 i += 1
             blocks.append(Block(kind="bullets", items=items))
             continue
 
-        number = _NUMBER.match(stripped)
-        if number:
+        number = _match_number(stripped)
+        if number is not None:
             flush_paragraph()
-            items = [number.group(1).strip()]
+            items = [number]
             i += 1
             while i < len(lines):
-                m = _NUMBER.match(lines[i].strip())
-                if not m:
+                nxt = _match_number(lines[i].strip())
+                if nxt is None:
                     break
-                items.append(m.group(1).strip())
+                items.append(nxt)
                 i += 1
             blocks.append(Block(kind="numbers", items=items))
             continue
@@ -149,8 +207,14 @@ def parse_blocks(source: str) -> list[Block]:
 
 # Inline spans. Bold is matched before italic so `**x**` is not seen as an
 # italic `*` wrapping `*x*`.
-_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_ITALIC = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", re.DOTALL)
+#
+# The span is `[^*]+`, not a lazy `.+?`. Excluding the delimiter leaves exactly
+# one way to match up to the closing marker, so the engine never backtracks —
+# the same py/polynomial-redos class as the line prefixes above. The cost is
+# that emphasis cannot contain a literal `*`, which for this subset is the
+# correct reading anyway.
+_BOLD = re.compile(r"\*\*([^*]+)\*\*", re.DOTALL)
+_ITALIC = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)", re.DOTALL)
 
 
 def split_inline(text: str) -> list[tuple[str, bool, bool]]:

@@ -10,6 +10,7 @@ the failure this suite exists to catch.
 from __future__ import annotations
 
 import io
+import time
 import zipfile
 
 import pytest
@@ -207,6 +208,59 @@ def test_parser_keeps_an_unsupported_construct_as_text():
 def test_inline_split_handles_bold_and_italic():
     assert ("loud", True, False) in split_inline("a **loud** b")
     assert ("soft", False, True) in split_inline("a *soft* b")
+
+
+class TestNoCatastrophicBacktracking:
+    """Adversarial inputs CodeQL's py/polynomial-redos named, at scale.
+
+    The original parser used `^[-*]\\s+(.*)$` and friends. `\\s+` followed by
+    `(.*)` is ambiguous — for "* " + " " * n the engine has n ways to split the
+    run of spaces and tries all of them before failing. Body text reaches this
+    parser from a model a user prompts, and the renderer runs under a CPU
+    limit, so quadratic input cost is a denial-of-service lever, not a
+    micro-optimisation.
+
+    A generous wall-clock bound is the honest assertion here: the quadratic
+    versions took seconds on inputs this size, the linear ones are
+    milliseconds, and a threshold in between distinguishes them without
+    turning into a flake on a loaded runner.
+    """
+
+    BUDGET_SECONDS = 2.0
+
+    def _timed(self, fn, *a):
+        start = time.perf_counter()
+        fn(*a)
+        return time.perf_counter() - start
+
+    def test_bullet_prefix_with_a_long_whitespace_run(self):
+        assert self._timed(parse_blocks, "* " + " " * 20_000) < self.BUDGET_SECONDS
+
+    def test_numbered_prefix_with_a_long_whitespace_run(self):
+        assert self._timed(parse_blocks, "9) " + " " * 20_000) < self.BUDGET_SECONDS
+
+    def test_heading_prefix_with_a_long_whitespace_run(self):
+        assert self._timed(parse_blocks, "# " + " " * 20_000) < self.BUDGET_SECONDS
+
+    def test_table_separator_probe_with_a_long_whitespace_run(self):
+        assert self._timed(parse_blocks, "|" + " " * 20_000) < self.BUDGET_SECONDS
+
+    def test_unterminated_italic_run(self):
+        assert self._timed(to_rl_markup, "*" + "*a" * 10_000) < self.BUDGET_SECONDS
+
+    def test_unterminated_bold_run(self):
+        assert self._timed(split_inline, "**" + "a*" * 10_000) < self.BUDGET_SECONDS
+
+    def test_the_whole_pipeline_survives_an_adversarial_body(self):
+        body = "\n".join(["* " + " " * 500, "9) " + " " * 500, "*" + "*a" * 500] * 20)
+        assert self._timed(renderers.render_pdf, "t", body) < 10.0
+
+
+def test_emphasis_cannot_span_a_literal_asterisk():
+    """The linear pattern excludes the delimiter, which is the correct reading
+    for this subset — `**a*b**` is not one bold span."""
+    assert ("loud", True, False) in split_inline("**loud**")
+    assert ("a*b", True, False) not in split_inline("**a*b**")
 
 
 def test_rl_markup_escapes_before_it_adds_tags():
