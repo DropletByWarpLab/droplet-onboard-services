@@ -36,6 +36,18 @@ const HNSW_INDEX_NAME = "FileContentChunk_embedding_hnsw_idx";
 const LEGACY_IVFFLAT_INDEX_NAME = "FileContentChunk_embedding_idx";
 
 /**
+ * Migrations that MUST apply before the HNSW one, checked against the
+ * directory listing rather than assumed.
+ */
+const PREREQUISITE_MIGRATIONS = [
+  // Creates "FileContentChunk" and its `embedding vector(384)` column. Index
+  // a column that does not exist yet and `migrate deploy` stops there.
+  "20260412000000_add_file_content_index",
+  // The migration that was latest on main when this branch was cut.
+  "20260826043700_warp_2137_erp_cloud_connection_config",
+];
+
+/**
  * SQL comments have to go before parsing: this file's own migration DISCUSSES
  * `DROP INDEX "FileContentChunk_embedding_idx"` in prose, and a parser that
  * cannot tell prose from DDL would read the explanation as a second drop.
@@ -112,16 +124,32 @@ describe("FileContentChunk vector index — migration-chain guard (WARP-2193)", 
     );
   });
 
-  it("sorts after the migration that was latest on main when it was written", () => {
+  it("sorts after every migration it was written against", () => {
     // Migrations authored on a branch carry the timestamp of the day they were
     // generated. If main moves on before the branch merges, the file can land
-    // BEFORE a migration it was written against — Prisma applies by filename,
-    // not by merge date. Pinned against the then-latest rather than against
-    // "is last", so a migration merged after this one does not fail the guard.
+    // BEFORE a migration it was written against — Prisma applies by FILENAME,
+    // not by merge date. Pinned against specific predecessors rather than
+    // against "is last", so a migration merged AFTER this one does not fail
+    // the guard.
+    //
+    // Both operands are read from the directory listing on purpose. Comparing
+    // the module constant against a string LITERAL would be constant against
+    // constant: true forever, whatever the repo actually contains, which is no
+    // assertion at all.
     const dirs = migrationDirs();
-    expect(dirs).toContain(HNSW_MIGRATION);
-    expect(HNSW_MIGRATION > "20260826043700_warp_2137_erp_cloud_connection_config").toBe(
-      true,
-    );
+    const at = dirs.indexOf(HNSW_MIGRATION);
+    expect(at, `${HNSW_MIGRATION} is not in ${MIGRATIONS_DIR}`).toBeGreaterThanOrEqual(0);
+
+    for (const prereq of PREREQUISITE_MIGRATIONS) {
+      const prereqAt = dirs.indexOf(prereq);
+      expect(
+        prereqAt,
+        `${prereq} is missing from the migration set`,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        prereqAt,
+        `${prereq} must apply before ${HNSW_MIGRATION}`,
+      ).toBeLessThan(at);
+    }
   });
 });

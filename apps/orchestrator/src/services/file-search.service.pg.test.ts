@@ -149,10 +149,10 @@ describe.skipIf(!RUN)(
       // The whole point: Postgres reports the value the service asked for,
       // read back inside the service's own transaction.
       expect(observed.inside).toBe(String(hnswEfSearchFor(250)));
-      expect(observed.inside).toBe("250");
+      expect(observed.inside).toBe("500"); // 250 requested, overscanned 2x
       // …and it was not already that beforehand, so the assertion above is
       // measuring the SET and not some ambient session state.
-      expect(observed.before).not.toBe("250");
+      expect(observed.before).not.toBe("500");
     });
 
     it("the setting does not outlive its transaction", async () => {
@@ -175,8 +175,8 @@ describe.skipIf(!RUN)(
         READ_EF_SEARCH,
       );
       // Either the GUC is back to pgvector's default or it was never
-      // materialised on this connection. Both are "not 250"; a leak is not.
-      expect(row?.ef ?? null).not.toBe("250");
+      // materialised on this connection. Both are "not 500"; a leak is not.
+      expect(row?.ef ?? null).not.toBe("500");
     });
   },
 );

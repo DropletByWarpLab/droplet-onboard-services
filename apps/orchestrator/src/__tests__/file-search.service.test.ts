@@ -16,6 +16,7 @@ import {
   hnswEfSearchFor,
   HNSW_EF_SEARCH_FLOOR,
   HNSW_EF_SEARCH_CEILING,
+  HNSW_EF_SEARCH_OVERSCAN,
   type VectorCandidateStats,
 } from "../services/file-search.service.js";
 
@@ -276,7 +277,12 @@ describe("searchByVector — HNSW ef_search wiring (WARP-2193)", () => {
     );
   });
 
-  it("raises ef_search when the caller asks for more rows than the floor", async () => {
+  it("opens the candidate list ABOVE the requested row count, not equal to it", async () => {
+    // `ef_search == k` is the bare minimum at which the walk can hold the rows
+    // it was asked for — the worst point of the recall curve. A caller passing
+    // an explicit perArmK must not land there. The floor of 100 masks this at
+    // the perArmK=100 default, so the test has to use a larger budget to see
+    // it at all.
     const prisma = buildFakePrisma([[]]);
     await searchByVector(prisma, {
       userId: "u1",
@@ -285,19 +291,41 @@ describe("searchByVector — HNSW ef_search wiring (WARP-2193)", () => {
       minSimilarity: 0.3,
     });
     const stmt = prisma.__journal.find((e) => SET_LOCAL_EF_SEARCH.test(e.sql))!;
-    expect(SET_LOCAL_EF_SEARCH.exec(stmt.sql)![1]).toBe("250");
+    const emitted = Number(SET_LOCAL_EF_SEARCH.exec(stmt.sql)![1]);
+    expect(emitted).toBe(250 * HNSW_EF_SEARCH_OVERSCAN);
+    expect(emitted).toBeGreaterThan(250);
   });
 
   it("clamps to pgvector's ceiling and only ever emits an integer literal", () => {
+    expect(hnswEfSearchFor(100)).toBe(200); // the perArmK default, overscanned
+    expect(hnswEfSearchFor(250)).toBe(500);
+    expect(hnswEfSearchFor(10)).toBe(HNSW_EF_SEARCH_FLOOR); // 20 -> floored
+    expect(hnswEfSearchFor(500)).toBe(HNSW_EF_SEARCH_CEILING); // 1000, exactly
     expect(hnswEfSearchFor(5_000)).toBe(HNSW_EF_SEARCH_CEILING);
     expect(hnswEfSearchFor(0)).toBe(HNSW_EF_SEARCH_FLOOR);
     expect(hnswEfSearchFor(-1)).toBe(HNSW_EF_SEARCH_FLOOR);
     expect(hnswEfSearchFor(Number.NaN)).toBe(HNSW_EF_SEARCH_FLOOR);
-    expect(hnswEfSearchFor(120.7)).toBe(120);
+    expect(hnswEfSearchFor(Number.POSITIVE_INFINITY)).toBe(HNSW_EF_SEARCH_FLOOR);
+    expect(hnswEfSearchFor(120.7)).toBe(240);
     // The value is interpolated into DDL-adjacent SQL, so it must not be
-    // capable of carrying anything but digits.
-    for (const n of [5_000, 0, -1, Number.NaN, 120.7, 1e9]) {
-      expect(Number.isInteger(hnswEfSearchFor(n))).toBe(true);
+    // capable of carrying anything but digits — for ANY input, including the
+    // ones where the overscan multiply is what overflows.
+    for (const n of [
+      5_000,
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      120.7,
+      1e9,
+      Number.MAX_VALUE, // trunc(n) * 2 === Infinity
+      Number.MAX_SAFE_INTEGER,
+    ]) {
+      const v = hnswEfSearchFor(n);
+      expect(Number.isInteger(v), `hnswEfSearchFor(${n}) === ${v}`).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(HNSW_EF_SEARCH_FLOOR);
+      expect(v).toBeLessThanOrEqual(HNSW_EF_SEARCH_CEILING);
     }
   });
 
@@ -325,9 +353,27 @@ describe("searchByVector — HNSW ef_search wiring (WARP-2193)", () => {
       returned: 3,
       aboveFloor: 2,
       readable: 2,
-      efSearch: 100,
+      efSearch: 200, // 100 requested, overscanned 2x
       minSimilarity: 0.3,
     });
+  });
+
+  it("a throwing onCandidates observer does not take the search down with it", async () => {
+    // Purely observational field. Losing already-computed hits to an
+    // instrumentation bug would be a worse defect than the one the
+    // instrumentation exists to expose.
+    const prisma = buildFakePrisma([[chunkRow("/a.pdf", 0.81)]]);
+    const hits = await searchByVector(prisma, {
+      userId: "u1",
+      vector: [0.1],
+      limit: 100,
+      minSimilarity: 0.3,
+      onCandidates: () => {
+        throw new Error("observer blew up");
+      },
+    });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.path).toBe("/a.pdf");
   });
 });
 

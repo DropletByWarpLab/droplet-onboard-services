@@ -304,6 +304,18 @@ interface RawSearchRow {
 export const HNSW_EF_SEARCH_FLOOR = 100;
 
 /**
+ * How far ABOVE the requested row count to open the candidate list.
+ *
+ * `ef_search == k` is the bare minimum at which the walk can physically hold
+ * the rows it was asked for — the weakest point of the recall curve, not a
+ * sensible operating point. pgvector's guidance is that `ef_search` should
+ * EXCEED `k`, and recall at `2k` is materially better for a cost that is a
+ * fraction of the scan it replaces. 2 is the smallest multiplier that gets
+ * off the minimum.
+ */
+export const HNSW_EF_SEARCH_OVERSCAN = 2;
+
+/**
  * pgvector rejects `hnsw.ef_search` above 1000 (`ERROR: 1001 is outside the
  * valid range for parameter "hnsw.ef_search"`). Clamping here turns a caller
  * asking for an absurd `limit` into a slightly-less-exhaustive search rather
@@ -317,13 +329,22 @@ export const HNSW_EF_SEARCH_CEILING = 1000;
  * so raising `perArmK` widens the graph walk to match instead of silently
  * asking for more rows than the walk can produce.
  *
+ * `2 * limit`, not `limit`: see {@link HNSW_EF_SEARCH_OVERSCAN}. Sizing it
+ * EQUAL to the row count puts every caller that passes an explicit `perArmK`
+ * on the worst point of the recall curve. The floor of 100 happens to cover
+ * the `perArmK = 100` default, which is exactly how that would have stayed
+ * hidden — a caller passing `perArmK: 400` would have landed on it alone.
+ *
  * Total function on purpose: the result is interpolated into SQL (see
  * `searchByVector`), so it must be incapable of returning anything but an
- * integer inside pgvector's range, for any input.
+ * integer inside pgvector's range, for any input. Note that
+ * `Math.trunc(limit) * OVERSCAN` can itself overflow to Infinity for an
+ * absurd `limit`; the clamp wraps the MULTIPLY rather than the input so it
+ * catches that too.
  */
 export function hnswEfSearchFor(limit: number): number {
   const wanted = Number.isFinite(limit)
-    ? Math.trunc(limit)
+    ? Math.trunc(limit) * HNSW_EF_SEARCH_OVERSCAN
     : HNSW_EF_SEARCH_FLOOR;
   return Math.min(
     HNSW_EF_SEARCH_CEILING,
@@ -366,10 +387,16 @@ export function hnswEfSearchFor(limit: number): number {
  *
  * ## Why the explicit timeouts
  *
- * They PRESERVE the pre-WARP-2193 behaviour rather than change it. The SELECT
- * used to be a bare `$queryRawUnsafe` with no cap at all; Prisma's
- * interactive-transaction defaults (maxWait 2s, timeout 5s) would have turned
- * a slow-but-succeeding search on a large corpus into a P2028 abort.
+ * They raise Prisma's interactive-transaction defaults (maxWait 2s, timeout
+ * 5s) so the cap is not the binding constraint on a large corpus, where those
+ * defaults would turn a slow-but-succeeding search into a P2028 abort.
+ *
+ * Be clear that this is a NEW ceiling, not a preserved one: before
+ * WARP-2193 the SELECT was a bare `$queryRawUnsafe` with no cap at all, so a
+ * query slower than 30s now fails where it previously just took its time. On
+ * the corpus sizes this ships against — and with the HNSW index this
+ * migration adds — that is not reachable, but it is a real behaviour change
+ * and not a no-op.
  */
 const VECTOR_SEARCH_TX = {
   maxWait: 5_000,
@@ -473,7 +500,21 @@ export async function searchByVector(
     minSimilarity: params.minSimilarity,
   };
   logger.debug(stats, "search.vector.candidates");
-  params.onCandidates?.(stats);
+  // Isolated: `onCandidates` is a new public field on SearchByVectorParams and
+  // a purely observational one. A throwing observer must not take down the
+  // search it was only supposed to be watching — the hits are already
+  // computed at this point, and losing them to an instrumentation bug would
+  // be a worse defect than the one the instrumentation exists to expose.
+  if (params.onCandidates) {
+    try {
+      params.onCandidates(stats);
+    } catch (e) {
+      logger.warn(
+        { err: String(e) },
+        "search.vector.candidates observer threw; hits returned anyway",
+      );
+    }
+  }
 
   return readable;
 }

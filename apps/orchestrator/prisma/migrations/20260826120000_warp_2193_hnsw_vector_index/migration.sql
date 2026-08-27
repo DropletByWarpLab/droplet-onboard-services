@@ -31,6 +31,30 @@
 -- at build time — which matters here, because a freshly provisioned box runs
 -- its migrations before it has indexed a single file.
 --
+-- ## WHICH WAY RECALL MOVES — read this before filing a bug
+--
+-- HNSW is an APPROXIMATE index. Measured against what this replaces, recall
+-- goes slightly DOWN, and that is the expected outcome, not a regression.
+--
+-- Be precise about the baseline, because there are two and they point in
+-- opposite directions:
+--
+--   * versus the state this database was ACTUALLY in (no ANN index, exact KNN
+--     by sequential scan): that scan was exhaustive, so its recall was 100% by
+--     construction. Any approximate index scores lower. What is bought with
+--     those points is the latency this ticket was raised for.
+--
+--   * versus the IVFFlat index the ticket THOUGHT was here (probes defaulting
+--     to 1, so ~1% of the corpus considered): recall goes sharply UP.
+--
+-- So: a small recall drop against today's numbers is the trade working as
+-- designed. `hnsw.ef_search`, set per query in `searchByVector`, is the dial
+-- that buys recall back toward exhaustive at the cost of walking more of the
+-- graph — it is not a knob for exceeding the exact scan, which is the ceiling.
+-- WARP-2193 also adds candidate-funnel instrumentation precisely so this can
+-- be MEASURED rather than argued about; whoever measures it should compare
+-- against the pre-migration exact scan and expect to give up a little.
+--
 -- Parameters m = 16, ef_construction = 64 are pgvector's own defaults and the
 -- operating point its documentation recommends at this corpus size.
 -- `vector_cosine_ops` is not optional: it must match the `<=>` operator the
