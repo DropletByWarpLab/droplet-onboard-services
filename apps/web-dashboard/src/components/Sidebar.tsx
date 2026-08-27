@@ -429,6 +429,34 @@ export function Sidebar() {
                                 nested
                               />
                             ))}
+                            {/* WARP-1548 — the Libraries group, in the drawer
+                                as well as the desktop aside. The addendum's
+                                §2.2 is explicit that the rail supersedes
+                                `SpaceSwitcher` "at every width — desktop via
+                                the sidebar's Files section, below 900px via
+                                the mobile drawer's Files section", and the
+                                desktop mount lives inside a `hidden lg:flex`
+                                aside. Mounting only there left every phone
+                                user with more than three libraries looking at
+                                the collapsed "Spaces ▾" menu this ticket
+                                exists to remove.
+
+                                `onNavigate` because the drawer is a modal
+                                that does not dismiss itself on navigation —
+                                the same callback every `DrawerLink` beside it
+                                takes. `variant="drawer"` for the 44px rows a
+                                touch surface owes. Suspense for the same
+                                reason as the aside: `useSearchParams` must be
+                                read under a boundary. */}
+                            {entry.item.href === "/files" && (
+                              <Suspense fallback={null}>
+                                <FilesLibrariesNav
+                                  pathname={pathname}
+                                  variant="drawer"
+                                  onNavigate={closeDrawer}
+                                />
+                              </Suspense>
+                            )}
                           </div>
                         </div>
                       );
@@ -634,6 +662,11 @@ function NavLink({
               Files has one: it is the single surface where "which library"
               is a question, and the component renders nothing on a Home
               install (ADR-029 §5, Home mode pixel-identical).
+
+              This is the DESKTOP mount, inside a `hidden lg:flex` aside. The
+              mobile drawer's Files caption group carries the same rail (see
+              the `entry.captionOnly` branch above) — the addendum's §2.2 asks
+              for both, and only both.
 
               Suspense, and scoped to just this: `useSearchParams` must be read
               under a boundary (see `app/admin/audit/page.tsx`), and the Sidebar

@@ -7,7 +7,8 @@
  * never reaches a plain member.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import type { FileSpace } from "@/lib/types";
 
 vi.mock("next/link", () => ({
@@ -68,8 +69,11 @@ const PRACTICE = [
   dept("Front Desk", "manager"),
 ];
 
-function renderNav(pathname = "/files") {
-  return render(<FilesLibrariesNav pathname={pathname} />);
+function renderNav(
+  pathname = "/files",
+  props: Partial<ComponentProps<typeof FilesLibrariesNav>> = {}
+) {
+  return render(<FilesLibrariesNav pathname={pathname} {...props} />);
 }
 
 beforeEach(() => {
@@ -232,6 +236,18 @@ describe("accessibility", () => {
     );
   });
 
+  it("treats an EMPTY ?space= as My Files being active, like the page does", () => {
+    // `app/files/page.tsx` reads the param with a truthy check, so `/files?space=`
+    // renders My Files there. A `??` here would only fall back on null, leaving
+    // the page showing one library and the rail highlighting none.
+    search = new URLSearchParams("space=");
+    renderNav();
+    expect(screen.getByRole("link", { name: /My Files/ })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+  });
+
   it("marks nothing active on a sub-route like /files/trash", () => {
     // Trash is not a library; highlighting one there would claim a location
     // the user is not in.
@@ -239,5 +255,77 @@ describe("accessibility", () => {
     for (const link of screen.getAllByRole("link")) {
       expect(link).not.toHaveAttribute("aria-current");
     }
+  });
+});
+
+describe("colour comes from the sheet, never an inline var()", () => {
+  // The rail mounts in the Sidebar, which `AuthGate` renders ABOVE every page
+  // scope (WARP-1079). `--text-muted` / `--brand` / `--border` and friends are
+  // descendant-scoped to `.droplet-shell`, so an inline `var(--text-muted)` on
+  // a sidebar row is a dropped declaration, not a colour. These assertions pin
+  // the classes; `__tests__/files-rail.contrast.test.ts` measures what they
+  // resolve to.
+  const SHELL_SCOPED = /var\(--(?:text|text-muted|text-faint|brand|border|surface)\)/;
+
+  it("sets no inline colour on any row, chip or caption", () => {
+    spaces = [personal, household, dept("Radiology", "manager", "provisioning"), dept("Lab", "manager", "failed")];
+    const { container } = renderNav();
+    for (const el of Array.from(container.querySelectorAll("[style]"))) {
+      expect(el.getAttribute("style")).not.toMatch(SHELL_SCOPED);
+    }
+  });
+
+  it("marks the two state captions with the AA-safe -text classes", () => {
+    spaces = [personal, household, dept("Radiology", "manager", "provisioning"), dept("Lab", "manager", "failed")];
+    renderNav();
+    expect(screen.getByText("Setting up…")).toHaveClass("files-rail-state-provisioning");
+    expect(screen.getByText("Needs attention")).toHaveClass("files-rail-state-failed");
+  });
+
+  it("styles the active row off aria-current rather than a second class", () => {
+    search = new URLSearchParams("space=dept:clinical");
+    renderNav();
+    const link = screen.getByRole("link", { name: /Clinical/ });
+    expect(link).toHaveClass("files-rail-row");
+    // `is-active` was a second source of truth for the same fact.
+    expect(link.className).not.toMatch(/is-active/);
+  });
+});
+
+describe("the drawer variant (addendum §2.2 — the rail at every width)", () => {
+  it("dismisses its host when a library is followed", () => {
+    // The mobile drawer is a modal that does not close on navigation; every
+    // DrawerLink beside these rows takes the same callback.
+    const onNavigate = vi.fn();
+    renderNav("/files", { variant: "drawer", onNavigate });
+    fireEvent.click(screen.getByRole("link", { name: /Clinical/ }));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives every row a 44px touch target", () => {
+    renderNav("/files", { variant: "drawer" });
+    for (const link of screen.getAllByRole("link")) {
+      expect(link.className).toContain("min-h-[44px]");
+    }
+  });
+
+  it("keeps the sidebar rows at the sub-nav's 32px", () => {
+    renderNav();
+    for (const link of screen.getAllByRole("link")) {
+      expect(link.className).toContain("h-8");
+      expect(link.className).not.toContain("min-h-[44px]");
+    }
+  });
+
+  it("renders the same libraries either way", () => {
+    const labels = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll("a, [aria-disabled]")).map(
+        (el) => el.textContent?.replace(/Reader|Contributor|Manager/g, "").trim()
+      );
+    const sidebar = renderNav();
+    const fromSidebar = labels(sidebar.container);
+    sidebar.unmount();
+    const drawer = renderNav("/files", { variant: "drawer" });
+    expect(labels(drawer.container)).toEqual(fromSidebar);
   });
 });
