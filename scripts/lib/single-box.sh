@@ -244,6 +244,20 @@ DROPLET_AP_PSK=$ap_psk
 # honored verbatim and detection is skipped.
 DROPLET_AP_PHY=${DROPLET_AP_PHY:-}
 DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-}
+
+# WARP-2054 - the onboard radio is NOT used. Founder rule (2026-07-28): "we will
+# never use the onboard droplet radios for the aps ... the final box will have
+# onboard radios deactivated and all traffic will go through the pi router for
+# security." AP duty belongs to the external AP.
+#
+# 0 (default) = droplet-openwrt-attach does not detect the radio, does not move
+# it into the container netns, soft-blocks it, and never starts hostapd. That
+# also makes this unit's state MEAN something: it used to fail on every boot for
+# the AP leg while the WireGuard overlay NAT leg succeeded, so a real overlay
+# failure was indistinguishable from a cosmetic one.
+#
+# 1 = dev-only on-box AP. Every DROPLET_AP_* key above applies only in that case.
+DROPLET_AP_ONBOARD=0
 EOF
     sudo chmod 0600 /etc/default/droplet-openwrt-attach.tmp
     sudo mv /etc/default/droplet-openwrt-attach.tmp /etc/default/droplet-openwrt-attach
