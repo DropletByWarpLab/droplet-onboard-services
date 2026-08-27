@@ -40,7 +40,7 @@ Pillow>=12.3.0
 faster-whisper==1.2.1
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor
 # (both use python-magic for content-based MIME sniffing).
-extract-msg==0.56.0
+extract-msg==0.56.1
 python-magic==0.4.27
 # WARP-198 RAG Phase 2 video extractor (subtitle parsing for embedded SRT/mov_text/etc.)
 srt==3.5.3
