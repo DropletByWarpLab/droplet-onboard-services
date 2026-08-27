@@ -293,6 +293,19 @@ describe("describeToolError — the correlation keys are always present", () => 
     expect(d.tool_call_id.length).toBeLessThanOrEqual(64);
   });
 
+  it("survives a NON-STRING tool_call_id from a broken provider", () => {
+    // Nothing zod-parses `choices[].message.tool_calls`; `call.id` is provider
+    // JSON cast to `ToolCall`. Everywhere else in the loop the id is only
+    // assigned, so this module would be the first to call a method on it — and
+    // a TypeError here would kill a still-recoverable turn.
+    for (const bad of [null, undefined, 42, { a: 1 }]) {
+      const d = describeWire('{"error":"x"}', {
+        toolCallId: bad as unknown as string,
+      });
+      expect(typeof d.tool_call_id).toBe("string");
+    }
+  });
+
   it("mints a distinct turn id per call", () => {
     expect(newAgentTurnId()).not.toBe(newAgentTurnId());
     expect(newAgentTurnId()).toMatch(/^[0-9a-f]{16}$/);

@@ -373,6 +373,10 @@ const MESSAGE_CLASSES: readonly (readonly [string, string])[] = [
   ["Gateway Timeout", "gateway_timeout"],
 ];
 
+/** Lowercased once at module load, not per call. Order is preserved. */
+const MESSAGE_CLASSES_LC: readonly (readonly [string, string])[] =
+  MESSAGE_CLASSES.map(([literal, token]) => [literal.toLowerCase(), token]);
+
 const UNCLASSIFIED_MESSAGE = "unclassified";
 
 /**
@@ -389,8 +393,8 @@ function classifyMessage(message: string): string {
       ? message
       : `${message.slice(0, CLASSIFY_HEAD)}\n${message.slice(-CLASSIFY_TAIL)}`;
   const haystack = text.toLowerCase();
-  for (const [literal, token] of MESSAGE_CLASSES) {
-    if (haystack.includes(literal.toLowerCase())) return token;
+  for (const [literal, token] of MESSAGE_CLASSES_LC) {
+    if (haystack.includes(literal)) return token;
   }
   return UNCLASSIFIED_MESSAGE;
 }
@@ -491,6 +495,18 @@ function classify(value: unknown): Classified {
 const MAX_CALL_ID_LEN = 64;
 
 /**
+ * `call.id` is provider JSON cast to `ToolCall` and is never schema-validated
+ * (nothing zod-parses `choices[].message.tool_calls` on the non-streaming
+ * path), so a broken provider can put a non-string here. Everywhere else in the
+ * loop the id is only ASSIGNED — this would be the first site to CALL a method
+ * on it, and a TypeError here would kill a turn the loop could still recover.
+ * Coerce, then bound.
+ */
+function safeCallId(id: string): string {
+  return (typeof id === "string" ? id : String(id)).slice(0, MAX_CALL_ID_LEN);
+}
+
+/**
  * Build the `agent_tool_error` payload for one failed tool call.
  *
  * Total, pure and non-throwing: it is called from inside the agent loop's tool
@@ -508,7 +524,7 @@ export function describeToolError(
 
   return {
     tool,
-    tool_call_id: input.toolCallId.slice(0, MAX_CALL_ID_LEN),
+    tool_call_id: safeCallId(input.toolCallId),
     turn_id: input.turnId,
     iter: input.iter,
     ...(input.threadId !== undefined ? { thread_id: input.threadId } : {}),
