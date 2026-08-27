@@ -1,7 +1,7 @@
 # Files sub-view addendum + design-brief pointer (WARP-1546)
 
 **Status:** discharges the `[GATE]` ticket **WARP-1546** on epic **WARP-1545**.
-**Gate authority:** `docs/ADR-029-teams-departments-files.md` §5, line 261 — verbatim:
+**Gate authority:** `docs/ADR-029-teams-departments-files.md` §5 (**"Design packet first"**, line 261) — verbatim:
 
 > **Design packet first:** a files sub-view addendum (per the design punch list) precedes all
 > frontend tickets; it also fixes the vocabulary decision D-3.
@@ -15,8 +15,9 @@ blocked.** Building any of them first contradicts an accepted ADR.
 
 Files code cites `§0.3 / §1 / §2 / §3 / §5` of a design brief in about a dozen places —
 `SpaceSwitcher.tsx:24, :58, :87-93, :177`, `app/files/page.tsx:65, :99, :263`,
-`app/admin/files/page.tsx:5, :14`, `apps/orchestrator/src/routes/departments.ts:180, :223, :289`,
-`components/FileManager/UploadZone.tsx:112` — and none of those documents were in this repo. Every
+`app/admin/files/page.tsx:5, :14`, `apps/orchestrator/src/routes/departments.ts:4, :197, :241, :244, :310`,
+`apps/web-dashboard/src/components/UploadZone.tsx:149` — and none of those documents were in this
+repo. Every
 constraint the shipped code claims to honor was unauditable from a PR.
 
 WARP-1546 offers two options: vendor the briefs, or pin them by path + SHA. **We pin, and vendor the
@@ -34,6 +35,29 @@ below.
 **When a `§`-reference in this repo's comments changes meaning, update this table's SHA in the same
 PR.** A stale pin is the failure mode this ticket exists to fix.
 
+### 1.1 How to cite in this document — and how it already went wrong once
+
+Every line number below was **verified against `d97ef85daa07`** (the `stage` head this was written
+against). Cite by **anchor first, line second**: a section title, a symbol name, a quoted fragment —
+with the line number as a convenience, never as the only handle. A reader who finds the anchor at a
+different line has still found the right thing; a reader given only a stale number has nothing.
+
+This is not theoretical. **The first version of this document got roughly a dozen citations wrong**,
+and every one of them was inherited rather than derived: `ADR-029:232`, `:244`, `:245`, `:306`,
+`SpaceSwitcher.tsx:145`, `:112`, `:191-197`, `app/files/page.tsx:65-69`, `departments.ts:180/:223/:289`
+and a `components/FileManager/UploadZone.tsx` path that does not exist were copied out of WARP-1546
+and WARP-1548, which state their own refs were *"verified against `origin/main` @ `3f46d6aa`"* — a
+snapshot from 2026-07-23. The files moved in the month since. `ADR-029:232` now lands on
+*"### 3. Provisioning lifecycle"*; `:244` is a blank line.
+
+That is the exact drift this ticket exists to stop, reproduced inside the document meant to stop it.
+Two rules follow:
+
+- **Never copy a line number from a ticket, a comment, or another doc.** Open the file and read it.
+  A citation you did not personally verify is a guess wearing a number.
+- **A `§`/line reference is a claim about the repo, so it gets checked like one.** `grep` for the
+  anchor before writing the number, and again before approving a PR that adds one.
+
 ---
 
 ## 2. The four decisions WARP-1546 delegates to the addendum
@@ -42,8 +66,9 @@ WARP-1548 and WARP-1546 both explicitly refuse to decide these in the ticket. Th
 
 ### 2.1 The rail's a11y role: `navigation`, not `tablist`, not `tree`
 
-The shipped control is `role="tablist" aria-label="File space"` (`SpaceSwitcher.tsx:145`). The rail
-is **`<nav aria-label="Places">` containing a list of links**.
+The shipped control is `role="tablist" aria-label="File space"` — `SpaceSwitcher.tsx:169` (the ≤3
+segmented form) and `:278` (the >3 menu form), **both** of which the rail replaces. The rail is
+**`<nav aria-label="Places">` containing a list of links**.
 
 This is a deliberate divergence from the Network-tabs precedent (`docs/indigo-redesign-handoff.md:128-130`),
 which preserved a tablist contract byte-for-byte. The rationale:
@@ -53,7 +78,7 @@ which preserved a tablist contract byte-for-byte. The rationale:
   history entry and its own deep link (WARP-1547 made `(space, path)` addressable). That is a
   navigation contract.
 - **`tree`** is worse. It promises expand/collapse and arrow traversal over arbitrary depth. This
-  hierarchy is **exactly one level** by ADR-029:306 and nothing collapses; the role would advertise
+  hierarchy is **exactly one level** (ADR-029 Non-goals, line 329) and nothing collapses; the role would advertise
   interactions that do not exist.
 - The Network precedent preserved a tablist because that control *stayed* a tabbed region. This one
   stops being one, so preserving the role would be the incidental outcome and changing it is the
@@ -75,13 +100,14 @@ children under a parent caption). There is no viewport where the switcher has a 
 doing, and shipping both showing the same thing is the outcome WARP-1548 warns against.
 
 Absorb, do not discard: kind glyphs, the neutral rights-chip treatment, `provisioning`/`failed`
-chips, department→team grouping, the orphan-team fallback (`SpaceSwitcher.tsx:191-197` — a team whose
-parent is absent still renders), and the owner/admin-only visibility filter for `failed` rows.
+chips, department→team grouping, the orphan-team fallback (`orphanTeams`, `SpaceSwitcher.tsx:220`, rendered at `:331`/`:350` — a team
+whose parent is absent still renders), and the owner/admin-only visibility filter for `failed` rows.
 `spaceSwitcherVisible()` becomes the rail's Home-mode gate (§3). **Delete the component only once
 each of those behaviors has a test on the rail.**
 
-`shared` stays a valid space id for one more release (ADR-029:245); `PINNED_IDS`
-(`SpaceSwitcher.tsx:112`) still depends on it. Retiring the switcher does not retire the id.
+`shared` stays a valid space id for one more release — ADR-029 **Migration** item 4 (line 268):
+"`shared` kept as an alias id for one release (mobile/MCP callers)". `PINNED_IDS`
+(`SpaceSwitcher.tsx:79`) still depends on it. Retiring the switcher does not retire the id.
 
 ### 2.3 `/files/devices`: out of the rail, and out of Files
 
@@ -113,10 +139,11 @@ reach the UI.
 
 ---
 
-## 3. Home mode stays pixel-identical (ADR-029:232)
+## 3. Home mode stays pixel-identical (ADR-029 §5)
 
-Binding, and this design does not touch it. **A single-space Home install renders exactly as it does
-today.** No rail, not collapsed, not a teaser. The predicate is the one already shipped: fewer than
+Binding, and this design does not touch it — ADR-029 **§5 "UI surfaces (all Business-gated per
+ADR-007; Home mode pixel-identical)"**, line 255. **A single-space Home install renders exactly as it
+does today.** No rail, not collapsed, not a teaser. The predicate is the one already shipped: fewer than
 two visible spaces means no location control at all.
 
 Everything else in the packet — view modes, facets, the inspector, the chat seam — is persona-neutral
@@ -125,9 +152,9 @@ and ships to both personas.
 Two prohibitions carry forward unchanged:
 
 - **No "personal homes" rail entry until WARP-1272** — not disabled, not a teaser, not a lock icon
-  (`app/admin/files/page.tsx:16-19`).
-- **Household gets no per-member rights editor pre-GA** (D-5, ADR-029:244). The rail *displays*
-  rights; it never edits them.
+  (`app/admin/files/page.tsx:16`).
+- **Household gets no per-member rights editor pre-GA** — D-5, ADR-029 **Migration** item 3 (line
+  267). The rail *displays* rights; it never edits them.
 
 ---
 
@@ -166,19 +193,22 @@ Verbatim copy for every one of these states is in the packet's §9 and ships as 
 
 Restated here so a reviewer can check them without leaving the repo.
 
-- **One level of nesting only.** Department → Team, full stop (ADR-029:306).
+- **One level of nesting only.** Department → Team, full stop (ADR-029 **Non-goals**, "Arbitrary-depth
+  hierarchy", line 329; the model decision is **D-3**, line 15).
 - **Visual nesting only — never a `mount_point` containing `/`.** The WARP-1254 spike proved writes
   to a synthetic intermediate segment silently land in the acting user's **personal** storage
-  (`apps/orchestrator/src/routes/departments.ts:20`). The flat `<Dept> — <Team>` mount name is a
+  (`apps/orchestrator/src/routes/departments.ts:19-20`). The flat `<Dept> — <Team>` mount name is a
   data-boundary safety requirement, not a style choice.
 - **Personal-root listing must keep hiding active dept mount names**, or every library appears twice
-  (`files.ts:1476-1491`, `activeDeptMountNames` at `:334-372`).
+  (`activeDeptMountNames`, `apps/orchestrator/src/routes/files.ts:419` — note it fails **open**,
+  `:740`).
 - **Nextcloud is never read as truth and never a management surface** (ADR-029:47, :181, :203 →
   ADR-013). Rail contents come from Prisma via the orchestrator — `GET /api/files/spaces`.
-- **`provisioning` / `failed` render as chips, never silent absence**; `failed` is owner/admin-only.
+- **`provisioning` / `failed` render as chips, never silent absence**; `failed` is owner/admin-only
+  (`isVisibleNonActive`, `SpaceSwitcher.tsx:93`).
 - **Reader posture stays honest** — writes visible-but-disabled with the locked tooltip. The
-  verbatim strings at `app/files/page.tsx:65-69` (`READER_TOOLBAR_TOOLTIP`,
-  `ADMIN_FOREIGN_LIBRARY_COPY`) are copy-locked.
+  verbatim strings `READER_TOOLBAR_TOOLTIP` (`app/files/page.tsx:89`) and
+  `ADMIN_FOREIGN_LIBRARY_COPY` (`:91`) are copy-locked.
 - **No new design tokens** unless they land in `DropletByWarpLab/design-and-style` first — the drift
   gate is bidirectional (`__tests__/design-tokens.lock.test.ts`).
 - **`--color-label-secondary` is `rgba(60,60,67,0.8)`, never `0.6`.** WARP-611 raised it because
