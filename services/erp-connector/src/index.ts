@@ -243,6 +243,55 @@ export {
   type TokenResolver,
 } from "./quickbooks/online-connector.js";
 
+// WARP-2215 — Stripe: the payments track. Read-through over a merchant-created
+// RESTRICTED key (never a secret key), with the pinned Stripe-Version on every
+// request, a 900s poll floor, and no money-movement surface at any tier.
+export {
+  StripeConnector,
+  ReadAllocationMeter,
+  InvalidStripeCredentialError,
+  StripeAccessPolicyError,
+  StripeEventGapError,
+  StripePollIntervalError,
+  StripeQuotaExhaustedError,
+  StripeReauthorizationRequiredError,
+  UnsafeStripeBaseUrlError,
+  assertReadableStripeCollection,
+  assertSafeStripeBaseUrl,
+  assertStripePollIntervalSeconds,
+  assertStripeRestrictedKey,
+  blockedStripeKeyResolver,
+  majorUnits as stripeMajorUnits,
+  EVENT_OBJECT_ROUTES as STRIPE_EVENT_OBJECT_ROUTES,
+  STRIPE_ALLOWED_API_HOSTS,
+  STRIPE_API_VERSION,
+  STRIPE_BACKFILL_MAX_ATTEMPTS,
+  STRIPE_BACKOFF_BASE_MS,
+  STRIPE_DATASETS,
+  STRIPE_DEFAULT_MONTHLY_READ_ALLOCATION,
+  STRIPE_EVENT_CURSOR_LAG_MS,
+  STRIPE_EVENT_RETENTION_MS,
+  STRIPE_IP_POLICY_REMEDIATION,
+  STRIPE_MAX_PAGES,
+  STRIPE_MAX_RATE_LIMIT_RETRIES,
+  STRIPE_MIN_POLL_INTERVAL_SECONDS,
+  STRIPE_PRODUCTION_BASE_URL,
+  STRIPE_PROVIDER,
+  STRIPE_READABLE_COLLECTIONS,
+  STRIPE_RESTRICTED_KEY_PATTERN,
+  STRIPE_TRACK_REMEDIATION,
+  type StripeBackfillResult,
+  type StripeBalanceTransactionRow,
+  type StripeChangeRecord,
+  type StripeConnectionState,
+  type StripeConnectorConfig,
+  type StripeConnectorDeps,
+  type StripeCredentialRejection,
+  type StripeEventPollResult,
+  type StripeKeyResolver,
+  type StripeStatus,
+} from "./stripe/connector.js";
+
 // WARP-2127 — Dentrix Ascend: the cloud dental PMS, read over Henry Schein
 // One's published Public API. This is the Dentrix surface that CAN be written
 // honestly — the on-premise Developer Program withholds its schema as policy,
