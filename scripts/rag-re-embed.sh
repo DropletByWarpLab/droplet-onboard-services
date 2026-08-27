@@ -144,8 +144,15 @@ statuses="$(psql_count 'SELECT count(*) FROM "FileIndexStatus"')"   || die "coul
 # and then "confirm" the replay against it. A non-numeric sentinel makes the
 # unknown impossible to mistake for "nothing to do".
 BRAIN_COUNT_FAILED="(COUNT FAILED — see runbook section 6, do NOT assume zero)"
-brain_ready="$(psql_count "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'")"   || brain_ready="$BRAIN_COUNT_FAILED"
-[ -n "$brain_ready" ] || brain_ready="$BRAIN_COUNT_FAILED"
+brain_count_rc=0
+brain_ready="$(psql_count "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'")" || brain_count_rc=$?
+if [ "$brain_count_rc" != 0 ] || [ -z "$brain_ready" ]; then
+  brain_ready="$BRAIN_COUNT_FAILED"
+  # Also on stderr: the summary block below scrolls past in a piped or logged
+  # run, and this is the one number whose absence is dangerous.
+  warn "could not count BrainMemoryItem rows — the step-3 replay count is UNKNOWN."
+  warn "Do NOT read that as zero. Get a real count before step 3; see runbook section 6."
+fi
 
 cat <<EOF
 

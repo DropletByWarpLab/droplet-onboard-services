@@ -37,7 +37,10 @@ class _TruncatingTokenizer:
     def __init__(self, max_length=128):
         self.truncation = {"max_length": max_length}
         self.max_length = max_length
-        self.padding = None
+        # Starts SET, not None. A fake that begins unpadded would let
+        # `test_padding_is_disabled_on_the_measuring_tokenizer` pass whether or
+        # not `no_padding()` is ever called — a test that cannot fail.
+        self.padding = {"strategy": "BatchLongest"}
 
     def encode(self, text, *a, **kw):
         # 1 token per whitespace word, capped while truncation is active.
@@ -104,6 +107,21 @@ def test_truncation_is_disabled_on_the_measuring_tokenizer(captured):
         "truncation left active — the splitter would measure every chunk as "
         "<= max_length and never split"
     )
+
+
+def test_padding_is_disabled_on_the_measuring_tokenizer(captured):
+    """Sibling of the truncation assertion above.
+
+    Lower impact than truncation — padding inflates rather than deflates, and
+    only for batched input, so a single-sequence `encode()` is unaffected in
+    practice. But `_get_measuring_tokenizer` calls both and only one was
+    defended, so the untested call was free to be dropped by a future edit.
+    """
+    _seen, tokenizer = captured
+
+    chunker._build_splitter(_BODY_CAPACITY, _OVERLAP)
+
+    assert tokenizer.padding is None
 
 
 def test_a_long_text_measures_past_the_truncation_cap(captured):

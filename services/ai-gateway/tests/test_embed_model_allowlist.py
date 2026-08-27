@@ -170,3 +170,146 @@ def test_allowlist_is_still_closed():
         "attacker/500gb-model",
     ):
         assert hostile not in allowed
+
+
+# ---------------------------------------------------------------------------
+# The RPC handler must actually USE the allow-list
+# ---------------------------------------------------------------------------
+#
+# Re-QA finding: the constant had three tests, its enforcement site had none —
+# deleting the INVALID_ARGUMENT block left this suite byte-identical. The
+# security property survives regardless (`embed_texts` calls `repo_for`, which
+# IS tested, so an unsupported id still cannot reach the Hub), but
+# `docs/RAG_RE_EMBED_RUNBOOK.md` section 4 promises the operator
+# INVALID_ARGUMENT specifically for a box still pinning the old model id, and
+# nothing held that contract.
+#
+# This enforcement site is pre-existing GWV-009; WARP-2196 changed the
+# constant's contents, not the check. These tests close an inherited gap.
+
+
+class _Aborted(BaseException):
+    """Stands in for grpc's abort, which does not return to the caller.
+
+    BaseException so the handler's `except Exception` cannot swallow it and
+    blur what the test is asserting.
+    """
+
+
+def _abort_context():
+    import grpc as _grpc
+
+    ctx = MagicMock()
+    seen = {}
+
+    async def _abort(code, details):
+        seen["code"] = code
+        seen["details"] = details
+        raise _Aborted()
+
+    ctx.abort = _abort
+    ctx._seen = seen
+    ctx._grpc = _grpc
+    return ctx, seen
+
+
+def _embed_request(model):
+    req = MagicMock()
+    req.texts = ["hello"]
+    req.model = model
+    req.HasField = MagicMock(return_value=model is not None)
+    return req
+
+
+def _servicer_with_stub_embedder(monkeypatch, recorder):
+    _install_proto_stubs()
+    mod = types.ModuleType("providers.embeddings")
+    mod.embed_texts = recorder
+    pkg = types.ModuleType("providers")
+    monkeypatch.setitem(sys.modules, "providers", pkg)
+    monkeypatch.setitem(sys.modules, "providers.embeddings", mod)
+
+    from grpc_server import InferenceServicer
+
+    return InferenceServicer(MagicMock(), MagicMock())
+
+
+@pytest.mark.asyncio
+async def test_embed_text_aborts_invalid_argument_for_an_unsupported_model(
+    monkeypatch,
+):
+    import grpc
+
+    calls = []
+    servicer = _servicer_with_stub_embedder(
+        monkeypatch, lambda *a, **k: calls.append(a) or [[0.0]]
+    )
+    ctx, seen = _abort_context()
+
+    with pytest.raises(_Aborted):
+        await servicer.EmbedText(_embed_request("gpt2"), ctx)
+
+    assert seen["code"] == grpc.StatusCode.INVALID_ARGUMENT
+    assert "gpt2" in seen["details"]
+    assert calls == [], "the model must never reach the embedder"
+
+
+@pytest.mark.asyncio
+async def test_embed_text_aborts_for_the_retired_minilm_id(monkeypatch):
+    """The exact case runbook section 4 tells the operator to expect.
+
+    A box that still pins EMBEDDING_MODEL=all-MiniLM-L6-v2 must fail closed
+    and loudly rather than write vectors from a second model into the corpus.
+    """
+    import grpc
+
+    calls = []
+    servicer = _servicer_with_stub_embedder(
+        monkeypatch, lambda *a, **k: calls.append(a) or [[0.0]]
+    )
+    ctx, seen = _abort_context()
+
+    with pytest.raises(_Aborted):
+        await servicer.EmbedText(_embed_request("all-MiniLM-L6-v2"), ctx)
+
+    assert seen["code"] == grpc.StatusCode.INVALID_ARGUMENT
+    assert "all-MiniLM-L6-v2" in seen["details"]
+    # The message names what IS allowed, so the operator can act on it.
+    assert "bge-small-en-v1.5" in seen["details"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_embed_text_allows_the_supported_model(monkeypatch):
+    """The gate must not be a wall — the shipped id has to get through."""
+    calls = []
+
+    def _recorder(texts, model):
+        calls.append(model)
+        return [[0.1, 0.2]]
+
+    servicer = _servicer_with_stub_embedder(monkeypatch, _recorder)
+    ctx, seen = _abort_context()
+
+    await servicer.EmbedText(_embed_request("bge-small-en-v1.5"), ctx)
+
+    assert seen == {}, "a supported model must not abort"
+    assert calls == ["bge-small-en-v1.5"]
+
+
+@pytest.mark.asyncio
+async def test_embed_text_allows_the_proto_default(monkeypatch):
+    """`model` unset means "no preference" and resolves to DEFAULT_MODEL."""
+    calls = []
+
+    def _recorder(texts, model):
+        calls.append(model)
+        return [[0.1, 0.2]]
+
+    servicer = _servicer_with_stub_embedder(monkeypatch, _recorder)
+    ctx, seen = _abort_context()
+
+    await servicer.EmbedText(_embed_request(None), ctx)
+
+    assert seen == {}
+    assert calls == [None]

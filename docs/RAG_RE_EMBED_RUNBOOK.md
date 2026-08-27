@@ -177,7 +177,8 @@ items. Get a real number before you go anywhere near §5, because §6's
 verification compares against it:
 
 ```bash
-$DC exec -T db psql -U droplet -d droplet -tAc   "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'"
+$DC exec -T db psql -U droplet -d droplet -tAc \
+  "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'"
 ```
 
 Likewise `(LOOKUP FAILED — corpus provenance unknown)` on the marker line is

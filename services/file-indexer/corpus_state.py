@@ -124,12 +124,24 @@ def read_corpus_model(conn) -> Optional[str]:
     if not row or row[0] is None:
         return None
     value = row[0]
-    # psycopg2 decodes jsonb to a Python object; a plain text column (or a
-    # driver without the jsonb adapter registered) hands back the raw string.
+    # THE READ HALF OF THE ROUND-TRIP. `stamp_corpus_model` writes
+    # `json.dumps(model)::jsonb`, i.e. the stored text is `"bge-small-en-v1.5"`
+    # WITH the quotes. psycopg2 normally decodes jsonb back to a Python str for
+    # us, but a plain text column, or a connection without the jsonb adapter
+    # registered, hands back that raw JSON text instead.
+    #
+    # Without this unwrap the marker can never equal EMBEDDING_MODEL, and the
+    # failure is a LOOP the operator cannot exit: guard blocks writes -> they
+    # run scripts/rag-re-embed.sh -> the emptied corpus is re-stamped -> the
+    # re-stamp reads back quoted again -> blocks again. The guard would brick
+    # the box it exists to protect, and the documented remedy would make no
+    # difference. Defended by test_corpus_state.py's round-trip tests.
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except (TypeError, ValueError):
+            # Not JSON at all — a hand-written text value. Take it verbatim
+            # rather than discarding a marker somebody set deliberately.
             return value or None
     return str(value) if value is not None else None
 

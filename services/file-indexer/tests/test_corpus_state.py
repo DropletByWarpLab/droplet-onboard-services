@@ -266,3 +266,104 @@ def test_a_db_failure_during_the_check_blocks_rather_than_assuming_health():
 
     assert verdict == cs.VERDICT_BLOCKED
     assert cs.writes_blocked()
+
+
+# ---------------------------------------------------------------------------
+# The marker ROUND-TRIP — write half and read half must agree
+# ---------------------------------------------------------------------------
+#
+# `stamp_corpus_model` writes `json.dumps(model)::jsonb`, so the stored text is
+# `"bge-small-en-v1.5"` WITH quotes. psycopg2 normally decodes jsonb back to a
+# str, and every other fake cursor in this file models that decoded case — so
+# without these tests the raw-text branch of `read_corpus_model` is never
+# exercised and deleting it leaves the suite green.
+#
+# It must not be deleted. If the marker reads back quoted it can never equal
+# EMBEDDING_MODEL, and the result is a loop with no exit: writes blocked ->
+# operator runs scripts/rag-re-embed.sh -> emptied corpus is re-stamped ->
+# re-stamp reads back quoted -> blocked again. The guard bricks the box it
+# exists to protect and the documented remedy changes nothing.
+#
+# This is also the closest thing we have to the live-Postgres round-trip,
+# which cannot be exercised in this suite.
+
+
+def _stamped_bind(model):
+    """Return exactly what `stamp_corpus_model` binds for ``model``.
+
+    Derived from the real call, not re-implemented here — otherwise the test
+    would agree with a copy of the write half rather than the write half.
+    """
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    cs.stamp_corpus_model(conn, model)
+    _sql, binds = cur.execute.call_args[0]
+    key, value = binds
+    assert key == cs.CORPUS_MODEL_KEY
+    return value
+
+
+def _reader(stored):
+    """Fake connection whose marker SELECT returns ``stored`` verbatim."""
+    cur = MagicMock()
+    cur.fetchone.return_value = (stored,)
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    return conn
+
+
+def test_the_write_half_really_does_store_quoted_json():
+    """Pins the premise the rest of these tests rest on."""
+    assert _stamped_bind("bge-small-en-v1.5") == '"bge-small-en-v1.5"'
+
+
+def test_read_unwraps_raw_jsonb_text():
+    """A driver that hands back the raw JSON text, not a decoded str."""
+    assert cs.read_corpus_model(_reader('"bge-small-en-v1.5"')) == "bge-small-en-v1.5"
+
+
+def test_read_accepts_an_already_decoded_value():
+    """psycopg2 with the jsonb adapter registered — the common case."""
+    assert cs.read_corpus_model(_reader("bge-small-en-v1.5")) == "bge-small-en-v1.5"
+
+
+def test_marker_round_trips_through_the_raw_jsonb_path():
+    """Write half -> storage -> read half, with no decoding in between."""
+    stored = _stamped_bind("bge-small-en-v1.5")
+    assert cs.read_corpus_model(_reader(stored)) == "bge-small-en-v1.5"
+
+
+def test_a_quoted_marker_does_not_block_a_matching_corpus():
+    """The loop, stated as the assertion that breaks it.
+
+    Non-empty corpus, marker stored exactly as `stamp_corpus_model` writes it,
+    configured model identical: the verdict must be MATCH. If the unwrap is
+    gone this is BLOCKED, the operator re-embeds, the re-stamp round-trips
+    through the same bug, and it is BLOCKED again — forever.
+    """
+    stored = _stamped_bind("bge-small-en-v1.5")
+    cur = MagicMock()
+    cur.fetchone.side_effect = [(stored,), (124312,)]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    verdict = cs.check_corpus_model(conn, model="bge-small-en-v1.5")
+
+    assert verdict == cs.VERDICT_MATCH, (
+        "a correctly-stamped corpus read back through the raw-jsonb path was "
+        "rejected — this is the un-exitable block/re-embed/block loop"
+    )
+    assert not cs.writes_blocked()
+
+
+def test_a_non_json_marker_is_taken_verbatim():
+    """Someone set the row by hand with plain text. Honour it."""
+    assert cs.read_corpus_model(_reader("bge-small-en-v1.5\x00not-json")) == (
+        "bge-small-en-v1.5\x00not-json"
+    )
+
+
+def test_an_empty_marker_reads_as_absent():
+    assert cs.read_corpus_model(_reader("")) is None
+    assert cs.read_corpus_model(_reader(None)) is None
