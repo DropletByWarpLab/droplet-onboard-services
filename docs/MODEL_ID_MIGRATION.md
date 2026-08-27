@@ -160,12 +160,16 @@ accept OCR-only image handling.
 - **`.env` (`LLM_MODEL`, `VISION_MODEL`, `DEFAULT_MODEL`)** — operator-owned.
   The report tells you what each would become; the command never edits the file.
 - **Embeddings.** `EMBEDDING_MODEL` defaults to `bge-small-en-v1.5`
-  (WARP-2196; previously `all-MiniLM-L6-v2`)
-  (`services/file-indexer/config.py:47`) and is served by ai-gateway's own
-  sentence-transformers (`providers/embeddings.py:18`), never by Ollama. DMR
-  does not serve it, **so no pgvector row needs re-embedding.** This is the
-  single biggest thing that is *not* in the blast radius and it is worth saying
-  out loud.
+  (WARP-2196; previously `all-MiniLM-L6-v2`) in
+  `services/file-indexer/config.py`, and is served by ai-gateway's own
+  sentence-transformers (`providers/embeddings.py`), never by Ollama. DMR does
+  not serve it, **so no pgvector row needs re-embedding for an Ollama/DMR
+  flip.** This is the single biggest thing that is *not* in the blast radius
+  and it is worth saying out loud.
+
+  Changing the EMBEDDER itself is a different operation entirely and *does*
+  require a full re-embed — the file-indexer refuses to index until it has
+  been done. See `docs/RAG_RE_EMBED_RUNBOOK.md`.
 
 **Unmapped ids always survive.** A model a customer pulled themselves is
 reported under "Unknown / customer-pulled" and left byte-for-byte as stored.

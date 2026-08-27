@@ -194,6 +194,61 @@ def test_build_splitter_refuses_a_budget_that_overruns_the_window(monkeypatch):
         chunker._build_splitter(512 - CHUNK_HEADER_BUDGET_TOKENS, 89)
 
 
+def test_split_params_guards_a_caller_supplied_header_budget(monkeypatch):
+    """`_build_splitter`'s guard is BLIND to a caller-supplied header_budget.
+
+    It reconstructs the budget as `capacity + CHUNK_HEADER_BUDGET_TOKENS`, i.e.
+    it always assumes the CONFIGURED reservation. So a caller that passes a
+    larger `header_budget` can hand it a capacity that looks fine while the
+    real chunk overruns the embedder window:
+
+        chunk_size=600, header_budget=152  ->  capacity 448
+        _build_splitter sees 448 + 64 = 512 <= 512  ->  passes
+
+    ...and a 600-token chunk goes into a 512-token window. That is the original
+    WARP-2196 defect, reintroduced through the parameter WARP-2191 added. The
+    guard in `_split_params` is the one that sees the real numbers, which is
+    why it is not redundant with the one in `_build_splitter`.
+    """
+    with pytest.raises(em.ChunkBudgetError) as exc:
+        chunker.chunk_text(
+            "some text here",
+            chunk_size=600,
+            overlap_ratio=0.2,
+            header_budget=152,
+        )
+    assert "600" in str(exc.value)
+    assert "512" in str(exc.value)
+
+
+def test_split_params_guard_is_not_reachable_via_build_splitter(monkeypatch):
+    """Proves the two guards are not interchangeable.
+
+    Same numbers as above, but calling `_build_splitter` directly with the
+    resulting capacity PASSES — demonstrating that removing the `_split_params`
+    check would leave nothing to catch it.
+    """
+    seen = {}
+
+    def _fake_from_hf(tokenizer, capacity, overlap):
+        seen["capacity"] = capacity
+        return object()
+
+    import sys
+    import types
+
+    sts = types.ModuleType("semantic_text_splitter")
+    sts.TextSplitter = type(
+        "_S", (), {"from_huggingface_tokenizer": staticmethod(_fake_from_hf)}
+    )
+    monkeypatch.setitem(sys.modules, "semantic_text_splitter", sts)
+    monkeypatch.setattr(chunker, "_measuring_tokenizer", _WordTokenizer())
+
+    chunker._build_splitter(448, 89)  # must NOT raise
+
+    assert seen["capacity"] == 448
+
+
 def test_budget_error_is_not_swallowed_by_the_word_split_fallback(monkeypatch):
     """`chunk_text` degrades to word-split on network failure — but NOT here.
 

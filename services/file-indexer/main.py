@@ -100,6 +100,65 @@ def build_http_app():
     return api
 
 
+def _enforce_corpus_state(conn_factory) -> None:
+    """WARP-2196 startup gate: may this box add to the corpus it already has?
+
+    A mismatch blocks chunk WRITES and logs an actionable ERROR; it does NOT
+    exit. The service stays up on purpose — reads keep working, the existing
+    corpus keeps serving queries, and the operator runs the re-embed in a
+    window of their choosing. Exiting would take search down entirely over a
+    corpus that is still internally consistent.
+
+    Every failure path here blocks writes. `check_corpus_model` already
+    fail-closes on its own read/count errors, but a throw from `conn_factory`
+    (it re-probes and can reconnect), from the stamping write, or from
+    anywhere else in this block would otherwise leave the block reason UNSET
+    and let writes proceed against a possibly-stale corpus — fail-open on the
+    escape path of a guard whose whole job is to fail closed.
+
+    Extracted from `main()` so it can be tested directly; `main()` is not
+    unit-runnable (fips self-test, volume wait, uvicorn).
+    """
+    try:
+        from corpus_state import (
+            VERDICT_BLOCKED,
+            block_writes,
+            check_corpus_model,
+        )
+    except Exception:
+        # corpus_state is unimportable. Nothing to set — but `db.upsert_chunk`
+        # imports `raise_if_write_blocked` from it on every call, so the same
+        # ImportError propagates there and writes already fail closed. Log it
+        # loudly; this is a broken image, not a corpus problem.
+        logger.exception(
+            "corpus_state: module could not be imported — chunk writes will "
+            "fail closed. This is a build/deploy defect."
+        )
+        return
+
+    try:
+        verdict = check_corpus_model(conn_factory())
+    except Exception as e:
+        reason = (
+            "REFUSING TO INDEX: the embedding-model startup check itself "
+            f"failed ({e}), so it is not known whether this box may add to "
+            "the corpus it has. Writes are blocked; reads are unaffected. "
+            "Restart the file-indexer once the database is healthy. If it "
+            "persists, see docs/RAG_RE_EMBED_RUNBOOK.md "
+            "(recovery: scripts/rag-re-embed.sh)."
+        )
+        logger.exception("corpus_state: startup check crashed")
+        logger.error(reason)
+        block_writes(reason)
+        return
+
+    if verdict == VERDICT_BLOCKED:
+        logger.error(
+            "file-indexer is running in READ-ONLY mode: no new chunks "
+            "will be written until the corpus is re-embedded."
+        )
+
+
 def main():
     from config import NEXTCLOUD_DATA_ROOT, AI_GATEWAY_GRPC_URL
 
@@ -143,22 +202,7 @@ def main():
     # WARP-2196: establish whether this box is allowed to add to the corpus it
     # already has. Runs BEFORE the brain-ingest subscription and the reconcile
     # thread below, so no write path can start before the verdict is in.
-    #
-    # A mismatch blocks chunk WRITES and logs an actionable ERROR; it does not
-    # exit. The service stays up on purpose — reads keep working, the existing
-    # corpus keeps serving queries, and the operator runs the re-embed in a
-    # window of their choosing. Exiting would take search down entirely over a
-    # corpus that is still internally consistent.
-    try:
-        from corpus_state import VERDICT_BLOCKED, check_corpus_model
-
-        if check_corpus_model(get_conn()) == VERDICT_BLOCKED:
-            logger.error(
-                "file-indexer is running in READ-ONLY mode: no new chunks "
-                "will be written until the corpus is re-embedded."
-            )
-    except Exception:
-        logger.exception("corpus_state: startup check crashed")
+    _enforce_corpus_state(get_conn)
 
     # WARP-203: subscribe to brain-memory uploads from the orchestrator.
     # Non-fatal if MQTT is unavailable — the subscriber is registered

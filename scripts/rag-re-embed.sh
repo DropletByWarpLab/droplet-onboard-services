@@ -113,12 +113,39 @@ psql_q 'SELECT 1' >/dev/null 2>&1 || die "cannot reach Postgres via the '$DB_SER
 configured="$(grep -E '^EMBEDDING_MODEL=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' " || true)"
 [ -n "$configured" ] || configured="(unset in .env — file-indexer will use its built-in default)"
 
-marker="$(psql_q "SELECT \"valueJson\" #>> '{}' FROM \"WorkspaceSetting\" WHERE \"key\" = 'ai.embedding.corpusModel'" || true)"
-[ -n "$marker" ] || marker="(never stamped — corpus predates the guard)"
+# The summary reads run through plain `dc`, NOT `dc_probe`. `count(*)` on
+# FileContentChunk is a sequential scan and a large corpus is exactly what this
+# script targets, so borrowing the reachability probe's short timeout would
+# abort the script on the boxes that most need it — and `set -e` kills a failed
+# command substitution before any `die` can explain why.
+psql_count() {
+  dc exec -T "$DB_SERVICE" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -tAc "$1"
+}
 
-chunks="$(psql_q 'SELECT count(*) FROM "FileContentChunk"')"
-statuses="$(psql_q 'SELECT count(*) FROM "FileIndexStatus"')"
-brain_ready="$(psql_q "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'" || echo 0)"
+# Same discipline as the counts below: a FAILED marker lookup must not be
+# reported as "never stamped". Those mean opposite things — one says the corpus
+# predates the guard (so a re-embed is needed), the other says we do not know.
+marker_rc=0
+marker="$(psql_count "SELECT \"valueJson\" #>> '{}' FROM \"WorkspaceSetting\" WHERE \"key\" = 'ai.embedding.corpusModel'")" || marker_rc=$?
+if [ "$marker_rc" != 0 ]; then
+  marker="(LOOKUP FAILED — corpus provenance unknown)"
+elif [ -z "$marker" ]; then
+  marker="(never stamped — corpus predates the guard)"
+fi
+
+chunks="$(psql_count 'SELECT count(*) FROM "FileContentChunk"')"   || die "could not count FileContentChunk rows"
+statuses="$(psql_count 'SELECT count(*) FROM "FileIndexStatus"')"   || die "could not count FileIndexStatus rows"
+
+# NEVER let this one degrade to a number. The brain replay (runbook section 6)
+# is the one step whose omission is silent AND unrecoverable: skip it and every
+# chat attachment disappears from search while the file still shows in the UI,
+# with no error and no badge. Runbook section 4 tells the operator to write this
+# count down — a swallowed failure would have them write down a fabricated zero
+# and then "confirm" the replay against it. A non-numeric sentinel makes the
+# unknown impossible to mistake for "nothing to do".
+BRAIN_COUNT_FAILED="(COUNT FAILED — see runbook section 6, do NOT assume zero)"
+brain_ready="$(psql_count "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'")"   || brain_ready="$BRAIN_COUNT_FAILED"
+[ -n "$brain_ready" ] || brain_ready="$BRAIN_COUNT_FAILED"
 
 cat <<EOF
 
@@ -141,8 +168,13 @@ if [ "$assume_yes" != 1 ]; then
   warn "can take hours on a large corpus. Search results will be incomplete"
   warn "until it finishes."
   printf '[rag-re-embed] Type REBUILD to continue: '
-  read -r reply
-  [ "$reply" = "REBUILD" ] || die "aborted (got '$reply')"
+  # `read` returns non-zero at EOF, which under `set -e` would kill the script
+  # before `die` could say why — a non-interactive invocation would then exit 1
+  # with no output at all. It still aborts (correctly); we just want it to say
+  # so. `|| reply=""` keeps the failure but hands it to the check below.
+  reply=""
+  read -r reply || reply=""
+  [ "$reply" = "REBUILD" ] || die "aborted (expected REBUILD, got '$reply'). Use -y for unattended runs."
 fi
 
 # One transaction: never leave chunks deleted but statuses intact (the corpus
@@ -175,7 +207,7 @@ NEXT STEPS — the rebuild has NOT started yet.
        docker compose -p $PROJECT -f docker/docker-compose.yml logs -f file-indexer \\
          | grep -E 'reconcile|Indexed|corpus_state'
 
-  3. >>> REPLAY THE BRAIN UPLOADS ($brain_ready item(s)). <<<
+  3. >>> REPLAY THE BRAIN UPLOADS. Items to replay: $brain_ready <<<
      Step 1 does NOT cover them. Chunks with source='brain' come from
      BrainMemoryItem uploads, which are ingested from an MQTT event and have
      NO reconcile path whatsoever. If you stop after step 2, every chat

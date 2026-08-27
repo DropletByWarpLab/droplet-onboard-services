@@ -140,8 +140,11 @@ def stamp_corpus_model(conn, model: str) -> None:
     ``WorkspaceSetting.updatedAt`` is Prisma-side ``@updatedAt``, i.e. the
     application sets it — raw SQL has to do so explicitly or the column would
     never move. ``id`` is a Prisma-side uuid default for the same reason, so
-    the INSERT supplies one via ``gen_random_uuid()`` (pgcrypto/PG13+ builtin,
-    already relied on elsewhere in this schema).
+    the INSERT supplies one via ``gen_random_uuid()::text``. The cast is not
+    cosmetic: the column is Prisma ``String`` (TEXT) while the function returns
+    ``uuid``, and the explicit cast is the house pattern —
+    ``20260525130200_warp_455_file_scope/migration.sql`` does exactly this for
+    ``File.id``.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -149,7 +152,7 @@ def stamp_corpus_model(conn, model: str) -> None:
             INSERT INTO "WorkspaceSetting"
                 ("id", "key", "section", "type", "valueJson",
                  "createdAt", "updatedAt")
-            VALUES (gen_random_uuid(), %s, 'ai'::"SettingSection",
+            VALUES (gen_random_uuid()::text, %s, 'ai'::"SettingSection",
                     'string'::"SettingType", %s::jsonb, NOW(), NOW())
             ON CONFLICT ("key") DO UPDATE SET
                 "valueJson" = EXCLUDED."valueJson",

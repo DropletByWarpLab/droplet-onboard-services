@@ -171,6 +171,20 @@ It prints the marker, the configured model, the chunk and status row counts,
 and the number of brain items that will need the §6 replay. **Write the brain
 count down.** You will need it, and it is the step that is easiest to skip.
 
+If that line reads `(COUNT FAILED — see runbook section 6, do NOT assume
+zero)`, the query did not return — it does **not** mean there are no brain
+items. Get a real number before you go anywhere near §5, because §6's
+verification compares against it:
+
+```bash
+$DC exec -T db psql -U droplet -d droplet -tAc   "SELECT count(*) FROM \"BrainMemoryItem\" WHERE status = 'ready'"
+```
+
+Likewise `(LOOKUP FAILED — corpus provenance unknown)` on the marker line is
+not the same as `(never stamped …)`: the first means the query failed, the
+second means the corpus genuinely predates the guard. Only the second tells
+you a re-embed is due.
+
 Expect the ai-gateway's first embed call after the swap to pull
 `BAAI/bge-small-en-v1.5` (~130 MB) from the HuggingFace Hub. On a box with
 restricted egress, pre-warm the HF cache first or the rebuild stalls at the
