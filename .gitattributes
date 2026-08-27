@@ -89,3 +89,11 @@ docker/nextcloud/* text eol=lf
 # SQL and anchor-codegen pins above; same fix (WARP-1567). Guarded by
 # apps/orchestrator/src/__tests__/snapshot-eol.test.ts.
 *.snap text eol=lf
+
+# WARP-2192 — systemd/kernel config fragments deployed to the box. A trailing
+# CR is NOT whitespace to either parser: modules-load.d would look for a module
+# literally named "sp5100_tco\r" and find nothing, and systemd keeps the CR
+# inside the value so `RuntimeWatchdogSec=120\r` fails to parse. Both failures
+# are silent — the file reads correctly and the watchdog simply never arms.
+scripts/host/etc-modules-load.d/* text eol=lf
+scripts/host/etc-systemd-system.conf.d/* text eol=lf

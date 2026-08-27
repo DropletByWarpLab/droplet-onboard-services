@@ -429,3 +429,58 @@ reset. `--no-backup` is a deprecated no-op kept for automation back-compat.
 backup→mutate→restore round-trip against a disposable docker compose project,
 asserting a restorable artifact per volume + both DBs, mode 600, and rotation.
 It SKIPs the live drill (keeping the static checks) when Docker is unavailable.
+
+## Hardware watchdog (WARP-2192)
+
+The floor beneath every other recovery path. If the **kernel** wedges — hard
+lock, driver deadlock, storage taking the whole IO path down — nothing in
+userspace can help. The *Self-heal watchdog* above is a systemd timer, so a
+wedged kernel takes it down too; only the FCH's own timer gets the box back.
+
+Two files, installed by `setup.sh` (via `scripts/lib/single-box.sh`). **Either
+one missing makes the whole thing a silent no-op:**
+
+| File | Installed to | Why it is needed |
+|---|---|---|
+| `etc-modules-load.d/droplet-watchdog-hw.conf` | `/etc/modules-load.d/` | systemd never loads watchdog drivers itself, so without this `/dev/watchdog` does not exist |
+| `etc-systemd-system.conf.d/droplet-watchdog.conf` | `/etc/systemd/system.conf.d/` | `RuntimeWatchdogSec` is `off` by default, so PID1 would never open or pet the device |
+
+**`RuntimeWatchdogSec=120` is deliberately conservative.** systemd pets at
+**half** the configured value (60s), so a transient stall — heavy IO, a storm of
+container restarts — has a full minute of slack before the counter matters. A
+spurious reboot of a healthy appliance is worse than two minutes of extra
+downtime on a genuine hang.
+
+`nowayout=0` on `sp5100_tco`, so systemd's clean close on a normal shutdown
+**disarms** the timer instead of leaving it to fire mid-reboot.
+`RebootWatchdogSec` stays at its 10 min default — that covers a hung *shutdown*
+sequence, a different failure.
+
+⚠ **`daemon-reload` is not enough.** `system.conf` is read by PID1 at startup,
+so applying a change needs `systemctl daemon-reexec`. A reload leaves the
+setting inert while the file on disk looks correct.
+
+⚠ **Check `dmesg` on any new board revision.** The known AMD FCH failure is
+`Watchdog hardware is disabled` when firmware never programmed the MMIO base —
+the module still loads, so "modprobe succeeded" proves nothing. The good path
+logs `Using 0x… for watchdog MMIO address`.
+
+```bash
+# Is it actually armed?
+cat /sys/class/watchdog/watchdog0/state      # want: active
+cat /sys/class/watchdog/watchdog0/timeout    # want: 120
+systemctl show -p RuntimeWatchdogUSec -p WatchdogDevice
+journalctl -b | grep -i watchdog             # "Watchdog running with a timeout of 2min."
+
+# Did the watchdog cause the last reboot? (non-zero = yes)
+cat /sys/class/watchdog/watchdog0/bootstatus
+```
+
+**Verifying a change here means proving PID1 is *petting* it, not just that it
+armed.** An armed-but-unpetted watchdog reboots the box every 2 minutes
+forever, and `state=active` looks identical in both cases. Record
+`/proc/sys/kernel/random/boot_id`, wait past the full timeout, and re-read it:
+
+```bash
+cat /proc/sys/kernel/random/boot_id; sleep 200; cat /proc/sys/kernel/random/boot_id
+```
