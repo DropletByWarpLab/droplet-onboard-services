@@ -84,12 +84,6 @@
 --        20260425220000 (which dropped the predecessor IVFFlat index as
 --        generated collateral) and WARP-2193, unnoticed for four months.
 --
---        !! THE GENERATED SECTION BELOW DOES NOT YET INCLUDE THIS ENTRY. It
---        needs one `scripts/check-schema-drift.sh --update` run against a
---        pgvector shadow database, which the branch that added this note had
---        no Postgres to do. Until then the pg-integration job's drift gate
---        fails with a "drift grew" diff naming exactly this one statement.
---
 -- UPDATING THIS FILE
 -- ------------------
 -- Do not hand-edit below the sentinel. Run:
@@ -113,6 +107,9 @@ ALTER TABLE "Department" DROP CONSTRAINT "Department_parentId_fkey";
 
 -- DropIndex
 DROP INDEX "Department_parentId_idx";
+
+-- DropIndex
+DROP INDEX "FileContentChunk_embedding_hnsw_idx";
 
 -- DropIndex
 DROP INDEX "FileContentChunk_text_tsv_idx";
