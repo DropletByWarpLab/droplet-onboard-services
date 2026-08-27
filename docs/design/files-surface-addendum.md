@@ -27,13 +27,21 @@ below.
 
 | Brief | Canonical path | Pinned at |
 |---|---|---|
-| Files surface (this epic's design) | `DropletByWarpLab/shared_brain` → `content/brand/handoffs/files/DESIGN-BRIEF.md` | `ce39ac818471` |
-| Files packet README (integration map) | `…/handoffs/files/README.md` | `ce39ac818471` |
-| Files prototype (clickable, all states) | `…/handoffs/files/prototype/index.html` | `ce39ac818471` |
+| Files surface (this epic's design) | `DropletByWarpLab/shared_brain` → `content/brand/handoffs/files/DESIGN-BRIEF.md` | `d60f33ce62b6` |
+| Files packet README (integration map) | `…/handoffs/files/README.md` | `d60f33ce62b6` |
+| Files prototype (clickable, all states) | `…/handoffs/files/prototype/index.html` | `d60f33ce62b6` |
 | Teams/Departments rights model (the §0.3/§1/§2/§3/§5 the code cites) | `…/handoffs/departments/DESIGN-BRIEF.md` + `ARCHITECTURE-BRIEF.md` | as referenced by `components/Departments/DepartmentsPanel.tsx:6-9` |
 
 **When a `§`-reference in this repo's comments changes meaning, update this table's SHA in the same
 PR.** A stale pin is the failure mode this ticket exists to fix.
+
+⚠ **Pin the SHA the content lands at on `main`, never a branch commit.** The first version of
+this table pinned `ce39ac818471` — the head of the packet's PR branch. That branch was
+squash-merged, so the commit is not an ancestor of `shared_brain` `main` and cannot be checked
+out; worse, it was the *pre-review* snapshot, still carrying the AA token regression and the
+wrong citations both PRs later fixed. A pin that resolves to nothing is merely useless; a pin
+that resolves to a known-defective snapshot is actively misleading. Re-pin in the PR that
+follows the merge.
 
 ### 1.1 How to cite in this document — and how it already went wrong once
 
