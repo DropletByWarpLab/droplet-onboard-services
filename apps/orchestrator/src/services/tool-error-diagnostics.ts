@@ -40,6 +40,16 @@
  *   - argument VALUES are never emitted, only salted digests,
  *   - free text is emitted only for the one shape this repo authors
  *     (`envelope`), and only through the mandatory {@link redactSecrets} scrub.
+ *
+ * RESIDUAL, stated rather than papered over: the shape guards bound the
+ * CHARSET, not the meaning. An identifier-shaped name still passes —
+ * `Jane_Doe_SSN_123456789` satisfies {@link ARG_KEY_RE}, and
+ * `Jane_Doe_SSN_123456789.pdf` satisfies {@link TOOL_NAME_RE}. That is a much
+ * narrower channel than the one the guards close (no separators, no spaces, no
+ * path), and it cannot carry a file path, which is what the threat model
+ * actually turns on. Closing it further would mean rejecting the underscore,
+ * which would reject most real tool names and argument keys and cost the line
+ * its whole purpose. Accepted deliberately.
  */
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
@@ -72,10 +82,13 @@ export interface ToolErrorDiagnostics {
   /** Shape-guarded tool name, or `<non-identifier>` — see {@link safeToolName}. */
   readonly tool: string;
   /**
-   * Provider-generated call id. THE join key: unlike `thread_id` it is always
-   * present (`thread_id` requires conversationId + assistantMessageId +
-   * citationUserId to ALL be truthy, so an ephemeral or service-token turn has
-   * none). Carries no user content.
+   * Provider-generated call id, shape-guarded by {@link CALL_ID_RE}. THE join
+   * key: unlike `thread_id` it is always present (`thread_id` requires
+   * conversationId + assistantMessageId + citationUserId to ALL be truthy, so
+   * an ephemeral or service-token turn has none).
+   *
+   * It is model-controlled, not server-minted — the guard is what keeps it free
+   * of user content, not the provider's good behaviour.
    */
   readonly tool_call_id: string;
   /** Minted once per `runAgent` call — groups every failure in one turn. */
@@ -416,6 +429,15 @@ const MAX_REDACT_INPUT = 64_000;
  * scrub applied to every byte before it can leave the appliance
  * (architecture-guard rule 19). Redact BEFORE truncating, so truncation cannot
  * split a secret past the point a rule could match it.
+ *
+ * CAVEAT, and this branch is what introduced it: "the envelope is repo-authored"
+ * is now a WEAKER premise than it was. `HANDLER_THREW`'s message is built by
+ * mcp-server's `describeThrown`, which renders whatever was thrown — including
+ * a cause chain that a future handler could populate from an upstream response
+ * body. No shipped handler interpolates one today, so the exposure is latent,
+ * and it stays flag-gated behind `AGENT_BLANK_TURN_DEBUG`. If a handler ever
+ * starts embedding upstream bodies in a thrown message, this excerpt must be
+ * narrowed to exclude `HANDLER_THREW` rather than relying on the scrub alone.
  */
 function buildExcerpt(message: string, shape: ToolErrorShape, include: boolean): string | undefined {
   if (!include || shape !== "envelope" || message.length === 0) return undefined;
@@ -491,19 +513,38 @@ function classify(value: unknown): Classified {
 
 // ── Entry points ─────────────────────────────────────────────────────────────
 
-/** Provider-generated ids are short in practice; bound the pathological case. */
-const MAX_CALL_ID_LEN = 64;
-
 /**
- * `call.id` is provider JSON cast to `ToolCall` and is never schema-validated
- * (nothing zod-parses `choices[].message.tool_calls` on the non-streaming
- * path), so a broken provider can put a non-string here. Everywhere else in the
- * loop the id is only ASSIGNED — this would be the first site to CALL a method
- * on it, and a TypeError here would kill a turn the loop could still recover.
- * Coerce, then bound.
+ * `call.id` is model-controlled, exactly like {@link TOOL_NAME_RE}'s input.
+ *
+ * It is provider JSON cast to the `ToolCall` interface: nothing zod-parses
+ * `choices[].message.tool_calls`, and the streaming path's `accumulateToolCall`
+ * copies `frag.id` through unchanged. It is NEVER minted server-side, so prompt
+ * injection steers it the same way it steers a tool name.
+ *
+ * Unguarded on content it was the WIDEST channel in this line: 64 characters of
+ * unrestricted charset (spaces, slashes, colons — strictly wider than the
+ * `arg_keys` channel {@link ARG_KEY_RE} exists to close), ALWAYS on rather than
+ * flag-gated, and newly routed OFF-BOX by this very log statement (before it,
+ * `call.id` reached only the SSE trace and DB rows; `orchestrator` is in
+ * `droplet-collect-logs.sh` DEFAULT_SERVICES, so a WARN line lands in the
+ * downloadable diagnostics zip). Neither redaction layer can catch it —
+ * `redactSecrets` and the host `sed` match secret SHAPES, not names or paths.
+ *
+ * The charset admits every id shape real providers mint (`call_abc123`,
+ * `toolu_01ABC…`, `chatcmpl-tool-…`, a bare uuid) and rejects a path or a
+ * sentence. The `{1,64}` bound is part of the pattern, so the shape check also
+ * subsumes the length check — an over-long id is not truncated into something
+ * that looks legitimate, it collapses to the same fixed token.
+ *
+ * Also total: a non-string from a broken provider fails the `typeof` check and
+ * lands on the token rather than throwing. Everywhere else in the loop the id
+ * is only ASSIGNED, so this module would be the first site to CALL a method on
+ * it, and a TypeError here would kill a still-recoverable turn.
  */
+const CALL_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
 function safeCallId(id: string): string {
-  return (typeof id === "string" ? id : String(id)).slice(0, MAX_CALL_ID_LEN);
+  return typeof id === "string" && CALL_ID_RE.test(id) ? id : NON_IDENTIFIER;
 }
 
 /**

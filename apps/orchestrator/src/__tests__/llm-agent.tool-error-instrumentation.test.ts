@@ -180,6 +180,29 @@ describe("agent_tool_error — it fires, and carries the envelope", () => {
       error_code: "NON_JSON_RESULT",
     });
   });
+
+  it("logs an isError body that carries no error field as unknown", async () => {
+    // The fourth shape, end to end. It exists so a future drift in the
+    // mcp-server wire contract shows up as a spike in ONE token rather than as
+    // silence — which is the failure mode WARP-1604 already caught once.
+    await runAgent(
+      buildDeps(
+        [{ id: "call_1", name: "read_file", args: '{"path":"/a.md"}' }],
+        wire('{"results":[]}'),
+      ),
+      REQ,
+    );
+
+    expect(errorLines()).toHaveLength(1);
+    expect(errorLines()[0].obj).toMatchObject({
+      error_shape: "unknown",
+      error_code: "UNCLASSIFIED",
+      message_class: "unclassified",
+      message_len: 0,
+    });
+    // Still attributable: the correlation keys do not depend on the shape.
+    expect(errorLines()[0].obj.tool_call_id).toBe("call_1");
+  });
 });
 
 describe("agent_tool_error — what it must NOT log", () => {

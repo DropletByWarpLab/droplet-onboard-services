@@ -288,21 +288,54 @@ describe("describeToolError — the correlation keys are always present", () => 
     expect(d.iter).toBe(3);
   });
 
-  it("bounds a pathological provider-supplied tool_call_id", () => {
+  it("accepts the id shapes real providers actually mint", () => {
+    for (const id of [
+      "call_abc123",
+      "toolu_01ABCdefGHIjklMNOpqr",
+      "chatcmpl-tool-9f8e7d6c",
+      "0f9c1e2a-4b6d-4a1f-9c3e-7d2b8a5f1e04",
+      "call:12.3",
+    ]) {
+      expect(describeWire('{"error":"x"}', { toolCallId: id }).tool_call_id).toBe(
+        id,
+      );
+    }
+  });
+
+  it("replaces a model-authored non-identifier tool_call_id with a fixed token", () => {
+    // `ToolCall.id` is provider JSON cast to an interface. Nothing zod-parses
+    // `choices[].message.tool_calls`, and the streaming accumulator copies
+    // `frag.id` through unchanged — it is never minted server-side, so it is
+    // exactly as model-controlled as `tool` is, and prompt injection steers it
+    // the same way. Unguarded it was a 64-char unrestricted-charset channel
+    // (spaces, slashes, colons) that is ALWAYS on, that this WARN line is the
+    // first thing to route into journald and therefore the diagnostics zip,
+    // and that neither redaction layer can catch — both match secret SHAPES,
+    // not names or paths.
+    const d = describeWire('{"error":"x"}', {
+      toolCallId: "/Patients/Jane Doe/chart.pdf ssn=123-45-6789",
+    });
+
+    expect(d.tool_call_id).toBe("<non-identifier>");
+    expect(JSON.stringify(d)).not.toContain("Jane Doe");
+    expect(JSON.stringify(d)).not.toContain("123-45-6789");
+  });
+
+  it("replaces an over-long tool_call_id rather than logging it", () => {
     const d = describeWire('{"error":"x"}', { toolCallId: "c".repeat(500) });
+    expect(d.tool_call_id).toBe("<non-identifier>");
     expect(d.tool_call_id.length).toBeLessThanOrEqual(64);
   });
 
   it("survives a NON-STRING tool_call_id from a broken provider", () => {
-    // Nothing zod-parses `choices[].message.tool_calls`; `call.id` is provider
-    // JSON cast to `ToolCall`. Everywhere else in the loop the id is only
-    // assigned, so this module would be the first to call a method on it — and
-    // a TypeError here would kill a still-recoverable turn.
+    // Everywhere else in the loop the id is only ASSIGNED, so this module
+    // would be the first to call a method on it — and a TypeError here would
+    // kill a still-recoverable turn.
     for (const bad of [null, undefined, 42, { a: 1 }]) {
       const d = describeWire('{"error":"x"}', {
         toolCallId: bad as unknown as string,
       });
-      expect(typeof d.tool_call_id).toBe("string");
+      expect(d.tool_call_id).toBe("<non-identifier>");
     }
   });
 
