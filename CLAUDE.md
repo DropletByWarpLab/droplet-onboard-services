@@ -137,6 +137,18 @@ feature branch ──PR──▶ stage ──PR──▶ main
                    (prerelease)     (--latest)
 ```
 
+- **`stage` is permanent — never delete it.** Not after a promote, not
+  because it looks stale, not because a ticket says the flow is retired.
+  A promotion PR's head **is** `stage`, so GitHub's *Delete branch*
+  button on a merged promote deletes the release channel itself — never
+  click it, never pass `--delete-branch` on a promote. Deleting it has
+  auto-closed every open PR based on it four separate times (2, then 9,
+  then 39 PRs) and a closed PR cannot be reopened once its base ref is
+  gone. The `Stage Protection` ruleset now blocks `deletion` with no
+  bypass actors; do not weaken it.
+- **Nothing is pushed directly to `stage` or `main`.** Both are reached
+  only through a PR — features into `stage`, promotions into `main`.
+  There is no direct-push path for anyone, bot or human.
 - **Open every PR against `stage`.** `main` only ever receives merges
   from `stage`. If you catch yourself opening a feature PR against
   `main`, that is the mistake — retarget it.

@@ -372,6 +372,22 @@ EOF
   sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
     /etc/avahi/services/droplet.service
 
+  # --- hardware watchdog (WARP-2192) --------------------------------------
+  # The floor beneath every userspace recovery path: if the KERNEL wedges,
+  # droplet-watchdog.service below cannot run either (it is a systemd timer),
+  # and only the FCH's own timer gets the box back.
+  #
+  # Two halves, and either one missing makes it a silent no-op: systemd never
+  # loads watchdog drivers itself (so /dev/watchdog would not exist), and
+  # RuntimeWatchdogSec is off by default (so PID1 would never pet it).
+  sudo install -d -m 0755 /etc/modules-load.d
+  sudo install -m 0644 "$host_src/etc-modules-load.d/droplet-watchdog-hw.conf" \
+    /etc/modules-load.d/droplet-watchdog-hw.conf
+  sudo install -d -m 0755 /etc/systemd/system.conf.d
+  sudo install -m 0644 "$host_src/etc-systemd-system.conf.d/droplet-watchdog.conf" \
+    /etc/systemd/system.conf.d/droplet-watchdog.conf
+  log_success "Installed the hardware watchdog config (sp5100_tco + RuntimeWatchdogSec)"
+
   # --- unified self-heal watchdog (WARP-1002) ------------------------------
   # One timer-driven supervisor for the proven-heal wedge states (Wi-Fi PCI
   # death via the WARP-869 helper, XVF3800 voice-DSP wedge, docker DNS,
@@ -400,6 +416,28 @@ EOF
   sudo rm -f /etc/systemd/system/droplet-wifi-watchdog.service \
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
+
+  # --- power-loss auto-restart (WARP-2190) ---------------------------------
+  # A box that does not come back after a power cut is dark until someone
+  # presses the button. Measured: ~30 h down after an unclean loss, because the
+  # board's AC-loss policy was "always off" and nothing here ever set it.
+  #
+  # Sets the AMD FCH PwrFailShadow bit (the hardware bit the BIOS "Restore on
+  # AC/Power Loss" option drives) and keeps an RTC wake alarm armed as an
+  # independent backstop. Re-applied on EVERY boot by the unit, because
+  # firmware rewrites that register from its own NVRAM copy at each POST.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-power-restore" \
+    /usr/local/sbin/droplet-power-restore
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-power-restore.service" \
+    /etc/systemd/system/droplet-power-restore.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-power-restore.timer" \
+    /etc/systemd/system/droplet-power-restore.timer
+  # Per-box tuning file: install once, never clobber operator edits.
+  if [ ! -f /etc/default/droplet-power-restore ]; then
+    sudo install -m 0644 "$host_src/etc-default/droplet-power-restore" \
+      /etc/default/droplet-power-restore
+  fi
+  log_success "Installed /usr/local/sbin/droplet-power-restore (+ units)"
 
   # --- WARP-1829 host-unit refresh ----------------------------------------
   # Host units execute their source out of the git working tree
@@ -507,6 +545,15 @@ EOF
   # --- Activate ----------------------------------------------------------
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
+  # WARP-2192: bring the hardware watchdog up on THIS run rather than waiting
+  # for the next boot. `modprobe` because modules-load.d only fires at boot;
+  # `daemon-reexec` because system.conf is read by PID1 at startup — a plain
+  # daemon-reload leaves RuntimeWatchdogSec inert while the file on disk looks
+  # correct. Both tolerate boards with no usable TCO timer (the driver logs
+  # "Watchdog hardware is disabled" and no device appears), so neither is
+  # allowed to fail a provision.
+  sudo modprobe sp5100_tco >/dev/null 2>&1 || true
+  sudo systemctl daemon-reexec >/dev/null 2>&1 || true
   # WARP-1680: enabled (not --now) — it is a boot-time recovery path, and
   # running it mid-setup on a healthy box would only log a no-op.
   sudo systemctl enable droplet-net-selfheal.service >/dev/null 2>&1
@@ -536,6 +583,15 @@ EOF
   # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
   # is a handful of read-only sysfs/docker probes every ~3 minutes.
   sudo systemctl enable --now droplet-watchdog.timer >/dev/null 2>&1
+  # WARP-2190: power-loss auto-restart. `enable` puts the policy back after
+  # every POST (firmware stomps the register); `--now` on the service applies
+  # it to THIS boot too, so a box provisioned today survives a cut tonight
+  # rather than waiting for its next reboot. The timer re-arms the RTC
+  # backstop. Both tolerate non-AMD/unmapped hardware: the script refuses to
+  # write and exits non-zero rather than guessing, so `|| true` keeps a
+  # provision on unsupported hardware from failing outright.
+  sudo systemctl enable --now droplet-power-restore.service >/dev/null 2>&1 || true
+  sudo systemctl enable --now droplet-power-restore.timer >/dev/null 2>&1 || true
   # WARP-268: runtime egress-audit collector. restart|| true so a missing
   # apt dep (conntrack/tcpdump/python3-yaml) doesn't fail the whole install;
   # the unit self-heals on the next setup.sh re-run once the deps land.
