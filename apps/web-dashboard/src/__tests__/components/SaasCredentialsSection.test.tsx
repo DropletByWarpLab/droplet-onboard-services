@@ -206,6 +206,87 @@ describe("connection state honesty", () => {
     expect(await screen.findByText(/Credential rejected/)).toBeInTheDocument();
     expect(screen.getByText("Not connected")).toBeInTheDocument();
   });
+
+  /**
+   * WARP-2483 — the same two disconnected states the hub tile shows.
+   *
+   * ADR-041 §2 promises that disconnecting removes the key. `DISABLED` alone
+   * used to render as a flat "Turned off", which is true of both a connection
+   * whose credential was destroyed and one whose credential is still sitting
+   * in Postgres — and those are opposite facts to the admin standing on the
+   * one page in the product where credentials are handed over.
+   *
+   * The presence half comes from `hasCredentials`, the SAME `hasX` boolean the
+   * rest of this surface is built on. No value, prefix or length is added to
+   * the payload to support this rendering, and none could be: the view type
+   * has nowhere to put one.
+   */
+  describe("a disconnected connector says whether the credential was removed", () => {
+    const OFF = (hasCredentials: boolean): SaasCredentialView => ({
+      ...CRM,
+      provider: "fixture-off",
+      displayName: "Fixture Off",
+      state: "DISABLED",
+      hasCredentials,
+      configured: true,
+      fields: [{ ...CRM.fields[0], hasValue: hasCredentials }],
+    });
+
+    async function stateLine(hasCredentials: boolean): Promise<string> {
+      vi.clearAllMocks();
+      setRole("owner");
+      fetchSaasCredentialsMock.mockResolvedValue([OFF(hasCredentials)]);
+      const { unmount } = render(<SaasCredentialsSection />);
+      const card = await screen.findByTestId("provider-fixture-off");
+      const text = card.textContent ?? "";
+      unmount();
+      return text;
+    }
+
+    /** Mutation: keep `STATE_COPY.DISABLED`'s "Turned off" → red. */
+    it("says the credential is gone when the box holds none", async () => {
+      const text = await stateLine(false);
+      expect(text).toContain("Disconnected · credential removed");
+      expect(text).not.toContain("Turned off");
+    });
+
+    /**
+     * The honest one. Mutation: render the purged sentence for both → red,
+     * and the admin is told a key was destroyed while it is still decryptable
+     * on the row.
+     */
+    it("admits the credential is still stored when it is", async () => {
+      const text = await stateLine(true);
+      expect(text).toContain(
+        "Disconnected · credential still stored — reconnect or remove",
+      );
+    });
+
+    /** THE mutation: ignore the flag → both renders identical → red. */
+    it("does not render the two states identically", async () => {
+      expect(await stateLine(false)).not.toEqual(await stateLine(true));
+    });
+
+    /**
+     * …and `hasX` stays the ONLY secret-presence signal. The still-stored
+     * state is exactly where a surface is tempted to prove itself by showing
+     * something of the credential; the input is still empty and still driven
+     * by the placeholder alone.
+     *
+     * Mutation: pre-fill a secret input from anything → red.
+     */
+    it("adds no new secret-presence signal to the still-stored state", async () => {
+      vi.clearAllMocks();
+      setRole("owner");
+      fetchSaasCredentialsMock.mockResolvedValue([OFF(true)]);
+      render(<SaasCredentialsSection />);
+
+      const input = await screen.findByLabelText(/Private app token/);
+      expect(input).toHaveAttribute("type", "password");
+      expect(input).toHaveValue("");
+      expect(input).toHaveAttribute("placeholder", "Saved — replace to change");
+    });
+  });
 });
 
 describe("the three-way rule, client half", () => {

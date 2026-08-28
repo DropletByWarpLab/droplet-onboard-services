@@ -73,6 +73,25 @@ export interface IntegrationConnection {
   nextSyncAt?: string;
   /** One-line human reason for a degraded / error / drift state. */
   reason?: string;
+  /**
+   * WARP-2453 — for a `DISABLED` connection, whether the credential material
+   * was actually removed from the row, or is still sitting there.
+   *
+   * The orchestrator derives it from two explicit persisted facts (the `status`
+   * enum and whether either credential column holds a blob) and always emits
+   * it, `false` included — see `integrations.service.ts:347-356`.
+   *
+   * OPTIONAL here on purpose. This interface is the dashboard's mirror of a
+   * JSON payload, not the payload itself, and a response that does not carry
+   * the key must not be read as either answer: `undefined` means "the box said
+   * nothing about the credential", which is a third fact and is rendered as
+   * neither "removed" nor "still stored" (WARP-2483). Making it required would
+   * force every construction site to assert a purge state it does not know.
+   *
+   * Meaningless outside `DISABLED`, where it is `false` — nothing was purged
+   * from a connection that is still connected, or was never configured.
+   */
+  credentialsPurged?: boolean;
 }
 
 export function writeModeOf(c: Pick<IntegrationConnection, "writeEnabled" | "writesPaused">): WriteMode {
