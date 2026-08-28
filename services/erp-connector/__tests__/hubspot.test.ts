@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach } from "vitest";
 
 import {
+  HUBSPOT_API_ROUTES,
   HUBSPOT_API_VERSION,
   HUBSPOT_BACKFILL_MAX_ATTEMPTS,
   HUBSPOT_BACKOFF_BASE_MS,
@@ -47,6 +48,7 @@ import {
   assertReadableHubspotObject,
   assertSafeHubspotBaseUrl,
   assertWritableHubspotObject,
+  hubspotPath,
   hubspotResourceOf,
   resetSearchGovernors,
 } from "../src/hubspot/connector.js";
@@ -381,6 +383,11 @@ describe("API version pin", () => {
 
   it("builds EVERY request path from the pin, not one sampled call", async () => {
     // Mutation: hardcode a path anywhere that skips hubspotPath() → red.
+    //
+    // The pin must appear as its own SEGMENT, which is a different claim from
+    // "the path contains the string": a version spliced into a name
+    // (`/crm/objects-2026-03/…`) would satisfy a substring check and 404 all
+    // the same.
     const { c, f } = connector({
       routes: [searchRoute([]), objectRoute(), exportRoutes()].flat(),
     });
@@ -390,7 +397,7 @@ describe("API version pin", () => {
 
     expect(f.calls.length).toBeGreaterThanOrEqual(4);
     for (const p of f.paths()) {
-      expect(p.startsWith(`/${HUBSPOT_API_VERSION}/`)).toBe(true);
+      expect(p.split("/")).toContain(HUBSPOT_API_VERSION);
     }
   });
 
@@ -407,18 +414,207 @@ describe("API version pin", () => {
     }
   });
 
-  it("resolves the contact↔deal association on v3 object routes, with no v-four call", async () => {
-    // v3 answers associations as a block on the object read
-    // (?associations=deals), so the link needs no separate API family.
+  it("resolves the contact↔deal association on the object route, with no v-four call", async () => {
+    // The object read answers associations as a block (?associations=deals),
+    // so the link needs no separate API family — which is what keeps the v4
+    // Associations API (support ends 2027-03-30) out of this connector.
     // Mutation: fetch the link from an associations v4 route → red.
     const { c, f } = connector({ routes: objectRoute() });
     const deals = await c.listAssociatedDeals("101");
     expect(deals).toEqual(["501", "502"]);
     for (const p of f.paths()) {
-      expect(p).toContain("/crm/v3/");
+      expect(p).toContain(`/crm/objects/${HUBSPOT_API_VERSION}/`);
       expect(p).not.toMatch(/v4/);
     }
     expect(f.calls[0].url).toContain("associations=deals");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Documented date-based path shape (WARP-2470)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The paths HubSpot's 2026-03 OpenAPI documents, byte for byte.
+ *
+ * Deliberately NOT built from {@link HUBSPOT_API_VERSION} or from any helper
+ * the connector also uses: a test that assembles the expectation the same way
+ * the code does cannot observe the code assembling it wrongly. These are typed
+ * out from the spec, which is the only oracle here — no live HubSpot call is
+ * needed or permitted.
+ *
+ * Sources (each verified 2026-08-27 against the embedded OpenAPI fragment on
+ * the endpoint's own reference page, all of which declare ZERO header
+ * parameters — the version is carried by the path and nothing else):
+ *   /crm/objects/2026-03/{objectType}                      crm-contacts-v2026-03.json
+ *   /crm/objects/2026-03/{objectType}/{objectId}           crm-contacts-v2026-03.json
+ *   /crm/objects/2026-03/{objectType}/search   (POST)      crm-contacts-v2026-03.json
+ *   /crm/owners/2026-03                                    crm-crm-owners-v2026-03.json
+ *   /crm/exports/2026-03/export/async          (POST)      crm-exports-v2026-03.json
+ *   /crm/exports/2026-03/export/async/tasks/{taskId}/status
+ *                                                          crm-exports-v2026-03.json
+ *   /marketing/emails/2026-03                              marketing-marketing-emails-v2026-03.json
+ *   /crm-object-schemas/2026-03/schemas                    crm-schemas-v2026-03.json
+ */
+const DOCUMENTED_PATHS = {
+  ownersList: "/crm/owners/2026-03",
+  objectsSearch: "/crm/objects/2026-03/contacts/search",
+  objectById: "/crm/objects/2026-03/contacts/101",
+  objectsCollection: "/crm/objects/2026-03/notes",
+  exportCreate: "/crm/exports/2026-03/export/async",
+  exportStatus: "/crm/exports/2026-03/export/async/tasks/exp_1/status",
+  marketingEmails: "/marketing/emails/2026-03",
+  objectSchemas: "/crm-object-schemas/2026-03/schemas",
+} as const;
+
+/**
+ * Routes matched on the request TAIL only, so the stub answers both the shipped
+ * (broken) shape and the documented one. If these regexes encoded either shape
+ * the suite would fail with "test stub has no route for …" instead of the path
+ * mismatch the assertion is actually about.
+ */
+function allEndpointRoutes(): Route[] {
+  return [
+    { match: /\/search$/, responses: [{ body: { total: 0, results: [] } }] },
+    { match: /export\/async$/, responses: [{ body: { id: "exp_1" } }] },
+    {
+      match: /tasks\/exp_1\/status$/,
+      responses: [
+        { body: { status: "COMPLETE", result: "https://export.example.test/exp_1" } },
+      ],
+    },
+    { match: /schemas/, responses: [{ body: { results: [] } }] },
+    { match: /marketing/, responses: [{ body: { results: [] } }] },
+    { match: /owners/, responses: [{ body: { results: [] } }] },
+    {
+      match: /contacts\/101/,
+      responses: [
+        {
+          body: {
+            id: "101",
+            properties: {},
+            associations: { deals: { results: [{ id: "501" }] } },
+          },
+        },
+      ],
+    },
+    { match: /notes$/, responses: [{ body: { id: "n_1" } }] },
+    // Anything else is a path nobody declared. Left unmatched on purpose: the
+    // stub throws, which is how an undeclared route announces itself.
+  ];
+}
+
+/** Drive every endpoint the connector can dial and return the paths it built. */
+async function dialEveryEndpoint(): Promise<string[]> {
+  const { c, f } = connector({ routes: allEndpointRoutes() });
+  await c.connect();
+  await c.pollObjectChanges({ objectType: "contacts", watermark: 0 });
+  await c.listAssociatedDeals("101");
+  await c.runBackfill({ objectType: "contacts", properties: ["email"] });
+  await c.listMarketingEmails();
+  await c.listCustomObjectSchemas();
+  await c.createNote({ body: "call summary", associatedContactId: "101" }, { confirmed: true });
+  return f.paths();
+}
+
+describe("documented 2026-03 path shape", () => {
+  it("dials exactly the paths HubSpot's 2026-03 spec documents, byte for byte", async () => {
+    // The whole defect in one assertion. The shipped shape prefixes the date
+    // (`/2026-03/crm/v3/objects/contacts`); the spec puts it AFTER the product
+    // group, with the object name ahead of it. Compared as exact strings, not a
+    // regex, because a regex loose enough to accept both orderings is a regex
+    // that cannot see the bug.
+    // Mutation: move the date back to the path root → red.
+    const paths = await dialEveryEndpoint();
+
+    expect(paths).toContain(DOCUMENTED_PATHS.ownersList);
+    expect(paths).toContain(DOCUMENTED_PATHS.objectsSearch);
+    expect(paths).toContain(DOCUMENTED_PATHS.objectById);
+    expect(paths).toContain(DOCUMENTED_PATHS.objectsCollection);
+    expect(paths).toContain(DOCUMENTED_PATHS.exportCreate);
+    expect(paths).toContain(DOCUMENTED_PATHS.exportStatus);
+    expect(paths).toContain(DOCUMENTED_PATHS.marketingEmails);
+    expect(paths).toContain(DOCUMENTED_PATHS.objectSchemas);
+
+    // And nothing outside the documented set.
+    const documented = new Set<string>(Object.values(DOCUMENTED_PATHS));
+    expect([...new Set(paths)].filter((p) => !documented.has(p))).toEqual([]);
+  });
+
+  it("never puts the date version at the path root", async () => {
+    // The exact shape shipped on stage today. Stated as its own assertion so
+    // the failure names the defect rather than showing a string diff.
+    // Mutation: revert hubspotPath() to `/${VERSION}${rest}` → red.
+    for (const p of await dialEveryEndpoint()) {
+      expect(p.startsWith(`/${HUBSPOT_API_VERSION}/`)).toBe(false);
+      expect(p).not.toMatch(/^\/\d{4}-\d{2}\//);
+    }
+  });
+
+  it("assembles each documented path from its route family, byte for byte", async () => {
+    // hubspotPath() in isolation, against the spec strings. The connector-level
+    // test above proves the call sites use it; this proves what it produces.
+    // Mutation: swap any HUBSPOT_API_ROUTES value, or move the version to the
+    //           front of the template → red.
+    expect(hubspotPath("owners")).toBe(DOCUMENTED_PATHS.ownersList);
+    expect(hubspotPath("objects", "contacts/search")).toBe(DOCUMENTED_PATHS.objectsSearch);
+    expect(hubspotPath("objects", "contacts/101")).toBe(DOCUMENTED_PATHS.objectById);
+    expect(hubspotPath("objects", "notes")).toBe(DOCUMENTED_PATHS.objectsCollection);
+    expect(hubspotPath("exports", "export/async")).toBe(DOCUMENTED_PATHS.exportCreate);
+    expect(hubspotPath("exports", "export/async/tasks/exp_1/status")).toBe(
+      DOCUMENTED_PATHS.exportStatus,
+    );
+    expect(hubspotPath("marketingEmails")).toBe(DOCUMENTED_PATHS.marketingEmails);
+    expect(hubspotPath("objectSchemas", "schemas")).toBe(DOCUMENTED_PATHS.objectSchemas);
+
+    // The two families the allowlist names but no method dials yet.
+    expect(hubspotPath("pipelines", "deals")).toBe("/crm/pipelines/2026-03/deals");
+    expect(hubspotPath("properties", "contacts")).toBe("/crm/properties/2026-03/contacts");
+  });
+
+  it("documents every route family it can build, and builds none it has not documented", () => {
+    // The docstring table on HUBSPOT_API_ROUTES is the record of what was
+    // checked against HubSpot's published spec. A family present in the code
+    // but missing from that table is an endpoint nobody verified.
+    // Mutation: add a family to HUBSPOT_API_ROUTES without a table row → red.
+    const src = readFileSync(join(HUBSPOT_DIR, "connector.ts"), "utf8");
+    const table = src.slice(
+      src.indexOf("| Connector call"),
+      src.indexOf("export const HUBSPOT_API_ROUTES"),
+    );
+    expect(table).not.toBe("");
+
+    for (const apiName of Object.values(HUBSPOT_API_ROUTES)) {
+      expect(table).toContain(`/${apiName}/<version>`);
+    }
+  });
+
+  it("refuses to resolve the pre-fix shape, so a stale path cannot ride the allowlist", () => {
+    // `/2026-03/crm/v3/objects/contacts` is what stage shipped. It must map to
+    // NO resource, or the readable-resource allowlist would wave through a path
+    // that 404s at HubSpot.
+    // Mutation: make hubspotResourceOf tolerate a leading version → red.
+    expect(hubspotResourceOf(`/${HUBSPOT_API_VERSION}/crm/v3/objects/contacts`)).toBe("");
+    expect(hubspotResourceOf(`/${HUBSPOT_API_VERSION}/crm/v3/owners`)).toBe("");
+    expect(hubspotResourceOf(`/${HUBSPOT_API_VERSION}/marketing/v3/emails`)).toBe("");
+    // And the naive half-fix that only swaps the token in place.
+    expect(hubspotResourceOf(`/crm/${HUBSPOT_API_VERSION}/objects/contacts`)).toBe("");
+  });
+
+  it("carries the version as a path segment on every call, never as a header", async () => {
+    // The spec declares zero header parameters, so a version header would be a
+    // second, unversioned source of truth. Both halves matter: the pin must be
+    // IN the path, and absent from the headers.
+    // Mutation: send the version as an `X-HubSpot-Version` header instead → red.
+    const { c, f } = connector({ routes: allEndpointRoutes() });
+    await c.connect();
+    await c.pollObjectChanges({ objectType: "contacts", watermark: 0 });
+
+    for (const call of f.calls) {
+      expect(new URL(call.url).pathname.split("/")).toContain(HUBSPOT_API_VERSION);
+      const headers = call.init.headers as Record<string, string>;
+      expect(JSON.stringify(headers)).not.toContain(HUBSPOT_API_VERSION);
+    }
   });
 });
 
@@ -782,7 +978,7 @@ describe("failure states", () => {
     // to a customer who actually needs to re-create the private app.
     // Mutation: check HUBSPOT_TIER_GATED_RESOURCES before the error category → red.
     const { c } = connector({
-      routes: [{ match: /marketing\/v3\/emails/, responses: [permissionDeniedResponse()] }],
+      routes: [{ match: /marketing\/emails/, responses: [permissionDeniedResponse()] }],
     });
     await expect(c.listMarketingEmails()).rejects.toBeInstanceOf(HubSpotSuperAdminRevokedError);
   });
@@ -806,7 +1002,7 @@ describe("failure states", () => {
     const marketing = connector({
       routes: [
         {
-          match: /marketing\/v3\/emails/,
+          match: /marketing\/emails/,
           responses: [{ status: 403, body: { message: "not authorized" } }],
         },
       ],
@@ -820,7 +1016,7 @@ describe("failure states", () => {
     const schemas = connector({
       routes: [
         {
-          match: /crm\/v3\/schemas/,
+          match: /object-schemas/,
           responses: [{ status: 403, body: { message: "not authorized" } }],
         },
       ],
@@ -846,13 +1042,16 @@ describe("Exports API backfill", () => {
     // Search caps at 10,000 per query and is governed at 5 req/s per account
     // that cannot be raised, so seeding a portal's history through it would
     // take hours and starve the delta poller the whole time.
-    // Mutation: point backfill at /crm/v3/objects/contacts/search → red on the
+    // Mutation: point backfill at the object search route → red on the
     //           per-path call count.
     const { c, f } = connector({ routes: exportRoutes() });
     const out = await c.runBackfill({ objectType: "contacts", properties: ["email"] });
     expect(out.state).toBe("succeeded");
     expect(f.paths().filter((p) => p.endsWith("/search"))).toHaveLength(0);
-    expect(f.paths().filter((p) => p.includes("/exports/export/async")).length).toBeGreaterThan(0);
+    expect(
+      f.paths().filter((p) => p.startsWith(`/crm/exports/${HUBSPOT_API_VERSION}/export/async`))
+        .length,
+    ).toBeGreaterThan(0);
   });
 
   it("renders a still-processing export as in_progress, never as finished-and-empty", async () => {
@@ -860,7 +1059,7 @@ describe("Exports API backfill", () => {
     // Mutation: return a succeeded state when attempts run out → red.
     const { c, f, sleeps } = connector({
       routes: [
-        { match: /exports\/export\/async$/, responses: [{ body: { id: "exp_1" } }] },
+        { match: /export\/async$/, responses: [{ body: { id: "exp_1" } }] },
         { match: /tasks\/exp_1\/status/, responses: [{ body: { status: "PROCESSING" } }] },
       ],
     });
@@ -882,7 +1081,7 @@ describe("Exports API backfill", () => {
     //           and returns a watermark → red on both assertions.
     const { c, f } = connector({
       routes: [
-        { match: /exports\/export\/async$/, responses: [{ body: { id: "exp_1" } }] },
+        { match: /export\/async$/, responses: [{ body: { id: "exp_1" } }] },
         { match: /tasks\/exp_1\/status/, responses: [{ body: { status: "PROCESSING" } }] },
         ...searchRoute([record("c-1", NOW - 1000)]),
       ],
@@ -900,7 +1099,7 @@ describe("Exports API backfill", () => {
     // Mutation: set the flag without a finally → red.
     const { c } = connector({
       routes: [
-        { match: /exports\/export\/async$/, responses: [{ status: 500, body: {} }] },
+        { match: /export\/async$/, responses: [{ status: 500, body: {} }] },
         ...searchRoute([]),
       ],
     });
@@ -936,23 +1135,23 @@ describe("readable/writable allowlists", () => {
   it("refuses any resource outside HUBSPOT_READABLE_RESOURCES rather than dialing it", () => {
     // An ALLOWLIST enforced at request time, not a denylist of forbidden words
     // in source. Request paths here are assembled at runtime
-    // (`/crm/v3/objects/${objectType}`), so a denylist is blind to exactly the
+    // (`/crm/objects/<version>/${objectType}`), so a denylist is blind to exactly the
     // case that matters — the Stripe track proved that by mutation.
     // Mutation: make assertReadableHubspotObject a no-op → red.
     for (const bad of [
-      `/${HUBSPOT_API_VERSION}/crm/v3/objects/quotes`,
-      `/${HUBSPOT_API_VERSION}/settings/v3/users`,
-      `/${HUBSPOT_API_VERSION}/automation/v3/workflows`,
-      `/${HUBSPOT_API_VERSION}/crm/v3/objects/deals/merge`,
+      `/crm/objects/${HUBSPOT_API_VERSION}/quotes`,
+      `/settings/users/${HUBSPOT_API_VERSION}`,
+      `/automation/workflows/${HUBSPOT_API_VERSION}`,
+      `/crm/objects/${HUBSPOT_API_VERSION}/deals/merge`,
     ]) {
       expect(() => assertReadableHubspotObject(bad)).toThrow(ConnectorBlockedError);
     }
     for (const ok of [
-      `/${HUBSPOT_API_VERSION}/crm/v3/objects/contacts/search`,
-      `/${HUBSPOT_API_VERSION}/crm/v3/objects/deals/501`,
-      `/${HUBSPOT_API_VERSION}/crm/v3/exports/export/async`,
-      `/${HUBSPOT_API_VERSION}/crm/v3/owners`,
-      `/${HUBSPOT_API_VERSION}/marketing/v3/emails`,
+      `/crm/objects/${HUBSPOT_API_VERSION}/contacts/search`,
+      `/crm/objects/${HUBSPOT_API_VERSION}/deals/501`,
+      `/crm/exports/${HUBSPOT_API_VERSION}/export/async`,
+      `/crm/owners/${HUBSPOT_API_VERSION}`,
+      `/marketing/emails/${HUBSPOT_API_VERSION}`,
     ]) {
       expect(() => assertReadableHubspotObject(ok)).not.toThrow();
     }
@@ -970,7 +1169,7 @@ describe("readable/writable allowlists", () => {
 
   it("maps an unknown path shape to no resource at all — deny by default", () => {
     // Mutation: return the first path segment as a fallback resource → red.
-    expect(hubspotResourceOf(`/${HUBSPOT_API_VERSION}/nonsense/v9/things`)).toBe("");
+    expect(hubspotResourceOf(`/nonsense/v9/${HUBSPOT_API_VERSION}`)).toBe("");
     expect(hubspotResourceOf("/crm/v3/objects/contacts")).toBe("");
   });
 
@@ -1042,15 +1241,15 @@ describe("confirmed writes", () => {
     expect(f.calls).toHaveLength(0);
   });
 
-  it("posts to the v3 notes route once confirmed", async () => {
-    // Mutation: send the write to /crm/v3/objects/deals → red on the path.
+  it("posts to the documented notes object route once confirmed", async () => {
+    // Mutation: send the write to the deals object route → red on the path.
     const { c, f } = connector({ routes: [writeRoute("notes")] });
     const out = await c.createNote(
       { body: "call summary", associatedContactId: "101" },
       { confirmed: true },
     );
     expect(out.id).toBe("n_1");
-    expect(f.paths()[0]).toBe(`/${HUBSPOT_API_VERSION}/crm/v3/objects/notes`);
+    expect(f.paths()[0]).toBe(`/crm/objects/${HUBSPOT_API_VERSION}/notes`);
     expect(String(f.calls[0].init.method)).toBe("POST");
   });
 
@@ -1239,7 +1438,10 @@ function corpusSearchRoute(
 function objectRoute(): Route[] {
   return [
     {
-      match: /crm\/v3\/objects\/contacts\/101/,
+      // Matched on the record tail: under DBV the object name no longer sits
+      // adjacent to `objects/` (it is `objects/<version>/contacts/101`), so a
+      // regex spanning that join would silently stop matching.
+      match: /contacts\/101/,
       responses: [
         {
           body: {
@@ -1255,7 +1457,7 @@ function objectRoute(): Route[] {
 
 function exportRoutes(): Route[] {
   return [
-    { match: /exports\/export\/async$/, responses: [{ body: { id: "exp_1" } }] },
+    { match: /export\/async$/, responses: [{ body: { id: "exp_1" } }] },
     {
       match: /tasks\/exp_1\/status/,
       responses: [
@@ -1273,7 +1475,7 @@ function exportRoutes(): Route[] {
 
 function writeRoute(object: string): Route {
   return {
-    match: new RegExp(`crm/v3/objects/${object}$`),
+    match: new RegExp(`crm/objects/${HUBSPOT_API_VERSION}/${object}$`),
     responses: [{ body: { id: object === "notes" ? "n_1" : "t_1" } }],
   };
 }
