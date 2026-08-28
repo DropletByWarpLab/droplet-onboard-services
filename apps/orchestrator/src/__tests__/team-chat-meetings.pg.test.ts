@@ -100,18 +100,14 @@ describe.skipIf(!RUN)("team chat meetings — real Postgres (WARP-1685)", () => 
     await prisma.$connect();
   });
 
-  afterAll(async () => {
-    await prisma.$disconnect();
-  });
-
   const PREFIX = "warp1685-";
   const OURS = { startsWith: PREFIX } as const;
 
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    // FK-ordered, prefix-scoped cleanup. Threads cascade participants,
-    // messages, meetings, and (via meetings) RSVPs. CalendarEvent and
-    // NotificationLog rows are keyed by our prefixed usernames.
+  // FK-ordered, prefix-scoped cleanup. Threads cascade participants, messages,
+  // meetings, and (via meetings) RSVPs. CalendarEvent and NotificationLog rows
+  // are keyed by our prefixed usernames. Never an unscoped deleteMany, never a
+  // TRUNCATE (the access-role.pg.test.ts rule).
+  async function cleanupOurRows() {
     const ourUsers = await prisma.user.findMany({
       where: { username: OURS },
       select: { id: true },
@@ -125,6 +121,22 @@ describe.skipIf(!RUN)("team chat meetings — real Postgres (WARP-1685)", () => 
     await prisma.calendarEvent.deleteMany({ where: { userId: OURS } });
     await prisma.notificationLog.deleteMany({ where: { userId: OURS } });
     await prisma.user.deleteMany({ where: { username: OURS } });
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await cleanupOurRows();
+  });
+
+  // Clean at end-of-suite too, not just before each test. rail 5 in
+  // rbac-v2-guard-rails.pg.test.ts counts operators BOX-WIDE, so an ACTIVE
+  // admin this suite leaves on the shared DB (mallory) reads as a foreign
+  // operator there and fails its last-operator premise. beforeEach alone leaves
+  // the final test's rows behind; the pg lane also runs --no-file-parallelism
+  // so no two suites' operators are ever live at once.
+  afterAll(async () => {
+    await cleanupOurRows();
+    await prisma.$disconnect();
   });
 
   // ── fixtures ─────────────────────────────────────────────────────

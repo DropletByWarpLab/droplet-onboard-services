@@ -14,9 +14,14 @@ on:
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
       # WARP-1829: the host_unit_staleness check delegates to this detector.
       - "scripts/host/droplet-host-units.sh"
+      # WARP-2189: the relay_dns check delegates to this helper, and
+      # local-dns.sh is the setup-time caller that must keep it applied.
+      - "scripts/host/droplet-relay-dns.sh"
+      - "scripts/lib/local-dns.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
+      - "tests/droplet-relay-dns.test.sh"
       - ".github/workflows/droplet-watchdog-tests.yml"
   push:
     branches: [main]
@@ -26,9 +31,12 @@ on:
       - "scripts/host/etc-default/droplet-watchdog"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
       - "scripts/host/droplet-host-units.sh"
+      - "scripts/host/droplet-relay-dns.sh"
+      - "scripts/lib/local-dns.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
+      - "tests/droplet-relay-dns.test.sh"
       - ".github/workflows/droplet-watchdog-tests.yml"
   workflow_dispatch:
 
@@ -47,5 +55,9 @@ jobs:
         # warning severity to match ship-check's bar; no global excludes —
         # waivers live inline per scripts/test/ship-check.sh convention.
         run: shellcheck --severity=warning scripts/host/droplet-watchdog.sh
+      - name: shellcheck the relay-DNS helper
+        run: shellcheck --severity=warning scripts/host/droplet-relay-dns.sh
       - name: Run droplet-watchdog shell tests
         run: bash tests/droplet-watchdog.test.sh
+      - name: Run droplet-relay-dns shell tests
+        run: bash tests/droplet-relay-dns.test.sh

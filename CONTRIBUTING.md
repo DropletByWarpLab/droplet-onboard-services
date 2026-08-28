@@ -16,9 +16,24 @@ one channel. So `stage` is not a staging *server* — it is the build a
 subset of real boxes will install, ahead of everyone else. What lands on
 `stage` should be releasable; what lands on `main` should have soaked.
 
+**`stage` is permanent — never delete it, and never push straight to it.**
+Every commit reaches `stage` through a PR and reaches `main` through a
+promotion PR. Because a promotion PR's head *is* `stage`, the *Delete
+branch* button GitHub offers on the merged promote deletes the release
+channel itself — it has been clicked four times, and each time GitHub
+silently auto-closed every open PR based on `stage` (2, then 9, then 39),
+none of which can be reopened once the base ref is gone.
+
 Promoting is an ordinary PR (`stage` → `main`), reviewed like any other.
 Hotfixes take the same route: skipping `stage` means shipping every box a
 build that has never run on one.
+
+Your PR must carry the WARP key it implements in its **title** —
+`WARP-123: …` or `fix(scope): … (WARP-123)`. That is a required check
+(`title carries a WARP key`); genuinely ticketless maintenance opts out
+with `[no-ticket]`. Keys you merely *reference* go in the body, never the
+title. The full list of gates that must go green, and the rule for adding
+one, is [`docs/ci-required-checks.md`](docs/ci-required-checks.md).
 
 Releases are published by dispatching `publish-release.yml` from the
 branch you want to ship — the workflow derives the channel from the ref

@@ -424,8 +424,10 @@ services:
       # binds below exist specifically to avoid.
       - ../docker:${DROPLET_HOST_ROOT:-/opt/droplet}/docker:rw
       # Client-app installers (Windows/Android/iOS) the box hands to a
-      # browser at /downloads, staged INSIDE the appliance image by
-      # scripts/app-downloads/gen-catalog.mjs at build time. Read-only:
+      # browser at /downloads. NOT delivered by the image: the installers
+      # are git-ignored and the box clones this repo, so an operator puts
+      # them here with scripts/app-downloads/stage.sh and the directory is
+      # empty until they do. Read-only:
       # the orchestrator only ever hashes and streams these, never writes
       # them — and a read-only mount is what makes the serve-time digest
       # check meaningful rather than self-referential. Container path is
@@ -1202,14 +1204,37 @@ services:
       # pre-WARP-235 latent bug where camera-discovery (network_mode: host)
       # could never reach the unpublished broker at localhost:1883.
       - "127.0.0.1:8883:8883"
+    # WARP-2154: mosquitto drops to its unprivileged uid BEFORE loading TLS
+    # material, and the host-side bundle is install-user-owned 0600 — on a
+    # fresh install relocate_secrets_to_data (scripts/lib/luks.sh) chown -Rs
+    # the whole secrets tree to the install user, so mounting the bundle
+    # directly at the config path crash-looped the broker with "Unable to
+    # load server key file ... Permission denied". Stage key/cert/CA + the
+    # ACL with mosquitto-uid ownership as container-root, then exec the
+    # stock entrypoint — the WARP-233 db / WARP-234 cache pattern. The ACL
+    # copy (0640, mosquitto-owned) also clears mosquitto's world-readable /
+    # wrong-owner acl_file warnings (2.x warns; future versions refuse).
+    command:
+      - "sh"
+      - "-c"
+      - >-
+        install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls
+        && install -o mosquitto -g mosquitto -m 644 /certs-src/ca.pem /mosquitto/config/tls/ca.pem
+        && install -o mosquitto -g mosquitto -m 644 /certs-src/cert.pem /mosquitto/config/tls/cert.pem
+        && install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem
+        && install -o mosquitto -g mosquitto -m 640 /acl-src/droplet.acl /mosquitto/config/droplet.acl
+        && exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf
     volumes:
       # WARP-235: single mTLS listener — client identity is the cert CN
       # (use_identity_as_username), per-CN topic grants in mosquitto.acl,
       # server bundle issued by the WARP-236 internal CA. The shared-password
-      # file mount is retired.
+      # file mount is retired. WARP-2154: the bundle and the ACL land on
+      # STAGING paths (/certs-src, /acl-src) and the command above copies
+      # them to the paths mosquitto.conf names — mounting either directly at
+      # its final path reintroduces the ownership crash loop.
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto.acl:/mosquitto/config/droplet.acl:ro
-      - ../data/secrets/service-tls/broker:/mosquitto/config/tls:ro
+      - ./mosquitto.acl:/acl-src/droplet.acl:ro
+      - ../data/secrets/service-tls/broker:/certs-src:ro
     restart: always
     <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
@@ -1859,10 +1884,13 @@ services:
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
-      # deployment works out of the box. On GPU lab hosts the operator
-      # can redirect this to a dedicated NVMe partition by overriding
-      # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
-      # once the partition is provisioned. See docs/STATUS.md.
+      # deployment works out of the box -- but that volume lives under
+      # Docker's data root, i.e. ON THE BOOT DISK. `:-` absorbs an unset
+      # variable with no error, so this seam fails SILENTLY toward the worst
+      # possible target (WARP-2099). Provisioning now always writes the key
+      # explicitly; redirect it to a mounted pool with
+      # scripts/host/droplet-set-nvr-media.sh, which validates the target and
+      # recreates this container. See docs/ENVIRONMENT.md.
       - ${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
       # Writable: Frigate 0.17 persists API-driven config changes
@@ -1938,6 +1966,46 @@ services:
     <<: *default-logging
     mem_limit: ${WEB_FETCH_MEM_LIMIT:-256m}
     cpus: ${WEB_FETCH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Document renderer (WARP-2211) ---
+  # Turns a document SPEC into .pdf / .docx / .xlsx bytes for the
+  # orchestrator's POST /api/files/render, which is what the
+  # create_pdf_report / create_word_document / create_spreadsheet LLM tools
+  # dispatch to. It exists because the writers are Python (python-docx,
+  # openpyxl, reportlab) and the orchestrator is TypeScript — and because the
+  # box's model can emit at most 4096 tokens, so it cannot produce document
+  # bytes itself at any plausible window.
+  #
+  # Stateless and CREDENTIAL-FREE: spec in, bytes out. No Nextcloud access, no
+  # user token, no outbound network. Auth, path validation and the upload all
+  # stay in the orchestrator, which is why this container can hold no storage
+  # access at all. Bridge-net, `expose:` only, no host ports — the orchestrator
+  # is the only caller (bearer service token, DOC_RENDER_SERVICE_TOKEN).
+  #
+  # NOT profile-gated: unlike the `docs` engine (2 GB of Collabora), the three
+  # writers are pure Python and cost ~150 MB, so document generation works on
+  # the small box too. That is deliberate — a report tool that silently
+  # disappears on a RAM-constrained box is the failure mode this avoids.
+  doc-render:
+    build:
+      context: ..
+      dockerfile: services/doc-render/Dockerfile
+    expose:
+      - "8020"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot
+      # gate + OpenSSL config to the literal OFF posture (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${DOC_RENDER_MEM_LIMIT:-384m}
+    cpus: ${DOC_RENDER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- ERP direct-SQL bridge (WARP-1106) ---

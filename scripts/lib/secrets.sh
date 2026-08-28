@@ -411,6 +411,15 @@ generate_env() {
   # container's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_RAG_EVAL}.
   # Without it every scheduled + ad-hoc RAGAS run 401s at the first query.
   service_token_rag_eval=$(openssl rand -hex 32)
+  # WARP-2211: bearer the orchestrator presents on POST /render to the
+  # services/doc-render container (the .pdf/.docx/.xlsx renderer behind
+  # POST /api/files/render). doc-render fails CLOSED — 503 on every
+  # non-/health route — when its side is empty, so an unminted token turns
+  # every "make me a report" request into a refusal rather than an open
+  # renderer. Minted here deliberately: WEB_FETCH_SERVICE_TOKEN was never
+  # added to this function, which is why /api/web/* fails closed on a box
+  # nobody hand-edited.
+  doc_render_service_token=$(openssl rand -hex 32)
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -711,6 +720,15 @@ SERVICE_TOKEN_EMAIL=$service_token_email
 # orchestrator + rag-eval together.
 SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 
+# --- Document renderer bearer (orchestrator → doc-render) ---
+# WARP-2211. The orchestrator presents this on POST /render to the
+# doc-render container, which turns a document spec into .pdf/.docx/.xlsx
+# bytes for POST /api/files/render. Both ends read the same .env key via
+# compose — rotate in lockstep and recreate orchestrator + doc-render
+# together. doc-render fails CLOSED (503 on every non-/health route) when
+# its side is empty.
+DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
+
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
 # service's apscheduler jobs present this token on POSTs to
@@ -831,6 +849,26 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 # macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
 # Add "full" by hand if you want the hardware-facing services.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
+
+# --- NVR recordings target (WARP-2099) ---
+# Where Frigate writes 24/7 camera footage. Written EXPLICITLY on every
+# provisioning path -- never merely absent -- so .env always STATES where
+# footage goes. Absence is what made this invisible: the compose seam is
+# \`\${NVR_MEDIA_SOURCE:-nvrdata}\`, and \`:-\` absorbs an unset variable with
+# no error, so a box silently recorded to the boot disk while a 2x2 TB
+# RAID1 sat empty.
+#
+#   nvrdata          the compose-declared named volume -- on the BOOT DISK.
+#                    Correct default: a fresh box has no pool to point at,
+#                    and auto-adopting whichever array it happens to find is
+#                    the same silent behaviour that hid this for a month.
+#   /absolute/path   a bind mount -- point this at a mounted storage pool
+#                    (e.g. /mnt/droplet/<pool>/nvr) once one exists.
+#
+# Change it with scripts/host/droplet-set-nvr-media.sh, which validates the
+# target and recreates frigate. Editing this line by hand does NOT move a
+# running container. See docs/ENVIRONMENT.md.
+NVR_MEDIA_SOURCE=nvrdata
 EOF
 
   mv "$env_tmp" "$env_write_target"
@@ -949,6 +987,18 @@ migrate_env() {
   [ "$(uname)" = "Linux" ] && smb_enabled_default=1
   _migrate_ensure_key SMB_PASSWORD "$(_gen_password 20)"
   _migrate_ensure_key SMB_ENABLED "$smb_enabled_default"
+  # WARP-2099 backfill: existing installs predate the NVR recordings-target
+  # key entirely, so their .env is silent about where camera footage goes.
+  # Backfill the honest CURRENT behaviour (`nvrdata` = the boot-disk named
+  # volume) rather than a pool we went looking for: only-when-missing means
+  # an operator who already pointed this at an array keeps their value, and
+  # nobody's footage relocates behind their back on a routine setup re-run.
+  _migrate_ensure_key NVR_MEDIA_SOURCE nvrdata
+  # WARP-2211: an existing box has no DOC_RENDER_SERVICE_TOKEN, and
+  # doc-render fails closed without one — so every document request would
+  # refuse until someone hand-edited .env. Backfill is only-when-missing, so
+  # an operator who already set one keeps it.
+  _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
@@ -1512,10 +1562,12 @@ EOF
 # `--sync-secrets` run never dirties the checkout (the parity is pinned by
 # tests/mosquitto-conf.test.sh).
 #
-# WARP-185 lineage: the runtime mosquitto uid is 1883, so the broker's TLS
-# private key gets the same readability treatment the old passwd file needed —
-# internal_ca_issue (scripts/lib/internal-ca.sh) chowns key.pem to 1883 or
-# falls back to 0644 inside the 0700 data/secrets tree.
+# WARP-185 lineage → WARP-2154: mosquitto drops to its own uid (1883) before
+# loading TLS material, so the broker container stages key/cert/CA + the ACL
+# with mosquitto-uid ownership at start (docker-compose.yml broker command —
+# the db/cache pattern). Host-side the bundle stays 0600 install-user-owned;
+# the old issuance-time chown was silently undone by relocate_secrets_to_data
+# and its chmod-644 fallback world-read the key.
 _write_mosquitto_conf() {
   local conf_file="$REPO_ROOT/docker/mosquitto.conf"
 

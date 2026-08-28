@@ -12,6 +12,44 @@ checklist rather than a story.
 
 ---
 
+## WARP-2196 — embedder swap MiniLM→bge (operator-gated re-embed)
+
+**Background.** `EMBEDDING_MODEL` moves to `bge-small-en-v1.5`. Both models
+are 384-dim, so `FileContentChunk.embedding` and its index are unchanged —
+which is precisely why every vector must be recomputed: Postgres compares
+MiniLM and bge vectors happily and the result is noise.
+
+**No migration ships with this.** Deploying deletes nothing. The file-indexer
+records which model built the corpus (`WorkspaceSetting` key
+`ai.embedding.corpusModel`) and, on a mismatch, logs `REFUSING TO INDEX` and
+**blocks chunk writes while continuing to serve reads**. A box that never runs
+the re-embed keeps its self-consistent MiniLM corpus and stops indexing,
+loudly. It never mixes two vector spaces.
+
+**Required order:**
+
+1. Unset `EMBEDDING_MODEL` in `.env` if it still pins `all-MiniLM-L6-v2` —
+   that id is no longer in the gateway's EmbedText allow-list and now fails
+   the chunk-budget guard.
+2. Deploy. The box enters read-only indexing and stays there safely until
+   your maintenance window. Rollback up to this point is free.
+3. `./scripts/rag-re-embed.sh` — deletes `FileContentChunk` +
+   `FileIndexStatus` in one transaction. Interactive confirm; `--dry-run` to
+   preview; safe to re-run.
+4. **Recreate the file-indexer** (`up -d --force-recreate --no-deps
+   file-indexer`). It stamps the new marker, unblocks writes and re-indexes.
+   Nothing rebuilds until you do this.
+5. **Replay brain uploads.** `source='brain'` chunks have no reconcile path;
+   step 4 does not touch them. Skipping this silently removes every chat
+   attachment from search while the file still shows in the UI.
+
+Take your own `pg_dump` before step 3 if you want a rollback point — no
+migration runs, so `migrate-and-start.sh` takes no automatic snapshot.
+
+**Full procedure, verification and rollback:** `docs/RAG_RE_EMBED_RUNBOOK.md`.
+
+---
+
 ## WARP-493 — brain-memory username→UUID cutover (atomic; depends on WARP-485)
 
 **Background.** Brain-memory was the last pre-WARP-485 surface keyed by

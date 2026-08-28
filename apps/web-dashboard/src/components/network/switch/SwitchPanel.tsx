@@ -17,6 +17,20 @@ import type { SwitchAction } from "./helpers";
 
 type Layout = "face" | "table";
 
+/**
+ * WARP-2165 — describe the unit from its own ports.
+ *
+ * "8-port + 2 SFP" was hardcoded, which was the GS1900-10HP's layout printed
+ * over every switch we ship. Falls back to a neutral phrase while the port
+ * list is still loading rather than guessing a count.
+ */
+function portSummary(ports: { is_sfp: boolean }[]): string {
+  if (ports.length === 0) return "port layout loading…";
+  const sfp = ports.filter((p) => p.is_sfp).length;
+  const copper = ports.length - sfp;
+  return sfp > 0 ? `${copper}-port + ${sfp} SFP` : `${copper}-port`;
+}
+
 function lastAppliedLabel(iso: string | null): string {
   if (!iso) return "never";
   const then = new Date(iso).getTime();
@@ -134,7 +148,12 @@ export function SwitchPanel() {
             )}
           </div>
           <div className="type-caption-1 text-[color:var(--text-muted)] mt-0.5 font-mono">
-            PoE switch · 8-port + 2 SFP · firmware {status.firmware} · applied{" "}
+            {/* WARP-2165: this used to read the literal "8-port + 2 SFP" on
+                every unit — the layout of a GS1900-10HP. Count what the
+                switch actually reports so an 8HP (no optical cage) is
+                described correctly, and so the line stays right on whatever
+                hardware ships next. */}
+            PoE switch · {portSummary(ports)} · firmware {status.firmware} · applied{" "}
             {lastAppliedLabel(status.last_provisioned_at)}
           </div>
         </div>

@@ -111,6 +111,12 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "restore_file_version",
     "share_file",
     "create_document",
+    // WARP-2212 — document GENERATION, distinct from create_document's empty
+    // seed: these send a spec to POST /api/files/render and come back with a
+    // finished file.
+    "create_pdf_report",
+    "create_word_document",
+    "create_spreadsheet",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -284,6 +290,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   restore_file_version: "Roll a file back to an earlier version",
   share_file: "Create a shareable link to a file",
   create_document: "Create a new blank Word doc or spreadsheet",
+  // The contrast with create_document above is the whole point of the copy:
+  // that one makes an EMPTY file to type into, these three arrive finished.
+  create_pdf_report: "Write a finished PDF report and save it to your files",
+  create_word_document: "Write a Word document you can keep editing",
+  create_spreadsheet: "Build a spreadsheet from a table of data",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",

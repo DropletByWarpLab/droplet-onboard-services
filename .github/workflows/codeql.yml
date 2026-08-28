@@ -1,21 +1,59 @@
 name: codeql
 
-# WARP-243 — CodeQL SAST for JS/TS + Python (advanced setup: we need the
-# config file's test excludes and an explicit matrix; default setup offers
-# neither). BASELINE: none needed — GitHub's code-scanning PR check only
-# fails on alerts introduced by the PR diff, so pre-existing alerts on main
-# never block. Merge-blocking is wired as a ruleset `code_scanning` rule
-# (NOT a status check) so path-filtered runs don't leave PRs hanging on
-# "Expected" — see docs/SECURITY.md#codeql and WARP-968/969.
-# Path-filtered: at ~10 min/language this is the one expensive lane.
+# WARP-243 — CodeQL SAST for JS/TS + Python + Actions (advanced setup: we
+# need the config file's test excludes and explicit per-language jobs;
+# default setup offers neither, and cannot scan PRs at all here — see the
+# SINGLE OWNER note below).
 #
-# GATED ON D1 (GitHub Code Security / GHAS): on this private repo the SARIF
-# upload is rejected with "Code Security must be enabled for this
-# repository" until an org admin enables the feature (billing decision —
-# docs/SECURITY.md#codeql). The preflight job probes the code-scanning API
-# and SKIPS the analyze matrix while the feature is off, so this lane merges
-# green today and arms itself the moment Code Security is enabled — no
-# workflow edit needed afterwards.
+# ─── SINGLE OWNER (WARP-2167) ────────────────────────────────────────────
+# This workflow is the ONLY producer of code-scanning results for this repo.
+# GitHub's CodeQL **default setup** must stay OFF:
+#
+#     gh api repos/DropletByWarpLab/droplet-onboard-services/code-scanning/default-setup
+#     # -> {"state":"not-configured", ...}
+#
+# If default setup is ever re-enabled, every upload here is rejected with
+#   "CodeQL analyses from advanced configurations cannot be processed when
+#    the default setup is enabled"
+# and this lane goes permanently red while its results are silently
+# discarded. That is exactly what happened on 2026-08-24.
+#
+# THE TRAP: this repo is attached to the org-level "GitHub recommended"
+# code security configuration, which sets code_scanning_default_setup=enabled.
+# Applying/re-applying that configuration to this repo turns default setup
+# back on and re-breaks this lane. Enforcement is `unenforced`, so the
+# repo-level override above wins until someone re-applies the config.
+# Re-disable with:
+#
+#     gh api -X PATCH \
+#       repos/DropletByWarpLab/droplet-onboard-services/code-scanning/default-setup \
+#       -f state=not-configured
+#
+# Doing so does NOT touch secret scanning, push protection, Dependabot
+# alerts, dependency graph, or private vulnerability reporting — all verified
+# still enabled after the 2026-08-24 flip.
+#
+# WHY NOT default setup: every PR here targets `stage` (main moves only via
+# a promotion PR). Default setup runs on the default branch, PRs targeting
+# it, and a weekly cron — it never scans a `stage` PR. Handing it ownership
+# means zero code scanning at review time.
+#
+# NOT MERGE-BLOCKING: these checks are not in the required_status_checks of
+# either ruleset ("Main Protection" 14884851 / "Stage Protection" 20877684),
+# and no `code_scanning` ruleset rule exists on either — verified 2026-08-24
+# under WARP-2167, correcting an earlier claim in this header and in
+# docs/SECURITY.md. They are advisory signal plus the Security tab. Wiring
+# real enforcement is a separate decision, not a side effect of this file.
+#
+# BASELINE: none needed — GitHub's code-scanning PR check only surfaces
+# alerts introduced by the PR diff, so pre-existing alerts on the base
+# branch never block.
+#
+# COST: ~10 min/language, so this is the one expensive lane and it stays
+# path-filtered. `.github/workflows/**` is in the filter because the
+# `actions` language analyzes workflow files themselves; the trade-off is
+# that a workflow-only edit also re-runs the JS/TS and Python jobs (path
+# filters are workflow-scoped, not job-scoped).
 
 on:
   pull_request:
@@ -26,7 +64,8 @@ on:
       - "**/*.jsx"
       - "**/*.mjs"
       - "**/*.py"
-      - ".github/workflows/codeql.yml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
       - ".github/codeql/codeql-config.yml"
   push:
     branches: [main]
@@ -37,7 +76,8 @@ on:
       - "**/*.jsx"
       - "**/*.mjs"
       - "**/*.py"
-      - ".github/workflows/codeql.yml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
       - ".github/codeql/codeql-config.yml"
   schedule:
     - cron: "41 4 * * 1" # weekly full pass so new queries hit unchanged code
@@ -51,78 +91,63 @@ permissions:
   contents: read
   security-events: write
 
+# Three explicit jobs instead of a matrix: a matrix skipped at job level
+# reports one check literally named "codeql / ${{ matrix.language }}"
+# (GitHub never expands a matrix it skips), which would break the stable
+# per-language check names.
 jobs:
-  # D1 gate: only the exact "must be enabled" 403 means Code Security is
-  # off; any other response (200 alerts, 404 no-analyses-yet) means the
-  # upload will be accepted, so we analyze. Fails open on purpose — if the
-  # probe breaks we'd rather run CodeQL and see the real error than
-  # silently skip a security gate forever.
-  preflight:
-    name: code-security enabled (D1 gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      enabled: ${{ steps.probe.outputs.enabled }}
-    steps:
-      - name: Probe code-scanning API availability
-        id: probe
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          resp=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/alerts?per_page=1" 2>&1) || true
-          if printf '%s' "$resp" | grep -qi "must be enabled for this repository"; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "## CodeQL skipped — GitHub Code Security not enabled (decision D1)"
-              echo "The code-scanning API answered: \`$(printf '%s' "$resp" | head -c 300)\`"
-              echo "Enable it (org admin, billing) and this workflow arms itself on the next run:"
-              echo '```'
-              echo "gh api -X PATCH repos/$GITHUB_REPOSITORY -f 'security_and_analysis[advanced_security][status]=enabled'"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Two explicit jobs instead of a matrix: a matrix skipped at job level
-  # reports one check literally named "codeql / ${{ matrix.language }}"
-  # (GitHub never expands a matrix it skips), which would break the stable
-  # per-language check names the ruleset wiring expects.
   analyze-js:
     name: codeql / javascript-typescript
-    needs: preflight
-    if: needs.preflight.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v4.37.6
+      - uses: github/codeql-action/init@v4.37.8
         with:
           languages: javascript-typescript
           config-file: ./.github/codeql/codeql-config.yml
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v4.37.6
+      - uses: github/codeql-action/analyze@v4.37.8
         with:
           category: "/language:javascript-typescript"
 
   analyze-py:
     name: codeql / python
-    needs: preflight
-    if: needs.preflight.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v4.37.6
+      - uses: github/codeql-action/init@v4.37.8
         with:
           languages: python
           config-file: ./.github/codeql/codeql-config.yml
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v4.37.6
+      - uses: github/codeql-action/analyze@v4.37.8
         with:
           category: "/language:python"
+
+  # Added under WARP-2167: default setup was covering `actions` (workflow
+  # injection, unpinned third-party actions, secrets exfil in run steps).
+  # Turning it off without this job would have silently dropped that
+  # coverage — the exact "gate that looks configured but is switched off"
+  # shape this ticket was filed to remove.
+  analyze-actions:
+    name: codeql / actions
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4.37.8
+        with:
+          languages: actions
+          config-file: ./.github/codeql/codeql-config.yml
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v4.37.8
+        with:
+          category: "/language:actions"

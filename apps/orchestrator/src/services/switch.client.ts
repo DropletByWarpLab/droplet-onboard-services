@@ -316,10 +316,14 @@ export async function detectWanPort(): Promise<unknown> {
 
 // --- Camera Setup ---
 
+// WARP-2165: the port defaults were a GS1900-10HP's literal banks. An empty
+// list now means "let the switch service derive it from the device", so a
+// caller that omits them gets the right answer on any variant instead of a
+// trunk pointing at ports that may not exist.
 export async function setupCameraPorts(
   vlanId = 100,
-  cameraPorts = [1, 2, 3, 4, 5, 6, 7, 8],
-  uplinkPorts = [9, 10]
+  cameraPorts: number[] = [],
+  uplinkPorts: number[] = []
 ): Promise<SwitchWriteResult> {
   const resp = await internalFetch(`${SWITCH_URL}/setup/cameras`, {
     method: "POST",

@@ -3,7 +3,9 @@
 > **Audience:** anyone building, operating, or reviewing a Droplet integration.
 > **Scope:** the whole integration system — the generic connector framework that applies to **every** integration, with **Eaglesoft** as the first concrete provider.
 >
-> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — operator guide) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
+> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — setup guide, in two tracks) · [`credential-handling.md`](credential-handling.md) (what the box does with a pasted SaaS credential) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
+>
+> **Per-vendor customer setup guides (cloud/SaaS):** [`stripe.md`](stripe.md) · [`hubspot.md`](hubspot.md) · [`mailchimp.md`](mailchimp.md) · [`shopify.md`](shopify.md) · [`xero.md`](xero.md).
 
 ---
 
@@ -105,7 +107,7 @@ State is **always an explicit enum column**, never derived from a row's absence 
 
 | Model | Purpose |
 |---|---|
-| `IntegrationConnection` | One row per configured provider. Explicit `status` enum; `writeEnabled` opt-in flag; `host` / `databaseName`; **`secretRef` — a pointer into the encrypted secret store, never a cleartext password**; discovered `schemaVersion` + `schemaHash` (drift fingerprint). |
+| `IntegrationConnection` | One row per configured provider. Explicit `status` enum; `writeEnabled` opt-in flag; `host` / `databaseName`; **`secretRef` — a pointer into the encrypted secret store, never a cleartext password**; discovered `schemaVersion` + `schemaHash` (drift fingerprint). For the cloud tracks (WARP-2137): **`providerConfig`** carries the vendor's own account identifier (`realmId` / `organizationId`), validated structurally per provider rather than cast, and **`providerTokensEnc`** holds that track's OAuth tokens, AAD-bound to the row id so a blob moved to another connection fails closed. |
 | `ErpSyncCursor` | Per-entity incremental-sync watermark (explicit column, not `IS NULL`). |
 | `ErpEntityCache` | Cached read snapshots (PHI → encrypted at rest). A convenience/uptime layer, never the system of record; the UI always time-stamps it ("as of …"). |
 | `ErpWriteRequest` | The write **outbox** — one row per proposed write, with an explicit `WriteStatus` lifecycle. |
@@ -142,7 +144,7 @@ A write is **never applied without a confirmed request**. Intent (`createWriteRe
 Reads are safe; writing back into a live system of record is the sharp edge. Every layer is designed around that.
 
 1. **Read-only by default.** A new connection is read-only. Writes are a **per-practice, per-capability opt-in** (`writeEnabled`), off until explicitly enabled.
-2. **Least-privilege database access.** Droplet connects as **dedicated accounts it provisions inside the external database** — a `droplet_ro` (SELECT-only, the default) and, only when writes are enabled, a narrow `droplet_rw`. Never a shared/admin/default credential. See [`SETUP.md`](SETUP.md) §3 and [`eaglesoft.md`](eaglesoft.md).
+2. **Least-privilege database access.** Droplet connects as **dedicated accounts it provisions inside the external database** — a `droplet_ro` (SELECT-only, the default) and, only when writes are enabled, a narrow `droplet_rw`. Never a shared/admin/default credential. See [`SETUP.md`](SETUP.md) §2.3 ("The dedicated user in their database model") and [`eaglesoft.md`](eaglesoft.md). This applies to the **LAN track only** — a cloud/SaaS provider has no database in which to provision an account, and instead takes a credential the owner creates in the vendor's own console ([`SETUP.md`](SETUP.md) §3, [`credential-handling.md`](credential-handling.md)).
 3. **The assistant never emits SQL.** It invokes **named, parameterized commands** from the registries only. There is no "run this query" escape hatch against a live third-party system.
 4. **Financial / clinical / claim tables are never written.** `FORBIDDEN_WRITE_TABLES` makes them impossible targets. Writes are confined to a small, vetted, tested allow-list (e.g. an appointment reschedule).
 5. **The write outbox: create → confirm → apply → verify.** A proposed write is staged (`ErpWriteRequest`, `PENDING_CONFIRMATION`), a **human confirms** it (the dashboard's write-confirm modal — voice/LLM alone can never authorize a write), then the connector applies it in one transaction, then a verify-read checks the result. A blocked/failed apply is recorded `FAILED` — never a fake `APPLIED`.
@@ -185,6 +187,8 @@ The framework is built and buildable **without** any live external system. What'
 | Orchestrator API + service layer (this document's §6) | **Built** (PR #916) — endpoints return honest status/empty; the write outbox works end-to-end with the connector stubbed. |
 | **Live driver** (the provider's real DB connection + introspection + read/write execution) | **Blocked** — needs the provider's client + a data source. For Eaglesoft that's the SAP SQL Anywhere client + a copy of `PattersonPM.db` on an x86_64 host (see [`eaglesoft.md`](eaglesoft.md)). Wiring it live only replaces the connector's stubbed methods. |
 | **Export-drop track** (`<vendor>-export`, WARP-1964) | **Runnable today** — reads the report files a practice exports from its own PMS off a read-only share. Needs no vendor driver and no vendor enrolment, so it is the one track that does not wait on a third party; read-only by construction and vendor-agnostic via declarative profiles. See [`export-drop.md`](export-drop.md). |
+| **Cloud tracks** (`quickbooks-online` WARP-2109, `dentrix-ascend` WARP-2127) | **Selectable** (WARP-2137). Both connectors shipped with full suites but had no provider key in `erp-provider.ts`, so `validateProvider` rejected them and nothing could construct one — they were unreachable from the API. The keys, the connection config, and the token store are now wired; each still needs an operator to supply its account identifier and an authorized token before it reads anything. Egress for both is registered in [`allowed-egress.yaml`](../security/allowed-egress.yaml). |
+| **`quickbooks-desktop`** (WARP-2108) | **Not selectable.** The connector exists, but the Intuit Web Connector POSTs qbXML *to the box* and no such endpoint is built — a connector wired today would read a permanently empty snapshot store. Deliberately left unmapped rather than made constructible-but-useless. |
 
 **"Blocked" means the seam is stubbed, not missing.** The whole walking skeleton (dashboard ↔ orchestrator ↔ connector) is wired and tested; only the connector's driver methods (`connect`/`introspect`/`runRead`/`applyWrite`) reject with `ConnectorBlockedError` until the provider's driver lands.
 

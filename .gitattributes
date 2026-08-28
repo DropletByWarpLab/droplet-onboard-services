@@ -7,6 +7,10 @@
 # systemd path units (WARP-843: droplet-openwrt-attach.path) parse on the
 # appliance like .service files — same CRLF hazard, same pin.
 *.path text eol=lf
+# systemd timer units (WARP-2190: droplet-power-restore.timer) parse the same
+# way — and a trailing CR lands INSIDE the value, so `Unit=foo.service\r`
+# silently resolves to no such unit. Same hazard, same pin.
+*.timer text eol=lf
 *.py text eol=lf
 Dockerfile text eol=lf
 *.yml text eol=lf
@@ -17,6 +21,17 @@ Dockerfile text eol=lf
 # doesn't catch them — pin explicitly so a Windows checkout never ships
 # CRLF and breaks the shebang (203/EXEC) on the appliance.
 scripts/host/usr-local-sbin/* text eol=lf
+
+# Extensionless /etc/default tuning files. systemd's EnvironmentFile= keeps a
+# trailing CR as part of the VALUE, so `FOO=1800\r` reaches the service as
+# "1800\r" and every int() parse of it fails on a Windows-checked-out box.
+scripts/host/etc-default/* text eol=lf
+
+# Netplan drop-ins copied to /etc/netplan on the box. The *.yaml rule above does
+# NOT match `70-eth.yaml.example` -- its final extension is `.example` -- so this
+# file is otherwise unpinned, and a Windows checkout would hand an operator a
+# CRLF netplan file to copy onto an appliance.
+scripts/host/etc-netplan/* text eol=lf
 
 # WARP-663 / ADR-020 — extensionless CLI dispatcher (sibling of droplet-admin).
 # Same shebang-CRLF hazard as the host executables above; pin to LF so a
@@ -80,3 +95,11 @@ docker/nextcloud/* text eol=lf
 # SQL and anchor-codegen pins above; same fix (WARP-1567). Guarded by
 # apps/orchestrator/src/__tests__/snapshot-eol.test.ts.
 *.snap text eol=lf
+
+# WARP-2192 — systemd/kernel config fragments deployed to the box. A trailing
+# CR is NOT whitespace to either parser: modules-load.d would look for a module
+# literally named "sp5100_tco\r" and find nothing, and systemd keeps the CR
+# inside the value so `RuntimeWatchdogSec=120\r` fails to parse. Both failures
+# are silent — the file reads correctly and the watchdog simply never arms.
+scripts/host/etc-modules-load.d/* text eol=lf
+scripts/host/etc-systemd-system.conf.d/* text eol=lf

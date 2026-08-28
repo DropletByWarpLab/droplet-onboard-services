@@ -52,15 +52,23 @@ from .base import (
     SwitchAPIError,
     InvalidPortError,
     PoweredMemberError,
+    ProtectedPortError,
 )
 
 logger = logging.getLogger("droplet.switch.openwrt")
 
-# GS1900-10HP port configuration.
+# GS1900 family bounds. These are a SANITY RANGE for input validation across
+# the variants we ship — they are NOT the port list of any given unit, and
+# nothing user-visible may be derived from them (WARP-2165). The 8HP has
+# lan1-8 and no SFP cage at all; the 10HP has lan1-10 with 9-10 optical. The
+# real port set comes from the device via `_device_port_numbers()`, which is
+# read off a `network.device status` call `get_ports` was already making.
 PORT_MIN = 1
 PORT_MAX = 10
 POE_PORT_MIN = 1
 POE_PORT_MAX = 8
+# The optical bank on variants that HAVE one. Only ever applied to ports the
+# device actually reports, so on an 8HP this range matches nothing.
 SFP_PORT_MIN = 9
 SFP_PORT_MAX = 10
 
@@ -200,11 +208,15 @@ class OpenWrtSwitchDriver(SwitchDriver):
         plan_only: bool = True,
         timeout_s: float = 8.0,
         transport: Optional[Transport] = None,
+        protected_port: int = 0,
     ) -> None:
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        # The uplink/trunk this appliance reaches the router through. 0 = none
+        # configured, nothing protected. See `_refuse_if_protected`.
+        self._protected_port = protected_port
         self._plan_only = plan_only
         self._timeout_s = timeout_s
         self._base_url = f"http://{host}:{port}/ubus"
@@ -350,6 +362,9 @@ class OpenWrtSwitchDriver(SwitchDriver):
         board = await self._ubus("system", "board")
         info = await self._ubus("system", "info")
         poe = await self._poe_info()
+        # Count the ports the unit HAS. `PORT_MAX` is the widest variant, so
+        # reporting it told every 8HP owner they had 10 ports (WARP-2165).
+        port_count = len(await self._device_port_numbers())
         release = board.get("release") or {}
         mac = ""
         try:
@@ -365,7 +380,7 @@ class OpenWrtSwitchDriver(SwitchDriver):
             "mac_address": mac,
             "uptime": _format_uptime(info.get("uptime")),
             "hostname": board.get("hostname", ""),
-            "port_count": PORT_MAX,
+            "port_count": port_count,
             "poe_budget_mw": float(budget_w) * 1000 if budget_w is not None else None,
             "driver": "openwrt",
         }
@@ -381,17 +396,50 @@ class OpenWrtSwitchDriver(SwitchDriver):
                     out[p["port"]] = vlan["vlan_id"]
         return out
 
-    async def get_ports(self) -> list[dict]:
+    async def _device_status(self) -> dict:
         devices = await self._ubus("network.device", "status")
-        if not isinstance(devices, dict):
-            devices = {}
+        return devices if isinstance(devices, dict) else {}
+
+    @staticmethod
+    def _port_numbers_from(devices: dict) -> list[int]:
+        """The unit's REAL port numbers, off its own device list.
+
+        `network.device status` names every netdev the switch has — on the
+        live 8HP exactly `eth0 lan1..lan8 lo switch switch.1`. Only the `lanN`
+        entries are ports, so the non-port devices must be filtered rather
+        than counted, and the numbers must be taken as-is rather than
+        re-derived as `range(1, len+1)`: a unit that names lan1/lan2/lan5 has
+        a port 5, not a port 3.
+
+        Returns [] when the unit answers but names no ports. That is the
+        honest reading of a degraded response — falling back to the old
+        10-port assumption is exactly what invented two ports on the 8HP.
+        """
+        found = set()
+        for name in devices:
+            num = _port_from_name(name)
+            if num is not None:
+                found.add(num)
+        return sorted(found)
+
+    async def _device_port_numbers(self) -> list[int]:
+        ports = self._port_numbers_from(await self._device_status())
+        if not ports:
+            logger.warning(
+                "Switch reported no lanN devices — port list is empty. Not "
+                "assuming a %d-port unit (WARP-2165).", PORT_MAX,
+            )
+        return ports
+
+    async def get_ports(self) -> list[dict]:
+        devices = await self._device_status()
         try:
             pvids = await self._pvid_by_port()
         except (SwitchAPIError, ConnectionLost):
             pvids = {}
         poe_by_port = {p["port"]: p for p in await self.get_poe_status()}
         out = []
-        for port in range(PORT_MIN, PORT_MAX + 1):
+        for port in self._port_numbers_from(devices):
             st = devices.get(_port_name(port)) or {}
             speed_label, duplex = _speed_fields(st.get("speed"))
             entry = {
@@ -426,8 +474,29 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 return entry
         raise InvalidPortError(f"Port {port} not reported by the switch")
 
+    def _refuse_if_protected(self, port: int, enabled: bool, action: str) -> None:
+        """Hard refusal on the appliance's uplink (WARP-2165).
+
+        Only ever blocks the DISABLING direction — restoring a port can only
+        help, and a guard that blocked it would make the uplink unrecoverable
+        through the product. There is no `force` parameter on purpose: see
+        :class:`ProtectedPortError`.
+        """
+        if enabled or not self._protected_port or port != self._protected_port:
+            return
+        raise ProtectedPortError(
+            f"Refusing to {action} port {port}: it is this appliance's uplink "
+            f"to the router (SWITCH_PROTECTED_PORT). Cutting it severs the box "
+            f"from the fabric — including the connection carrying this request "
+            f"— so nothing would remain that could undo it."
+        )
+
     async def set_port_enabled(self, port: int, enabled: bool) -> None:
         self._validate_port(port)
+        # BEFORE the unimplemented-write error below, so the refusal is already
+        # correct on the day WARP-1674 lands the real write path rather than
+        # that day silently shipping an unguarded cut.
+        self._refuse_if_protected(port, enabled, "disable")
         # The image grants no `file exec` and netifd exposes no per-bridge-port
         # admin toggle over ubus — port admin control needs a confirmed uci
         # write shape against flashed hardware first (tracked with the
@@ -834,6 +903,10 @@ class OpenWrtSwitchDriver(SwitchDriver):
         self, port: int, enabled: bool, force: bool = False,
     ) -> dict | None:
         self._validate_poe_port(port)
+        # WARP-2165 runs BEFORE the ADR-035 §7 guard below because it is the
+        # stricter of the two: that one yields to `force`, this one does not.
+        # Ordering them the other way would let `force=true` reach the uplink.
+        self._refuse_if_protected(port, enabled, "cut PoE on")
         # ADR-035 §7 hard refusal. De-powering a device is the one action in
         # this rack with NO remote recovery: the device cannot roll itself
         # back, cannot confirm, and cannot be reached to undo it. So a
@@ -907,10 +980,20 @@ class OpenWrtSwitchDriver(SwitchDriver):
                 "reason": "SFP port with active link (uplink bank)",
             }
         if linked:
+            # Say WHY there was no optical answer. "no SFP link present" reads
+            # as "the cage is empty" on a unit that has no cage at all — on the
+            # 8HP the honest statement is that the variant has none
+            # (WARP-2165).
+            has_sfp_bank = any(p["is_sfp"] for p in ports)
+            reason = (
+                "first copper port with active link (no SFP link present)"
+                if has_sfp_bank
+                else "first copper port with active link (this unit has no SFP ports)"
+            )
             return {
                 "wan_port": linked[0]["port"],
                 "confidence": "low",
-                "reason": "first copper port with active link (no SFP link present)",
+                "reason": reason,
             }
         return {"wan_port": None, "confidence": "none", "reason": "no port has link"}
 

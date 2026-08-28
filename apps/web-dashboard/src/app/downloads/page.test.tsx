@@ -189,9 +189,18 @@ describe("/downloads — honest empty and error states", () => {
     } satisfies AppDownloadCatalog);
     render(<DownloadsPage />);
 
-    expect(await screen.findByText(/no apps are staged/i)).toBeInTheDocument();
+    const empty = await screen.findByText(
+      /no apps have been added to this box/i,
+    );
+    expect(empty).toBeInTheDocument();
     // Never a raw failure identifier in customer-facing copy.
     expect(screen.queryByText(/catalog_missing/)).not.toBeInTheDocument();
+    // It must not PROMISE that an update will deliver the app. Nothing about
+    // a box update stages an installer — an operator does — so the old copy
+    // ("the next box update will bring them") left the reader waiting for
+    // something that was never coming. Narrow on the promise, not the word:
+    // telling someone an update will NOT bring it is exactly right.
+    expect(empty.textContent ?? "").not.toMatch(/update will bring/i);
   });
 
   it("translates a signature failure into plain language", async () => {

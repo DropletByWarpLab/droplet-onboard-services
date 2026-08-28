@@ -904,6 +904,19 @@ const envSchema = z.object({
   // the fetcher unauthenticated.
   WEB_FETCH_SERVICE_TOKEN: z.string().default(""),
 
+  // --- Document rendering (WARP-2211) ---
+  // DOC_RENDER_URL — compose-internal base URL of services/doc-render, the
+  // stateless .pdf/.docx/.xlsx writer behind POST /api/files/render. It holds
+  // no credentials and makes no egress; this route is its only caller.
+  DOC_RENDER_URL: z.string().default("http://doc-render:8020"),
+  // DOC_RENDER_SERVICE_TOKEN — outbound bearer for /api/files/render →
+  // doc-render. Minted by scripts/lib/secrets.sh (generate_env on a fresh
+  // install, migrate_env backfill on an existing box), so unlike
+  // WEB_FETCH_SERVICE_TOKEN this is populated without a hand edit. When it IS
+  // empty the route fails CLOSED with 502 rather than calling the renderer
+  // unauthenticated — and doc-render itself 503s, so both ends refuse.
+  DOC_RENDER_SERVICE_TOKEN: z.string().default(""),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

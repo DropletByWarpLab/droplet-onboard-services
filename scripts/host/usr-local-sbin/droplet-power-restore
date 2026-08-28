@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""Bring the appliance back up by itself after mains power is lost.
+
+A box that does not come back after a power cut is dark until someone drives to
+the site. Measured on the first customer box: ~30 h down after an unclean loss,
+because the board's AC-loss policy was "always off".
+
+Two independent mechanisms, applied at every boot and refreshed on a timer:
+
+ 1. AMD FCH PwrFailShadow - PM register 0x5B, bits[1:0]. This is the exact
+    hardware bit the BIOS "Restore on AC/Power Loss" option drives. It sits in
+    the RTC / always-on power well, so the value survives a full G3 (mains
+    removed) and the FCH consults it the moment AC returns. Firmware rewrites
+    the register from its own NVRAM copy at every POST, which is why this must
+    be re-applied on each boot instead of being set once by hand.
+
+ 2. RTC wake alarm, held a short horizon ahead. If (1) does not take - board
+    settled in S5 rather than G3, brownout latched the PSU off, someone hit the
+    power button - the alarm still fires out of S5 and powers the machine on.
+    An alarm that fires while the box is already up is a harmless interrupt.
+
+The two are deliberately independent: (2) is armed even when (1) fails, because
+that is exactly the case where the backstop earns its keep.
+
+⚠ This does NOT remove the need to set "Restore on AC/Power Loss" = "Power On"
+in BIOS. This re-applies the bit only once Linux is up, so a box that POSTs but
+fails to boot will not be protected against the NEXT cut. Firmware is the
+belt; this is the braces.
+
+Writes nothing unless it can first prove the PM block is mapped where it
+believes it is - see pm_block_selfcheck(). A check that cannot fail is worse
+than no check, so the self-check compares against a value the firmware
+published via ACPI and that this script cannot influence.
+
+Paths are overridable purely so the test suite can drive this hermetically
+against fixture files; the PM block base and register offsets are NOT
+overridable, because those are the safety-critical constants.
+"""
+
+from __future__ import annotations
+
+import os
+import struct
+import sys
+import time
+
+# --- AMD FCH ACPI MMIO ------------------------------------------------------
+# Deliberately not configurable: a wrong base here means writing a policy byte
+# into an unknown register on live hardware.
+ACPI_MMIO_PM_BLOCK = 0xFED80300  # PM register block base
+PM_RTC_SHADOW = 0x5B             # PwrFailShadow in bits[1:0]
+PM_TMR_BLK_OFF = 0x64            # spec-fixed: ACPI PM timer block address
+
+PWRFAIL_MASK = 0b11
+PWRFAIL_ALWAYS_OFF = 0b00
+PWRFAIL_ALWAYS_ON = 0b01
+PWRFAIL_PREV_STATE = 0b11
+
+PWRFAIL_NAMES = {
+    PWRFAIL_ALWAYS_OFF: "always-off (stays dark when AC returns)",
+    PWRFAIL_ALWAYS_ON: "always-on (powers up when AC returns)",
+    PWRFAIL_PREV_STATE: "previous-state",
+}
+
+# ACPI 1.0 FADT fixed layout: PM_TMR_BLK is a u32 at offset 76.
+FADT_PM_TMR_BLK_OFFSET = 76
+
+MEM_PATH = os.environ.get("DROPLET_POWER_RESTORE_MEM", "/dev/mem")
+FADT_PATH = os.environ.get(
+    "DROPLET_POWER_RESTORE_FADT", "/sys/firmware/acpi/tables/FACP"
+)
+RTC_WAKEALARM = os.environ.get(
+    "DROPLET_POWER_RESTORE_RTC", "/sys/class/rtc/rtc0/wakealarm"
+)
+
+# Worst-case dark time before the RTC backstop fires. The refresh timer runs
+# well inside this, so a pending alarm is always in the future.
+DEFAULT_RTC_HORIZON_SEC = 1800
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def _mem_read(offset: int, n: int) -> bytes:
+    fd = os.open(MEM_PATH, os.O_RDONLY)
+    try:
+        data = os.pread(fd, n, offset)
+    finally:
+        os.close(fd)
+    if len(data) != n:
+        raise OSError(
+            "short read of %d byte(s) at 0x%X from %s" % (n, offset, MEM_PATH)
+        )
+    return data
+
+
+def _mem_write(offset: int, data: bytes) -> None:
+    fd = os.open(MEM_PATH, os.O_RDWR | os.O_SYNC)
+    try:
+        if os.pwrite(fd, data, offset) != len(data):
+            raise OSError("short write to %s at 0x%X" % (MEM_PATH, offset))
+    finally:
+        os.close(fd)
+
+
+def pm_read8(reg: int) -> int:
+    return _mem_read(ACPI_MMIO_PM_BLOCK + reg, 1)[0]
+
+
+def pm_read16(reg: int) -> int:
+    return struct.unpack("<H", _mem_read(ACPI_MMIO_PM_BLOCK + reg, 2))[0]
+
+
+def pm_write8(reg: int, value: int) -> None:
+    _mem_write(ACPI_MMIO_PM_BLOCK + reg, bytes([value]))
+
+
+def fadt_pm_tmr_blk() -> int:
+    """PM timer port as ACPI itself declares it - our independent control."""
+    with open(FADT_PATH, "rb") as fh:
+        data = fh.read()
+    if len(data) < FADT_PM_TMR_BLK_OFFSET + 4:
+        raise RuntimeError("%s is too short to be a FADT" % FADT_PATH)
+    return struct.unpack_from("<I", data, FADT_PM_TMR_BLK_OFFSET)[0]
+
+
+def pm_block_selfcheck() -> int:
+    """Prove ACPI_MMIO_PM_BLOCK really is the FCH PM block before writing.
+
+    PM[0x64] is the spec-fixed ACPI PM-timer block address. If the window and
+    offsets are right it must equal the PM_TMR_BLK the firmware published in
+    the FADT (and which the kernel echoes as `ACPI: PM-Timer IO Port:`). A
+    mismatch means this board maps things differently - different silicon, a
+    moved window, a BIOS change - and we must not drop a policy byte into an
+    unknown register.
+    """
+    want = fadt_pm_tmr_blk()
+    got = pm_read16(PM_TMR_BLK_OFF)
+    if want == 0 or got != want:
+        raise RuntimeError(
+            "PM block self-check FAILED: PM[0x%02X]=0x%04X but FADT PM_TMR_BLK="
+            "0x%04X - refusing to write, the register map is not what this "
+            "script assumes" % (PM_TMR_BLK_OFF, got, want)
+        )
+    return want
+
+
+def apply_pwrfail() -> bool:
+    """Set PwrFailShadow to always-on. Returns True if a write was needed."""
+    tmr = pm_block_selfcheck()
+    log("PM block verified (PM_TMR_BLK=0x%04X matches FADT)" % tmr)
+
+    cur_raw = pm_read8(PM_RTC_SHADOW)
+    cur = cur_raw & PWRFAIL_MASK
+    if cur == PWRFAIL_ALWAYS_ON:
+        log("PwrFailShadow already %s - no write needed" % PWRFAIL_NAMES[cur])
+        return False
+
+    # Read-modify-write: every other bit in this register belongs to firmware.
+    new_raw = (cur_raw & ~PWRFAIL_MASK) | PWRFAIL_ALWAYS_ON
+    log(
+        "PwrFailShadow is %s - setting %s (PM[0x%02X] 0x%02X -> 0x%02X)"
+        % (
+            PWRFAIL_NAMES.get(cur, "reserved"),
+            PWRFAIL_NAMES[PWRFAIL_ALWAYS_ON],
+            PM_RTC_SHADOW,
+            cur_raw,
+            new_raw,
+        )
+    )
+    pm_write8(PM_RTC_SHADOW, new_raw)
+
+    # Verify bits[1:0] ONLY. On real silicon bits[5:4] mirror bits[1:0] - the
+    # FCH propagates the write into its shadow copy - so the byte read back is
+    # legitimately not the byte written (observed: wrote 0x45, read 0x55).
+    back = pm_read8(PM_RTC_SHADOW)
+    if (back & PWRFAIL_MASK) != PWRFAIL_ALWAYS_ON:
+        raise RuntimeError(
+            "verify FAILED: PM[0x%02X] reads back 0x%02X" % (PM_RTC_SHADOW, back)
+        )
+    log(
+        "verified: PM[0x%02X]=0x%02X, PwrFailShadow=always-on"
+        % (PM_RTC_SHADOW, back)
+    )
+    return True
+
+
+def arm_rtc(horizon: int) -> None:
+    if horizon <= 0:
+        log("RTC backstop disabled by configuration")
+        return
+    if not os.path.exists(RTC_WAKEALARM):
+        log("RTC backstop unavailable: %s missing" % RTC_WAKEALARM)
+        return
+    when = int(time.time()) + horizon
+    # An armed alarm has to be cleared before it can be re-armed.
+    with open(RTC_WAKEALARM, "w") as fh:
+        fh.write("0\n")
+    with open(RTC_WAKEALARM, "w") as fh:
+        fh.write("%d\n" % when)
+    with open(RTC_WAKEALARM) as fh:
+        got = fh.read().strip()
+    if got != str(when):
+        raise RuntimeError(
+            "RTC alarm verify FAILED: wrote %d, reads back %s"
+            % (when, got or "empty")
+        )
+    log(
+        "RTC wake alarm armed for %s (+%ds)"
+        % (time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(when)), horizon)
+    )
+
+
+def show_status() -> None:
+    """Read-only. Safe to run at any time, including as a non-root probe."""
+    try:
+        want = fadt_pm_tmr_blk()
+        got = pm_read16(PM_TMR_BLK_OFF)
+        state = "OK" if got == want else "MISMATCH"
+        print(
+            "PM block self-check : %s (PM[0x64]=0x%04X, FADT=0x%04X)"
+            % (state, got, want)
+        )
+    except Exception as exc:  # noqa: BLE001 - a probe must never raise
+        print("PM block self-check : ERROR (%s)" % exc)
+
+    try:
+        raw = pm_read8(PM_RTC_SHADOW)
+        bits = raw & PWRFAIL_MASK
+        print(
+            "AC-loss policy      : %s  [PM[0x%02X]=0x%02X]"
+            % (PWRFAIL_NAMES.get(bits, "reserved"), PM_RTC_SHADOW, raw)
+        )
+    except Exception as exc:  # noqa: BLE001
+        print("AC-loss policy      : ERROR (%s)" % exc)
+
+    try:
+        with open(RTC_WAKEALARM) as fh:
+            val = fh.read().strip()
+        if not val or val == "0":
+            print("RTC wake alarm      : not armed")
+        else:
+            when = int(val)
+            print(
+                "RTC wake alarm      : %s (in %ds)"
+                % (
+                    time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(when)),
+                    when - int(time.time()),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        print("RTC wake alarm      : ERROR (%s)" % exc)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args and args[0] in ("-s", "--status"):
+        show_status()
+        return 0
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if args:
+        print("unknown argument: %s (try --status or --help)" % args[0])
+        return 2
+
+    # Root is only needed to touch the REAL /dev/mem. When the paths are
+    # redirected they are ordinary files, which is how the test suite drives
+    # this without privileges - and keeps the friendly error for the real case
+    # instead of a bare EACCES from open().
+    if MEM_PATH == "/dev/mem" and os.geteuid() != 0:
+        log("must run as root")
+        return 1
+
+    try:
+        horizon = int(
+            os.environ.get(
+                "DROPLET_POWER_RESTORE_RTC_HORIZON_SEC", DEFAULT_RTC_HORIZON_SEC
+            )
+        )
+    except ValueError:
+        log(
+            "DROPLET_POWER_RESTORE_RTC_HORIZON_SEC is not an integer - falling "
+            "back to %ds" % DEFAULT_RTC_HORIZON_SEC
+        )
+        horizon = DEFAULT_RTC_HORIZON_SEC
+
+    rc = 0
+    try:
+        apply_pwrfail()
+    except Exception as exc:  # noqa: BLE001
+        log("ERROR applying AC-loss policy: %s" % exc)
+        rc = 1
+
+    # Independent of the above on purpose - see the module docstring.
+    try:
+        arm_rtc(horizon)
+    except Exception as exc:  # noqa: BLE001
+        log("ERROR arming RTC backstop: %s" % exc)
+        rc = 1
+
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,5 +1,5 @@
 fastapi>=0.140.7
-uvicorn>=0.52.1
+uvicorn>=0.52.4
 # Floor raised to 0.0.32 (WARP-1948): every release below 0.0.31 carries at
 # least one OSV advisory (PYSEC-2026-1851/-1852/-3036..-3041). 0.0.32 matches
 # services/voice-io's pin.
@@ -25,5 +25,5 @@ cryptography>=50.0.0
 # WARP-1948 — OSV floors: the osv-nightly resolver scores transitive deps at
 # their minimum resolvable version; state the real minimum instead of
 # suppressing the advisory. h11 backs uvicorn's HTTP/1.1 parser.
-idna>=3.15
+idna>=3.19
 h11>=0.16.0

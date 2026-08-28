@@ -53,6 +53,11 @@ import listFileVersions from "./handlers/files/list-file-versions.js";
 import restoreFileVersion from "./handlers/files/restore-file-version.js";
 import shareFile from "./handlers/files/share-file.js";
 import createDocument from "./handlers/files/create-document.js";
+// WARP-2212 — document GENERATION, as opposed to createDocument's empty seed.
+// These send a spec to POST /api/files/render; the model never handles bytes.
+import createPdfReport from "./handlers/files/create-pdf-report.js";
+import createWordDocument from "./handlers/files/create-word-document.js";
+import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -258,6 +263,9 @@ const allTools: Tool[] = [
   restoreFileVersion,
   shareFile,
   createDocument,
+  createPdfReport,
+  createWordDocument,
+  createSpreadsheet,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,

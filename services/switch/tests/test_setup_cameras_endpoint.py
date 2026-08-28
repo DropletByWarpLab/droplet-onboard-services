@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 
 class _FakeDriver:
-    """Minimal stand-in for the route's two driver calls.
+    """Minimal stand-in for the route's driver calls.
 
     Records writes so a test can assert plan-only never claims a write it did
     not make. ``plan_only`` is the only attribute the route inspects.
@@ -32,6 +32,15 @@ class _FakeDriver:
         self.plan_only = plan_only
         self.vlans_created: list[tuple[int, str]] = []
         self.memberships_set: list[tuple[int, list[dict]]] = []
+
+    async def get_ports(self) -> list[dict]:
+        """WARP-2165: the route no longer defaults the port banks to a
+        GS1900-10HP's literals — it asks the device. A fake switch that cannot
+        list its own ports is not a switch, so the stand-in reports a 10HP
+        (copper 1-8, SFP 9-10), which is what these tests always assumed."""
+        return [
+            {"port": n, "is_sfp": n >= 9} for n in range(1, 11)
+        ]
 
     async def create_vlan(self, vlan_id: int, name: str) -> None:
         self.vlans_created.append((vlan_id, name))

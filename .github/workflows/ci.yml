@@ -92,6 +92,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # WARP-2351 — customer setup-guide drift gate. Deliberately a STEP of
+      # this job rather than a leg of its own: `detect` is the only job that
+      # runs on every PR and every main push, and ci-summary already requires
+      # it to succeed, so this reports under the required check with no new
+      # leg, no matrix entry, no `paths:` widening and no new `pull_request:`
+      # trigger (docs/ci-cost-budget.md — CI spend is capped). It also has to
+      # be here for correctness, not only for cost: a docs-only PR triggers NO
+      # other leg at all, and a docs-only PR is exactly what this gate exists
+      # to catch. It runs in ~1s of an already-running job.
+      #
+      # What it closes: a cloud provider shipping with no customer setup
+      # guide, a guide losing one of its six required sections or a
+      # commercially load-bearing fact (Shopify's Grow-plan price, Xero's
+      # per-organisation charge and country list, Stripe's rk_ prefix
+      # contract, HubSpot's super-admin requirement) to a well-meaning copy
+      # pass, and a rotted intra-docs link. See the script's own header.
+      - name: Customer setup guides — coverage, fact pins, link integrity
+        run: bash scripts/check-setup-guides.sh
+
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@v4
@@ -141,6 +160,19 @@ jobs:
               - "scripts/host/etc-systemd-system/droplet-ssh-access.path"
               - "scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service"
               - "tests/droplet-ssh-access.test.sh"
+              # WARP-2142: the install-mode SSH window is planted by the
+              # autoinstall seed, and the vitest guard now reads user-data to
+              # pin the marker-path agreement with the boot reset — so a
+              # user-data edit must re-run this leg pre-merge, or a path typo
+              # ships as a window that silently never opens.
+              - "scripts/image/autoinstall/user-data"
+              # The /downloads staging tools. The orchestrator re-hashes these
+              # artifacts against catalog.json before serving a byte, so the
+              # generator and the stager are part of this service's contract
+              # even though they run on the host — a stager that picks the
+              # wrong `primary` is served faithfully and is still wrong.
+              - "scripts/app-downloads/**"
+              - "tests/app-downloads-stage.test.sh"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -189,6 +221,13 @@ jobs:
             device-identity-svc:
               - "services/device-identity-svc/**"
               - "proto/**"
+            # WARP-2211: the document renderer. Its suite round-trips every
+            # produced file through the reader a user's own application would
+            # use, which is the only thing that distinguishes a valid OOXML
+            # package from a broken one that still starts with "PK" — so it
+            # has to be a leg, not just a local run.
+            doc-render:
+              - "services/doc-render/**"
             # WARP-1988: the factory-reset bulk-storage wipe and the
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at
@@ -211,7 +250,7 @@ jobs:
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
             "voice-io","device-identity-svc","erp-sql-bridge",
-            "inference-manager"]
+            "inference-manager","doc-render"]
           ALL_STORAGE: '["storage"]'
         run: |
           set -eu
@@ -384,6 +423,17 @@ jobs:
       - name: Test @droplet/orchestrator
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
+
+      # The staging half of /downloads. The orchestrator's own suite covers the
+      # serving half (parse, digest, refuse); this covers the script that puts
+      # an installer there in the first place — including the silent failure
+      # neither half would catch on its own, where a leftover installer from
+      # last release stays `primary` and the download button keeps handing out
+      # the older build with a catalog that parses and a digest that verifies.
+      # Runs on the orchestrator leg because that service owns the surface.
+      - name: App-download staging script
+        if: matrix.suite == 'orchestrator'
+        run: bash tests/app-downloads-stage.test.sh
 
       # WARP-1984: the SSH toggle's host half. The orchestrator's vitest guard
       # reads these artefacts as TEXT (it can prove `iptables` never appears);

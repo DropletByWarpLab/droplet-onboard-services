@@ -68,9 +68,22 @@ function Cell({ p, onPick }: { p: SwitchPort; onPick: (port: SwitchPort) => void
  * (hidden below the mobile breakpoint by the panel). Copper bank flexes;
  * the SFP bank is fixed-width, separated by a hairline divider.
  */
+/** "1–8", or "3" for a single port, or "" for none. Ports arrive sorted. */
+function bankLabel(ports: SwitchPort[]): string {
+  if (ports.length === 0) return "";
+  const first = ports[0].port;
+  const last = ports[ports.length - 1].port;
+  return first === last ? `${first}` : `${first}–${last}`;
+}
+
 export function Faceplate({ ports, onPick }: Props) {
   const copper = ports.filter((p) => !p.is_sfp);
   const sfp = ports.filter((p) => p.is_sfp);
+  // WARP-2165: the SFP bank is a property of the VARIANT. The 10HP has one;
+  // the 8HP has no optical cage at all. Rendering the divider and the
+  // fixed-width bank unconditionally left a stray hairline and a dead 110px
+  // column on the right of every 8HP faceplate.
+  const hasSfp = sfp.length > 0;
   return (
     <div>
       <div className="flex gap-[18px] items-stretch bg-[var(--card-inner)] border border-[var(--card-bd)] rounded-[12px] p-3.5">
@@ -79,12 +92,16 @@ export function Faceplate({ ports, onPick }: Props) {
             <Cell key={p.port} p={p} onPick={onPick} />
           ))}
         </div>
-        <div className="w-px bg-[var(--card-bd)]" aria-hidden="true" />
-        <div className="grid grid-flow-col gap-2 flex-none" style={{ gridAutoColumns: "110px" }}>
-          {sfp.map((p) => (
-            <Cell key={p.port} p={p} onPick={onPick} />
-          ))}
-        </div>
+        {hasSfp && (
+          <>
+            <div className="w-px bg-[var(--card-bd)]" aria-hidden="true" />
+            <div className="grid grid-flow-col gap-2 flex-none" style={{ gridAutoColumns: "110px" }}>
+              {sfp.map((p) => (
+                <Cell key={p.port} p={p} onPick={onPick} />
+              ))}
+            </div>
+          </>
+        )}
       </div>
       <div className="flex items-center gap-4 mt-2.5 type-caption-2 text-[color:var(--text-muted)] flex-wrap">
         <span className="inline-flex items-center gap-1.5">
@@ -103,7 +120,15 @@ export function Faceplate({ ports, onPick }: Props) {
           <span className="w-2.5 h-2.5 rounded-[3px] bg-system-red" aria-hidden="true" />
           disabled
         </span>
-        <span className="ml-auto font-mono">copper 1–8 · SFP 9–10</span>
+        {/* Describe the unit in front of you, not the one we shipped first. */}
+        <span className="ml-auto font-mono">
+          {[
+            copper.length > 0 ? `copper ${bankLabel(copper)}` : "",
+            hasSfp ? `SFP ${bankLabel(sfp)}` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </span>
       </div>
     </div>
   );

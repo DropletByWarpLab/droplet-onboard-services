@@ -175,6 +175,30 @@ install_single_box_host_integration() {
     /usr/local/sbin/droplet-openwrt-watch
   log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net + droplet-openwrt-watch"
 
+  # --- WARP-2150: iw is a hard prerequisite of droplet-openwrt-attach --------
+  # detect_ap_radio maps the wireless phy to its netdev via `iw dev`, and the
+  # attach moves the phy into the container netns via `iw phy ... set netns`.
+  # Ubuntu Server does not ship iw, and nothing else here installed it: the
+  # first validated fresh install (2026-08-24) hit `iw: command not found`,
+  # the iface resolved empty, and the AP never came up. Ensure it at setup time
+  # so re-runs heal existing boxes too. Best-effort apt with one update+retry
+  # (restic precedent in lib/backup.sh): a transient failure must not abort
+  # setup — the attach now skips AP bring-up with a loud, actionable message
+  # when the iface stays unresolved, and a setup.sh re-run self-heals.
+  if ! command -v iw >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iw; then
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iw || true
+      fi
+    fi
+    if command -v iw >/dev/null 2>&1; then
+      log_success "Installed iw (wireless phy/iface control for droplet-openwrt-attach)"
+    else
+      log_warn "iw still missing — droplet-openwrt-attach will SKIP AP bring-up (no Wi-Fi AP) until 'sudo apt-get install -y iw' succeeds and the unit restarts"
+    fi
+  fi
+
   # --- /etc/default/ envs -------------------------------------------------
   # droplet-host-net is committed as-is (no secrets). Copy directly.
   sudo install -m 0644 "$host_src/etc-default/droplet-host-net" \
@@ -220,6 +244,20 @@ DROPLET_AP_PSK=$ap_psk
 # honored verbatim and detection is skipped.
 DROPLET_AP_PHY=${DROPLET_AP_PHY:-}
 DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-}
+
+# WARP-2054 - the onboard radio is NOT used. Founder rule (2026-07-28): "we will
+# never use the onboard droplet radios for the aps ... the final box will have
+# onboard radios deactivated and all traffic will go through the pi router for
+# security." AP duty belongs to the external AP.
+#
+# 0 (default) = droplet-openwrt-attach does not detect the radio, does not move
+# it into the container netns, soft-blocks it, and never starts hostapd. That
+# also makes this unit's state MEAN something: it used to fail on every boot for
+# the AP leg while the WireGuard overlay NAT leg succeeded, so a real overlay
+# failure was indistinguishable from a cosmetic one.
+#
+# 1 = dev-only on-box AP. Every DROPLET_AP_* key above applies only in that case.
+DROPLET_AP_ONBOARD=0
 EOF
     sudo chmod 0600 /etc/default/droplet-openwrt-attach.tmp
     sudo mv /etc/default/droplet-openwrt-attach.tmp /etc/default/droplet-openwrt-attach
@@ -252,9 +290,27 @@ EOF
   sudo install -d -m 0755 /etc/droplet
 
   # --- /etc/droplet-host-net/ -----------------------------------------
+  # NOTE: this install is unconditional, so it OVERWRITES the live conf on
+  # every setup run. Anything a box needs beyond the static baseline has to be
+  # re-generated afterwards, not hand-edited here — see droplet-relay-dns
+  # below, and setup_local_dns() (scripts/lib/local-dns.sh), which runs later
+  # in the same pass and re-applies both managed blocks.
   sudo install -d -m 0755 /etc/droplet-host-net
   sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
     /etc/droplet-host-net/lan-dhcp.conf
+
+  # --- relay DNS origin (WARP-2189) ---------------------------------------
+  # The template above names ONE listen-address (the .20.1 LAN leg) and
+  # dnsmasq runs with bind-interfaces, so nothing binds any other leg. On a
+  # box reached over the ADR-025 cloudflared relay the connector dials
+  # DROPLET_PUBLIC_FQDN_IP:53 for every off-site lookup, and when that address
+  # is a different leg the dial gets connection refused — a healthy tunnel
+  # that cannot resolve the box's own name. Twice this was fixed by hand and
+  # twice the install above wiped it. This helper owns the pairing "answer for
+  # a name at an address => listen on that address" and is invoked from
+  # setup_local_dns() (setup time) and droplet-watchdog (runtime self-heal).
+  sudo install -m 0755 "$host_src/droplet-relay-dns.sh" \
+    /usr/local/sbin/droplet-relay-dns
 
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
@@ -348,6 +404,22 @@ EOF
   sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
     /etc/avahi/services/droplet.service
 
+  # --- hardware watchdog (WARP-2192) --------------------------------------
+  # The floor beneath every userspace recovery path: if the KERNEL wedges,
+  # droplet-watchdog.service below cannot run either (it is a systemd timer),
+  # and only the FCH's own timer gets the box back.
+  #
+  # Two halves, and either one missing makes it a silent no-op: systemd never
+  # loads watchdog drivers itself (so /dev/watchdog would not exist), and
+  # RuntimeWatchdogSec is off by default (so PID1 would never pet it).
+  sudo install -d -m 0755 /etc/modules-load.d
+  sudo install -m 0644 "$host_src/etc-modules-load.d/droplet-watchdog-hw.conf" \
+    /etc/modules-load.d/droplet-watchdog-hw.conf
+  sudo install -d -m 0755 /etc/systemd/system.conf.d
+  sudo install -m 0644 "$host_src/etc-systemd-system.conf.d/droplet-watchdog.conf" \
+    /etc/systemd/system.conf.d/droplet-watchdog.conf
+  log_success "Installed the hardware watchdog config (sp5100_tco + RuntimeWatchdogSec)"
+
   # --- unified self-heal watchdog (WARP-1002) ------------------------------
   # One timer-driven supervisor for the proven-heal wedge states (Wi-Fi PCI
   # death via the WARP-869 helper, XVF3800 voice-DSP wedge, docker DNS,
@@ -376,6 +448,28 @@ EOF
   sudo rm -f /etc/systemd/system/droplet-wifi-watchdog.service \
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
+
+  # --- power-loss auto-restart (WARP-2190) ---------------------------------
+  # A box that does not come back after a power cut is dark until someone
+  # presses the button. Measured: ~30 h down after an unclean loss, because the
+  # board's AC-loss policy was "always off" and nothing here ever set it.
+  #
+  # Sets the AMD FCH PwrFailShadow bit (the hardware bit the BIOS "Restore on
+  # AC/Power Loss" option drives) and keeps an RTC wake alarm armed as an
+  # independent backstop. Re-applied on EVERY boot by the unit, because
+  # firmware rewrites that register from its own NVRAM copy at each POST.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-power-restore" \
+    /usr/local/sbin/droplet-power-restore
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-power-restore.service" \
+    /etc/systemd/system/droplet-power-restore.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-power-restore.timer" \
+    /etc/systemd/system/droplet-power-restore.timer
+  # Per-box tuning file: install once, never clobber operator edits.
+  if [ ! -f /etc/default/droplet-power-restore ]; then
+    sudo install -m 0644 "$host_src/etc-default/droplet-power-restore" \
+      /etc/default/droplet-power-restore
+  fi
+  log_success "Installed /usr/local/sbin/droplet-power-restore (+ units)"
 
   # --- WARP-1829 host-unit refresh ----------------------------------------
   # Host units execute their source out of the git working tree
@@ -483,6 +577,15 @@ EOF
   # --- Activate ----------------------------------------------------------
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
+  # WARP-2192: bring the hardware watchdog up on THIS run rather than waiting
+  # for the next boot. `modprobe` because modules-load.d only fires at boot;
+  # `daemon-reexec` because system.conf is read by PID1 at startup — a plain
+  # daemon-reload leaves RuntimeWatchdogSec inert while the file on disk looks
+  # correct. Both tolerate boards with no usable TCO timer (the driver logs
+  # "Watchdog hardware is disabled" and no device appears), so neither is
+  # allowed to fail a provision.
+  sudo modprobe sp5100_tco >/dev/null 2>&1 || true
+  sudo systemctl daemon-reexec >/dev/null 2>&1 || true
   # WARP-1680: enabled (not --now) — it is a boot-time recovery path, and
   # running it mid-setup on a healthy box would only log a no-op.
   sudo systemctl enable droplet-net-selfheal.service >/dev/null 2>&1
@@ -512,6 +615,15 @@ EOF
   # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
   # is a handful of read-only sysfs/docker probes every ~3 minutes.
   sudo systemctl enable --now droplet-watchdog.timer >/dev/null 2>&1
+  # WARP-2190: power-loss auto-restart. `enable` puts the policy back after
+  # every POST (firmware stomps the register); `--now` on the service applies
+  # it to THIS boot too, so a box provisioned today survives a cut tonight
+  # rather than waiting for its next reboot. The timer re-arms the RTC
+  # backstop. Both tolerate non-AMD/unmapped hardware: the script refuses to
+  # write and exits non-zero rather than guessing, so `|| true` keeps a
+  # provision on unsupported hardware from failing outright.
+  sudo systemctl enable --now droplet-power-restore.service >/dev/null 2>&1 || true
+  sudo systemctl enable --now droplet-power-restore.timer >/dev/null 2>&1 || true
   # WARP-268: runtime egress-audit collector. restart|| true so a missing
   # apt dep (conntrack/tcpdump/python3-yaml) doesn't fail the whole install;
   # the unit self-heals on the next setup.sh re-run once the deps land.
@@ -523,6 +635,78 @@ EOF
   log_info "  Self-heal:   droplet-watchdog.timer (status: /var/lib/droplet/watchdog/status.json)"
   log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net -u droplet-watchdog"
+}
+
+# ----------------------------------------------------------------------------
+# WARP-2142 — close the install-mode SSH window on a SUCCESSFUL provision.
+#
+# The autoinstall seed (scripts/image/autoinstall/user-data) plants an
+# epoch-stamped marker at /var/lib/droplet-ssh-access/install-mode and enables
+# ssh in the installed target, so a factory-fresh box is reachable over the
+# LAN from its very first boot; while that marker is fresh (<48h) the
+# WARP-1984 boot reset stamps intent=on at every boot instead of off. That is
+# the fail-OPEN half — a box that hangs or dies mid-provision stays rescuable
+# over SSH (the WARP-2100 dead-end: a wedged first boot, no console, no way
+# in).
+#
+# This hook is the fail-CLOSED half. setup.sh calls it from its success tail,
+# which only a provision that ran to completion ever reaches (`set -e` — a
+# failed provision dies earlier and LEAVES the marker; the 48h backstop then
+# expires it on an abandoned box). Gated on the marker, so it is a no-op on
+# every box that is not mid-install: a manual re-run on a shipped box has no
+# marker and nothing here fires — in particular a live WARP-1984 owner-toggle
+# session is never touched. A manual rescue re-run INSIDE the window that
+# succeeds is every bit as much "provisioning completed" and closes it too.
+#
+# Deliberately NOT in the droplet-firstboot unit's ExecStartPost: that unit
+# definition is frozen into shipped ISOs (iterating it needs a new ISO, while
+# setup.sh is cloned fresh at install time), and it would close the window on
+# the firstboot path only.
+#
+# The marker path literal must agree with the seed and the boot reset —
+# tests/image-pipeline.test.sh and the vitest guard pin the agreement.
+# ----------------------------------------------------------------------------
+close_install_mode_ssh_window() {
+  if [ "$(uname)" != "Linux" ]; then
+    return 0
+  fi
+  local marker="/var/lib/droplet-ssh-access/install-mode"
+  if [ ! -f "$marker" ]; then
+    return 0
+  fi
+
+  log_info "Provisioning complete — closing the install-mode SSH window (WARP-2142)..."
+
+  # Order matters, fail-closed: the marker goes FIRST. Even if every step
+  # after this line fails, the next boot's reset finds no marker and stamps
+  # off as usual.
+  sudo rm -f "$marker"
+
+  # Undo the seed's standing enablement — steady state is WARP-1984's
+  # start-not-enable: the dashboard toggle is the only thing that opens SSH,
+  # every time, and it never survives a reboot. Both unit names (Debian/
+  # Ubuntu `ssh`, most others `sshd`) and both activation forms (service +
+  # socket), mirroring the applier's own resolution and socket handling;
+  # `|| true` because most boxes carry only one of each.
+  sudo systemctl disable ssh.service ssh.socket >/dev/null 2>&1 || true
+  sudo systemctl disable sshd.service sshd.socket >/dev/null 2>&1 || true
+
+  # Re-assert intent=off the way the boot reset does: atomic tmp+rename into
+  # the watched path, so droplet-ssh-access.path (enabled --now earlier in
+  # this very provision) fires and the APPLIER stops sshd and records
+  # state=off. Acting on intent stays the applier's job — nothing here
+  # touches the droplet-ssh-access units themselves.
+  sudo sh -c 'umask 022
+    mkdir -p /var/lib/droplet-ssh-access/intent.d
+    tmp="/var/lib/droplet-ssh-access/intent.d/intent.tmp"
+    {
+      echo "# WARP-2142 — install window closed: provisioning completed successfully."
+      echo "# From here the WARP-1984 owner toggle is the only thing that opens SSH."
+      echo "DROPLET_SSH_ACCESS=off"
+    } >"$tmp"
+    mv -f "$tmp" "${tmp%.tmp}"'
+
+  log_success "Install-mode SSH window closed (marker removed; ssh back to owner-toggle-only)"
 }
 
 # WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND
@@ -1270,6 +1454,23 @@ EOF
   # itself scan (iw scan -> Not supported -95); the graceful "scan unavailable"
   # UX is a separate dashboard ticket. This only wires the config so the radio
   # name is correct rather than the absent wlan0.
+  #
+  # WARP-2054 CONSEQUENCE, stated rather than left to be discovered: with
+  # DROPLET_AP_ONBOARD=0 (the default this ticket introduces) the onboard radio
+  # is soft-blocked and never moved into the openwrt netns, so the device named
+  # here does not exist in the container and the dashboard Wi-Fi scan/clients
+  # panel reads EMPTY on a default box. That is the designed state, not a fault:
+  # Wi-Fi is served by the external AP, and the routing SDK already treats an
+  # absent radio as data rather than an error (services/routing/tests/
+  # test_radio_detail.py). The panel is empty for the same reason a healthy box
+  # reports zero radios.
+  #
+  # The value is deliberately still written, and NOT blanked. Blanking is worse:
+  # _default_wifi_scan_device() in services/routing/droplet_openwrt_sdk.py
+  # coalesces unset-or-empty to the hardcoded "wlan0" last resort, so an empty
+  # value resolves to a name that is wrong on every shape -- the exact bug the
+  # paragraph above records fixing. Naming the real radio keeps the config
+  # honest for the DROPLET_AP_ONBOARD=1 dev path, where the device does appear.
   upsert_env DROPLET_WIFI_SCAN_DEVICE "${DROPLET_AP_IFACE:-wlp14s0}"
   # device-bridge pairing-QR source: the single-box AP is a host hostapd, not
   # a UCI router, so the bridge must read creds in hostapd mode (it defaults to
@@ -1316,21 +1517,65 @@ EOF
   # the gateway still can't be read (a genuine Docker fault) — never silently
   # leave the unreachable host.docker.internal default in place.
   local bridge_net="droplet_default" bridge_gw=""
-  # Create the bridge if absent so the gateway is derivable at Phase-4 time.
+  # WARP-2148: on a FRESH install this code runs seconds after dockerd's very
+  # first startup, and the daemon's network controller can still be
+  # initializing — the create silently no-ops/fails, the inspect returns an
+  # empty gateway, and the loud refusal below aborted the whole first boot.
+  # Live bench evidence (2026-08-24, three consecutive failed installs): the
+  # IDENTICAL create+inspect succeeded instantly ten minutes later (gateway
+  # 172.18.0.1). Deterministic on fresh installs, not a fluke. So: bounded
+  # retry. Each attempt (a) re-ensures the network exists — the create's
+  # stderr is LOGGED now, never discarded (an "already exists" complaint is
+  # expected and tolerated; anything else is the daemon telling us why the
+  # race is live) — then (b) inspects for the gateway. First non-empty
+  # gateway wins. On exhaustion the pre-existing loud refusal fires exactly
+  # as before — the guard is correct and stays loud.
+  # Tunables (env seam so the unit test can shrink them; defaults ride out
+  # the observed race with margin):
+  #   DROPLET_NET_GATEWAY_RETRIES  attempts before giving up  (default 6)
+  #   DROPLET_NET_GATEWAY_DELAY    seconds between attempts   (default 2)
+  local _gw_retries="${DROPLET_NET_GATEWAY_RETRIES:-6}"
+  local _gw_delay="${DROPLET_NET_GATEWAY_DELAY:-2}"
+  local _gw_attempt=1 _gw_create_err="" _gw_precreate_logged=0
   # `|| true` on each docker call: under `set -euo pipefail` a non-zero exit
   # inside this function would abort setup silently (no inherited ERR trap); we
   # validate the derived value explicitly below and fail loud with context.
-  if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
-    docker network create \
-      --label com.docker.compose.network=default \
-      --label com.docker.compose.project=droplet \
-      "$bridge_net" >/dev/null 2>&1 || true
-    log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
-  fi
-  bridge_gw=$(docker network inspect "$bridge_net" \
-    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-  # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
-  bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+  while :; do
+    # (a) Ensure the bridge exists so the gateway is derivable at Phase-4 time
+    # (compose adopts a pre-created default-labeled bridge on `up`).
+    if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
+      _gw_create_err=$(docker network create \
+        --label com.docker.compose.network=default \
+        --label com.docker.compose.project=droplet \
+        "$bridge_net" 2>&1 >/dev/null) || true
+      if [ -n "$_gw_create_err" ]; then
+        case "$_gw_create_err" in
+          *"already exists"*)
+            log_info "docker network create $bridge_net: already exists (fine — adopting it): $_gw_create_err" ;;
+          *)
+            log_info "docker network create $bridge_net (attempt ${_gw_attempt}/${_gw_retries}) stderr: $_gw_create_err" ;;
+        esac
+      fi
+      if [ "$_gw_precreate_logged" = 0 ]; then
+        log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
+        _gw_precreate_logged=1
+      fi
+    fi
+    # (b) Read back the gateway Docker's IPAM assigned.
+    bridge_gw=$(docker network inspect "$bridge_net" \
+      -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
+    bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+    if [ -n "$bridge_gw" ]; then
+      break
+    fi
+    if [ "$_gw_attempt" -ge "$_gw_retries" ]; then
+      break
+    fi
+    log_info "configure_single_box_env: $bridge_net gateway not derivable yet (attempt ${_gw_attempt}/${_gw_retries} — dockerd's network controller may still be initializing on first boot, WARP-2148); retrying in ${_gw_delay}s."
+    sleep "$_gw_delay"
+    _gw_attempt=$((_gw_attempt + 1))
+  done
   if [ -z "$bridge_gw" ]; then
     # Fail loud — do NOT silently leave the unreachable host.docker.internal
     # default. An empty gateway here is the difference between a working router

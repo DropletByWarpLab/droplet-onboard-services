@@ -83,6 +83,38 @@ if [ -z "$ACTION" ] || { [ "$ACTION" != "reconcile" ] && [ -z "$DEVICE" ]; }; th
   exit 1
 fi
 
+# WARP-2151: resolve the PHYSICAL DISK(S) beneath any block node by walking
+# lsblk's inverse tree. One PKNAME hop is NOT enough — on an LVM root the
+# source is /dev/mapper/<vg>-<lv>, whose PKNAME is the PV *partition*
+# (nvme0n1p3), so the old sibling comparisons matched nothing and the ESP +
+# /boot were unmounted and re-adopted as user drives (fresh 0.2.2.1 install
+# 2026-08-24; the same silent /boot divergence was found on the customer box
+# 2026-08-13). Same walk the device-bridge uses for whole-disk resolution.
+phys_disks_of() {
+  # `|| true`: under set -e/pipefail a device that vanished mid-event must
+  # yield an empty set (guard stands down), not abort the whole script.
+  lsblk -rnso NAME,TYPE "$1" 2>/dev/null | awk '$2 == "disk" { print $1 }' | sort -u || true
+}
+
+# WARP-2152: the live install medium is not user storage. The stick stays
+# plugged in (WARP-2143 flips boot priority instead of demanding a pull), so
+# every boot delivers add events for the hybrid-ISO disk node, its ESP and
+# its 'writable' persistence partition — the disk node's mount attempt fails
+# EBUSY (a red unit every boot) and the persistence partition surfaced in the
+# dashboard as a ~55 GB USB drive. Any node whose disk ancestry carries an
+# iso9660 filesystem labelled DROPLET_* (the volid the ISO build stamps) is
+# install media.
+is_install_medium() {
+  local _disk
+  for _disk in $(phys_disks_of "$1"); do
+    if lsblk -rno FSTYPE,LABEL "/dev/${_disk}" 2>/dev/null \
+         | grep -q '^iso9660 DROPLET_'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # The per-device guards below only make sense for udev add/remove events;
 # `reconcile` carries no device (it walks the already-mounted paths).
 if [ "$ACTION" != "reconcile" ]; then
@@ -98,20 +130,34 @@ esac
 
 # Paranoia guard — re-check even though udev should have filtered these.
 # If anything goes sideways with the rule, this keeps the boot fs safe.
+# WARP-2151: compare PHYSICAL DISK SETS (phys_disks_of), not one PKNAME hop —
+# the one-hop comparison never matched the ESP/boot partitions on an LVM
+# root. WARP-1361 semantics preserved: an unresolvable root (overlay,
+# still-assembling md) leaves the boot set empty and the guard stands down
+# rather than skipping the device that most needed mounting, and an md
+# array's ancestry resolves to its member disks, never the OS disk.
 boot_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-boot_parent="$(lsblk -no PKNAME "$boot_src" 2>/dev/null || true)"
-dev_base="$(basename "$DEVICE")"
-dev_parent="$(lsblk -no PKNAME "$DEVICE" 2>/dev/null || true)"
-# WARP-1361: require a NON-EMPTY boot parent before the sibling comparisons.
-# An md array node has no single PKNAME (lsblk reports nothing for it), and a
-# root fs lsblk can't resolve (overlay, dm-stacked) leaves boot_parent empty
-# too — the old empty-equals-empty match silently skipped the device that
-# most needed mounting.
-if [ "$DEVICE" = "$boot_src" ] \
-   || { [ -n "$boot_parent" ] \
-        && { [ "$dev_base" = "$boot_parent" ] \
-             || [ "$dev_parent" = "$boot_parent" ]; }; }; then
+boot_disks="$(phys_disks_of "$boot_src")"
+dev_disks="$(phys_disks_of "$DEVICE")"
+skip_boot_sibling=0
+if [ "$DEVICE" = "$boot_src" ]; then
+  skip_boot_sibling=1
+elif [ -n "$boot_disks" ]; then
+  for _d in $dev_disks; do
+    if printf '%s\n' "$boot_disks" | grep -qxF "$_d"; then
+      skip_boot_sibling=1
+      break
+    fi
+  done
+fi
+if [ "$skip_boot_sibling" = 1 ]; then
   log "skip $DEVICE (holds rootfs / sibling of boot device)"
+  exit 0
+fi
+
+# WARP-2152: never adopt the droplet install medium (see is_install_medium).
+if is_install_medium "$DEVICE"; then
+  log "skip $DEVICE (droplet install medium — not user storage)"
   exit 0
 fi
 
@@ -539,14 +585,27 @@ case "$ACTION" in
       RW_MODE="rw"
     fi
 
-    # If udisks or something else already mounted this device elsewhere
-    # (common on desktop-oriented distros), unmount it first so we can
-    # reseat it under /mnt/droplet/. That's the path Nextcloud + the
-    # display bridge agree on.
+    # If something already mounted this device at a STALE PATH UNDER OUR OWN
+    # BASE (re-enumerated /dev/sdX after a re-plug, a desktop distro's
+    # udisks), unmount it so we can reseat it at the derived path — that's
+    # the path Nextcloud + the display bridge agree on.
+    # WARP-2151: a mount anywhere OUTSIDE $MOUNT_BASE is system-managed —
+    # fstab (/boot, /boot/efi, a pool pinned at /mnt/nvr) or an operator
+    # action — and stealing it is how the live box lost /boot and the ESP
+    # ("already mounted at /boot; unmounting to relocate"). Skip the device
+    # entirely instead.
     existing=$(findmnt -n -o TARGET --source "$DEVICE" 2>/dev/null | head -1 || true)
     if [ -n "$existing" ] && [ "$existing" != "$MOUNT" ]; then
-      log "$DEVICE already mounted at $existing; unmounting to relocate"
-      umount "$existing" 2>/dev/null || umount -l "$existing" 2>/dev/null || true
+      case "$existing" in
+        "$MOUNT_BASE"/*)
+          log "$DEVICE already mounted at $existing; unmounting to relocate"
+          umount "$existing" 2>/dev/null || umount -l "$existing" 2>/dev/null || true
+          ;;
+        *)
+          log "skip $DEVICE (system mount at $existing — not relocating)"
+          exit 0
+          ;;
+      esac
     fi
 
     # Clear any phantom mount-entry left over from a previous device

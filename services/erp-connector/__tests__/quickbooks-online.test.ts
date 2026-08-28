@@ -692,3 +692,43 @@ describe("capability and posture", () => {
     expect(fp).toContain(`:mv${QBO_MINOR_VERSION}`);
   });
 });
+
+describe("WARP-2137 — a non-array entity is a contract break, not a TypeError", () => {
+  // Unguarded, `qr[entity]` was cast straight to an array: `page.length` came
+  // back undefined, `undefined < PAGE` was false, and the spread below threw a
+  // bare "not iterable" TypeError from inside the pagination loop. That reached
+  // the orchestrator as a generic fault naming neither the entity nor the shape.
+  for (const [label, value] of [
+    ["an object", { Id: "1" }],
+    ["a string", "Invoice"],
+    ["a number", 7],
+  ] as const) {
+    it(`refuses ${label} with a typed blocked error`, async () => {
+      const { c } = qbo({ pages: [{ QueryResponse: { Invoice: value } }] });
+      await c.connect();
+      await expect(c.runRead("get_open_invoices", {})).rejects.toBeInstanceOf(ConnectorBlockedError);
+    });
+  }
+
+  it("names the entity and the shape it got, so the report is actionable", async () => {
+    const { c } = qbo({ pages: [{ QueryResponse: { Invoice: { Id: "1" } } }] });
+    await c.connect();
+    await expect(c.runRead("get_open_invoices", {})).rejects.toThrow(/Invoice \(object\)/);
+  });
+
+  it("treats an explicit null entity as no rows, exactly as the ?? it replaced did", async () => {
+    // Tightening this into a refusal would turn a harmless, already-working
+    // response into a hard failure for any company that answers null.
+    const { c } = qbo({ pages: [{ QueryResponse: { Invoice: null } }] });
+    await c.connect();
+    await expect(c.runRead("get_open_invoices", {})).resolves.toEqual([]);
+  });
+
+  it("still treats a MISSING entity key as an empty result, not a fault", async () => {
+    // An empty QuickBooks company answers `{}` with no entity key at all. That
+    // is a legitimate "no rows" and must not be caught by the guard.
+    const { c } = qbo({ pages: [{ QueryResponse: {} }] });
+    await c.connect();
+    await expect(c.runRead("get_open_invoices", {})).resolves.toEqual([]);
+  });
+});

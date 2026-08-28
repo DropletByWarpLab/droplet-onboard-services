@@ -153,6 +153,13 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("read_document_text"), // ctx.readDocumentText shim (no ctx.http hop)
   { tool: "list_recent_files", client: "nextcloud", hops: [admit("get", "/api/files/recents")] },
   { tool: "write_file", client: "nextcloud", hops: [admit("post", "/api/files/upload")] },
+  // WARP-2212: the three generators all dispatch one spec to the same render
+  // route. `nextcloud` because that client targets the orchestrator's
+  // /api/files surface (FILES_API_URL) and carries the caller's NC
+  // credentials — the document must land in the CALLER's storage.
+  { tool: "create_pdf_report", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  { tool: "create_word_document", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  { tool: "create_spreadsheet", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "delete_file", client: "nextcloud", hops: [admit("delete", "/api/files")] },
   { tool: "create_directory", client: "nextcloud", hops: [admit("post", "/api/files/mkdir")] },
   { tool: "rename_file", client: "nextcloud", hops: [admit("post", "/api/files/move")] },

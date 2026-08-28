@@ -10,7 +10,7 @@
 
 # Which checks run on this box (space-separated). Anything not listed reports
 # an explicit not_applicable in status.json — never silently absent.
-#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop"
+#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness relay_dns"
 
 # Escalation: consecutive heal failures before a check goes `escalated`
 # (CRITICAL log + suspended heals), and how many runs between suspended
@@ -38,3 +38,12 @@
 # episode into /var/lib/droplet/watchdog/diagnostics/.
 #DROPLET_WATCHDOG_CRASHLOOP_THRESHOLD=3
 #DROPLET_WATCHDOG_LOG_TAIL=200
+
+# Relay DNS origin (WARP-2189): the helper that owns the "answer for a name at
+# an address => listen on that address" pairing, and the connector container
+# the check will start if it is found stopped. The helper self-gates
+# (not_applicable) on a box with no split-horizon FQDN, so these defaults are
+# safe everywhere. To opt a box OUT of the automatic conf repair entirely, drop
+# relay_dns from DROPLET_WATCHDOG_CHECKS above rather than blanking these.
+#DROPLET_WATCHDOG_RELAY_DNS_BIN=/usr/local/sbin/droplet-relay-dns
+#DROPLET_WATCHDOG_RELAY_CONTAINER=droplet-cloudflared
