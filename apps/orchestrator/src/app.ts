@@ -21,6 +21,7 @@ import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createErpDriftRouter } from "./routes/erp-drift.js";
 import { createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -302,6 +303,12 @@ export function createApp(
   // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
   // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
   app.use("/api", createIntegrationsRouter(prisma));
+  // WARP-2463 — admin-only read over the reconciliation sweep's STORED drift
+  // report. Its own factory rather than a route on the integrations router:
+  // that router's floor is family-and-up, this surface is owner/admin, and a
+  // route whose guard is narrower than its neighbours' is safer as its own
+  // registration than as an exception inside someone else's file.
+  app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
   // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.

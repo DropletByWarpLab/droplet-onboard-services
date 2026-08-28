@@ -704,6 +704,18 @@ const envSchema = z.object({
   // .int() rejects sub-day floats and .finite() rejects Infinity.
   DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // WARP-2463: retention window (days) for ErpDriftRecord — the reconciliation
+  // sweep's stored drift report. Its own 03:30 cron leg trims rows older than
+  // this. 90 days mirrors the audit window and is the shortest horizon that
+  // still answers the question the table exists for: "has the incremental path
+  // been trustworthy for this vendor THIS MONTH, and was it better last
+  // month" needs two months of history to have a second month to compare to.
+  // Set 0 to disable the trim entirely — the explicit "keep forever" stance,
+  // NOT a sentinel: 0 parses here and trimErpDriftRecords treats <= 0 as skip
+  // (defense in depth). A negative window is nonsensical input, so the schema
+  // rejects it at startup rather than silently treating it as disable.
+  DROPLET_ERP_DRIFT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
   //   polls for cosign-signed OTA release manifests. Default is the
