@@ -355,7 +355,7 @@ export interface QuickBooksOnlineDeps {
 /** The accounting datasets a QuickBooks company carries. Note what is absent:
  *  a dental practice's schedule. A QBO connection has no appointments and
  *  saying so is a capability, not a failure. */
-export const QBO_DATASETS: readonly string[] = ["invoice", "bill", "ap_summary"];
+export const QBO_DATASETS: readonly DatasetName[] = ["invoice", "bill", "ap_summary"];
 
 /**
  * The connection-state vocabulary ADR-041 §5 fixes for every cloud connector.
@@ -610,7 +610,7 @@ export class QuickBooksOnlineConnector implements Connector {
     return QBO_DATASETS.map((dataset) => ({
       name: dataset,
       owner: "qbo",
-      columns: CANONICAL_COLUMNS[dataset as DatasetName].map((name) => ({ name, type: "text" })),
+      columns: CANONICAL_COLUMNS[dataset].map((name) => ({ name, type: "text" })),
     }));
   }
 
