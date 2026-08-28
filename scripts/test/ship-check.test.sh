@@ -501,8 +501,8 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
 # Test: shellcheck catches new SC2034 violation in scripts/lib (WARP-486)
 # =============================================================================
 #
-# Bug class this guards (WARP-486 → ADR-style): before WARP-486, the
-# shellcheck ship-check ran with a global `--exclude=SC2034,SC2024,SC2155`
+# Bug class this guards (WARP-486 → ADR-style): before WARP-486, the shellcheck
+# ship-check ran with a global `--exclude=SC2034,SC2024,SC2155`
 # blanket. That muted the pre-existing baseline (load-bearing-but-unused
 # vars in device-identity.sh / docker.sh / preflight.sh, sudo+redirect in
 # local-dns.sh, declare+assign in secrets.sh / camera-drivers.sh), but it
@@ -582,6 +582,91 @@ test_shellcheck_catches_new_sc2034_violation() {
   fi
 
   # 3. shellcheck should now FAIL because the global SC2034 exclude is gone.
+  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+}
+
+# =============================================================================
+# Test: shellcheck lints the gate itself, and a directive-shaped prose
+#       comment is caught rather than silently truncating the lint (WARP-2477)
+# =============================================================================
+#
+# Bug class this guards (WARP-2477). ShellCheck treats ANY comment whose
+# first word is the bare token `shellcheck` as a DIRECTIVE. Prose that merely
+# begins with the tool's name — `#   shellcheck  — local-dns.sh class: …` —
+# therefore parses as a malformed directive and raises SC1073/SC1072. Both
+# are `error` severity, so `--severity=warning` cannot suppress them, and
+# both are PARSE errors, so ShellCheck stops there and lints NOTHING after
+# that line.
+#
+# `scripts/test/ship-check.sh` carried exactly that at line 29, and a second
+# instance further down. Measured at the branch point (907e40ca): planting a
+# violation at line 1000 and running ShellCheck reported only the line-29
+# parse error — the plant was never seen. After rewording, the same plant is
+# reported at line 1000. So ~28 of 1,900 lines were being linted, and the
+# file looked clean because nothing was reading it.
+#
+# It went unnoticed because run_check_shellcheck did not lint the gate or its
+# harness at all — the one pair of shell files in the repo that the gate
+# never pointed at itself. WARP-2477 added both to the target list, which is
+# what makes this test possible: the mutation below is planted in
+# ship-check.sh itself.
+#
+# Synthetic regression: insert a directive-shaped prose comment into
+# scripts/test/ship-check.sh and assert the shellcheck check goes red. The
+# comment is inert to bash — it is a comment — so ship-check.sh stays
+# executable throughout and the test driver keeps working mid-mutation.
+# Restore via `git checkout --` on RETURN.
+#
+# Mutation that turns this test red: revert the line-29 rewording (drop the
+# backticks around `shellcheck`). Then the baseline assertion in step 1
+# fails, because the gate is red before this test plants anything.
+test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+
+  local target_rel="scripts/test/ship-check.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: the gate passes on the unmutated tree. This is the assertion
+  #    that goes red if either directive-shaped comment is ever reintroduced.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" shellcheck; then
+    printf "    baseline shellcheck failed against unmodified real repo —\n" >&2
+    printf "    a directive-shaped comment may have been reintroduced\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: a prose comment opening with the bare token
+  #    `shellcheck`, inserted after the shebang — SC1073/SC1072, error
+  #    severity. Verified that all three spacings ('#shellcheck …',
+  #    '# shellcheck …', '#   shellcheck …') trigger it, so the leading
+  #    whitespace here is not load-bearing.
+  awk -v bad='# shellcheck is a static analysis tool for shell scripts' '
+    NR == 1 { print; print bad; next }
+    { print }
+  ' "$target" > "$target.tmp" && mv "$target.tmp" "$target"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. shellcheck should now FAIL — proving both that the gate lints itself
+  #    and that a directive-shaped comment is a hard error, not a silent
+  #    truncation of the lint.
   _assert_check_fails "$REPO_ROOT_REAL" shellcheck
 }
 
@@ -1402,6 +1487,9 @@ _run_test "shellcheck catches local-outside-function in scripts/lib" \
 
 _run_test "shellcheck catches new SC2034 violation in scripts/lib (WARP-486)" \
   test_shellcheck_catches_new_sc2034_violation
+
+_run_test "shellcheck lints the gate itself and catches a directive-shaped comment (WARP-2477)" \
+  test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment
 
 _run_test "docker-build-smoke shim rejects unknown docker subcommand" \
   test_docker_build_smoke_shim_rejects_unknown_subcommand

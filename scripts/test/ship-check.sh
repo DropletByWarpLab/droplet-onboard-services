@@ -26,9 +26,14 @@
 #   frigate-env-scan      — WARP-446 class: committed docker/frigate/config.yml
 #                           referencing operator-specific env vars (KeyError
 #                           on first boot).
-#   shellcheck            — local-dns.sh class: bash bugs caught by static
+#   `shellcheck`          — local-dns.sh class: bash bugs caught by static
 #                           analysis (parse errors, quoting, declared-but-
-#                           unused vars).
+#                           unused vars). Backticked deliberately: a comment
+#                           whose first word is the bare token `shellcheck`
+#                           parses as a malformed ShellCheck DIRECTIVE
+#                           (SC1073/SC1072, error severity), which aborts the
+#                           parse and silently leaves the rest of this file
+#                           unlinted. WARP-2477.
 #   matter-env-allowlist  — architecture-guard rule 11: MATTER_* env vars
 #                           outside the allowlist crash matter.js controller
 #                           init. Delegates to scripts/test-security.sh.
@@ -240,10 +245,11 @@ CHECKS
                         was never seeded, KeyError-crashing Frigate at boot.
 
   shellcheck            Run shellcheck on scripts/setup.sh,
-                        scripts/factory-reset.sh, and scripts/lib/*.sh at
-                        warning severity. Requires shellcheck on PATH; the
-                        script FAILS (not skips) if it is missing — install
-                        it before you ship.
+                        scripts/factory-reset.sh, scripts/lib/*.sh, and this
+                        gate itself (scripts/test/ship-check.sh and its test
+                        harness) at warning severity. Requires shellcheck on
+                        PATH; the script FAILS (not skips) if it is missing —
+                        install it before you ship.
 
   matter-env-allowlist  Delegate to scripts/test-security.sh, which already
                         enforces the architecture-guard rule 11 (MATTER_*
@@ -691,11 +697,18 @@ run_check_frigate_env_scan() {
 }
 
 run_check_shellcheck() {
-  # Run shellcheck across the three high-blast-radius script sets:
+  # Run shellcheck across the high-blast-radius script sets:
   #   - scripts/setup.sh           (single-entry-point installer)
   #   - scripts/factory-reset.sh   (wipe-and-restart path)
   #   - scripts/lib/*.sh           (sourced helpers — every check pulls
   #                                 these in transitively)
+  #   - scripts/test/ship-check.sh + ship-check.test.sh  (WARP-2477 — the
+  #                                 gate and its harness. Until WARP-2477
+  #                                 these were the one pair of shell files
+  #                                 the gate never pointed at itself, so a
+  #                                 bug in the thing that catches bugs had
+  #                                 no catcher. They are ~3.3k lines of
+  #                                 bash that every PR depends on.)
   #
   # Severity is `warning`, which includes the `error` band (SC2168
   # "local outside function" — the very class of bug that escaped review
@@ -736,10 +749,14 @@ run_check_shellcheck() {
 
   # Build the target list. Glob expands lib/*.sh against the real tree;
   # if any of these files is missing it's a setup precondition issue and
-  # shellcheck will surface it loudly.
+  # ShellCheck will surface it loudly. (Capitalised so this line does not
+  # open with the bare token `shellcheck` — see WARP-2477 and the note at
+  # the head of this file.)
   local targets=()
   local file
-  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh"; do
+  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/test/ship-check.sh" \
+              "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
       targets+=("$file")
     fi
