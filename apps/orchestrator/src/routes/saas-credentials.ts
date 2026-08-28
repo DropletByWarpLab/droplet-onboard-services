@@ -162,7 +162,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
               databaseName: "",
               secretRef: `${descriptor.id}:pending`,
             },
-          })) as unknown as SaasConnectionRow);
+          })) as SaasConnectionRow);
 
         const resolved = resolveCredentialUpdate(
           descriptor,
@@ -188,7 +188,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
         const saved = (await prisma.integrationConnection.update({
           where: { id: row.id },
           data: data as never,
-        })) as unknown as SaasConnectionRow;
+        })) as SaasConnectionRow;
 
         // AFTER the write commits. Recording first would log a change that a
         // failed update never made — the audit log would be describing a box

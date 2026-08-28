@@ -73,6 +73,29 @@ const PINNED_AT_74492C21: Readonly<
   ap_summary: { category: "accounting", columns: ["vendor_id", "balance"] },
 };
 
+/**
+ * Columns APPENDED to an original-six dataset since `74492c21`, per dataset,
+ * in append order.
+ *
+ * The pinned arrays above stay verbatim; this is the only sanctioned way for
+ * one of them to grow, and it is deliberately a second table rather than an
+ * edit to the first. Editing `PINNED_AT_74492C21` to absorb a new column would
+ * destroy the evidence of what the array used to be, which is the entire value
+ * of a pinned fixture — the next reader could no longer tell a legitimate
+ * addition from a silent rewrite.
+ *
+ * WARP-2464 appends `updated_at` to `invoice` and `bill` (Xero's
+ * `UpdatedDateUTC`). The assertion below stays exact-and-ordered, so the
+ * addition is permitted at the END and nowhere else: prepending it, inserting
+ * it mid-array, reordering the pinned prefix or renaming any of it is still
+ * red. See `canonical-updated-at.test.ts` for why those two datasets get the
+ * column and the other four of the six do not.
+ */
+const APPENDED_SINCE_74492C21: Readonly<Record<string, readonly string[]>> = {
+  invoice: ["updated_at"],
+  bill: ["updated_at"],
+};
+
 /** The names WARP-2280 added, in the order the vendors own them. */
 const ADDED_BY_WARP_2280: readonly DatasetName[] = [
   "charge",
@@ -100,18 +123,31 @@ const ADDED_BY_WARP_2466: readonly DatasetName[] = [
 ];
 
 describe("the widening is additive — the original six are untouched", () => {
-  it("keeps every original name, its category and its columns byte-identical", () => {
+  it("keeps every original name, its category and its pinned columns intact", () => {
     // Mutation: reorder CANONICAL_COLUMNS.invoice, rename one of its columns,
     // or refile `account` under "practice" → red. This is the whole point of
     // the fixture: none of those three is visible in a diff review of a file
     // that grew by fourteen entries.
+    //
+    // WARP-2464 mutation: move `updated_at` to the front of invoice's array,
+    // or add one to a dataset APPENDED_SINCE_74492C21 does not name → red. The
+    // fixture permits an append and nothing else, so "the widening adds a
+    // column, it does not reorder or rename" is asserted rather than reviewed.
     for (const [dataset, pinned] of Object.entries(PINNED_AT_74492C21)) {
       expect(isDatasetName(dataset), `${dataset} left the vocabulary`).toBe(true);
       const name = dataset as DatasetName;
       expect(DATASET_CATEGORY[name], `${dataset} category`).toBe(pinned.category);
       // toEqual on an array is order-sensitive, which is the assertion: the
       // canonical column list IS the row's column order on every track.
-      expect(CANONICAL_COLUMNS[name], `${dataset} columns`).toEqual(pinned.columns);
+      const expected = [...pinned.columns, ...(APPENDED_SINCE_74492C21[dataset] ?? [])];
+      expect(CANONICAL_COLUMNS[name], `${dataset} columns`).toEqual(expected);
+      // ...and the pinned columns are still exactly the PREFIX, stated
+      // separately so a reviewer sees the original array survive verbatim
+      // rather than having to reconstruct it from the concatenation above.
+      expect(
+        CANONICAL_COLUMNS[name].slice(0, pinned.columns.length),
+        `${dataset} pinned prefix`,
+      ).toEqual(pinned.columns);
     }
   });
 

@@ -55,6 +55,7 @@ import {
   type MailchimpPurgeStore,
 } from "../src/mailchimp/connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
+import { CANONICAL_COLUMNS, COLUMN_KIND } from "../src/export-drop/profiles.js";
 
 /** 2026-08-27T12:00:00Z, the clock every test runs on. */
 const NOW = Date.UTC(2026, 7, 27, 12, 0, 0);
@@ -735,6 +736,115 @@ describe("contact and campaign delta reads", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// `updated_at` — WARP-2494
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("updated_at on the contact dataset", () => {
+  /**
+   * One list member, as Mailchimp serves it. `last_changed` and `timestamp_opt`
+   * are deliberately DIFFERENT instants: a projection reaching for the opt-in
+   * time — this dataset's nearest thing to a creation stamp — must not be able
+   * to pass by coincidence.
+   */
+  function member(over: { id?: string; last_changed?: string | null } = {}) {
+    const row: Record<string, unknown> = {
+      id: over.id ?? "m1",
+      email_address: `${over.id ?? "m1"}@example.test`,
+      status: "subscribed",
+      timestamp_opt: "2026-01-15T08:00:00+00:00",
+    };
+    if (over.last_changed !== null) {
+      row.last_changed = over.last_changed ?? "2026-08-20T09:30:00+00:00";
+    }
+    return row;
+  }
+
+  function memberRoute(members: Record<string, unknown>[]) {
+    return [{ match: /members/, responses: [{ body: { members } }] }];
+  }
+
+  it("emits updated_at as a UTC ISO instant from the member's last_changed", async () => {
+    // A Mailchimp `contact` IS a list member, and `last_changed` is the field
+    // the API's own `since_last_changed` delta filter keys on — so it is the
+    // one honest modification time this dataset has.
+    // Mutation: drop the `updated_at` projection → red (undefined).
+    // Mutation: project `timestamp_opt` instead → red (2026-01-15, not 08-20).
+    const { c } = connector({ routes: memberRoute([member()]) });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+    // The opt-in time is still on the row, and is a different instant.
+    expect(rows[0].timestamp_opt).toBe("2026-01-15T08:00:00+00:00");
+  });
+
+  it("normalises the vendor's +00:00 offset form to a Z instant", async () => {
+    // Mailchimp emits `2026-08-20T09:30:00+00:00`; every other track produces a
+    // full `…Z` instant, and `COLUMN_KIND.updated_at` is one column across all
+    // of them. Passing the vendor string through leaves two spellings of one
+    // moment in one column.
+    // Mutation: assign `last_changed` verbatim → red.
+    const { c } = connector({
+      routes: memberRoute([member({ last_changed: "2026-08-20T09:30:00+00:00" })]),
+    });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+    expect(rows[0].updated_at).not.toBe(rows[0].last_changed);
+  });
+
+  it("carries a non-UTC offset across to the correct UTC instant", async () => {
+    // Mutation: slice the string instead of parsing it → red (it would keep
+    // the wall-clock time and silently drop the offset).
+    const { c } = connector({
+      routes: memberRoute([member({ last_changed: "2026-08-20T09:30:00-07:00" })]),
+    });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBe("2026-08-20T16:30:00.000Z");
+  });
+
+  it("leaves updated_at undefined — never guessed — when last_changed is absent", async () => {
+    // Absent source stays absent. Falling back to the opt-in time would put
+    // another field's timestamp here under this one's name.
+    // Mutation: fall back to `timestamp_opt` → red.
+    const { c } = connector({ routes: memberRoute([member({ last_changed: null })]) });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBeUndefined();
+    // Present-and-undefined, not missing: an unmapped canonical column is still
+    // a declared column.
+    expect("updated_at" in rows[0]).toBe(true);
+  });
+
+  it("leaves updated_at undefined when last_changed does not parse", async () => {
+    // Mutation: emit the unparseable string verbatim → red.
+    const { c } = connector({
+      routes: memberRoute([member({ last_changed: "not-a-date" })]),
+    });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBeUndefined();
+  });
+
+  it("every produced updated_at parses as an ISO instant (COLUMN_KIND.timestamp)", async () => {
+    // Mutation: emit the epoch number instead of the ISO string → red.
+    const { c } = connector({ routes: memberRoute([memberPage(0, 3).members].flat()) });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows).toHaveLength(3);
+    for (const r of rows) {
+      expect(typeof r.updated_at).toBe("string");
+      expect(new Date(r.updated_at as string).toISOString()).toBe(r.updated_at);
+    }
+  });
+
+  it("does not disturb the returned watermark, which stays the vendor's own form", async () => {
+    // The watermark is fed straight back as `since_last_changed`, so it must
+    // remain the string Mailchimp gave us — normalising it here would change an
+    // outgoing filter this ticket has no business touching.
+    // Mutation: set the watermark from `updated_at` → red.
+    const { c } = connector({ routes: [{ match: /members/, responses: [{ body: memberPage(0, 3) }] }] });
+    const { watermark } = await c.listMembers("list_1");
+    expect(watermark).toBe("2026-08-03T00:00:00+00:00");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // E-commerce — a DECLARED full scan (WARP-2400)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1105,5 +1215,345 @@ describe("read-only surface", () => {
       `Basic ${Buffer.from(`anystring:${KEY}`).toString("base64")}`,
     );
     expect(f.calls[0].init.redirect).toBe("error");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Canonical row mappers (WARP-2497)
+//
+// `runRead` threw by design until this story, so all three datasets this track
+// declares produced raw vendor JSON and no canonical rows — WARP-2218's
+// scheduled sync ran, reported success, and landed nothing.
+//
+// The leak assertion matters more here than on any other track: a Mailchimp
+// member object carries the subscriber's signup and opt-in IP addresses, their
+// full merge-field bag and a location guess, none of which this product asked
+// for. A mapper written as `{ ...member, ... }` would persist all of it on the
+// box, so the fixtures below carry those fields specifically to catch it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** ISO-8601 as `canonicalInstant` emits it: always UTC, always milliseconds. */
+const MC_UTC_INSTANT = /^-?\d{4,}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/** Mailchimp emits an explicit offset, not a `Z`. Normalising it is the point:
+ *  two spellings of one moment in a watermark column is how a sync silently
+ *  stops advancing. */
+const LAST_CHANGED = "2026-08-20T09:30:00+00:00";
+const OPTED_IN = "2026-07-01T08:15:00+00:00";
+const SENT_AT = "2026-08-18T14:00:00+00:00";
+const PROCESSED_AT = "2026-08-19T11:45:00+00:00";
+
+/** The personal data this product never asked for, present on every member
+ *  fixture so a spread-the-record mapper is observable. */
+const MEMBER_PII = {
+  ip_signup: "203.0.113.7",
+  ip_opt: "203.0.113.8",
+  merge_fields: { FNAME: "Ada", LNAME: "Lovelace", PHONE: "+15555550123" },
+  location: { latitude: 33.64, longitude: -117.92 },
+};
+
+function memberPayload(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    email_address: `${id}@example.test`,
+    status: "subscribed",
+    timestamp_opt: OPTED_IN,
+    last_changed: LAST_CHANGED,
+    list_id: "aud-1",
+    ...MEMBER_PII,
+    ...overrides,
+  };
+}
+
+function campaignPayload(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    send_time: SENT_AT,
+    status: "sent",
+    emails_sent: 1240,
+    recipients: { list_id: "aud-1", recipient_count: 1240 },
+    settings: { subject_line: "August product update", title: "Aug blast", from_name: "Ada" },
+    report_summary: { unique_opens: 512, subscriber_clicks: 88, opens: 900, clicks: 140 },
+    ...overrides,
+  };
+}
+
+function orderPayload(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    store_id: "store-1",
+    customer: { id: "cust-9", email_address: "buyer@example.test", opt_in_status: true },
+    order_total: 149.5,
+    currency_code: "USD",
+    processed_at_foreign: PROCESSED_AT,
+    // Mailchimp's own ingest time, deliberately DIFFERENT from the store's, so
+    // a mapper reaching for the wrong one cannot pass by coincidence.
+    processed_at: "2026-08-21T03:00:00+00:00",
+    ...overrides,
+  };
+}
+
+/** Route set for a full three-dataset enumeration. `lists` and `ecommerce` are
+ *  already in MAILCHIMP_READABLE_RESOURCES, so this adds no new resource. */
+function mcRoutes(opts: {
+  members?: unknown[];
+  campaigns?: unknown[];
+  orders?: unknown[];
+} = {}): Route[] {
+  return [
+    { match: /\/lists\/[^/]+\/members/, responses: [{ body: { members: opts.members ?? [] } }] },
+    { match: /\/lists(\?|$)/, responses: [{ body: { lists: [{ id: "aud-1" }] } }] },
+    { match: /\/campaigns/, responses: [{ body: { campaigns: opts.campaigns ?? [] } }] },
+    {
+      match: /\/ecommerce\/stores\/[^/]+\/orders/,
+      responses: [{ body: { orders: opts.orders ?? [] } }],
+    },
+    { match: /\/ecommerce\/stores/, responses: [{ body: { stores: [{ id: "store-1" }] } }] },
+  ];
+}
+
+const MAILCHIMP_FIXTURES: ReadonlyArray<{
+  dataset: string;
+  readQuery: string;
+  routes: Route[];
+}> = [
+  {
+    dataset: "audience_member",
+    readQuery: "get_audience_members",
+    routes: mcRoutes({ members: [memberPayload("m-1")] }),
+  },
+  {
+    dataset: "campaign",
+    readQuery: "get_campaign_performance",
+    routes: mcRoutes({ campaigns: [campaignPayload("cmp-1")] }),
+  },
+  {
+    dataset: "ecommerce_order",
+    readQuery: "get_ecommerce_orders",
+    routes: mcRoutes({ orders: [orderPayload("ord-1")] }),
+  },
+];
+
+describe("canonical row mappers", () => {
+  for (const fx of MAILCHIMP_FIXTURES) {
+    it(`${fx.dataset}: emits EXACTLY the canonical columns, no more and no fewer`, async () => {
+      // Mutation A (drop): make projectCanonicalRow skip a column → the key set
+      //   shrinks → red.
+      // Mutation B (leak): spread the vendor record into the row → the member's
+      //   `ip_signup`, `ip_opt`, `merge_fields` and `location`, or the
+      //   campaign's `report_summary`, appear → red. That mutation is the one
+      //   that persists a subscriber's IP addresses onto the box.
+      const { c } = connector({ routes: fx.routes });
+      const rows = (await c.runRead(fx.readQuery, {})) as Record<string, unknown>[];
+
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(Object.keys(row).sort()).toEqual(
+          [...CANONICAL_COLUMNS[fx.dataset as never]].sort(),
+        );
+      }
+    });
+
+    it(`${fx.dataset}: every value matches its COLUMN_KIND`, async () => {
+      // Mutation: drop the `money`/`count` branch from projectCanonicalRow →
+      // `total_amount` and the campaign counts come back as strings → red.
+      const { c } = connector({ routes: fx.routes });
+      const rows = (await c.runRead(fx.readQuery, {})) as Record<string, unknown>[];
+
+      for (const row of rows) {
+        for (const [column, value] of Object.entries(row)) {
+          if (value === undefined) continue;
+          switch (COLUMN_KIND[column]) {
+            case "timestamp":
+              expect(String(value), `${fx.dataset}.${column}`).toMatch(MC_UTC_INSTANT);
+              break;
+            case "money":
+            case "count":
+              expect(typeof value, `${fx.dataset}.${column}`).toBe("number");
+              break;
+            default:
+              expect(typeof value, `${fx.dataset}.${column}`).toBe("string");
+              break;
+          }
+        }
+      }
+    });
+  }
+
+  it("fills an audience member from the fields Mailchimp actually publishes", async () => {
+    // A key-set test passes just as well on a mapper returning every column
+    // undefined. `last_changed_at` is the load-bearing one: it is this track's
+    // watermark column, and WARP-2466 spelled it `last_changed_at` rather than
+    // `updated_at`, so a mapper copied from the HubSpot track fills nothing.
+    // Mutation: `case "last_changed_at": return record.updated_at;` → undefined
+    //           → red.
+    const { c } = connector({ routes: mcRoutes({ members: [memberPayload("m-1")] }) });
+    const [row] = (await c.runRead("get_audience_members", {})) as Record<string, unknown>[];
+
+    expect(row).toEqual({
+      audience_member_id: "m-1",
+      audience_id: "aud-1",
+      email: "m-1@example.test",
+      subscription_status: "subscribed",
+      opted_in_at: new Date(OPTED_IN).toISOString(),
+      last_changed_at: new Date(LAST_CHANGED).toISOString(),
+    });
+  });
+
+  it("reads a campaign's subject from settings and its counts from report_summary", async () => {
+    // Three different nesting depths in one row: `id` at the root,
+    // `settings.subject_line` one level down, `report_summary.unique_opens`
+    // one level down under a different key.
+    // Mutation: return `report_summary.opens` for `opens_unique` → 900, not 512
+    //           → red. Those count the same subscriber repeatedly and are a
+    //           DIFFERENT measurement from the one the column names.
+    const { c } = connector({ routes: mcRoutes({ campaigns: [campaignPayload("cmp-1")] }) });
+    const [row] = (await c.runRead("get_campaign_performance", {})) as Record<string, unknown>[];
+
+    expect(row).toEqual({
+      campaign_id: "cmp-1",
+      sent_at: new Date(SENT_AT).toISOString(),
+      audience_id: "aud-1",
+      subject: "August product update",
+      status: "sent",
+      emails_sent: 1240,
+      opens_unique: 512,
+      clicks_unique: 88,
+    });
+  });
+
+  it("times an order by the STORE's clock, not Mailchimp's ingest time", async () => {
+    // `processed_at_foreign` is the storefront's own timestamp. An order
+    // imported a day late still happened when the store says it did, and using
+    // the ingest time reorders a revenue report.
+    // Mutation: `case "processed_at": return record.processed_at;` → red.
+    const { c } = connector({ routes: mcRoutes({ orders: [orderPayload("ord-1")] }) });
+    const [row] = (await c.runRead("get_ecommerce_orders", {})) as Record<string, unknown>[];
+
+    expect(row).toEqual({
+      ecommerce_order_id: "ord-1",
+      store_id: "store-1",
+      customer_id: "cust-9",
+      total_amount: 149.5,
+      currency: "USD",
+      processed_at: new Date(PROCESSED_AT).toISOString(),
+    });
+  });
+
+  it("normalises Mailchimp's offset timestamps to a UTC instant", async () => {
+    // Mailchimp emits `+00:00`, every other track emits `Z`. `COLUMN_KIND`
+    // types these `timestamp` precisely because a watermark COMPARES them, and
+    // a string comparison of two spellings of one moment is how an incremental
+    // sync silently stops advancing.
+    // Mutation: return `record.last_changed` verbatim → red.
+    const { c } = connector({ routes: mcRoutes({ members: [memberPayload("m-1")] }) });
+    const [row] = (await c.runRead("get_audience_members", {})) as Record<string, unknown>[];
+
+    expect(row.last_changed_at).toBe("2026-08-20T09:30:00.000Z");
+    expect(row.last_changed_at).not.toBe(LAST_CHANGED);
+  });
+
+  it("passes `since` to Mailchimp as the documented since_last_changed filter", async () => {
+    // Omitting the filter does NOT fail — it silently degrades into a full scan
+    // returning correct-looking rows, which is why this asserts on the outgoing
+    // REQUEST and not on the rows that came back.
+    // Mutation: drop `sinceLastChanged: since` from the listMembers call → the
+    //           parameter is absent → red.
+    const { c, f } = connector({ routes: mcRoutes({ members: [memberPayload("m-1")] }) });
+
+    await c.runRead("get_audience_members", { since: "2026-08-19T00:00:00Z" });
+
+    const memberCall = f.urls().findIndex((u) => u.includes("/members"));
+    expect(memberCall).toBeGreaterThanOrEqual(0);
+    expect(f.params(memberCall).get("since_last_changed")).toBe("2026-08-19T00:00:00.000Z");
+  });
+
+  it("never smuggles a date filter onto the orders endpoint", async () => {
+    // `/ecommerce/stores/{id}/orders` documents no `since_*` of any kind, and
+    // Mailchimp IGNORES unknown query parameters — so an invented one produces
+    // a full scan REPORTED AS a delta. `since` is therefore applied to the
+    // mapped rows instead.
+    // Mutation: pass `since` into the orders query string → assertEcommerceOrderParams
+    //           throws → red.
+    const { c, f } = connector({
+      routes: mcRoutes({ orders: [orderPayload("ord-1"), orderPayload("ord-2")] }),
+    });
+
+    const rows = (await c.runRead("get_ecommerce_orders", {
+      since: "2026-08-19T00:00:00Z",
+    })) as Record<string, unknown>[];
+
+    const orderCall = f.urls().findIndex((u) => u.includes("/orders"));
+    for (const key of f.paramKeys(orderCall)) {
+      expect(MAILCHIMP_ECOMMERCE_ORDER_PARAMS.has(key), `${key} is not documented`).toBe(true);
+    }
+    // The window still applied — to the rows, after mapping.
+    expect(rows).toHaveLength(2);
+  });
+
+  it("enumerates every audience when the caller names none", async () => {
+    // `get_audience_members` is enumerable — the sync runner has no audience id
+    // to pass — but `/lists/{id}/members` is not: there is no account-wide
+    // member endpoint, so the lists have to be listed first.
+    // Mutation: return `[]` from audienceIds → no members at all → red.
+    const { c, f } = connector({
+      routes: [
+        { match: /\/lists\/[^/]+\/members/, responses: [{ body: { members: [memberPayload("m-1")] } }] },
+        { match: /\/lists(\?|$)/, responses: [{ body: { lists: [{ id: "aud-1" }, { id: "aud-2" }] } }] },
+      ],
+    });
+
+    const rows = (await c.runRead("get_audience_members", {})) as Record<string, unknown>[];
+
+    expect(rows).toHaveLength(2);
+    expect(f.paths().filter((p) => p.endsWith("/members"))).toHaveLength(2);
+  });
+
+  it("filters on a supplied status and enumerates without one", async () => {
+    // The registry query makes the status filter MANDATORY, because an
+    // unfiltered member list mixes people who unsubscribed in with people who
+    // did not. The sync runner still needs the enumeration.
+    // Mutation: make the status filter unconditional → the `{}` call returns
+    //           nothing → red.
+    const routes = mcRoutes({
+      members: [
+        memberPayload("m-1"),
+        memberPayload("m-2", { status: "unsubscribed" }),
+      ],
+    });
+
+    const all = (await connector({ routes }).c.runRead("get_audience_members", {})) as Record<
+      string,
+      unknown
+    >[];
+    expect(all).toHaveLength(2);
+
+    const only = (await connector({ routes }).c.runRead("get_audience_members", {
+      status: "subscribed",
+    })) as Record<string, unknown>[];
+    expect(only.map((r) => r.audience_member_id)).toEqual(["m-1"]);
+  });
+
+  it("still refuses a read whose dataset this track does not serve", async () => {
+    // `[]` from get_open_invoices reads as "you are owed nothing", which no
+    // caller can tell apart from a genuinely empty ledger.
+    // Mutation: drop the assertDatasetsServed call → red.
+    const { c, f } = connector();
+    await expect(c.runRead("get_open_invoices", {})).rejects.toBeInstanceOf(DatasetNotServedError);
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it("introspects the canonical shape it actually returns", async () => {
+    // Before WARP-2466 this track's introspection described Mailchimp PROPERTY
+    // spellings (`email_address`, `order_total`) while claiming to be canonical
+    // columns, so drift-freeze watched a schema no caller ever saw.
+    // Mutation: revert tables() to a local vendor-property table → red.
+    const { c } = connector({ blocked: true });
+    const out = await c.introspect();
+    for (const t of out.tables) {
+      expect(t.columns.map((col) => col.name).sort()).toEqual(
+        [...CANONICAL_COLUMNS[t.name as never]].sort(),
+      );
+    }
   });
 });
