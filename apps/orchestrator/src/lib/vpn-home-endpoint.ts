@@ -96,9 +96,27 @@ export function pickHomeEndpoint(inputs: {
   envFallback: string;
   summary: NetworkSummary | null;
   bridgeIp: string | null;
+  /**
+   * WARP-2183 - did the routing summary actually READ?  Defaults true so every
+   * existing caller and test keeps its meaning (`summary: null` there means "no
+   * WAN", not "unreadable").
+   *
+   * The bridge answers with the BOX's own uplink IP, which is a usable endpoint
+   * only when the box itself owns the WAN. Behind a real edge router the same
+   * probe returns a router-LAN address (e.g. 192.168.9.195) that no home-mode
+   * peer on the household network can dial, so minting it hands the user a conf
+   * that silently never handshakes.
+   *
+   * A throw from the summary and a genuine `wan.present:false` both arrive here
+   * as `summary === null`, so null alone cannot separate "single-box, the host
+   * owns the WAN" from "shape unknown". Pass false for the latter and the
+   * bridge is skipped in favour of an honest null.
+   */
+  summaryOk?: boolean;
 }): string | null {
   const fromSummary = pickHomeEndpointFromSummary(inputs.summary, inputs.envFallback);
   if (fromSummary) return fromSummary;
+  if (inputs.summaryOk === false) return null;
   const bridgeIp = (inputs.bridgeIp ?? "").trim();
   if (bridgeIp !== "" && isUsableHostIp(bridgeIp)) return bridgeIp;
   return null;
