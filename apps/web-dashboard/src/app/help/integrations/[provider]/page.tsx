@@ -34,18 +34,17 @@ export function generateStaticParams(): { provider: string }[] {
 /** Anything not in the list above is a 404, not a dynamic render. */
 export const dynamicParams = false;
 
-export default function IntegrationGuidePage({
-  params,
-}: {
-  params: { provider: string };
+export default async function IntegrationGuidePage(props: {
+  params: Promise<{ provider: string }>;
 }) {
-  const markdown = integrationGuide(params.provider);
+  const { provider } = await props.params;
+  const markdown = integrationGuide(provider);
   if (markdown === undefined) notFound();
 
   return (
     <IntegrationGuideView
-      slug={params.provider}
-      title={integrationGuideTitle(params.provider)}
+      slug={provider}
+      title={integrationGuideTitle(provider)}
       markdown={markdown}
     />
   );
