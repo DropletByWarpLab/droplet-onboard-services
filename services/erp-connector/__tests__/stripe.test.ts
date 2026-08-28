@@ -1122,6 +1122,9 @@ describe("read surface", () => {
             },
           ],
         },
+        // The modification time is a second, separate read (WARP-2494); this
+        // test is about the money columns, so the feed is empty here.
+        { match: /\/v1\/events/, responses: [{ body: { has_more: false, data: [] } }] },
       ],
     });
     const rows = (await c.runRead("get_open_invoices", {})) as Record<string, unknown>[];
@@ -1162,6 +1165,7 @@ describe("read surface", () => {
             },
           ],
         },
+        { match: /\/v1\/events/, responses: [{ body: { has_more: false, data: [] } }] },
       ],
     });
     const rows = (await c.runRead("get_open_invoices", {})) as Record<string, unknown>[];
@@ -1218,6 +1222,161 @@ describe("read surface", () => {
       net: 96.8,
       status: "available",
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `updated_at` — WARP-2494
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("updated_at comes from the event feed, never from the object", () => {
+  /** 2026-07-01 — when the invoice was CREATED. */
+  const CREATED_S = Math.floor(Date.UTC(2026, 6, 1) / 1000);
+  /** 2026-08-20 — when it was last CHANGED. Deliberately a different day, so a
+   *  projection that reaches for `created` cannot coincidentally pass. */
+  const MODIFIED_S = Math.floor(Date.UTC(2026, 7, 20) / 1000);
+
+  /** An open invoice as `/v1/invoices` serves it. `id` and `number` differ on
+   *  purpose: the event feed keys on the OBJECT id, the canonical row carries
+   *  the human-facing number, and confusing the two is the trap this fixture
+   *  exists to catch. */
+  function openInvoice(over: { id?: string; number?: string; created?: number } = {}) {
+    return {
+      id: over.id ?? "in_1",
+      object: "invoice",
+      number: over.number ?? "INV-1001",
+      created: over.created ?? CREATED_S,
+      due_date: Math.floor(Date.UTC(2026, 6, 31) / 1000),
+      customer: "cus_1",
+      currency: "usd",
+      total: 120_000,
+      amount_remaining: 120_000,
+      status: "open",
+    };
+  }
+
+  function readRoutes(invoices: unknown[], events: unknown[]): Route[] {
+    return [
+      { match: /\/v1\/invoices/, responses: [{ body: { has_more: false, data: invoices } }] },
+      { match: /\/v1\/events/, responses: [{ body: { has_more: false, data: events } }] },
+    ];
+  }
+
+  async function readInvoices(invoices: unknown[], events: unknown[]) {
+    const { c, f } = connector({ routes: readRoutes(invoices, events) });
+    const rows = (await c.runRead("get_open_invoices", {})) as Record<string, unknown>[];
+    return { rows, f };
+  }
+
+  it("stamps the latest invoice.* event time, not the object's created", async () => {
+    // Stripe puts NO modification timestamp on an invoice — the object carries
+    // only `created`. Emitting `created` here would advance a watermark on a
+    // row that never changed, which is the exact lie this column exists to
+    // prevent.
+    // Mutation: emit `StripeConnector.instant(r.created)` instead → red
+    // (2026-07-01 for a row whose only change was on 2026-08-20).
+    // Mutation: drop the `updated_at` mapping entirely → red (undefined).
+    const { rows } = await readInvoices(
+      [openInvoice()],
+      [event({ id: "evt_1", objectId: "in_1", type: "invoice.updated", created: MODIFIED_S })],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].updated_at).toBe("2026-08-20T00:00:00.000Z");
+    // The creation time is still reported, under its own name.
+    expect(rows[0].issued_at).toBe("2026-07-01T00:00:00.000Z");
+    expect(rows[0].updated_at).not.toBe(rows[0].issued_at);
+  });
+
+  it("keys the event lookup on the Stripe object id, not on the invoice number", async () => {
+    // `invoice_id` is the merchant-facing `number` ("INV-1001"); the event feed
+    // only ever names the object id ("in_1"). Keying the join on the canonical
+    // column looks right and silently matches nothing.
+    // Mutation: build the lookup key from `invoice_id` → red (undefined).
+    const { rows } = await readInvoices(
+      [openInvoice({ id: "in_1", number: "INV-1001" })],
+      [event({ id: "evt_1", objectId: "in_1", type: "invoice.updated", created: MODIFIED_S })],
+    );
+    expect(rows[0].invoice_id).toBe("INV-1001");
+    expect(rows[0].updated_at).toBe("2026-08-20T00:00:00.000Z");
+  });
+
+  it("takes the MAXIMUM event time per invoice, not the last one on the page", async () => {
+    // Ordering on /v1/events is explicitly not guaranteed (the cursor poller
+    // documents the same trap), so "last one wins" reports a stale change time.
+    // Mutation: assign unconditionally instead of keeping the max → red.
+    const { rows } = await readInvoices(
+      [openInvoice()],
+      [
+        event({ id: "evt_a", objectId: "in_1", type: "invoice.updated", created: MODIFIED_S }),
+        event({
+          id: "evt_b",
+          objectId: "in_1",
+          type: "invoice.payment_succeeded",
+          created: MODIFIED_S - 86_400,
+        }),
+      ],
+    );
+    expect(rows[0].updated_at).toBe("2026-08-20T00:00:00.000Z");
+  });
+
+  it("leaves updated_at undefined — never guessed — when no event names the invoice", async () => {
+    // An invoice last changed outside the 30-day event retention has no honest
+    // modification time. Absent stays absent; the sweep is what catches it.
+    // Mutation: fall back to `created` when the lookup misses → red.
+    const { rows } = await readInvoices(
+      [openInvoice({ id: "in_1", number: "INV-1001" }), openInvoice({ id: "in_2", number: "INV-1002" })],
+      [event({ id: "evt_1", objectId: "in_1", type: "invoice.updated", created: MODIFIED_S })],
+    );
+    const byId = new Map(rows.map((r) => [r.invoice_id, r]));
+    expect(byId.get("INV-1001")!.updated_at).toBe("2026-08-20T00:00:00.000Z");
+    expect(byId.get("INV-1002")!.updated_at).toBeUndefined();
+    // Present-and-undefined, not missing: an unmapped canonical column is still
+    // a declared column.
+    expect("updated_at" in byId.get("INV-1002")!).toBe(true);
+  });
+
+  it("every produced updated_at parses as an ISO instant (COLUMN_KIND.timestamp)", async () => {
+    // `COLUMN_KIND.updated_at` is `timestamp`. A value that does not parse
+    // would be a text column wearing a timestamp's name.
+    // Mutation: emit the raw epoch seconds instead of the ISO string → red.
+    const { rows } = await readInvoices(
+      [openInvoice()],
+      [event({ id: "evt_1", objectId: "in_1", type: "invoice.updated", created: MODIFIED_S })],
+    );
+    const v = rows[0].updated_at;
+    expect(typeof v).toBe("string");
+    expect(Number.isNaN(Date.parse(v as string))).toBe(false);
+    // Round-trips: it is a real UTC ISO instant, not merely parseable.
+    expect(new Date(v as string).toISOString()).toBe(v);
+  });
+
+  it("asks /v1/events only for invoice.* and only back to the retention floor", async () => {
+    // The event feed is METERED. Scanning every event type, or the whole feed,
+    // spends a quiet merchant's read allocation on rows this read discards.
+    // Mutation: drop the `type` filter → red.
+    const { f } = await readInvoices(
+      [openInvoice()],
+      [event({ id: "evt_1", objectId: "in_1", type: "invoice.updated", created: MODIFIED_S })],
+    );
+    const call = f.calls.find((x) => new URL(x.url).pathname === "/v1/events");
+    expect(call).toBeDefined();
+    const q = new URL(call!.url).searchParams;
+    expect(q.get("type")).toBe("invoice.*");
+    // No event can predate the object it is about, so the floor never reaches
+    // further back than the oldest open invoice — nor past retention.
+    const floor = Number(q.get("created[gte]"));
+    expect(Number.isFinite(floor)).toBe(true);
+    expect(floor).toBeGreaterThanOrEqual(
+      Math.floor((NOW - STRIPE_EVENT_RETENTION_MS) / 1000),
+    );
+  });
+
+  it("spends nothing on the event feed when there are no open invoices", async () => {
+    // Nothing to stamp, so the metered call must not happen at all.
+    // Mutation: hoist the event query above the empty check → red.
+    const { f } = await readInvoices([], []);
+    expect(f.paths()).not.toContain("/v1/events");
+    expect(f.paths()).toContain("/v1/invoices");
   });
 });
 

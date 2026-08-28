@@ -114,6 +114,8 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/services/tool-selection.regression.test.ts` | `apps/orchestrator` | your tool is actually selectable on a plausible sentence — the failure mode where a tool ships and the model simply never sees it |
 | `apps/orchestrator/src/services/tool-result-bounding.canary.test.ts` | `apps/orchestrator` | site 8 |
 | `apps/orchestrator/src/__tests__/write-tools-derivation.guard.test.ts` | `apps/orchestrator` | that nobody "helpfully" hand-listed your tool somewhere instead of letting `requiresWrite` derive it |
+| `apps/orchestrator/src/__tests__/confirmation-owner-drift.guard.test.ts` | `apps/orchestrator` | that your tool's `confirmationOwner` still matches reality. `"route"` is a claim about a file in a DIFFERENT package, so it rots from either end — a safety tier moves and the descriptor keeps yesterday's answer, or a new pass-through tool ships undeclared and silently inherits `"interceptor"` against a route that already confirms. All three inputs are read at runtime (live registry, compiled call site, `classifyNetworkCommand`), so a name list cannot satisfy it. |
+| `apps/orchestrator/src/__tests__/warp-2472-passthrough-single-prompt.test.ts` | `apps/orchestrator` | that one approved action costs the user **one** prompt. Nothing is stubbed between MCP dispatch and the route's confirmation decision, so the double prompt this pins (WARP-2472 — it shipped, and reached chat) cannot come back. |
 
 ### Read-only — these gates read them; do not edit them to go green
 
@@ -126,6 +128,9 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/services/prompt-budget.consts.ts` | The fixed-block char caps the ceiling is derived from. |
 | `apps/orchestrator/src/services/context-budget.service.ts` | `DEFAULT_CONTEXT_WINDOW` and the chars→tokens estimator. |
 | `apps/orchestrator/src/services/identity-prompt.ts` | `IDENTITY_MAX_CHARS`, the largest fixed block. |
+| `apps/orchestrator/src/config/network-safety-rules.ts` | The safety tiers the ownership gate classifies against, reached through `classifyNetworkCommand` — the same function the routes call. Restating a tier in your tool instead of consulting it is exactly what that gate rejects. |
+| `apps/orchestrator/src/routes/network-firewall.routes.ts` | This route confirms Tier 2/3 operations itself. If your tool calls it, the ROUTE owns the prompt: declare `confirmationOwner: "route"` rather than letting the interceptor add a second one. |
+| `apps/orchestrator/src/routes/network-phone-home.routes.ts` | Same ownership as the firewall routes — the confirmation lives here, so a pass-through tool must not re-ask. |
 
 <!-- add-llm-tool:sites:end -->
 

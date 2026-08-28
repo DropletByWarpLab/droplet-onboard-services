@@ -12,11 +12,16 @@
  * (`services/erp-connector/src/export-drop/profiles.ts` `CANONICAL_COLUMNS`),
  * so this table is not a fourth vocabulary; it is a view over the existing one.
  *
- * ## Why the marker field is not an "updated at"
+ * ## The marker field is the ORDERING key, and it is not the only position
  *
- * There isn't one. No canonical column carries a vendor-side modification
- * timestamp, and for three of the five v1 vendors there is no field that could
- * carry a trustworthy one:
+ * When this table was written no canonical column carried a vendor-side
+ * modification timestamp. WARP-2464 added one — `updated_at`, on thirteen of
+ * the twenty datasets — so each entity now declares BOTH: the ordering key it
+ * enumerates by, and the canonical column a watermark prefers when the vendor
+ * actually filled it (WARP-2474). `watermark.ts` owns the choice between them.
+ *
+ * Adding that column changed nothing about why the sweep exists. For three of
+ * the five v1 vendors the new column is documented-incomplete at the source:
  *
  *   Xero     `UpdatedDateUTC` does not fire on DueDate, SentToContact, or
  *            contact-balance changes.
@@ -24,11 +29,11 @@
  *            may not appear in a search issued now.
  *   Stripe   event ordering is explicitly not guaranteed.
  *
- * So the marker below is the best available ORDERING key, not a correctness
- * guarantee, and the watermark built from it is approximate by construction.
- * That is not a defect to fix here — it is the reason the full reconciliation
- * sweep ships alongside the incremental path rather than after it. Read
- * `reconcile.ts` before changing anything in this file.
+ * So both positions are the best available ORDERING key, not a correctness
+ * guarantee, and the watermark built from either is approximate by
+ * construction. That is not a defect to fix here — it is the reason the full
+ * reconciliation sweep ships alongside the incremental path rather than after
+ * it. Read `reconcile.ts` before changing anything in this file.
  */
 
 /** How one synced dataset is read, identified and ordered. */
@@ -40,8 +45,20 @@ export interface ErpSyncEntity {
   readonly readQuery: string;
   /** Canonical column holding the vendor's stable id for the record. */
   readonly sourceKeyField: string;
-  /** Canonical column the watermark is built from. See the caveat above. */
+  /** Canonical column the rows are ORDERED by. See the caveat above. */
   readonly markerField: string;
+  /**
+   * Canonical column carrying the vendor's own modification time (WARP-2464),
+   * which the watermark prefers over `markerField` when a track defines it.
+   *
+   * Declared per entity rather than assumed, for the same reason every other
+   * field here is: seven of the twenty datasets deliberately have no such
+   * column, and a poller that guesses which field means "modified" produces a
+   * watermark that is confidently wrong. A dataset whose rows never carry it —
+   * or carry it undefined, as the QuickBooks invoice and bill builders do —
+   * falls back to `markerField` with no configuration.
+   */
+  readonly updatedAtField: string;
 }
 
 /**
@@ -59,12 +76,14 @@ export const ERP_SYNC_ENTITIES: readonly ErpSyncEntity[] = [
     readQuery: "get_open_invoices",
     sourceKeyField: "invoice_id",
     markerField: "issued_at",
+    updatedAtField: "updated_at",
   },
   {
     entity: "bill",
     readQuery: "get_open_bills",
     sourceKeyField: "bill_id",
     markerField: "issued_at",
+    updatedAtField: "updated_at",
   },
 ];
 

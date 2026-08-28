@@ -38,7 +38,7 @@
  *
  * There is no column here a record identifier, a customer name, an amount or
  * an email can reach. `watermarkAt` / `earliestMissedAt` are `DateTime`, and
- * the raw vendor marker is coerced by `reconcile.ts`'s `markerTimestamp`
+ * the raw vendor marker is coerced by `watermark.ts`'s `isoInstant`
  * before it can get near them — a vendor whose ordering key IS the record id
  * (Stripe cursors are object ids) would otherwise write invoice numbers into
  * a column that looks like a timestamp. A diagnostics table full of invoice
@@ -51,7 +51,8 @@
  * until WARP-2028 lands the encryption that model's schema already promises.
  */
 import type { CronRuntime } from "../cron-runtime.service.js";
-import { markerTimestamp, type ErpEntityDrift } from "./reconcile.js";
+import { type ErpEntityDrift } from "./reconcile.js";
+import { isoInstant } from "./watermark.js";
 
 /**
  * The `ErpDriftClassification` enum members, as a TypeScript union.
@@ -115,7 +116,7 @@ export function classifyEntityDrift(drift: ErpEntityDrift): ErpDriftClassificati
  * Project one entity's drift onto the row that gets stored.
  *
  * `watermark` is the vendor's raw ordering token off the cursor, and it goes
- * through `markerTimestamp` on the way in for the reason the module docstring
+ * through `isoInstant` on the way in for the reason the module docstring
  * gives. It is the last place a raw marker exists in this path.
  */
 export function driftRowFor(input: {
@@ -135,7 +136,7 @@ export function driftRowFor(input: {
     missedCount: drift.missedCount,
     fullCount: drift.fullCount,
     incrementalCount: drift.incrementalCount,
-    watermarkAt: markerTimestamp(watermark),
+    watermarkAt: isoInstant(watermark),
     earliestMissedAt: drift.earliestMissedAt,
   };
 }
