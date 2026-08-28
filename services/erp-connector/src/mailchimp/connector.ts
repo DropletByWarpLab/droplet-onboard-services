@@ -104,6 +104,7 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
+import type { DatasetName } from "../export-drop/profiles.js";
 import { createHash } from "node:crypto";
 
 /** Provider key for this track. */
@@ -207,15 +208,29 @@ export const MAILCHIMP_MAX_PAGES = 500;
 /**
  * The datasets this track can serve.
  *
- * Typed `readonly string[]` and NOT `DatasetName[]`, because none of these
- * exist in the closed six-name union at `../export-drop/profiles.ts:37-47` —
- * that vocabulary is dental and accounting, and marketing shapes do not fit
- * it. Widening that union is shared surface owned by WARP-2280; declaring the
- * names here as strings keeps this connector honest today without racing
- * another branch for the same lines.
+ * Typed `readonly DatasetName[]` since WARP-2466 (WARP-2306's requirement) and
+ * NOT cast — each name is a member of the closed union in
+ * `../export-drop/profiles.ts`.
+ *
+ * WARP-2466 reconciled the three declared here against that union BY COLUMN
+ * LIST rather than by name, and two of the three did NOT match:
+ *
+ *  • `campaign` IS the canonical `campaign` — Mailchimp is the vendor that
+ *    shape was designed for.
+ *  • What this connector called `contact` is `audience_member`. A Mailchimp
+ *    member is a SUBSCRIPTION record — an address plus a subscribe/unsubscribe
+ *    state plus an opt-in time — not a CRM person with a name, a company and a
+ *    lifecycle stage. Declaring `contact` would have made `find_contact`
+ *    (a last-name prefix search) resolvable against a schema map with no
+ *    `last_name` column in it.
+ *  • `ecommerce_order` keeps its own name rather than becoming `order`: it
+ *    carries no tax, refund or currency column, so `order`'s documented
+ *    revenue arithmetic cannot be run on it.
+ *
+ * The full reasoning is the table in `profiles.ts`'s docstring.
  */
-export const MAILCHIMP_DATASETS: readonly string[] = [
-  "contact",
+export const MAILCHIMP_DATASETS: readonly DatasetName[] = [
+  "audience_member",
   "campaign",
   "ecommerce_order",
 ];
@@ -232,7 +247,7 @@ export const MAILCHIMP_DATASETS: readonly string[] = [
  * not exist.
  */
 export const MAILCHIMP_SCAN_MODE: Readonly<Record<string, "delta" | "full_scan_only">> = {
-  contact: "delta",
+  audience_member: "delta",
   campaign: "delta",
   ecommerce_order: "full_scan_only",
 };
@@ -873,7 +888,7 @@ export interface MailchimpMemberPage {
 }
 
 const MAILCHIMP_DATASET_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  contact: ["contact_id", "email_address", "status", "last_changed", "opt_in_time"],
+  audience_member: ["contact_id", "email_address", "status", "last_changed", "opt_in_time"],
   campaign: ["campaign_id", "title", "status", "send_time", "emails_sent"],
   ecommerce_order: ["order_id", "store_id", "customer_id", "order_total", "processed_at"],
 };

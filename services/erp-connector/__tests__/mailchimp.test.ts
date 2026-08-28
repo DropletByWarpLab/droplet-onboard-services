@@ -737,7 +737,7 @@ describe("e-commerce orders: full-scan only", () => {
     // Mutation: mark ecommerce_order as "delta" → red. A declared property, not
     // an accident of the code.
     expect(MAILCHIMP_SCAN_MODE.ecommerce_order).toBe("full_scan_only");
-    expect(MAILCHIMP_SCAN_MODE.contact).toBe("delta");
+    expect(MAILCHIMP_SCAN_MODE.audience_member).toBe("delta");
     expect(MAILCHIMP_SCAN_MODE.campaign).toBe("delta");
     // Every declared dataset has a declared scan mode — no silent omissions.
     for (const d of MAILCHIMP_DATASETS) {
@@ -791,16 +791,16 @@ describe("per-account purge", () => {
     // on a box with two Mailchimp connections.
     // Mutation: scope deleteByConnection by provider → red.
     const { store, rows } = fakeStore({
-      conn_a: { contact: 120, campaign: 8, ecommerce_order: 40 },
-      conn_b: { contact: 77, campaign: 3, ecommerce_order: 12 },
+      conn_a: { audience_member: 120, campaign: 8, ecommerce_order: 40 },
+      conn_b: { audience_member: 77, campaign: 3, ecommerce_order: 12 },
     });
     const { c } = connector({ connectionId: "conn_a", purgeStore: store });
     const result = await c.purgeAccount();
 
     expect(result.connectionId).toBe("conn_a");
     expect(result.totalDeleted).toBe(168);
-    expect(rows.conn_a).toEqual({ contact: 0, campaign: 0, ecommerce_order: 0 });
-    expect(rows.conn_b).toEqual({ contact: 77, campaign: 3, ecommerce_order: 12 });
+    expect(rows.conn_a).toEqual({ audience_member: 0, campaign: 0, ecommerce_order: 0 });
+    expect(rows.conn_b).toEqual({ audience_member: 77, campaign: 3, ecommerce_order: 12 });
   });
 
   it("derives the purged set from servesDatasets rather than a hand-kept list", async () => {
@@ -825,7 +825,7 @@ describe("per-account purge", () => {
     // Mutation: drop the record() call → red. Mutation: put a sample row or an
     // address into the scope → red on the content assertion.
     const seen: { action: string; scope: Record<string, unknown> }[] = [];
-    const { store } = fakeStore({ conn_a: { contact: 2, campaign: 0, ecommerce_order: 0 } });
+    const { store } = fakeStore({ conn_a: { audience_member: 2, campaign: 0, ecommerce_order: 0 } });
     const { c } = connector({
       purgeStore: store,
       audit: (e) => {

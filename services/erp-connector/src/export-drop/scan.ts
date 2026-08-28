@@ -367,6 +367,7 @@ const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   company: ["company_id"],
   deal: ["deal_id"],
   ticket: ["ticket_id"],
+  engagement: ["engagement_id"],
   order: ["order_id"],
   product: ["product_id"],
   customer: ["customer_id"],
@@ -375,6 +376,11 @@ const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   // would double `member_count`, the marketing twin of doubling a balance.
   campaign: ["campaign_id"],
   audience: ["audience_id"],
+  // WARP-2466 — a membership is identified by the member row the platform
+  // issues, not by the address: an address can leave a list and rejoin it, and
+  // keying on it would collapse two distinct consent events into one.
+  audience_member: ["audience_member_id"],
+  ecommerce_order: ["ecommerce_order_id"],
 };
 
 /**

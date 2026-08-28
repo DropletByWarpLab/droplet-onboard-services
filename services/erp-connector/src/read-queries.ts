@@ -633,6 +633,84 @@ const getAudiences: ReadQuery = {
   },
 };
 
+// ── WARP-2466: the three shapes the connector reconciliation added ──────────
+
+const getEngagements: ReadQuery = {
+  name: "get_engagements",
+  description: "CRM activities — calls, emails, meetings, notes, tasks — in a [from, to) window.",
+  dependsOnTables: ["engagement"],
+  exampleParams: { from: "2026-08-01T00:00:00Z", to: "2026-09-01T00:00:00Z" },
+  build(map, params) {
+    const engagement = resolveTable(map, "engagement");
+    const engagementId = resolveColumn(map, "engagement", "engagement_id");
+    const occurredAt = resolveColumn(map, "engagement", "occurred_at");
+    const type = resolveColumn(map, "engagement", "type");
+    const contactId = resolveColumn(map, "engagement", "contact_id");
+    const dealId = resolveColumn(map, "engagement", "deal_id");
+    // Ordered by when the activity HAPPENED, never by when the record was
+    // written: a meeting logged the next morning still happened the day
+    // before, and sorting a timeline by write time reorders history.
+    const sql =
+      `SELECT ${engagementId}, ${occurredAt}, ${type}, ${contactId}, ${dealId} ` +
+      `FROM ${engagement} ` +
+      `WHERE ${occurredAt} >= ? AND ${occurredAt} < ? ` +
+      `ORDER BY ${occurredAt} DESC, ${engagementId}`;
+    return { sql, params: [params.from, params.to] };
+  },
+};
+
+const getAudienceMembers: ReadQuery = {
+  name: "get_audience_members",
+  description: "Members of one mailing list filtered by subscription status.",
+  dependsOnTables: ["audience_member"],
+  exampleParams: { audienceId: "a-123", status: "subscribed" },
+  build(map, params) {
+    const member = resolveTable(map, "audience_member");
+    const memberId = resolveColumn(map, "audience_member", "audience_member_id");
+    const audienceId = resolveColumn(map, "audience_member", "audience_id");
+    const email = resolveColumn(map, "audience_member", "email");
+    const status = resolveColumn(map, "audience_member", "subscription_status");
+    const optedInAt = resolveColumn(map, "audience_member", "opted_in_at");
+    const lastChanged = resolveColumn(map, "audience_member", "last_changed_at");
+    // The status filter is MANDATORY rather than optional. An unfiltered
+    // member list mixes people who unsubscribed in with people who did not,
+    // and the caller most likely to forget the distinction is the one about to
+    // send them something.
+    const sql =
+      `SELECT ${memberId}, ${audienceId}, ${email}, ${status}, ${optedInAt}, ${lastChanged} ` +
+      `FROM ${member} ` +
+      `WHERE ${audienceId} = ? AND ${status} = ? ` +
+      `ORDER BY ${lastChanged} DESC, ${memberId}`;
+    return { sql, params: [params.audienceId, params.status] };
+  },
+};
+
+const getEcommerceOrders: ReadQuery = {
+  name: "get_ecommerce_orders",
+  description:
+    "Purchases a marketing platform attributed to a campaign, in a [from, to) window.",
+  dependsOnTables: ["ecommerce_order"],
+  exampleParams: { from: "2026-08-01T00:00:00Z", to: "2026-09-01T00:00:00Z" },
+  build(map, params) {
+    const order = resolveTable(map, "ecommerce_order");
+    const orderId = resolveColumn(map, "ecommerce_order", "ecommerce_order_id");
+    const storeId = resolveColumn(map, "ecommerce_order", "store_id");
+    const customerId = resolveColumn(map, "ecommerce_order", "customer_id");
+    const total = resolveColumn(map, "ecommerce_order", "total_amount");
+    const currency = resolveColumn(map, "ecommerce_order", "currency");
+    const processedAt = resolveColumn(map, "ecommerce_order", "processed_at");
+    // Deliberately NOT the `order` columns. This shape carries no tax and no
+    // refund, so `list_orders`' revenue arithmetic is not available here and
+    // must not be implied by selecting columns that look like it.
+    const sql =
+      `SELECT ${orderId}, ${storeId}, ${customerId}, ${total}, ${currency}, ${processedAt} ` +
+      `FROM ${order} ` +
+      `WHERE ${processedAt} >= ? AND ${processedAt} < ? ` +
+      `ORDER BY ${processedAt} DESC, ${orderId}`;
+    return { sql, params: [params.from, params.to] };
+  },
+};
+
 export const READ_QUERIES: readonly ReadQuery[] = [
   getScheduleToday,
   findPatient,
@@ -657,6 +735,10 @@ export const READ_QUERIES: readonly ReadQuery[] = [
   findCustomer,
   getCampaignPerformance,
   getAudiences,
+  // WARP-2466 — the shapes the HubSpot/Mailchimp reconciliation added.
+  getEngagements,
+  getAudienceMembers,
+  getEcommerceOrders,
 ];
 
 const BY_NAME: ReadonlyMap<string, ReadQuery> = new Map(READ_QUERIES.map((q) => [q.name, q]));

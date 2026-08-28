@@ -53,6 +53,7 @@ import {
   resetSearchGovernors,
 } from "../src/hubspot/connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
+import { DATASETS } from "../src/export-drop/profiles.js";
 
 /** 2026-08-27T12:00:00Z, the wall clock every test starts on. */
 const NOW = Date.UTC(2026, 7, 27, 12, 0, 0);
@@ -1312,19 +1313,25 @@ describe("blocked boundary", () => {
     expect(c.schemaFingerprint).toBe(out.fingerprint);
   });
 
-  it("serves none of the six canonical datasets, and says so rather than returning []", async () => {
-    // HubSpot CRM objects do not map onto the accounting/practice union at
-    // export-drop/profiles.ts. Forcing them in would be a bad cast; declaring
-    // the track's own dataset names and refusing the canonical reads is the
-    // honest shape. `[]` from get_open_invoices reads as "you are owed
-    // nothing", which is a confident false statement about money.
+  it("serves the CRM datasets and refuses the accounting/practice reads", async () => {
+    // Before WARP-2466 this track declared `crm_*` names outside the union and
+    // served NOTHING the read registry could reach. The reconciliation showed
+    // four of them ARE canonical CRM shapes, so the track now serves them —
+    // and still refuses the accounting and practice reads, which is the part
+    // that matters: `[]` from get_open_invoices reads as "you are owed
+    // nothing", a confident false statement about money.
     // Mutation: widen HUBSPOT_DATASETS to include "invoice" → red.
     const { c, f } = connector();
     for (const q of ["get_open_invoices", "get_open_bills", "get_schedule_today"]) {
       await expect(c.runRead(q, {})).rejects.toBeInstanceOf(DatasetNotServedError);
     }
     expect(f.calls).toHaveLength(0);
-    for (const d of HUBSPOT_DATASETS) expect(d.startsWith("crm_")).toBe(true);
+    // Every declared name is now IN the shared vocabulary — the reconciliation
+    // this suite used to assert the absence of.
+    // Mutation: declare a name outside DATASETS → tsc red at the connector,
+    // and this red here.
+    for (const d of HUBSPOT_DATASETS) expect(DATASETS).toContain(d);
+    expect([...HUBSPOT_DATASETS]).toEqual(["contact", "company", "deal", "ticket", "engagement"]);
   });
 
   it("sends the token as a bearer credential and never in a URL", async () => {

@@ -45,7 +45,8 @@
  * dataset added on one side and not the other goes red rather than silently
  * splitting the vocabulary in two.
  *
- * Widened six → twenty alongside WARP-2280, with that drift test as the guard.
+ * Widened six → twenty alongside WARP-2280, then twenty → twenty-three by
+ * WARP-2466's reconciliation, with that drift test as the guard throughout.
  */
 export const DATASET_NAMES = [
   // practice-management (WARP-1964)
@@ -62,22 +63,25 @@ export const DATASET_NAMES = [
   "payout",
   "balance_transaction",
   "subscription",
-  // CRM — HubSpot (WARP-2280)
+  // CRM — HubSpot (WARP-2280; `engagement` added by WARP-2466)
   "contact",
   "company",
   "deal",
   "ticket",
+  "engagement",
   // commerce — Shopify (WARP-2280)
   "order",
   "product",
   "customer",
-  // marketing — Mailchimp (WARP-2280)
+  // marketing — Mailchimp (WARP-2280; the two below added by WARP-2466)
   "campaign",
   "audience",
+  "audience_member",
+  "ecommerce_order",
 ] as const;
 
 /**
- * The closed union of twenty. A descriptor's `datasets` is typed with THIS, never
+ * The closed union of twenty-three. A descriptor's `datasets` is typed with THIS, never
  * `string[]`: the exhaustive `Record`s keyed by it (`DATASET_CATEGORY`,
  * `CANONICAL_COLUMNS`) only buy exhaustiveness while the union stays closed,
  * and a widened `string[]` throws that away silently.

@@ -162,6 +162,7 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
+import type { DatasetName } from "../export-drop/profiles.js";
 
 /** Provider key for this track. */
 export const HUBSPOT_PROVIDER = "hubspot";
@@ -298,34 +299,38 @@ export const HUBSPOT_SUPER_ADMIN_REMEDIATION =
 /**
  * The datasets this track serves.
  *
- * Typed `readonly string[]` — matching `Connector.servesDatasets` — and
- * deliberately NOT the closed `DatasetName` union from
- * `../export-drop/profiles.ts`. That union is six names built for accounting
- * and practice-management shapes, and HubSpot's CRM objects do not map onto
- * them: a contact is not a patient, a deal is not an invoice, and casting one
- * into the other would produce a connector that answers `get_open_invoices`
- * with CRM rows. Widening the union is a real design decision with two
- * exhaustive `Record`s behind it (and WARP-2280 is moving that surface right
- * now), so this track declares its own names and refuses every canonical read
- * through `assertDatasetsServed` instead — which is a capability statement, not
- * a fault.
+ * Typed `readonly DatasetName[]` since WARP-2466 (WARP-2306's requirement) and
+ * NOT cast — every name below is a member of the closed union in
+ * `../export-drop/profiles.ts`, which is what makes the annotation an
+ * assertion rather than a formality.
+ *
+ * These used to be `crm_contact` … `crm_engagement` as bare strings, because
+ * the union at the time was six accounting-and-dental names that could not
+ * express a CRM object. WARP-2280 widened it to twenty and WARP-2466
+ * reconciled these five against it BY COLUMN LIST rather than by name: four of
+ * them turned out to BE the canonical shape under HubSpot's own property
+ * spellings (`firstname` is `first_name`, `dealstage` is `stage`), and
+ * `crm_engagement` had no canonical equivalent and entered the union as
+ * `engagement`. The per-name reasoning is the table in `profiles.ts`'s
+ * docstring. The `crm_` prefix is gone because a namespace segment is not a
+ * type — the vocabulary decision that file already made.
  */
-export const HUBSPOT_DATASETS: readonly string[] = [
-  "crm_contact",
-  "crm_company",
-  "crm_deal",
-  "crm_ticket",
-  "crm_engagement",
+export const HUBSPOT_DATASETS: readonly DatasetName[] = [
+  "contact",
+  "company",
+  "deal",
+  "ticket",
+  "engagement",
 ];
 
 /** The canonical columns each served dataset exposes. Synthesized rather than
  *  introspected: HubSpot's schema is HubSpot's, published and versioned. */
 const HUBSPOT_DATASET_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  crm_contact: ["id", "email", "firstname", "lastname", "lifecyclestage", LAST_MODIFIED_PROPERTY],
-  crm_company: ["id", "name", "domain", "industry", LAST_MODIFIED_PROPERTY],
-  crm_deal: ["id", "dealname", "dealstage", "pipeline", "amount", LAST_MODIFIED_PROPERTY],
-  crm_ticket: ["id", "subject", "hs_pipeline_stage", "hs_ticket_priority", LAST_MODIFIED_PROPERTY],
-  crm_engagement: ["id", "hs_engagement_type", "hs_timestamp", LAST_MODIFIED_PROPERTY],
+  contact: ["id", "email", "firstname", "lastname", "lifecyclestage", LAST_MODIFIED_PROPERTY],
+  company: ["id", "name", "domain", "industry", LAST_MODIFIED_PROPERTY],
+  deal: ["id", "dealname", "dealstage", "pipeline", "amount", LAST_MODIFIED_PROPERTY],
+  ticket: ["id", "subject", "hs_pipeline_stage", "hs_ticket_priority", LAST_MODIFIED_PROPERTY],
+  engagement: ["id", "hs_engagement_type", "hs_timestamp", LAST_MODIFIED_PROPERTY],
 };
 
 /**
