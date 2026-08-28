@@ -425,7 +425,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         // `MAILCHIMP_API_KEY_PATTERN`. The `-us14` suffix is not decoration —
         // it SELECTS THE HOST, so a key that does not carry one cannot be
         // dialed at all and is refused here rather than producing a request to
-        // `https://undefined.api.mailchimp.com`.
+        // a URL whose first label is the string "undefined".
         pattern: "^([0-9A-Za-z]{20,64})-([a-z]{2}\\d{1,2})$",
         help:
           "Account → Extras → API keys. The key ends in a datacentre suffix like -us14, " +

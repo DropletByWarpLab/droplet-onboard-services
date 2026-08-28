@@ -812,9 +812,9 @@ registerConnectorFactory(HUBSPOT_PROVIDER, ({ selector: sel, config: cfg }) => {
 registerConnectorFactory(MAILCHIMP_PROVIDER, ({ selector: sel, config: cfg }) => {
   const datacenter = providerConfigString(cfg, "datacenter");
   // The datacentre SELECTS THE HOST. Without it there is no destination at
-  // all, and guessing one would mean assembling `https://undefined.api.…`.
-  // Read from `providerConfig`, never re-derived from the key, so answering
-  // "where does this dial?" never decrypts a credential.
+  // all, and guessing one would mean assembling a URL whose first label is the
+  // string "undefined". Read from `providerConfig`, never re-derived from the
+  // key, so answering "where does this dial?" never decrypts a credential.
   if (!datacenter) {
     throw new ConnectorBlockedError(
       "construct (no Mailchimp datacentre configured)",
