@@ -69,6 +69,16 @@ const NOT_A_CURSOR: Record<string, string> = {
     "reaches does hold a resume position (its `watermark` column), but that never crosses a " +
     "tool result: WARP-2218's poller is a cron job, not a tool. Adding it to CURSOR_KEYS would " +
     "preserve a key that is never in a payload in the first place.",
+  nextSecrets:
+    "saas-credential.service.ts — a LOCAL const, not a payload key: " +
+    "`const nextSecrets: Record<string, string>`. declaredKeys() greps `identifier:` and so " +
+    "cannot tell a TypeScript type annotation on a local from an object literal key. It holds " +
+    "the credential map being assembled for sealSaasCredentials() and never reaches a wire " +
+    "payload — it is the one thing in this file that must never be serialised anywhere.",
+  nextConfig:
+    "saas-credential.service.ts — the sibling local to nextSecrets, same annotation-not-a-key " +
+    "reason: `const nextConfig: Record<string, string | number>`, the non-secret providerConfig " +
+    "being assembled beside it.",
   nextRole: "routes/access.ts + people.ts — the RBAC role being transitioned TO",
   nextValue: "routes/settings.ts — the setting value being written",
   nextParam: "file-search.service.ts — a parsed query-string parameter",

@@ -146,6 +146,19 @@ One page, shared by every vendor, rather than five paraphrases that could drift 
 3. **Choose what Droplet can see.** The same scope list as Track A, bounded by what you actually granted in the vendor's console. Asking here for something the credential does not permit surfaces as a named error, not as an empty screen.
 4. **Confirm and connect.** Droplet makes its first call. A credential that authenticates but cannot read a resource you asked for is reported as exactly that, naming the permission you need to go and tick.
 
+### 3.6 Changing a credential later (WARP-2275)
+
+Rotating a key, or correcting an account id you mistyped, does not mean redoing the connect wizard. `Integrations → Credentials` in the sidebar is a dedicated page for exactly that.
+
+**Owner and admin only.** The page is not shown to any other role, and the API refuses the request even if it is called directly — the guard is on the route, not just the navigation.
+
+The form is generated from what each connector declares it needs, so it shows exactly the fields that vendor requires and nothing else. Two editing rules follow from the fact that Droplet cannot show you a stored secret back:
+
+- **Leave a field blank to keep what is stored.** This is what lets you fix a region or an account id without going to find the original key again. A saved field reads *"Saved — replace to change"* rather than showing a masked value, because there is nothing to mask — the box cannot read it back either.
+- **Clear a field explicitly to remove it.** The connection then reports *Not connected* rather than continuing to claim it works.
+
+Every save, replacement and clear is written to the audit log with **whether** a credential is set — never the value, a prefix, a length, or a hash. What is stored is encrypted and bound to the connection row it belongs to, so a credential blob copied to another connection fails to decrypt rather than authenticating as the wrong account. The full statement is in [`credential-handling.md`](credential-handling.md).
+
 ---
 
 ## 4. Turning writes on (and off)
