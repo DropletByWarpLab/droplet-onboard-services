@@ -16,16 +16,18 @@
   // checked as CJS (see the note at
   // `apps/orchestrator/src/__tests__/write-tools-derivation.guard.test.ts:25-28`).
   //
-  // Only the three keys below are overridden:
-  //   - `noEmit`      — this is a check, not a build; `tsconfig.json` still
-  //                     owns the emit that produces `dist/`.
-  //   - `declaration` — off, because it cannot combine with `noEmit`.
-  //   - `rootDir`     — widened from `./src` to `.` so `__tests__/` is not
-  //                     reported as TS6059 "not under rootDir".
+  // Only the two keys below are overridden:
+  //   - `noEmit`  — this is a check, not a build; `tsconfig.json` still owns
+  //                 the emit that produces `dist/`.
+  //   - `rootDir` — widened from `./src` to `.` so `__tests__/` is not
+  //                 reported as TS6059 "not under rootDir".
+  //
+  // `declaration: true` is inherited and deliberately NOT overridden: it is a
+  // no-op under `noEmit`, and TypeScript has allowed the pair since 5.0
+  // (verified on the lockfile-pinned 5.9.3 — the combination raises nothing).
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "declaration": false,
     "rootDir": "."
   },
   "include": ["src/**/*", "__tests__/**/*"],
