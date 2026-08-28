@@ -15,6 +15,35 @@
  * Prisma is a `vi.fn()` stub, per the house rule against mock-database
  * integration tests: what is being asserted is the SHAPE OF THE WRITE — which
  * columns the one `update` carries — not what a database does with it.
+ *
+ * ---
+ *
+ * ## WARP-2482 — the second half of the same purge
+ *
+ * This file is EXTENDED rather than joined by a sibling, deliberately. The
+ * defect WARP-2482 fixes is that WARP-2453's purge stopped at
+ * `IntegrationConnection` and left the connection's `ErpSyncCursor` rows
+ * behind, so `foldSyncState` kept folding a dead credential's last words —
+ * `needsReconnect: true`, `syncState: "FAILED"` — into a purged connection's
+ * hub summary. A NEW file asserting the cursors are reset could pass in full
+ * while every assertion here still described a purge that only did half the
+ * job; the two facts have to be able to fail each other, so they share a
+ * fixture and a stub.
+ *
+ * The stub grows two capabilities to carry that:
+ *
+ *  - **The rows are now live objects, not per-call literals.** The old stub
+ *    could only answer "what shape was the write". The claim under test now is
+ *    what the HUB READS BACK, so `getEaglesoft()` after `disconnect()` has to
+ *    see what `disconnect()` wrote. Still a hand-rolled `vi.fn()` stub and
+ *    still no database — the house rule bans mock DATABASES, not stubs that
+ *    remember what they were told.
+ *  - **A real `$transaction`**, the shared WARP-1570 seam rather than
+ *    `(fn) => fn(self)`. The purge and the reset must be ONE transaction, and
+ *    the hand-rolled shape cannot express that: it discards the isolation
+ *    option and never rolls back, so "the reset failed, therefore the purge is
+ *    not visible either" would be unprovable and a split into two
+ *    transactions would stay green.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
@@ -25,6 +54,12 @@ vi.mock("./activity.singleton.js", () => ({ recordActivity: recordActivityMock }
 
 import { ConnectorBlockedError } from "@droplet/erp-connector";
 import { createIntegrationsService } from "./integrations.service.js";
+import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+  type TransactionSeam,
+} from "../__tests__/helpers/prisma-tx-harness.js";
 
 /**
  * Stand-ins for the two encrypted columns, distinctive enough that a leak into
@@ -93,22 +128,135 @@ function connectedRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function stubPrisma(row: Record<string, unknown> | null) {
+/**
+ * A cursor as the poller leaves it when a customer revokes the grant in the
+ * vendor's console: parked, latched on `needsReconnect`, still holding the
+ * position it reached. This is the row `disconnect()` used to walk past.
+ */
+function revokedCursor(over: Record<string, unknown> = {}) {
   return {
+    id: "cur_1",
+    connectionId: "conn_1",
+    entity: "invoice",
+    watermark: "2026-08-20T00:00:00.000Z",
+    state: "FAILED",
+    consecutiveFailures: 7,
+    nextAttemptAt: new Date("2026-08-21T00:00:00.000Z"),
+    lastSyncedAt: new Date("2026-08-20T00:00:00.000Z"),
+    lastSweepAt: new Date("2026-08-19T00:00:00.000Z"),
+    needsReconnect: true,
+    lastError: "vendor rejected the credential",
+    ...over,
+  };
+}
+
+/**
+ * Every progress-bearing cursor field, with the value an UNSTARTED cursor
+ * carries — written out LITERALLY rather than imported from
+ * `UNSTARTED_ERP_CURSOR`.
+ *
+ * Importing the constant would make this assertion a tautology: a mutation
+ * that changed what "unstarted" means (leaving `needsReconnect: true`, say)
+ * would change both sides at once and stay green. Spelling the values here is
+ * what makes the constant answerable to something.
+ */
+const UNSTARTED_CURSOR_FIELDS = {
+  watermark: null,
+  state: "IDLE",
+  consecutiveFailures: 0,
+  nextAttemptAt: null,
+  lastSyncedAt: null,
+  lastSweepAt: null,
+  needsReconnect: false,
+  lastError: null,
+} as const;
+
+export interface StubPrisma {
+  integrationConnection: Record<string, ReturnType<typeof vi.fn>>;
+  erpAuditLog: Record<string, ReturnType<typeof vi.fn>>;
+  erpSyncCursor: Record<string, ReturnType<typeof vi.fn>>;
+  erpDriftRecord: Record<string, ReturnType<typeof vi.fn>>;
+  $transaction: TransactionSeam["$transaction"];
+  /** The live connection rows, so a test can read back what was written. */
+  rows: Array<Record<string, unknown>>;
+  /** The live cursor rows, same reason. */
+  cursors: Array<Record<string, unknown>>;
+  seam: TransactionSeam;
+}
+
+/**
+ * The in-memory stub. `rows` and `cursors` are MUTATED by the write methods so
+ * a later read observes the write — see the header note on why that is not a
+ * mock database.
+ */
+function stubPrisma(
+  row: Record<string, unknown> | null,
+  cursors: Array<Record<string, unknown>> = [],
+): StubPrisma {
+  const rows = row ? [{ ...row }] : [];
+  const cursorRows = cursors.map((c) => ({ ...c }));
+
+  const self = {
     integrationConnection: {
-      findFirst: vi.fn(async () => (row ? { ...row } : null)),
-      findMany: vi.fn(async () => (row ? [{ ...row }] : [])),
-      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
-        ...connectedRow(),
-        ...data,
-      })),
-      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
-        ...(row ?? connectedRow()),
-        ...data,
-      })),
+      findFirst: vi.fn(async () => (rows[0] ? { ...rows[0] } : null)),
+      findMany: vi.fn(async () => rows.map((r) => ({ ...r }))),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        const created = { ...connectedRow(), ...data };
+        rows.push(created);
+        return { ...created };
+      }),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        const target = rows[0] ?? { ...connectedRow() };
+        Object.assign(target, data);
+        if (!rows[0]) rows.push(target);
+        return { ...target };
+      }),
     },
     erpAuditLog: { create: vi.fn(async () => ({})) },
-  };
+    erpSyncCursor: {
+      findMany: vi.fn(
+        async (args?: { where?: { connectionId?: string } }) =>
+          cursorRows
+            .filter(
+              (c) =>
+                !args?.where?.connectionId ||
+                c.connectionId === args.where.connectionId,
+            )
+            .map((c) => ({ ...c })),
+      ),
+      updateMany: vi.fn(
+        async (args: {
+          where: { connectionId: string };
+          data: Record<string, unknown>;
+        }) => {
+          const hit = cursorRows.filter(
+            (c) => c.connectionId === args.where.connectionId,
+          );
+          for (const c of hit) Object.assign(c, args.data);
+          return { count: hit.length };
+        },
+      ),
+    },
+    /**
+     * Present so a test can assert the WARP-2463 drift records are NOT
+     * deleted. A stub that lacked the model would make that assertion pass by
+     * making the deletion impossible, which proves nothing.
+     */
+    erpDriftRecord: {
+      findMany: vi.fn(async () => []),
+      deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
+  } as unknown as StubPrisma;
+
+  const seam = createTransactionSeam({
+    client: () => self,
+    stores: { rows, cursors: cursorRows },
+  });
+  self.$transaction = seam.$transaction;
+  self.rows = rows;
+  self.cursors = cursorRows;
+  self.seam = seam;
+  return self;
 }
 
 /** A connector whose every live method is blocked — the shipped stub shape. */
@@ -138,6 +286,18 @@ function updateData(
     { data: Record<string, unknown> },
   ];
   return call[0].data;
+}
+
+/** The `where` + `data` of the Nth `erpSyncCursor.updateMany` call. */
+function cursorResetCall(
+  prisma: ReturnType<typeof stubPrisma>,
+  n = 0,
+): { where: Record<string, unknown>; data: Record<string, unknown> } {
+  const call = prisma.erpSyncCursor.updateMany.mock.calls[n] as unknown as [
+    { where: Record<string, unknown>; data: Record<string, unknown> },
+  ];
+  if (!call) throw new Error("erpSyncCursor.updateMany was never called");
+  return call[0];
 }
 
 beforeEach(() => {
@@ -190,13 +350,271 @@ describe("disconnect() purges the connection's secrets and identity", () => {
     expect(prisma.integrationConnection.update).toHaveBeenCalledTimes(1);
   });
 
-  it("is idempotent — no row means no write and no audit", async () => {
+  it("is idempotent — no row means no write, no cursor reset and no audit", async () => {
     const prisma = stubPrisma(null);
     const detail = await serviceFor(prisma).disconnect({ actor: "romain" });
 
+    expect(prisma.erpSyncCursor.updateMany).not.toHaveBeenCalled();
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
     expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
     expect(detail.status).toBe("NOT_CONFIGURED");
+  });
+});
+
+/**
+ * WARP-2482 — the purge above stopped at `IntegrationConnection`.
+ *
+ * Every test in this describe is red against `feat/warp-2466-wire-cloud-
+ * connectors`, which carries WARP-2453's purge and nothing else.
+ */
+describe("disconnect() also returns the connection's cursors to unstarted", () => {
+  it("resets every cursor of THIS connection, by connectionId", async () => {
+    // Mutation: delete the `resetCursorsForConnection(tx, row.id)` call from
+    // `disconnect()` → red. That deletion IS the code this ticket fixes.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    await serviceFor(prisma).disconnect({ actor: "romain" });
+
+    const { where } = cursorResetCall(prisma);
+    // Scoped to the connection. An unscoped `updateMany` would rewind every
+    // other provider's cursors on the box because one connection was dropped.
+    expect(where).toEqual({ connectionId: "conn_1" });
+  });
+
+  it("clears every progress-bearing field, each to an EXPLICIT value", async () => {
+    // Mutation: drop any single field from `UNSTARTED_ERP_CURSOR` → red on
+    // that field. The values are spelled out here rather than imported, so a
+    // change to the constant's meaning cannot move both sides at once.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    await serviceFor(prisma).disconnect({ actor: "romain" });
+
+    const { data } = cursorResetCall(prisma);
+    for (const [field, value] of Object.entries(UNSTARTED_CURSOR_FIELDS)) {
+      expect(data, `${field} must be written by the reset`).toHaveProperty(field);
+      expect(data[field], `${field} must be reset to ${String(value)}`).toEqual(value);
+    }
+  });
+
+  it("resets rather than deletes, so the registration stays explicit", async () => {
+    // The no-guessing rule applied to the cursor table. `deleteMany` would
+    // make "this connection is not syncing" an inference from absent rows —
+    // and `foldSyncState` would then report `syncState: null` ("no cursor
+    // registered"), a different claim from "registered, idle, at zero".
+    //
+    // Mutation: swap the reset for a `deleteMany` → red.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    await serviceFor(prisma).disconnect({ actor: "romain" });
+
+    expect(prisma.cursors).toHaveLength(1);
+    expect(prisma.cursors[0]).toMatchObject(UNSTARTED_CURSOR_FIELDS);
+    // The registration itself survives — same row, same entity.
+    expect(prisma.cursors[0]).toMatchObject({ id: "cur_1", entity: "invoice" });
+  });
+
+  it("RETAINS the WARP-2463 drift records — they are not credential material", async () => {
+    // The decision, made explicit and testable rather than left to a comment.
+    // Drift rows are counts and timestamps by construction, are read only by
+    // their own admin endpoint and the sweep-cadence streak (never folded into
+    // a connection summary, so they cannot reproduce this defect), and answer
+    // a question about the VENDOR that outlives one credential. Their lifetime
+    // already belongs to `trimErpDriftRecords`.
+    //
+    // Mutation: add an `erpDriftRecord.deleteMany` to
+    // `resetCursorsForConnection` → red.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    await serviceFor(prisma).disconnect({ actor: "romain" });
+
+    expect(prisma.erpDriftRecord.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("counts the reset cursors into the audit scope, never their entity names", async () => {
+    // An entity name is the closest thing to customer content this row could
+    // acquire; the count says how much position was repudiated without it.
+    const prisma = stubPrisma(connectedRow(), [
+      revokedCursor(),
+      revokedCursor({ id: "cur_2", entity: "bill" }),
+    ]);
+    await serviceFor(prisma).disconnect({ actor: "romain" });
+
+    const call = prisma.erpAuditLog.create.mock.calls[0] as unknown as [
+      { data: { scope: Record<string, unknown> } },
+    ];
+    expect(call[0].data.scope.cursorsReset).toBe(2);
+    expect(JSON.stringify(call[0].data.scope)).not.toContain("invoice");
+    expect(JSON.stringify(call[0].data.scope)).not.toContain("bill");
+  });
+});
+
+/**
+ * The end-to-end statement of the defect: what the HUB READS BACK.
+ *
+ * Every other assertion in this file is about the shape of a write. These two
+ * are about the answer `GET /api/integrations` gives afterwards, which is
+ * where a customer actually met the bug — a purged connection asking to be
+ * re-authorized, and reporting a sync failure for a sync that is not running.
+ */
+describe("after a disconnect the hub stops advertising a dead credential", () => {
+  it("no longer folds needsReconnect / FAILED into the detail view", async () => {
+    // Mutation: delete the reset call → red on BOTH assertions, with the
+    // before-block above proving the fixture actually carried the defect (the
+    // "make the defect observable" rule: an empty cursor set passes vacuously).
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    const svc = serviceFor(prisma);
+
+    const before = await svc.getEaglesoft();
+    expect(before.syncState).toBe("FAILED");
+    expect(before.needsReconnect).toBe(true);
+
+    await svc.disconnect({ actor: "romain" });
+
+    const after = await svc.getEaglesoft();
+    expect(after.needsReconnect).toBe(false);
+    expect(after.syncState).toBe("IDLE");
+    // …and the WARP-2453 half is still true at the same moment.
+    expect(after.status).toBe("DISABLED");
+    expect(after.credentialsPurged).toBe(true);
+  });
+
+  it("no longer folds them into the hub LISTING either", async () => {
+    // `list()` reads the cursors through a different query than `detailFor()`
+    // — one findMany across all connections rather than one scoped read — so
+    // it is a genuinely separate path and gets its own assertion.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    const svc = serviceFor(prisma);
+
+    const before = (await svc.list()).find((s) => s.provider === "eaglesoft");
+    expect(before?.needsReconnect).toBe(true);
+    expect(before?.syncState).toBe("FAILED");
+
+    await svc.disconnect({ actor: "romain" });
+
+    const after = (await svc.list()).find((s) => s.provider === "eaglesoft");
+    expect(after?.needsReconnect).toBe(false);
+    expect(after?.syncState).toBe("IDLE");
+  });
+});
+
+/**
+ * WARP-2482 — the purge and the reset are ONE transaction.
+ *
+ * Not a style point. The two half-commits are independently wrong and the
+ * failure modes are not symmetric: purge-without-reset is the defect made
+ * permanent (a second `disconnect()` finds a row it considers already purged,
+ * so retrying cannot repair it), and reset-without-purge silently rewinds a
+ * live connection to position zero and re-enumerates the whole account.
+ */
+describe("the purge and the cursor reset commit together or not at all", () => {
+  it("opens exactly one transaction, at an explicit SERIALIZABLE isolation", async () => {
+    // Mutation: drop the `SERIALIZABLE_TX` options argument → red. A
+    // transaction with no explicit isolationLevel runs at READ COMMITTED,
+    // where the row this decision was taken from can change underneath it.
+    // Mutation: split into two `$transaction` calls → red on the count.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    await serviceFor(prisma).disconnect({ actor: "romain" });
+
+    expect(prisma.seam.calls()).toHaveLength(1);
+    expectAllTransactionsAt(prisma.seam, SERIALIZABLE_TX);
+  });
+
+  it("rolls the purge back when the cursor reset fails — nothing visible", async () => {
+    // The atomicity proof, and the reason the shared seam replaced
+    // `(fn) => fn(self)`: the hand-rolled shape never rolls back, so this
+    // would have passed against two separate transactions.
+    //
+    // Mutation: move the reset into its own `$transaction` after the purge →
+    // red. The purge commits, the credentials are gone, and the cursors keep
+    // claiming `needsReconnect` with no way left to repair them.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    prisma.erpSyncCursor.updateMany.mockRejectedValueOnce(
+      new Error("cursor reset failed"),
+    );
+
+    await expect(
+      serviceFor(prisma).disconnect({ actor: "romain" }),
+    ).rejects.toThrow("cursor reset failed");
+
+    // The row still holds BOTH credentials and its CONNECTED status.
+    expect(prisma.rows[0]).toMatchObject({
+      status: "CONNECTED",
+      apiCredentialsEnc: SEEDED_API_CIPHERTEXT,
+      providerTokensEnc: SEEDED_TOKEN_CIPHERTEXT,
+    });
+    // And the hub says so, rather than reporting a purge that did not happen.
+    const detail = await serviceFor(prisma).getEaglesoft();
+    expect(detail.credentialsPurged).toBe(false);
+  });
+
+  it("still rolls back whole when another transaction commits in between", async () => {
+    // The interleaving case. A rollback that merely restored the snapshot it
+    // took on entry would also undo whatever a CONCURRENT transaction
+    // committed in the meantime; the seam replays those instead, and the claim
+    // here is that this disconnect's own half-write is the ONLY thing undone.
+    //
+    // The concurrent writer touches a DIFFERENT connection's cursors — a model
+    // the disconnect writes but never READS — so the two cannot collide under
+    // SSI, and the test stays about atomicity rather than about P2034.
+    //
+    // Mutation: move the reset into its own `$transaction` after the purge →
+    // red. The purge is then a committed transaction of its own, and no
+    // rollback of the reset can reach it.
+    const prisma = stubPrisma(connectedRow(), [
+      revokedCursor(),
+      revokedCursor({ id: "cur_other", connectionId: "conn_other" }),
+    ]);
+
+    // Two explicit rendezvous rather than a race the event loop happens to
+    // order: `parked` says the disconnect is mid-transaction (purge written,
+    // uncommitted), `release` lets its reset fail once the other transaction
+    // has committed.
+    let parked!: () => void;
+    const parkedAt = new Promise<void>((resolve) => (parked = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+
+    const applyReset = prisma.erpSyncCursor.updateMany
+      .getMockImplementation() as (args: {
+      where: { connectionId: string };
+      data: Record<string, unknown>;
+    }) => Promise<{ count: number }>;
+    prisma.erpSyncCursor.updateMany.mockImplementation(
+      async (args: { where: { connectionId: string } }) => {
+        // Keyed on the connection, not on call order: a bare `…Once` is
+        // consumed by whichever transaction reaches the model first, which is
+        // the concurrent writer, not the disconnect.
+        if (args.where.connectionId !== "conn_1") return applyReset(args as never);
+        parked();
+        await released;
+        throw new Error("cursor reset failed");
+      },
+    );
+
+    const disconnecting = serviceFor(prisma).disconnect({ actor: "romain" });
+    await parkedAt;
+
+    await prisma.$transaction(
+      async (tx: StubPrisma) =>
+        tx.erpSyncCursor.updateMany({
+          where: { connectionId: "conn_other" },
+          data: { lastError: "committed by the concurrent writer" },
+        }),
+      SERIALIZABLE_TX,
+    );
+
+    release();
+    await expect(disconnecting).rejects.toThrow("cursor reset failed");
+
+    // Nothing of the disconnect is visible…
+    expect(prisma.rows[0]).toMatchObject({
+      status: "CONNECTED",
+      apiCredentialsEnc: SEEDED_API_CIPHERTEXT,
+    });
+    expect(prisma.cursors.find((c) => c.id === "cur_1")).toMatchObject({
+      state: "FAILED",
+      needsReconnect: true,
+    });
+    // …while the transaction that DID commit survived the rollback.
+    expect(prisma.cursors.find((c) => c.id === "cur_other")).toMatchObject({
+      lastError: "committed by the concurrent writer",
+    });
   });
 });
 
@@ -338,5 +756,50 @@ describe("connect() after a disconnect is a full re-provision", () => {
     const data = updateData(prisma);
     expect(data.apiCaCert).toContain("fresh");
     expect(data.apiRouteMap).toEqual({ appointments: "/api/appt" });
+  });
+
+  /**
+   * WARP-2482 — the reconnect half of the same story.
+   *
+   * `disconnect()` now resets on the way out, so on a row this build disabled
+   * these are belt and braces. They are not redundant: a row disabled by a
+   * build that predates this change still carries its stale watermarks and its
+   * latched `needsReconnect`, and `connect()` is the only place left that
+   * repairs it. The position also simply is not ours to keep — the grant being
+   * pasted is a new one, and a watermark earned by the old one is not a claim
+   * we can stand behind.
+   */
+  it("starts a reconnect from reset cursors, in the same transaction as the flip", async () => {
+    // Mutation: delete the `resetCursorsForConnection(tx, existing.id)` call
+    // from `connect()`'s DISABLED branch → red.
+    // Mutation: move it outside the `$transaction` → red on the transaction
+    // count, which is what stops a reconnect from rewinding cursors while its
+    // own status flip rolls back.
+    const prisma = stubPrisma(purgedRow(), [revokedCursor()]);
+    await serviceFor(prisma).connect({ host: "10.0.0.9" });
+
+    const { where, data } = cursorResetCall(prisma);
+    expect(where).toEqual({ connectionId: "conn_1" });
+    expect(data).toMatchObject(UNSTARTED_CURSOR_FIELDS);
+    expect(prisma.seam.calls()).toHaveLength(1);
+    expectAllTransactionsAt(prisma.seam, SERIALIZABLE_TX);
+  });
+
+  it("leaves a LIVE connection's cursors alone — the gate is the DISABLED enum", async () => {
+    // The other half of the gate, and the mutation that matters most:
+    // dropping the `existing.status !== "DISABLED"` check → red here.
+    // Re-running connect() on a CONNECTED row is how an owner changes a host
+    // or rotates a key on a live connection; wiping the watermarks there
+    // silently re-enumerates the entire account for an edit that changed
+    // nothing about the position.
+    const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
+    await serviceFor(prisma).connect({ host: "10.0.0.9" });
+
+    expect(prisma.erpSyncCursor.updateMany).not.toHaveBeenCalled();
+    expect(prisma.cursors[0]).toMatchObject({
+      watermark: "2026-08-20T00:00:00.000Z",
+    });
+    // And no transaction was opened for a path with only one write to make.
+    expect(prisma.seam.calls()).toHaveLength(0);
   });
 });
