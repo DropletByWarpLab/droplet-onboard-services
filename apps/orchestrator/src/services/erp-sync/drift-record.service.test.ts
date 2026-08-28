@@ -225,7 +225,12 @@ describe("the stored row carries no customer content", () => {
       ],
     );
     expect(real.missedCount).toBe(1); // the gap is genuinely detected...
-    expect(real.earliestMissedAt).toBeNull(); // ...off a marker that is an ID.
+    // ...and DATED, off the `updated_at` it was detected on, even though the
+    // record's own ordering key is an invoice number. Before WARP-2495 this
+    // was `null`: the row was judged missed on its `updated_at` and then dated
+    // on its marker, so the forensic answer contradicted the finding.
+    // MUTATION: `isoInstant(r.marker)` instead of `isoInstant(value)` → null → red.
+    expect(real.earliestMissedAt?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
 
     const row = await recordEntityDrift(prisma, {
       connectionId: "conn-1",
@@ -239,11 +244,42 @@ describe("the stored row carries no customer content", () => {
     const stored = JSON.stringify(prisma.erpDriftRecord.create.mock.calls[0][0]);
     expect(stored).not.toContain("INV-1003");
     expect(stored).not.toContain("INV-1001");
-    expect(row.earliestMissedAt).toBeNull();
+    expect(row.earliestMissedAt?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
     // The diagnosis itself is intact — this is not "safe because it stored
     // nothing".
     expect(row.classification).toBe("MISSED_NEWER_AND_WATERMARK_BEHIND");
     expect(row.missedCount).toBe(1);
+  });
+
+  it("stores no date at all when a missed record's only position is an id", async () => {
+    // The other side of the flip above, so "dates the gap off the judged-on
+    // value" never becomes "coerces whatever it was handed". A null watermark
+    // filtered nothing, so this row is missed on the ABSENCE itself and the
+    // predicate never orders anything — yet its only position is still an
+    // invoice number, and `isoInstant` is what keeps that out of a DateTime
+    // column.
+    //
+    // MUTATION: coerce with a bare `new Date(value)` → "INV-1003" lands as an
+    // Invalid Date rather than null → red.
+    const prisma = driftPrisma();
+    const real = diffForDrift(
+      "invoice",
+      null,
+      [],
+      [{ sourceKey: "INV-1003", marker: "INV-1003", updatedAt: null }],
+    );
+    expect(real.missedCount).toBe(1);
+    expect(real.earliestMissedAt).toBeNull();
+
+    const row = await recordEntityDrift(prisma, {
+      connectionId: "conn-1",
+      provider: "stripe",
+      sweepAt: NOW,
+      watermark: null,
+      drift: real,
+    });
+    expect(row.earliestMissedAt).toBeNull();
+    expect(JSON.stringify(prisma.erpDriftRecord.create.mock.calls[0][0])).not.toContain("INV-1003");
   });
 
   it("never stores a watermark the vendor expressed as a record id", async () => {

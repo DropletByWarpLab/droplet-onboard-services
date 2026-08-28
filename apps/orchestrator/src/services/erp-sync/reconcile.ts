@@ -98,7 +98,7 @@ export interface ErpEntityDrift {
    *  this entity on this pass, which is itself the useful signal. */
   classes: ErpDriftClass[];
   /**
-   * Oldest marker among the missed records, as a TIMESTAMP (WARP-2463).
+   * Oldest position among the missed records, as a TIMESTAMP (WARP-2463).
    *
    * "How far back did the gap start" is the forensic question when an owner
    * reports that the assistant did not know about something. Computed here
@@ -106,8 +106,16 @@ export interface ErpEntityDrift {
    * exactly one implementation — a second copy in the persistence layer would
    * be free to disagree with this one, and the disagreement would be silent.
    *
-   * `null` when nothing was missed, and also when the missed records' markers
-   * are not timestamps at all. See `watermark.ts`'s `isoInstant`.
+   * Measured on the value the record was JUDGED missed on — `watermarkValueOf`,
+   * the same one the predicate and the advance use (WARP-2495). Reading the
+   * ordering key here instead would answer a different question from the one
+   * that selected the record: a row caught only because its `updated_at` moved
+   * would report `null` beside a `missedCount` of 1, which reads as "we cannot
+   * date the gap" when in fact we can.
+   *
+   * `null` when nothing was missed, and when the missed records have no ISO
+   * position at all — an opaque token is never a timestamp and must never be
+   * stored as one. See `watermark.ts`'s `isoInstant`.
    */
   earliestMissedAt: Date | null;
 }
@@ -207,6 +215,12 @@ export function diffForDrift(
   let earliestMissedAt: Date | null = null;
   for (const r of full) {
     if (seen.has(r.sourceKey)) continue;
+    // The row's position, chosen exactly as the watermark's own advance
+    // chooses it. Bound ONCE and used for both the predicate below and the
+    // forensic timestamp under it, so the two cannot come to answer on
+    // different values (WARP-2495) — which is what happened when the predicate
+    // moved to `updated_at` and `earliestMissedAt` stayed on the ordering key.
+    const value = watermarkValueOf(r);
     // Strictly after, on the SAME value the watermark advances on and through
     // the SAME comparator `watermark-behind` uses (WARP-2495). Three
     // consequences, each of which was a defect in the string compare this
@@ -228,10 +242,14 @@ export function diffForDrift(
     //
     // A null watermark filtered nothing, so absence from the incremental read
     // is drift on its own evidence; `isWatermarkAhead` answers that too.
-    if (!isWatermarkAhead(watermarkValueOf(r), watermark)) continue;
+    if (!isWatermarkAhead(value, watermark)) continue;
     missedCount += 1;
-    // Coerced HERE, so no caller ever sees the raw marker of a missed record.
-    const at = isoInstant(r.marker);
+    // Coerced HERE, so no caller ever sees a missed record's raw position.
+    // `isoInstant` is `null` for an opaque token, and that is the whole of
+    // WARP-2463's PHI rule: a vendor that orders by its record key cannot get
+    // an invoice number into a DateTime column, because there is no path from
+    // a raw position to storage that does not pass through this line.
+    const at = isoInstant(value);
     if (at !== null && (earliestMissedAt === null || at < earliestMissedAt)) {
       earliestMissedAt = at;
     }
