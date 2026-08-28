@@ -1,0 +1,18 @@
+# WARP-2493 PROOF COMMIT — DO NOT MERGE.
+#
+# Deliberate hadolint violations, to demonstrate live that ci-summary now goes
+# RED because of the hadolint leg. Before WARP-2493 the hadolint job went red
+# and the merge went through anyway. This branch is deleted as soon as the run
+# URL is captured.
+#
+# A hadolint violation is used rather than a planted secret because
+# .gitleaks.toml sets `useDefault = true`, so every gitleaks rule here is a
+# known vendor token shape — and GitHub push protection enforces those same
+# shapes at `git push`, rejecting the commit before CI ever runs (WARP-2379).
+# The ticket sanctions this fallback explicitly.
+#
+# DL3007 (warning): always tag the version of an image explicitly.
+FROM ubuntu:latest
+
+# DL3002 (error): last USER should not be root.
+USER root
