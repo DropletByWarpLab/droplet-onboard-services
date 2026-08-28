@@ -162,7 +162,14 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
-import type { DatasetName } from "../export-drop/profiles.js";
+import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
+import {
+  canonicalInstant,
+  projectCanonicalRow,
+  type CanonicalRow,
+  type VendorLookup,
+} from "../canonical-row.js";
+import { sortByKey } from "../api-dto.js";
 
 /** Provider key for this track. */
 export const HUBSPOT_PROVIDER = "hubspot";
@@ -349,15 +356,163 @@ export const HUBSPOT_DATASETS: readonly DatasetName[] = [
   "engagement",
 ];
 
-/** The canonical columns each served dataset exposes. Synthesized rather than
- *  introspected: HubSpot's schema is HubSpot's, published and versioned. */
-const HUBSPOT_DATASET_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  contact: ["id", "email", "firstname", "lastname", "lifecyclestage", LAST_MODIFIED_PROPERTY],
-  company: ["id", "name", "domain", "industry", LAST_MODIFIED_PROPERTY],
-  deal: ["id", "dealname", "dealstage", "pipeline", "amount", LAST_MODIFIED_PROPERTY],
-  ticket: ["id", "subject", "hs_pipeline_stage", "hs_ticket_priority", LAST_MODIFIED_PROPERTY],
-  engagement: ["id", "hs_engagement_type", "hs_timestamp", LAST_MODIFIED_PROPERTY],
+/**
+ * The HubSpot CRM object type(s) each canonical dataset is read from.
+ *
+ * Four of the five are one-to-one. `engagement` is not: HubSpot has no
+ * "engagement" object in the v3 CRM API — a timeline activity is a `call`, an
+ * `email`, a `meeting`, a `note` or a `task`, each its own object type behind
+ * its own endpoint. They union into one canonical dataset because "what
+ * happened with this customer" is one question, and answering it from five
+ * separately-polled tables would put the ordering burden on every caller.
+ *
+ * Which one a row came from is not lost in the union — it becomes the
+ * dataset's `type` column, via {@link ENGAGEMENT_TYPE_OF}.
+ */
+export const HUBSPOT_DATASET_OBJECT_TYPES: Readonly<Record<string, readonly string[]>> = {
+  contact: ["contacts"],
+  company: ["companies"],
+  deal: ["deals"],
+  ticket: ["tickets"],
+  engagement: ["calls", "emails", "meetings", "notes", "tasks"],
 };
+
+/**
+ * The canonical `type` value each engagement object type contributes.
+ *
+ * A table rather than a `slice(0, -1)` depluralisation: the mapping happens to
+ * be regular for these five and would silently produce "activitie" for the
+ * first irregular one added.
+ */
+const ENGAGEMENT_TYPE_OF: Readonly<Record<string, string>> = {
+  calls: "call",
+  emails: "email",
+  meetings: "meeting",
+  notes: "note",
+  tasks: "task",
+};
+
+/**
+ * The vendor properties each dataset's canonical row is built from.
+ *
+ * HubSpot returns ONLY the properties a request names — an unnamed property is
+ * absent from the response rather than defaulted — so this list is what makes
+ * the row mappers below able to fill anything at all. It was previously a
+ * `HUBSPOT_DATASET_COLUMNS` table describing the schema, which is what
+ * `CANONICAL_COLUMNS` does now that WARP-2466 put these five names in the
+ * union; keeping both would be two lists to hold in step.
+ *
+ * `hs_lastmodifieddate` is deliberately absent from every row: it is appended
+ * by {@link withLastModifiedProperty} on the way out, so a dataset cannot lose
+ * the connector's filter, sort key and watermark by editing this table.
+ */
+export const HUBSPOT_DATASET_PROPERTIES: Readonly<Record<string, readonly string[]>> = {
+  contact: [
+    "createdate",
+    "firstname",
+    "lastname",
+    "email",
+    // The primary associated company, exposed by HubSpot as a real read-only
+    // CONTACT property. The other three datasets have no equivalent — see the
+    // association note on the mappers below.
+    "associatedcompanyid",
+    "lifecyclestage",
+  ],
+  company: ["createdate", "name", "domain"],
+  deal: ["createdate", "closedate", "dealname", "dealstage", "amount", "deal_currency_code"],
+  ticket: ["createdate", "closed_date", "subject", "hs_pipeline_stage", "hs_ticket_priority"],
+  engagement: ["hs_timestamp"],
+};
+
+/**
+ * One dataset's vendor-record -> canonical-column lookup.
+ *
+ * Returns the RAW vendor value; `projectCanonicalRow` owns the coercion and
+ * owns the row's key set, so a mapper cannot emit an extra key, cannot skip a
+ * canonical one, and cannot disagree with another track about how a money or
+ * timestamp column is spelled.
+ *
+ * ## The association columns
+ *
+ * `deal.company_id`, `ticket.contact_id`, `engagement.contact_id` and
+ * `engagement.deal_id` are left undefined, and that is a statement rather than
+ * an oversight. Those links are HubSpot ASSOCIATIONS, not properties: the
+ * Search endpoint this track reads returns a property bag and no association
+ * data at all, so there is nothing on the record to map. They stay present and
+ * undefined, exactly as `profiles.ts` specifies for a column a track has no
+ * source for — the alternative, dropping the key, would make a row that is
+ * missing a link indistinguishable from a row whose link is absent.
+ *
+ * `contact.company_id` is the one that CAN be filled, because HubSpot exposes
+ * the primary company on the contact as an ordinary property.
+ */
+function hubspotLookup(record: HubSpotRecord, objectType: string): VendorLookup {
+  const p = record.properties;
+  return (column: string): unknown => {
+    switch (column) {
+      // Every dataset's own id column is the OBJECT id, never a property.
+      case "contact_id":
+        // On `contact` this is the record itself; on `ticket`/`engagement` it
+        // is an association this track cannot read.
+        return objectType === "contacts" ? record.id : undefined;
+      case "company_id":
+        return objectType === "companies" ? record.id : p.associatedcompanyid;
+      case "deal_id":
+        return objectType === "deals" ? record.id : undefined;
+      case "ticket_id":
+      case "engagement_id":
+        return record.id;
+
+      case "created_at":
+        return p.createdate;
+      // HubSpot spells the close date differently on deals and tickets.
+      case "closed_at":
+        return objectType === "deals" ? p.closedate : p.closed_date;
+      // When the activity HAPPENED, which is not when the record was written.
+      case "occurred_at":
+        return p.hs_timestamp;
+      // Already parsed and normalised by `toRecord` (WARP-2494). Read from the
+      // record rather than re-parsing the property, so one record cannot carry
+      // two spellings of its own modification time.
+      case "updated_at":
+        return record.updated_at;
+
+      case "first_name":
+        return p.firstname;
+      case "last_name":
+        return p.lastname;
+      case "email":
+        return p.email;
+      case "lifecycle_stage":
+        return p.lifecyclestage;
+      case "name":
+        return objectType === "deals" ? p.dealname : p.name;
+      case "domain":
+        return p.domain;
+      case "stage":
+        return p.dealstage;
+      case "amount":
+        return p.amount;
+      case "currency":
+        return p.deal_currency_code;
+      case "subject":
+        return p.subject;
+      // A ticket's "status" is its pipeline stage — HubSpot has no separate
+      // status property, and inventing one from `closed_date IS NULL` is the
+      // guessed-state pattern the house rules forbid.
+      case "status":
+        return p.hs_pipeline_stage;
+      case "priority":
+        return p.hs_ticket_priority;
+      // Which of the five engagement object types this row came from.
+      case "type":
+        return ENGAGEMENT_TYPE_OF[objectType];
+
+      default:
+        return undefined;
+    }
+  };
+}
 
 /**
  * Every resource this connector may ever dial.
@@ -1403,7 +1558,12 @@ export class HubSpotConnector implements Connector {
     return HUBSPOT_DATASETS.map((dataset) => ({
       name: dataset,
       owner: HUBSPOT_PROVIDER,
-      columns: (HUBSPOT_DATASET_COLUMNS[dataset] ?? []).map((name) => ({ name, type: "text" })),
+      // From `CANONICAL_COLUMNS` since WARP-2466 put these five names in the
+      // union — the same shape `runRead` actually returns. It used to be a
+      // local table of HubSpot PROPERTY spellings, which described the vendor
+      // rather than the rows this track serves, so drift-freeze was watching a
+      // schema no caller ever saw.
+      columns: CANONICAL_COLUMNS[dataset].map((name) => ({ name, type: "text" })),
     }));
   }
 
@@ -1417,20 +1577,158 @@ export class HubSpotConnector implements Connector {
     return { tables, fingerprint };
   }
 
-  async runRead(name: string, _params: Record<string, unknown>): Promise<unknown[]> {
+  /**
+   * Serve a named CRM read as canonical rows (WARP-2497).
+   *
+   * Before this existed the method threw by design, because the track declared
+   * `crm_*` names no registry query could reach. WARP-2466 reconciled those
+   * names into the vocabulary, so the five CRM reads now route here — and while
+   * this still threw, WARP-2218's scheduled sync ran, succeeded, and landed
+   * nothing.
+   *
+   * ## The filter params are optional, and that is the whole design
+   *
+   * The registry's queries are written for the SQL track, where every one
+   * carries a mandatory filter (`find_contact` takes a name prefix,
+   * `get_deals_by_stage` a stage). The sync runner is not a caller of that
+   * shape: it passes `{}` or `{ since }` and expects the dataset ENUMERATED.
+   * Both are served here — a filter param that is present filters, and one that
+   * is absent enumerates — so the same named read backs the assistant's lookup
+   * and the poller's sweep without a second query name meaning almost the same
+   * thing.
+   *
+   * `since` is the poller's watermark, applied as HubSpot's own
+   * `hs_lastmodifieddate` floor through the shipped Search path: the 10,000
+   * result cap, the re-anchoring, the rate governor and the consistency overlap
+   * are {@link pollObjectChanges}'s and are not reimplemented here.
+   */
+  async runRead(name: string, params: Record<string, unknown>): Promise<unknown[]> {
     const query = getReadQuery(name);
-    // Every registered read depends on the six canonical datasets, and this
-    // track serves none of them, so this refuses — loudly and by type. That is
-    // a capability statement: `[]` from `get_open_invoices` reads as "you are
-    // owed nothing", which no caller can tell apart from a genuinely empty
-    // ledger. HubSpot's own surface is served by the named methods below.
+    // Still the capability statement it always was: `[]` from
+    // `get_open_invoices` reads as "you are owed nothing", which no caller can
+    // tell apart from a genuinely empty ledger. This track serves the five CRM
+    // datasets and refuses the rest, by type, before any I/O.
     assertDatasetsServed(this.provider, this.servesDatasets, name, query.dependsOnTables);
-    throw this.blocked(
-      `runRead:${name}`,
-      "the HubSpot track answers CRM reads through its own named methods; the canonical " +
-        "read registry is built on accounting and practice-management datasets it does " +
-        "not serve",
-    );
+    const dataset = query.dependsOnTables[0];
+    const op = `runRead:${name}`;
+
+    const rows = await this.enumerate(dataset, params.since);
+
+    switch (name) {
+      case "find_contact": {
+        const prefix = HubSpotConnector.lowerText(params.query);
+        const matched =
+          prefix === undefined
+            ? rows
+            : rows.filter((r) => HubSpotConnector.lowerText(r.last_name)?.startsWith(prefix));
+        return sortByKey(sortByKey(matched, "first_name"), "last_name");
+      }
+      case "get_company": {
+        const wanted = HubSpotConnector.lowerText(params.companyId);
+        return wanted === undefined
+          ? rows
+          : rows.filter((r) => HubSpotConnector.lowerText(r.company_id) === wanted);
+      }
+      case "get_deals_by_stage": {
+        const stage = HubSpotConnector.lowerText(params.stage);
+        const matched =
+          stage === undefined
+            ? rows
+            : rows.filter((r) => HubSpotConnector.lowerText(r.stage) === stage);
+        // `ORDER BY amount DESC, deal_id`. Sorted ascending then reversed would
+        // also reverse the id tiebreak, so the descending leg is its own pass.
+        const byId = sortByKey(matched, "deal_id");
+        return [...byId].sort((a, b) => Number(b.amount ?? 0) - Number(a.amount ?? 0));
+      }
+      case "get_tickets_by_status": {
+        const status = HubSpotConnector.lowerText(params.status);
+        const matched =
+          status === undefined
+            ? rows
+            : rows.filter((r) => HubSpotConnector.lowerText(r.status) === status);
+        // Oldest first — the ticket that has waited longest is the one an owner
+        // needs to see, which is the opposite of every other list here.
+        return sortByKey(sortByKey(matched, "ticket_id"), "created_at");
+      }
+      case "get_engagements": {
+        const windowed = HubSpotConnector.inWindow(rows, "occurred_at", params.from, params.to);
+        const byId = sortByKey(windowed, "engagement_id");
+        // `ORDER BY occurred_at DESC, engagement_id`.
+        return [...byId].sort((a, b) => String(b.occurred_at ?? "").localeCompare(String(a.occurred_at ?? "")));
+      }
+      default:
+        // Unreachable while every served read is handled above; a new registry
+        // entry on a served dataset lands here rather than silently returning
+        // nothing, which would read as "your CRM is empty".
+        throw this.blocked(op, "read is not served by the HubSpot track");
+    }
+  }
+
+  /**
+   * Enumerate one canonical dataset as canonical rows.
+   *
+   * Runs the shipped delta poller once per HubSpot object type the dataset
+   * covers — one for the four CRM objects, five for `engagement` — and projects
+   * every record through {@link projectCanonicalRow}, so the row's key set is
+   * `CANONICAL_COLUMNS[dataset]` by construction rather than by convention.
+   */
+  private async enumerate(dataset: DatasetName, since: unknown): Promise<CanonicalRow[]> {
+    const watermark = HubSpotConnector.watermarkMs(since);
+    const objectTypes = HUBSPOT_DATASET_OBJECT_TYPES[dataset] ?? [];
+    const properties = HUBSPOT_DATASET_PROPERTIES[dataset] ?? [];
+    const rows: CanonicalRow[] = [];
+    for (const objectType of objectTypes) {
+      const page = await this.pollObjectChanges({ objectType, watermark, properties });
+      for (const record of page.records) {
+        rows.push(projectCanonicalRow(dataset, hubspotLookup(record, objectType)));
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * The poller's `since` as an epoch-millisecond floor.
+   *
+   * Absent or unparseable becomes 0 — a full enumeration — rather than `now`:
+   * a watermark that could not be read must re-read everything, because the
+   * alternative is silently skipping the window it could not parse.
+   */
+  private static watermarkMs(since: unknown): number {
+    if (typeof since === "number") return Number.isFinite(since) ? since : 0;
+    if (typeof since !== "string" || since.trim() === "") return 0;
+    const raw = since.trim();
+    const ms = /^-?\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  /** Case-folded text for a comparison, or undefined for an absent value.
+   *  HubSpot stage and status values are vendor-supplied strings whose casing
+   *  a caller has no way to know. */
+  private static lowerText(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const raw = value.trim();
+    return raw === "" ? undefined : raw.toLowerCase();
+  }
+
+  /** Half-open `[from, to)` on an ISO column, skipping either bound the caller
+   *  omitted. Rows with no value in the column are dropped by a bounded read —
+   *  a row that cannot be placed in the window is not in it. */
+  private static inWindow(
+    rows: readonly CanonicalRow[],
+    column: string,
+    from: unknown,
+    to: unknown,
+  ): CanonicalRow[] {
+    const lo = typeof from === "string" ? canonicalInstant(from) : undefined;
+    const hi = typeof to === "string" ? canonicalInstant(to) : undefined;
+    if (lo === undefined && hi === undefined) return [...rows];
+    return rows.filter((r) => {
+      const v = r[column];
+      if (typeof v !== "string") return false;
+      if (lo !== undefined && v < lo) return false;
+      if (hi !== undefined && v >= hi) return false;
+      return true;
+    });
   }
 
   async applyWrite(name: string, _params: Record<string, unknown>): Promise<unknown> {

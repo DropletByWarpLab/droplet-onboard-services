@@ -105,7 +105,14 @@ import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
 import { md5Hex } from "./md5.js";
-import type { DatasetName } from "../export-drop/profiles.js";
+import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
+import {
+  canonicalInstant,
+  projectCanonicalRow,
+  type CanonicalRow,
+  type VendorLookup,
+} from "../canonical-row.js";
+import { sortByKey } from "../api-dto.js";
 
 /** Provider key for this track. */
 export const MAILCHIMP_PROVIDER = "mailchimp";
@@ -920,24 +927,95 @@ export interface MailchimpMemberPage {
   watermark: string | undefined;
 }
 
-const MAILCHIMP_DATASET_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  // `updated_at` (WARP-2494) is the CANONICAL modification column, from the
-  // member's own `last_changed`. Both are listed: the vendor field is what the
-  // delta filter keys on and what an operator recognises, the canonical column
-  // is what a watermark reads. A Mailchimp audience member IS a list member,
-  // which is why this dataset can honestly carry the column while `campaign`
-  // cannot. (WARP-2466 renamed the dataset `contact` -> `audience_member`.)
-  audience_member: [
-    "contact_id",
-    "email_address",
-    "status",
-    "last_changed",
-    "opt_in_time",
-    "updated_at",
-  ],
-  campaign: ["campaign_id", "title", "status", "send_time", "emails_sent"],
-  ecommerce_order: ["order_id", "store_id", "customer_id", "order_total", "processed_at"],
-};
+/**
+ * One Mailchimp record -> canonical-column lookup, per dataset.
+ *
+ * Returns the RAW vendor value; `projectCanonicalRow` owns the coercion and
+ * owns the row's key set, so a mapper can neither leak a vendor field onto a
+ * row nor drop a canonical one. That matters more here than on the other
+ * tracks: a Mailchimp member object carries the subscriber's IP addresses,
+ * their opt-in source, their full merge-field bag and a location guess, none of
+ * which this product asked for and all of which would be persisted on the box
+ * by a mapper written as `{ ...member, ... }`.
+ *
+ * ## Where `updated_at` went
+ *
+ * It is absent from all three datasets, and only `audience_member` has a
+ * modification time at all — Mailchimp's `last_changed`, which WARP-2466
+ * spelled `last_changed_at` in the canonical vocabulary rather than
+ * `updated_at`. So the poller's watermark for this track keys on
+ * `last_changed_at`. The `updated_at` field WARP-2494 projects onto the raw
+ * member payload in {@link MailchimpConnector.listMembers} is that same
+ * instant under the other name, kept for callers of the named method.
+ */
+function mailchimpLookup(dataset: DatasetName, record: Record<string, unknown>): VendorLookup {
+  const nested = (key: string, field: string): unknown => {
+    const node = record[key];
+    return node && typeof node === "object" ? (node as Record<string, unknown>)[field] : undefined;
+  };
+  return (column: string): unknown => {
+    switch (column) {
+      // Every dataset's id column is the record's own `id`.
+      case "audience_member_id":
+      case "campaign_id":
+      case "ecommerce_order_id":
+        return record.id;
+
+      // A member carries its list id directly; a campaign's is under
+      // `recipients`, which is the object Mailchimp scopes a send by.
+      case "audience_id":
+        return dataset === "campaign" ? nested("recipients", "list_id") : record.list_id;
+
+      case "email":
+        return record.email_address;
+      case "subscription_status":
+        return record.status;
+      // Mailchimp's opt-in timestamp. Empty string for a member who never
+      // double-opted-in, which `canonicalText`/`canonicalInstant` read as
+      // absent rather than as the epoch.
+      case "timestamp_opt":
+      case "opted_in_at":
+        return record.timestamp_opt;
+      case "last_changed_at":
+        return record.last_changed;
+
+      // The subject line lives under `settings`, not on the campaign root.
+      case "subject":
+        return nested("settings", "subject_line");
+      case "status":
+        return record.status;
+      case "sent_at":
+        return record.send_time;
+      case "emails_sent":
+        return record.emails_sent;
+      // Report counts, and DELIBERATELY the unique ones: Mailchimp also
+      // publishes `opens` and `clicks` totals, which count the same subscriber
+      // repeatedly and are a different measurement from the one these columns
+      // name.
+      case "opens_unique":
+        return nested("report_summary", "unique_opens");
+      case "clicks_unique":
+        return nested("report_summary", "subscriber_clicks");
+
+      case "store_id":
+        return record.store_id;
+      case "customer_id":
+        return nested("customer", "id");
+      case "total_amount":
+        return record.order_total;
+      case "currency":
+        return record.currency_code;
+      // The store's OWN clock (`_foreign`), not Mailchimp's ingest time: an
+      // order imported a day late still happened when the storefront says it
+      // did, and the ingest time would reorder a revenue report.
+      case "processed_at":
+        return record.processed_at_foreign;
+
+      default:
+        return undefined;
+    }
+  };
+}
 
 export class MailchimpConnector implements Connector {
   readonly provider = MAILCHIMP_PROVIDER;
@@ -1277,13 +1355,12 @@ export class MailchimpConnector implements Connector {
     return MAILCHIMP_DATASETS.map((dataset) => ({
       name: dataset,
       owner: MAILCHIMP_PROVIDER,
-      // NOT from `CANONICAL_COLUMNS`: none of these dataset names exist in the
-      // closed `DatasetName` union yet (WARP-2280), so indexing it would be a
-      // lie the type system cannot catch.
-      columns: (MAILCHIMP_DATASET_COLUMNS[dataset] ?? []).map((name) => ({
-        name,
-        type: "text",
-      })),
+      // From `CANONICAL_COLUMNS` since WARP-2466 put these three names in the
+      // union — the same shape `runRead` returns. The previous comment here
+      // said indexing it "would be a lie the type system cannot catch", which
+      // was true while the names were outside the union and stopped being true
+      // when the reconciliation landed.
+      columns: CANONICAL_COLUMNS[dataset].map((name) => ({ name, type: "text" })),
     }));
   }
 
@@ -1304,14 +1381,172 @@ export class MailchimpConnector implements Connector {
    * serve raises `DatasetNotServedError`, both of which are honest. The
    * marketing surface is reached through the named methods below.
    */
-  async runRead(name: string, _params: Record<string, unknown>): Promise<unknown[]> {
+  /**
+   * Serve a named marketing read as canonical rows (WARP-2497).
+   *
+   * Before this existed the method threw by design, and WARP-2218's scheduled
+   * sync therefore ran, reported success, and landed nothing.
+   *
+   * Filter params are OPTIONAL for the same reason as on the HubSpot track: the
+   * registry's queries carry mandatory filters written for the SQL track, while
+   * the sync runner passes `{}` or `{ since }` and wants the dataset
+   * enumerated. A param that is present filters; one that is absent enumerates.
+   *
+   * `since` reaches the vendor as `since_last_changed` / `since_send_time` —
+   * the documented delta filters — for the two datasets that have one.
+   * `ecommerce_order` has none at all ({@link MAILCHIMP_SCAN_MODE},
+   * {@link MAILCHIMP_ECOMMERCE_ORDER_PARAMS}), so `since` is applied to the
+   * MAPPED rows there instead of being smuggled into a query string Mailchimp
+   * would silently ignore — a full scan reported as a delta is precisely the
+   * failure {@link assertEcommerceOrderParams} exists to prevent.
+   */
+  async runRead(name: string, params: Record<string, unknown>): Promise<unknown[]> {
     const query = getReadQuery(name);
     assertDatasetsServed(this.provider, this.servesDatasets, name, query.dependsOnTables);
-    throw this.blocked(
-      `runRead:${name}`,
-      "the Mailchimp track serves its datasets through its named read methods until the " +
-        "read registry carries marketing queries (WARP-2410)",
+    const dataset = query.dependsOnTables[0];
+    const op = `runRead:${name}`;
+    const since = canonicalInstant(params.since);
+
+    switch (name) {
+      case "get_audience_members": {
+        const wanted = MailchimpConnector.text(params.audienceId);
+        const listIds = wanted === undefined ? await this.audienceIds() : [wanted];
+        const rows: CanonicalRow[] = [];
+        for (const listId of listIds) {
+          const page = await this.listMembers(listId, { sinceLastChanged: since });
+          for (const member of page.rows) {
+            // `list_id` is on the member payload, but a member fetched through
+            // a list endpoint that omitted it would silently lose its audience,
+            // so the id the read was scoped BY is the fallback.
+            rows.push(
+              projectCanonicalRow(
+                dataset,
+                mailchimpLookup(dataset, { list_id: listId, ...member }),
+              ),
+            );
+          }
+        }
+        const status = MailchimpConnector.text(params.status)?.toLowerCase();
+        const matched =
+          status === undefined
+            ? rows
+            : rows.filter((r) => String(r.subscription_status ?? "").toLowerCase() === status);
+        // `ORDER BY last_changed_at DESC, audience_member_id`.
+        const byId = sortByKey(matched, "audience_member_id");
+        return [...byId].sort((a, b) =>
+          String(b.last_changed_at ?? "").localeCompare(String(a.last_changed_at ?? "")),
+        );
+      }
+
+      case "get_campaign_performance": {
+        const raw = await this.listCampaigns({ sinceSendTime: since });
+        const rows = raw.map((c) => projectCanonicalRow(dataset, mailchimpLookup(dataset, c)));
+        const windowed = MailchimpConnector.inWindow(rows, "sent_at", params.from, params.to);
+        // `ORDER BY sent_at DESC, campaign_id`.
+        const byId = sortByKey(windowed, "campaign_id");
+        return [...byId].sort((a, b) =>
+          String(b.sent_at ?? "").localeCompare(String(a.sent_at ?? "")),
+        );
+      }
+
+      case "get_ecommerce_orders": {
+        const rows: CanonicalRow[] = [];
+        for (const storeId of await this.ecommerceStoreIds()) {
+          const raw = await this.listEcommerceOrders(storeId);
+          for (const order of raw) {
+            rows.push(
+              projectCanonicalRow(
+                dataset,
+                mailchimpLookup(dataset, { store_id: storeId, ...order }),
+              ),
+            );
+          }
+        }
+        // The window is applied here, after mapping, because the endpoint has
+        // no date parameter to push it down to.
+        let windowed = MailchimpConnector.inWindow(rows, "processed_at", params.from, params.to);
+        if (since !== undefined) {
+          windowed = windowed.filter(
+            (r) => typeof r.processed_at === "string" && r.processed_at >= since,
+          );
+        }
+        // `ORDER BY processed_at DESC, ecommerce_order_id`.
+        const byId = sortByKey(windowed, "ecommerce_order_id");
+        return [...byId].sort((a, b) =>
+          String(b.processed_at ?? "").localeCompare(String(a.processed_at ?? "")),
+        );
+      }
+
+      default:
+        // Unreachable while every served read is handled above; a new registry
+        // entry on a served dataset lands here rather than silently returning
+        // nothing, which would read as "this account has no audience".
+        throw this.blocked(op, "read is not served by the Mailchimp track");
+    }
+  }
+
+  /**
+   * Every audience id on the account.
+   *
+   * Needed because `get_audience_members` is enumerable — the sync runner has
+   * no audience id to pass — while `/lists/{id}/members` is not: there is no
+   * account-wide member endpoint. `lists` is already in
+   * {@link MAILCHIMP_READABLE_RESOURCES}, so this adds no new resource and no
+   * new egress host.
+   */
+  private async audienceIds(): Promise<string[]> {
+    const lists = await this.page(
+      "audienceIds",
+      `${MAILCHIMP_API_BASE_PATH}/lists`,
+      "lists",
+      {},
+      MAILCHIMP_MAX_PAGE_SIZE,
     );
+    return lists.map((l) => MailchimpConnector.text(l.id)).filter((id): id is string => id !== undefined);
+  }
+
+  /** Every e-commerce store id on the account, for the same reason as
+   *  {@link audienceIds}: orders are addressed per store and the poller has no
+   *  store id to pass. */
+  private async ecommerceStoreIds(): Promise<string[]> {
+    const stores = await this.page(
+      "ecommerceStoreIds",
+      `${MAILCHIMP_API_BASE_PATH}/ecommerce/stores`,
+      "stores",
+      {},
+      MAILCHIMP_MAX_PAGE_SIZE,
+    );
+    return stores.map((s) => MailchimpConnector.text(s.id)).filter((id): id is string => id !== undefined);
+  }
+
+  /** A vendor value as trimmed text, or undefined when absent/empty. */
+  private static text(value: unknown): string | undefined {
+    if (typeof value === "string") {
+      const raw = value.trim();
+      return raw === "" ? undefined : raw;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    return undefined;
+  }
+
+  /** Half-open `[from, to)` on an ISO column, skipping either bound the caller
+   *  omitted. A row with no value in the column is not in a bounded window. */
+  private static inWindow(
+    rows: readonly CanonicalRow[],
+    column: string,
+    from: unknown,
+    to: unknown,
+  ): CanonicalRow[] {
+    const lo = canonicalInstant(from);
+    const hi = canonicalInstant(to);
+    if (lo === undefined && hi === undefined) return [...rows];
+    return rows.filter((r) => {
+      const v = r[column];
+      if (typeof v !== "string") return false;
+      if (lo !== undefined && v < lo) return false;
+      if (hi !== undefined && v >= hi) return false;
+      return true;
+    });
   }
 
   async applyWrite(name: string, _params: Record<string, unknown>): Promise<unknown> {
