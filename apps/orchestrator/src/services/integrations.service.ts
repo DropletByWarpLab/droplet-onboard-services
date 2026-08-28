@@ -47,6 +47,11 @@ import {
   EAGLESOFT_API_PROVIDER,
   type ResolvedApiCredentials,
 } from "./erp-provider.js";
+// WARP-2482 — the sync side owns what a cursor reset MEANS; this service owns
+// WHEN one happens. Exposed as a single call so the credential lifecycle never
+// hand-writes the cursor field set (see `UNSTARTED_ERP_CURSOR`).
+import { resetCursorsForConnection } from "./erp-sync/cursor.service.js";
+import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 const logger = createLogger("integrations-service");
 
@@ -215,9 +220,17 @@ export interface IntegrationsServiceDeps {
 
 /** Minimal Prisma surface this service needs (structural — tests pass a stub). */
 type IntegrationsPrisma = Pick<PrismaClient, "integrationConnection" | "erpAuditLog"> &
+  // WARP-2482 — the credential lifecycle spans two models (the connection row
+  // and its cursors), so the paths that move both need a real transaction.
+  // NOT optional, and not `(fn) => fn(self)`-shaped: taking the genuine
+  // `PrismaClient["$transaction"]` is what types the callback's `tx` as the
+  // full transactional client, which is why `resetCursorsForConnection(tx, …)`
+  // below needs no cast and no optional-chaining.
+  Pick<PrismaClient, "$transaction"> &
   // WARP-2218 — optional so every existing test stub keeps working; a stub
   // without it reports "no cursor registered", which is the honest answer for
-  // a store that has none.
+  // a store that has none. This covers the READ paths only; the reset inside
+  // `disconnect()` goes through `tx`, where the model is always present.
   Partial<Pick<PrismaClient, "erpSyncCursor">>;
 
 /**
@@ -498,20 +511,47 @@ export function createIntegrationsService(
           : {}),
         ...(input.apiCaCert !== undefined ? { apiCaCert: input.apiCaCert } : {}),
       };
-      const base = existing
-        ? await prisma.integrationConnection.update({
-            where: { id: existing.id },
-            data: {
-              host: input.host,
-              port: input.port ?? null,
-              databaseName,
-              secretRef,
-              writeEnabled,
-              status: "PROVISIONING",
-              ...apiMaterial,
-            },
-          })
-        : await prisma.integrationConnection.create({
+      const baseData = {
+        host: input.host,
+        port: input.port ?? null,
+        databaseName,
+        secretRef,
+        writeEnabled,
+        // `as const` because this object is no longer written inline: without
+        // it the literal widens to `string` and stops satisfying Prisma's
+        // `IntegrationStatus` enum input.
+        status: "PROVISIONING" as const,
+        ...apiMaterial,
+      };
+
+      /**
+       * WARP-2482 — a reconnect FROM DISABLED starts from reset cursors.
+       *
+       * Gated on the explicit `DISABLED` enum, never on "the credential
+       * columns look empty". Both halves of that gate matter:
+       *
+       *  • Only DISABLED. Re-running `connect()` on a CONNECTED row is how an
+       *    owner changes a host or rotates a key on a LIVE connection, and
+       *    wiping the watermarks there would silently re-enumerate the entire
+       *    account for an edit that changed nothing about the position.
+       *  • Every DISABLED row, including one that still holds a credential.
+       *    `disconnect()` now resets on the way out, so this is normally a
+       *    no-op — but a row disabled by a build that predates this change
+       *    still carries its stale watermarks and its latched
+       *    `needsReconnect`, and this is the one place that repairs it. It
+       *    also covers the case the position argument rests on: the grant
+       *    being pasted here is a NEW one, and a position earned by the old
+       *    one is not a claim we can stand behind.
+       *
+       * Same transaction as the status flip, for the mirror of the reason
+       * `disconnect()` gives: a reset that commits without the flip rewinds a
+       * connection that is still disabled, and a flip that commits without the
+       * reset puts the hub back to advertising `needsReconnect` on a
+       * connection that just reconnected.
+       */
+      const persistBase = async () => {
+        if (!existing) {
+          return prisma.integrationConnection.create({
             data: {
               provider,
               status: "PROVISIONING",
@@ -524,6 +564,25 @@ export function createIntegrationsService(
               ...apiMaterial,
             },
           });
+        }
+        if (existing.status !== "DISABLED") {
+          // One write, already atomic. A transaction around it would buy
+          // nothing and would cost every existing caller a `$transaction`.
+          return prisma.integrationConnection.update({
+            where: { id: existing.id },
+            data: baseData,
+          });
+        }
+        return prisma.$transaction(async (tx) => {
+          const row = await tx.integrationConnection.update({
+            where: { id: existing.id },
+            data: baseData,
+          });
+          await resetCursorsForConnection(tx, existing.id);
+          return row;
+        }, SERIALIZABLE_TX);
+      };
+      const base = await persistBase();
 
       /**
        * WARP-2283 — the consent record.
@@ -718,6 +777,35 @@ export function createIntegrationsService(
      * would leave a row reading DISABLED while still holding a live credential
      * — precisely the lie being fixed, made durable.
      *
+     * ## WARP-2482 — the cursors go with it, in the same transaction
+     *
+     * The purge above stops at `IntegrationConnection`, and this connection's
+     * `ErpSyncCursor` rows outlived the credential that earned them. Because
+     * `foldSyncState` reads `state` and `needsReconnect` across them,
+     * `detailFor()` and `list()` kept folding a dead credential's last words
+     * into a purged connection's summary — the hub telling an owner to
+     * re-authorize a connection there is nothing left to re-authorize with,
+     * and reporting `syncState: "FAILED"` for a sync that is not running.
+     *
+     * `resetCursorsForConnection` is the sync side's own definition of what
+     * "unstarted" means, so this lifecycle never hand-writes that field set;
+     * it also documents the deliberate decision to RETAIN the WARP-2463 drift
+     * records rather than delete them.
+     *
+     * It runs inside the SAME transaction as the purge for the same reason the
+     * purge is one `update`: two transactions can half-commit. The order of
+     * the two failures is not symmetric, and both are wrong —
+     *   • purge commits, reset does not → credentials gone, cursors still
+     *     claiming `needsReconnect`. The defect, now unfixable by retrying,
+     *     because a second `disconnect()` finds a row it considers already
+     *     purged.
+     *   • reset commits, purge does not → a live, connected connection is
+     *     silently rewound to position zero and re-enumerates the account.
+     * The transaction is SERIALIZABLE because this is a read-then-write: the
+     * decision to purge is taken from the row read at the top, and a connect
+     * committing in between would otherwise have its fresh credential purged
+     * by a disconnect that never saw it.
+     *
      * What this does NOT do: revoke at the vendor. We cannot rotate what we did
      * not mint (ADR-042 §6); the customer revokes in their own console and the
      * setup guides say so. And it does not touch `secretRef` — ADR-041 §4
@@ -725,41 +813,57 @@ export function createIntegrationsService(
      * (WARP-2028), and the column is a non-null pending pointer regardless.
      */
     async disconnect(ctx) {
-      const row = await findRow();
-      if (!row) return toDetail(null); // idempotent — nothing to disconnect
-      const updated = await prisma.integrationConnection.update({
-        where: { id: row.id },
-        data: {
-          status: "DISABLED",
-          writeEnabled: false,
-          // --- the purge, in the SAME write as the status flip -------------
-          apiCredentialsEnc: null,
-          providerTokensEnc: null,
-          providerConfig: Prisma.DbNull,
-          apiRouteMap: Prisma.DbNull,
-          apiCaCert: null,
-          schemaHash: null,
-          schemaVersion: null,
-          lastHealthyAt: null,
-        },
-      });
-      await prisma.erpAuditLog.create({
-        data: {
-          connectionId: row.id,
-          actor: ctx.actor,
-          action: "disconnect",
-          entity: "integration",
-          // `purged` is a literal, not a computed flag: the very `update` above
-          // is what nulls the columns, so re-deriving it here would only be
-          // this function checking its own arithmetic. The marker exists so an
-          // auditor can tell a disconnect that purged from one written by a
-          // build that did not. It is a BOOLEAN and nothing else — the values
-          // never appear, because an append-only, exportable audit row is the
-          // worst possible second home for a credential (rule 19).
-          scope: { provider: EAGLESOFT_PROVIDER, purged: true },
-        },
-      });
-      return toDetail(updated);
+      const purge = await prisma.$transaction(async (tx) => {
+        // Read inside the transaction, not before it. Outside, the row this
+        // decision rests on is not covered by the isolation that protects the
+        // write, and SERIALIZABLE has nothing to conflict on.
+        const row = await tx.integrationConnection.findFirst({
+          where: { provider: EAGLESOFT_PROVIDER },
+        });
+        if (!row) return null; // idempotent — nothing to disconnect
+        const updated = await tx.integrationConnection.update({
+          where: { id: row.id },
+          data: {
+            status: "DISABLED",
+            writeEnabled: false,
+            // --- the purge, in the SAME write as the status flip -------------
+            apiCredentialsEnc: null,
+            providerTokensEnc: null,
+            providerConfig: Prisma.DbNull,
+            apiRouteMap: Prisma.DbNull,
+            apiCaCert: null,
+            schemaHash: null,
+            schemaVersion: null,
+            lastHealthyAt: null,
+          },
+        });
+        const cursorsReset = await resetCursorsForConnection(tx, row.id);
+        await tx.erpAuditLog.create({
+          data: {
+            connectionId: row.id,
+            actor: ctx.actor,
+            action: "disconnect",
+            entity: "integration",
+            // `purged` is a literal, not a computed flag: the very `update`
+            // above is what nulls the columns, so re-deriving it here would
+            // only be this function checking its own arithmetic. The marker
+            // exists so an auditor can tell a disconnect that purged from one
+            // written by a build that did not. It is a BOOLEAN and nothing
+            // else — the values never appear, because an append-only,
+            // exportable audit row is the worst possible second home for a
+            // credential (rule 19).
+            //
+            // `cursorsReset` is a COUNT for the same reason: it says how much
+            // sync position was repudiated, and an entity name is the closest
+            // thing to customer content this row could otherwise acquire.
+            scope: { provider: EAGLESOFT_PROVIDER, purged: true, cursorsReset },
+          },
+        });
+        return updated;
+      }, SERIALIZABLE_TX);
+      // Idempotent — no row meant no write, no reset and no audit.
+      if (!purge) return toDetail(null);
+      return toDetail(purge);
     },
   };
 }

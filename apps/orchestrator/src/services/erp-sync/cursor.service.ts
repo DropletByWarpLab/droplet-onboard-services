@@ -167,6 +167,38 @@ export async function claimDueErpCursors(
 }
 
 /**
+ * Every progress-bearing field of a cursor that has never run, with the
+ * EXPLICIT value each one carries in that state.
+ *
+ * ONE definition, shared by the two writers that have to produce it: the
+ * `create` half of `upsertErpCursor` (a cursor that has never existed) and
+ * `resetCursorsForConnection` (a cursor whose history has been repudiated).
+ * Two hand-written copies would agree on the day they were written and
+ * diverge on the day a field is added — whoever adds it updates the writer
+ * they happen to be thinking about, and the other silently starts leaving a
+ * stale value behind. Shared, extending this object is the only way to extend
+ * either writer.
+ *
+ * `state: "IDLE"` is the load-bearing member, and the reason a reset WRITES
+ * this set rather than deleting the rows. Deleting them would make "this
+ * connection is not syncing" something a later reader INFERS from absence,
+ * which is exactly what the explicit-enum rule forbids — and `foldSyncState`
+ * would then report `syncState: null`, "no cursor registered", a different
+ * claim from "registered, idle, at position zero".
+ */
+export const UNSTARTED_ERP_CURSOR = {
+  /** Null = enumerate from the beginning (schema.prisma:4486-4494). */
+  watermark: null,
+  state: "IDLE",
+  consecutiveFailures: 0,
+  nextAttemptAt: null,
+  lastSyncedAt: null,
+  lastSweepAt: null,
+  needsReconnect: false,
+  lastError: null,
+} as const satisfies { state: ErpSyncStateName } & Record<string, unknown>;
+
+/**
  * Register an entity this connection should track. Idempotent.
  *
  * Deliberately does NOT reset an existing cursor's watermark: registration
@@ -181,21 +213,92 @@ export async function upsertErpCursor(
 ): Promise<void> {
   await prisma.erpSyncCursor.upsert({
     where: { connectionId_entity: { connectionId, entity } },
-    create: {
-      connectionId,
-      entity,
-      watermark: null,
-      state: "IDLE",
-      consecutiveFailures: 0,
-      nextAttemptAt: null,
-      lastSyncedAt: null,
-      lastSweepAt: null,
-      needsReconnect: false,
-      lastError: null,
-    },
+    create: { connectionId, entity, ...UNSTARTED_ERP_CURSOR },
     // Touch nothing that carries progress. Re-registration is not news.
     update: {},
   });
+}
+
+/**
+ * The Prisma surface a cursor RESET needs — deliberately narrower than
+ * `ErpCursorPrisma`.
+ *
+ * The caller is `integrations.service.ts` `disconnect()`, which passes the
+ * interactive transaction handle it is already holding. Demanding the full
+ * scheduler surface there would force every integrations test stub to grow
+ * `claimDueErpCursors`'s methods to satisfy a function that calls exactly one
+ * of them. `ErpCursorPrisma` still satisfies this structurally, so the sync
+ * side can pass its own client unchanged.
+ */
+export interface ErpCursorResetPrisma {
+  erpSyncCursor: { updateMany(args: unknown): Promise<{ count: number }> };
+}
+
+/**
+ * WARP-2482 — return every cursor of one connection to the unstarted state.
+ *
+ * ## The defect this closes
+ *
+ * `disconnect()` (WARP-2453) nulls the eight credential and identity columns
+ * in the same `update` as `status: "DISABLED"`, and left `ErpSyncCursor`
+ * entirely alone. Those rows outlive the credential that earned them, so
+ * `foldSyncState` — which reads `state` and `needsReconnect` across a
+ * connection's cursors — kept folding them into `detailFor()` and `list()`.
+ * A connection whose credential had been revoked and then purged still
+ * rendered `needsReconnect: true` / `syncState: "FAILED"` on the hub: the
+ * dashboard asking an owner to re-authorize a connection nobody can
+ * re-authorize, and reporting a sync failure for a sync that is not running.
+ *
+ * ## Why a reset and not a delete
+ *
+ * See `UNSTARTED_ERP_CURSOR`. Registration survives a disconnect; only
+ * POSITION and HEALTH are repudiated. That also keeps this module inside
+ * ADR-041 §4 — it still moves positions and never becomes `ErpEntityCache`'s
+ * first writer.
+ *
+ * ## `ErpDriftRecord` is deliberately RETAINED, not reset
+ *
+ * The decision, so it is not left implicit. WARP-2463's drift rows for this
+ * connection are NOT deleted here, for four reasons:
+ *
+ *  1. They are not credential material and not customer content. The model is
+ *     counts and timestamps by construction (schema.prisma:4586-4598) — there
+ *     is no column a record id, a name or an amount can reach — so ADR-041
+ *     §2's purge mandate, which is about *stored tokens*, does not reach them.
+ *  2. They cannot reproduce this defect. Nothing folds them into a connection
+ *     summary: the only readers are `driftForConnection` (its own admin
+ *     endpoint) and `cleanSweepStreak`. `detailFor()` and `list()` read
+ *     `erpSyncCursor` and nothing else.
+ *  3. What they answer outlives one credential. "Has the incremental path
+ *     been trustworthy for this vendor" is a question about the VENDOR's API
+ *     semantics — Xero's `UpdatedDateUTC` not moving on a DueDate change is
+ *     true of Xero, not of the key we authenticated with. Deleting the
+ *     evidence on disconnect would destroy it exactly when a reconnect is
+ *     about to need it.
+ *  4. Their lifetime already has an owner: the `sweepAt`-indexed retention
+ *     trim (`trimErpDriftRecords`, `ERP_DRIFT_RETENTION_CRON`). A second,
+ *     differently-shaped deletion trigger would make retention two rules that
+ *     can disagree instead of one.
+ *
+ * The consequence, stated rather than discovered later: a `cleanSweepStreak`
+ * earned before a disconnect carries across it, so the first sweep after a
+ * reconnect can still run at a lengthened cadence. That is intended under (3)
+ * — the streak measures the vendor, not the grant — and it is capped at
+ * `MAX_SWEEP_INTERVAL_MULTIPLIER` either way. Revisit only if reconnecting a
+ * connection to a *different* account at the same vendor becomes a real flow.
+ *
+ * Returns the number of cursors reset, so the caller can log a count without
+ * a second read.
+ */
+export async function resetCursorsForConnection(
+  tx: ErpCursorResetPrisma,
+  connectionId: string,
+): Promise<number> {
+  const { count } = await tx.erpSyncCursor.updateMany({
+    where: { connectionId },
+    data: { ...UNSTARTED_ERP_CURSOR },
+  });
+  return count;
 }
 
 /**
