@@ -135,6 +135,8 @@ export default function ChatPage() {
     editMessage,
     rateMessage,
     approveScene,
+    decideToolConfirmation,
+    rerequestApproval,
     clearMessages,
     attachments,
     sessionAttachments,
@@ -576,6 +578,37 @@ export default function ChatPage() {
     [regenerate, selectedModel, selectedProvider, systemPrompt],
   );
 
+  // WARP-2469: approve / decline a WARP-2305 interceptor challenge, and
+  // re-ask after one expired. Both continue the conversation on the
+  // currently-selected model, exactly like handleRegenerate above.
+  const handleToolDecision = useCallback(
+    (messageId: string, toolCallId: string, decision: "approve" | "deny") => {
+      if (!selectedModel) return;
+      void decideToolConfirmation(
+        messageId,
+        toolCallId,
+        decision,
+        selectedModel,
+        systemPrompt || undefined,
+        selectedProvider,
+      );
+    },
+    [decideToolConfirmation, selectedModel, selectedProvider, systemPrompt],
+  );
+
+  const handleRerequestApproval = useCallback(
+    (messageId: string) => {
+      if (!selectedModel) return;
+      void rerequestApproval(
+        messageId,
+        selectedModel,
+        systemPrompt || undefined,
+        selectedProvider,
+      );
+    },
+    [rerequestApproval, selectedModel, selectedProvider, systemPrompt],
+  );
+
   // WARP-844: edit & resend. Withheld while a stream is in flight (the
   // ChatMessage pencil is gated on the prop being present).
   const handleEdit = useCallback(
@@ -883,6 +916,8 @@ export default function ChatPage() {
                         onQuote={handleQuote}
                         onRegenerate={handleRegenerate}
                         onApproveScene={approveScene}
+                        onToolDecision={handleToolDecision}
+                        onRerequestApproval={handleRerequestApproval}
                         onFeedback={(id, fb) => void rateMessage(id, fb)}
                       />
                     );
@@ -944,6 +979,8 @@ export default function ChatPage() {
                 onQuote={handleQuote}
                 onRegenerate={handleRegenerate}
                 onApproveScene={approveScene}
+                onToolDecision={handleToolDecision}
+                onRerequestApproval={handleRerequestApproval}
                 onEdit={isStreaming ? undefined : handleEdit}
                 onFeedback={(id, fb) => void rateMessage(id, fb)}
               />
