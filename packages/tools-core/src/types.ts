@@ -196,11 +196,52 @@ export type ToolHandler = (
   ctx: ToolContext,
 ) => Promise<ToolResult>;
 
+/**
+ * WARP-2472 — WHICH LAYER OWNS THIS TOOL'S CONFIRMATION.
+ *
+ * `requiresConfirmation: true` says a human must approve the write. It
+ * never said WHO asks. Before WARP-2305 that did not matter: the only
+ * asker was whatever the handler happened to do. Once the dispatch
+ * interceptor started asking generically it mattered a great deal —
+ * nine tools relay a `202` from an orchestrator route that runs its OWN
+ * Tier-2 gate (`apps/orchestrator/src/config/network-safety-rules.ts`),
+ * so the user was asked twice for one action. Worse, the second
+ * challenge carries the ROUTE's token, redeemable only by the dashboard
+ * confirm endpoint; the model cannot present it, so the approved write
+ * never happened at all.
+ *
+ *   - `"interceptor"` — the dispatch-time interceptor challenges, mints
+ *     the token and runs the handler only once it comes back. The
+ *     default, and the right answer for every tool whose write is
+ *     performed by the handler itself, or by a route with no gate of its
+ *     own.
+ *   - `"route"` — the orchestrator route this tool calls already answers
+ *     `202 confirmation_required` for the operation, with its own token
+ *     and its own dashboard redemption path. The interceptor stands down
+ *     so that route stays the SINGLE gate. `requiresConfirmation` remains
+ *     `true` — the flag describes the tool, not the mechanism — so
+ *     nothing that reads it (`WRITE_TOOLS`, the catalog, the chat scope)
+ *     changes meaning.
+ *
+ * An explicit enum, not something inferred from the route's behaviour at
+ * runtime: guessing is exactly what produced the double prompt.
+ * `apps/orchestrator/src/__tests__/confirmation-owner-drift.guard.test.ts`
+ * is the gate that stops a declaration drifting away from the safety
+ * tier it describes.
+ */
+export type ConfirmationOwner = "interceptor" | "route";
+
 export interface Tool {
   name: string;
   description: string;
   inputSchema: object;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * Which layer asks the user. Omitted means `"interceptor"`. Resolve it
+   * through `confirmationOwnerOf()` (`./interceptor.ts`) rather than
+   * reading the field, so the default lives in exactly one place.
+   */
+  confirmationOwner?: ConfirmationOwner;
   handler: ToolHandler;
 }
