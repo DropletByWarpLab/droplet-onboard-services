@@ -81,7 +81,12 @@ export class SqlBridgeClient {
   private readonly fetchImpl?: FetchLike;
 
   constructor(opts: SqlBridgeOptions = {}) {
-    this.baseUrl = (opts.baseUrl ?? DEFAULT_BRIDGE_URL).replace(/\/+$/, "");
+    // Trim trailing slashes by index: `/\/+$/` re-scans the run from every
+    // offset, quadratic on a long slash run (CodeQL js/polynomial-redos).
+    const raw = opts.baseUrl ?? DEFAULT_BRIDGE_URL;
+    let end = raw.length;
+    while (end > 0 && raw.charAt(end - 1) === "/") end--;
+    this.baseUrl = raw.slice(0, end);
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.target = opts.target;
     this.fetchImpl = opts.fetchImpl;
