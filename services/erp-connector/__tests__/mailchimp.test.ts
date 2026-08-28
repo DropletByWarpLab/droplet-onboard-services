@@ -478,7 +478,13 @@ describe("subscriber hash", () => {
     // Mutation: drop `.toLowerCase()` → red.
     const mixed = "Camille.Moreau@Example.TEST";
     const lowered = mixed.toLowerCase();
+    // `subscriberHash` itself no longer uses node:crypto — MD5 is refused by the
+    // FIPS provider (WARP-2460). node:crypto MD5 stays HERE on purpose, as the
+    // independent oracle the pure implementation is checked against; asserting
+    // against our own digest would be vacuous. Test runs are never FIPS.
+    // fips:allowed: mailchimp-subscriber-hash
     expect(subscriberHash(mixed)).toBe(createHash("md5").update(lowered).digest("hex"));
+    // fips:allowed: mailchimp-subscriber-hash
     expect(subscriberHash(mixed)).not.toBe(createHash("md5").update(mixed).digest("hex"));
     expect(subscriberHash(mixed)).toBe(subscriberHash(lowered));
   });

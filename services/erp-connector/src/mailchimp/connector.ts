@@ -104,7 +104,7 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
-import { createHash } from "node:crypto";
+import { md5Hex } from "./md5.js";
 
 /** Provider key for this track. */
 export const MAILCHIMP_PROVIDER = "mailchimp";
@@ -694,9 +694,20 @@ export function assertEcommerceOrderParams(params: Record<string, unknown>): voi
  * agreed with the vendor. It authenticates nothing and protects nothing, so its
  * cryptographic weakness is not in scope; there is also no alternative, since
  * the API keys members by this exact digest.
+ *
+ * The digest comes from {@link md5Hex} — an arithmetic RFC 1321 implementation
+ * — and DELIBERATELY NOT from `node:crypto`. MD5 is not a FIPS 140-3 approved
+ * algorithm, so on a box running with `DROPLET_FIPS_MODE=1` the OpenSSL FIPS
+ * provider refuses to construct it and the `node:crypto` MD5 constructor throws
+ * `ERR_OSSL_EVP_UNSUPPORTED` before any request goes out. `erp-connector` ships
+ * inside the `orchestrator` image, which is one of the six provider-carrying
+ * images that enforce FIPS (`docs/fips.md`, "Scope — which services enforce"),
+ * so a `node:crypto` digest here means a FIPS customer's member lookups fail
+ * outright while list and campaign reads keep working — the connector
+ * half-works, with an error that reads like a crypto bug (WARP-2460).
  */
 export function subscriberHash(email: string): string {
-  return createHash("md5").update(email.trim().toLowerCase()).digest("hex");
+  return md5Hex(email.trim().toLowerCase());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
