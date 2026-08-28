@@ -71,6 +71,12 @@ import {
   type ErpCursorPrisma,
   type ErpSyncStateName,
 } from "./cursor.service.js";
+import {
+  cleanSweepStreak,
+  recordEntityDrift,
+  sweepIntervalMsFor,
+  type ErpDriftPrisma,
+} from "./drift-record.service.js";
 import { ERP_SYNC_ENTITIES, erpSyncEntity } from "./entities.js";
 import {
   buildDriftReport,
@@ -105,7 +111,7 @@ export interface SyncConnectionRow {
 }
 
 /** The Prisma surface the runner needs, beyond the cursor writers'. */
-export interface ErpSyncPrisma extends ErpCursorPrisma {
+export interface ErpSyncPrisma extends ErpCursorPrisma, ErpDriftPrisma {
   integrationConnection: ErpCursorPrisma["integrationConnection"] & {
     findUnique(args: unknown): Promise<SyncConnectionRow | null>;
     update(args: unknown): Promise<unknown>;
@@ -127,7 +133,13 @@ export interface ErpSyncDeps {
   budgetFor?: (conn: SyncConnectionRow) => SyncCallBudget;
   now?: () => Date;
   tickLimit?: number;
-  /** How stale a sweep may get before the sweep leg runs it again. */
+  /**
+   * BASE staleness before the sweep leg re-enumerates a cursor.
+   *
+   * The effective interval is this scaled per connection by its stored
+   * drift-free streak (WARP-2463) — a connection that keeps coming back clean
+   * earns a longer wait, and one miss puts it straight back to this base.
+   */
   sweepIntervalMs?: number;
 }
 
@@ -363,7 +375,18 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       const params = cursor.watermark === null ? {} : { since: cursor.watermark };
       const rows = await readEntity(connector, budget, spec.readQuery, params);
 
-      const records = identify(rows, spec.sourceKeyField, spec.markerField);
+      const records = identify(
+        rows,
+        spec.sourceKeyField,
+        spec.markerField,
+        spec.updatedAtField,
+      );
+      // WARP-2474 — the position advances on the vendor's own `updated_at`
+      // when the track defines one and on the ordering key otherwise, decided
+      // per row inside `highWaterMark`. A row edited after it was issued moves
+      // only the former, so a watermark built from the ordering key alone
+      // re-reads it on every tick forever.
+      //
       // Never regress the watermark: an empty page must not reset the position
       // to null and re-enumerate the whole account on the next tick.
       const next = highWaterMark(records) ?? cursor.watermark;
@@ -459,11 +482,21 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
           where: { connectionId: conn.id },
         })) as Array<Record<string, unknown>>;
 
+        // WARP-2463 — the cadence is EARNED, per connection, from stored
+        // evidence. A connection whose last N sweeps all came back clean waits
+        // longer before paying for the next re-enumeration; one that caught a
+        // miss drops straight back to the base interval. Xero's egress is
+        // metered per app and scales with units sold (WARP-2383), so every
+        // unnecessary sweep is money — and drift history is the only thing
+        // that can justify skipping one.
+        const streak = await cleanSweepStreak(prisma, conn.id);
+        const connSweepIntervalMs = sweepIntervalMsFor(sweepIntervalMs, streak);
+
         const due = cursors.filter((c) => {
           const last = c.lastSweepAt as Date | null | undefined;
           // Persisted, so a restart does not re-trigger the expensive
           // re-enumeration immediately.
-          return !last || at.getTime() - last.getTime() >= sweepIntervalMs;
+          return !last || at.getTime() - last.getTime() >= connSweepIntervalMs;
         });
         if (due.length === 0) continue;
 
@@ -496,9 +529,34 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
             // Re-enumerate. NO watermark. This is the load-bearing line.
             const fullRows = await readEntity(connector, budget, spec.readQuery, {});
 
-            const incremental = identify(incrementalRows, spec.sourceKeyField, spec.markerField);
-            const full = identify(fullRows, spec.sourceKeyField, spec.markerField);
-            entityDrift.push(diffForDrift(entity, watermark, incremental, full));
+            const incremental = identify(
+              incrementalRows,
+              spec.sourceKeyField,
+              spec.markerField,
+              spec.updatedAtField,
+            );
+            const full = identify(
+              fullRows,
+              spec.sourceKeyField,
+              spec.markerField,
+              spec.updatedAtField,
+            );
+            const drift = diffForDrift(entity, watermark, incremental, full);
+            entityDrift.push(drift);
+
+            // WARP-2463 — persist it. UNCONDITIONALLY: a clean sweep writes a
+            // row saying so. There is no `if (missedCount > 0)` guard here and
+            // adding one is the mutation that breaks this table, because
+            // absence of a row would then mean both "the incremental path was
+            // trustworthy" and "no sweep ever ran" — which are the two answers
+            // the whole story exists to keep apart.
+            await recordEntityDrift(prisma, {
+              connectionId: conn.id,
+              provider: conn.provider,
+              sweepAt: at,
+              watermark,
+              drift,
+            });
 
             // The sweep saw the whole account, so its high-water mark is the
             // authoritative one — adopting it is how the Xero class of drift
