@@ -14,8 +14,7 @@
  *     from the static output with no test noticing.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { readdirSync } from "node:fs";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   providerDescriptors,
@@ -35,15 +34,21 @@ import {
 } from "./integration-guides";
 import { generateStaticParams } from "@/app/help/integrations/[provider]/page";
 
-/** Locate the repo's `docs/integrations` from wherever vitest was launched. */
-function docsDir(): string {
+/** The repo root, from wherever vitest was launched. Fails loudly rather than
+ *  walking off the top — a path assertion that silently reads the wrong tree
+ *  passes forever. */
+function repoRoot(): string {
   let dir = process.cwd();
   for (let i = 0; i < 6; i++) {
-    const candidate = resolve(dir, "docs/integrations");
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(resolve(dir, "docs/integrations"))) return dir;
     dir = resolve(dir, "..");
   }
-  throw new Error(`could not locate docs/integrations from ${process.cwd()}`);
+  throw new Error(`could not locate the repo root from ${process.cwd()}`);
+}
+
+/** The repo's `docs/integrations`. */
+function docsDir(): string {
+  return resolve(repoRoot(), "docs/integrations");
 }
 
 /** Slugs the ROUTE will prerender — read through the page's own
@@ -262,6 +267,40 @@ describe("page furniture", () => {
   });
 
   /**
+   * WARP-2498 — the slug rule has TWO implementations in two languages, and
+   * they must agree or `check-setup-guides.sh` starts blessing anchors the
+   * rendered page does not have.
+   *
+   * `scripts/fixtures/heading-slug-cases.tsv` is the shared statement of the
+   * rule; the shell's `slugify()` runs the same file in its own self-check.
+   * Neither side is trusted to match the other — both are checked against it.
+   *
+   * Mutation: change either implementation without the other → whichever one
+   * moved goes red against the fixture.
+   */
+  it("agrees with the shell checker's slugify, case for case", () => {
+    const tsv = readFileSync(
+      resolve(repoRoot(), "scripts/fixtures/heading-slug-cases.tsv"),
+      "utf8",
+    );
+    const cases = tsv
+      .split("\n")
+      .filter((line) => line.trim() !== "" && !line.startsWith("#"))
+      .map((line) => line.split("\t"));
+
+    expect(cases.length).toBeGreaterThanOrEqual(10);
+    for (const [heading, expected] of cases) {
+      expect(headingSlug(heading), `heading: ${heading}`).toBe(expected);
+    }
+  });
+
+  /** Trimming, which the TSV cannot express — trailing spaces in a fixture
+   *  file are invisible and get eaten by editors. */
+  it("trims before slugging", () => {
+    expect(headingSlug("  Padded heading  ")).toBe("padded-heading");
+  });
+
+  /**
    * Every cross-guide `#anchor` in the corpus lands on a heading that actually
    * exists in the target guide. This is what makes the six `SETUP.md#…` links
    * in the vendor guides worth having — an anchor that misses drops the reader
@@ -283,14 +322,11 @@ describe("page furniture", () => {
         if (!headings.includes(anchor)) missed.push(`${from} → ${m[1]}`);
       }
     }
-    // One PRE-EXISTING broken anchor, listed rather than skipped so a SECOND
-    // one still goes red. `vendor-setup-template.md:81` cites `SETUP.md` §8;
-    // SETUP.md has seven sections. `check-setup-guides.sh` resolves link
-    // PATHS, not fragments, so nothing has ever caught it. Not fixed here —
-    // it is a docs defect outside this ticket, and silently repairing prose in
-    // a routing change is how a real error hides.
-    expect(missed).toEqual([
-      "vendor-setup-template → SETUP.md#8-cloud--saas-connectors--pasting-a-credential-warp-2275",
-    ]);
+    // No exceptions. `vendor-setup-template.md`'s dead `SETUP.md` §8 citation
+    // was the one entry that used to live here; WARP-2498 repointed it at
+    // §3.6, the section that actually covers replacing a stored credential,
+    // and taught `check-setup-guides.sh` to resolve fragments so a second one
+    // cannot ship in the first place.
+    expect(missed).toEqual([]);
   });
 });
