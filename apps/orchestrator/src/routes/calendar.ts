@@ -127,8 +127,10 @@ export function createCalendarPublicRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_user" });
         return;
       }
-      const token = req.query.token as string | undefined;
-      if (!token || !safeEqual(token, publishToken(user))) {
+      const token = req.query.token;
+      // CodeQL js/type-confusion-through-parameter-tampering: `?token=a&token=b`
+      // arrives as an array; only a single string can be the HMAC token.
+      if (typeof token !== "string" || !safeEqual(token, publishToken(user))) {
         res.status(403).json({ error: "invalid_token" });
         return;
       }

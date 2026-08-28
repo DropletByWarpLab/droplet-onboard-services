@@ -24,8 +24,7 @@
 
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { TOOLS } from "../src/registry.js";
 import {
   TOOL_ROUTES,
@@ -33,7 +32,12 @@ import {
   type ToolRouteHop,
 } from "../src/tool-routes.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
+// `__dirname`, not `import.meta.url`: this package builds to CommonJS
+// (`module: NodeNext` + no `"type": "module"`), where `import.meta` is a
+// TS1470 error. `vitest` does not typecheck (esbuild strips types), so
+// only `npm run -w @droplet/tools-core typecheck:tests` catches it — same
+// note as `apps/orchestrator/src/__tests__/write-tools-derivation.guard.test.ts`.
+const HERE = __dirname;
 const HANDLERS_DIR = join(HERE, "..", "src", "handlers");
 
 const REGISTERED = new Set(TOOLS.keys());

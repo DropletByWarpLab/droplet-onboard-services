@@ -5,6 +5,7 @@ import { ncGetUserQuota } from "../services/nextcloud.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
 import { requireRole, recordAccessDenied } from "../middleware/auth.js";
+import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import {
   evaluateStorageCommand,
   confirmStorageCommand,
@@ -447,7 +448,11 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * `displayName` / `icon` / `notes` from the `Drive` table when one
    * exists. Fields are `null` for drives the customer hasn't named yet.
    */
-  router.get("/storage/drives", async (_req, res) => {
+  // CodeQL js/missing-rate-limiting — inline per-IP ceilings on the bridge-
+  // proxied drive handlers. /drives is a plain read the dashboard fetches on
+  // page load (no polling), so the standard preset; rescan and eject drive
+  // udev/unmount work on the host, so they get the tighter sensitive preset.
+  router.get("/storage/drives", standardRateLimit, async (_req, res) => {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
@@ -628,7 +633,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * udev rule calls on hot-plug — so this only drops a cache; it never
    * mounts or unmounts. Admin-only because it's a device-control action.
    */
-  router.post("/storage/drives/rescan", async (req, res) => {
+  router.post("/storage/drives/rescan", sensitiveRateLimit, async (req, res) => {
     if (!isAdmin(req)) {
       // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
       // local isAdmin() denials must not be silent (requireRole parity).
@@ -682,7 +687,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * user can close files and retry; other bridge errors return a generic
    * message and are logged server-side.
    */
-  router.post("/storage/drives/:uuid/eject", async (req, res) => {
+  router.post("/storage/drives/:uuid/eject", sensitiveRateLimit, async (req, res) => {
     if (!isAdmin(req)) {
       // WARP-1062 (audit item B): requireRole-parity policy-violation row.
       recordAccessDenied(req, "role-not-permitted");

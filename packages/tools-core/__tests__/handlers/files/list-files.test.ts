@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listFiles from "../../../src/handlers/files/list-files.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  get: ReturnType<typeof vi.fn>,
+  get: Mock,
   opts: { ncToken?: string; userId?: string } = {},
 ): ToolContext {
   return {
@@ -13,6 +14,7 @@ function ctxWith(
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      orchestrator: {} as ToolContext["http"]["orchestrator"],
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],

@@ -78,11 +78,11 @@ function cursorRow(over: Record<string, unknown> = {}) {
 
 interface Harness {
   prisma: any;
-  recorder: { record: ReturnType<typeof vi.fn<any, any>> };
-  connector: Connector & { runRead: ReturnType<typeof vi.fn<any, any>> };
+  recorder: { record: ReturnType<typeof vi.fn<(...args: any[]) => any>> };
+  connector: Connector & { runRead: ReturnType<typeof vi.fn<(...args: any[]) => any>> };
   budget: {
-    assertHeadroom: ReturnType<typeof vi.fn<any, any>>;
-    record: ReturnType<typeof vi.fn<any, any>>;
+    assertHeadroom: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+    record: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
   };
 }
 
@@ -92,9 +92,12 @@ function harness(opts: {
   /** Answers keyed by whether the read carried a `since` param. */
   read?: (name: string, params: Record<string, unknown>) => Promise<unknown[]>;
   headroom?: () => void;
+  /** Pre-existing `ErpDriftRecord` rows (WARP-2463's earned cadence). */
+  driftRecords?: Array<Record<string, unknown>>;
 } = {}): Harness {
   const cursors = (opts.cursors ?? [cursorRow()]).map((c) => ({ ...c }));
   const connections = opts.connections ?? [connectionRow()];
+  const driftRows = (opts.driftRecords ?? []).map((r) => ({ ...r }));
 
   const recorder = { record: vi.fn(async () => ({}) as never) };
   const budget = {
@@ -119,6 +122,7 @@ function harness(opts: {
   const prisma = {
     __cursors: cursors,
     __conns: connections,
+    __driftRows: driftRows,
     __cursor: (id: string) => cursors.find((c) => c.id === id),
     integrationConnection: {
       findMany: vi.fn(async (args: any) => {
@@ -166,6 +170,27 @@ function harness(opts: {
         return row;
       }),
       upsert: vi.fn(async () => ({})),
+    },
+    // WARP-2463 — the sweep's drift report is persisted. Seeded rows let a
+    // case exercise the earned-cadence path without running N real sweeps.
+    erpDriftRecord: {
+      create: vi.fn(async (args: any) => {
+        driftRows.push({ id: `d-${driftRows.length + 1}`, ...args.data });
+        return args.data;
+      }),
+      findMany: vi.fn(async (args: any) => {
+        const w = args?.where ?? {};
+        let out = driftRows.filter(
+          (r) => !w.connectionId || r.connectionId === w.connectionId,
+        );
+        if (args?.orderBy?.sweepAt === "desc") {
+          out = [...out].sort(
+            (a, b) => (b.sweepAt as Date).getTime() - (a.sweepAt as Date).getTime(),
+          );
+        }
+        return typeof args?.take === "number" ? out.slice(0, args.take) : out;
+      }),
+      deleteMany: vi.fn(async () => ({ count: 0 })),
     },
   };
 
@@ -341,6 +366,84 @@ describe("runIncrementalTick", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Which value the watermark advances on (WARP-2474)
+// ---------------------------------------------------------------------------
+
+describe("watermark source", () => {
+  /** A vendor that fills WARP-2464's canonical column: the documents were
+   *  issued in August and MODIFIED afterwards. */
+  const ROWS_WITH_UPDATED_AT = INVOICE_ROWS.map((r, i) => ({
+    ...r,
+    updated_at: i === 0 ? "2026-08-24T00:00:00Z" : "2026-08-25T00:00:00Z",
+  }));
+
+  /** The QuickBooks Online / Desktop invoice+bill shape: the canonical column
+   *  is PRESENT on every row and carries `undefined`, exactly as `status`
+   *  does on the same builders. */
+  const QUICKBOOKS_ROWS = INVOICE_ROWS.map((r) => ({
+    ...r,
+    updated_at: undefined as string | undefined,
+  }));
+
+  it("advances on `updated_at` when the vendor supplies one", async () => {
+    // The defect: an incremental pull keyed on `issued_at` re-reads every row
+    // whose only change is a vendor-side modification — the exact case
+    // WARP-2464 added the column for.
+    // MUTATION: build the watermark from `spec.markerField` alone → the
+    // cursor stops at 2026-08-20 → red.
+    const h = harness({ read: async () => ROWS_WITH_UPDATED_AT });
+    await runnerFor(h).runIncrementalTick();
+    expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-25T00:00:00Z");
+  });
+
+  it("reads the next tick from the `updated_at` it advanced to", async () => {
+    // The advance is only worth anything if the vendor read inherits it.
+    const h = harness({ read: async () => ROWS_WITH_UPDATED_AT });
+    const runner = runnerFor(h);
+    await runner.runIncrementalTick();
+    h.connector.runRead.mockClear();
+    await runner.runIncrementalTick();
+    expect(h.connector.runRead).toHaveBeenCalledWith("get_open_invoices", {
+      since: "2026-08-25T00:00:00Z",
+    });
+  });
+
+  it("falls back to the ordering key, NON-NULL, when `updated_at` is undefined", async () => {
+    // *** THE CASE THE TICKET IS WRITTEN AROUND ***
+    // QBO and QBD serve invoice/bill from hand-written row builders that emit
+    // `updated_at: undefined`. A fallback that tests COLUMN PRESENCE reads
+    // that as "there is an updated_at" and regresses this track to a null —
+    // or, once stringified, to the literal "undefined" — watermark.
+    //
+    // MUTATION: in `identify`, project the column with a presence test
+    // (`updatedAtField in rec ? String(...) : null`) → the stored watermark
+    // becomes the string "undefined" → red.
+    const h = harness({ read: async () => QUICKBOOKS_ROWS });
+    await runnerFor(h).runIncrementalTick();
+    const watermark = h.prisma.__cursor("cur-1")!.watermark;
+    expect(watermark).toBe("2026-08-20T00:00:00Z");
+    expect(watermark).not.toBeNull();
+    expect(watermark).not.toBe("undefined");
+  });
+
+  it("falls back for a dataset whose rows carry no `updated_at` column at all", async () => {
+    // The seven datasets WARP-2464 deliberately withheld the column from.
+    const h = harness();
+    await runnerFor(h).runIncrementalTick();
+    expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-20T00:00:00Z");
+  });
+
+  it("adopts the sweep's `updated_at` high-water mark too", async () => {
+    // The sweep repairs a watermark left behind, so it must repair it to the
+    // same kind of value the tick advances to — otherwise the two legs fight
+    // over the cursor every day.
+    const h = harness({ read: async () => ROWS_WITH_UPDATED_AT });
+    await runnerFor(h).runReconciliationSweep();
+    expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-25T00:00:00Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 
@@ -414,34 +517,38 @@ describe("audit rows", () => {
 // The full reconciliation sweep — the load-bearing half
 // ---------------------------------------------------------------------------
 
-describe("runReconciliationSweep", () => {
-  /**
-   * The vendor page the incremental read gets OMITS a record that was
-   * genuinely mutated — the Xero/HubSpot/Stripe trap. The full enumeration
-   * returns it.
-   */
-  function driftHarness() {
-    const mutatedButOmitted = {
-      invoice_id: "INV-1003",
-      issued_at: "2026-08-26T00:00:00Z",
-      due_at: "2026-09-26T00:00:00Z",
-      customer_id: "smith-dental",
-      amount: "77.10",
-      balance: "77.10",
-      status: "Open",
-    };
-    return harness({
-      cursors: [cursorRow({ entity: "invoice", watermark: "2026-08-15T00:00:00Z" })],
-      read: async (_name, params) => {
-        // The delta read honours `since` and — this is the defect being
-        // modelled — silently leaves out a record it should have returned.
-        if ("since" in params) return INVOICE_ROWS;
-        // The full re-enumeration sees everything.
-        return [...INVOICE_ROWS, mutatedButOmitted];
-      },
-    });
-  }
+/**
+ * The vendor page the incremental read gets OMITS a record that was
+ * genuinely mutated — the Xero/HubSpot/Stripe trap. The full enumeration
+ * returns it.
+ *
+ * Module scope rather than inside `describe("runReconciliationSweep")` because
+ * WARP-2463's persistence cases need the same drifted account (a second copy
+ * would be free to stop modelling the same defect).
+ */
+function driftHarness() {
+  const mutatedButOmitted = {
+    invoice_id: "INV-1003",
+    issued_at: "2026-08-26T00:00:00Z",
+    due_at: "2026-09-26T00:00:00Z",
+    customer_id: "smith-dental",
+    amount: "77.10",
+    balance: "77.10",
+    status: "Open",
+  };
+  return harness({
+    cursors: [cursorRow({ entity: "invoice", watermark: "2026-08-15T00:00:00Z" })],
+    read: async (_name, params) => {
+      // The delta read honours `since` and — this is the defect being
+      // modelled — silently leaves out a record it should have returned.
+      if ("since" in params) return INVOICE_ROWS;
+      // The full re-enumeration sees everything.
+      return [...INVOICE_ROWS, mutatedButOmitted];
+    },
+  });
+}
 
+describe("runReconciliationSweep", () => {
   it("finds a record the incremental read dropped, and says so in the drift report", async () => {
     // ***  THE TEST THIS STORY EXISTS FOR — DO NOT WEAKEN  ***
     //
@@ -571,6 +678,141 @@ describe("runReconciliationSweep", () => {
     const h = harness({ connections: [connectionRow({ status: "DISABLED" })] });
     expect((await runnerFor(h).runReconciliationSweep()).reports).toHaveLength(0);
     expect(h.connector.runRead).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2463 — the sweep's drift report reaches storage, not only a log line
+// ---------------------------------------------------------------------------
+
+describe("the sweep persists its drift report", () => {
+  it("writes ONE row per (connectionId, entity), including a ZERO-DRIFT one", async () => {
+    // MUTATION: skip the write when `missedCount === 0` → the `invoice` /
+    // `bill` clean rows vanish → red.
+    //
+    // This is the case the story turns on. With only drifted rows stored,
+    // absence means both "the incremental path was trustworthy" and "no sweep
+    // ever ran" — and the cadence the sweep is tuned by is read from exactly
+    // that distinction.
+    const h = harness({
+      cursors: [cursorRow(), cursorRow({ id: "cur-2", entity: "bill" })],
+    });
+    await runnerFor(h).runReconciliationSweep();
+
+    const written = h.prisma.erpDriftRecord.create.mock.calls.map((c: any[]) => c[0].data);
+    expect(written).toHaveLength(2);
+    expect(written.map((r: any) => r.entity).sort()).toEqual(["bill", "invoice"]);
+    for (const row of written) {
+      expect(row.connectionId).toBe("conn-1");
+      expect(row.provider).toBe("quickbooks-online");
+      expect(row.sweepAt).toEqual(NOW);
+      // The explicit member, not a null and not a missing row.
+      expect(row.classification).toBe("NONE");
+      expect(row.missedCount).toBe(0);
+    }
+  });
+
+  it("stores the classification the sweep actually found", async () => {
+    const h = driftHarness();
+    await runnerFor(h).runReconciliationSweep();
+    const row = h.prisma.erpDriftRecord.create.mock.calls[0][0].data;
+    expect(row.classification).toBe("MISSED_NEWER_AND_WATERMARK_BEHIND");
+    expect(row.missedCount).toBe(1);
+    expect(row.fullCount).toBe(3);
+    expect(row.incrementalCount).toBe(2);
+  });
+
+  it("puts no customer content in the stored row", async () => {
+    // MUTATION: store the first missed record's id "for debugging" → red.
+    const h = driftHarness();
+    await runnerFor(h).runReconciliationSweep();
+    const stored = JSON.stringify(
+      h.prisma.erpDriftRecord.create.mock.calls.map((c: any[]) => c[0].data),
+    );
+    expect(stored).not.toContain("INV-1001");
+    expect(stored).not.toContain("INV-1003");
+    expect(stored).not.toContain("smith");
+    expect(stored).not.toContain("4210.55");
+    expect(stored).not.toContain("example.com");
+    // The diagnosis survives.
+    expect(stored).toContain("MISSED_NEWER");
+    expect(stored).toContain("invoice");
+  });
+
+  it("writes no drift row for a sweep that DEFERRED on an exhausted budget", async () => {
+    // A deferred sweep did not measure anything, so it must not leave a row
+    // claiming it did. Storing a clean row here would be worse than storing
+    // nothing: it would lengthen the cadence on a sweep that never ran.
+    let calls = 0;
+    const h = driftHarness();
+    h.budget.assertHeadroom.mockImplementation(() => {
+      calls += 1;
+      if (calls > 1) throw new QuotaExhaustedError(5000, 5000);
+    });
+    const { deferred } = await runnerFor(h).runReconciliationSweep();
+    expect(deferred).toBe(1);
+    expect(h.prisma.erpDriftRecord.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("the sweep cadence is earned per connection", () => {
+  /** N clean sweeps for one connection, oldest first, ending `agoMs` back. */
+  function cleanHistory(count: number, spacingMs: number, endAgoMs: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `d-${i}`,
+      connectionId: "conn-1",
+      provider: "quickbooks-online",
+      entity: "invoice",
+      sweepAt: new Date(NOW.getTime() - endAgoMs - (count - 1 - i) * spacingMs),
+      classification: "NONE",
+      missedCount: 0,
+      fullCount: 3,
+      incrementalCount: 3,
+    }));
+  }
+
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it("LENGTHENS the interval after three clean sweeps in a row", async () => {
+    // MUTATION: ignore the drift-free counter and keep the flat base interval
+    // → the cursor is due at 25 h and the sweep runs → red.
+    //
+    // The cursor was swept 25 h ago: due under the flat 24 h base, NOT due
+    // under the 48 h a three-sweep clean streak earns.
+    const h = harness({
+      cursors: [cursorRow({ lastSweepAt: new Date(NOW.getTime() - 25 * 60 * 60 * 1000) })],
+      driftRecords: cleanHistory(3, DAY, 25 * 60 * 60 * 1000),
+    });
+    const { reports } = await runnerFor(h).runReconciliationSweep();
+    expect(reports).toHaveLength(0);
+    expect(h.connector.runRead).not.toHaveBeenCalled();
+  });
+
+  it("RESETS to the base interval when the most recent sweep caught a miss", async () => {
+    // MUTATION: let a miss merely pause the streak instead of resetting it →
+    // the connection keeps the earned 48 h and this sweep does not run → red.
+    // A connection actively dropping records is the last one that should be
+    // swept less often.
+    const history = cleanHistory(3, DAY, 25 * 60 * 60 * 1000);
+    history[history.length - 1].classification = "MISSED_NEWER";
+    history[history.length - 1].missedCount = 1;
+
+    const h = harness({
+      cursors: [cursorRow({ lastSweepAt: new Date(NOW.getTime() - 25 * 60 * 60 * 1000) })],
+      driftRecords: history,
+    });
+    const { reports } = await runnerFor(h).runReconciliationSweep();
+    expect(reports).toHaveLength(1);
+    expect(h.connector.runRead).toHaveBeenCalled();
+  });
+
+  it("still sweeps a clean connection once the LONGER interval has elapsed", async () => {
+    // The earned interval lengthens the wait; it never stops reconciling.
+    const h = harness({
+      cursors: [cursorRow({ lastSweepAt: new Date(NOW.getTime() - 49 * 60 * 60 * 1000) })],
+      driftRecords: cleanHistory(3, DAY, 49 * 60 * 60 * 1000),
+    });
+    expect((await runnerFor(h).runReconciliationSweep()).reports).toHaveLength(1);
   });
 });
 

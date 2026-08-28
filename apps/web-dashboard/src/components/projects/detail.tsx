@@ -2,7 +2,7 @@
 
 // Work-item detail — rendered in a right slide-over (canonical Dialog).
 
-import { useId, useState, useEffect } from "react";
+import { useId, useState, useEffect, type JSX } from "react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { PmIcon } from "./icons";

@@ -180,6 +180,31 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // to Kitchen" names the target only by its label, so the verb is the
   // ONLY signal. A false-positive domain is cheap (see the rule comment).
   { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|uploads?|attachments?|downloads?|scans?|presentations?|slides?|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["files"] },
+  // WARP-2454 — DOCUMENTS NAMED BY WHAT THEY ARE, not by a container word.
+  //
+  // THE DESIGN LIMIT, WRITTEN DOWN. The rule above lists CONTAINERS
+  // (file/document/pdf/invoice). "find the signed lease agreement" names the
+  // thing by its subject and matched nothing, and no regex can close that in
+  // general: the subject of a document is unbounded vocabulary. That part is
+  // structurally the retrieval layer's job, and it is already covered —
+  // `search_content` ("Search inside your files for what you need") is in
+  // CORE_TOOL_NAMES, so it is advertised on EVERY turn regardless of this
+  // rule. A subject-named file is therefore never un-findable; what it lost
+  // was the other 15 files tools, `search_files` above all.
+  //
+  // What IS closeable is the common case, and it is closed the way WARP-1921
+  // closed the cameras `people` gap: by adding the nouns people actually use.
+  // These are document TYPES an SMB or household names out loud.
+  //
+  // REJECTED — a verb fallback (`find|locate|where is|open` + a noun phrase).
+  // It cannot separate "find the signed lease agreement" from "find me a good
+  // plumber" on anything better than the determiner, which is an accident of
+  // grammar dressed up as intent; and `files` is the LARGEST domain in the
+  // catalog (20 tools), so firing it on every `find`/`where is` turn is the
+  // most expensive over-match available. tool-selection.service.test.ts
+  // asserts those three negatives so the fallback cannot be reintroduced
+  // quietly.
+  { pattern: /\b(leases?|agreements?|contracts?|statements?|warrant(y|ies)|quotes?|estimates?|reports?|manuals?|certificates?|licen[cs]es?|permits?|insurance|tax returns?)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|sockets?|outlets?|switch(es)?|heating|cooling|air-?con(ditioning)?|fans?|temperature|dim|brightness|blinds?|curtains?|locks?|unlock|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
   { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?|online|offline|connected|guest|ethernet|vpn|slow)\b/i, domains: ["network"] },
   // The places a household points cameras, and the things it looks for —
@@ -189,6 +214,24 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // advertise rename_camera.
   { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell|snapshots?|surveillance|nvr|frigate|live view|people|person|someone|somebody|anybody|anyone|intruders?|visitors?|packages?|parcels?|deliver(y|ies)|driveway|porch|doorstep|front door|back door|garage|yard|gate|who (was|were|came|is|has been)|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["cameras"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
+  // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
+  //
+  // The rule above carried the literal `free time`, so "am I free Thursday
+  // afternoon?" — the most natural availability question there is — matched
+  // nothing. Bare `\bfree\b` is NOT the fix: it fires on "is the free trial
+  // still on" and "how much free space is left", and calendar tools on a
+  // billing question are pure waste.
+  //
+  // So the availability word must be FOLLOWED by a time reference, allowing
+  // an optional preposition and determiner between them ("free on Friday",
+  // "free at the weekend", "available next week", "free at 3", "free on the
+  // 12th"). That ordering is deliberate, and the negative cases in
+  // tool-selection.service.test.ts are what hold it: the reverse direction
+  // ("is Thursday free?") is knowingly NOT matched, because a cue-then-word
+  // alternative would re-admit "is this free trial still on" through `this`.
+  // A missed "is Thursday free?" costs one self-heal iteration; the guard is
+  // worth more than the case it gives up.
+  { pattern: /\b(free|available|availability|unavailable)\s+(up\s+)?((on|at|for|in|this|next|any)\s+)?(the\s+)?(\b(today|tonight|tomorrow|later|soon|morning|afternoon|evening|weekend|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|weds?|thurs?|fri|sat|sun)\b|\d{1,2}(st|nd|rd|th)?\b)/i, domains: ["calendar"] },
   { pattern: /\b(remind(er)?s?|tasks?|to-?dos?|don'?t forget|shopping list)\b/i, domains: ["reminders"] },
   { pattern: /\b(notifications?|notify|alerts?)\b/i, domains: ["notifications"] },
   // WARP-2058 — the `pm` domain had NO rule, so under the shipping
@@ -199,7 +242,35 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // both domains matching a sentence that mentions each is the intended
   // generous behaviour, not a collision.
   { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work)\b/i, domains: ["pm"] },
-  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|replied?|sent)\b/i, domains: ["email"] },
+  // WARP-2454 — `repl(y|ies|ied|ying)`, never `replied?`. The original was
+  // "replie" plus an OPTIONAL "d": it matched `replied` and the non-word
+  // `replie`, and missed `reply` and `replies` entirely — so "did the
+  // accountant ever reply" advertised no email tool at all. Every other
+  // alternative is unchanged.
+  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent)\b/i, domains: ["email"] },
+  // WARP-2454 — team_chat had NO rule at all, so its tools were reachable
+  // only by continuity: a conversation that had not already used the domain
+  // could never start using it. Same defect class WARP-2058 fixed for `pm`,
+  // and the one that would have made WARP-2397's Slack connector look
+  // working-in-tests and dead-in-conversation.
+  //
+  // THE TRADE-OFF, RECORDED: this rule is deliberately NARROWER than the
+  // others in this file, which is a departure from the module's
+  // false-positives-are-cheap bias stated above. The reason is size. Every
+  // other domain costs a handful of local schemas; `team_chat` is the domain
+  // a remote Slack catalog registers into (15 tools in the WARP-2446
+  // fixture), so an over-match here is the most expensive one available and
+  // it is paid on turns that have nothing to do with work chat.
+  //
+  // So the ambiguous words are qualified rather than taken bare:
+  //   • `channel` alone means TV/YouTube far more often than Slack, so it
+  //     needs a workplace qualifier ("slack/team/work/group/company channel").
+  //   • `thread` alone is sewing, forums, or a mail thread; same treatment.
+  //   • `mention` was dropped entirely — it is an ordinary English verb
+  //     ("did anyone mention the plumber") and no qualifier made it pay.
+  // `slack`, `standup`, `huddle` and `dm` carry no such ambiguity and are
+  // taken bare. The negatives in tool-selection.service.test.ts pin this.
+  { pattern: /\b(slack|stand-?ups?|huddles?|dms?|direct messages?|group chats?|team chats?|(slack|team|work|group|company) channels?|(slack|stand-?up|chat|message|comment) threads?)\b/i, domains: ["team_chat"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
   { pattern: /\b(business|company|opening hours|customers?)\b/i, domains: ["business"] },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },

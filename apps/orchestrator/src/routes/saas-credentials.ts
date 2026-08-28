@@ -178,8 +178,8 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
         // the stored ciphertext is left byte-identical. Writing `undefined`
         // explicitly would be the same to Prisma, but building the object this
         // way keeps the three-way rule readable at the call site.
-        if (resolved.apiCredentialsEnc !== undefined) {
-          data.apiCredentialsEnc = resolved.apiCredentialsEnc;
+        if (resolved.providerTokensEnc !== undefined) {
+          data.providerTokensEnc = resolved.providerTokensEnc;
         }
         if (resolved.providerConfig !== undefined) {
           data.providerConfig = resolved.providerConfig;

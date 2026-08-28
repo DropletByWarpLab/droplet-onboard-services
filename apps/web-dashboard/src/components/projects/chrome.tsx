@@ -4,6 +4,8 @@
 
 import { PmIcon } from "./icons";
 
+import type { JSX } from "react";
+
 export type ProjectView = "board" | "list" | "cycles" | "modules";
 export type SavedView = "all" | "mine" | "active" | "overdue" | "noassignee";
 
