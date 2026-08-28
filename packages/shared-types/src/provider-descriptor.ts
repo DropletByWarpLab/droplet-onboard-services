@@ -232,6 +232,32 @@ export interface ProviderDescriptor {
    * full strings precisely so the scanner can read them.
    */
   readonly egressHosts: readonly string[];
+  /**
+   * Present when this track's host is ASSEMBLED AT RUNTIME and therefore
+   * cannot appear in {@link egressHosts} at all.
+   *
+   * Mailchimp is the shipped case (WARP-2379): the customer's API key carries
+   * a `-us14` datacentre suffix that SELECTS the host, so there is no literal
+   * for the CI scanner to find and no fixed name to register. Its
+   * `allowed-egress.yaml` entry is `kind: dynamic` with a `config_key`, and
+   * this field is the descriptor's half of that registration.
+   *
+   * It exists so an empty `egressHosts` stays UNAMBIGUOUS. Without it, "this
+   * track never leaves the LAN" (Eaglesoft) and "this track's host is
+   * per-connection" (Mailchimp) are the same empty array — and reading the
+   * second as the first is how a cloud track quietly acquires a LAN-only
+   * guarantee it does not have. Absence is never a silent anything.
+   *
+   * The code-side exact-host guard is the enforcement, not this declaration:
+   * `assertSafeMailchimpBaseUrl` is what refuses a host the key did not name.
+   */
+  readonly dynamicEgress?: {
+    /** Mirrors the YAML entry's `config_key`: where the host comes from. */
+    readonly configKey: string;
+    /** The `allowed-egress.yaml` entry id this pairs with, so the two cannot
+     *  drift apart without a test noticing. */
+    readonly registryId: string;
+  };
   /** Datasets this track can serve. Reconciled against what the connector
    *  reports at runtime (`Connector.servesDatasets`) rather than trusted. */
   readonly datasets: readonly DatasetName[];

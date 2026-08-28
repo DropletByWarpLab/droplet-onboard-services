@@ -73,6 +73,18 @@ const KNOWN_ERP_PROVIDERS_BEFORE = [
 
 const CLOUD_ERP_PROVIDERS_BEFORE = ["quickbooks-online", "dentrix-ascend"] as const;
 
+/**
+ * WARP-2466 — the three WARP-2214 SaaS vendors, registered on top of the
+ * historical set.
+ *
+ * Kept SEPARATE from the `_BEFORE` anchors above rather than appended to them.
+ * Those two lists are a record of what shipped before the descriptor refactor
+ * and their whole value is that they are not edited when providers are added;
+ * folding new ids into them would quietly turn a regression anchor into a
+ * running total. The assertions below compose the two explicitly instead.
+ */
+const SAAS_PROVIDERS_WARP_2214 = ["stripe", "hubspot", "mailchimp"] as const;
+
 afterEach(() => {
   __resetRegisteredProvidersForTest();
   __resetCallBudgetsForTest();
@@ -84,21 +96,41 @@ afterEach(() => {
 // ===========================================================================
 
 describe("the descriptor set covers exactly the providers that shipped before", () => {
-  it("descriptor ids SET-EQUAL the pre-change KNOWN_ERP_PROVIDERS", () => {
+  it("descriptor ids are the pre-change set PLUS the WARP-2214 vendors", () => {
     // Mutation: delete one descriptor from provider-registry.ts → red.
-    expect(new Set(buildableProviderIds())).toEqual(new Set(KNOWN_ERP_PROVIDERS_BEFORE));
+    expect(new Set(buildableProviderIds())).toEqual(
+      new Set([...KNOWN_ERP_PROVIDERS_BEFORE, ...SAAS_PROVIDERS_WARP_2214]),
+    );
   });
 
-  it("cloud-track descriptor ids SET-EQUAL the pre-change CLOUD_ERP_PROVIDERS", () => {
+  it("cloud-track ids are the pre-change cloud set PLUS all three SaaS vendors", () => {
     // The cloud/LAN split is preserved as a descriptor field rather than
-    // erased. Mutation: flip `dentrix-ascend`'s track to "lan" → red.
-    expect(new Set(cloudProviderIds())).toEqual(new Set(CLOUD_ERP_PROVIDERS_BEFORE));
+    // erased. Every WARP-2214 vendor is a cloud track by definition — it
+    // reaches a vendor SaaS — so a `track: "lan"` on any of them would be a
+    // claim that it stays on the practice network, which is false.
+    // Mutation: flip `dentrix-ascend`'s track to "lan", or any SaaS vendor's
+    // → red.
+    expect(new Set(cloudProviderIds())).toEqual(
+      new Set([...CLOUD_ERP_PROVIDERS_BEFORE, ...SAAS_PROVIDERS_WARP_2214]),
+    );
   });
 
   it("keeps the ORDER the two exported lists have always had", () => {
-    // Not merely set-equal: callers see these arrays.
-    expect(KNOWN_ERP_PROVIDERS).toEqual([...KNOWN_ERP_PROVIDERS_BEFORE]);
-    expect(CLOUD_ERP_PROVIDERS).toEqual([...CLOUD_ERP_PROVIDERS_BEFORE]);
+    // Not merely set-equal: callers see these arrays. The historical prefix is
+    // asserted as a PREFIX so the pre-change order is still pinned exactly,
+    // and the new vendors are asserted to follow it in declaration order.
+    expect(KNOWN_ERP_PROVIDERS.slice(0, KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
+      ...KNOWN_ERP_PROVIDERS_BEFORE,
+    ]);
+    expect(KNOWN_ERP_PROVIDERS.slice(KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
+      ...SAAS_PROVIDERS_WARP_2214,
+    ]);
+    expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
+      ...CLOUD_ERP_PROVIDERS_BEFORE,
+    ]);
+    expect(CLOUD_ERP_PROVIDERS.slice(CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
+      ...SAAS_PROVIDERS_WARP_2214,
+    ]);
   });
 
   it("every buildable descriptor can actually be built — no id without a factory", () => {
@@ -106,9 +138,25 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // set-equality assertion above and then throw the first time a real
     // connection used it.
     for (const id of buildableProviderIds()) {
-      expect(() => connectorForProvider({ provider: id, host: "10.0.0.5" })).not.toThrow(
-        /unknown ERP provider/,
-      );
+      expect(() =>
+        connectorForProvider({
+          provider: id,
+          host: "10.0.0.5",
+          connectionId: "conn-1",
+          // The minimum each cloud factory needs to get past its own refusal.
+          // Supplied for every provider rather than per-id, because this test
+          // is about "is there a factory", not about validation — and a
+          // per-id switch here would be the vendor branching the registry
+          // exists to remove.
+          providerConfig: {
+            provider: id,
+            realmId: "r-1",
+            organizationId: "o-1",
+            portalId: "p-1",
+            datacenter: "us14",
+          },
+        }),
+      ).not.toThrow(/unknown ERP provider/);
     }
   });
 
@@ -530,6 +578,12 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "dentrix",
       "quickbooks",
       "opendental",
+      // WARP-2466 — the three SaaS vendors, after the practice/accounting
+      // cards that shipped first. `catalog.order` pins this, so it survives a
+      // reordering of the descriptor declarations.
+      "stripe",
+      "hubspot",
+      "mailchimp",
     ]);
   });
 });
