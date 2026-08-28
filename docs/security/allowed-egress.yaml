@@ -31,12 +31,27 @@
 #                 concatenated parts, or named only in a comment, no longer
 #                 counts as backing.
 #   no_code_literal
-#                 (kind: egress only) one-line reason this destination can
-#                 have no repo literal — a third-party binary or SDK owns
-#                 it. Per-entry and reviewed; there is deliberately no
-#                 blanket exemption, because the list of exemptions is the
-#                 list of things the registry cannot prove. The gate also
-#                 fails if a literal DOES exist, so the list self-prunes.
+#                 (kind: egress only) reason this destination can have no
+#                 repo literal — a third-party binary or SDK owns it.
+#                 Reviewed, and deliberately never blanket: the list of
+#                 exemptions is the list of things the registry cannot
+#                 prove. The gate fails if a literal DOES exist, so it
+#                 self-prunes.
+#                 PER HOST since WARP-2487, in either of two shapes:
+#                   no_code_literal: <reason>          covers every host
+#                   no_code_literal: {<host>: <reason>} covers those hosts
+#                 The mapping exists because a MIXED entry was previously
+#                 inexpressible: with two hosts, one SDK-owned and one
+#                 dialled by our own code, declaring the flag failed (a
+#                 literal exists) and omitting it passed (some host is
+#                 backed) while nothing accounted for the SDK-owned half.
+#                 A mapping key that is not one of the entry's own hosts is
+#                 a config error (exit 2), not a silent no-op.
+#
+#   ids must be UNIQUE. Two list items may legally carry the same `id:` as
+#   far as YAML is concerned, and PR #1828 shipped two byte-identical
+#   `hubspot-api` blocks under a green "OK — 41 registry entries". The gate
+#   now fails on a duplicate id and prints both line numbers (WARP-2487).
 # =============================================================================
 version: 1
 policy:
@@ -141,7 +156,10 @@ entries:
     ticket: WARP-243
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/config.ts, docs/ONBOARDING_SSO_OIDC.md]
+    # WARP-2468: docs/ONBOARDING_SSO_OIDC.md was listed here and is still the
+    # operator guide for this entry — but a doc the denial scan never reads
+    # cannot be evidence the host is dialled, so it lives in this comment now.
+    code_refs: [apps/orchestrator/src/config.ts]
 
   - id: calendar-location-autocomplete
     kind: egress
@@ -168,7 +186,12 @@ entries:
     kind: egress
     service: voice-io
     destination:
-      hosts: [ipapi.co]
+      # WARP-2467: ip-api.com added. It was always a real second destination —
+      # GEO_URL can be pointed at it without a code change, and geo.py branches
+      # on its differently-shaped response (city/regionName/country) at :139.
+      # Only the bare-host blind spot kept it out of this list: the host is
+      # never written as a scheme URL literal, so nothing extracted it.
+      hosts: [ipapi.co, ip-api.com]
       ports: [443]
       protocol: https
     phase: runtime
@@ -255,6 +278,14 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/services/model-readiness.service.ts]
+    # WARP-2487: the one occurrence of this host in the repo is
+    # services/inference-manager/runtime/base.py:190, inside a DOCSTRING
+    # explaining that Ollama resolves names against it. That is prose about
+    # the daemon's behaviour, not a call — the file is not a code_ref of this
+    # entry and does not dial the host — so the declaration below is true per
+    # host, not merely true on average. Recorded here because per-host
+    # checking makes the question askable and the answer should be written
+    # down rather than rediscovered.
     no_code_literal: >-
       The Ollama daemon owns model-weight distribution and resolves this
       itself; our code never names it. Already stated in this entry's own
@@ -278,6 +309,14 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [services/ai-gateway/providers/anthropic_cloud.py, services/ai-gateway/providers/openai_cloud.py]
+    # WARP-2487: api.anthropic.com also appears at
+    # services/egress-audit/allowlist.py:14 — inside the module DOCSTRING, as
+    # the worked example of this very schema. Prose about the registry
+    # format, in a file that is not a code_ref here and dials nothing. The
+    # declaration below holds for BOTH hosts: neither provider names a base
+    # URL, so the string form (which covers every host of the entry) is the
+    # accurate shape. The host->reason mapping form exists for entries where
+    # that is not true.
     no_code_literal: >-
       The LiteLLM SDK holds the base URLs; the providers pass only a model
       id and an API key (see anthropic_cloud.py, which names no host).
@@ -385,9 +424,19 @@ entries:
     ticket: WARP-2114
     added: 2026-08-19
     review_by: 2027-08-19
-    # Code lands in WARP-2115 (auth) and WARP-2118 (sync engine); this entry is
-    # registered with the ADR that authorises the class, ahead of the client.
-    code_refs: [docs/ADR-041-cloud-connector-class.md]
+    # WARP-2468: was docs/ADR-041-cloud-connector-class.md, which the denial
+    # scan never reads — the ADR that PROPOSED this host was keeping the entry
+    # green. Repointed at the sync-engine files the Graph client will live in.
+    # The ADR remains the authorising document; it is just not evidence of use.
+    code_refs: [apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
+    no_code_literal: >-
+      Registered ahead of its caller: the WARP-2118 sync engine has no HTTP
+      client yet, so nothing in apps/ or services/ names this host —
+      @microsoft/microsoft-graph-client is not a dependency, and the only
+      occurrences in the repo are .test.ts fixtures, which are out of the
+      scanner's scope. Self-pruning: the moment WARP-2118 lands a
+      graph.microsoft.com literal in a code_refs file, the gate fails on
+      this entry until this declaration is deleted. (WARP-2468 / WARP-2118)
 
   - id: m365-entra-login
     kind: egress
@@ -411,7 +460,12 @@ entries:
     ticket: WARP-2114
     added: 2026-08-19
     review_by: 2027-08-19
-    code_refs: [docs/ADR-041-cloud-connector-class.md]
+    # WARP-2468: was docs/ADR-041-cloud-connector-class.md. Unlike its sibling
+    # m365-graph-api this destination IS dialled today — WARP-2115 landed the
+    # MSAL client, entra-client.ts builds the authority from
+    # config.M365_AUTHORITY_HOST, and config.ts holds the host as a literal
+    # default. So it needs no no_code_literal declaration: the code backs it.
+    code_refs: [apps/orchestrator/src/config.ts, apps/orchestrator/src/services/m365/entra-client.ts]
 
   - id: quickbooks-online-api
     kind: egress
@@ -625,51 +679,6 @@ entries:
     review_by: 2027-08-27
     code_refs: [services/erp-connector/src/hubspot/connector.ts]
 
-  - id: hubspot-api
-    kind: egress
-    service: erp-connector
-    destination:
-      hosts: [api.hubapi.com]
-      ports: [443]
-      protocol: https
-    phase: runtime
-    data_class: user-content-on-request
-    purpose: >-
-      HubSpot CRM connector (ADR-041) — reads the customer-relationship records
-      of a HubSpot portal the owner explicitly connected: contacts, companies,
-      deals, tickets and the engagement objects (calls, emails, meetings, notes,
-      tasks), plus owners, pipelines and properties. Carries that customer
-      content in the response. Nothing box-local is ever sent and nothing is
-      sent opportunistically; the connector only ever dials out, because the box
-      accepts no inbound connections and HubSpot webhooks are therefore
-      structurally unavailable to it. ONE entry covers this connector
-      completely: api.hubapi.com serves the CRM object routes, the Search API
-      used for delta polling, and the Exports API used for bulk backfill, and
-      there is no separate token endpoint because there is no OAuth dance —
-      HubSpot supports no PKCE, so the customer's own super admin creates a
-      PRIVATE APP in their portal and its access token (pat-…) is presented
-      directly as a bearer credential. If a token endpoint is ever added it gets
-      its own entry with data_class: none, as m365-entra-login does. A completed
-      export is served from a signed URL on a DIFFERENT host; the connector
-      returns that reference rather than dialing it, because that host is not
-      registered here and downloading it is a separate decision with its own
-      security review. READ-MOSTLY: the only writes are notes and tasks behind
-      an explicit confirmation, and no deal-stage change, contact merge or
-      record deletion surface exists in the connector at any tier. Like the
-      QuickBooks and Stripe tracks and unlike the M365 one, it does NOT persist
-      what it reads — CRM reads are answered read-through, so no synced copy
-      exists to encrypt and the connector does not become the first writer of
-      the unencrypted ErpEntityCache or of ErpSyncCursor (ADR-041 §4,
-      WARP-2028). Off until the owner connects a portal. Metered by HubSpot on
-      the Search API at 5 requests per second per ACCOUNT — a ceiling that
-      cannot be raised at any tier and returns no rate-limit headers — so the
-      connector serialises Search behind an account-keyed governor and derives
-      its backoff from the 429 itself.
-    ticket: WARP-2317
-    added: 2026-08-27
-    review_by: 2027-08-27
-    code_refs: [services/erp-connector/src/hubspot/connector.ts]
-
   - id: ref-dentrix-ascend-spec
     kind: reference
     service: orchestrator
@@ -691,7 +700,13 @@ entries:
     kind: egress
     service: orchestrator
     destination:
-      hosts: [prod.hs1api.com, test.hs1api.com]
+      # WARP-2467: the apex hs1api.com is listed because the connector's own
+      # guard constant is a suffix — ASCEND_ALLOWED_HOST_SUFFIX = ".hs1api.com"
+      # (ascend-connector.ts) — and the bare-host scan reads it as that apex.
+      # Exact-match only, deliberately NOT "*.hs1api.com": nothing here widens
+      # what the connector will send a bearer token to. The two hosts it
+      # actually dials remain prod. and test.
+      hosts: [prod.hs1api.com, test.hs1api.com, hs1api.com]
       ports: [443]
       protocol: https
     phase: runtime
@@ -805,7 +820,11 @@ entries:
   # or one sampled datacenter would be worse than useless — it would turn
   # egress-gate green over a host that nothing constrains. Since a dynamic
   # entry contributes NO host patterns to the scanner, this connector's source
-  # deliberately carries no https://…mailchimp.com literal either.
+  # deliberately carries no https://…mailchimp.com literal either. What it
+  # DOES carry is the bare suffix constant ".api.mailchimp.com" the code-side
+  # guard anchors on — visible to the gate since the WARP-2467 bare-host scan
+  # reads string literals, and accounted for by ref-mailchimp-host-suffix
+  # below, which registers that NAME without granting any egress.
   #
   # THE ENFORCEMENT IS IN CODE, not here. assertSafeMailchimpBaseUrl() does
   # exact-host equality against <dc>.api.mailchimp.com for the datacenter this
@@ -831,6 +850,26 @@ entries:
     ticket: WARP-2379
     added: 2026-08-27
     review_by: 2027-08-27
+    code_refs: [services/erp-connector/src/mailchimp/connector.ts]
+
+  - id: ref-mailchimp-host-suffix
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT an egress destination and NOT a wildcard grant. The box never
+      # dials api.mailchimp.com itself — the dialled host is
+      # <dc>.api.mailchimp.com, per-connection, governed by
+      # mailchimp-marketing-api above and by assertSafeMailchimpBaseUrl().
+      # This entry exists because the connector carries ".api.mailchimp.com"
+      # as a whole-string literal for that guard to anchor on, and the
+      # WARP-2467 bare-host scan (rightly) reads a bare name out of it.
+      # Exact name only, so a sampled-datacenter literal like
+      # us1.api.mailchimp.com is still denied — which is the point.
+      hosts: [api.mailchimp.com]
+    purpose: the anchored host-suffix constant behind the Mailchimp exact-host guard, named in code as the guard's anchor — not a connection the box makes
+    ticket: WARP-2379
+    added: 2026-08-28
+    review_by: 2027-08-28
     code_refs: [services/erp-connector/src/mailchimp/connector.ts]
 
   # ── build / setup / ci egress ───────────────────────────────────────────
@@ -958,7 +997,65 @@ entries:
     review_by: 2027-07-04
     code_refs: [scripts/fetch-oui.sh]
 
+  - id: ci-public-suffix-list
+    kind: egress
+    service: ci
+    destination:
+      hosts: [publicsuffix.org]
+      ports: [443]
+      protocol: https
+    phase: ci
+    data_class: none
+    purpose: >-
+      Refresh of the vendored Public Suffix List snapshot
+      (scripts/data/public_suffix_list.dat), which decides what the egress
+      gate itself treats as a hostname. Fetched by a human or a scheduled
+      job and committed; the scanner never goes to the network — it runs
+      offline in CI and on the appliance. Upstream states this is the only
+      supported URL for the list.
+    ticket: WARP-2487
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [scripts/fetch-public-suffix-list.sh]
+
   # ── reference-only (hostnames in the repo that are NOT egress) ──────────
+  # WARP-2487: the gate now decides what a hostname is from the Public
+  # Suffix List instead of a fifteen-entry TLD tuple, which is what makes a
+  # destination on `.sh`/`.app`/`.xyz` visible at all. The cost is that ~1,440
+  # delegated TLDs include ordinary English words, so a dotted identifier key
+  # written as a whole string literal is indistinguishable FROM A HOSTNAME by
+  # any structural rule — `wireless.channel` and `vendor.channel` are the same
+  # shape. Filtering it in code would need a rule that also hides real
+  # destinations, so these are registered instead, by exact name: each token
+  # below is spelled out, so `evil.chat` still denies. Same idea as
+  # ref-xml-namespaces, which registers namespace identifiers.
+  #
+  # Measured: this is the entire residue. Widening the gate to the full
+  # suffix list took pristine stage from 69 hosts to 459 unfiltered, and to
+  # 76 with the pattern filters — of which these seven are the only ones not
+  # already registered, and none is a destination.
+  - id: ref-dotted-identifier-keys
+    kind: reference
+    service: repo
+    destination:
+      hosts: [ai.model.chat, ble.hci.id, brain-memory.zip, ops.services,
+              service.health, wireless.channel, workspace.name]
+    purpose: >-
+      Dotted identifier keys whose last label collides with a delegated TLD
+      (.chat .id .zip .services .health .channel .name). None is a
+      destination and the box never resolves any of them: two WorkspaceSetting
+      keys (ai.model.chat, workspace.name), a matter.js environment variable
+      name (ble.hci.id), a Python logger name (ops.services), an analytics
+      metric name (service.health), an OpenWrt UCI command name
+      (wireless.channel), and the filename the dashboard hands the browser
+      for a brain-memory export (brain-memory.zip).
+    ticket: WARP-2487
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [apps/orchestrator/src/services/workspace-settings.service.ts,
+                apps/orchestrator/src/routes/network-wifi.routes.ts,
+                services/matter-controller/src/ble.ts]
+
   - id: ref-xml-namespaces
     kind: reference
     service: repo
@@ -994,6 +1091,56 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/routes/calendar.ts, docker/docker-compose.yml]
+
+  # ── WARP-2467: first seen once bare hosts in code literals began to be
+  # scanned. Each was already in the tree; the gate simply could not see it.
+  - id: ref-meeting-provider-hosts
+    kind: reference
+    service: repo
+    destination:
+      # NOT destinations. A recognition table: meeting-link.ts is the single
+      # gate deciding whether a user-authored string may become an https
+      # anchor, and it matches these hosts to LABEL the link ("Zoom",
+      # "Microsoft Teams"). The box opens no connection to any of them — the
+      # member who clicks the anchor does, in their own browser. The module
+      # makes no network call at all (WARP-1874).
+      hosts: [zoom.us, zoomgov.com, teams.microsoft.com, teams.live.com,
+              teams.microsoft.us, meet.google.com, webex.com]
+    purpose: video-call provider hostnames matched to label a user-pasted meeting link for rendering — never dialled by the appliance
+    ticket: WARP-2467
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [packages/shared-types/src/meeting-link.ts]
+
+  - id: ref-ui-placeholder-hosts
+    kind: reference
+    service: web-dashboard
+    destination:
+      # NOT a destination. Placeholder text in the SMTP host field, shown to
+      # an operator as an example of what to type. The host the box actually
+      # dials is whatever that operator saves, which is covered by the
+      # per-account dynamic entry (mailbox settings imapHost/smtpHost).
+      hosts: [smtp.gmail.com]
+    purpose: example SMTP hostname in dashboard placeholder copy — the real host is per-account configuration, registered as kind dynamic
+    ticket: WARP-2467
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [apps/web-dashboard/src/components/settings/EmailChannelSection.tsx]
+
+  - id: ref-model-maker-names
+    kind: reference
+    service: inference-manager
+    destination:
+      # NOT a destination. "Z.ai" is the model publisher's BRAND, sitting in
+      # a `maker` field of the model manifest beside "display_name" and
+      # "description". It is a company name that happens to be spelled like a
+      # domain; nothing resolves or dials it.
+      hosts: [z.ai]
+    purpose: model-publisher brand name in the inference-manager model manifest's maker field — a vendor label, not a host
+    ticket: WARP-2467
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [services/inference-manager/models/model-manifest.json]
 
   - id: ref-non-egress-ip-literals
     kind: reference
