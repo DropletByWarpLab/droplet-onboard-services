@@ -103,9 +103,10 @@ def _source_label(url: str) -> str:
     """Label the geo provider by its parsed hostname, not by substring.
 
     CodeQL py/incomplete-url-substring-sanitization: `"ip-api.com" in url`
-    also matched `https://ip-api.com.example.net/` or a path that merely
-    mentions the name. The host must equal a known domain (or be a subdomain
-    of it); anything else is reported as the raw URL.
+    also matched a lookalike host that merely *starts* with the provider's
+    name under someone else's domain, or a path that mentions it. The host
+    must equal a known domain (or be a subdomain of it); anything else is
+    reported as the raw URL.
     """
     host = (urlparse(url).hostname or "").lower()
     for known in _KNOWN_GEO_HOSTS:
