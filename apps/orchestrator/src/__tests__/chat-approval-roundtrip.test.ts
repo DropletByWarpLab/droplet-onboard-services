@@ -74,7 +74,10 @@ function makeDispatch(now: () => number) {
       const refusal = interceptOutcomeToToolResult(tool, outcome);
       if (refusal) {
         return {
-          isError: refusal.status === "error",
+          // mcp-server sets `isError` only for `status === "error"`, so a
+          // `confirmation_required` refusal is NOT an error — the same
+          // distinction the agent loop reads downstream.
+          isError: "status" in refusal && refusal.status === "error",
           content: [{ type: "text", text: JSON.stringify(refusal) }],
         };
       }
