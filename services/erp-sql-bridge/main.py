@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys as _sys
 import time
 from contextlib import asynccontextmanager
@@ -100,11 +99,72 @@ def _target_from(req: ExecRequest | IntrospectRequest) -> Target:
 
 # Comments are stripped before ANY classification, so `/*SELECT*/ UPDATE ...`
 # cannot masquerade as a read.
-_COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.S)
+#
+# CodeQL py/polynomial-redos (alerts #63/#64): this used to be two regexes —
+# `/\*.*?\*/|--[^\n]*` for comments and `[\s;]+$` for trailing terminators —
+# and both backtrack quadratically on request-controlled SQL (an unclosed `/*`
+# followed by many `a/*`, or a long run of tabs before a non-terminator: ~7 s
+# at 50k chars, measured). It is now one left-to-right scan; no regex touches
+# the statement at all.
+
+
+def _strip_comments_and_mask_literals(sql: str) -> str:
+    """One linear pass: block/line comments become a single space, single-quoted
+    literals become `''` (a doubled quote inside a literal stays inside it).
+
+    Doing both in ONE pass — rather than comments first and literals second, as
+    the regex version did — also closes a bypass that ordering had: a `--`
+    INSIDE a literal (`SET reason = '--'; DROP ...`) swallowed the rest of the
+    line, semicolon included, before the literal mask ever saw it, so a stacked
+    write read as a single statement. Lexed together, a quote opens a literal
+    and nothing inside it is a comment, and vice versa.
+
+    Unterminated constructs are left as-is so a stray `;` inside them still
+    counts as a separator (fail closed, same as before).
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    # Once a `/*` has no closing `*/` anywhere after it, no later `/*` has one
+    # either — remember that instead of re-scanning to the end for every
+    # opener, which is exactly the quadratic behaviour this replaces.
+    block_may_close = True
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            if j >= n:
+                out.append(sql[i:])  # unterminated literal: keep it visible
+                break
+            out.append("''")
+            i = j + 1
+        elif ch == "/" and block_may_close and sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                block_may_close = False
+                out.append(ch)
+                i += 1
+            else:
+                out.append(" ")
+                i = end + 2
+        elif ch == "-" and sql.startswith("--", i):
+            end = sql.find("\n", i)
+            out.append(" ")
+            i = n if end == -1 else end  # the newline itself is kept
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def _bare(sql: str) -> str:
-    """Comments removed, trailing terminators removed, string literals masked.
+    """Comments removed, string literals masked, trailing terminators removed.
 
     "Trailing terminators" means any run of semicolons and whitespace at the
     very end — `;`, `;;;`, and `; ; ` all normalize the same way. They are
@@ -115,11 +175,14 @@ def _bare(sql: str) -> str:
     verified). Only the END is stripped — an interior `;` is exactly the
     separator this is looking for and must survive.
 
-    Literals are masked AFTER that, so a semicolon INSIDE a value ('x;y') is
-    not mistaken for a separator either.
+    Literals are masked in the same pass as comments, so a semicolon INSIDE a
+    value ('x;y') is not mistaken for a separator either.
     """
-    stripped = re.sub(r"[\s;]+$", "", _COMMENT.sub(" ", sql).strip())
-    return re.sub(r"'(?:''|[^'])*'", "''", stripped)
+    bare = _strip_comments_and_mask_literals(sql).strip()
+    end = len(bare)
+    while end and (bare[end - 1] == ";" or bare[end - 1].isspace()):
+        end -= 1
+    return bare[:end]
 
 
 def _is_single_statement(sql: str) -> bool:

@@ -3,7 +3,7 @@
 // Shared Projects primitives — safety chip, priority, state pill, labels,
 // avatars, due/count metas, empty + skeleton. All `pm-`-classed (scoped).
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, type JSX } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PmIcon } from "./icons";
 import { PRIORITY, fmtDate, isOverdue } from "./config";

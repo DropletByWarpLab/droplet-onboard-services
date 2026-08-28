@@ -42,6 +42,7 @@ import { inlinePreviewContentType } from "../lib/file-content.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { publishRunOne } from "../services/transcription-bus.service.js";
 import { createLogger } from "../lib/logger.js";
+import { standardRateLimit } from "../middleware/rate-limit.js";
 
 // WARP-218 — per-item rolling-hour retry cap for /transcribe-now.
 const TRANSCRIBE_NOW_RETRY_WINDOW_MS = 60 * 60 * 1000;
@@ -555,7 +556,9 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
   // ── GET /api/files/brain/:itemId/download ──
   // Stream the original bytes of a single item. RBAC + zip-slip
   // defense match the export route.
-  router.get("/files/brain/:itemId/download", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — owner-scoped read that streams from
+  // local disk; the standard per-IP preset is enough (no polling caller).
+  router.get("/files/brain/:itemId/download", standardRateLimit, async (req, res, next) => {
     try {
       const userId = getUserId(req);
       if (!userId) {

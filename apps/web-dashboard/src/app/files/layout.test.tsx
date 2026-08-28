@@ -38,7 +38,7 @@ function readPage(sub: string): string {
 const STATIC_SUBVIEWS = ["drives", "favorites", "recents", "shared", "trash"];
 
 // ── the layout's own dependencies ────────────────────────────────────────
-const mockPathname = vi.fn<[], string>(() => "/files/trash");
+const mockPathname = vi.fn<() => string>(() => "/files/trash");
 vi.mock("next/navigation", () => ({
   usePathname: () => mockPathname(),
 }));
