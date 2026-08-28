@@ -54,6 +54,10 @@ vi.mock("./activity.singleton.js", () => ({ recordActivity: recordActivityMock }
 
 import { ConnectorBlockedError } from "@droplet/erp-connector";
 import { createIntegrationsService } from "./integrations.service.js";
+// WARP-2500 — the provider table is DERIVED from the live registry, never
+// hand-written here: a provider added to `provider-registry.ts` has to join
+// the provider-scoping assertions without anyone remembering to list it.
+import { KNOWN_ERP_PROVIDERS, EAGLESOFT_PROVIDER } from "./erp-provider.js";
 import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 import {
   createTransactionSeam,
@@ -190,27 +194,80 @@ export interface StubPrisma {
  * mock database.
  */
 function stubPrisma(
-  row: Record<string, unknown> | null,
+  /**
+   * WARP-2500 — accepts an ARRAY as well as a single row.
+   *
+   * A one-row box cannot express the defect this ticket fixes: with only an
+   * Eaglesoft row present, "disconnect the Eaglesoft row" and "disconnect the
+   * row the caller named" are the same write, so the hardcoded provider and
+   * the parameterised one are indistinguishable. The table-driven suite below
+   * seeds one row per KNOWN provider precisely so those two come apart.
+   */
+  row: Record<string, unknown> | Array<Record<string, unknown>> | null,
   cursors: Array<Record<string, unknown>> = [],
 ): StubPrisma {
-  const rows = row ? [{ ...row }] : [];
+  const seeded = row === null ? [] : Array.isArray(row) ? row : [row];
+  const rows = seeded.map((r) => ({ ...r }));
   const cursorRows = cursors.map((c) => ({ ...c }));
 
   const self = {
     integrationConnection: {
-      findFirst: vi.fn(async () => (rows[0] ? { ...rows[0] } : null)),
+      /**
+       * WARP-2500 — this HONORS `where.provider`.
+       *
+       * It used to return `rows[0]` whatever it was asked for. That was
+       * harmless while every test seeded one Eaglesoft row, and fatal the
+       * moment the suite went table-driven over providers: a stub that hands
+       * back the only row regardless of the filter cannot tell a
+       * provider-scoped read from the hardcoded `EAGLESOFT_PROVIDER` one this
+       * ticket removes, so the mutation "restore the Eaglesoft default" would
+       * have stayed GREEN and the table would have proved nothing.
+       *
+       * Filtering here is not a mock database (§4's rule) — it is one `where`
+       * clause the subject actually depends on, made observable. The tests that
+       * seed several providers below are the reason it has to be.
+       */
+      findFirst: vi.fn(async (args?: { where?: { provider?: string } }) => {
+        const wanted = args?.where?.provider;
+        const hit =
+          wanted === undefined ? rows[0] : rows.find((r) => r.provider === wanted);
+        return hit ? { ...hit } : null;
+      }),
       findMany: vi.fn(async () => rows.map((r) => ({ ...r }))),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         const created = { ...connectedRow(), ...data };
         rows.push(created);
         return { ...created };
       }),
-      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        const target = rows[0] ?? { ...connectedRow() };
-        Object.assign(target, data);
-        if (!rows[0]) rows.push(target);
-        return { ...target };
-      }),
+      /**
+       * WARP-2500 — this HONORS `where.id`, for the same reason `findFirst`
+       * honors `where.provider`.
+       *
+       * Writing to `rows[0]` unconditionally meant a multi-provider test could
+       * assert "the Stripe row was purged" while the service had in fact
+       * updated whichever row happened to be seeded first. The `where.id` the
+       * service passes comes from the row it read, so honoring it is what makes
+       * "purged the RIGHT row" an assertable fact rather than an assumption.
+       */
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where?: { id?: string };
+          data: Record<string, unknown>;
+        }) => {
+          const target =
+            (where?.id ? rows.find((r) => r.id === where.id) : rows[0]) ?? null;
+          if (!target) {
+            const created = { ...connectedRow(), ...data };
+            rows.push(created);
+            return { ...created };
+          }
+          Object.assign(target, data);
+          return { ...target };
+        },
+      ),
     },
     erpAuditLog: { create: vi.fn(async () => ({})) },
     erpSyncCursor: {
@@ -310,7 +367,7 @@ describe("disconnect() purges the connection's secrets and identity", () => {
     // → every one of these assertions goes red. That mutation IS the code on
     // `origin/stage`.
     const prisma = stubPrisma(connectedRow());
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const data = updateData(prisma);
     for (const column of PURGED_SCALAR_COLUMNS) {
@@ -330,7 +387,7 @@ describe("disconnect() purges the connection's secrets and identity", () => {
     // absence of a row. Deleting the row would make the hub derive the state
     // from absence, which is the thing the enum column exists to prevent.
     const prisma = stubPrisma(connectedRow());
-    const detail = await serviceFor(prisma).disconnect({ actor: "romain" });
+    const detail = await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const data = updateData(prisma);
     expect(data.status).toBe("DISABLED");
@@ -345,14 +402,14 @@ describe("disconnect() purges the connection's secrets and identity", () => {
     // means a crash between them leaves a row reading DISABLED while still
     // holding a live credential — the exact lie this fix removes.
     const prisma = stubPrisma(connectedRow());
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     expect(prisma.integrationConnection.update).toHaveBeenCalledTimes(1);
   });
 
   it("is idempotent — no row means no write, no cursor reset and no audit", async () => {
     const prisma = stubPrisma(null);
-    const detail = await serviceFor(prisma).disconnect({ actor: "romain" });
+    const detail = await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     expect(prisma.erpSyncCursor.updateMany).not.toHaveBeenCalled();
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
@@ -372,7 +429,7 @@ describe("disconnect() also returns the connection's cursors to unstarted", () =
     // Mutation: delete the `resetCursorsForConnection(tx, row.id)` call from
     // `disconnect()` → red. That deletion IS the code this ticket fixes.
     const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const { where } = cursorResetCall(prisma);
     // Scoped to the connection. An unscoped `updateMany` would rewind every
@@ -385,7 +442,7 @@ describe("disconnect() also returns the connection's cursors to unstarted", () =
     // that field. The values are spelled out here rather than imported, so a
     // change to the constant's meaning cannot move both sides at once.
     const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const { data } = cursorResetCall(prisma);
     for (const [field, value] of Object.entries(UNSTARTED_CURSOR_FIELDS)) {
@@ -402,7 +459,7 @@ describe("disconnect() also returns the connection's cursors to unstarted", () =
     //
     // Mutation: swap the reset for a `deleteMany` → red.
     const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     expect(prisma.cursors).toHaveLength(1);
     expect(prisma.cursors[0]).toMatchObject(UNSTARTED_CURSOR_FIELDS);
@@ -421,7 +478,7 @@ describe("disconnect() also returns the connection's cursors to unstarted", () =
     // Mutation: add an `erpDriftRecord.deleteMany` to
     // `resetCursorsForConnection` → red.
     const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     expect(prisma.erpDriftRecord.deleteMany).not.toHaveBeenCalled();
   });
@@ -433,7 +490,7 @@ describe("disconnect() also returns the connection's cursors to unstarted", () =
       revokedCursor(),
       revokedCursor({ id: "cur_2", entity: "bill" }),
     ]);
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const call = prisma.erpAuditLog.create.mock.calls[0] as unknown as [
       { data: { scope: Record<string, unknown> } },
@@ -464,7 +521,7 @@ describe("after a disconnect the hub stops advertising a dead credential", () =>
     expect(before.syncState).toBe("FAILED");
     expect(before.needsReconnect).toBe(true);
 
-    await svc.disconnect({ actor: "romain" });
+    await svc.disconnect({ actor: "romain" }, "eaglesoft");
 
     const after = await svc.getEaglesoft();
     expect(after.needsReconnect).toBe(false);
@@ -485,7 +542,7 @@ describe("after a disconnect the hub stops advertising a dead credential", () =>
     expect(before?.needsReconnect).toBe(true);
     expect(before?.syncState).toBe("FAILED");
 
-    await svc.disconnect({ actor: "romain" });
+    await svc.disconnect({ actor: "romain" }, "eaglesoft");
 
     const after = (await svc.list()).find((s) => s.provider === "eaglesoft");
     expect(after?.needsReconnect).toBe(false);
@@ -509,7 +566,7 @@ describe("the purge and the cursor reset commit together or not at all", () => {
     // where the row this decision was taken from can change underneath it.
     // Mutation: split into two `$transaction` calls → red on the count.
     const prisma = stubPrisma(connectedRow(), [revokedCursor()]);
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     expect(prisma.seam.calls()).toHaveLength(1);
     expectAllTransactionsAt(prisma.seam, SERIALIZABLE_TX);
@@ -529,7 +586,7 @@ describe("the purge and the cursor reset commit together or not at all", () => {
     );
 
     await expect(
-      serviceFor(prisma).disconnect({ actor: "romain" }),
+      serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft"),
     ).rejects.toThrow("cursor reset failed");
 
     // The row still holds BOTH credentials and its CONNECTED status.
@@ -587,7 +644,7 @@ describe("the purge and the cursor reset commit together or not at all", () => {
       },
     );
 
-    const disconnecting = serviceFor(prisma).disconnect({ actor: "romain" });
+    const disconnecting = serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
     await parkedAt;
 
     await prisma.$transaction(
@@ -631,7 +688,7 @@ describe("the disconnect audit row records THAT it purged, never WHAT", () => {
     // cannot distinguish a disconnect that purged from one written by an older
     // build that did not, which is the question an auditor asks about this row.
     const prisma = stubPrisma(connectedRow());
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const audit = disconnectAudit(prisma);
     expect(audit.action).toBe("disconnect");
@@ -643,7 +700,7 @@ describe("the disconnect audit row records THAT it purged, never WHAT", () => {
     // An append-only, exportable audit row is the worst possible second home
     // for a credential: no rotation can recall it.
     const prisma = stubPrisma(connectedRow());
-    await serviceFor(prisma).disconnect({ actor: "romain" });
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     const serialized = JSON.stringify(disconnectAudit(prisma).scope);
     expect(serialized).not.toContain(SEEDED_API_CIPHERTEXT);
@@ -659,7 +716,7 @@ describe("the read view says whether the credentials are gone", () => {
     // "disconnected, credentials removed" from "disabled by policy while still
     // holding a key"; collapsing them is the failure ADR-042 §6 names.
     const prisma = stubPrisma(connectedRow());
-    const detail = await serviceFor(prisma).disconnect({ actor: "romain" });
+    const detail = await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
 
     expect(detail.credentialsPurged).toBe(true);
   });
@@ -699,7 +756,7 @@ describe("connect() after a disconnect is a full re-provision", () => {
    * `connect()` consulted the row for anything but its id, one of these would
    * surface in the update.
    */
-  function purgedRow() {
+  function purgedRow(overrides: Record<string, unknown> = {}) {
     return connectedRow({
       status: "DISABLED",
       writeEnabled: false,
@@ -713,6 +770,7 @@ describe("connect() after a disconnect is a full re-provision", () => {
       schemaHash: null,
       schemaVersion: null,
       lastHealthyAt: null,
+      ...overrides,
     });
   }
 
@@ -745,7 +803,16 @@ describe("connect() after a disconnect is a full re-provision", () => {
   it("still writes the material the input DOES supply", async () => {
     // The negative above must not be satisfied by connect() simply never
     // writing these columns: with the input carrying them, they are written.
-    const prisma = stubPrisma(purgedRow());
+    //
+    // WARP-2500 — the seeded row is now `eaglesoft-api`, matching the provider
+    // this connect names. It used to be the default `eaglesoft` row and the
+    // test still took the UPDATE path, because the stub's `findFirst` ignored
+    // `where.provider` and returned whatever row existed. Against real Prisma
+    // that call finds nothing and CREATEs, so the assertion below was reading
+    // an update the production path would never have performed. Seeding the
+    // matching provider keeps the test's actual subject — "the supplied
+    // material is written" — while making the path it exercises the real one.
+    const prisma = stubPrisma(purgedRow({ provider: "eaglesoft-api" }));
     await serviceFor(prisma).connect({
       host: "10.0.0.9",
       provider: "eaglesoft-api",
@@ -801,5 +868,334 @@ describe("connect() after a disconnect is a full re-provision", () => {
     });
     // And no transaction was opened for a path with only one write to make.
     expect(prisma.seam.calls()).toHaveLength(0);
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * WARP-2500 — the lifecycle calls are PROVIDER-SCOPED
+ *
+ * Everything above this line seeds exactly one Eaglesoft row. That is the
+ * shape in which this bug is invisible: with one row on the box, "read the
+ * Eaglesoft row" and "read the row the caller named" are the same read, so a
+ * hardcoded `EAGLESOFT_PROVIDER` and a parameterised `provider` produce
+ * identical writes and every assertion above passes either way.
+ *
+ * The suite below seeds one CONNECTED row for every provider in
+ * `KNOWN_ERP_PROVIDERS` — an Eaglesoft row always among them — and then
+ * disconnects them one at a time. That is what makes the two come apart, and
+ * it is the reason the table is driven off the live registry rather than a
+ * hand-written list: a provider added to `provider-registry.ts` joins these
+ * assertions without anyone remembering to add it.
+ *
+ * ## The mutation, and what it must do
+ *
+ *   In `integrations.service.ts`, restore the Eaglesoft default:
+ *     disconnect()      `where: { provider: scoped }` → `provider: EAGLESOFT_PROVIDER`
+ *     setWriteEnabled() `findRow(scoped)`             → `findRow(EAGLESOFT_PROVIDER)`
+ *
+ * Expected: the `eaglesoft` row of the table stays GREEN — it always did —
+ * and EVERY OTHER provider goes RED. A mutation that leaves the whole table
+ * green means the table is not seeing the provider, and is a finding to chase
+ * rather than a result to record.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** Stable per-provider ids, so an assertion can name the row it expects. */
+const connIdFor = (provider: string) => `conn_${provider}`;
+const cursorIdFor = (provider: string) => `cur_${provider}`;
+
+/**
+ * A box with every known provider connected at once.
+ *
+ * Every row carries credential material on every purgeable column, so "this
+ * row was purged" and "that row was not" are both observable. A row seeded
+ * empty would make the negative assertion pass vacuously.
+ */
+function everyProviderConnected() {
+  return KNOWN_ERP_PROVIDERS.map((provider) =>
+    connectedRow({ id: connIdFor(provider), provider }),
+  );
+}
+
+/** One parked, needs-reconnect cursor per connection. */
+function everyProviderCursor() {
+  return KNOWN_ERP_PROVIDERS.map((provider) =>
+    revokedCursor({ id: cursorIdFor(provider), connectionId: connIdFor(provider) }),
+  );
+}
+
+/** The live row for a provider, read back out of the stub after the call. */
+function rowFor(prisma: StubPrisma, provider: string) {
+  const hit = prisma.rows.find((r) => r.provider === provider);
+  if (!hit) throw new Error(`no seeded row for provider "${provider}"`);
+  return hit;
+}
+
+/**
+ * Guards the whole table against a vacuous pass. If the registry ever returned
+ * one provider — or an empty list — every `describe.each` below would run over
+ * a set too small to distinguish a scoped read from a hardcoded one, and would
+ * report green while proving nothing.
+ */
+describe("the provider table this suite is driven from", () => {
+  it("contains Eaglesoft AND several others, or the table proves nothing", () => {
+    expect(KNOWN_ERP_PROVIDERS).toContain(EAGLESOFT_PROVIDER);
+    expect(
+      KNOWN_ERP_PROVIDERS.filter((p) => p !== EAGLESOFT_PROVIDER).length,
+    ).toBeGreaterThan(1);
+  });
+});
+
+describe.each(KNOWN_ERP_PROVIDERS)(
+  "disconnect(ctx, %s) on a box where every provider is connected",
+  (provider) => {
+    /** WARP-2453, now per provider. */
+    it("purges THIS provider's credential material", async () => {
+      const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+      await serviceFor(prisma).disconnect({ actor: "romain" }, provider);
+
+      const purged = rowFor(prisma, provider);
+      expect(purged.status).toBe("DISABLED");
+      expect(purged.writeEnabled).toBe(false);
+      for (const column of PURGED_SCALAR_COLUMNS) {
+        expect(purged[column], `${provider}.${column} must be purged`).toBeNull();
+      }
+    });
+
+    it("leaves EVERY OTHER provider's credential material untouched", async () => {
+      // This is the assertion the Eaglesoft default kills. With it restored,
+      // disconnecting `stripe` purges the `eaglesoft` row instead, so the
+      // Stripe row still holds its ciphertext and this goes red — for every
+      // provider in the table except `eaglesoft` itself.
+      const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+      await serviceFor(prisma).disconnect({ actor: "romain" }, provider);
+
+      for (const other of KNOWN_ERP_PROVIDERS.filter((p) => p !== provider)) {
+        const row = rowFor(prisma, other);
+        expect(row.status, `${other} must still be CONNECTED`).toBe("CONNECTED");
+        expect(
+          row.providerTokensEnc,
+          `disconnecting ${provider} must not purge ${other}`,
+        ).toBe(SEEDED_TOKEN_CIPHERTEXT);
+        expect(row.apiCredentialsEnc).toBe(SEEDED_API_CIPHERTEXT);
+      }
+    });
+
+    /** WARP-2482, now per provider. */
+    it("resets THIS provider's cursors, by its own connectionId", async () => {
+      const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+      await serviceFor(prisma).disconnect({ actor: "romain" }, provider);
+
+      const { where, data } = cursorResetCall(prisma);
+      expect(where).toEqual({ connectionId: connIdFor(provider) });
+      expect(data).toMatchObject(UNSTARTED_CURSOR_FIELDS);
+    });
+
+    it("leaves every OTHER provider's cursors at their recorded position", async () => {
+      const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+      await serviceFor(prisma).disconnect({ actor: "romain" }, provider);
+
+      for (const other of KNOWN_ERP_PROVIDERS.filter((p) => p !== provider)) {
+        const cursor = prisma.cursors.find(
+          (c) => c.connectionId === connIdFor(other),
+        );
+        expect(cursor, `${other} must still have a cursor`).toBeDefined();
+        // Still parked exactly where the revoked credential left it.
+        expect(cursor).toMatchObject({
+          watermark: "2026-08-20T00:00:00.000Z",
+          state: "FAILED",
+          needsReconnect: true,
+        });
+      }
+    });
+
+    it("audits the provider it actually purged", async () => {
+      // The audit used to be a hardcoded constant, so on a mis-scoped purge it
+      // agreed with the mistake — an audit row that cannot be used to discover
+      // the thing it exists to record.
+      const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+      await serviceFor(prisma).disconnect({ actor: "romain" }, provider);
+
+      const audit = prisma.erpAuditLog.create.mock.calls[0][0] as {
+        data: { connectionId: string; scope: Record<string, unknown> };
+      };
+      expect(audit.data.connectionId).toBe(connIdFor(provider));
+      expect(audit.data.scope).toMatchObject({ provider, purged: true });
+      // Rule 19 — the scope still carries no credential material.
+      expect(JSON.stringify(audit.data.scope)).not.toContain("CIPHERTEXT");
+    });
+
+    it("returns a detail naming THIS provider", async () => {
+      const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+      const detail = await serviceFor(prisma).disconnect(
+        { actor: "romain" },
+        provider,
+      );
+
+      expect(detail.provider).toBe(provider);
+      expect(detail.status).toBe("DISABLED");
+      expect(detail.credentialsPurged).toBe(true);
+    });
+  },
+);
+
+describe.each(KNOWN_ERP_PROVIDERS)(
+  "setWriteEnabled(ctx, %s, …) on a box where every provider is connected",
+  (provider) => {
+    /**
+     * The write flag is one of the two inputs to the WARP-2465 connector-grant
+     * axis: `effective-access.service.ts`'s `connectionLevels()` reads
+     * `{ provider, writeEnabled }` per row and `min()`s it against the role's
+     * `AccessRoleConnectorGrant`. That fold was already provider-keyed; what it
+     * never received was a per-provider INPUT, because only the Eaglesoft row's
+     * flag could move. These tests are that input.
+     */
+    it("flips THIS provider's flag and no other's", async () => {
+      const prisma = stubPrisma(
+        everyProviderConnected().map((r) => ({ ...r, writeEnabled: false })),
+      );
+      await serviceFor(prisma).setWriteEnabled({ actor: "romain" }, provider, true);
+
+      expect(rowFor(prisma, provider).writeEnabled).toBe(true);
+      for (const other of KNOWN_ERP_PROVIDERS.filter((p) => p !== provider)) {
+        expect(
+          rowFor(prisma, other).writeEnabled,
+          `enabling writes for ${provider} must not enable them for ${other}`,
+        ).toBe(false);
+      }
+    });
+
+    it("audits the provider it actually flipped", async () => {
+      const prisma = stubPrisma(
+        everyProviderConnected().map((r) => ({ ...r, writeEnabled: false })),
+      );
+      await serviceFor(prisma).setWriteEnabled({ actor: "romain" }, provider, true);
+
+      const audit = prisma.erpAuditLog.create.mock.calls[0][0] as {
+        data: {
+          connectionId: string;
+          action: string;
+          scope: Record<string, unknown>;
+        };
+      };
+      expect(audit.data.connectionId).toBe(connIdFor(provider));
+      expect(audit.data.action).toBe("write-enable");
+      expect(audit.data.scope).toMatchObject({ provider, writeEnabled: true });
+    });
+
+    it("disables writes for THIS provider and no other", async () => {
+      const prisma = stubPrisma(everyProviderConnected()); // all writeEnabled: true
+      await serviceFor(prisma).setWriteEnabled({ actor: "romain" }, provider, false);
+
+      expect(rowFor(prisma, provider).writeEnabled).toBe(false);
+      for (const other of KNOWN_ERP_PROVIDERS.filter((p) => p !== provider)) {
+        expect(rowFor(prisma, other).writeEnabled).toBe(true);
+      }
+    });
+  },
+);
+
+/**
+ * The 404 half of the acceptance criteria.
+ *
+ * The failure being ruled out is not "it throws the wrong error" — it is the
+ * SILENT NO-OP the old shape produced: `disconnect(ctx)` on a box with no
+ * Eaglesoft row returned `{ provider: "eaglesoft", status: "NOT_CONFIGURED" }`
+ * having written nothing, which a caller asking about Stripe could not tell
+ * apart from a successful disconnect of Stripe.
+ */
+describe("an unknown provider is an error, never a silent no-op", () => {
+  /** A key no descriptor declares and no export profile can mint. */
+  const UNKNOWN = "not-a-real-connector";
+
+  it("is genuinely unknown, or the tests below prove nothing", () => {
+    expect(KNOWN_ERP_PROVIDERS).not.toContain(UNKNOWN);
+  });
+
+  it("disconnect() rejects it with a 404-class ErpError", async () => {
+    const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+    await expect(
+      serviceFor(prisma).disconnect({ actor: "romain" }, UNKNOWN),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+  });
+
+  it("disconnect() writes NOTHING when it rejects", async () => {
+    // The mutation this kills: validating INSIDE the transaction, or after the
+    // read, so an unknown provider still opens a SERIALIZABLE transaction and
+    // still reaches the `if (!row) return null` branch — which is exactly the
+    // silent no-op, re-created one layer down.
+    const prisma = stubPrisma(everyProviderConnected(), everyProviderCursor());
+    await serviceFor(prisma)
+      .disconnect({ actor: "romain" }, UNKNOWN)
+      .catch(() => {});
+
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+    expect(prisma.erpSyncCursor.updateMany).not.toHaveBeenCalled();
+    expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
+    expect(prisma.seam.calls()).toHaveLength(0);
+    // And no provider's credentials moved.
+    for (const p of KNOWN_ERP_PROVIDERS) {
+      expect(rowFor(prisma, p).providerTokensEnc).toBe(SEEDED_TOKEN_CIPHERTEXT);
+    }
+  });
+
+  it("setWriteEnabled() rejects it with a 404-class ErpError and writes nothing", async () => {
+    const prisma = stubPrisma(everyProviderConnected());
+    await expect(
+      serviceFor(prisma).setWriteEnabled({ actor: "romain" }, UNKNOWN, true),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+    expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A KNOWN provider with no row is a different fact from an unknown one, and
+ * both are different from "some other provider's status".
+ */
+describe("a known but unconfigured provider answers about ITSELF", () => {
+  /** Every provider except the one under test — so a row always exists, and a
+   *  mis-scoped read has something wrong to find. */
+  const seedAllBut = (provider: string) =>
+    KNOWN_ERP_PROVIDERS.filter((p) => p !== provider).map((p) =>
+      connectedRow({ id: connIdFor(p), provider: p }),
+    );
+
+  it("disconnect() is idempotent and names the provider ASKED about", async () => {
+    // With the Eaglesoft default restored this returns `provider: "eaglesoft"`
+    // — and worse, on a box that HAS an Eaglesoft row it purges it. Both are
+    // wrong answers to a question about Stripe.
+    const target = "stripe";
+    expect(KNOWN_ERP_PROVIDERS).toContain(target);
+    const prisma = stubPrisma(seedAllBut(target));
+
+    const detail = await serviceFor(prisma).disconnect({ actor: "romain" }, target);
+
+    expect(detail.provider).toBe(target);
+    expect(detail.status).toBe("NOT_CONFIGURED");
+    expect(detail.credentialsPurged).toBe(false);
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+    expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
+    // Every other provider is untouched — nothing was purged by proxy.
+    for (const other of KNOWN_ERP_PROVIDERS.filter((p) => p !== target)) {
+      expect(rowFor(prisma, other).status).toBe("CONNECTED");
+    }
+  });
+
+  it("setWriteEnabled() reports NOT_CONFIGURED for the provider ASKED about", async () => {
+    const target = "hubspot";
+    expect(KNOWN_ERP_PROVIDERS).toContain(target);
+    const prisma = stubPrisma(seedAllBut(target));
+
+    await expect(
+      serviceFor(prisma).setWriteEnabled({ actor: "romain" }, target, true),
+    ).rejects.toMatchObject({
+      code: "NOT_CONFIGURED",
+      // The MESSAGE has to name the right provider too: a 409 that says
+      // "eaglesoft" to someone asking about HubSpot sends them to fix the
+      // wrong connector.
+      message: expect.stringContaining(target),
+    });
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
   });
 });
