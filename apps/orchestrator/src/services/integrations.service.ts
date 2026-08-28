@@ -33,10 +33,15 @@ import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import { ErpError } from "./erp-error.js";
-// WARP-2466 — the ADR-041 §5 mapping. `statusAfterHealthProbe` is the only
-// thing that decides a row's status after a probe, and it has no input that
-// produces PROVISIONING.
-import { statusAfterHealthProbe } from "./cloud-connection-state.js";
+// WARP-2466 — the ADR-041 §5 mapping. These two are the only things that
+// decide a row's status after a probe, and neither has an input that produces
+// PROVISIONING. The zero-arg wrapper serves the success path; the catch calls
+// the classifier directly, because the wrapper's `undefined` means "resolved"
+// and a rejection VALUE of `undefined` must not be read as one.
+import {
+  integrationStatusForHealthFailure,
+  statusAfterHealthProbe,
+} from "./cloud-connection-state.js";
 import { providerDescriptor } from "@droplet/shared-types";
 import {
   connectorForProvider,
@@ -760,8 +765,14 @@ export function createIntegrationsService(
           // NEEDS_RECONNECT so the owner is told to paste a new key; a throttle
           // becomes DEGRADED so they are not; an access-policy or plan refusal
           // becomes ERROR because a new key would not fix it. The classifier
-          // has no branch that can return CONNECTED.
-          const status = statusAfterHealthProbe(err);
+          // has no branch that can return CONNECTED — which is why this is
+          // `integrationStatusForHealthFailure` and NOT
+          // `statusAfterHealthProbe(err)`: the wrapper reads an `undefined`
+          // argument as its no-argument success convention, so a
+          // `Promise.reject(undefined)` out of `health()` would have recorded
+          // a failed probe as a healthy row. In a catch block the failure is a
+          // fact; only its classification is in question.
+          const status = integrationStatusForHealthFailure(err);
           logger.info({ provider, status }, "cloud connect probe failed; status classified");
           const probed = await prisma.integrationConnection.update({
             where: { id: base.id },
