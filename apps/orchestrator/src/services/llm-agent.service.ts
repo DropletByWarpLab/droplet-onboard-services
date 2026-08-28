@@ -49,6 +49,7 @@ import {
   describeToolError,
   newAgentTurnId,
 } from "./tool-error-diagnostics.js";
+import type { ChatApprovalStore } from "./chat-approval.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
   toolAllowedInScope,
@@ -110,8 +111,31 @@ export interface CitationDeps {
   ): void;
 }
 
+/**
+ * WARP-2469 — the loop's half of the chat approval round-trip.
+ *
+ * A narrow port rather than the concrete store, so a test can inject a
+ * two-method stub and so this module keeps no opinion about where
+ * approvals live. `chatApprovalStore` in
+ * `services/chat-approval.service.ts` is the production instance; the
+ * route half (`POST /api/llm/confirm/:challengeId`) uses the same one.
+ */
+export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
+
 export interface AgentDeps {
   mcp: McpClientService;
+  /**
+   * WARP-2469 — turns an interceptor challenge into something a human
+   * can approve, and an approval into the token the re-issued call
+   * presents.
+   *
+   * Optional: the ToolSpec runner and the voice pipeline drive this loop
+   * too, and neither has a human watching a chat stream. When it is
+   * absent a confirming tool is still refused (WARP-2305 is doing its
+   * job) — there is simply no in-chat path to approve it, which is the
+   * pre-WARP-2469 behaviour and is fail-closed.
+   */
+  approvals?: ChatApprovalPort;
   aiGateway: {
     chat: (
       req: {
@@ -1937,6 +1961,35 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       }
 
+      // WARP-2469 — the closing arrow of the approval round-trip.
+      //
+      // The model has re-issued a call that a human approved. Attach the
+      // interceptor's bound token via `_meta` so WARP-2305's gate admits
+      // it. The grant is claimable only for the SAME tool with the SAME
+      // arguments (matched on the interceptor's own binding hash) and only
+      // for the user whose turn was challenged; it is spent on claim, so a
+      // second identical call in the same turn is challenged afresh.
+      //
+      // WARP-2305 deliberately never set `confirmationToken` from this
+      // loop, reasoning that "a loop re-attaching a token it was just
+      // handed is the model approving its own writes". That still holds
+      // and this does not breach it: a token becomes claimable ONLY after
+      // a human moved the challenge to `approved` through the
+      // `requireRole`-gated `POST /api/llm/confirm/:challengeId`. Nothing
+      // the model or the interceptor produces reaches this store on its
+      // own.
+      const approvalUserId = req.toolCallContext?.userId;
+      if (deps.approvals && approvalUserId) {
+        const grantedToken = deps.approvals.claimGrant({
+          tool: call.function.name,
+          args,
+          userId: approvalUserId,
+        });
+        if (grantedToken) {
+          toolContext = { ...(toolContext ?? {}), confirmationToken: grantedToken };
+        }
+      }
+
       // ORCH-05 — a *thrown* tool dispatch (stdio hiccup, child-process
       // blip, or a handler that throws instead of returning
       // `{isError:true}`) must NOT abort the whole turn. Catch it, feed a
@@ -2023,9 +2076,60 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // the action. Tools without a token (firewall etc.) omit this and the
         // chip stays display-only.
         const details = errObj?.details as
-          | { type?: string; sceneId?: string; confirmationToken?: string }
+          | {
+              type?: string;
+              sceneId?: string;
+              confirmationToken?: string;
+              interceptor?: {
+                outcome?: string;
+                tool?: string;
+                confirmationToken?: string;
+                expiresAt?: number;
+              };
+            }
           | undefined;
-        if (details && typeof details.confirmationToken === "string") {
+        // WARP-2469 — the OPENING arrow of the round-trip, and a token
+        // leak closed on the way.
+        //
+        // A WARP-2305 challenge carries the interceptor's 256-bit secret
+        // in `details` (both nested and, for the WARP-640 chip, flat).
+        // Forwarding that on the SSE stream would put the approval in the
+        // hands of whoever holds the stream — including a `guest`, who may
+        // approve nothing. So an interceptor challenge is registered here
+        // and the wire carries only an opaque `challengeId`, which
+        // authorises nothing by itself.
+        //
+        // The token is NEVER forwarded for an interceptor challenge, even
+        // when no approval store is wired (voice, ToolSpec runs). Without
+        // a store the chip is display-only — the pre-WARP-2469 posture for
+        // a tool with no in-chat approval path, and fail-closed.
+        const interceptorBlock = details?.interceptor;
+        const isInterceptorChallenge =
+          interceptorBlock?.outcome === "confirmation_required" &&
+          typeof interceptorBlock.confirmationToken === "string";
+
+        if (isInterceptorChallenge) {
+          if (deps.approvals && approvalUserId) {
+            const challenge = deps.approvals.register({
+              tool: call.function.name,
+              args,
+              token: interceptorBlock!.confirmationToken!,
+              expiresAt:
+                typeof interceptorBlock!.expiresAt === "number"
+                  ? interceptorBlock!.expiresAt
+                  : Date.now(),
+              userId: approvalUserId,
+            });
+            evt.confirmation = {
+              kind: "tool_confirmation",
+              challengeId: challenge.challengeId,
+              tool: challenge.tool,
+              status: challenge.status,
+              expiresAt: challenge.expiresAt,
+              summary: challenge.summary,
+            };
+          }
+        } else if (details && typeof details.confirmationToken === "string") {
           evt.confirmation = {
             kind: typeof details.type === "string" ? details.type : "generic",
             sceneId:

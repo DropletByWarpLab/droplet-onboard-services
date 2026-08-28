@@ -3696,6 +3696,58 @@ export async function runSceneConfirmed(
   return res.json();
 }
 
+/** WARP-2469 — the outcome of an in-chat tool approval. */
+export interface ToolConfirmationOutcome {
+  challengeId: string;
+  status: "approved" | "denied";
+  tool: string;
+  /**
+   * The interceptor's bound token, present only on `approved`.
+   *
+   * The chat client does NOT need to do anything with it — the agent
+   * loop claims its own copy from the orchestrator's approval store and
+   * attaches it via `_meta` when the model re-issues the call. It is
+   * returned because the route is a general approval surface (an API
+   * client driving `/api/llm/chat` directly has no agent loop to claim
+   * on its behalf), and because a response that says "approved" while
+   * withholding the thing approval produces is a worse contract.
+   */
+  confirmationToken?: string;
+  expiresAt?: number;
+}
+
+/**
+ * WARP-2469 — approve or deny a WARP-2305 interceptor challenge raised
+ * during a chat turn.
+ *
+ * The client holds only the opaque `challengeId`; the token stays in the
+ * orchestrator. A 403 means this role may not approve this tool, a 410
+ * means the challenge outlived its TTL (the prompt should render as
+ * expired and offer a re-request), and a 409 means it was already
+ * resolved. Each throws with `status` attached so the chip can tell
+ * those apart instead of showing one generic failure.
+ */
+export async function resolveToolConfirmation(
+  challengeId: string,
+  decision: "approve" | "deny",
+): Promise<ToolConfirmationOutcome> {
+  const res = await authFetch(`${BASE}/api/llm/confirm/${challengeId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(
+      data.error || data.status || `Couldn't record your decision (${res.status})`,
+    ) as Error & { status?: number; reason?: string };
+    err.status = res.status;
+    err.reason = typeof data.status === "string" ? data.status : undefined;
+    throw err;
+  }
+  return res.json();
+}
+
 /**
  * A smart-home routine (Scene, WARP-474) as listed by `GET /api/scenes` — a
  * named batch of device actions an owner can run in one tap. `actionCount` is
