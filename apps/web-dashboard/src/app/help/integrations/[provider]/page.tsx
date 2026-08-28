@@ -37,17 +37,14 @@ export const dynamicParams = false;
 export default async function IntegrationGuidePage(props: {
   params: Promise<{ provider: string }>;
 }) {
-  // Next 15.5's generated `PageProps` makes `params` a Promise on every
-  // dynamic route; a server component awaits it (same shape as
-  // `email/[account]/[[...thread]]/page.tsx`).
-  const params = await props.params;
-  const markdown = integrationGuide(params.provider);
+  const { provider } = await props.params;
+  const markdown = integrationGuide(provider);
   if (markdown === undefined) notFound();
 
   return (
     <IntegrationGuideView
-      slug={params.provider}
-      title={integrationGuideTitle(params.provider)}
+      slug={provider}
+      title={integrationGuideTitle(provider)}
       markdown={markdown}
     />
   );
