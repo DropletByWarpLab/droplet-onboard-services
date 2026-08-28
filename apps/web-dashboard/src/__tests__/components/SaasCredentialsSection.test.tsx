@@ -412,6 +412,7 @@ describe("hub and credentials page agree about the credential", () => {
     "CONNECTED",
     "DEGRADED",
     "DRIFT_LOCKED",
+    "NEEDS_RECONNECT",
     "ERROR",
     "DISABLED",
   ];
@@ -432,6 +433,15 @@ describe("hub and credentials page agree about the credential", () => {
     CONNECTED: "CONNECTED",
     DEGRADED: "DEGRADED",
     DRIFT_LOCKED: "DRIFT_LOCKED",
+    NEEDS_RECONNECT: "NEEDS_RECONNECT",
+    // KNOWN-STALE, deliberately. The service folds ERROR to "ERROR" since
+    // WARP-2458 removed the ERROR-means-reconnect inference, so the honest
+    // value here is "ERROR" — but the dashboard's own `SaasConnectionState`
+    // (`lib/api.ts`) is still the 7-member union without it, and `STATE_COPY`
+    // therefore has no ERROR entry. Correcting this line makes the suite throw
+    // `Cannot read properties of undefined (reading 'label')`, which is the
+    // real defect it would be papering over. Fix the union and the copy first;
+    // this line is the last step, not the first.
     ERROR: "NEEDS_RECONNECT",
     DISABLED: "DISABLED",
   };
