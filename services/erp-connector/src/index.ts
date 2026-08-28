@@ -433,6 +433,7 @@ export {
   assertReadableMailchimpResource,
   assertSafeMailchimpBaseUrl,
   blockedMailchimpKeyResolver,
+  escapeRegExpLiteral as escapeMailchimpRegExpLiteral,
   mailchimpBaseUrlFor,
   parseMailchimpApiKey,
   subscriberHash as mailchimpSubscriberHash,

@@ -128,6 +128,26 @@ export const MAILCHIMP_API_HOST_SUFFIX = ".api.mailchimp.com";
 export const MAILCHIMP_API_BASE_PATH = "/3.0";
 
 /**
+ * Escape every regular-expression metacharacter in a literal string.
+ *
+ * Hoisted out of {@link MAILCHIMP_ALLOWED_HOST_PATTERN} (WARP-2379 review,
+ * CodeQL "Incomplete string escaping or encoding"). The previous form escaped
+ * only `.`, which was *correct for today's input* — the suffix constant is a
+ * compile-time literal containing nothing but dots and letters — but correct
+ * for an accidental reason. Escaping the full metacharacter set makes the
+ * guard right for a reason that survives the constant changing: if
+ * {@link MAILCHIMP_API_HOST_SUFFIX} ever gained a `-`, a `+` or a `$`, a
+ * dot-only escape would silently produce a pattern that means something other
+ * than the literal it was built from.
+ *
+ * The class is the standard one, and `\\` is first so an inserted backslash is
+ * not re-escaped by a later alternative.
+ */
+export function escapeRegExpLiteral(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * The ONLY host shape this connector will ever send an API key to.
  *
  * Two letters and one or two digits — `us14`, `us6`, `eu1` — followed by the
@@ -135,11 +155,13 @@ export const MAILCHIMP_API_BASE_PATH = "/3.0";
  * an unanchored or `endsWith` check accepts `us14.api.mailchimp.com.evil.test`,
  * which is the attack this guard exists to stop.
  *
- * Built from {@link MAILCHIMP_API_HOST_SUFFIX} rather than re-typed so the
- * literal and the guard cannot drift apart.
+ * Built from {@link MAILCHIMP_API_HOST_SUFFIX} through
+ * {@link escapeRegExpLiteral} rather than re-typed, so the literal and the
+ * guard cannot drift apart and the suffix is matched as TEXT rather than as a
+ * pattern.
  */
 export const MAILCHIMP_ALLOWED_HOST_PATTERN = new RegExp(
-  `^[a-z]{2}\\d{1,2}${MAILCHIMP_API_HOST_SUFFIX.replace(/\./g, "\\.")}$`,
+  `^[a-z]{2}\\d{1,2}${escapeRegExpLiteral(MAILCHIMP_API_HOST_SUFFIX)}$`,
 );
 
 /**
