@@ -189,6 +189,55 @@ instance initialized second lost, and its first TLS client crashed the boot.
    `sslmode=require`) is this kind — its reconciliation (FIPS-path-scoped
    `sslmode=disable` vs. server-side FIPS ciphers) is owned by that review.
 
+## Failure mode: a VENDOR PROTOCOL mandates a non-approved digest
+
+**Symptom.** With FIPS ON, one feature of an otherwise-healthy integration
+throws `ERR_OSSL_EVP_UNSUPPORTED` (`error:0308010C:digital envelope
+routines::unsupported`) — Node — or `ValueError: unsupported hash type` —
+Python — while every other call in the same service keeps working. Nothing is
+wrong with the provider: it is enforcing exactly as designed. The code asked
+it for an algorithm FIPS does not have.
+
+**The shipped case: Mailchimp subscriber hashing (WARP-2460).** Mailchimp
+addresses a single list member by the **MD5 of the lowercased email address**
+— `GET /3.0/lists/{list_id}/members/{subscriber_hash}`. It is the vendor's
+URL addressing scheme and the API offers no other way to key a member. A
+`node:crypto` MD5 there throws before any request is made, so on a FIPS box
+list and campaign reads would keep working while **every contact read failed**
+— a connector that half-works, with an error that reads like a crypto bug.
+
+**Why that is acceptable, and how it is resolved.** The digest is an
+*identifier*, not a security primitive: it authenticates nothing, protects
+nothing, and is not secret — the same address must always produce the same
+hash, because that is how the URL is formed. Such a use does not need, and
+must not take, a FIPS-approved algorithm — it needs a digest that is simply
+**independent of the provider**. `services/erp-connector/src/mailchimp/md5.ts`
+is an arithmetic RFC 1321 implementation with **no imports at all**; it
+reaches no OpenSSL provider and behaves identically with the knob on or off.
+Registered as `mailchimp-subscriber-hash` in
+[`docs/security/fips-exceptions.md`](security/fips-exceptions.md).
+
+Note the digest is not a privacy control either — MD5 of an email address is
+trivially reversible by dictionary attack — so its output is treated as
+equivalent to the address itself in logs and exports.
+
+**The general rule when you meet this.** Ask *what the digest is for* before
+reaching for a workaround:
+
+- **It secures something** (authentication, signature, integrity, key
+  derivation) → this is a real finding. Move to a FIPS-approved algorithm; see
+  [`docs/security/fips-allowed-algorithms.md`](security/fips-allowed-algorithms.md).
+- **A third-party protocol mandates it and it secures nothing** → implement it
+  independently of the provider (or use a pure-language library), and register
+  the exception. Do **not** reach for `setFips(0)`, a process-wide
+  `OPENSSL_CONF` override, or a second provider: Node exposes no per-call
+  provider selection, so every one of those disables FIPS for the whole
+  process to serve one call.
+- Either way the exception registry is not optional. Note the static lint
+  matches *call sites* (`createHash("md5")`, `hashlib.md5(`), so a hand-rolled
+  implementation matches no pattern and will pass silently — register it
+  anyway, or the next auditor grepping for MD5 will not find it.
+
 ## Scope — which services enforce
 
 | Service | Provider in image | Under `--fips` | Why |
