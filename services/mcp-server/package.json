@@ -3,7 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "require": "./dist/lib.js",
+      "import": "./dist/lib.js",
+      "default": "./dist/lib.js"
+    },
+    "./dist/*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "droplet-mcp-server": "dist/index.js"
   },

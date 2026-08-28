@@ -87,12 +87,19 @@ import { registerFirewallRoutes } from "../routes/network-firewall.routes.js";
 import { registerPhoneHomeRoutes } from "../routes/network-phone-home.routes.js";
 import type { AuthUser } from "../middleware/auth.js";
 
-// The mcp-server's real dispatch handler. Deep import of the built entry —
-// `services/mcp-server` ships no barrel export, and `dist/` is what the
-// appliance runs. Built by ship-check's leaf-build phase and by the
-// orchestrator Dockerfile.
-import { createServer, type ServerOptions } from "@droplet/mcp-server/dist/server.js";
-import type { ContextDeps } from "@droplet/mcp-server/dist/context.js";
+// The mcp-server's real dispatch handler, imported from the package barrel.
+// WARP-2473 gave `@droplet/mcp-server` `declaration: true` and an `exports`
+// entry, so these are the REAL types emitted from `src/` — not the
+// hand-written ambient shim this file used to carry, which declared a
+// narrowed `ContextDeps` and an `unknown`-claims `TrustContext` and would
+// have gone on typechecking green after either one drifted.
+// `dist/` is what the appliance runs; it is built by ship-check's leaf-build
+// phase and by the orchestrator Dockerfile.
+import {
+  createServer,
+  type ServerOptions,
+  type ContextDeps,
+} from "@droplet/mcp-server";
 
 /** The AI's dispatch identity — every tool call reaches routes as this. */
 const MCP_PRINCIPAL: AuthUser = {
