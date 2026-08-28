@@ -200,11 +200,33 @@ readiness poll that gates the attach re-kick, and the reachability-derived
 `routerConnected`) are verified statically by unit tests, but the live radio +
 on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
 
+> **WARP-2054 — on a default box the onboard AP is OFF, so steps 1, 2, 4 and 5
+> below do NOT apply.** `DROPLET_AP_ONBOARD` defaults to `0`: the onboard radio
+> is soft-blocked, never moved into the container, and hostapd never starts.
+> Wi-Fi is served by the **external AP**, per the founder rule. On such a box:
+>
+> - step 1 expects the `onboard radio DISABLED by policy` line, **not**
+>   `AP radio detected` — see the amended step below;
+> - steps 2, 4 and 5 are `DROPLET_AP_ONBOARD=1` (dev-only on-box AP) checks.
+>   Running them on a default box shows an absent iface, no hostapd and no
+>   joinable SSID — all expected;
+> - the dashboard Wi-Fi scan/clients panel reads **empty** for the same reason.
+>   A healthy default box reports zero onboard radios.
+>
+> Steps 3 and 6 apply to every box — they check the router, not the AP.
+
 1. **The radio was detected (not the old hardcoded phy1/wlp7s0).**
    ```bash
    sudo journalctl -u droplet-openwrt-attach | grep -E "AP radio detected|no wireless phy"
    ```
-   Expect `AP radio detected — phy=<phyN> iface=<name>` matching the card the box
+   On a **default box** (`DROPLET_AP_ONBOARD=0`) expect exactly one line —
+   `onboard radio DISABLED by policy (WARP-2054 founder rule)` — and nothing
+   else. That is the pass condition: the radio is soft-blocked and Wi-Fi comes
+   from the external AP. `AP radio detected` **not** appearing is correct here,
+   and its absence is no longer the ambiguous signal it used to be.
+
+   The rest of this step applies only with `DROPLET_AP_ONBOARD=1`. Then expect
+   `AP radio detected — phy=<phyN> iface=<name>` matching the card the box
    actually has (`ls /sys/class/ieee80211` + `iw dev` to cross-check). A
    `no wireless phy/iface resolved` WARN (followed by the WARP-2150
    `skipping AP bring-up` line — the attach no longer limps into nft/hostapd
@@ -216,7 +238,7 @@ on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
    `DROPLET_AP_IFACE` in `/etc/default/droplet-openwrt-attach` only if the card
    is present but enumerates oddly.
 
-2. **The PHY moved into the container netns.**
+2. **The PHY moved into the container netns.** _(`DROPLET_AP_ONBOARD=1` only.)_
    ```bash
    # Host should NO LONGER see the AP phy; the container should.
    iw dev                                   # AP iface absent on host
@@ -233,7 +255,7 @@ on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
    `not READY (Running + ubus) within budget`, the container never came up — check
    `docker logs droplet-openwrt`.
 
-4. **hostapd is up and beaconing the default SSID.**
+4. **hostapd is up and beaconing the default SSID.** _(`DROPLET_AP_ONBOARD=1` only.)_
    ```bash
    docker exec droplet-openwrt pgrep -a hostapd          # running, -P /run/hostapd.pid
    docker exec droplet-openwrt cat /etc/hostapd.conf | grep -E "^interface|^ssid"
@@ -242,6 +264,7 @@ on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
    `DROPLET_AP_SSID` (default `Droplet`).
 
 5. **A client can associate, get a DHCP lease, and resolve the local name.**
+   _(`DROPLET_AP_ONBOARD=1` only — on a default box, join the external AP instead.)_
    From a phone/laptop: join the `Droplet` SSID with the per-box PSK
    (`sudo cat /etc/droplet/ap-psk`). Confirm it gets a `192.168.20.x` lease
    (`docker exec droplet-openwrt cat /tmp/dhcp.leases`) and that typing

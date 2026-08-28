@@ -1004,8 +1004,28 @@ model FileContentChunk {
   path        String // Human-readable path for display
   chunkIdx    Int // 0-based chunk index within the file
   text        String // Raw text of this chunk
-  // pgvector column — 384 dims for all-MiniLM-L6-v2.
+  // pgvector column — 384 dims for bge-small-en-v1.5 (WARP-2196; the
+  // pre-WARP-2196 all-MiniLM-L6-v2 was also 384, which is why the swap
+  // needed a re-embed rather than a column change — see
+  // docs/RAG_RE_EMBED_RUNBOOK.md).
   // Prisma doesn't support vector natively; use Unsupported + raw SQL.
+  //
+  // WARP-2193 — the ANN index on this column is RAW SQL ONLY:
+  // "FileContentChunk_embedding_hnsw_idx", USING hnsw (embedding
+  // vector_cosine_ops), created in
+  // 20260826120000_warp_2193_hnsw_vector_index. It cannot be declared below
+  // with @@index, because Prisma has no way to express an index on an
+  // Unsupported() column.
+  //
+  // Which means: `prisma migrate dev` reads it as DRIFT and will emit a
+  // `DROP INDEX "FileContentChunk_embedding_hnsw_idx";` at the top of the
+  // next generated migration, whatever that migration is about. DELETE THAT
+  // LINE. This exact drift already ate the index once —
+  // 20260425220000_add_camera_audit_snapshot_tables opens with a generated
+  // drop of the IVFFlat index this replaced, nothing recreated it, and the
+  // vector arm ran on sequential scans for four months without a single
+  // failing test. src/__tests__/vector-index-migration.guard.test.ts replays
+  // the migration chain so it cannot happen silently a third time.
   embedding   Unsupported("vector(384)")
   indexedAt   DateTime                   @default(now())
   source      FileContentSource          @default(nextcloud)
@@ -4398,17 +4418,94 @@ model IntegrationConnection {
   @@index([provider, status])
 }
 
+/// Sync state for one ERP / cloud-connector cursor (WARP-2218), modelled
+/// member-for-member on `M365SyncState` because the poller shape is the same:
+/// claim a due cursor, run one read, release it into an explicit outcome.
+///
+/// Explicit column, never inferred from whether `watermark` happens to be
+/// null — IDLE-with-no-watermark (never synced) and RESYNC_REQUIRED (the
+/// vendor rejected the position we held, re-enumerate) both have a null
+/// watermark and mean opposite things to whoever is reading the dashboard.
+enum ErpSyncState {
+  /// Never run, or finished cleanly and waiting for its next tick.
+  IDLE
+  /// A run is in progress. Guards against two ticks overlapping on one cursor
+  /// — the claim flips IDLE/BACKOFF/RESYNC_REQUIRED to this conditionally, so
+  /// a second tick's conditional update matches zero rows and skips.
+  SYNCING
+  /// Throttled or wobbling. `nextAttemptAt` says when to try again, and is set
+  /// from `sync-policy.ts` `computeBackoffMs` — which obeys `Retry-After`
+  /// exactly when the vendor sends one.
+  BACKOFF
+  /// The vendor will not honour the position we held (a dead page token, a
+  /// cursor aged out, a 410). The next run re-enumerates from scratch.
+  /// A normal transition, not a failure: it does not count toward the failure
+  /// streak and is not delayed by backoff, because delaying it only leaves
+  /// the owner's data stale for longer.
+  RESYNC_REQUIRED
+  /// Broken in a way retrying will not fix. Needs a person to look.
+  FAILED
+}
+
 /// Incremental-sync watermark per (connection, entity). `watermark` is an
 /// EXPLICIT string column (a discovered timestamp / rowversion, brief §10.2)
 /// — the cursor position is never inferred from the absence of a row.
+///
+/// WARP-2218 gave this model its first writers. `state` is the explicit
+/// lifecycle column; the poller reads it, never a null check.
 model ErpSyncCursor {
-  id           String   @id @default(cuid())
+  id           String @id @default(cuid())
   connectionId String
   entity       String
-  watermark    String
-  updatedAt    DateTime @updatedAt
+
+  /// The vendor-side position the next incremental read resumes from.
+  ///
+  /// NULL means **never synced** — nothing has been read for this
+  /// (connection, entity) yet, so the next run enumerates from the beginning.
+  /// That is NOT the same thing as `state = RESYNC_REQUIRED`, which means a
+  /// position existed and the vendor stopped honouring it. Both show a null
+  /// watermark; only `state` distinguishes them, which is exactly why `state`
+  /// is a column and not a derivation.
+  watermark String?
+
+  /// Explicit lifecycle. Never derived from `watermark IS NULL`.
+  state ErpSyncState @default(IDLE)
+
+  /// Consecutive failed runs, feeding `computeBackoffMs`'s exponent. Reset to
+  /// 0 by a success and by a RESYNC_REQUIRED, which is not a failure.
+  consecutiveFailures Int @default(0)
+
+  /// When this cursor may next be claimed. NULL = claimable now.
+  nextAttemptAt DateTime?
+
+  /// Last successful incremental run. Distinct from `lastSweepAt`.
+  lastSyncedAt DateTime?
+
+  /// Last completed full reconciliation sweep. Persisted so a restart does not
+  /// re-trigger the expensive re-enumeration immediately — the sweep is the
+  /// half that can trip a vendor rate limit.
+  lastSweepAt DateTime?
+
+  /// The vendor's grant is dead (revoked in their console, credential
+  /// rotated, consent withdrawn) and only a person pasting a new credential
+  /// fixes it. ADR-041 treats this as ROUTINE, so it is its own explicit
+  /// column rather than an ERROR status: a reconnect-needed connection must
+  /// stay distinguishable from both "never configured" and "broken", exactly
+  /// as `M365ConnectionState.NEEDS_RECONNECT` is at :4990-5012.
+  needsReconnect Boolean @default(false)
+
+  /// Operator-facing reason for BACKOFF / FAILED. Must never carry a token,
+  /// an API key, a page cursor or raw bearer material — same prohibition
+  /// `M365ConnectionState.lastError` carries. Redacted on the way in.
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([connectionId, entity])
+  /// The scheduler's "what is due now" query.
+  @@index([state, nextAttemptAt])
+  @@index([connectionId])
 }
 
 /// Read-model cache row (brief §10.2). A convenience/uptime layer, NEVER the

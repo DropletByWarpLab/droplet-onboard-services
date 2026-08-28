@@ -25,6 +25,8 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "./activity.singleton.js";
+import type { ActivityActor } from "./activity.service.js";
 import { ErpError } from "./erp-error.js";
 import {
   connectorForProvider,
@@ -80,7 +82,46 @@ export interface IntegrationSummary {
    * with "never synced".
    */
   lastSyncedAt: string | null;
+
+  /**
+   * WARP-2218 — the poller's explicit state for this connection, read from the
+   * `ErpSyncCursor.state` COLUMN. `null` means no cursor is registered yet,
+   * which is a different fact from any of the five states and is carried as an
+   * explicit null rather than an omitted key.
+   *
+   * Deliberately a SEPARATE field from `status` rather than extra members on
+   * `IntegrationStatus`. A connection can be perfectly `CONNECTED` — correctly
+   * configured, credential valid — while its sync is in `BACKOFF` because the
+   * vendor throttled us ten seconds ago. Folding one into the other would make
+   * a healthy connection render as broken every time a vendor got busy.
+   */
+  syncState: ErpSyncStateName | null;
+
+  /**
+   * WARP-2218 / ADR-041 — the customer's credential was revoked, rotated in
+   * the vendor's console, or expired, and the owner needs to paste a new one.
+   *
+   * A ROUTINE state, never an error. It must stay distinguishable from both
+   * "never configured" (`status: NOT_CONFIGURED`) and "broken"
+   * (`status: ERROR`), for the same reason `M365ConnectionState` insists
+   * `NEEDS_RECONNECT` is distinguishable from `DISCONNECTED`
+   * (`schema.prisma:4990-5012`): they look identical from "is there a working
+   * token" and mean opposite things to the person reading the dashboard. One
+   * needs thirty seconds of their time; the other needs a support call.
+   *
+   * Read from the explicit `needsReconnect` column, never inferred from a null
+   * token or an absent row.
+   */
+  needsReconnect: boolean;
 }
+
+/** The five `ErpSyncState` members, mirrored for the API surface. */
+export type ErpSyncStateName =
+  | "IDLE"
+  | "SYNCING"
+  | "BACKOFF"
+  | "RESYNC_REQUIRED"
+  | "FAILED";
 
 /** Connection detail (brief §13 `GET /api/integrations/eaglesoft`). Shaped to
  *  the dashboard's IntegrationConnection type; the route nests it under
@@ -145,7 +186,46 @@ export interface IntegrationsServiceDeps {
 }
 
 /** Minimal Prisma surface this service needs (structural — tests pass a stub). */
-type IntegrationsPrisma = Pick<PrismaClient, "integrationConnection" | "erpAuditLog">;
+type IntegrationsPrisma = Pick<PrismaClient, "integrationConnection" | "erpAuditLog"> &
+  // WARP-2218 — optional so every existing test stub keeps working; a stub
+  // without it reports "no cursor registered", which is the honest answer for
+  // a store that has none.
+  Partial<Pick<PrismaClient, "erpSyncCursor">>;
+
+/**
+ * One connection's sync facts, folded from its per-entity cursors.
+ *
+ * A connection has one cursor per entity, and the hub renders one row. The
+ * fold is deliberately ranked rather than "latest wins": the state worth
+ * surfacing is the most actionable one. A connection with a healthy invoice
+ * cursor and a FAILED bill cursor is not healthy, and showing IDLE because it
+ * happened to be read second would hide the only thing an owner can act on.
+ */
+const SYNC_STATE_RANK: Record<ErpSyncStateName, number> = {
+  FAILED: 5,
+  RESYNC_REQUIRED: 4,
+  BACKOFF: 3,
+  SYNCING: 2,
+  IDLE: 1,
+};
+
+function foldSyncState(
+  cursors: Array<{ state: string; needsReconnect: boolean }>,
+): { syncState: ErpSyncStateName | null; needsReconnect: boolean } {
+  if (cursors.length === 0) return { syncState: null, needsReconnect: false };
+  let best: ErpSyncStateName = "IDLE";
+  let reconnect = false;
+  for (const c of cursors) {
+    const state = c.state as ErpSyncStateName;
+    if (SYNC_STATE_RANK[state] !== undefined && SYNC_STATE_RANK[state] > SYNC_STATE_RANK[best]) {
+      best = state;
+    }
+    // Explicit column, never inferred. Any entity needing a credential means
+    // the connection needs one.
+    if (c.needsReconnect) reconnect = true;
+  }
+  return { syncState: best, needsReconnect: reconnect };
+}
 
 const DEFAULT_DATABASE_NAME = "PattersonPM";
 
@@ -177,10 +257,23 @@ function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
   });
 }
 
+/**
+ * Who is connecting.
+ *
+ * WARP-2283 — optional so the 293 existing call sites keep compiling, but the
+ * route SHOULD pass it: under ADR-041 §2 connecting is the consent record, and
+ * a consent record with no actor answers "was this allowed?" but not "by whom",
+ * which is the question an audit is for. Absent, the row is attributed to the
+ * box itself rather than being silently dropped.
+ */
+export interface ConnectContext {
+  actor?: ActivityActor;
+}
+
 export interface IntegrationsService {
   list(): Promise<IntegrationSummary[]>;
   getEaglesoft(): Promise<IntegrationDetail>;
-  connect(input: ConnectInput): Promise<IntegrationDetail>;
+  connect(input: ConnectInput, ctx?: ConnectContext): Promise<IntegrationDetail>;
   test(input: ConnectInput): Promise<TestResult>;
   setWriteEnabled(
     enabled: boolean,
@@ -202,8 +295,32 @@ export function createIntegrationsService(
     });
   }
 
+  /**
+   * WARP-2218 — the poller's explicit state for one connection.
+   *
+   * Returns "no cursor registered" when the model is unavailable (a test stub
+   * that predates this field) or empty, which is the honest answer rather than
+   * a guess. Never derived from a null column.
+   */
+  async function loadSyncFacts(
+    connectionId: string | null,
+  ): Promise<{ syncState: ErpSyncStateName | null; needsReconnect: boolean }> {
+    if (!connectionId || !prisma.erpSyncCursor) {
+      return { syncState: null, needsReconnect: false };
+    }
+    const cursors = (await prisma.erpSyncCursor.findMany({
+      where: { connectionId },
+      select: { state: true, needsReconnect: true },
+    })) as unknown as Array<{ state: string; needsReconnect: boolean }>;
+    return foldSyncState(cursors);
+  }
+
   function toDetail(
     row: Awaited<ReturnType<typeof findRow>>,
+    sync: { syncState: ErpSyncStateName | null; needsReconnect: boolean } = {
+      syncState: null,
+      needsReconnect: false,
+    },
   ): IntegrationDetail {
     if (!row) {
       // Explicit constant — NOT derived from the absence of a row. The hub /
@@ -220,6 +337,10 @@ export function createIntegrationsService(
         account: null,
         lastSyncedAt: null,
         lastHealthyAt: null,
+        // Never configured is not "needs reconnect": one has never had a
+        // credential, the other had one that stopped working.
+        syncState: null,
+        needsReconnect: false,
       };
     }
     const lastSynced = row.lastHealthyAt ? row.lastHealthyAt.toISOString() : null;
@@ -238,13 +359,40 @@ export function createIntegrationsService(
       account: row.provider === EAGLESOFT_API_PROVIDER ? null : "droplet_ro",
       lastSyncedAt: lastSynced,
       lastHealthyAt: lastSynced,
+      syncState: sync.syncState,
+      needsReconnect: sync.needsReconnect,
     };
+  }
+
+  /** `toDetail` with the sync facts loaded. */
+  async function detailFor(
+    row: Awaited<ReturnType<typeof findRow>>,
+  ): Promise<IntegrationDetail> {
+    return toDetail(row, await loadSyncFacts(row?.id ?? null));
   }
 
   return {
     async list() {
       const rows = await prisma.integrationConnection.findMany();
       const byProvider = new Map(rows.map((r) => [r.provider, r]));
+      // WARP-2218 — one query for every connection's cursors rather than one
+      // per row: the hub lists N providers and an N+1 here would be N+1 round
+      // trips on a page that renders on every dashboard load.
+      const cursors = prisma.erpSyncCursor
+        ? ((await prisma.erpSyncCursor.findMany({
+            select: { connectionId: true, state: true, needsReconnect: true },
+          })) as unknown as Array<{
+            connectionId: string;
+            state: string;
+            needsReconnect: boolean;
+          }>)
+        : [];
+      const cursorsByConnection = new Map<string, typeof cursors>();
+      for (const c of cursors) {
+        const list = cursorsByConnection.get(c.connectionId) ?? [];
+        list.push(c);
+        cursorsByConnection.set(c.connectionId, list);
+      }
       // The framework knows about Eaglesoft even before it is configured, so
       // the hub always lists it (explicit NOT_CONFIGURED when no row exists).
       const providers = new Set<string>([
@@ -254,6 +402,7 @@ export function createIntegrationsService(
       ]);
       return Array.from(providers).map((provider) => {
         const row = byProvider.get(provider);
+        const sync = foldSyncState(row ? (cursorsByConnection.get(row.id) ?? []) : []);
         return {
           provider,
           status: (row?.status as IntegrationStatusName) ?? "NOT_CONFIGURED",
@@ -263,15 +412,19 @@ export function createIntegrationsService(
           // `?.` alone so an unconfigured provider carries the key with an
           // explicit null instead of `undefined`, which JSON would drop.
           lastSyncedAt: row?.lastHealthyAt ? row.lastHealthyAt.toISOString() : null,
+          // Same treatment: explicit null for "no cursor registered", which is
+          // a different fact from any of the five states.
+          syncState: sync.syncState,
+          needsReconnect: sync.needsReconnect,
         };
       });
     },
 
     async getEaglesoft() {
-      return toDetail(await findRow());
+      return detailFor(await findRow());
     },
 
-    async connect(input) {
+    async connect(input, ctx) {
       const provider = resolveProvider(input.provider);
       // Upsert-by-hand: reuse the existing row if present so we never orphan a
       // second connection for the same provider.
@@ -321,6 +474,43 @@ export function createIntegrationsService(
             },
           });
 
+      /**
+       * WARP-2283 — the consent record.
+       *
+       * `connect()` persists a customer's encrypted credentials and, until this
+       * story, wrote NO activity row at all: the moment a credential entered
+       * the box was the one moment nothing observed. ADR-041 §2 makes
+       * connecting itself the consent event, so this is a compliance gap, not a
+       * nicety.
+       *
+       * Emitted from ONE place covering all three outcomes — CONNECTED, blocked
+       * (row stays PROVISIONING) and ERROR — because all three persisted the
+       * credential; only an exception before this point writes nothing, which
+       * is correct, since nothing was stored. Rows are written and the outcome
+       * is known, so it is after the effect, never a prediction of it.
+       */
+      const auditConnect = async (detail: IntegrationDetail): Promise<IntegrationDetail> => {
+        await recordActivity({
+          kind: "system",
+          severity: detail.status === "ERROR" ? "warn" : "info",
+          sourceIcon: "plug",
+          what: "Integration connected",
+          sub: provider,
+          actor: ctx?.actor ?? { type: "system", id: null },
+          refs: {
+            provider,
+            status: detail.status,
+            writeEnabled,
+            // WHETHER credentials were supplied — never the credentials. The
+            // triple is already sealed into `apiCredentialsEnc`; a second copy
+            // in an append-only, exportable audit row would be a durable
+            // cleartext leak that no rotation could recall.
+            hasSecret: input.apiCredentials !== undefined,
+          },
+        });
+        return detail;
+      };
+
       const connector = connectorFor(provider, input);
       try {
         await connector.connect();
@@ -331,7 +521,7 @@ export function createIntegrationsService(
           where: { id: base.id },
           data: { status: "CONNECTED", lastHealthyAt: new Date() },
         });
-        return toDetail(connected);
+        return await auditConnect(toDetail(connected));
       } catch (err) {
         if (err instanceof ConnectorBlockedError) {
           // HONEST degradation: the connector can't reach the ERP yet (SQL:
@@ -342,7 +532,7 @@ export function createIntegrationsService(
             { provider },
             "connect blocked: connector not reachable / not yet wired; status stays PROVISIONING",
           );
-          return toDetail(base);
+          return await auditConnect(toDetail(base));
         }
         // A genuine, unexpected failure → explicit ERROR status.
         logger.error({ err }, "eaglesoft connect failed");
@@ -350,7 +540,7 @@ export function createIntegrationsService(
           where: { id: base.id },
           data: { status: "ERROR" },
         });
-        return toDetail(errored);
+        return await auditConnect(toDetail(errored));
       } finally {
         await connector.close().catch(() => {});
       }

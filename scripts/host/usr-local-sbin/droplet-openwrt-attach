@@ -381,8 +381,69 @@ EOF
   fi
   return 0
 }
-detect_ap_radio
 # <<< detect_ap_radio (WARP-826)
+
+# >>> onboard_radio_policy (WARP-2054)
+# FOUNDER RULE (2026-07-28): "we will never use the onboard droplet radios for
+# the aps. droplet box should be totally local always ... the final box will
+# have onboard radios deactivated and all traffic will go through the pi router
+# for security." AP duty belongs to the EXTERNAL AP (Zyxel NWA50BE); an on-box
+# AP is dev scaffolding.
+#
+# So the onboard AP is OFF BY DEFAULT, opted into only with DROPLET_AP_ONBOARD=1.
+# It was ON by default until 2026-08-27, and that cost two distinct things:
+#
+#   1. detect_ap_radio resolved the phy and the attach MOVED it into the
+#      container netns, leaving the radio claimed and powered - exactly what
+#      the rule forbids. (It also makes the host look like it has no Wi-Fi
+#      card at all, which reads as a hardware fault during triage.)
+#   2. hostapd was then attempted and failed on EVERY boot, so this unit sat
+#      permanently `failed` - and this same unit installs the WireGuard overlay
+#      NAT. A real overlay-NAT failure and a cosmetic AP failure were
+#      indistinguishable by unit state, so `systemctl is-active` was useless as
+#      a health signal here. That masking is the reason this is a bug and not
+#      merely untidiness.
+#
+# The AP could not have worked anyway: openwrt-singlebox:24.10.2 ships
+# /usr/share/hostap/hostapd.uc without the ucode `common` module it imports, so
+# hostapd exits before it ever touches the radio. Fixing that image is a
+# separate concern - it does not belong on the shipping path either way.
+#
+# With the policy off we do not detect, do not move the phy, and never start
+# hostapd, so a `failed` unit now means a REAL failure of the overlay-NAT /
+# rpcd / routing legs.
+AP_ONBOARD="${DROPLET_AP_ONBOARD:-0}"
+AP_POLICY_OFF=0
+if [ "$AP_ONBOARD" = 1 ]; then
+  detect_ap_radio
+  # A previous policy-off boot leaves the radio soft-blocked. An opt-in that
+  # silently kept it blocked would present as "the AP still does not work" -
+  # the very symptom this ticket is about - so undo it here rather than making
+  # the operator discover rfkill on their own.
+  if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock wlan 2>/dev/null || true
+  fi
+else
+  AP_POLICY_OFF=1
+  # Force both sides empty even if an operator left a stale DROPLET_AP_PHY /
+  # DROPLET_AP_IFACE pin in the env file: that pin is AUTHORITATIVE elsewhere in
+  # this script, so without this it would carry the AP phase straight past the
+  # WARP-2150 gate onto a radio policy says must not be used.
+  AP_PHY=""
+  AP_IFACE=""
+  # Deactivate, do not merely ignore: a powered-but-unused radio is still a
+  # transmitter, and the rule says the radio is off. rfkill is chip-agnostic
+  # (unlike a modprobe blacklist, which only helps if you already know the
+  # card), so this holds on whatever is seated.
+  # Bluetooth is a SEPARATE rfkill class and is deliberately NOT touched -
+  # Matter BLE commissioning needs the adapter, and on the MT7922 it is a
+  # different USB function of the same chip.
+  if command -v rfkill >/dev/null 2>&1; then
+    rfkill block wlan 2>/dev/null || true
+  fi
+  echo "droplet-openwrt-attach: onboard radio DISABLED by policy (WARP-2054 founder rule) - Wi-Fi is served by the external AP; radio soft-blocked and not moved into the container. Set DROPLET_AP_ONBOARD=1 in /etc/default/droplet-openwrt-attach for a dev-only on-box AP."
+fi
+# <<< onboard_radio_policy (WARP-2054)
 
 # WARP-2150: decide ONCE whether the AP phase may run at all. The first
 # validated fresh install (2026-08-24) shipped a host without iw(8): line 449
@@ -409,14 +470,21 @@ detect_ap_radio
 AP_ATTACH=1
 if [ -z "$AP_IFACE" ]; then
   AP_ATTACH=0
-  if ! command -v iw >/dev/null 2>&1; then
+  if [ "${AP_POLICY_OFF:-0}" = 1 ]; then
+    _ap_skip_why="the onboard radio is disabled by policy (WARP-2054 founder rule) - this is the intended shipping state, not a fault"
+  elif ! command -v iw >/dev/null 2>&1; then
     _ap_skip_why="the host has no iw(8) installed, so the phy cannot be mapped to its netdev — run: sudo apt-get install -y iw (setup.sh now ensures it)"
   elif [ -z "$AP_PHY" ]; then
     _ap_skip_why="no wireless phy visible on the host (no card seated, or the radio already lives in the container netns)"
   else
     _ap_skip_why="phy ${AP_PHY} exposes no netdev to bind"
   fi
-  echo "droplet-openwrt-attach: WARN: wireless iface unresolved — skipping AP bring-up (${_ap_skip_why}); no nft/hostapd will be attempted with an empty iface. Fix the cause or pin DROPLET_AP_PHY/DROPLET_AP_IFACE in /etc/default/droplet-openwrt-attach, then: systemctl restart droplet-openwrt-attach"
+  # Under the WARP-2054 policy this is the intended state and already logged
+  # above, so do not tell the operator to "fix the cause" of something we
+  # deliberately did.
+  if [ "${AP_POLICY_OFF:-0}" != 1 ]; then
+    echo "droplet-openwrt-attach: WARN: wireless iface unresolved — skipping AP bring-up (${_ap_skip_why}); no nft/hostapd will be attempted with an empty iface. Fix the cause or pin DROPLET_AP_PHY/DROPLET_AP_IFACE in /etc/default/droplet-openwrt-attach, then: systemctl restart droplet-openwrt-attach"
+  fi
 fi
 # <<< ap_attach_gate (WARP-2150)
 
@@ -1555,7 +1623,52 @@ fi
 #
 # LIVE-APPLY IS STEFAN-GATED: applying on .87 also needs the compose port
 # removed (done) + `systemctl restart droplet-openwrt-attach`. Code + tests only.
-if command -v nft >/dev/null 2>&1; then
+#
+# WARP-2183 — SHAPE GATE. Every rule below exists ONLY to compensate for wg0
+# living in a container behind docker-proxy. On the edge-router shape the tunnel
+# terminates on the RB5009 itself: there is no docker-proxy rewriting the source
+# port, no container IP to DNAT to, and no Docker FORWARD DROP to punch through.
+# Installing them there is not merely redundant — rule (a) would hijack inbound
+# udp/51820 arriving on the box's uplink and redirect it into a container whose
+# wg0 holds no peers, silently blackholing a tunnel the router was serving.
+#
+# The shape signal is the one WARP-1980 already established and tests: an
+# OPENWRT_HOST naming a NON-loopback host means an operator pointed this box at
+# a real external router. Empty or loopback means the bundled container. Same
+# case list as configure_single_box_env() in scripts/lib/single-box.sh — keep
+# them in step; a box that is behind a router but still says 127.0.0.1 has a
+# broken .env, and the WARP-1980 guard is what keeps that from happening.
+OVERLAY_NAT_ENV_FILE="${DROPLET_OVERLAY_NAT_ENV_FILE:-${REPO_ENV_FILE:-/home/droplet/edge-platform/.env}}"
+overlay_wg_host_nat_applies() {
+  _ownh="${OPENWRT_HOST:-}"
+  if [ -z "$_ownh" ] && [ -f "$OVERLAY_NAT_ENV_FILE" ]; then
+    _ownh="$(grep -m1 '^OPENWRT_HOST=' "$OVERLAY_NAT_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  fi
+  case "$_ownh" in
+    ''|127.0.0.1|localhost|::1) return 0 ;;   # bundled container — wg0 is here
+    *) return 1 ;;                            # external edge router — wg0 is there
+  esac
+}
+if ! overlay_wg_host_nat_applies; then
+  # Tear down any table a PREVIOUS attach installed while this box was still on
+  # the container shape. Leaving it behind would keep hijacking udp/51820 after
+  # the retarget, which is exactly the silent failure this gate exists to stop.
+  if command -v nft >/dev/null 2>&1 && nft list table ip droplet_overlay_nat >/dev/null 2>&1; then
+    nft delete table ip droplet_overlay_nat &&       echo "droplet-openwrt-attach: removed stale host WG overlay NAT (box is behind an external edge router)"
+  fi
+  # The DOCKER-USER accept cannot redirect anything on its own — the nft table
+  # above is the half that hijacks. It is still stale over-permission, so drop
+  # it too, best-effort: DOCKER-USER is not ours to flush, and the container may
+  # not be running to resolve an IP, so a miss here is not an error.
+  if command -v iptables >/dev/null 2>&1 && iptables -S DOCKER-USER >/dev/null 2>&1; then
+    _stale_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt 2>/dev/null) || true
+    _stale_if=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)
+    if [ -n "$_stale_ip" ] && [ -n "$_stale_if" ]; then
+      while iptables -D DOCKER-USER -i "$_stale_if" -d "$_stale_ip" -p udp --dport 51820 -j ACCEPT 2>/dev/null; do :; done
+    fi
+  fi
+  echo "droplet-openwrt-attach: skipping host WG overlay NAT — box is behind an external edge router (OPENWRT_HOST is not loopback); WireGuard terminates on the router, not in droplet-openwrt (WARP-2183)"
+elif command -v nft >/dev/null 2>&1; then
   # Resolve the openwrt container IP with the SAME validated retry idiom the
   # GATEWAY_IP DNAT resolution uses above — reject empty / 0.0.0.0 / multi-net
   # concatenations, since a garbage DNAT target makes the whole `nft add` fail.
