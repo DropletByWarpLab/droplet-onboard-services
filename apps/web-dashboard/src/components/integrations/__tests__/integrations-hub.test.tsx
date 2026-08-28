@@ -180,7 +180,12 @@ describe("hub dispatch", () => {
       conn("eaglesoft", "NOT_CONFIGURED"),
       conn("quickbooks-online", "CONNECTED"),
       conn("m365", "PROVISIONING"),
-      conn("acme-pms", "NOT_CONFIGURED"),
+      // WARP-2483 — a DISABLED tile whose credential was purged is a state the
+      // hub only started rendering differently once `credentialsPurged` was
+      // consumed, and a new rendering is exactly where a dispatch gets
+      // dropped. It stays in the exhaustive sweep so the new copy cannot
+      // arrive at the cost of the click.
+      conn("acme-pms", "DISABLED", { credentialsPurged: true }),
     ];
     vi.mocked(fetchIntegrations).mockResolvedValue(rows);
 
@@ -257,6 +262,65 @@ describe("hub dispatch", () => {
 
     fireEvent.click(within(tile(container, "Acme PMS")).getByRole("button"));
     expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
+  });
+
+  /**
+   * WARP-2483 — the purged tile's own dispatch, asserted directly rather than
+   * only inside the sweep above, so the failure names the state.
+   *
+   * The credential is gone, so the honest next step is to set the connector up
+   * again: Connect, opening the wizard.
+   *
+   * Mutation: give the DISABLED branch of `ConnectorCard` no live button (the
+   * obvious way to render "this is off") → red, because a tile the owner can
+   * act on becomes one they cannot.
+   */
+  it("a disconnected tile whose credential was removed still dispatches its Connect", async () => {
+    extraDescriptors.push(ACME);
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("acme-pms", "DISABLED", { credentialsPurged: true }),
+    ]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+
+    const card = tile(container, "Acme PMS");
+    expect(within(card).getByText("Disconnected · credential removed")).toBeTruthy();
+
+    expect(screen.queryByTestId("connect-wizard")).toBeNull();
+    fireEvent.click(within(card).getByRole("button"));
+    expect(screen.getByTestId("connect-wizard")).toBeTruthy();
+  });
+
+  /**
+   * …and the other boolean routes somewhere the purge can actually be
+   * finished. "Disconnected, key still stored" is the one state whose action
+   * is neither Connect nor nothing: the owner asked for the credential to go
+   * and it did not, so the tile offers the disconnect path again.
+   *
+   * Mutation: reuse the purged branch's `connect` action here → red, because
+   * the click then opens the setup wizard, which stores a NEW credential
+   * instead of removing the one still sitting on the row.
+   */
+  it("a disconnected tile whose credential is still stored offers the disconnect action again", async () => {
+    extraDescriptors.push(ACME);
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("acme-pms", "DISABLED", { credentialsPurged: false }),
+    ]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+
+    const card = tile(container, "Acme PMS");
+    expect(
+      within(card).getByText(
+        "Disconnected · credential still stored — reconnect or remove",
+      ),
+    ).toBeTruthy();
+
+    const button = within(card).getByRole("button");
+    expect(button.textContent).toContain("Remove credential");
+    fireEvent.click(button);
+    expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
+    expect(screen.queryByTestId("connect-wizard")).toBeNull();
   });
 
   it("the Eaglesoft tile opens the connect wizard", async () => {
@@ -559,5 +623,87 @@ describe("loading, fetch-error and not-configured are three states", () => {
       expect(within(tile(container, name)).getByText(label), `${name} → ${label}`).toBeTruthy();
     }
     expect(new Set(labels.map(([, l]) => l)).size).toBe(7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Disconnected credentials — WARP-2483
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-041 §2 promises that disconnecting removes the key. WARP-2453 made that
+ * true and put the answer on the wire as `credentialsPurged`; nothing rendered
+ * it, so the promise was kept in Postgres and invisible on the surface it was
+ * made on.
+ *
+ * The two booleans are not decoration. `true` closes the loop — the owner is
+ * told the thing they asked for happened. `false` is the honest admission that
+ * a row disabled by a build predating the purge still holds its credential,
+ * and it is the one that still owes them an action.
+ */
+describe("a disconnected tile says whether the credential was actually removed", () => {
+  /** Render one DISABLED Acme tile and hand back its text. */
+  async function disconnectedTileText(
+    over: Partial<IntegrationConnection>,
+  ): Promise<string> {
+    extraDescriptors.length = 0;
+    extraDescriptors.push(ACME);
+    push.mockReset();
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("acme-pms", "DISABLED", over),
+    ]);
+    const { container, unmount } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+    const text = tile(container, "Acme PMS").textContent ?? "";
+    unmount();
+    return text;
+  }
+
+  /**
+   * Mutation: drop `credentialsPurged` from `statusView`'s DISABLED branch →
+   * red on the sentence.
+   */
+  it("renders the purged state in the canonical words", async () => {
+    const text = await disconnectedTileText({ credentialsPurged: true });
+    expect(text).toContain("Disconnected · credential removed");
+    expect(text).not.toContain("still stored");
+  });
+
+  it("renders the not-purged state, and says what to do about it", async () => {
+    const text = await disconnectedTileText({ credentialsPurged: false });
+    expect(text).toContain(
+      "Disconnected · credential still stored — reconnect or remove",
+    );
+  });
+
+  /**
+   * THE mutation the ticket names, as a test: ignore the flag and both renders
+   * become the same DOM.
+   *
+   * Asserted on the whole tile rather than on one string, so it stays red for
+   * *any* way of ignoring the flag — dropping the argument, collapsing the two
+   * branches, or rendering one sentence for both.
+   */
+  it("the two booleans do not produce the same tile", async () => {
+    const purged = await disconnectedTileText({ credentialsPurged: true });
+    const retained = await disconnectedTileText({ credentialsPurged: false });
+    expect(purged).not.toEqual(retained);
+  });
+
+  /**
+   * The third case, and the reason the flag is optional in the dashboard's
+   * mirror of the payload: a response that carries no purge fact must be
+   * rendered as neither answer.
+   *
+   * Mutation: default the missing flag to `false` (or to `true`) → red,
+   * because the tile then makes a claim about a credential nobody asked the
+   * box about. Note this is the one branch where being wrong is unsafe in the
+   * *reassuring* direction.
+   */
+  it("claims nothing when the box reported no purge fact at all", async () => {
+    const text = await disconnectedTileText({});
+    expect(text).toContain("Turned off");
+    expect(text).not.toContain("credential removed");
+    expect(text).not.toContain("credential still stored");
   });
 });
