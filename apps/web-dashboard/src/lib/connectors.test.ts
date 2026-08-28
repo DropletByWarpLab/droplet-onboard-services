@@ -80,6 +80,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Payments, refunds and payouts read straight from Stripe — never money movement.",
     availability: "available",
+    setupGuideHref: "/help/integrations/stripe",
   },
   {
     id: "hubspot",
@@ -87,6 +88,7 @@ const CATALOG_WARP_2214 = [
     category: "CRM",
     description: "Contacts, companies, deals and tickets from your CRM — read on request.",
     availability: "available",
+    setupGuideHref: "/help/integrations/hubspot",
   },
   {
     id: "mailchimp",
@@ -95,6 +97,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Audiences, campaign performance and attributed orders — read from Mailchimp.",
     availability: "available",
+    setupGuideHref: "/help/integrations/mailchimp",
   },
 ];
 
@@ -309,9 +312,32 @@ describe("the setup guide travels with the card", () => {
       },
     };
     expect(ok.catalog?.setupGuideHref).toBeUndefined();
+
+    // WARP-2466 corrected the loop that used to sit here. It read
+    //
+    //   if (d?.track === "cloud") expect(card.availability).toBe("coming-soon")
+    //
+    // which asserted that EVERY cloud card is coming-soon. That happened to be
+    // true when it was written (QuickBooks was the only cloud card), but it is
+    // not the property this test is named for, and it goes red the moment any
+    // cloud provider actually ships — which is what registering Stripe,
+    // HubSpot and Mailchimp does.
+    //
+    // The real property, both halves:
+    //   • an `available` cloud card MUST carry a guide (the union enforces it
+    //     at compile time; this is the runtime witness on shipped data);
+    //   • a `coming-soon` cloud card need not.
+    // Mutation: drop `setupGuideHref` from any of the three → tsc red AND red
+    // here.
     for (const card of CONNECTORS) {
       const d = descriptorForCatalogId(card.id);
-      if (d?.track === "cloud") expect(card.availability).toBe("coming-soon");
+      if (d?.track !== "cloud") continue;
+      if (card.availability === "available") {
+        expect(
+          d.catalog?.setupGuideHref,
+          `${card.id} is an available cloud card with no setup guide`,
+        ).toBeTruthy();
+      }
     }
   });
 });
