@@ -101,11 +101,15 @@ included tier, headroom to ~1.6× today's PR volume.
   copying any retired-trigger sibling (e.g. `switch-tests.yml`).
 - **Never add an unfiltered `pull_request:` trigger** to any job heavier
   than ~1 min. The only every-PR workflows are the ~1-min hygiene checks
-  (egress-gate, gitleaks, hadolint, ci-coverage, codeql-trigger)
+  (egress-gate, ci-coverage, codeql-trigger)
   and ci.yml's detect+summary. That list is closed — extending it is a
-  budget decision for Romain. (`semgrep` left this list in WARP-2481: it is
-  now an unfiltered *leg* of ci.yml, same trigger set and same ~1 billable
-  min, so the spend is unchanged — it just blocks merges now.)
+  budget decision for Romain. (`semgrep` left this list in WARP-2481, and
+  `gitleaks` + `hadolint` in WARP-2493: all three are now *legs* of ci.yml.
+  semgrep and gitleaks stayed unfiltered — same trigger set, same billable
+  minute, spend unchanged, they just block merges now. hadolint gained a
+  `detect` filter on Dockerfiles + .hadolint.yaml, which is a **saving**:
+  its verdict is a pure function of those files, so a PR touching neither
+  could only re-report the base branch's result.)
 - **Widening a `paths:` list on docker-build / setup-e2e / test-fips is a
   spend decision.** These are the 20–60-min jobs; a glob like
   `apps/orchestrator/**` or `services/**` puts them on ~half of all PRs.

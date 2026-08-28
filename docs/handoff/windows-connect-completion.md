@@ -325,5 +325,18 @@ overlay-built installer (Part A local build is fine). Order matters:
 2. Make the vpnd CI job a required check (separate Task; the job name string
    `cargo check + clippy (droplet-vpnd)` at ci.yml:47-48 IS the branch-protection
    contract — add it, never rename it).
+   > **⚠️ UNVERIFIED (WARP-2504, 2026-08-28) — check `droplet-windows`'
+   > workflows for a path filter before acting.** This step names a job in the
+   > **`droplet-windows`** repo, which is not checked out alongside this one, so
+   > whether its `ci.yml` is path-filtered could not be established here. **A
+   > required context must come from a workflow that runs on *every* PR**: if
+   > that workflow is path-filtered, adding the job as a required context hangs
+   > every out-of-scope PR forever on *"Expected — waiting for status to be
+   > reported"* and no re-run clears it. That trap has already been hit on this
+   > repo (WARP-2172). Read the `on:` block first; if it is filtered, use one of
+   > the two safe shapes in
+   > [`docs/ci-required-checks.md`](../ci-required-checks.md) instead. Note also
+   > that `droplet-windows` has its own branch-protection config — nothing in
+   > this repo's rulesets applies to it.
 3. WARP-1388 decomposition story items 2-7, roughly in that order; 5 (redial) is the
    largest and the only one touching the service.
