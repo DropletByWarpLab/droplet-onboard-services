@@ -78,7 +78,7 @@ The five headings below are **required and fixed**. They exist because per-vendo
 
 `Integrations → Credentials` in the sidebar, owner/admin only. Paste the value into `<field label>` and Save.
 
-Droplet encrypts it on the box, never displays it again, and records only *whether* a credential is set — never its value. Leave the field blank on a later edit to keep the stored credential; clear it explicitly to remove it. Full behaviour: [`SETUP.md` §8](SETUP.md#8-cloud--saas-connectors--pasting-a-credential-warp-2275).
+Droplet encrypts it on the box, never displays it again, and records only *whether* a credential is set — never its value. Leave the field blank on a later edit to keep the stored credential; clear it explicitly to remove it. Full behaviour: [`SETUP.md` §3.6](SETUP.md#36-changing-a-credential-later-warp-2275).
 
 ## If it stops working
 
