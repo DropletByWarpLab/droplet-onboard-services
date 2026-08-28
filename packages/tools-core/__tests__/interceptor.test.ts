@@ -18,6 +18,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import {
+  confirmationOwnerOf,
   createRuntimeDenyTier,
   createToolCallInterceptor,
   declaresConfirmedFlag,
@@ -462,5 +463,92 @@ describe("declaresConfirmedFlag", () => {
     expect(declaresConfirmedFlag(TOOLS.get("memory_forget")!)).toBe(true);
     expect(declaresConfirmedFlag(TOOLS.get("list_files")!)).toBe(false);
     expect(declaresConfirmedFlag({ name: "x", requiresConfirmation: true })).toBe(false);
+  });
+});
+
+/**
+ * WARP-2472 — the ownership skip, on synthetic tools so the assertions
+ * are about the MECHANISM rather than about today's roster. The roster
+ * itself is covered by `confirmation-interceptor-compat.test.ts` and by
+ * the orchestrator's `confirmation-owner-drift.guard.test.ts`.
+ */
+describe("confirmationOwner — which layer asks (WARP-2472)", () => {
+  const routeOwned: InterceptableTool = {
+    name: "route_owned_fixture",
+    requiresConfirmation: true,
+    confirmationOwner: "route",
+  };
+  const interceptorOwned: InterceptableTool = {
+    name: "interceptor_owned_fixture",
+    requiresConfirmation: true,
+    confirmationOwner: "interceptor",
+  };
+  const undeclared: InterceptableTool = {
+    name: "undeclared_fixture",
+    requiresConfirmation: true,
+  };
+
+  it("defaults to `interceptor` when the tool declares nothing", () => {
+    // Fail-closed: forgetting the field must never remove a gate.
+    expect(confirmationOwnerOf(undeclared)).toBe("interceptor");
+    expect(confirmationOwnerOf(routeOwned)).toBe("route");
+    expect(confirmationOwnerOf(interceptorOwned)).toBe("interceptor");
+  });
+
+  it("STILL challenges an interceptor-owned tool", () => {
+    // The control that stops the skip from being written as unconditional.
+    // Mutation: hard-code the skip (return proceed for every confirming
+    // tool) → this reds while the route-owned test below stays green.
+    const interceptor = createToolCallInterceptor();
+    const outcome = interceptor.intercept(interceptorOwned, { a: 1 }, undefined, T0);
+    expect(outcome.kind).toBe("confirmation_required");
+    expect(interceptor.tokens.size()).toBe(1);
+  });
+
+  it("STILL challenges a tool that declares no owner at all", () => {
+    const interceptor = createToolCallInterceptor();
+    const outcome = interceptor.intercept(undeclared, { a: 1 }, undefined, T0);
+    expect(outcome.kind).toBe("confirmation_required");
+  });
+
+  it("does NOT challenge a route-owned tool, and mints nothing", () => {
+    // Mutation: remove the `confirmationOwner === "route"` skip → this
+    // reds, and that red IS the WARP-2472 double prompt returning.
+    const interceptor = createToolCallInterceptor();
+    const outcome = interceptor.intercept(routeOwned, { a: 1 }, undefined, T0);
+
+    expect(outcome.kind).toBe("proceed");
+    if (outcome.kind !== "proceed") return;
+    // The arguments reach the handler untouched — no `confirmed` is
+    // fabricated, so the route sees exactly what the tool sent.
+    expect(outcome.args).toEqual({ a: 1 });
+    // Nothing was consumed, so §11's audit writes no `confirm_consumed`
+    // row for a confirmation this layer never granted.
+    expect(outcome.confirmationConsumed).toBe(false);
+    expect(interceptorAuditEvent(routeOwned, outcome)).toBeNull();
+    // And no unredeemable token was left in the store.
+    expect(interceptor.tokens.size()).toBe(0);
+    // Nothing to render, so no prompt reaches the user from here.
+    expect(interceptOutcomeToToolResult(routeOwned, outcome)).toBeNull();
+  });
+
+  it("keeps the deny tier ABOVE the skip — a denied route-owned tool is still refused", () => {
+    // There is no approval, from any layer, that makes a blocked action
+    // allowed. Mutation: move the ownership skip above the deny
+    // evaluation → this reds.
+    const interceptor = createToolCallInterceptor();
+    interceptor.denyTier.add("warp-2472", () => ({ code: "NOPE", message: "blocked" }));
+    const outcome = interceptor.intercept(routeOwned, { a: 1 }, undefined, T0);
+    expect(outcome.kind).toBe("denied");
+  });
+
+  it("leaves reads alone regardless of the declared owner", () => {
+    const interceptor = createToolCallInterceptor();
+    const read: InterceptableTool = {
+      name: "read_fixture",
+      requiresConfirmation: false,
+      confirmationOwner: "route",
+    };
+    expect(interceptor.intercept(read, {}, undefined, T0).kind).toBe("proceed");
   });
 });
