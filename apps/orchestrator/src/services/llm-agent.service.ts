@@ -49,6 +49,10 @@ import {
   describeToolError,
   newAgentTurnId,
 } from "./tool-error-diagnostics.js";
+import {
+  boundControlEnvelopeForModel,
+  boundToolResultForModel,
+} from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
   toolAllowedInScope,
@@ -233,7 +237,16 @@ export function presetForClass(cls: QueryClass, query?: string): AdaptivePreset 
         searchOverrides: { rerankCandidates: 80 },
       };
     case "conversational":
-      return { searchOverrides: { minSimilarity: 0.5, perArmK: 50 } };
+      // WARP-2196: 0.5 -> 0.75. This floor's job is to sit ABOVE what
+      // chit-chat scores against the corpus so a conversational turn
+      // retrieves nothing. Under MiniLM the ceiling for the conversational
+      // eval queries was 0.200 and 0.5 cleared it 2.5x over; under
+      // bge-small-en-v1.5 that ceiling is 0.590, so 0.5 would have admitted
+      // 8 of the 10 conversational fixture queries — the gate inverted from
+      // "skip retrieval" to "retrieve almost always". 0.75 is the measured
+      // bge-equivalent of MiniLM's 0.5 by irrelevant-pair selectivity (1.3%
+      // vs 1.4%). See services/similarity-floors.test.ts.
+      return { searchOverrides: { minSimilarity: 0.75, perArmK: 50 } };
     case "navigational": {
       const token = query ? extractFilenameToken(query) : undefined;
       return token ? { filenameContains: token } : {};
@@ -1808,7 +1821,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: JSON.stringify(denialError).slice(0, 8000),
+          content: boundControlEnvelopeForModel(JSON.stringify(denialError)),
         });
         // Counted as a guard hit: a model that keeps re-issuing a refused
         // tool must still trip the FINDING 1 circuit breaker rather than
@@ -1872,7 +1885,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           messages.push({
             role: "tool",
             tool_call_id: call.id,
-            content: JSON.stringify(heal).slice(0, 8000),
+            content: boundControlEnvelopeForModel(JSON.stringify(heal)),
           });
           continue;
         }
@@ -1911,12 +1924,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         });
         // Feed the same envelope back to the model as the tool's reply so
         // the next iteration sees the valid-tool list and can self-correct.
-        // Bound it with the same 8000-char cap as real tool results (below)
-        // so a large advertised-tool list can't inflate next-turn context.
+        // WARP-2203 — bounded by the loop's OWN static control-envelope cap,
+        // not by the tool-result reducer: this string is authored HERE, is
+        // fixed-shape, and its only variable part is the advertised-tool name
+        // list (2,439 chars for the whole 137-tool registry, canaried under
+        // the cap). Running a shape-driven reducer over it would change the
+        // CONTENT of the WARP-642 self-correction message.
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: guardText.slice(0, 8000),
+          content: boundControlEnvelopeForModel(guardText),
         });
         iterGuardHits++;
         continue;
@@ -1949,7 +1966,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: JSON.stringify(nudge).slice(0, 8000),
+          content: boundControlEnvelopeForModel(JSON.stringify(nudge)),
         });
         if (priorCalls >= 2) {
           finalizeReason = finalizeReason ?? "repetition";
@@ -2107,12 +2124,43 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         }
       }
 
-      // Bound the tool result we feed back to the model so one giant
-      // payload doesn't blow the next-turn context window.
+      // WARP-2203 — bound the tool result we feed back to the model so one
+      // giant payload doesn't blow the next-turn context window. This used
+      // to be `text.slice(0, 8000)`, which cut JSON at a CHARACTER count:
+      // the result was invalid JSON with every field after the cut deleted.
+      // Paging tools put the bulk text FIRST and the continuation marker
+      // LAST, so the cut removed exactly the "there is more" signal and kept
+      // the fragment that looks complete — `read_file` and
+      // `read_document_text` were both inert on this path while their own
+      // suites were green, because the cap lives HERE and no tool-boundary
+      // test can see it.
+      //
+      // The bounded string has exactly one consumer: the model's next turn.
+      // The trace already holds `parsed` (line ~1974), the SSE event already
+      // carried it (~2039) and citation extraction already ran (~2046), so
+      // this step takes TEXT and returns TEXT and touches nothing else.
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: text.slice(0, 8000),
+        content: boundToolResultForModel(text, call.function.name, (refusal) => {
+          // The refusal branch DESYNCS the model from the operator trace:
+          // SSE already said `ok: true` and the trace holds the full payload,
+          // while the model's history now carries none of it. Without this
+          // line the two are unreconcilable after the fact. Sits alongside
+          // the `agent_tool_error` warn above, on the same correlation keys.
+          logger.warn(
+            {
+              tool: call.function.name,
+              tool_call_id: call.id,
+              turn_id: turnId,
+              iter,
+              input_chars: refusal.inputChars,
+              reason: refusal.reason,
+              ...(refusal.detail ? { detail: refusal.detail } : {}),
+            },
+            "agent_tool_result_refused",
+          );
+        }),
       });
     }
 
