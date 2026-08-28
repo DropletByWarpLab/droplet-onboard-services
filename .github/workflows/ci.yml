@@ -93,6 +93,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # WARP-2351 — customer setup-guide drift gate. Deliberately a STEP of
+      # this job rather than a leg of its own: `detect` is the only job that
+      # runs on every PR and every main push, and ci-summary already requires
+      # it to succeed, so this reports under the required check with no new
+      # leg, no matrix entry, no `paths:` widening and no new `pull_request:`
+      # trigger (docs/ci-cost-budget.md — CI spend is capped). It also has to
+      # be here for correctness, not only for cost: a docs-only PR triggers NO
+      # other leg at all, and a docs-only PR is exactly what this gate exists
+      # to catch. It runs in ~1s of an already-running job.
+      #
+      # What it closes: a cloud provider shipping with no customer setup
+      # guide, a guide losing one of its six required sections or a
+      # commercially load-bearing fact (Shopify's Grow-plan price, Xero's
+      # per-organisation charge and country list, Stripe's rk_ prefix
+      # contract, HubSpot's super-admin requirement) to a well-meaning copy
+      # pass, and a rotted intra-docs link. See the script's own header.
+      - name: Customer setup guides — coverage, fact pins, link integrity
+        run: bash scripts/check-setup-guides.sh
+
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@v4

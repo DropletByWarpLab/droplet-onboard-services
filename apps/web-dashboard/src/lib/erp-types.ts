@@ -26,7 +26,14 @@ export type ConnectorId = "eaglesoft" | "dentrix" | "opendental" | "quickbooks";
 export type ConnectorAvailability = "available" | "coming-soon";
 
 export interface ConnectorMeta {
-  id: ConnectorId;
+  /**
+   * The tile's identity. Usually a {@link ConnectorId} from the catalog, but
+   * the hub also renders tiles for providers the box reports that the catalog
+   * does not list — `<vendor>-export` keys, M365, anything a newer box adds
+   * (WARP-2291). Narrowing this back to `ConnectorId` would make those
+   * connections unrepresentable, which is how they came to be dropped.
+   */
+  id: string;
   name: string;
   /** e.g. "Practice management", "Accounting". */
   category: string;
@@ -39,7 +46,15 @@ export interface ConnectorMeta {
 export type WriteMode = "read-only" | "writes-enabled" | "writes-paused";
 
 export interface IntegrationConnection {
-  provider: ConnectorId;
+  /**
+   * The orchestrator's provider key, verbatim — free-form TEXT on
+   * `IntegrationConnection.provider` (`erp-provider.ts`), NOT a catalog id.
+   * `eaglesoft` is the only value that is byte-equal to a {@link ConnectorId};
+   * `eaglesoft-api`, `quickbooks-online`, `dentrix-ascend` and every
+   * `<vendor>-export` key are not. Typing this as `ConnectorId` was the lie
+   * that made the hub's `byId.get(meta.id)` join look correct (WARP-2291).
+   */
+  provider: string;
   status: IntegrationStatus;
   /** Eaglesoft server host/IP (mono). */
   host?: string;

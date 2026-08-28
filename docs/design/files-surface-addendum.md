@@ -74,8 +74,8 @@ WARP-1548 and WARP-1546 both explicitly refuse to decide these in the ticket. Th
 
 ### 2.1 The rail's a11y role: `navigation`, not `tablist`, not `tree`
 
-The shipped control is `role="tablist" aria-label="File space"` — `SpaceSwitcher.tsx:169` (the ≤3
-segmented form) and `:278` (the >3 menu form), **both** of which the rail replaces. The rail is
+The shipped control is `role="tablist" aria-label="File space"` — `SpaceSwitcher.tsx:138` (the ≤3
+segmented form) and `:247` (the >3 menu form), **both** of which the rail replaces. The rail is
 **`<nav aria-label="Places">` containing a list of links**.
 
 This is a deliberate divergence from the Network-tabs precedent (`docs/indigo-redesign-handoff.md:128-130`),
@@ -108,14 +108,20 @@ children under a parent caption). There is no viewport where the switcher has a 
 doing, and shipping both showing the same thing is the outcome WARP-1548 warns against.
 
 Absorb, do not discard: kind glyphs, the neutral rights-chip treatment, `provisioning`/`failed`
-chips, department→team grouping, the orphan-team fallback (`orphanTeams`, `SpaceSwitcher.tsx:220`, rendered at `:331`/`:350` — a team
+chips, department→team grouping, the orphan-team fallback (`orphanTeams`, `SpaceSwitcher.tsx:189`, rendered at `:300`/`:319` — a team
 whose parent is absent still renders), and the owner/admin-only visibility filter for `failed` rows.
 `spaceSwitcherVisible()` becomes the rail's Home-mode gate (§3). **Delete the component only once
 each of those behaviors has a test on the rail.**
 
+⚠ That gate, `isActiveState`/`isVisibleNonActive` and the rights labels moved out of the switcher
+to `apps/web-dashboard/src/lib/space-rows.ts` when the rail landed (WARP-1548). Two consumers had
+verbatim copies of the same filter for one review cycle, which is how a row list and the render
+gate above it start disagreeing — and it also pointed an always-mounted piece of global nav at the
+FileManager module graph. Take them from `lib/`, never re-derive them.
+
 `shared` stays a valid space id for one more release — ADR-029 **Migration** item 4 (line 268):
 "`shared` kept as an alias id for one release (mobile/MCP callers)". `PINNED_IDS`
-(`SpaceSwitcher.tsx:79`) still depends on it. Retiring the switcher does not retire the id.
+(`SpaceSwitcher.tsx:84`) still depends on it. Retiring the switcher does not retire the id.
 
 ### 2.3 `/files/devices`: out of the rail, and out of Files
 
@@ -213,7 +219,7 @@ Restated here so a reviewer can check them without leaving the repo.
 - **Nextcloud is never read as truth and never a management surface** (ADR-029:47, :181, :203 →
   ADR-013). Rail contents come from Prisma via the orchestrator — `GET /api/files/spaces`.
 - **`provisioning` / `failed` render as chips, never silent absence**; `failed` is owner/admin-only
-  (`isVisibleNonActive`, `SpaceSwitcher.tsx:93`).
+  (`isVisibleNonActive`, `apps/web-dashboard/src/lib/space-rows.ts`).
 - **Reader posture stays honest** — writes visible-but-disabled with the locked tooltip. The
   verbatim strings `READER_TOOLBAR_TOOLTIP` (`app/files/page.tsx:89`) and
   `ADMIN_FOREIGN_LIBRARY_COPY` (`:91`) are copy-locked.
