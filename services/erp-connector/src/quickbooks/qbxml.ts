@@ -12,6 +12,7 @@
  * PURE: no I/O, no clock.
  */
 import { childrenNamed, escapeXml, parseXml, textAt, type XmlElement } from "./xml.js";
+import { utcInstant } from "./timestamp.js";
 import { roundCents } from "../api-dto.js";
 
 /**
@@ -38,6 +39,21 @@ export type QbxmlStep = (typeof QBXML_STEPS)[number];
  * That matters more here than it looks — the Web Connector holds QuickBooks
  * single-threaded while a session runs, so an oversized response is time the
  * front desk cannot use their own software.
+ *
+ * WARP-2475 — note what is deliberately ABSENT: no `IncludeRetElement`.
+ * That element is qbXML's projection list, and it is subtractive — supply none
+ * and QuickBooks returns the whole `*Ret` aggregate, supply one and it returns
+ * ONLY what is listed. Every field this module reads therefore arrives today,
+ * `TimeModified` included, which is why populating `updated_at` needed no
+ * change here.
+ *
+ * If a projection list is ever added to trim the response, `TimeModified` MUST
+ * be in it. Leaving it out would blank the column that WARP-2218's incremental
+ * watermark keys on, and every other assertion in the desktop suite would still
+ * pass while it happened — so the test suite pins this property rather than
+ * trusting the next reader to know it. (`BillQueryRq` has no
+ * `IncludeRetElement` at all, so bills cannot be trimmed this way even
+ * deliberately.)
  */
 export function buildRequest(step: QbxmlStep, requestId = "1"): string {
   const rq =
@@ -179,14 +195,13 @@ export function parseResponse(step: QbxmlStep, xml: string): Record<string, unkn
       amount: sumFields(row, shape.amountFields),
       balance: money(textAt(row, shape.balanceField)),
       status: undefined as string | undefined,
-      // WARP-2464 — declared canonical for `invoice`/`bill`, present-and-
-      // undefined here. `InvoiceRet`/`BillRet` do carry `TimeModified`, but
-      // this track does not request it yet and its shape is a full local
-      // timestamp rather than the date-only cells `date()` normalizes, so
-      // mapping it is its own change. Undefined is what tells a watermark to
-      // fall back to its ordering key; `TxnDate` here would be a creation time
-      // wearing a modification time's name.
-      updated_at: undefined as string | undefined,
+      // WARP-2475 — the modification time. `TimeModified` is a REQUIRED
+      // element of both `InvoiceRet` and `BillRet`, and it already arrives:
+      // `buildRequest` supplies no `IncludeRetElement` projection list, so
+      // QuickBooks returns the full aggregate. Naive values (no offset, which
+      // older releases print) resolve to undefined rather than to a guessed
+      // zone — see `timestamp.ts` for why that refusal is the honest answer.
+      updated_at: utcInstant(textAt(row, "TimeModified")),
     };
   });
 }
