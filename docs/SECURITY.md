@@ -61,10 +61,12 @@ decision in its own right, not a side effect of a docs correction. It was
 The cheaper correct shape is the one `docs/ci-required-checks.md` calls option
 2: leave the builds where they are and give `docker-build.yml` an unfiltered
 job that reports green when no image is in scope, making `docker-build ok`
-requireable. That is WARP-2172's territory —
-`docs/security/fips-ci-gate-required.md` still instructs adding
-`docker-build ok` as a required context today, which would hang every
-out-of-scope PR on "Expected".
+requireable. That is WARP-2172's territory.
+[`docs/security/fips-ci-gate-required.md`](security/fips-ci-gate-required.md)
+covers the same ground for the FIPS build-time gate; it previously instructed
+adding `docker-build ok` as a required context, which would have hung every
+out-of-scope PR on "Expected". That instruction and its ruleset JSON were
+removed under WARP-2493.
 
 Until one of those lands: **a fixable HIGH/CRITICAL in a rebuilt image turns
 `docker-build ok` red and does not stop the merge.** Treat it as review-blocking

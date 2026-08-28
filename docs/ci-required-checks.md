@@ -109,8 +109,10 @@ starts. `docker-build ok` (`docker-build.yml`) is exactly this shape: it is a
 correct fan-in for a dynamic matrix, but `docker-build.yml` is path-filtered
 to Dockerfiles, `package*.json`, `requirements*.txt`, `docker/docker-compose.yml`,
 `docker/fips/**` and `docker/nginx/**`, so it is absent from #1729 and present
-on #1690. It is **not** requireable as written — see WARP-2172, which also
-covers `docs/security/fips-ci-gate-required.md` still instructing otherwise.
+on #1690. It is **not** requireable as written — see WARP-2172.
+`docs/security/fips-ci-gate-required.md` used to instruct adding it anyway;
+that instruction and its ruleset JSON were removed under WARP-2493, and the
+file now points back here.
 
 The two safe shapes:
 
@@ -184,10 +186,12 @@ upload, no `security-events` permission), and it already fans into the stable
 
 Folding it into `ci-summary` would mean moving the entire 13-image build matrix
 into `ci.yml`; that is a real cost decision, not a wiring fix, and WARP-2493
-deliberately did not do it. The cheaper route is safe shape 2 below. Note
-`docs/security/fips-ci-gate-required.md` still instructs adding
-`docker-build ok` as a required context — following it today would hang every
-out-of-scope PR on "Expected" (WARP-2172).
+deliberately did not do it. The cheaper route is safe shape 2 below.
+[`docs/security/fips-ci-gate-required.md`](security/fips-ci-gate-required.md)
+documents the same conclusion for the FIPS build-time gate; it previously
+instructed adding `docker-build ok` as a required context, which would have
+hung every out-of-scope PR on "Expected" (WARP-2172). That instruction and the
+ruleset JSON it applied were removed under WARP-2493.
 
 ### CodeQL is advisory and **cannot** be folded into `ci-summary` {#codeql}
 
