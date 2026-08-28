@@ -151,10 +151,51 @@ function collides(readKey: string, writeKey: string): boolean {
   return rId === "*" || wId === "*";
 }
 
+/**
+ * Is this one of the shared mock's Prisma JSON-null sentinels (WARP-2484)?
+ * They are frozen singletons the real client distinguishes BY IDENTITY, so a
+ * snapshot must carry the sentinel itself through — a clone would be a
+ * lookalike that fails every identity check. They also cannot be
+ * `structuredClone`d at all: their `toString`/`toJSON` are functions, which is
+ * exactly the `DataCloneError` a row holding `Prisma.DbNull` used to throw
+ * out of `snapshotAll` the moment a rollback needed a snapshot.
+ */
+function isPrismaJsonNullSentinel(value: object): boolean {
+  const tag = (value as { _tag?: unknown })._tag;
+  return typeof tag === "string" && tag.startsWith("Prisma.");
+}
+
+/**
+ * `structuredClone`, except Prisma's JSON-null sentinels pass through by
+ * reference (see {@link isPrismaJsonNullSentinel}). Handles the shapes store
+ * rows actually contain — plain objects, arrays, `Date`s, `Map`s, `Set`s and
+ * primitives; anything more exotic in a store row would have thrown out of
+ * `structuredClone` before this existed too.
+ */
+function cloneValue<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  if (isPrismaJsonNullSentinel(value)) return value;
+  if (value instanceof Date) return new Date(value.getTime()) as T;
+  if (value instanceof Map) {
+    const out = new Map<unknown, unknown>();
+    for (const [k, v] of value) out.set(cloneValue(k), cloneValue(v));
+    return out as T;
+  }
+  if (value instanceof Set) {
+    const out = new Set<unknown>();
+    for (const v of value) out.add(cloneValue(v));
+    return out as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => cloneValue(v)) as T;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) out[k] = cloneValue(v);
+  return out as T;
+}
+
 function cloneStore(store: Store): unknown {
-  if (store instanceof Map) return structuredClone([...store.entries()]);
-  if (Array.isArray(store)) return structuredClone(store);
-  return structuredClone(store.get());
+  if (store instanceof Map) return cloneValue([...store.entries()]);
+  if (Array.isArray(store)) return cloneValue(store);
+  return cloneValue(store.get());
 }
 
 function restoreStore(store: Store, snap: unknown): void {
