@@ -192,7 +192,7 @@ export interface SearchByVectorParams {
    * the caller, never here.
    */
   additionalUserIds?: string[];
-  /** Embedding vector. Length must match `FileContentChunk.embedding` (384 for all-MiniLM-L6-v2). */
+  /** Embedding vector. Length must match `FileContentChunk.embedding` (384 for bge-small-en-v1.5). */
   vector: number[];
   /** Maximum rows to return (caller-clamped). */
   limit: number;
@@ -890,8 +890,31 @@ export interface SearchHybridParams {
 export const SEARCH_HYBRID_DEFAULT_PER_ARM_K = 100;
 /** Caller-facing default result count. */
 export const SEARCH_HYBRID_DEFAULT_LIMIT = 10;
-/** Cosine-similarity floor for the vector arm of `searchHybrid`. */
-export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.3;
+/**
+ * Cosine-similarity floor for the vector arm of `searchHybrid`.
+ *
+ * MODEL-SPECIFIC CALIBRATION — not a universal "good enough" threshold. The
+ * value is applied client-side in `searchByVector` to `1 - (embedding <=> $v)`,
+ * so it only means something relative to the score distribution the embedder
+ * produces.
+ *
+ * WARP-2196 moved the embedder from all-MiniLM-L6-v2 to bge-small-en-v1.5 and
+ * re-derived this from measurement. Measured over the committed eval fixtures
+ * (65 queries x 47 passages), bge's LOWEST score across every pair — matched,
+ * unmatched and chit-chat alike — is +0.344. The previous 0.3 was therefore
+ * not merely loose under bge, it was an exact no-op: it rejected nothing the
+ * SQL had returned.
+ *
+ * 0.65 reproduces MiniLM-at-0.3's operating point: 10.7% of the irrelevant
+ * pair population survives (MiniLM at 0.3: 10.5%) while per-query match recall
+ * goes UP, 96.4% -> 98.2%. Full distributions and the derivation live in
+ * `similarity-floors.test.ts` and
+ * docs/RAG_RE_EMBED_RUNBOOK.md §8.
+ *
+ * Changing the embedder REQUIRES re-deriving this. Carrying it across is how
+ * a cosine floor turns into decoration.
+ */
+export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.65;
 
 /**
  * Hybrid retrieval: parallel BM25 + vector, fused via RRF.
