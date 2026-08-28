@@ -179,6 +179,14 @@ export function parseResponse(step: QbxmlStep, xml: string): Record<string, unkn
       amount: sumFields(row, shape.amountFields),
       balance: money(textAt(row, shape.balanceField)),
       status: undefined as string | undefined,
+      // WARP-2464 — declared canonical for `invoice`/`bill`, present-and-
+      // undefined here. `InvoiceRet`/`BillRet` do carry `TimeModified`, but
+      // this track does not request it yet and its shape is a full local
+      // timestamp rather than the date-only cells `date()` normalizes, so
+      // mapping it is its own change. Undefined is what tells a watermark to
+      // fall back to its ordering key; `TxnDate` here would be a creation time
+      // wearing a modification time's name.
+      updated_at: undefined as string | undefined,
     };
   });
 }
