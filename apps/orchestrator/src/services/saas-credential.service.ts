@@ -88,6 +88,11 @@ export type SaasConnectionState =
   | "PROVISIONING"
   | "CONNECTED"
   | "NEEDS_RECONNECT"
+  // WARP-2458 — present since NEEDS_RECONNECT stopped being inferred from it.
+  // Terminal in the sense the enum's docstring means: reconnecting will not
+  // fix it, so the view must be able to say so rather than folding it into an
+  // instruction to paste a new key.
+  | "ERROR"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   | "DISABLED";
@@ -226,9 +231,15 @@ export function openSaasCredentials(
  *  2. No credential ⇒ NOT_CONFIGURED, whatever the status column says. This is
  *     the honesty rule: a row left at CONNECTED after its credential was
  *     cleared must not keep claiming to work.
- *  3. ERROR **with** a credential present ⇒ NEEDS_RECONNECT — the vendor
- *     rejected what we hold, which is actionable ("paste a new key") in a way
- *     that a bare ERROR is not.
+ *  3. NEEDS_RECONNECT is now a PERSISTED status (WARP-2458) and passes
+ *     straight through. Before that member existed this function had to infer
+ *     it from `ERROR` + a credential being present, because the enum could not
+ *     express it. That inference is now WRONG and has been removed: with a
+ *     real member available, `ERROR` means what its docstring says — something
+ *     reconnecting will not fix, like a Stripe key whose IP access policy
+ *     refuses this box, or a Mailchimp plan that excludes the resource.
+ *     Collapsing those into "paste a new key" sends the owner to mint keys
+ *     until one of them works, which is the opposite of actionable.
  */
 export function saasConnectionState(
   status: string,
@@ -239,8 +250,10 @@ export function saasConnectionState(
   switch (status) {
     case "CONNECTED":
       return "CONNECTED";
-    case "ERROR":
+    case "NEEDS_RECONNECT":
       return "NEEDS_RECONNECT";
+    case "ERROR":
+      return "ERROR";
     case "DEGRADED":
       return "DEGRADED";
     case "DRIFT_LOCKED":

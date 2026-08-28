@@ -210,11 +210,40 @@ describe("buildCredentialView — redaction", () => {
 });
 
 describe("saasConnectionState — honesty", () => {
-  it("maps a rejected credential to NEEDS_RECONNECT, distinct from both ends", () => {
-    const state = saasConnectionState("ERROR", true);
+  it("passes NEEDS_RECONNECT through, distinct from both ends", () => {
+    // WARP-2458 made this a PERSISTED status. Before it existed this function
+    // had to infer it from `ERROR` + a credential being present, because the
+    // enum could not express it; `connect()`'s probe now writes the real
+    // member, so the inference is gone.
+    // Mutation: fold NEEDS_RECONNECT back into the CONNECTED branch → red.
+    const state = saasConnectionState("NEEDS_RECONNECT", true);
     expect(state).toBe("NEEDS_RECONNECT");
     expect(state).not.toBe("NOT_CONFIGURED");
     expect(state).not.toBe("CONNECTED");
+  });
+
+  it("no longer rewrites ERROR into NEEDS_RECONNECT", () => {
+    // The inference this replaced was wrong once a real member existed. ERROR
+    // means what the enum's docstring says — reconnecting will NOT fix it (a
+    // Stripe key whose IP access policy refuses this box, a Mailchimp plan
+    // that excludes the resource). Telling that owner to paste a new key sends
+    // them to mint credentials until one works.
+    // Mutation: restore `case "ERROR": return "NEEDS_RECONNECT"` → red.
+    expect(saasConnectionState("ERROR", true)).toBe("ERROR");
+  });
+
+  it("keeps the DISABLED / NOT_CONFIGURED / NEEDS_RECONNECT triple pairwise distinct", () => {
+    // ADR-042 §6's requirement, asserted directly: all three look identical to
+    // a "does a credential decrypt?" check and mean opposite things to the
+    // person reading the dashboard.
+    // Mutation: collapse any pair → red.
+    const triple = [
+      saasConnectionState("DISABLED", true),
+      saasConnectionState("CONNECTED", false),
+      saasConnectionState("NEEDS_RECONNECT", true),
+    ];
+    expect(triple).toEqual(["DISABLED", "NOT_CONFIGURED", "NEEDS_RECONNECT"]);
+    expect(new Set(triple).size).toBe(3);
   });
 
   it("never reports CONNECTED for a row whose credential is gone", () => {

@@ -28,6 +28,11 @@ import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import { ErpError } from "./erp-error.js";
+// WARP-2466 — the ADR-041 §5 mapping. `statusAfterHealthProbe` is the only
+// thing that decides a row's status after a probe, and it has no input that
+// produces PROVISIONING.
+import { statusAfterHealthProbe } from "./cloud-connection-state.js";
+import { providerDescriptor } from "@droplet/shared-types";
 import {
   connectorForProvider,
   encodeApiCredentials,
@@ -516,18 +521,42 @@ export function createIntegrationsService(
       };
 
       const connector = connectorFor(provider, input);
+      /**
+       * WARP-2466 — cloud tracks are PROBED; LAN tracks are not.
+       *
+       * The split is the descriptor's `track`, not a vendor comparison, and it
+       * is load-bearing in both directions.
+       *
+       * A LAN track that raises `ConnectorBlockedError` has not been probed at
+       * all: the SQL driver or the discovered route map is absent, nothing was
+       * dialed, and the row genuinely is mid-provisioning. Leaving it at
+       * PROVISIONING is the honest answer and is what the branch below has
+       * always done.
+       *
+       * A CLOUD track is the case WARP-2275's implementer flagged — "the state
+       * mapping and NEEDS_RECONNECT are implemented and tested; no prober
+       * drives them" — where a freshly pasted key sat at PROVISIONING forever
+       * because nothing ever asked the vendor whether it worked. Here the probe
+       * completes, so the row MUST move: `statusAfterHealthProbe` has no input
+       * that yields PROVISIONING, which makes that a property of the code
+       * rather than a rule this call site has to remember.
+       */
+      const isCloudTrack = providerDescriptor(provider)?.track === "cloud";
       try {
         await connector.connect();
         await connector.introspect();
-        // The live path is unreachable in this slice, so this branch is not hit
-        // today — but when the driver lands it flips the row to CONNECTED.
+        // The probe itself. Rejecting rather than returning `{ ok: false }` is
+        // the connectors' blocked-boundary contract — a caller that ignores a
+        // return value cannot ignore a rejection — so a successful call here
+        // IS the evidence the credential works.
+        await connector.health();
         const connected = await prisma.integrationConnection.update({
           where: { id: base.id },
-          data: { status: "CONNECTED", lastHealthyAt: new Date() },
+          data: { status: statusAfterHealthProbe(), lastHealthyAt: new Date() },
         });
         return await auditConnect(toDetail(connected));
       } catch (err) {
-        if (err instanceof ConnectorBlockedError) {
+        if (err instanceof ConnectorBlockedError && !isCloudTrack) {
           // HONEST degradation: the connector can't reach the ERP yet (SQL:
           // driver + copy DB absent; API: vendor creds + discovered /help routes
           // absent). We do NOT fake CONNECTED — the row stays PROVISIONING so
@@ -538,7 +567,21 @@ export function createIntegrationsService(
           );
           return await auditConnect(toDetail(base));
         }
-        // A genuine, unexpected failure → explicit ERROR status.
+        if (isCloudTrack) {
+          // Classified, never guessed. A reauthorize-class rejection becomes
+          // NEEDS_RECONNECT so the owner is told to paste a new key; a throttle
+          // becomes DEGRADED so they are not; an access-policy or plan refusal
+          // becomes ERROR because a new key would not fix it. The classifier
+          // has no branch that can return CONNECTED.
+          const status = statusAfterHealthProbe(err);
+          logger.info({ provider, status }, "cloud connect probe failed; status classified");
+          const probed = await prisma.integrationConnection.update({
+            where: { id: base.id },
+            data: { status },
+          });
+          return await auditConnect(toDetail(probed));
+        }
+        // A genuine, unexpected failure on a LAN track → explicit ERROR status.
         logger.error({ err }, "eaglesoft connect failed");
         const errored = await prisma.integrationConnection.update({
           where: { id: base.id },
