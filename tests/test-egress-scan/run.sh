@@ -505,6 +505,112 @@ run_entry_case "m365: dropping the declaration restores green" 0 \
   "$YAML_M365_UNDECLARED" "services/m365/sync.ts" \
   'export const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";'
 
+# =============================================================================
+# WARP-2467 — bare hosts in CODE files, filtered by pattern not by exemption.
+#
+# Before this, the only shape the gate enforced in code was a literal scheme
+# URL, so `const HOST = "api.evil-corp.io"` + a runtime-assembled fetch passed
+# with exit 0 and the destination was registered nowhere. Bare-host matching
+# was config-files-only to dodge prose noise — which meant the gate caught
+# connectors that already follow the whole-string-URL convention and missed
+# every one that does not.
+# =============================================================================
+
+# The reproduction from the ticket. The host is spelled with a real TLD, not
+# the ticket's `.example`: RFC 2606 names are filtered by design (see the
+# noise cases below), so an `.example` fixture could never fail.
+# Mutation: restore the config-files-only bare-host scope -> exit 0, red.
+run_case "bare host in a code string literal fails" 1 \
+  "apps/svc/src/beacon.ts" \
+  'const HOST = "api.evil-corp.io";
+export const u = `https://${HOST}/v1/data`;'
+
+# The same host in Python, where the assembly is an f-string. This is the
+# ambient-rates-ecb shape verbatim (ECB_HOST = "..." then f"https://{ECB_HOST}").
+run_case "bare host in a python string literal fails" 1 \
+  "services/svc/fetcher.py" \
+  'ECB_HOST = "api.evil-corp.io"
+ECB_URL = f"https://{ECB_HOST}/stats/daily.xml"'
+
+# Comments are stripped for the BARE-host pass: a hostname in prose is usually
+# just prose, and that was the whole reason code files were exempt.
+# Mutation: stop stripping comments in the bare-host pass -> exit 1, red.
+run_case "bare host in a code comment does not deny" 0 \
+  "apps/svc/src/beacon.ts" \
+  '// the old vendor was api.evil-corp.io before the migration
+export const N = 1;'
+
+# ...but a SCHEME URL in a comment still denies. That asymmetry is deliberate:
+# a commented-out endpoint is one uncomment away from egress, whereas a bare
+# hostname in prose is not. Pinned above as well ("unregistered host in a
+# comment still fails"); repeated here as the pair to the case above so the
+# two cannot be "simplified" into one rule.
+run_case "scheme URL in a comment still denies, unlike a bare host" 1 \
+  "apps/svc/src/beacon.ts" \
+  '// the old vendor was https://api.evil-corp.io/v1 before the migration
+export const N = 1;'
+
+# ── The noise filter: PATTERNS. Every one of these is a shape, not a file. ──
+
+# RFC 2606 reserved names, filtered in TWO independent layers — worth stating
+# because it decides what a meaningful mutation looks like here:
+#   1. BARE_HOST_TLDS — the bare-host matcher only considers a scanned TLD,
+#      and `.example`/`.test`/`.invalid`/`.localhost` are not in that list.
+#   2. INTERNAL_HOST_RE — filters reserved names for EVERY extraction mode.
+# `example.com` is the case where only layer 2 stands in the way (`.com` is a
+# scanned TLD), so it is the one that pins layer 2 non-vacuously.
+# Mutation: drop `example\.(com|net|org)` from INTERNAL_HOST_RE -> exit 1, red.
+run_case "noise: example.com in a code literal does not deny" 0 \
+  "apps/svc/src/beacon.ts" \
+  'const HOST = "example.com";
+export const u = `https://${HOST}/v1/data`;'
+
+# Layer 1. Dropping `.example` from INTERNAL_HOST_RE alone does NOT turn this
+# red — BARE_HOST_TLDS already excludes it — so the mutation has to break both
+# layers: add the reserved TLDs to BARE_HOST_TLDS and drop them from
+# INTERNAL_HOST_RE. Recorded here so nobody reads this row as pinning layer 2.
+run_case "noise: RFC 2606 .example/.test/.invalid bare hosts do not deny" 0 \
+  "apps/svc/src/beacon.ts" \
+  'const A = "api.evil.example"; const B = "b.evil.test"; const C = "c.evil.invalid";'
+
+# An npm scoped package can never be a hostname — a host cannot start with `@`.
+# Mutation: stop excluding @scope/name -> exit 1, red (socket.io matches
+# BARE_HOST_RE and .io is a scanned TLD).
+run_case "noise: @scope/name package identifier does not deny" 0 \
+  "apps/svc/src/beacon.ts" \
+  'import { io } from "@vendor/socket.io";'
+
+# Dashboard onboarding copy. `you@company.com` is an example address.
+# Mutation: drop the email-localpart filter -> exit 1, red.
+run_case "noise: sample email domain in placeholder copy does not deny" 0 \
+  "apps/svc/src/beacon.tsx" \
+  'export const P = <input placeholder="you@company.com" />;'
+
+# ...but userinfo in a REAL url is not excused. URL_RE alone does not catch
+# this shape (its host class excludes `@`), so the bare-host pass is the only
+# thing standing between `https://user@host/` and a silent pass.
+# Mutation: drop the `"://" in literal` guard on the email filter -> exit 0, red.
+run_case "noise filter does not excuse userinfo in a real URL" 1 \
+  "apps/svc/src/beacon.ts" \
+  'export const u = "https://user@telemetry.evil-corp.io/beacon";'
+
+# A Python docstring is prose, not a literal. Without this the scanner denies
+# on its own module docstring, and on every explanatory docstring in the repo.
+# Mutation: stop treating triple quotes as prose -> exit 1, red.
+run_case "noise: prose in a python docstring does not deny" 0 \
+  "services/svc/fetcher.py" \
+  'def f():
+    """Used to fetch from api.evil-corp.io before the migration."""
+    return 1'
+
+# ── Config files keep their old, wider behaviour ────────────────────────────
+# A bare host in .env.example is a setting, not prose, and the whole raw line
+# is still read. Pinned so the code-file path cannot replace it.
+# Mutation: return only string literals for config files too -> exit 0, red.
+run_case "config file bare host still denies on a raw line" 1 \
+  ".env.example" \
+  'GEO_URL=api.evil-corp.io'
+
 echo
 echo "egress-scan tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

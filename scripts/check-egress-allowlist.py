@@ -80,7 +80,14 @@ TEXT_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".sh", ".yml",
 URL_RE = re.compile(r"(?:https?|wss?|ftp)://([A-Za-z0-9._-]+\.[A-Za-z]{2,})")
 BARE_HOST_RE = re.compile(r"\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b")
 BARE_HOST_TLDS = (".com", ".org", ".net", ".io", ".ai", ".co", ".dev",
-                  ".goog", ".cloud", ".us", ".uk", ".de", ".fr")
+                  ".goog", ".cloud", ".us", ".uk", ".de", ".fr", ".eu")
+# WARP-2467 noise filters. PATTERNS, never file exemptions — exempting a file
+# reopens the hole this closes, one directory at a time.
+#   * an npm scoped package (`@droplet/tools-core`) can never be a hostname
+#   * `you@company.com` is a sample address in placeholder text, not a
+#     destination — but only when the literal carries no scheme, so a real
+#     `https://user@host/` still denies.
+EMAIL_LOCALPART_RE = re.compile(r"[A-Za-z0-9._%+-]+@$")
 IPV4_RE = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3})\b")
 
 INTERNAL_HOST_RE = re.compile(
@@ -134,6 +141,73 @@ def is_public_ip(token: str) -> bool:
                 or ip.is_multicast or ip.is_unspecified or ip.is_reserved)
 
 
+def is_package_specifier(literal: str) -> bool:
+    """Is this string literal a package/module id rather than a hostname?
+
+    WARP-2467's noise filter is a PATTERN list, never a file exemption —
+    exempting a file would reopen the same hole the ticket closes, one
+    directory at a time. Two shapes, both of which really occur:
+
+      * `@scope/name` — an npm scoped package. `@droplet/tools-core`,
+        `@modelcontextprotocol/sdk`. Never a hostname: a host cannot start
+        with `@`.
+      * a specifier whose dotted segment is followed by a path separator
+        (`next/navigation`, `socket.io/client`) — hosts do appear with
+        paths, but only behind a scheme, and URL_RE already owns that case.
+
+    RFC 2606 names (.example/.test/.invalid/.localhost) and localhost
+    itself are NOT handled here — INTERNAL_HOST_RE already filters them for
+    every extraction mode, so there is one list, not two.
+    """
+    lit = literal.strip()
+    return lit.startswith("@") and "/" in lit
+
+
+def is_email_domain(literal: str, start: int) -> bool:
+    """Is the match at `start` the domain half of a sample email address?
+
+    `placeholder="you@company.com"` and `"Enter a valid email (e.g.
+    name@acme.co)"` are the dashboard's onboarding copy, not destinations.
+
+    Guarded on the literal carrying no scheme, so `https://user@evil.com/`
+    is NOT excused — userinfo in a URL still names a real host.
+    """
+    if "://" in literal:
+        return False
+    return bool(EMAIL_LOCALPART_RE.search(literal[:start]))
+
+
+def bare_host_sources(path: str, lines: list[str]) -> list[list[str]]:
+    """Per line, the text the bare-host matcher is allowed to read.
+
+    Config files (docker-compose, OpenWrt UCI, .env.example) hand over the
+    whole raw line: a host there is a setting, and there is no prose to be
+    noisy about.
+
+    Code files were EXEMPT until WARP-2467, which meant the only shape the
+    gate enforced in code was a literal scheme URL:
+
+        const HOST = "api.evil.example";        // never scanned
+        await fetch(`https://${HOST}/v1/data`); // no literal scheme URL
+
+    passed with exit 0 while the destination was registered nowhere. The
+    exemption existed to dodge prose noise, but it made the gate catch only
+    connectors that already follow the convention — and a gate that only
+    catches the compliant is not a gate. So code files hand over their
+    string-literal contents instead: the noise lived in comments and prose,
+    which a filter can remove, rather than in literals.
+    """
+    if CONFIG_FILES_FOR_BARE_HOSTS.search(path):
+        return [[line] for line in lines]
+    slashes, hashes = comment_styles(path)
+    per_line = string_literal_lines("".join(lines), slashes, hashes)
+    # scan_source preserves newlines, so per_line tracks `lines` — but a file
+    # with no trailing newline, or one ending mid-literal, can come up short.
+    while len(per_line) < len(lines):
+        per_line.append([])
+    return per_line
+
+
 def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
     found: dict[str, set[tuple[str, int]]] = defaultdict(set)
     for path in files:
@@ -145,14 +219,20 @@ def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
                 lines = fh.readlines()
         except OSError:
             continue
-        bare_ok = bool(CONFIG_FILES_FOR_BARE_HOSTS.search(path))
+        # Bare hosts: a whole raw line in config files, string-literal
+        # contents only in code files (WARP-2467). See bare_host_sources.
+        bare_src = bare_host_sources(path, lines)
         for lineno, line in enumerate(lines, 1):
             for m in URL_RE.finditer(line):
                 host = m.group(1).lower().rstrip(".")
                 if not is_internal_host(host):
                     found[host].add((path, lineno))
-            if bare_ok:
-                for m in BARE_HOST_RE.finditer(line):
+            for chunk in bare_src[lineno - 1]:
+                if is_package_specifier(chunk):
+                    continue
+                for m in BARE_HOST_RE.finditer(chunk):
+                    if is_email_domain(chunk, m.start()):
+                        continue
                     host = m.group(1).lower()
                     if host.endswith(BARE_HOST_TLDS) and not is_internal_host(host):
                         found[host].add((path, lineno))
@@ -171,45 +251,72 @@ def comment_styles(path: str) -> tuple[bool, bool]:
     return slashes, hashes
 
 
-def strip_comments(text: str, slashes: bool, hashes: bool) -> str:
-    """Remove comments so a hostname in prose cannot vouch for an entry.
+def scan_source(text: str, slashes: bool, hashes: bool):
+    """Walk `text` yielding (char, in_string) for every NON-comment char.
+
+    The single source-walking primitive both directions share. WARP-2452
+    introduced it inside strip_comments; WARP-2467 lifted it out so the
+    bare-host denial pass could ask the other question the same walk
+    already answers — "was this character inside a string literal?" —
+    rather than growing a second, subtly different parser.
 
     A pragmatic scanner, NOT a language parser (WARP-2452 says it need not
-    be). It walks the text tracking quoted strings, so `https://` inside a
-    literal is never mistaken for the start of a `//` comment, and handles
-    `//` + `/* */` for C-family files and `#` for shell/python/YAML/conf.
+    be). Tracking quotes is what keeps `https://` inside a literal from
+    reading as the start of a `//` comment; it handles `//` + `/* */` for
+    C-family files and `#` for shell/python/YAML/conf.
+
+    Newlines are always yielded, INCLUDING the ones inside a block comment,
+    so a caller can count lines. Quote delimiters yield in_string=False and
+    their contents in_string=True, so "inside a literal" means the content.
 
     Known limits, accepted deliberately:
-      * Python triple quotes read as three one-character strings, so a `#`
-        inside a docstring ends a line there.
       * An unbalanced apostrophe in prose ("don't") leaves the walker inside
         a phantom string, suppressing comment detection for the rest of it.
       * Markdown and JSON get no stripping — neither has comment syntax.
+      * A triple-quoted block used as DATA rather than prose (a heredoc-ish
+        SQL blob) is treated as prose, so a host inside one does not deny.
+        Rare, and it fails in the permissive direction like the rest.
 
-    Every limit fails PERMISSIVE: it can only retain text, never delete a
-    real literal. So the worst case is a lie we miss, never a false CI
-    failure against honest code.
+    Every limit fails PERMISSIVE for the BACKING pass: it can only retain
+    text, never delete a real literal, so the worst case is a lie we miss,
+    never a false CI failure against honest code. For the DENIAL pass the
+    same permissiveness means at worst an extra host to register, which is
+    cheap and reviewed — never a missed destination.
     """
-    if not slashes and not hashes:
-        return text
-    out: list[str] = []
     i, n, quote = 0, len(text), None
     while i < n:
         ch = text[i]
         if quote is not None:
             if ch == "\\" and i + 1 < n:      # keep escapes intact
-                out.append(ch)
-                out.append(text[i + 1])
+                yield ch, True
+                yield text[i + 1], True
                 i += 2
                 continue
-            out.append(ch)
             if ch == quote:
                 quote = None
+                yield ch, False
+            else:
+                yield ch, True
             i += 1
+            continue
+        # Triple-quoted block: PROSE, not a literal (WARP-2467). Yielded with
+        # in_string=False, so strip_comments still keeps every character —
+        # the BACKING pass is unchanged — while the bare-host denial pass,
+        # which reads only in_string=True, skips it. Without this the
+        # scanner's own docstrings deny ("api.evil.example", "socket.io"),
+        # and so does every explanatory docstring in the repo. A scheme URL
+        # in a docstring still denies: that pass reads raw lines.
+        if text[i:i + 3] in ('"""', "'''"):
+            fence = text[i:i + 3]
+            end = text.find(fence, i + 3)
+            stop = n if end < 0 else end + 3
+            for c in text[i:stop]:
+                yield c, False
+            i = stop
             continue
         if ch in "\"'`":
             quote = ch
-            out.append(ch)
+            yield ch, False
             i += 1
             continue
         # `://` is a URL scheme, never a comment — guards unquoted config URLs.
@@ -220,15 +327,66 @@ def strip_comments(text: str, slashes: bool, hashes: bool) -> str:
             continue
         if slashes and ch == "/" and i + 1 < n and text[i + 1] == "*":
             end = text.find("*/", i + 2)
-            i = n if end < 0 else end + 2
+            stop = n if end < 0 else end + 2
+            # Re-emit the comment's newlines: dropping them would shift every
+            # line number after a block comment in the denial report.
+            for c in text[i:stop]:
+                if c == "\n":
+                    yield c, False
+            i = stop
             continue
         if hashes and ch == "#":
             while i < n and text[i] != "\n":
                 i += 1
             continue
-        out.append(ch)
+        yield ch, False
         i += 1
-    return "".join(out)
+
+
+def strip_comments(text: str, slashes: bool, hashes: bool) -> str:
+    """Comment-free `text`, for the BACKING pass (WARP-2452).
+
+    A hostname in prose must not vouch for a registry entry. See
+    scan_source for the walker and its accepted limits.
+    """
+    if not slashes and not hashes:
+        return text
+    return "".join(ch for ch, _ in scan_source(text, slashes, hashes))
+
+
+def string_literal_lines(text: str, slashes: bool, hashes: bool) -> list[list[str]]:
+    """Per line (1-based index - 1), the string literals it contains.
+
+    The DENIAL pass's bare-host extractor (WARP-2467) works on this instead
+    of raw lines. Two properties matter:
+
+      * comments are already gone, so `// see api.open-meteo.com` does not
+        deny — but a scheme URL in a comment still does, because that path
+        keeps scanning raw lines. That asymmetry is the existing rule: a
+        commented-out endpoint is one uncomment away from egress, whereas a
+        hostname in prose is usually just prose.
+      * literals are kept SEPARATE rather than concatenated, so a filter can
+        judge a whole literal — an npm specifier like "@droplet/tools-core"
+        or "socket.io" is discarded as a unit, not char-spliced into its
+        neighbour and made to look like a host.
+    """
+    out: list[list[str]] = [[]]
+    current: list[str] = []
+    for ch, in_string in scan_source(text, slashes, hashes):
+        if ch == "\n":
+            if current:
+                out[-1].append("".join(current))
+                current = []
+            out.append([])
+            continue
+        if in_string:
+            current.append(ch)
+        elif current:
+            out[-1].append("".join(current))
+            current = []
+    if current:
+        out[-1].append("".join(current))
+    return out
 
 
 def host_literal_in(host: str, text: str) -> bool:

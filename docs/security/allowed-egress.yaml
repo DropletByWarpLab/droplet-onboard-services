@@ -171,7 +171,12 @@ entries:
     kind: egress
     service: voice-io
     destination:
-      hosts: [ipapi.co]
+      # WARP-2467: ip-api.com added. It was always a real second destination —
+      # GEO_URL can be pointed at it without a code change, and geo.py branches
+      # on its differently-shaped response (city/regionName/country) at :139.
+      # Only the bare-host blind spot kept it out of this list: the host is
+      # never written as a scheme URL literal, so nothing extracted it.
+      hosts: [ipapi.co, ip-api.com]
       ports: [443]
       protocol: https
     phase: runtime
@@ -531,7 +536,13 @@ entries:
     kind: egress
     service: orchestrator
     destination:
-      hosts: [prod.hs1api.com, test.hs1api.com]
+      # WARP-2467: the apex hs1api.com is listed because the connector's own
+      # guard constant is a suffix — ASCEND_ALLOWED_HOST_SUFFIX = ".hs1api.com"
+      # (ascend-connector.ts) — and the bare-host scan reads it as that apex.
+      # Exact-match only, deliberately NOT "*.hs1api.com": nothing here widens
+      # what the connector will send a bearer token to. The two hosts it
+      # actually dials remain prod. and test.
+      hosts: [prod.hs1api.com, test.hs1api.com, hs1api.com]
       ports: [443]
       protocol: https
     phase: runtime
@@ -793,6 +804,56 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/routes/calendar.ts, docker/docker-compose.yml]
+
+  # ── WARP-2467: first seen once bare hosts in code literals began to be
+  # scanned. Each was already in the tree; the gate simply could not see it.
+  - id: ref-meeting-provider-hosts
+    kind: reference
+    service: repo
+    destination:
+      # NOT destinations. A recognition table: meeting-link.ts is the single
+      # gate deciding whether a user-authored string may become an https
+      # anchor, and it matches these hosts to LABEL the link ("Zoom",
+      # "Microsoft Teams"). The box opens no connection to any of them — the
+      # member who clicks the anchor does, in their own browser. The module
+      # makes no network call at all (WARP-1874).
+      hosts: [zoom.us, zoomgov.com, teams.microsoft.com, teams.live.com,
+              teams.microsoft.us, meet.google.com, webex.com]
+    purpose: video-call provider hostnames matched to label a user-pasted meeting link for rendering — never dialled by the appliance
+    ticket: WARP-2467
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [packages/shared-types/src/meeting-link.ts]
+
+  - id: ref-ui-placeholder-hosts
+    kind: reference
+    service: web-dashboard
+    destination:
+      # NOT a destination. Placeholder text in the SMTP host field, shown to
+      # an operator as an example of what to type. The host the box actually
+      # dials is whatever that operator saves, which is covered by the
+      # per-account dynamic entry (mailbox settings imapHost/smtpHost).
+      hosts: [smtp.gmail.com]
+    purpose: example SMTP hostname in dashboard placeholder copy — the real host is per-account configuration, registered as kind dynamic
+    ticket: WARP-2467
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [apps/web-dashboard/src/components/settings/EmailChannelSection.tsx]
+
+  - id: ref-model-maker-names
+    kind: reference
+    service: inference-manager
+    destination:
+      # NOT a destination. "Z.ai" is the model publisher's BRAND, sitting in
+      # a `maker` field of the model manifest beside "display_name" and
+      # "description". It is a company name that happens to be spelled like a
+      # domain; nothing resolves or dials it.
+      hosts: [z.ai]
+    purpose: model-publisher brand name in the inference-manager model manifest's maker field — a vendor label, not a host
+    ticket: WARP-2467
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [services/inference-manager/models/model-manifest.json]
 
   - id: ref-non-egress-ip-literals
     kind: reference
