@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   registerProviderDescriptor,
   __resetRegisteredProvidersForTest,
+  CREDENTIAL_VARIANT_FIELD,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
 
@@ -485,5 +486,295 @@ describe("openSaasCredentials — fails closed across rows", () => {
   it("throws rather than returning an empty bundle for another row's blob", () => {
     const blob = sealSaasCredentials(ROW_ID, { apiKey: SEEDED_SECRET });
     expect(() => openSaasCredentials("conn_a_different_row", blob)).toThrow();
+  });
+});
+
+// ===========================================================================
+// WARP-2491 — a provider with a discriminated credential choice
+// ===========================================================================
+
+/**
+ * Two mutually exclusive authentication paths, modelled on Xero (WARP-2383).
+ *
+ * Each path owns one secret and one `providerConfig` field the other does not,
+ * which is what makes the drop observable: "the other path's field is absent"
+ * is a key that is either there or not, rather than a vague rejection.
+ */
+const VARIANT_FIXTURE: ProviderDescriptor = {
+  id: "fixture-two-path",
+  displayName: "Fixture Two-Path",
+  category: "Accounting",
+  track: "cloud",
+  credentialFields: [
+    {
+      name: "tenantId",
+      label: "Tenant ID",
+      type: "string",
+      required: true,
+      secret: false,
+      storage: "providerConfig",
+    },
+  ],
+  credentialVariants: [
+    {
+      id: "custom-connection",
+      label: "Custom Connection",
+      fields: [
+        {
+          name: "connectionName",
+          label: "Connection name",
+          type: "string",
+          required: true,
+          secret: false,
+          storage: "providerConfig",
+        },
+        {
+          name: "customSecret",
+          label: "Custom Connection secret",
+          type: "string",
+          required: true,
+          secret: true,
+          storage: "encrypted",
+        },
+      ],
+    },
+    {
+      id: "pkce-app",
+      label: "Your own PKCE app",
+      fields: [
+        {
+          name: "pkceClientId",
+          label: "PKCE client ID",
+          type: "string",
+          required: true,
+          secret: false,
+          storage: "providerConfig",
+        },
+        {
+          name: "pkceSecret",
+          label: "PKCE client secret",
+          type: "string",
+          required: true,
+          secret: true,
+          storage: "encrypted",
+        },
+      ],
+    },
+  ],
+  egressHosts: ["two-path.example.test"],
+  datasets: [],
+};
+
+const VARIANT_ROW_ID = "conn_variant_000000000001";
+
+/** A row already saved on the Custom Connection path. */
+function variantRow(
+  overrides: Partial<SaasConnectionRow> = {},
+  secrets: Record<string, string> = { customSecret: SEEDED_SECRET },
+): SaasConnectionRow {
+  return {
+    id: VARIANT_ROW_ID,
+    provider: VARIANT_FIXTURE.id,
+    status: "CONNECTED",
+    providerTokensEnc: sealSaasCredentials(VARIANT_ROW_ID, secrets),
+    apiCredentialsEnc: null,
+    providerConfig: {
+      provider: VARIANT_FIXTURE.id,
+      [CREDENTIAL_VARIANT_FIELD]: "custom-connection",
+      tenantId: "t-1",
+      connectionName: "Acme Books",
+    },
+    updatedAt: new Date("2026-08-27T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+describe("the read view is variant-aware", () => {
+  beforeEach(() => registerProviderDescriptor(VARIANT_FIXTURE));
+
+  /**
+   * Mutation: build the view's fields from `descriptor.credentialFields` alone
+   * (the pre-WARP-2491 line) → red on both assertions. The chosen path's
+   * fields vanish from the form, which is the browser half of the same defect:
+   * the box asks for a credential it will not store.
+   */
+  it("renders the chosen path's fields, and not the other path's", () => {
+    const view = buildCredentialView(VARIANT_FIXTURE, variantRow());
+    const names = view.fields.map((f) => f.name);
+
+    expect(names).toEqual(["tenantId", "connectionName", "customSecret"]);
+    expect(names).not.toContain("pkceClientId");
+    expect(names).not.toContain("pkceSecret");
+  });
+
+  /**
+   * `hasValue` is the read view's whole answer about a secret, and it has to be
+   * asked of the RIGHT secret.
+   *
+   * Mutation: drop the `variantId` argument from `credentialSecretFieldsFor`
+   * → red, because `hasCredentials` is then an `every()` over both paths'
+   * secrets and a fully-configured Custom Connection row reports unusable.
+   */
+  it("answers hasValue and hasCredentials about the path the row is on", () => {
+    const view = buildCredentialView(VARIANT_FIXTURE, variantRow());
+    const byName = Object.fromEntries(view.fields.map((f) => [f.name, f]));
+
+    expect(byName.customSecret.hasValue).toBe(true);
+    expect(byName.tenantId.hasValue).toBeNull();
+    // The PKCE secret is not missing — it is not part of this credential.
+    expect(view.hasCredentials).toBe(true);
+    expect(view.state).toBe("CONNECTED");
+  });
+
+  it("emits the chosen variant's non-secret value, and never a secret's", () => {
+    const view = buildCredentialView(VARIANT_FIXTURE, variantRow());
+    expect(view.values.connectionName).toBe("Acme Books");
+    expect(view.values.tenantId).toBe("t-1");
+    expect(JSON.stringify(view)).not.toContain(SEEDED_SECRET);
+  });
+});
+
+describe("the write path is variant-aware", () => {
+  beforeEach(() => registerProviderDescriptor(VARIANT_FIXTURE));
+
+  /**
+   * THE mutation test for the service half.
+   *
+   * Mutation: ignore the discriminator — resolve `configFields` from
+   * `credentialFieldsFor(descriptor, undefined)`, or union every variant's
+   * fields — and this goes red, because `pkceClientId` is then written into a
+   * Custom Connection row's config.
+   */
+  it("stores the chosen path's fields and refuses the other path's", () => {
+    const resolved = resolveCredentialUpdate(
+      VARIANT_FIXTURE,
+      null,
+      {
+        [CREDENTIAL_VARIANT_FIELD]: "custom-connection",
+        tenantId: "t-1",
+        connectionName: "Acme Books",
+        customSecret: "CUSTOM-PATH-SECRET",
+        // Belongs to the path NOT chosen.
+        pkceClientId: "should-not-be-stored",
+      },
+      VARIANT_ROW_ID,
+    );
+
+    expect(resolved.providerConfig?.connectionName).toBe("Acme Books");
+    expect(resolved.providerConfig && "pkceClientId" in resolved.providerConfig).toBe(false);
+    // The choice is PERSISTED explicitly — never re-derived from which fields
+    // the row happens to carry.
+    expect(resolved.providerConfig?.[CREDENTIAL_VARIANT_FIELD]).toBe("custom-connection");
+
+    const sealed = openSaasCredentials(VARIANT_ROW_ID, resolved.providerTokensEnc as string);
+    expect(sealed.customSecret).toBe("CUSTOM-PATH-SECRET");
+    expect("pkceSecret" in sealed).toBe(false);
+  });
+
+  it("rejects a body that names no path on a connection that has none", () => {
+    // Mutation: fall back to the first variant instead of throwing → red. That
+    // fallback is a FORM behaviour; here it would persist a path the owner
+    // never chose and call the row configured.
+    try {
+      resolveCredentialUpdate(
+        VARIANT_FIXTURE,
+        null,
+        { tenantId: "t-1", connectionName: "Acme Books" },
+        VARIANT_ROW_ID,
+      );
+      expect.unreachable("a missing discriminator must be refused");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SaasCredentialValidationError);
+      const fieldErrors = (err as SaasCredentialValidationError).fieldErrors;
+      expect(Object.keys(fieldErrors)).toEqual([CREDENTIAL_VARIANT_FIELD]);
+    }
+  });
+
+  it("rejects a path the descriptor does not declare, without echoing it back", () => {
+    try {
+      resolveCredentialUpdate(
+        VARIANT_FIXTURE,
+        null,
+        { [CREDENTIAL_VARIANT_FIELD]: "oauth-implicit", tenantId: "t-1" },
+        VARIANT_ROW_ID,
+      );
+      expect.unreachable("an unknown discriminator must be refused");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SaasCredentialValidationError);
+      const fieldErrors = (err as SaasCredentialValidationError).fieldErrors;
+      expect(fieldErrors[CREDENTIAL_VARIANT_FIELD]).toEqual(["Unknown credential variant."]);
+      // Rule 19 — the submitted value is not quoted back into a 400 body that
+      // every log between here and the browser will carry.
+      expect(JSON.stringify(fieldErrors)).not.toContain("oauth-implicit");
+    }
+  });
+
+  /**
+   * The three-way rule (WARP-2278) still governs the discriminator itself.
+   *
+   * Mutation: throw whenever the body omits it → red, because editing a tenant
+   * id on a saved connection would then demand the owner re-pick their path.
+   */
+  it("keeps the stored path when the body omits the discriminator", () => {
+    const resolved = resolveCredentialUpdate(
+      VARIANT_FIXTURE,
+      variantRow(),
+      { tenantId: "t-2" },
+      VARIANT_ROW_ID,
+    );
+
+    expect(resolved.providerConfig?.[CREDENTIAL_VARIANT_FIELD]).toBe("custom-connection");
+    expect(resolved.providerConfig?.tenantId).toBe("t-2");
+    // Untouched secret survives, byte-identical — the column is not in the
+    // update at all.
+    expect(resolved.providerTokensEnc).toBeUndefined();
+  });
+
+  /**
+   * Switching path must not leave the abandoned path's secret sealed on the
+   * row: it is credential material for a flow nobody can use, and nothing in
+   * the UI would admit it is still there.
+   *
+   * Mutation: drop the other-variant delete loop → red, `customSecret`
+   * reappears in the resealed blob.
+   */
+  it("drops the abandoned path's secret when the owner switches", () => {
+    const resolved = resolveCredentialUpdate(
+      VARIANT_FIXTURE,
+      variantRow(),
+      {
+        [CREDENTIAL_VARIANT_FIELD]: "pkce-app",
+        tenantId: "t-1",
+        pkceClientId: "c-1",
+        pkceSecret: "PKCE-PATH-SECRET",
+      },
+      VARIANT_ROW_ID,
+    );
+
+    const sealed = openSaasCredentials(VARIANT_ROW_ID, resolved.providerTokensEnc as string);
+    expect(sealed.pkceSecret).toBe("PKCE-PATH-SECRET");
+    expect("customSecret" in sealed).toBe(false);
+    // The shared field belongs to the ACCOUNT and survives the switch; the old
+    // path's config field does not.
+    expect(resolved.providerConfig?.tenantId).toBe("t-1");
+    expect(resolved.providerConfig && "connectionName" in resolved.providerConfig).toBe(false);
+    expect(resolved.providerConfig?.[CREDENTIAL_VARIANT_FIELD]).toBe("pkce-app");
+  });
+
+  it("still requires the chosen path's own required field", () => {
+    try {
+      resolveCredentialUpdate(
+        VARIANT_FIXTURE,
+        null,
+        { [CREDENTIAL_VARIANT_FIELD]: "pkce-app", tenantId: "t-1", pkceSecret: "s" },
+        VARIANT_ROW_ID,
+      );
+      expect.unreachable("a required variant field must be enforced");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SaasCredentialValidationError);
+      expect(
+        (err as SaasCredentialValidationError).fieldErrors.pkceClientId,
+      ).toEqual(["PKCE client ID is required."]);
+    }
   });
 });
