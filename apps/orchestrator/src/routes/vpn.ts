@@ -82,6 +82,7 @@ import {
   verifyProfilePop,
   verifyStatusPop,
 } from "../services/overlay-link.service.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("vpn-route");
 
@@ -1060,6 +1061,13 @@ export function createVpnRouter(
     // redeem route. Reuse the by-token per-IP + global limiter keys so a flood
     // of polls shares the redeem budget (bounded on an always-on box).
     auditEvery4xx(ROUTE_STATUS),
+    // CodeQL js/missing-rate-limiting — the hand-rolled FixedWindowRateLimiter
+    // below IS the real limit (20/min/IP shared with redeem) but CodeQL only
+    // credits a limiter it recognises, so `sensitiveRateLimit` (60/min/IP)
+    // rides along as the outer ceiling. Placed AFTER auditEvery4xx so its 429s
+    // are audited like every other 4xx on this route, and it is looser than
+    // the local limiter so it never becomes the binding constraint.
+    sensitiveRateLimit,
     (req: Request, res: Response, next: NextFunction) => {
       if (
         !rl.check("bytoken:global", limits.byTokenGlobal, limits.windowMs) ||
@@ -1111,6 +1119,7 @@ export function createVpnRouter(
   router.get(
     ROUTE_PROFILE,
     auditEvery4xx(ROUTE_PROFILE),
+    sensitiveRateLimit, // CodeQL js/missing-rate-limiting — see ROUTE_STATUS
     (req: Request, res: Response, next: NextFunction) => {
       // Same unauthenticated-endpoint DoS backstop as redeem/status, sharing
       // their budget: an ECDSA verify per hit on an always-on box.

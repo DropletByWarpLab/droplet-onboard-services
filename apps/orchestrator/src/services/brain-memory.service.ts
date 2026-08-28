@@ -48,9 +48,48 @@ const UUID_REGEX =
 export const BRAIN_ROOT =
   process.env.BRAIN_MEMORY_ROOT ?? "/data/brain-memory";
 
-/** Path to the per-item directory. Does NOT create it. */
+/**
+ * CodeQL js/path-injection (#168–#171): `userId` / `itemId` reach the
+ * filesystem straight from route params — `req.params.itemId` in
+ * routes/files-brain.ts, `req.params.username` via `purgeUserData` in
+ * routes/auth.ts. Both are opaque identifiers (a `User.id` UUID or a
+ * pre-WARP-485 Nextcloud username; a `BrainMemoryItem.id` UUID), so a single
+ * path segment is all they may ever be. The charset is Nextcloud's own
+ * username rule (`a-zA-Z0-9`, space, `_.@-'`) — a superset of UUID — which
+ * makes a separator, NUL or `..` impossible by construction.
+ */
+const PATH_SEGMENT_REGEX = /^[A-Za-z0-9 _.@'-]{1,128}$/;
+
+function safeSegment(kind: "userId" | "itemId", value: string): string {
+  if (!PATH_SEGMENT_REGEX.test(value) || value === "." || value === "..") {
+    throw new Error(`brain-memory: invalid ${kind} (not a single path segment)`);
+  }
+  return value;
+}
+
+/**
+ * Resolve `segments` under BRAIN_ROOT and refuse anything that lands outside
+ * it. Belt-and-braces on top of `safeSegment` — and the normalize-then-
+ * startsWith shape is the check CodeQL credits as a path-injection barrier.
+ */
+function resolveUnderRoot(...segments: string[]): string {
+  const root = resolve(BRAIN_ROOT);
+  const resolved = resolve(root, ...segments);
+  if (!resolved.startsWith(root + sep)) {
+    throw new Error("brain-memory: path escapes BRAIN_ROOT");
+  }
+  return resolved;
+}
+
+/**
+ * Path to the per-item directory. Does NOT create it. Throws if either id is
+ * not a single, traversal-free path segment (see `safeSegment`).
+ */
 export function pathForItem(userId: string, itemId: string): string {
-  return join(BRAIN_ROOT, userId, itemId);
+  return resolveUnderRoot(
+    safeSegment("userId", userId),
+    safeSegment("itemId", itemId),
+  );
 }
 
 /** Create the per-item directory (recursive) and return its path. */
@@ -124,7 +163,10 @@ export async function purgeItem(
  * path (WARP-205) and the test suite to reset between cases.
  */
 export async function purgeUser(userId: string): Promise<void> {
-  await rm(join(BRAIN_ROOT, userId), { recursive: true, force: true });
+  await rm(resolveUnderRoot(safeSegment("userId", userId)), {
+    recursive: true,
+    force: true,
+  });
 }
 
 /**

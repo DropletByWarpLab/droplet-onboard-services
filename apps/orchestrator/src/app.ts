@@ -12,6 +12,7 @@ import {
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
@@ -114,6 +115,14 @@ import {
 } from "./services/workspace-settings.service.js";
 import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
 import { createLogger } from "./lib/logger.js";
+
+// One limiter for the process (module scope, not per createApp): tests build
+// several apps and express-rate-limit warns when a MemoryStore is created
+// repeatedly from the same call site.
+const authenticatedApiRateLimit = createRateLimit("authenticated-api", {
+  windowMs: 60_000,
+  limit: 1_200,
+});
 
 export function createApp(
   prisma: PrismaClient,
@@ -241,6 +250,18 @@ export function createApp(
   // post-boot read must find the client bound. Availability config rides
   // along for the workspace-module intersection (modules.service).
   initEffectiveAccess(prisma, config);
+
+  // CodeQL js/missing-rate-limiting — per-client ceiling on the whole
+  // authenticated surface, mounted right before authMiddleware so the public
+  // routers above keep their own tighter presets. Keyed on the real client:
+  // nginx sets X-Forwarded-For on the /api leg and `trust proxy` is 1. The
+  // budget is a DoS backstop, NOT a policy limit: 1,200/min = 20 req/s
+  // sustained per IP, ~10x the dashboard's steady state (widgets poll at
+  // 10-60 s) and comfortably above its worst legitimate burst (page-load
+  // fan-out, a folder of thumbnails ≈ 100 requests). Each internal service
+  // principal (mcp-server, email-indexer, routing, …) comes from its own
+  // container IP so they don't share a bucket with a browser.
+  app.use(authenticatedApiRateLimit);
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);

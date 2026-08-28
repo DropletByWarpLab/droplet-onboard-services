@@ -22,6 +22,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -93,6 +94,26 @@ def get_geo() -> GeoLocation:
     return GeoLocation(description=desc, timezone=tz, source=fetched.source)
 
 
+# Providers whose response shape we know how to normalise. `source` is
+# reported by exact hostname so a status line names the real answerer.
+_KNOWN_GEO_HOSTS = ("ipapi.co", "ip-api.com")
+
+
+def _source_label(url: str) -> str:
+    """Label the geo provider by its parsed hostname, not by substring.
+
+    CodeQL py/incomplete-url-substring-sanitization: `"ip-api.com" in url`
+    also matched `https://ip-api.com.example.net/` or a path that merely
+    mentions the name. The host must equal a known domain (or be a subdomain
+    of it); anything else is reported as the raw URL.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    for known in _KNOWN_GEO_HOSTS:
+        if host == known or host.endswith("." + known):
+            return known
+    return url
+
+
 def _fetch_via_ipapi() -> Optional[GeoLocation]:
     """One HTTP GET to ipapi.co (or override). Returns None on any
     error — caller falls back to UTC.
@@ -136,7 +157,7 @@ def _fetch_via_ipapi() -> Optional[GeoLocation]:
     region = data.get("region") or data.get("regionName") or ""
     country = data.get("country_name") or data.get("country") or ""
     tz = (data.get("timezone") or "").strip()
-    source = "ipapi.co" if "ipapi.co" in url else "ip-api.com" if "ip-api.com" in url else url
+    source = _source_label(url)
 
     parts = [p for p in (city, region, country) if p and p.strip()]
     description = ", ".join(parts) if parts else None

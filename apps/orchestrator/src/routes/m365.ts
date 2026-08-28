@@ -25,6 +25,7 @@ import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 
 import { requireRole } from "../middleware/auth.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 import {
   beginDeviceCodeConnect,
   disconnect,
@@ -78,6 +79,9 @@ export function createM365Router(
 
   router.post(
     "/m365/connect",
+    // CodeQL js/missing-rate-limiting — each call opens a device-code flow
+    // against Microsoft and rewrites the connection row; sensitive preset.
+    sensitiveRateLimit,
     requireRole(...CONNECT_ROLES),
     async (req, res) => {
       const userId = (req as AuthedRequest).user?.id;
