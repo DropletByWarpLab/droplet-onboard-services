@@ -37,5 +37,10 @@
   },
   "devDependencies": {
     "turbo": "^2.10.11"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "^8.5.18"
+    }
   }
 }

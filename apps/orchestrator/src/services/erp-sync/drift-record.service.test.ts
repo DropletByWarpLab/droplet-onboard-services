@@ -34,7 +34,8 @@ import {
   trimErpDriftRecords,
   type ErpDriftPrisma,
 } from "./drift-record.service.js";
-import { diffForDrift, markerTimestamp, type ErpEntityDrift } from "./reconcile.js";
+import { diffForDrift, type ErpEntityDrift, type RecordIdentity } from "./reconcile.js";
+import { isoInstant } from "./watermark.js";
 
 const NOW = new Date("2026-08-28T12:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
@@ -158,10 +159,10 @@ describe("classifyEntityDrift", () => {
     const real = diffForDrift(
       "invoice",
       "2026-08-15T00:00:00Z",
-      [{ sourceKey: "A", marker: "2026-08-10T00:00:00Z" }],
+      [{ sourceKey: "A", marker: "2026-08-10T00:00:00Z", updatedAt: null }],
       [
-        { sourceKey: "A", marker: "2026-08-10T00:00:00Z" },
-        { sourceKey: "B", marker: "2026-08-26T00:00:00Z" },
+        { sourceKey: "A", marker: "2026-08-10T00:00:00Z", updatedAt: null },
+        { sourceKey: "B", marker: "2026-08-26T00:00:00Z", updatedAt: null },
       ],
     );
     expect(real.missedCount).toBe(1);
@@ -173,12 +174,14 @@ describe("classifyEntityDrift", () => {
 // The PHI-free rule, made structural
 // ---------------------------------------------------------------------------
 
-describe("markerTimestamp", () => {
+// `markerTimestamp` was this module's own copy of the ISO gate until
+// WARP-2495 unified it with `watermark.ts`'s `isoInstant`. The assertions are
+// unchanged — what they guard is the PERSISTENCE side of that one gate, which
+// is why they stay here rather than moving to `watermark.test.ts`.
+describe("isoInstant — the coercion this table's PHI rule rests on", () => {
   it("accepts a real ISO timestamp", () => {
-    expect(markerTimestamp("2026-08-26T00:00:00Z")?.toISOString()).toBe(
-      "2026-08-26T00:00:00.000Z",
-    );
-    expect(markerTimestamp("2026-08-26")?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
+    expect(isoInstant("2026-08-26T00:00:00Z")?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
+    expect(isoInstant("2026-08-26")?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
   });
 
   it("rejects a record identifier used as an ordering key", () => {
@@ -186,11 +189,11 @@ describe("markerTimestamp", () => {
     // → red. `new Date("1001")` is the YEAR 1001, so a bare numeric invoice
     // number would otherwise parse as a plausible timestamp and land in a
     // column an operator reads as one.
-    expect(markerTimestamp("INV-1003")).toBeNull();
-    expect(markerTimestamp("1001")).toBeNull();
-    expect(markerTimestamp("in_1PxyzABC123")).toBeNull();
-    expect(markerTimestamp(null)).toBeNull();
-    expect(markerTimestamp(undefined)).toBeNull();
+    expect(isoInstant("INV-1003")).toBeNull();
+    expect(isoInstant("1001")).toBeNull();
+    expect(isoInstant("in_1PxyzABC123")).toBeNull();
+    expect(isoInstant(null)).toBeNull();
+    expect(isoInstant(undefined)).toBeNull();
   });
 });
 
@@ -202,23 +205,38 @@ describe("the stored row carries no customer content", () => {
     //
     // MUTATION: keep `watermarkAt` / `earliestMissedAt` as the raw marker
     // string "for debugging" → "INV-1003" appears in the row → red.
+    //
+    // The row is MISSED on its `updated_at` (WARP-2464's column, which this
+    // vendor does populate) while still being ORDERED by its invoice number.
+    // That pairing is what keeps this test honest after WARP-2495: the gap has
+    // to be genuinely detected for the redaction to be asserting anything, and
+    // an opaque marker can no longer produce one on its own — `isWatermarkAhead`
+    // refuses to order two tokens, so a fixture ordered end-to-end by invoice
+    // number now yields `missedCount: 0` and every assertion below would pass
+    // vacuously.
     const prisma = driftPrisma();
     const real = diffForDrift(
       "invoice",
-      "INV-1000",
-      [{ sourceKey: "INV-1001", marker: "INV-1001" }],
+      "2026-08-15T00:00:00Z",
+      [{ sourceKey: "INV-1001", marker: "INV-1001", updatedAt: "2026-08-10T00:00:00Z" }],
       [
-        { sourceKey: "INV-1001", marker: "INV-1001" },
-        { sourceKey: "INV-1003", marker: "INV-1003" },
+        { sourceKey: "INV-1001", marker: "INV-1001", updatedAt: "2026-08-10T00:00:00Z" },
+        { sourceKey: "INV-1003", marker: "INV-1003", updatedAt: "2026-08-26T00:00:00Z" },
       ],
     );
     expect(real.missedCount).toBe(1); // the gap is genuinely detected...
+    // ...and DATED, off the `updated_at` it was detected on, even though the
+    // record's own ordering key is an invoice number. Before WARP-2495 this
+    // was `null`: the row was judged missed on its `updated_at` and then dated
+    // on its marker, so the forensic answer contradicted the finding.
+    // MUTATION: `isoInstant(r.marker)` instead of `isoInstant(value)` → null → red.
+    expect(real.earliestMissedAt?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
 
     const row = await recordEntityDrift(prisma, {
       connectionId: "conn-1",
       provider: "stripe",
       sweepAt: NOW,
-      watermark: "INV-1000",
+      watermark: "2026-08-15T00:00:00Z",
       drift: real,
     });
 
@@ -226,13 +244,63 @@ describe("the stored row carries no customer content", () => {
     const stored = JSON.stringify(prisma.erpDriftRecord.create.mock.calls[0][0]);
     expect(stored).not.toContain("INV-1003");
     expect(stored).not.toContain("INV-1001");
-    expect(stored).not.toContain("INV-1000");
-    expect(row.watermarkAt).toBeNull();
-    expect(row.earliestMissedAt).toBeNull();
+    expect(row.earliestMissedAt?.toISOString()).toBe("2026-08-26T00:00:00.000Z");
     // The diagnosis itself is intact — this is not "safe because it stored
     // nothing".
     expect(row.classification).toBe("MISSED_NEWER_AND_WATERMARK_BEHIND");
     expect(row.missedCount).toBe(1);
+  });
+
+  it("stores no date at all when a missed record's only position is an id", async () => {
+    // The other side of the flip above, so "dates the gap off the judged-on
+    // value" never becomes "coerces whatever it was handed". A null watermark
+    // filtered nothing, so this row is missed on the ABSENCE itself and the
+    // predicate never orders anything — yet its only position is still an
+    // invoice number, and `isoInstant` is what keeps that out of a DateTime
+    // column.
+    //
+    // MUTATION: coerce with a bare `new Date(value)` → "INV-1003" lands as an
+    // Invalid Date rather than null → red.
+    const prisma = driftPrisma();
+    const real = diffForDrift(
+      "invoice",
+      null,
+      [],
+      [{ sourceKey: "INV-1003", marker: "INV-1003", updatedAt: null }],
+    );
+    expect(real.missedCount).toBe(1);
+    expect(real.earliestMissedAt).toBeNull();
+
+    const row = await recordEntityDrift(prisma, {
+      connectionId: "conn-1",
+      provider: "stripe",
+      sweepAt: NOW,
+      watermark: null,
+      drift: real,
+    });
+    expect(row.earliestMissedAt).toBeNull();
+    expect(JSON.stringify(prisma.erpDriftRecord.create.mock.calls[0][0])).not.toContain("INV-1003");
+  });
+
+  it("never stores a watermark the vendor expressed as a record id", async () => {
+    // The other half of the same rule, split out because it cannot share a
+    // fixture with the case above: an opaque watermark is unorderable, so no
+    // record can be reported missed against it, and a single test asserting
+    // both would have to choose which half to make vacuous.
+    //
+    // MUTATION: `watermarkAt: new Date(watermark)` → "INV-1000" reaches the
+    // column as an Invalid Date, or a numeric invoice id as the year 1001 →
+    // red.
+    const prisma = driftPrisma();
+    const row = await recordEntityDrift(prisma, {
+      connectionId: "conn-1",
+      provider: "stripe",
+      sweepAt: NOW,
+      watermark: "INV-1000",
+      drift: drift({ classes: [] }),
+    });
+    expect(row.watermarkAt).toBeNull();
+    expect(JSON.stringify(prisma.erpDriftRecord.create.mock.calls[0][0])).not.toContain("INV-1000");
   });
 
   it("keeps a genuine timestamp marker, so the redaction is not blanket", async () => {
@@ -240,7 +308,7 @@ describe("the stored row carries no customer content", () => {
       "invoice",
       "2026-08-15T00:00:00Z",
       [],
-      [{ sourceKey: "INV-1003", marker: "2026-08-26T00:00:00Z" }],
+      [{ sourceKey: "INV-1003", marker: "2026-08-26T00:00:00Z", updatedAt: null }],
     );
     const row = driftRowFor({
       connectionId: "conn-1",
@@ -264,11 +332,11 @@ describe("the stored row carries no customer content", () => {
     // trap WARP-2218's state-fold test fell into — a vendor page has no
     // guaranteed order (Stripe explicitly does not promise one), so neither
     // order may be the one that works.
-    const earliest = (full: Array<{ sourceKey: string; marker: string }>) =>
+    const earliest = (full: RecordIdentity[]) =>
       diffForDrift("invoice", "2026-08-15T00:00:00Z", [], full).earliestMissedAt?.toISOString();
 
-    const NEWEST = { sourceKey: "B", marker: "2026-08-26T00:00:00Z" };
-    const OLDEST = { sourceKey: "A", marker: "2026-08-20T00:00:00Z" };
+    const NEWEST = { sourceKey: "B", marker: "2026-08-26T00:00:00Z", updatedAt: null };
+    const OLDEST = { sourceKey: "A", marker: "2026-08-20T00:00:00Z", updatedAt: null };
 
     expect(earliest([NEWEST, OLDEST])).toBe("2026-08-20T00:00:00.000Z");
     expect(earliest([OLDEST, NEWEST])).toBe("2026-08-20T00:00:00.000Z");

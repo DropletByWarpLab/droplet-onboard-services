@@ -9,11 +9,12 @@
  * Tier-1 read; the companion to apply_update.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getUpdateStatus from "../../../src/handlers/system/get-update-status.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  orchestratorGet: ReturnType<typeof vi.fn>,
+  orchestratorGet: Mock,
   role?: Role,
 ): ToolContext {
   return {
@@ -65,7 +66,7 @@ const PENDING_ROW = {
 
 const SETTINGS = { channel: "stable", applyWindowCron: "0 3 * * *", autoApply: true };
 
-function statusResponse(payload: unknown, status = 200): ReturnType<typeof vi.fn> {
+function statusResponse(payload: unknown, status = 200): Mock {
   return vi.fn().mockResolvedValue(
     new Response(JSON.stringify(payload), { status }),
   );

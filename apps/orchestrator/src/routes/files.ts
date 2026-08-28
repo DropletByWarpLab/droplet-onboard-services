@@ -64,6 +64,7 @@ import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
+import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
@@ -88,6 +89,22 @@ import { departmentManagerOrAdmin } from "../services/department-membership.serv
 import { getEffectiveUsage } from "../services/effective-usage.service.js";
 
 const logger = pino({ name: "files-route" });
+
+/**
+ * Strip trailing `=` padding for the strict-base64 round-trip check in
+ * POST /files/upload.
+ *
+ * CodeQL js/polynomial-redos: this was `/=+$/`. That pattern is unanchored on
+ * the left, so on a body like `"====…=a"` the engine restarts the `=+` run
+ * from every offset before failing at `$` — O(n²) over an attacker-sized
+ * `contentBase64`. A backward scan is linear and returns the identical
+ * string for every input.
+ */
+export function stripBase64Padding(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 0x3d /* "=" */) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
 
 const CACHE_PREFIX = "files:list:";
 const CACHE_TTL = 10;
@@ -2212,7 +2229,7 @@ export function createFilesRouter(
         // write_file's INVALID_BASE64 posture (re-encode must round-trip).
         const cleaned = body.contentBase64.replace(/\s+/g, "");
         const buffer = Buffer.from(cleaned, "base64");
-        if (buffer.toString("base64").replace(/=+$/, "") !== cleaned.replace(/=+$/, "")) {
+        if (stripBase64Padding(buffer.toString("base64")) !== stripBase64Padding(cleaned)) {
           res.status(400).json({ error: "invalid base64 content" });
           return;
         }
@@ -3543,7 +3560,11 @@ export function createFilesRouter(
   }
 
   // ── Update existing share (PUT /api/files/share/:id) ──
-  router.put("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — inline per-IP ceilings on the flagged
+  // handlers. Share update/revoke mint or tear down link tokens, so the
+  // sensitive preset; `/files/:id/content` is a plain authenticated read
+  // (citation previews), so the standard preset.
+  router.put("/files/share/:id", sensitiveRateLimit, requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -3598,7 +3619,7 @@ export function createFilesRouter(
   });
 
   // ── Revoke a share (DELETE /api/files/share/:id) ──
-  router.delete("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.delete("/files/share/:id", sensitiveRateLimit, requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -4168,7 +4189,7 @@ export function createFilesRouter(
   //
   // Registered LAST so the static sibling routes above (`/files/search/content`
   // in particular, which `:id` would otherwise shadow) keep winning.
-  router.get("/files/:id/content", async (req, res, next) => {
+  router.get("/files/:id/content", standardRateLimit, async (req, res, next) => {
     try {
       const classified = classifyFileContentId(req.params.id);
 

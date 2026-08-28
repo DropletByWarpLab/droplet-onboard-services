@@ -99,6 +99,71 @@ _assert_check_passes() {
   return 0
 }
 
+# --- Isolated git index (WARP-2479) ------------------------------------------
+#
+# The `exec-bits` tests mutate a REAL tracked file's index mode with
+# `git update-index --chmod=…`. That command does not edit a mode bit in
+# place: it rewrites the whole index entry from the CURRENT WORKING-TREE
+# CONTENT. So if the caller has an unstaged edit to the target file, the
+# mutation silently STAGES that edit, and the `--chmod=+x` restore only puts
+# the mode back — the staged content stays. Measured on 2026-08-28:
+#
+#   $ printf '…\n' >> scripts/test/ship-check.sh   # unstaged edit
+#   $ git diff --cached --quiet -- scripts/test/ship-check.sh; echo $?
+#   0                                              # dirty-guard below says OK
+#   $ bash scripts/test/ship-check.test.sh         # 14/15
+#   $ git diff --cached --stat
+#    scripts/test/ship-check.sh | 2 ++             # staged by nobody
+#
+# Two consequences, both bad. The next run trips the "already staged —
+# refusing to mutate" guard and reports a spurious red (measured: 13/15,
+# `exec-bits catches chmod-stripped tracked script`). And any `git commit -a`
+# afterwards commits a half-finished edit the author never staged — which is
+# exactly the situation an agent editing ship-check.sh is in when it runs the
+# harness. The dirty-guard cannot catch this: it compares INDEX to HEAD, and
+# an unstaged edit leaves those identical.
+#
+# Fix: point every git command in the test — and the ship-check.sh child it
+# spawns, which reads the index via `git ls-files --stage` — at a THROWAWAY
+# COPY of the index via GIT_INDEX_FILE. The caller's index is then never
+# opened for writing, so there is nothing to restore and nothing to leak.
+# `git worktree add` would also work but checks out the whole monorepo; a
+# 100 KB index copy is the cheap equivalent. `git stash` is not an option —
+# the stash stack is shared across every worktree of this repo.
+_ISOLATED_INDEX_FILE=""
+
+# Redirect git to a disposable copy of the caller's index. Returns non-zero
+# (without exporting anything) if the copy could not be made, so a caller
+# that checks the return value never proceeds to mutate the real index.
+_isolated_index_begin() {
+  local real_index
+  # --git-path resolves the per-worktree index for LINKED worktrees
+  # (.git/worktrees/<name>/index), not just .git/index.
+  real_index="$(cd "$REPO_ROOT_REAL" && git rev-parse --git-path index 2>/dev/null)" || return 1
+  [ -n "$real_index" ] || return 1
+  case "$real_index" in
+    /*) ;;
+    *) real_index="$REPO_ROOT_REAL/$real_index" ;;
+  esac
+  [ -f "$real_index" ] || return 1
+
+  _ISOLATED_INDEX_FILE="$(mktemp "${TMPDIR:-/tmp}/ship-check-index.XXXXXX")" || return 1
+  cp "$real_index" "$_ISOLATED_INDEX_FILE" || return 1
+  export GIT_INDEX_FILE="$_ISOLATED_INDEX_FILE"
+  return 0
+}
+
+# Drop the disposable index and put git back on the caller's. Safe to call
+# when _isolated_index_begin was never run or failed.
+_isolated_index_end() {
+  unset GIT_INDEX_FILE
+  if [ -n "$_ISOLATED_INDEX_FILE" ]; then
+    rm -f "$_ISOLATED_INDEX_FILE"
+    _ISOLATED_INDEX_FILE=""
+  fi
+  return 0
+}
+
 # =============================================================================
 # Test: tsc-full catches WARP-329 class (test fixture missing required fields)
 # =============================================================================
@@ -436,8 +501,8 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
 # Test: shellcheck catches new SC2034 violation in scripts/lib (WARP-486)
 # =============================================================================
 #
-# Bug class this guards (WARP-486 → ADR-style): before WARP-486, the
-# shellcheck ship-check ran with a global `--exclude=SC2034,SC2024,SC2155`
+# Bug class this guards (WARP-486 → ADR-style): before WARP-486, the shellcheck
+# ship-check ran with a global `--exclude=SC2034,SC2024,SC2155`
 # blanket. That muted the pre-existing baseline (load-bearing-but-unused
 # vars in device-identity.sh / docker.sh / preflight.sh, sudo+redirect in
 # local-dns.sh, declare+assign in secrets.sh / camera-drivers.sh), but it
@@ -521,6 +586,205 @@ test_shellcheck_catches_new_sc2034_violation() {
 }
 
 # =============================================================================
+# Test: shellcheck lints the gate itself, and a directive-shaped prose
+#       comment is caught rather than silently truncating the lint (WARP-2477)
+# =============================================================================
+#
+# Bug class this guards (WARP-2477). ShellCheck treats ANY comment whose
+# first word is the bare token `shellcheck` as a DIRECTIVE. Prose that merely
+# begins with the tool's name — `#   shellcheck  — local-dns.sh class: …` —
+# therefore parses as a malformed directive and raises SC1073/SC1072. Both
+# are `error` severity, so `--severity=warning` cannot suppress them, and
+# both are PARSE errors, so ShellCheck stops there and lints NOTHING after
+# that line.
+#
+# `scripts/test/ship-check.sh` carried exactly that at line 29, and a second
+# instance further down. Measured at the branch point (907e40ca): planting a
+# violation at line 1000 and running ShellCheck reported only the line-29
+# parse error — the plant was never seen. After rewording, the same plant is
+# reported at line 1000. So ~28 of 1,900 lines were being linted, and the
+# file looked clean because nothing was reading it.
+#
+# It went unnoticed because run_check_shellcheck did not lint the gate or its
+# harness at all — the one pair of shell files in the repo that the gate
+# never pointed at itself. WARP-2477 added both to the target list, which is
+# what makes this test possible: the mutation below is planted in
+# ship-check.sh itself.
+#
+# Synthetic regression: insert a directive-shaped prose comment into
+# scripts/test/ship-check.sh and assert the shellcheck check goes red. The
+# comment is inert to bash — it is a comment — so ship-check.sh stays
+# executable throughout and the test driver keeps working mid-mutation.
+# Restore via `git checkout --` on RETURN.
+#
+# Mutation that turns this test red: revert the line-29 rewording (drop the
+# backticks around `shellcheck`). Then the baseline assertion in step 1
+# fails, because the gate is red before this test plants anything.
+test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+
+  local target_rel="scripts/test/ship-check.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: the gate passes on the unmutated tree. This is the assertion
+  #    that goes red if either directive-shaped comment is ever reintroduced.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" shellcheck; then
+    printf "    baseline shellcheck failed against unmodified real repo —\n" >&2
+    printf "    a directive-shaped comment may have been reintroduced\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: a prose comment opening with the bare token
+  #    `shellcheck`, inserted after the shebang — SC1073/SC1072, error
+  #    severity. Verified that all three spacings ('#shellcheck …',
+  #    '# shellcheck …', '#   shellcheck …') trigger it, so the leading
+  #    whitespace here is not load-bearing.
+  awk -v bad='# shellcheck is a static analysis tool for shell scripts' '
+    NR == 1 { print; print bad; next }
+    { print }
+  ' "$target" > "$target.tmp" && mv "$target.tmp" "$target"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. shellcheck should now FAIL — proving both that the gate lints itself
+  #    and that a directive-shaped comment is a hard error, not a silent
+  #    truncation of the lint.
+  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+}
+
+# =============================================================================
+# Test: the shellcheck check REPORTS its findings, not just a non-zero exit
+# =============================================================================
+#
+# Bug class this guards (WARP-2492). `ship-check.sh` runs `set -euo pipefail`.
+# `run_check_shellcheck` captured findings with a BARE assignment:
+#
+#     out="$(shellcheck … )"
+#     rc=$?
+#
+# ShellCheck exits non-zero exactly when it has something to report, so under
+# `set -e` that assignment killed the script AT THAT LINE — before the FAIL
+# banner and before the captured findings were printed. The operator got exit
+# 1 and a bare header, and never learned which file or which code. Measured on
+# the parent commit with a directive-shaped comment planted in scripts/lib:
+# stdout was three lines of header, stderr empty, rc 1; `bash -x` showed
+# execution stopping immediately after `out='…'` with the SC1073/SC1072 text
+# captured and never emitted.
+#
+# Especially bad after WARP-2477, which made the gate lint itself and its own
+# harness: a lint that now reads 3.3k more lines of bash would have reported
+# nothing it found.
+#
+# The fix is the `&& rc=0 || rc=$?` tail — an AND-OR list is exempt from
+# `set -e` — which is the shape the image-pipeline check already used.
+#
+# This case asserts the TWO PROPERTIES SEPARATELY, because the bug moved only
+# one of them: the exit code was always correct, it was the OUTPUT that
+# vanished. A test that only checked `rc != 0` (as _assert_check_fails does)
+# passed happily throughout the entire defect — which is why neither of the
+# two existing shellcheck cases ever caught it.
+#
+#   1. non-zero exit          — was ALREADY true before the fix
+#   2. finding text on stdout — was FALSE before the fix
+#
+# Mutation: restore the bare capture. Assertion 2 goes red while assertion 1
+# stays green.
+#
+# The plant is a throwaway file in scripts/lib/ (which the check globs), never
+# git-added, removed on RETURN — and the whole case runs under the disposable
+# index from WARP-2479, so nothing it does can reach the caller's real index.
+test_shellcheck_reports_findings_not_just_exit_code() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+
+  local plant_rel="scripts/lib/zzz-warp-2492-fixture.sh"
+  local plant="$REPO_ROOT_REAL/$plant_rel"
+
+  if [ -e "$plant" ]; then
+    printf "    fixture path already exists: %s\n" "$plant_rel" >&2
+    return 1
+  fi
+
+  if ! _isolated_index_begin; then
+    printf "    could not create an isolated git index — refusing to proceed\n" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2064  # capture the path value at trap-set time
+  trap "rm -f '$plant'; _isolated_index_end" RETURN EXIT
+
+  # 1. Sanity: the gate is green before we plant anything.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" shellcheck; then
+    printf "    baseline shellcheck failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Plant a file the scripts/lib/*.sh glob picks up, carrying a comment
+  #    whose first word is the bare token `shellcheck` — SC1073/SC1072, error
+  #    severity. Assembled at runtime so this harness file does not itself
+  #    contain a directive-shaped comment.
+  {
+    printf '#!/bin/bash\n'
+    printf '# %s is a static analysis tool for shell scripts\n' "shellcheck"
+    printf 'echo warp-2492-fixture\n'
+  } > "$plant"
+
+  if [ ! -s "$plant" ]; then
+    printf "    fixture plant no-op — %s is empty or missing\n" "$plant_rel" >&2
+    return 1
+  fi
+
+  local output rc
+  output="$(REPO_ROOT="$REPO_ROOT_REAL" bash "$SHIP_CHECK" shellcheck 2>&1)" && rc=0 || rc=$?
+
+  # ASSERTION 1 — non-zero exit. True both before and after the fix.
+  if [ "$rc" -eq 0 ]; then
+    printf "    expected non-zero exit from the shellcheck check, got 0\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # ASSERTION 2 — the findings actually reach the operator. This is the one
+  # the bare capture broke: the check died before printing anything.
+  if ! printf '%s' "$output" | grep -q 'SC1073'; then
+    printf "    the check exited %d but never reported its findings —\n" "$rc" >&2
+    printf "    no SC1073 in the output. A capture under 'set -e' is\n" >&2
+    printf "    swallowing the reporting path (WARP-2492).\n" >&2
+    printf "    captured output was:\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # And the FAIL banner itself, so a bare stack trace cannot satisfy the above.
+  if ! printf '%s' "$output" | grep -q 'FAIL.*shellcheck'; then
+    printf "    findings present but the FAIL banner is missing from the output\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Test: exec-bits catches a chmod-stripped tracked script
 # =============================================================================
 #
@@ -535,8 +799,11 @@ test_shellcheck_catches_new_sc2034_violation() {
 #
 # Synthetic regression: strip the exec bit from a tracked script via
 # `git update-index --chmod=-x` and assert the exec-bits check fails.
-# Restore via `git update-index --chmod=+x` on RETURN — works even on
-# Windows where filesystem chmod is a no-op.
+# The mutation lands on a DISPOSABLE COPY of the index (GIT_INDEX_FILE,
+# see _isolated_index_begin) which is deleted on RETURN, so there is no
+# restore step and the caller's index is never written (WARP-2479). The
+# index — not the filesystem bit — is the canonical signal, so this works
+# on Windows where chmod is a no-op.
 #
 # Why scripts/test/ship-check.sh (and not e.g. scripts/setup.sh)? Because
 # the check's allowlist (see run_check_exec_bits in ship-check.sh)
@@ -562,8 +829,14 @@ test_exec_bits_catches_chmod_stripped() {
     return 1
   fi
 
-  # shellcheck disable=SC2064  # capture path values at trap-set time
-  trap "(cd '$REPO_ROOT_REAL' && git update-index --chmod=+x '$target_rel') 2>/dev/null || true" RETURN EXIT
+  # Every git command below — and the ship-check.sh child, which reads the
+  # index through `git ls-files --stage` — now writes to a disposable copy.
+  # The caller's index is never opened for writing (WARP-2479).
+  if ! _isolated_index_begin; then
+    printf "    could not create an isolated git index — refusing to mutate the real one\n" >&2
+    return 1
+  fi
+  trap '_isolated_index_end' RETURN EXIT
 
   # 1. Sanity: passes on the unmutated tree (100755 from commit 1 of WARP-487).
   if ! _assert_check_passes "$REPO_ROOT_REAL" exec-bits; then
@@ -609,8 +882,8 @@ test_exec_bits_catches_chmod_stripped() {
 # 100644.
 #
 # Synthetic regression: identical mechanism to the WARP-487 test —
-# `git update-index --chmod=-x <openwrt/scripts/upgrade-router.sh>`,
-# assert the check fails, restore via `--chmod=+x` on RETURN. The
+# `git update-index --chmod=-x <openwrt/scripts/upgrade-router.sh>` on a
+# disposable index copy, assert the check fails, drop the copy on RETURN. The
 # script is OPERATOR-FACING (its --help documents `./scripts/upgrade-
 # router.sh <firmware-image>` as the canonical invocation), so the
 # canonical-invocation rationale from WARP-487 applies one-for-one.
@@ -631,8 +904,12 @@ test_exec_bits_catches_chmod_stripped_openwrt() {
     return 1
   fi
 
-  # shellcheck disable=SC2064  # capture path values at trap-set time
-  trap "(cd '$REPO_ROOT_REAL' && git update-index --chmod=+x '$target_rel') 2>/dev/null || true" RETURN EXIT
+  # Same disposable-index isolation as the WARP-487 test (WARP-2479).
+  if ! _isolated_index_begin; then
+    printf "    could not create an isolated git index — refusing to mutate the real one\n" >&2
+    return 1
+  fi
+  trap '_isolated_index_end' RETURN EXIT
 
   # 1. Sanity: passes on the unmutated tree (100755 from commit 1 of WARP-489).
   if ! _assert_check_passes "$REPO_ROOT_REAL" exec-bits; then
@@ -868,6 +1145,76 @@ test_lifecycle_naming_catches_new_poc_token() {
 
   # 3. lifecycle-naming should now FAIL — the new poc token is beyond the
   #    grandfather allowlist.
+  _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
+}
+
+# =============================================================================
+# Test: lifecycle-naming catches STRUCTURAL dev/test framing, and still
+#       honours the Tier 1 grandfather (WARP-2478)
+# =============================================================================
+#
+# The test above covers the primary token class (`poc` / `prototype`). The
+# check has a SECOND, independent scan for structural lifecycle framing —
+# `profiles: ["dev"]`, `COMPOSE_PROFILES=test`, `--some-flag-dev` — which had
+# no regression coverage at all. WARP-2478 rewrote both scans from a per-file
+# `while read < <(grep …)` loop (the shape that SIGTRAPs bash 3.2 at scale,
+# see WARP-2456) into single multi-file passes, and in doing so folded the
+# structural scan's TWO greps into one ERE alternation. An error in that
+# union would silently drop a whole violation class while every existing
+# test stayed green — so this test pins it.
+#
+# It is two-sided in both directions that matter:
+#   * a grandfathered legacy identifier alone must still PASS (proving the
+#     Tier 1 strip-then-rescan survived the rewrite of the parse), and
+#   * a structural dev-profile entry must FAIL.
+#
+# Mutations that turn this red:
+#   * drop the `profiles:…"(dev|test|prototype)"` half of the structural
+#     alternation  -> step 3 goes green.
+#   * drop the grandfathered_tokens strip -> step 2 goes red.
+test_lifecycle_naming_structural_and_grandfather() {
+  local compose_rel="docker/docker-compose.yml"
+  local compose="$REPO_ROOT_REAL/$compose_rel"
+
+  if [ ! -f "$compose" ]; then
+    printf "    compose file missing: %s\n" "$compose" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$compose_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
+    printf "    baseline lifecycle-naming failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Grandfather side: a line whose ONLY lifecycle token is the legacy
+  #    host-net identifier must still pass. Tier 1 strips the known token and
+  #    re-scans the residual; `droplet--host-net` carries no lifecycle token,
+  #    so there is nothing left to flag.
+  printf '\n# WARP-2478 test mutation: do not commit. droplet-poc-host-net\n' >> "$compose"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    grandfather mutation no-op — compose file unchanged\n" >&2
+    return 1
+  fi
+
+  if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
+    printf "    grandfathered droplet-poc-host-net was flagged as a violation —\n" >&2
+    printf "    the Tier 1 strip-then-rescan is not working\n" >&2
+    return 1
+  fi
+
+  # 3. Structural side: a dev-named compose profile. Not a `poc`/`prototype`
+  #    token at all, so ONLY the structural scan can catch it.
+  printf '  profiles: ["dev"]\n' >> "$compose"
+
   _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
 }
 
@@ -1229,11 +1576,83 @@ test_ship_check_is_runnable_on_bash_3_2() {
 }
 
 # =============================================================================
+# Test: the suite leaves the caller's git index exactly as it found it
+# =============================================================================
+#
+# WARP-2479. The `exec-bits` cases mutate index modes with
+# `git update-index`, which rewrites the entry from current working-tree
+# content — so before the GIT_INDEX_FILE isolation above, running the suite
+# with an unstaged edit in the tree STAGED that edit and left it staged.
+# Measured on the pre-fix harness: run 1 → 14/15 and
+# `git diff --cached --stat` reporting `scripts/test/ship-check.sh | 2 ++`;
+# run 2 → 13/15, the extra red being the harness's own "already staged —
+# refusing to mutate" guard. The danger is not the spurious red, it is a
+# subsequent `git commit -a` shipping content the author never staged.
+#
+# This test compares the FULL index listing captured before the first case
+# ran against the listing now. `git ls-files -s` prints `<mode> <object>
+# <stage>\t<path>` for every entry, so it catches a changed mode, a changed
+# blob, an added path and a removed path alike. It is deliberately a
+# BEFORE/AFTER comparison rather than a bare `git diff --cached --quiet`,
+# which asks a different question — "is the index clean?" — and would go red
+# for a developer who legitimately had staged work before invoking the suite,
+# even though the suite touched nothing. The ticket's literal
+# `git diff --cached --quiet` is asserted too, but only when the index was
+# in fact clean on entry, where the two questions coincide.
+#
+# Mutation: drop the `_isolated_index_begin` call from either exec-bits case
+# and run the suite with any unstaged edit in the tree → red here.
+test_harness_leaves_caller_index_untouched() {
+  if [ ! -f "$_INDEX_SNAPSHOT_AT_START" ]; then
+    printf "    no index snapshot captured at suite start\n" >&2
+    return 1
+  fi
+
+  local now rc
+  now="$(mktemp "${TMPDIR:-/tmp}/ship-check-index-after.XXXXXX")" || return 1
+  (cd "$REPO_ROOT_REAL" && git ls-files -s) > "$now" 2>/dev/null
+
+  if ! diff -u "$_INDEX_SNAPSHOT_AT_START" "$now" > "$now.diff" 2>&1; then
+    printf "    the suite modified the caller's git index:\n" >&2
+    head -20 "$now.diff" | sed 's/^/    | /' >&2
+    rm -f "$now" "$now.diff"
+    return 1
+  fi
+  rm -f "$now" "$now.diff"
+
+  # The ticket's literal assertion. Only meaningful when the caller handed
+  # us a clean index — otherwise their own staged work would fail it.
+  if [ "$_INDEX_CLEAN_AT_START" = "true" ]; then
+    (cd "$REPO_ROOT_REAL" && git diff --cached --quiet 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf "    index was clean at suite start but 'git diff --cached --quiet' now exits %d\n" "$rc" >&2
+      (cd "$REPO_ROOT_REAL" && git diff --cached --stat) | sed 's/^/    | /' >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
 printf "  Real repo: %s\n" "$REPO_ROOT_REAL"
 printf "  ──────────────────────────────────\n"
+
+# Snapshot the caller's index BEFORE any case runs, so the final test can
+# prove the suite gave it back unchanged (WARP-2479). Captured here rather
+# than inside the test so it records the true pre-suite state. Removed at
+# the foot of the driver rather than via an EXIT trap, because several test
+# bodies set their own `trap … RETURN EXIT` and would clobber it.
+_INDEX_SNAPSHOT_AT_START="$(mktemp "${TMPDIR:-/tmp}/ship-check-index-before.XXXXXX")"
+(cd "$REPO_ROOT_REAL" && git ls-files -s) > "$_INDEX_SNAPSHOT_AT_START" 2>/dev/null
+if (cd "$REPO_ROOT_REAL" && git diff --cached --quiet 2>/dev/null); then
+  _INDEX_CLEAN_AT_START=true
+else
+  _INDEX_CLEAN_AT_START=false
+fi
 
 _run_test "tsc-full catches WARP-329 fixture regression" \
   test_tsc_full_catches_fixture_regression
@@ -1253,6 +1672,12 @@ _run_test "shellcheck catches local-outside-function in scripts/lib" \
 _run_test "shellcheck catches new SC2034 violation in scripts/lib (WARP-486)" \
   test_shellcheck_catches_new_sc2034_violation
 
+_run_test "shellcheck lints the gate itself and catches a directive-shaped comment (WARP-2477)" \
+  test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment
+
+_run_test "shellcheck check reports its findings, not just a non-zero exit (WARP-2492)" \
+  test_shellcheck_reports_findings_not_just_exit_code
+
 _run_test "docker-build-smoke shim rejects unknown docker subcommand" \
   test_docker_build_smoke_shim_rejects_unknown_subcommand
 
@@ -1268,6 +1693,9 @@ _run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)"
 _run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
   test_lifecycle_naming_catches_new_poc_token
 
+_run_test "lifecycle-naming catches structural dev/test framing and honours the grandfather (WARP-2478)" \
+  test_lifecycle_naming_structural_and_grandfather
+
 _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
 
@@ -1279,6 +1707,13 @@ _run_test "bash version floor reports COULD NOT RUN with its own exit code (WARP
 
 _run_test "ship-check.sh is runnable on stock macOS bash 3.2 (WARP-2449)" \
   test_ship_check_is_runnable_on_bash_3_2
+
+# MUST stay last: it asserts every case above gave the caller's index back
+# untouched (WARP-2479).
+_run_test "suite leaves the caller's git index untouched (WARP-2479)" \
+  test_harness_leaves_caller_index_untouched
+
+rm -f "$_INDEX_SNAPSHOT_AT_START"
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

@@ -325,13 +325,22 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "amount",
     "balance",
     "status",
+    // THREE vendors serve this dataset, and their timestamps are not
+    // interchangeable — read the one that applies to the track in hand.
+    //
     // Xero `UpdatedDateUTC`. DOCUMENTED-INCOMPLETE, and this is the one entry
     // whose limits change how the sync must be operated: it does not fire on a
     // DueDate edit, on SentToContact, or on a contact-balance change
     // (WARP-2383). An incremental pass keyed on it therefore misses real edits
     // in silence, which is why WARP-2218's sweep stays MANDATORY for Xero
-    // rather than becoming a safety net. The QuickBooks tracks also serve this
-    // dataset and have no field to fill this from, so they leave it undefined.
+    // rather than becoming a safety net.
+    //
+    // QuickBooks Online `MetaData.LastUpdatedTime` and QuickBooks Desktop
+    // qbXML `TimeModified` (WARP-2475). Both are complete — they move on any
+    // edit — but both are LOCAL WALL-CLOCK PLUS AN OFFSET, normalised to UTC
+    // on the way in. QBD sometimes prints no offset at all, and a naive value
+    // is refused rather than guessed, so this column is undefined on those
+    // rows and the sweep is what catches those edits.
     "updated_at",
   ],
   // Money OWED BY the business — the half WARP-1991 records as having no data
@@ -346,7 +355,10 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "status",
     // Xero `UpdatedDateUTC`, with the same documented gaps as `invoice`: no
     // fire on DueDate, SentToContact, or a contact-balance change (WARP-2383).
-    // The sweep stays mandatory here for the same reason.
+    // The sweep stays mandatory here for the same reason. QuickBooks Online
+    // `MetaData.LastUpdatedTime` and QuickBooks Desktop qbXML `TimeModified`
+    // fill it on their own tracks (WARP-2475), on the same terms as
+    // `invoice`: converted from an offset, refused when naive.
     "updated_at",
   ],
   ap_summary: ["vendor_id", "balance"],

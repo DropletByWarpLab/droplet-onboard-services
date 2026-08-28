@@ -7,11 +7,12 @@
  * kind/actor/q filters. Tier-1 read.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import getAuditLog from "../../../src/handlers/system/get-audit-log.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  orchestratorGet: ReturnType<typeof vi.fn>,
+  orchestratorGet: Mock,
   role?: Role,
 ): ToolContext {
   return {
@@ -79,7 +80,7 @@ const ITEMS = [
   },
 ];
 
-function okGet(items: unknown[] = ITEMS): ReturnType<typeof vi.fn> {
+function okGet(items: unknown[] = ITEMS): Mock {
   return vi
     .fn()
     .mockResolvedValue(

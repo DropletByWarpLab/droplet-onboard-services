@@ -12,6 +12,7 @@ describe("discover_matter_devices", () => {
         sendCommand: vi.fn(),
         discover: vi.fn().mockResolvedValue(fake),
         commission: vi.fn(),
+        decommission: vi.fn(),
         getAuditLog: vi.fn(),
       },
       prisma: {} as ToolContext["prisma"],

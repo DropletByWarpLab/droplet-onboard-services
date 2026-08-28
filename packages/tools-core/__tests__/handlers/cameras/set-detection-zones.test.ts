@@ -11,10 +11,11 @@
  * burning a round-trip.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import setDetectionZones from "../../../src/handlers/cameras/set-detection-zones.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorPatch: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorPatch: Mock): ToolContext {
   return {
     http: {
       cameras: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },

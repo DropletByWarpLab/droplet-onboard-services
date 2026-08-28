@@ -832,3 +832,85 @@ describe("a disconnected tile says whether the credential was actually removed",
     expect(text).not.toContain("credential still stored");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Disconnected credentials — WARP-2483
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-041 §2 promises that disconnecting removes the key. WARP-2453 made that
+ * true and put the answer on the wire as `credentialsPurged`; nothing rendered
+ * it, so the promise was kept in Postgres and invisible on the surface it was
+ * made on.
+ *
+ * The two booleans are not decoration. `true` closes the loop — the owner is
+ * told the thing they asked for happened. `false` is the honest admission that
+ * a row disabled by a build predating the purge still holds its credential,
+ * and it is the one that still owes them an action.
+ */
+describe("a disconnected tile says whether the credential was actually removed", () => {
+  /** Render one DISABLED Acme tile and hand back its text. */
+  async function disconnectedTileText(
+    over: Partial<IntegrationConnection>,
+  ): Promise<string> {
+    extraDescriptors.length = 0;
+    extraDescriptors.push(ACME);
+    push.mockReset();
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("acme-pms", "DISABLED", over),
+    ]);
+    const { container, unmount } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+    const text = tile(container, "Acme PMS").textContent ?? "";
+    unmount();
+    return text;
+  }
+
+  /**
+   * Mutation: drop `credentialsPurged` from `statusView`'s DISABLED branch →
+   * red on the sentence.
+   */
+  it("renders the purged state in the canonical words", async () => {
+    const text = await disconnectedTileText({ credentialsPurged: true });
+    expect(text).toContain("Disconnected · credential removed");
+    expect(text).not.toContain("still stored");
+  });
+
+  it("renders the not-purged state, and says what to do about it", async () => {
+    const text = await disconnectedTileText({ credentialsPurged: false });
+    expect(text).toContain(
+      "Disconnected · credential still stored — reconnect or remove",
+    );
+  });
+
+  /**
+   * THE mutation the ticket names, as a test: ignore the flag and both renders
+   * become the same DOM.
+   *
+   * Asserted on the whole tile rather than on one string, so it stays red for
+   * *any* way of ignoring the flag — dropping the argument, collapsing the two
+   * branches, or rendering one sentence for both.
+   */
+  it("the two booleans do not produce the same tile", async () => {
+    const purged = await disconnectedTileText({ credentialsPurged: true });
+    const retained = await disconnectedTileText({ credentialsPurged: false });
+    expect(purged).not.toEqual(retained);
+  });
+
+  /**
+   * The third case, and the reason the flag is optional in the dashboard's
+   * mirror of the payload: a response that carries no purge fact must be
+   * rendered as neither answer.
+   *
+   * Mutation: default the missing flag to `false` (or to `true`) → red,
+   * because the tile then makes a claim about a credential nobody asked the
+   * box about. Note this is the one branch where being wrong is unsafe in the
+   * *reassuring* direction.
+   */
+  it("claims nothing when the box reported no purge fact at all", async () => {
+    const text = await disconnectedTileText({});
+    expect(text).toContain("Turned off");
+    expect(text).not.toContain("credential removed");
+    expect(text).not.toContain("credential still stored");
+  });
+});

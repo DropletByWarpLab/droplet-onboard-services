@@ -160,8 +160,14 @@ export function parseMoney(raw: string | undefined): number | undefined {
   // means debit. Treating `CR` as decoration inverts the sign of every credit
   // balance and inflates `get_ar_summary.total_balance` by twice each one.
   // The marker must be preceded by a digit, a closing paren or whitespace so a
-  // cell that merely ends in those letters is not misread.
-  const marker = /^(.*[\d)\s])\s*(CR|DR)\.?$/i.exec(body);
+  // cell that merely ends in those letters is not misread. No `\s*` between
+  // the guard class and the marker: `[\d)\s]` already admits whitespace, and
+  // the extra run overlaps with it and with `.*`, so a cell of many tabs
+  // backtracks quadratically (CodeQL js/polynomial-redos). Group 1 is the
+  // same prefix either way — everything before the marker. `[\s\S]*` rather
+  // than `.*` so line breaks inside the trailing whitespace, which the old
+  // `\s*` admitted, still reach the marker.
+  const marker = /^([\s\S]*[\d)\s])(CR|DR)\.?$/i.exec(body);
   if (marker) {
     if (marker[2].toUpperCase() === "CR") negative = true;
     body = marker[1];
@@ -222,7 +228,10 @@ export function parseMoney(raw: string | undefined): number | undefined {
     normalized = body;
   }
 
-  if (!/^\d*\.?\d*$/.test(normalized) || normalized === "" || normalized === ".") return undefined;
+  // `\d*\.?\d*` is the same language, but its two digit runs are ambiguous
+  // when the dot is absent — quadratic on a long digit string (CodeQL
+  // js/polynomial-redos). The second run is reachable only after the dot.
+  if (!/^\d*(?:\.\d*)?$/.test(normalized) || normalized === "" || normalized === ".") return undefined;
 
   const value = Number(normalized);
   if (!Number.isFinite(value)) return undefined;

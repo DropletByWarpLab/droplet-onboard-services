@@ -26,9 +26,14 @@
 #   frigate-env-scan      — WARP-446 class: committed docker/frigate/config.yml
 #                           referencing operator-specific env vars (KeyError
 #                           on first boot).
-#   shellcheck            — local-dns.sh class: bash bugs caught by static
+#   `shellcheck`          — local-dns.sh class: bash bugs caught by static
 #                           analysis (parse errors, quoting, declared-but-
-#                           unused vars).
+#                           unused vars). Backticked deliberately: a comment
+#                           whose first word is the bare token `shellcheck`
+#                           parses as a malformed ShellCheck DIRECTIVE
+#                           (SC1073/SC1072, error severity), which aborts the
+#                           parse and silently leaves the rest of this file
+#                           unlinted. WARP-2477.
 #   matter-env-allowlist  — architecture-guard rule 11: MATTER_* env vars
 #                           outside the allowlist crash matter.js controller
 #                           init. Delegates to scripts/test-security.sh.
@@ -194,6 +199,14 @@ push that touches Dockerfile / compose / scripts / orchestrator TypeScript.
 
 OPTIONS
   --full              Also run --full-only checks (docker-build-smoke, ~15min)
+  --list-scanned      Debug: print the surface set a scan-based check
+                      inspects, one repo-relative path per line, and exit
+                      without scanning. Diff two runs to prove a change to
+                      the scan machinery did not change coverage. Supported
+                      for stale-repo-names (the default) and
+                      lifecycle-naming; pass the check name as the
+                      subcommand, e.g.
+                      `ship-check.sh --list-scanned lifecycle-naming`.
   -h, --help          Show this help and the full check list
 
 SUBCOMMAND
@@ -221,6 +234,15 @@ CHECKS
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
+                        Then runs a SECOND pass, `npx tsc --noEmit -p
+                        tsconfig.test.json`, in each of those workspaces that
+                        ships one. A workspace's `tsconfig.json` is a BUILD
+                        config and may legitimately exclude its tests — as
+                        `packages/tools-core` did, leaving all 133 of its
+                        `__tests__/` files unchecked by anything, since
+                        `vitest` strips types without checking them. A
+                        workspace joins this pass by adding the file; there is
+                        no second list to keep in sync.
 
   compose-config        Run `docker compose config --quiet` against
                         docker/docker-compose.yml using .env.example (falls
@@ -236,10 +258,11 @@ CHECKS
                         was never seeded, KeyError-crashing Frigate at boot.
 
   shellcheck            Run shellcheck on scripts/setup.sh,
-                        scripts/factory-reset.sh, and scripts/lib/*.sh at
-                        warning severity. Requires shellcheck on PATH; the
-                        script FAILS (not skips) if it is missing — install
-                        it before you ship.
+                        scripts/factory-reset.sh, scripts/lib/*.sh, and this
+                        gate itself (scripts/test/ship-check.sh and its test
+                        harness) at warning severity. Requires shellcheck on
+                        PATH; the script FAILS (not skips) if it is missing —
+                        install it before you ship.
 
   matter-env-allowlist  Delegate to scripts/test-security.sh, which already
                         enforces the architecture-guard rule 11 (MATTER_*
@@ -437,12 +460,42 @@ run_check_tsc_full() {
     fi
   done
 
+  # Phase 4: SECOND pass over the same workspaces for the ones that ship a
+  # `tsconfig.test.json`. A workspace's own `tsconfig.json` is a BUILD config:
+  # it scopes to what gets emitted, so `packages/tools-core` excluded
+  # `__tests__` and phase 3 above therefore never type-checked a single one of
+  # its 133 test files. That is the exact hole PR #261 (WARP-329) shipped a
+  # TS2322 test fixture through, and `vitest` cannot close it because esbuild
+  # strips types without checking them.
+  #
+  # Opt-in by file existence rather than a second hardcoded list, so a
+  # workspace joins this pass by adding the config — no edit here required.
+  local tested=0
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+    if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
+      continue
+    fi
+    tested=$((tested + 1))
+    if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit -p tsconfig.test.json 2>&1)"; then
+      failed_workspaces+=("$ws (tests)")
+      printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s tests\n" "$label" "$ws"
+      printf '%s\n' "$out" | head -20 | sed 's/^/    | /' >&2
+      local extra_t
+      extra_t=$(printf '%s\n' "$out" | wc -l)
+      if [ "$extra_t" -gt 20 ]; then
+        printf "    | (... %d more lines suppressed; cd %s && npx tsc --noEmit -p tsconfig.test.json)\n" \
+          "$((extra_t - 20))" "$ws" >&2
+      fi
+      rc=1
+    fi
+  done
+
   if [ "$rc" -ne 0 ]; then
     _record_result "$label" fail
     return 1
   fi
 
-  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces)\n" "$label"
+  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces, %d with tests)\n" "$label" "$tested"
   _record_result "$label" pass
   return 0
 }
@@ -687,11 +740,18 @@ run_check_frigate_env_scan() {
 }
 
 run_check_shellcheck() {
-  # Run shellcheck across the three high-blast-radius script sets:
+  # Run shellcheck across the high-blast-radius script sets:
   #   - scripts/setup.sh           (single-entry-point installer)
   #   - scripts/factory-reset.sh   (wipe-and-restart path)
   #   - scripts/lib/*.sh           (sourced helpers — every check pulls
   #                                 these in transitively)
+  #   - scripts/test/ship-check.sh + ship-check.test.sh  (WARP-2477 — the
+  #                                 gate and its harness. Until WARP-2477
+  #                                 these were the one pair of shell files
+  #                                 the gate never pointed at itself, so a
+  #                                 bug in the thing that catches bugs had
+  #                                 no catcher. They are ~3.3k lines of
+  #                                 bash that every PR depends on.)
   #
   # Severity is `warning`, which includes the `error` band (SC2168
   # "local outside function" — the very class of bug that escaped review
@@ -732,10 +792,14 @@ run_check_shellcheck() {
 
   # Build the target list. Glob expands lib/*.sh against the real tree;
   # if any of these files is missing it's a setup precondition issue and
-  # shellcheck will surface it loudly.
+  # ShellCheck will surface it loudly. (Capitalised so this line does not
+  # open with the bare token `shellcheck` — see WARP-2477 and the note at
+  # the head of this file.)
   local targets=()
   local file
-  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh"; do
+  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/test/ship-check.sh" \
+              "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
       targets+=("$file")
     fi
@@ -757,12 +821,20 @@ run_check_shellcheck() {
   # `source` directives so cross-file undeclared-var detection works AND
   # so the analyzer doesn't bail on dynamic-path sources we can't
   # statically resolve (the `source "$libdir/x"` pattern in setup.sh).
+  #
+  # WARP-2492: the `&& rc=0 || rc=$?` tail is load-bearing, not noise. This
+  # script runs `set -euo pipefail`, and shellcheck exits non-zero precisely
+  # when it has findings to report. As a BARE assignment the non-zero status
+  # propagates and `set -e` kills the script AT THIS LINE — before the FAIL
+  # banner, before the finding list. The operator got exit 1 and a header,
+  # and never learned which file or which code. An AND-OR list is exempt from
+  # `set -e`, so the status lands in rc and the reporting path below runs.
+  # Same shape the image-pipeline check already used for its own capture.
   local out rc
   out="$(shellcheck \
     --severity=warning \
     --external-sources \
-    "${targets[@]}" 2>&1)"
-  rc=$?
+    "${targets[@]}" 2>&1)" && rc=0 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s))\n" "$label" "${#targets[@]}"
@@ -956,6 +1028,62 @@ run_check_exec_bits() {
   return 0
 }
 
+# Emit the curated surface set that `stale-repo-names` scans: one
+# repo-relative path per line, in the order the check inspects them. Each
+# entry is a path `grep` can ingest. Recursive trees are resolved with find
+# rather than bash globstar (which is opt-in via `shopt -s globstar` and not
+# guaranteed across operator shells).
+#
+# This is the SINGLE source of truth for the scanned set -- the check reads
+# it, and so does `--list-scanned`. The debug flag therefore cannot drift
+# from what is actually inspected, which is what makes a before/after diff
+# of the scanned set a real proof rather than a restatement (WARP-2456).
+# The surface list itself is documented, with rationale for every inclusion
+# and exemption, in run_check_stale_repo_names below.
+_stale_repo_names_surfaces() {
+  local f svc
+
+  # Top-level README + the compose file.
+  for f in "README.md" "docker/docker-compose.yml"; do
+    [ -f "$REPO_ROOT/$f" ] && printf '%s\n' "$f"
+  done
+
+  # services/*/README.md and services/*/TESTING.md (immediate children only).
+  if [ -d "$REPO_ROOT/services" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
+             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
+  fi
+
+  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
+  # exempt for the mDNS hostname allowlist).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # apps/orchestrator/src/**/*.ts (recursive, including *.test.ts — the
+  # canonical name should reach test fixtures too).
+  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
+  fi
+
+  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
+  for svc in services/ai-gateway services/voice-io; do
+    if [ -d "$REPO_ROOT/$svc" ]; then
+      while IFS= read -r f; do
+        printf '%s\n' "${f#$REPO_ROOT/}"
+      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
+    fi
+  done
+
+  return 0
+}
+
 run_check_stale_repo_names() {
   # Walk a curated set of user-facing surfaces and FAIL on any reference
   # to the LEGACY repo names `inference-engine` or `droplet-jetson-ai`.
@@ -1022,53 +1150,15 @@ run_check_stale_repo_names() {
   # `.local` disqualifies it as a repo-name reference.
   local label="stale-repo-names"
 
-  # Surface walk — build the file list. Each entry is a repo-relative path
-  # that grep -nE can ingest. We resolve recursive trees with find rather
-  # than relying on bash globstar (which is opt-in via `shopt -s globstar`
-  # and not guaranteed across operator shells).
+  # Surface walk — see _stale_repo_names_surfaces above, which owns the
+  # walk so the check and `--list-scanned` can never disagree about what is
+  # in scope.
   local files=()
   local f
-
-  # Top-level README + the compose file.
-  for f in "README.md" "docker/docker-compose.yml"; do
-    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
-  done
-
-  # services/*/README.md and services/*/TESTING.md (immediate children only).
-  if [ -d "$REPO_ROOT/services" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
-             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
-  fi
-
-  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
-  # exempt for the mDNS hostname allowlist).
-  if [ -d "$REPO_ROOT/scripts" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
-
-  # apps/orchestrator/src/**/*.ts (recursive, but NOT *.test.ts — those
-  # are test-only and not user-facing). All .ts files are in scope per
-  # the ticket; we include .test.ts deliberately because the canonical
-  # name should reach test fixtures too.
-  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
-  fi
-
-  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
-  local svc
-  for svc in services/ai-gateway services/voice-io; do
-    if [ -d "$REPO_ROOT/$svc" ]; then
-      while IFS= read -r f; do
-        files+=("${f#$REPO_ROOT/}")
-      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
-    fi
-  done
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    files+=("$f")
+  done < <(_stale_repo_names_surfaces)
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
@@ -1090,38 +1180,70 @@ run_check_stale_repo_names() {
   allowlist+="services/voice-io/TESTING.md:171"$'\n'
   allowlist+="services/ops-console/README.md:58"$'\n'
 
-  # Run grep -nE per file, post-filter for the .local exemption and the
-  # per-line allowlist, collect violations.
+  # ONE multi-file grep over the whole surface set, post-processed by a
+  # SINGLE read loop.
+  #
+  # WARP-2456: this used to be `while read … done < <(grep …)` executed once
+  # PER FILE. bash 3.2.57 — the stock macOS /bin/bash, which this script's
+  # version floor commits to supporting — dies with SIGTRAP (exit 133) at
+  # around the 251st iteration of that shape. A synthetic tree of 100 files
+  # survived, 500 crashed; the real tree carries ~1.1k surfaces, so the check
+  # was simply un-runnable on the primary dev machine while CI's bash 5 stayed
+  # green — silent in the direction that hurts. An fd leak, `local` inside the
+  # loop and the inner command substitution were each ruled out standalone;
+  # what remained was the repeated loop-over-process-substitution shape
+  # itself. One grep sidesteps the class entirely, and is faster everywhere.
+  #
+  # Paths are NUL-delimited into xargs so the command line cannot overflow
+  # ARG_MAX as the tree grows; -H forces the `<path>:` prefix even when a
+  # chunk ends up holding a single file, so every output line parses the same
+  # way. grep runs with cwd = REPO_ROOT so the paths it echoes back are
+  # byte-identical to the ones _stale_repo_names_surfaces emitted, which is
+  # what keeps the allowlist keys (`<path>:<lineno>`) matching.
+  #
+  # The pattern is deliberately unanchored (the repo names appear inside
+  # markdown links, code blocks, etc.); the `.local` post-filter below handles
+  # the only ambiguous overlap.
   local violations=""
-  local line lineno content
+  local line rest lineno content residual
+
+  # A ':' in a scanned path would make "<path>:<lineno>:<text>" ambiguous. No
+  # path in this repo has one; fail loudly rather than mis-parse if that ever
+  # changes.
   for f in "${files[@]}"; do
-    # Match either bare repo name. grep -nE returns "<lineno>:<text>".
-    # We don't anchor the pattern (the repo names can appear inside
-    # markdown links, code blocks, etc.); the .local post-filter handles
-    # the only ambiguous overlap.
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-
-      # Post-filter 1: if the line's only stale-name occurrence is
-      # `inference-engine.local` (the mDNS hostname), skip it. We do
-      # this by removing every `.local` suffix occurrence and re-grepping
-      # the residual for either bare pattern.
-      local residual
-      residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
-      if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
-        continue
-      fi
-
-      # Post-filter 2: per-line allowlist.
-      if _allowlisted "$f:$lineno" "$allowlist"; then
-        continue
-      fi
-
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <(grep -nE 'inference-engine|droplet-jetson-ai' "$REPO_ROOT/$f" 2>/dev/null || true)
+    case "$f" in
+      *:*)
+        printf "  ${_RED}FAIL${_RESET}  %s — scanned path contains ':' (%s); scan output cannot be parsed unambiguously\n" "$label" "$f"
+        _record_result "$label" fail
+        return 1
+        ;;
+    esac
   done
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+
+    # Post-filter 1: if the line's only stale-name occurrence is
+    # `inference-engine.local` (the mDNS hostname), skip it. We do this by
+    # removing every `.local` suffix occurrence and re-grepping the residual
+    # for either bare pattern.
+    residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
+    if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
+      continue
+    fi
+
+    # Post-filter 2: per-line allowlist.
+    if _allowlisted "$f:$lineno" "$allowlist"; then
+      continue
+    fi
+
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -nHE 'inference-engine|droplet-jetson-ai' 2>/dev/null || true)
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no stale refs)\n" "$label" "${#files[@]}"
@@ -1144,6 +1266,44 @@ run_check_stale_repo_names() {
   printf "    | allowlist in run_check_stale_repo_names with rationale.\n" >&2
   _record_result "$label" fail
   return 1
+}
+
+# Emit the curated surface set that `lifecycle-naming` scans: one
+# repo-relative path per line, in the order the check inspects them. Each
+# entry is a path `grep` can ingest. Recursive trees are resolved with find
+# rather than bash globstar (which is opt-in via `shopt -s globstar` and not
+# guaranteed across operator shells).
+#
+# Deliberately the same shape as _stale_repo_names_surfaces above: this is
+# the SINGLE source of truth for the scanned set -- the check reads it, and
+# so does `--list-scanned lifecycle-naming`. Keeping the two helpers
+# structurally identical is the point, so a future change to one is an
+# obvious prompt to look at the other (WARP-2478). The surface list itself is
+# documented, with rationale for every inclusion and exemption, in
+# run_check_lifecycle_naming below.
+_lifecycle_naming_surfaces() {
+  local f
+
+  # The compose file + the operator-facing env catalogue.
+  for f in "docker/docker-compose.yml" ".env.example"; do
+    [ -f "$REPO_ROOT/$f" ] && printf '%s\n' "$f"
+  done
+
+  # Top-level scripts/*.sh only (NOT scripts/lib, scripts/test, scripts/host).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # scripts/lib/*.sh (sourced helpers).
+  if [ -d "$REPO_ROOT/scripts/lib" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts/lib" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  return 0
 }
 
 run_check_lifecycle_naming() {
@@ -1217,27 +1377,15 @@ run_check_lifecycle_naming() {
   # only in those structural positions.
   local label="lifecycle-naming"
 
-  # --- Build the surface file list (find, not globstar — portable). --------
+  # Surface walk — see _lifecycle_naming_surfaces above, which owns the walk
+  # so the check and `--list-scanned lifecycle-naming` can never disagree
+  # about what is in scope.
   local files=()
   local f
-
-  for f in "docker/docker-compose.yml" ".env.example"; do
-    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
-  done
-
-  # Top-level scripts/*.sh only (NOT scripts/lib, scripts/test, scripts/host).
-  if [ -d "$REPO_ROOT/scripts" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
-
-  # scripts/lib/*.sh (sourced helpers).
-  if [ -d "$REPO_ROOT/scripts/lib" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts/lib" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    files+=("$f")
+  done < <(_lifecycle_naming_surfaces)
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
@@ -1267,47 +1415,93 @@ run_check_lifecycle_naming() {
   )
 
   # --- Scan. -----------------------------------------------------------------
-  # Primary token: whole-word poc|prototype, case-insensitive. grep -nE gives
-  # "<lineno>:<text>". We post-filter each hit through the grandfather tiers.
+  # TWO multi-file greps over the whole surface set (one per token class),
+  # each post-processed by a SINGLE read loop.
+  #
+  # WARP-2478: both scans used to be `while read … done < <(grep …)` executed
+  # once PER FILE — the exact shape WARP-2456 had to remove from
+  # stale-repo-names, where bash 3.2.57 (the stock macOS /bin/bash this
+  # script's version floor commits to supporting) dies with SIGTRAP, exit
+  # 133, at around the 251st iteration. This check was never red only because
+  # its surface set is smaller: 44 files here against stale-repo-names' ~1.1k
+  # at the time of that fix. Same shape, same growth curve, same wall — and
+  # every new top-level script or scripts/lib helper moved it closer, with
+  # CI's bash 5 structurally unable to see it coming. Converted before it
+  # arrived rather than after.
+  #
+  # Mechanics mirror run_check_stale_repo_names exactly: paths go
+  # NUL-delimited through xargs so the command line cannot overflow ARG_MAX
+  # as the tree grows; -H forces the `<path>:` prefix even when a chunk holds
+  # a single file, so every output line parses the same way; and grep runs
+  # with cwd = REPO_ROOT so the paths it echoes back are byte-identical to
+  # the ones _lifecycle_naming_surfaces emitted — which is what keeps the
+  # allowlist keys (`<path>:<lineno>`) matching.
   local violations=""
-  local line lineno content residual t
+  local line rest lineno content residual t
+
+  # A ':' in a scanned path would make "<path>:<lineno>:<text>" ambiguous. No
+  # path in this repo has one; fail loudly rather than mis-parse if that ever
+  # changes.
   for f in "${files[@]}"; do
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-
-      # Tier 1: strip every grandfathered legacy identifier, then re-test the
-      # residual for a lifecycle token. If nothing remains, this line's only
-      # hit was the known debt → allow.
-      residual="$content"
-      for t in "${grandfathered_tokens[@]}"; do
-        residual="${residual//$t/}"
-      done
-      if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
-        continue
-      fi
-
-      # Tier 2: explicit per-line comment allowlist.
-      if _allowlisted "$f:$lineno" "$allowlist"; then
-        continue
-      fi
-
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <(grep -niwE '(poc|prototype)' "$REPO_ROOT/$f" 2>/dev/null || true)
+    case "$f" in
+      *:*)
+        printf "  ${_RED}FAIL${_RESET}  %s — scanned path contains ':' (%s); scan output cannot be parsed unambiguously\n" "$label" "$f"
+        _record_result "$label" fail
+        return 1
+        ;;
+    esac
   done
+
+  # Primary token: whole-word poc|prototype, case-insensitive. We post-filter
+  # each hit through the grandfather tiers.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+
+    # Tier 1: strip every grandfathered legacy identifier, then re-test the
+    # residual for a lifecycle token. If nothing remains, this line's only
+    # hit was the known debt → allow.
+    residual="$content"
+    for t in "${grandfathered_tokens[@]}"; do
+      residual="${residual//$t/}"
+    done
+    if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
+      continue
+    fi
+
+    # Tier 2: explicit per-line comment allowlist.
+    if _allowlisted "$f:$lineno" "$allowlist"; then
+      continue
+    fi
+
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -niwHE '(poc|prototype)' 2>/dev/null || true)
 
   # Structural dev/test framing: only in compose profile entries, a
   # COMPOSE_PROFILES= value, or a --flag. No grandfather entries exist for
   # this class today, so any hit is a violation.
-  for f in "${files[@]}"; do
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <({ grep -nE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; grep -nE 'profiles:[[:space:]]*\[[^]]*"(dev|test|prototype)"|COMPOSE_PROFILES=([^[:space:]]*,)?(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; } | sort -t: -k1,1n -u || true)
-  done
+  #
+  # The per-file version ran TWO greps per file and merged them with
+  # `sort -t: -k1,1n -u`, whose only job was to drop the duplicate when a
+  # line matched both patterns. Folding the two patterns into one ERE
+  # alternation removes the duplicate at the source, so the merge sort goes
+  # away entirely — and with it the risk of reordering the report, since one
+  # grep already emits surface order then line order, exactly as before.
+  # `|` is the lowest-precedence ERE operator and each original pattern keeps
+  # its own grouping, so the union matches precisely what the two matched.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -nHE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b|profiles:[[:space:]]*\[[^]]*"(dev|test|prototype)"|COMPOSE_PROFILES=([^[:space:]]*,)?(dev|test|prototype)\b' 2>/dev/null || true)
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no NEW lifecycle-stage naming)\n" "$label" "${#files[@]}"
@@ -1762,14 +1956,18 @@ INNER
   # which mangles the `-v <src>:<dst>:<opts>` syntax. On Linux/macOS
   # the variable is unset and ignored. See
   #   https://github.com/moby/moby/issues/24029#issuecomment-292499324
+  # WARP-2492: `&& rc=0 || rc=$?`, not a bare assignment. `docker run` exits
+  # non-zero exactly in the case this check exists to report, and under this
+  # script's `set -e` a bare assignment would abort here — losing the FAIL
+  # banner and the container output that says WHY setup.sh failed. This check
+  # is `--full` only, so that path is rarely walked and the loss went unseen.
   local out rc
   out="$(MSYS_NO_PATHCONV=1 docker run \
     --rm \
     --name "$container_name" \
     -v "$REPO_ROOT:/repo:ro" \
     "$image" \
-    bash -c "$inner_script" 2>&1)"
-  rc=$?
+    bash -c "$inner_script" 2>&1)" && rc=0 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (setup.sh ran clean on %s)\n" "$label" "$image"
@@ -1852,6 +2050,7 @@ main() {
   # Parse args. Supports `--help`, `--full`, single subcommand, or nothing.
   local run_full=false
   local single_check=""
+  local list_scanned=false
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1861,6 +2060,10 @@ main() {
         ;;
       --full)
         run_full=true
+        shift
+        ;;
+      --list-scanned)
+        list_scanned=true
         shift
         ;;
       --)
@@ -1886,6 +2089,25 @@ main() {
   if [ ! -d "$REPO_ROOT/.git" ] && [ ! -f "$REPO_ROOT/.git" ]; then
     printf "${_RED}error:${_RESET} %s is not a git repo\n" "$REPO_ROOT" >&2
     return 3
+  fi
+
+  # Debug flag. Dump the surface set `stale-repo-names` scans and exit --
+  # nothing else is printed, so two runs can be diffed directly. This exists
+  # so a change to the scan machinery can be PROVEN not to change coverage
+  # (WARP-2456 restructured N per-file greps into one multi-file grep).
+  if [ "$list_scanned" = "true" ]; then
+    # Defaults to stale-repo-names when no subcommand is given, so the
+    # original WARP-2456 invocation keeps working unchanged.
+    case "${single_check:-stale-repo-names}" in
+      stale-repo-names) _stale_repo_names_surfaces ;;
+      lifecycle-naming) _lifecycle_naming_surfaces ;;
+      *)
+        printf "${_RED}error:${_RESET} --list-scanned is implemented for stale-repo-names and lifecycle-naming (got '%s')\n" \
+          "$single_check" >&2
+        return 2
+        ;;
+    esac
+    return 0
   fi
 
   printf "\n  ${_BOLD}Droplet ship-check${_RESET}  (repo: %s)\n" "$REPO_ROOT"

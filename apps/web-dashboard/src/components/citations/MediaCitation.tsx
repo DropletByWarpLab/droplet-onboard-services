@@ -11,7 +11,7 @@
  * recordings, etc.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type JSX } from "react";
 import Link from "next/link";
 import type { MediaTimestampAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";

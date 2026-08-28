@@ -50,7 +50,9 @@ function apiItem(over: Record<string, unknown> = {}) {
   };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("pm_list_workspaces", () => {
   it("is read-only", () => {

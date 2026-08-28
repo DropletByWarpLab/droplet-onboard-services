@@ -11,18 +11,32 @@
  * day it is added. A provenance guard below fails if someone replaces the
  * derivation with a literal array.
  *
+ * WARP-2472 SPLIT THE SET. A confirming tool now declares WHICH LAYER
+ * asks (`confirmationOwner`), because ten of them relay a 202 from an
+ * orchestrator route that runs its own Tier-2 gate — challenging here as
+ * well asked the user twice, and the route's challenge is the one the
+ * model cannot answer. So the "exactly one challenge" assertion below is
+ * scoped to the interceptor-owned tools, and route-owned tools get their
+ * own assertion: the interceptor must stand down completely, minting
+ * nothing and consuming nothing. Both partitions stay DERIVED.
+ *
  * Mutations these are written to catch:
  *   - make the interceptor challenge unconditionally, ignoring a valid
  *     token → the challenge count becomes 2 and the enumerated test reds
  *   - stop setting `confirmed: true` on a verified call → the legacy
  *     handlers raise a second prompt and the end-to-end test reds
+ *   - remove the `confirmationOwner === "route"` skip → the route-owned
+ *     partition reds (that is the WARP-2472 double prompt, back)
+ *   - hard-code the skip so it fires for every tool → the
+ *     interceptor-owned partition reds on zero challenges
  *   - hardcode the tool list → the provenance guard reds
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { TOOLS } from "../src/registry.js";
 import {
+  confirmationOwnerOf,
   createToolCallInterceptor,
   declaresConfirmedFlag,
   interceptOutcomeToToolResult,
@@ -34,6 +48,17 @@ const T0 = 1_700_000_000_000;
 
 /** DERIVED, not hardcoded — this expression is the point of the file. */
 const CONFIRMING: Tool[] = [...TOOLS.values()].filter((t) => t.requiresConfirmation);
+
+/**
+ * WARP-2472 — the two partitions, both derived. `confirmationOwnerOf`
+ * applies the `"interceptor"` default, so a tool that declares nothing
+ * lands in the gated half; forgetting the declaration can never silently
+ * remove a gate.
+ */
+const INTERCEPTOR_OWNED: Tool[] = CONFIRMING.filter(
+  (t) => confirmationOwnerOf(t) === "interceptor",
+);
+const ROUTE_OWNED: Tool[] = CONFIRMING.filter((t) => confirmationOwnerOf(t) === "route");
 
 /** Plausible arguments for a tool, from its own schema. Never a name map. */
 function argsFor(tool: Tool): Record<string, unknown> {
@@ -62,10 +87,20 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
     expect(CONFIRMING.length).toBeGreaterThanOrEqual(37);
   });
 
-  it("challenges EXACTLY ONCE per two-phase flow — not zero, not two — for every one of them", () => {
+  it("splits into two non-empty, exhaustive partitions by declared owner (WARP-2472)", () => {
+    // Neither half may be empty, or the assertions below go vacuously
+    // green — the failure mode that made #1818's own dispatch test useless.
+    expect(INTERCEPTOR_OWNED.length).toBeGreaterThan(0);
+    expect(ROUTE_OWNED.length).toBeGreaterThan(0);
+    expect(INTERCEPTOR_OWNED.length + ROUTE_OWNED.length).toBe(CONFIRMING.length);
+    // Ten tools relay a 202 from a route that gates the operation itself.
+    expect(ROUTE_OWNED.length).toBe(10);
+  });
+
+  it("challenges EXACTLY ONCE per two-phase flow — not zero, not two — for every interceptor-owned tool", () => {
     const report: string[] = [];
 
-    for (const tool of CONFIRMING) {
+    for (const tool of INTERCEPTOR_OWNED) {
       const interceptor = createToolCallInterceptor();
       const args = argsFor(tool);
       let challenges = 0;
@@ -93,10 +128,64 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
     expect(report, `double-prompt / gate failures:\n${report.join("\n")}`).toEqual([]);
   });
 
-  it("hands `confirmed: true` to exactly the handlers whose schema declares it", () => {
+  it("challenges ZERO times for every route-owned tool, and mints nothing (WARP-2472)", () => {
+    // The route already answers 202 with its own dashboard-redeemable
+    // token for these operations. A second challenge here is the defect:
+    // the user is asked twice, and the route's ask is the one the model
+    // cannot satisfy, so the approved write never lands.
+    //
+    // "Mints nothing" is the stronger half. A skip that still handed back
+    // a token would leave a credential nobody can use lying in the store
+    // — the `set_ssh_access` failure class `confirm-dispatcher-coverage`
+    // exists to prevent.
+    const report: string[] = [];
+
+    for (const tool of ROUTE_OWNED) {
+      const interceptor = createToolCallInterceptor();
+      const outcome = interceptor.intercept(tool, argsFor(tool), undefined, T0);
+
+      if (outcome.kind !== "proceed") {
+        report.push(`${tool.name}: first call was ${outcome.kind}, expected proceed`);
+        continue;
+      }
+      if (outcome.confirmationConsumed) {
+        report.push(`${tool.name}: claimed to consume a confirmation it never issued`);
+      }
+      // Nothing to render to the caller, so no prompt reaches the user.
+      if (interceptOutcomeToToolResult(tool, outcome) !== null) {
+        report.push(`${tool.name}: produced a refusal payload`);
+      }
+      // And no unredeemable token was left behind.
+      if (interceptor.tokens.size() !== 0) {
+        report.push(`${tool.name}: minted ${interceptor.tokens.size()} token(s)`);
+      }
+    }
+
+    expect(report, `route-owned interference:\n${report.join("\n")}`).toEqual([]);
+  });
+
+  it("still refuses a route-owned tool the DENY TIER objects to (WARP-2472)", () => {
+    // The ownership skip must sit BELOW the deny tier. There is no
+    // approval — from any layer — that makes a blocked action allowed, so
+    // delegating the confirmation must not delegate the refusal.
+    //
+    // Mutation: move the `confirmationOwner === "route"` check above the
+    // deny evaluation → red.
+    const tool = ROUTE_OWNED[0]!;
+    const interceptor = createToolCallInterceptor();
+    interceptor.denyTier.add("warp-2472-fixture", () => ({
+      code: "TEST_DENY",
+      message: "denied by fixture",
+    }));
+
+    const outcome = interceptor.intercept(tool, argsFor(tool), undefined, T0);
+    expect(outcome.kind).toBe("denied");
+  });
+
+  it("hands `confirmed: true` to exactly the interceptor-owned handlers whose schema declares it", () => {
     // This is the no-double-prompt MECHANISM. Detected from each tool's
     // own schema, so no parallel list of "legacy" tools exists to drift.
-    const declaring = CONFIRMING.filter(declaresConfirmedFlag);
+    const declaring = INTERCEPTOR_OWNED.filter(declaresConfirmedFlag);
     expect(declaring.length).toBeGreaterThan(0);
 
     for (const tool of declaring) {
@@ -114,7 +203,7 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
   });
 
   it("never fabricates `confirmed` for a tool whose schema does not declare it", () => {
-    for (const tool of CONFIRMING.filter((t) => !declaresConfirmedFlag(t))) {
+    for (const tool of INTERCEPTOR_OWNED.filter((t) => !declaresConfirmedFlag(t))) {
       const interceptor = createToolCallInterceptor();
       const args = argsFor(tool);
       const first = interceptor.intercept(tool, args, undefined, T0);
@@ -132,7 +221,7 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
     // with `confirmed: true` because it has no way to obtain a token.
     // If this regressed, every one of these tools would challenge forever
     // in the chat surface — the production break this guards.
-    const declaring = CONFIRMING.filter(declaresConfirmedFlag);
+    const declaring = INTERCEPTOR_OWNED.filter(declaresConfirmedFlag);
     const report: string[] = [];
 
     for (const tool of declaring) {
@@ -151,13 +240,16 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
     }
 
     expect(report, `chat-flow failures:\n${report.join("\n")}`).toEqual([]);
-    expect(declaring.length).toBeGreaterThanOrEqual(16);
+    // 15, not 16: WARP-2472 moved `set_wifi_password` — the one
+    // route-owned tool that also declares `confirmed` — out of this
+    // partition. Its own handler gate is untouched and still runs.
+    expect(declaring.length).toBeGreaterThanOrEqual(15);
   });
 
   it("refuses `confirmed: true` for every legacy tool when nothing challenged it", () => {
     // The security floor the legacy path must not give up: a bare boolean
     // is not an approval.
-    for (const tool of CONFIRMING.filter(declaresConfirmedFlag)) {
+    for (const tool of INTERCEPTOR_OWNED.filter(declaresConfirmedFlag)) {
       const interceptor = createToolCallInterceptor();
       const outcome = interceptor.intercept(
         tool,
@@ -171,8 +263,8 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
     }
   });
 
-  it("emits a machine-readable challenge for every one of them", () => {
-    for (const tool of CONFIRMING) {
+  it("emits a machine-readable challenge for every interceptor-owned tool", () => {
+    for (const tool of INTERCEPTOR_OWNED) {
       const interceptor = createToolCallInterceptor();
       const outcome = interceptor.intercept(tool, argsFor(tool), undefined, T0);
       const res = interceptOutcomeToToolResult(tool, outcome);
@@ -186,7 +278,11 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
 
 describe("provenance guard — the list must stay derived (WARP-2322)", () => {
   it("this file derives its tool list from the flag and contains no hardcoded roster", () => {
-    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    // `__filename`, not `import.meta.url`: this package builds to CommonJS,
+    // where `import.meta` is a TS1470 error (see the same note in
+    // `tool-routes.test.ts`). Both spell "this file" and `vitest` defines
+    // `__filename` in its CJS-interop module scope.
+    const source = readFileSync(__filename, "utf8");
 
     // The derivation itself must be present.
     expect(source).toContain("filter((t) => t.requiresConfirmation)");
@@ -203,7 +299,7 @@ describe("provenance guard — the list must stay derived (WARP-2322)", () => {
 });
 
 /** Minimal ToolContext for the end-to-end handler run below. */
-function memoryCtx(findUnique: ReturnType<typeof vi.fn>, update: ReturnType<typeof vi.fn>): ToolContext {
+function memoryCtx(findUnique: Mock, update: Mock): ToolContext {
   return {
     prisma: { memoryFact: { findUnique, update } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],
