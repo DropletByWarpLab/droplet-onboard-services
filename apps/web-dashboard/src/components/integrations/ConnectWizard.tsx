@@ -56,6 +56,7 @@ import {
   Copy,
   Check,
   ArrowRight,
+  BookOpen,
   CheckCircle2,
   AlertTriangle,
 } from "lucide-react";
@@ -126,6 +127,24 @@ function StepDots({ count, index }: { count: number; index: number }) {
         />
       ))}
     </div>
+  );
+}
+
+/** The guide link, at the moment of use (WARP-2342). Renders nothing when the
+ *  provider declares none, rather than linking nowhere. */
+function SetupGuideLink({ href }: { href: string | undefined }) {
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-3 inline-flex items-center gap-1.5 type-footnote text-accent"
+      data-testid="setup-guide-link"
+    >
+      <BookOpen size={14} aria-hidden />
+      Read the setup guide
+    </a>
   );
 }
 
@@ -282,6 +301,7 @@ function CredentialFlow({
           Droplet reads {descriptor.displayName} with a credential you create and own.
           It&rsquo;s stored encrypted on this box and never leaves it.
         </p>
+        <SetupGuideLink href={descriptor.catalog?.setupGuideHref} />
 
         {/* A discriminated choice — two genuinely different ways to
             authenticate the same account. Only the chosen path's fields render

@@ -40,6 +40,17 @@ export interface ConnectorMeta {
   /** One line: what connecting it does. */
   description: string;
   availability: ConnectorAvailability;
+  /**
+   * WARP-2342 — where the customer reads how to produce this provider's
+   * credential, carried through from the shared descriptor's catalog block.
+   *
+   * Rendered on the tile AND at the wizard's credential step, because a guide
+   * the customer cannot find is a guide they will not read. Optional HERE
+   * because the field is only *required* of a cloud track whose card is
+   * `available` — the descriptor type enforces that at the declaration site
+   * (`CloudProviderCatalogMeta`), which is the only place that can.
+   */
+  setupGuideHref?: string;
 }
 
 /** Resting write posture shown on the ERP hero. Read-only is the safe default. */

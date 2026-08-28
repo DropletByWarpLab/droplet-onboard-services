@@ -13,11 +13,16 @@
  *    ordering change here would land in their surface.
  */
 import { describe, it, expect } from "vitest";
-import { descriptorForCatalogId, providerDescriptor } from "@droplet/shared-types";
+import {
+  descriptorForCatalogId,
+  providerDescriptor,
+  type ProviderDescriptor,
+} from "@droplet/shared-types";
 import {
   CONNECTORS,
   connectorMeta,
   connectorCredentialFields,
+  connectorSetupGuideHref,
   providerKeyForConnector,
 } from "./connectors";
 
@@ -136,5 +141,101 @@ describe("credential fields come from the shared descriptor, not from this file"
       CONNECTORS.map((c) => connectorCredentialFields(c.id)),
     );
     expect(serialised).not.toMatch(/password|token|secret["']?\s*:\s*["'][^"']/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2342 — the setup guide is part of a cloud card's contract
+// ---------------------------------------------------------------------------
+
+describe("the setup guide travels with the card", () => {
+  /**
+   * The pass-through is real, and a card with no guide carries no key —
+   * `{ setupGuideHref: undefined }` would make "no guide declared" and
+   * "declared as nothing" indistinguishable, including to the pinned-catalog
+   * assertion at the top of this file.
+   *
+   * Mutation: always emit the key → red, because `"setupGuideHref" in meta`
+   * then holds for every card.
+   */
+  it("omits the key entirely for a card that declares no guide", () => {
+    for (const card of CONNECTORS) {
+      const declared = descriptorForCatalogId(card.id)?.catalog?.setupGuideHref;
+      expect(("setupGuideHref" in card), card.id).toBe(declared !== undefined);
+      expect(connectorSetupGuideHref(card.id)).toBe(declared);
+    }
+  });
+
+  it("has no guide for an id that is not a card", () => {
+    expect(connectorSetupGuideHref("not-a-card")).toBeUndefined();
+  });
+
+  /**
+   * The type-level half: a cloud provider offered on the hub CANNOT ship
+   * without a guide link. An SMB owner is being told to go and create a
+   * credential in a vendor console we do not control (ADR-042 §2), so an
+   * unreachable click-path is the connector being unusable.
+   *
+   * ⚠ Enforced by `tsc`, NOT by vitest — esbuild strips types, so under vitest
+   * the body below is an object literal like any other.
+   *
+   * Mutation: make `setupGuideHref` optional on the cloud arm and the
+   * `@ts-expect-error` becomes UNUSED, which is itself a tsc error ("Unused
+   * '@ts-expect-error' directive") — so the mutation goes red in both
+   * directions.
+   */
+  it("makes an available cloud card without a guide a TYPE error", () => {
+    // @ts-expect-error -- an `available` cloud card must declare setupGuideHref.
+    const bad: ProviderDescriptor = {
+      id: "fixture-no-guide",
+      displayName: "Fixture No Guide",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-no-guide",
+        name: "Fixture No Guide",
+        category: "Payments",
+        description: "Offered, with nowhere to read about it.",
+        availability: "available",
+        order: 99,
+      },
+    };
+    expect(bad.catalog?.setupGuideHref).toBeUndefined();
+  });
+
+  /**
+   * …and a `coming-soon` cloud card is deliberately exempt: it has no connect
+   * flow, so there is no moment of use to link from, and requiring a href
+   * would mean pointing at a guide nobody has written. Both shipped cloud
+   * cards are in exactly that state.
+   *
+   * Mutation: require the href on every cloud card → this stops compiling.
+   */
+  it("exempts a coming-soon cloud card", () => {
+    const ok: ProviderDescriptor = {
+      id: "fixture-later",
+      displayName: "Fixture Later",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-later",
+        name: "Fixture Later",
+        category: "Payments",
+        description: "Not offered yet.",
+        availability: "coming-soon",
+        order: 99,
+      },
+    };
+    expect(ok.catalog?.setupGuideHref).toBeUndefined();
+    for (const card of CONNECTORS) {
+      const d = descriptorForCatalogId(card.id);
+      if (d?.track === "cloud") expect(card.availability).toBe("coming-soon");
+    }
   });
 });

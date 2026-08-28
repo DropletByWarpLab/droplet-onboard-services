@@ -84,6 +84,7 @@ const PASTE_ONLY: ProviderDescriptor = {
     category: "Payments",
     description: "One pasted key, nothing else.",
     availability: "available",
+    setupGuideHref: "/docs/integrations/fixture-paste",
     order: 90,
   },
 };
@@ -121,6 +122,9 @@ const PAIR: ProviderDescriptor = {
     category: "Commerce",
     description: "Two fields, both required.",
     availability: "available",
+    // A DIFFERENT href from PASTE_ONLY's — the WARP-2342 assertion is that two
+    // providers link to two places, which a hardcoded link would fail.
+    setupGuideHref: "/docs/integrations/fixture-pair",
     order: 91,
   },
 };
@@ -185,6 +189,7 @@ const TWO_PATH: ProviderDescriptor = {
     category: "Accounting",
     description: "Two ways in, one account.",
     availability: "available",
+    setupGuideHref: "/docs/integrations/fixture-ledger",
     order: 92,
   },
 };
@@ -733,4 +738,39 @@ describe("the wizard is closed to vendors and open to descriptors", () => {
     expect(screen.getByText(/can’t be set up here yet/)).toBeTruthy();
   });
 
+  /**
+   * WARP-2342 — the guide is reachable at the moment of use, and it is the
+   * provider's own guide.
+   *
+   * Mutation: hardcode one href (or read it from the first descriptor) → red,
+   * because the two providers below must resolve to two different documents.
+   */
+  it("links each provider to its OWN setup guide", async () => {
+    registerProviderDescriptor(PASTE_ONLY);
+    registerProviderDescriptor(PAIR);
+
+    const first = renderWizard("fixture-paste");
+    await screen.findByText("Restricted API key *");
+    const a = screen.getByTestId("setup-guide-link").getAttribute("href");
+    first.unmount();
+
+    renderWizard("fixture-pair");
+    await screen.findByText("Client ID *");
+    const b = screen.getByTestId("setup-guide-link").getAttribute("href");
+
+    expect(a).toBe("/docs/integrations/fixture-paste");
+    expect(b).toBe("/docs/integrations/fixture-pair");
+    expect(a).not.toBe(b);
+  });
+
+  /**
+   * A provider with no guide gets no link — better than a link to nowhere.
+   *
+   * Mutation: always render the anchor → red.
+   */
+  it("renders no guide link for a provider that declares none", () => {
+    vi.mocked(testLanConnection).mockResolvedValue({ reachable: true });
+    renderWizard("eaglesoft");
+    expect(screen.queryByTestId("setup-guide-link")).toBeNull();
+  });
 });

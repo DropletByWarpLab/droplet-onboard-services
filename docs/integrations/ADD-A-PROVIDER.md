@@ -105,8 +105,11 @@ catalog: {
   id, name, category, description,
   availability: "available" | "coming-soon",
   order,                 // sort position on the hub, pinned
+  setupGuideHref,        // WARP-2342 — REQUIRED for a cloud track that is `available`
 }
 ```
+
+`setupGuideHref` is where the customer reads how to produce the credential. It is **not optional for an `available` cloud card** — `ProviderDescriptor`'s cloud arm requires it, so omitting it is a `tsc` error at the declaration site, not a review note. A `coming-soon` card is exempt: it has no connect flow, so there is no moment of use to link from. LAN tracks are exempt for the same reason the guide gate is cloud-only — there is no vendor console involved.
 
 Live connection **status** is merged in from `GET /api/integrations`; the descriptor is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
 
@@ -118,7 +121,7 @@ Live connection **status** is merged in from `GET /api/integrations`; the descri
 
 A descriptor that declares `lanProvisioning` instead gets the LAN-database flow (find the server → provision the read-only account → choose read scopes → confirm). That block carries every string the flow shows: `accountName`, `databaseName`, `defaultPort`, `hostPlaceholder`, `reachableLabel`, the one-off DBA `script`, the read `scopes`, and the optional `writeOptIn`. **`ConnectWizard.tsx` names no vendor and a test asserts it** — if a provider needs special handling there, the descriptor is under-specified and that is the bug to fix.
 
-> **A cloud/SaaS provider also needs a customer setup guide** at `docs/integrations/<id>.md`, listed in `SETUP.md` §3.3, before it can ship. The credential is created by the customer in a vendor console we do not control, so an undocumented click-path is the connector being unusable rather than an inconvenience. `scripts/check-setup-guides.sh` enforces coverage, the six required sections, the per-vendor fact pins and link integrity, and runs on every PR. Start from an existing guide — [`stripe.md`](stripe.md) is the simplest, [`xero.md`](xero.md) the one with the most qualification gates — and link the shared [`credential-handling.md`](credential-handling.md) rather than paraphrasing it. **WARP-2342** will add a `setupGuideHref` field to the metadata shape above so the guide is reachable from the hub; until it lands, the guide is reachable only from `SETUP.md`.
+> **A cloud/SaaS provider also needs a customer setup guide** at `docs/integrations/<id>.md`, listed in `SETUP.md` §3.3, before it can ship. The credential is created by the customer in a vendor console we do not control, so an undocumented click-path is the connector being unusable rather than an inconvenience. `scripts/check-setup-guides.sh` enforces coverage, the six required sections, the per-vendor fact pins and link integrity, and runs on every PR. Start from an existing guide — [`stripe.md`](stripe.md) is the simplest, [`xero.md`](xero.md) the one with the most qualification gates — and link the shared [`credential-handling.md`](credential-handling.md) rather than paraphrasing it. Point `setupGuideHref` at that guide; the hub card and the wizard's credential step both render it.
 
 ---
 

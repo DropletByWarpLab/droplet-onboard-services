@@ -207,7 +207,45 @@ export interface ProviderCatalogMeta {
   /** Sort position in the hub, pinned so the order survives a reordering of
    *  the descriptor declarations. */
   readonly order: number;
+  /**
+   * WARP-2342 — where the customer reads how to produce this provider's
+   * credential.
+   *
+   * Rendered by the hub card AND by the connect wizard at the credential-entry
+   * step, which is the moment the reader actually needs it. A guide the
+   * customer cannot find is a guide they will not read, and for a cloud
+   * provider the credential is created in a vendor console Warp Lab does not
+   * control — so an unreachable click-path is the connector being unusable,
+   * not a documentation nit.
+   *
+   * Declared `?` HERE but REQUIRED by the type below for a cloud track whose
+   * card is `available`; see {@link CloudProviderCatalogMeta}. Keeping the
+   * property optional on the base is what lets every reader say
+   * `catalog?.setupGuideHref` without narrowing first.
+   */
+  readonly setupGuideHref?: string;
 }
+
+/**
+ * The catalog block a CLOUD track may carry.
+ *
+ * A cloud provider's credential is created by the customer in a vendor console
+ * (ADR-042 §2), so `available` means "an SMB owner without an IT department is
+ * being asked to go and make one" — and that is not shippable without a guide.
+ * The union makes it a `tsc` error rather than a review note.
+ *
+ * `coming-soon` is deliberately exempt: such a card has no connect flow at all
+ * (the hub renders it disabled), so there is no moment of use to link from, and
+ * requiring a href would mean pointing at a guide that has not been written.
+ * `scripts/check-setup-guides.sh` owns the other half — that the guide named
+ * here exists and carries its six sections.
+ */
+export type CloudProviderCatalogMeta =
+  | (ProviderCatalogMeta & { readonly availability: "coming-soon" })
+  | (ProviderCatalogMeta & {
+      readonly availability: "available";
+      readonly setupGuideHref: string;
+    });
 
 /**
  * One mutually exclusive way of authenticating a provider.
@@ -281,8 +319,9 @@ export interface LanProvisioning {
   };
 }
 
-/** Everything both apps need to know about one provider. */
-export interface ProviderDescriptor {
+/** Everything both apps need to know about one provider, minus the two fields
+ *  whose legality depends on the track — see {@link ProviderDescriptor}. */
+interface ProviderDescriptorBase {
   /** The provider key persisted on `IntegrationConnection.provider` (free-text
    *  TEXT — a new key needs no migration; this registry is the only gate). */
   readonly id: string;
@@ -321,9 +360,25 @@ export interface ProviderDescriptor {
   readonly pollIntervalFloorMs?: number;
   /** Declared by a LAN track that provisions its own database account. */
   readonly lanProvisioning?: LanProvisioning;
-  readonly track: ProviderTrack;
-  readonly catalog?: ProviderCatalogMeta;
 }
+
+/**
+ * Everything both apps need to know about one provider.
+ *
+ * A union on `track` rather than a flat interface, for exactly one reason: a
+ * cloud provider offered on the hub must carry a setup-guide link, and that is
+ * a rule `tsc` can enforce at the declaration site. Every other property is
+ * shared, so readers still write `descriptor.egressHosts` without narrowing.
+ */
+export type ProviderDescriptor =
+  | (ProviderDescriptorBase & {
+      readonly track: "lan" | "catalog";
+      readonly catalog?: ProviderCatalogMeta;
+    })
+  | (ProviderDescriptorBase & {
+      readonly track: "cloud";
+      readonly catalog?: CloudProviderCatalogMeta;
+    });
 
 /**
  * The variant a form is currently on, or `undefined` for a provider that
