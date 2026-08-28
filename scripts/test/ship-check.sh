@@ -194,6 +194,10 @@ push that touches Dockerfile / compose / scripts / orchestrator TypeScript.
 
 OPTIONS
   --full              Also run --full-only checks (docker-build-smoke, ~15min)
+  --list-scanned      Debug: print the surface set stale-repo-names scans,
+                      one repo-relative path per line, and exit without
+                      scanning. Diff two runs to prove a change to the scan
+                      machinery did not change coverage.
   -h, --help          Show this help and the full check list
 
 SUBCOMMAND
@@ -956,6 +960,62 @@ run_check_exec_bits() {
   return 0
 }
 
+# Emit the curated surface set that `stale-repo-names` scans: one
+# repo-relative path per line, in the order the check inspects them. Each
+# entry is a path `grep` can ingest. Recursive trees are resolved with find
+# rather than bash globstar (which is opt-in via `shopt -s globstar` and not
+# guaranteed across operator shells).
+#
+# This is the SINGLE source of truth for the scanned set -- the check reads
+# it, and so does `--list-scanned`. The debug flag therefore cannot drift
+# from what is actually inspected, which is what makes a before/after diff
+# of the scanned set a real proof rather than a restatement (WARP-2456).
+# The surface list itself is documented, with rationale for every inclusion
+# and exemption, in run_check_stale_repo_names below.
+_stale_repo_names_surfaces() {
+  local f svc
+
+  # Top-level README + the compose file.
+  for f in "README.md" "docker/docker-compose.yml"; do
+    [ -f "$REPO_ROOT/$f" ] && printf '%s\n' "$f"
+  done
+
+  # services/*/README.md and services/*/TESTING.md (immediate children only).
+  if [ -d "$REPO_ROOT/services" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
+             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
+  fi
+
+  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
+  # exempt for the mDNS hostname allowlist).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # apps/orchestrator/src/**/*.ts (recursive, including *.test.ts — the
+  # canonical name should reach test fixtures too).
+  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
+  fi
+
+  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
+  for svc in services/ai-gateway services/voice-io; do
+    if [ -d "$REPO_ROOT/$svc" ]; then
+      while IFS= read -r f; do
+        printf '%s\n' "${f#$REPO_ROOT/}"
+      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
+    fi
+  done
+
+  return 0
+}
+
 run_check_stale_repo_names() {
   # Walk a curated set of user-facing surfaces and FAIL on any reference
   # to the LEGACY repo names `inference-engine` or `droplet-jetson-ai`.
@@ -1022,53 +1082,15 @@ run_check_stale_repo_names() {
   # `.local` disqualifies it as a repo-name reference.
   local label="stale-repo-names"
 
-  # Surface walk — build the file list. Each entry is a repo-relative path
-  # that grep -nE can ingest. We resolve recursive trees with find rather
-  # than relying on bash globstar (which is opt-in via `shopt -s globstar`
-  # and not guaranteed across operator shells).
+  # Surface walk — see _stale_repo_names_surfaces above, which owns the
+  # walk so the check and `--list-scanned` can never disagree about what is
+  # in scope.
   local files=()
   local f
-
-  # Top-level README + the compose file.
-  for f in "README.md" "docker/docker-compose.yml"; do
-    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
-  done
-
-  # services/*/README.md and services/*/TESTING.md (immediate children only).
-  if [ -d "$REPO_ROOT/services" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
-             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
-  fi
-
-  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
-  # exempt for the mDNS hostname allowlist).
-  if [ -d "$REPO_ROOT/scripts" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
-
-  # apps/orchestrator/src/**/*.ts (recursive, but NOT *.test.ts — those
-  # are test-only and not user-facing). All .ts files are in scope per
-  # the ticket; we include .test.ts deliberately because the canonical
-  # name should reach test fixtures too.
-  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
-  fi
-
-  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
-  local svc
-  for svc in services/ai-gateway services/voice-io; do
-    if [ -d "$REPO_ROOT/$svc" ]; then
-      while IFS= read -r f; do
-        files+=("${f#$REPO_ROOT/}")
-      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
-    fi
-  done
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    files+=("$f")
+  done < <(_stale_repo_names_surfaces)
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
@@ -1090,38 +1112,70 @@ run_check_stale_repo_names() {
   allowlist+="services/voice-io/TESTING.md:171"$'\n'
   allowlist+="services/ops-console/README.md:58"$'\n'
 
-  # Run grep -nE per file, post-filter for the .local exemption and the
-  # per-line allowlist, collect violations.
+  # ONE multi-file grep over the whole surface set, post-processed by a
+  # SINGLE read loop.
+  #
+  # WARP-2456: this used to be `while read … done < <(grep …)` executed once
+  # PER FILE. bash 3.2.57 — the stock macOS /bin/bash, which this script's
+  # version floor commits to supporting — dies with SIGTRAP (exit 133) at
+  # around the 251st iteration of that shape. A synthetic tree of 100 files
+  # survived, 500 crashed; the real tree carries ~1.1k surfaces, so the check
+  # was simply un-runnable on the primary dev machine while CI's bash 5 stayed
+  # green — silent in the direction that hurts. An fd leak, `local` inside the
+  # loop and the inner command substitution were each ruled out standalone;
+  # what remained was the repeated loop-over-process-substitution shape
+  # itself. One grep sidesteps the class entirely, and is faster everywhere.
+  #
+  # Paths are NUL-delimited into xargs so the command line cannot overflow
+  # ARG_MAX as the tree grows; -H forces the `<path>:` prefix even when a
+  # chunk ends up holding a single file, so every output line parses the same
+  # way. grep runs with cwd = REPO_ROOT so the paths it echoes back are
+  # byte-identical to the ones _stale_repo_names_surfaces emitted, which is
+  # what keeps the allowlist keys (`<path>:<lineno>`) matching.
+  #
+  # The pattern is deliberately unanchored (the repo names appear inside
+  # markdown links, code blocks, etc.); the `.local` post-filter below handles
+  # the only ambiguous overlap.
   local violations=""
-  local line lineno content
+  local line rest lineno content residual
+
+  # A ':' in a scanned path would make "<path>:<lineno>:<text>" ambiguous. No
+  # path in this repo has one; fail loudly rather than mis-parse if that ever
+  # changes.
   for f in "${files[@]}"; do
-    # Match either bare repo name. grep -nE returns "<lineno>:<text>".
-    # We don't anchor the pattern (the repo names can appear inside
-    # markdown links, code blocks, etc.); the .local post-filter handles
-    # the only ambiguous overlap.
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-
-      # Post-filter 1: if the line's only stale-name occurrence is
-      # `inference-engine.local` (the mDNS hostname), skip it. We do
-      # this by removing every `.local` suffix occurrence and re-grepping
-      # the residual for either bare pattern.
-      local residual
-      residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
-      if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
-        continue
-      fi
-
-      # Post-filter 2: per-line allowlist.
-      if _allowlisted "$f:$lineno" "$allowlist"; then
-        continue
-      fi
-
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <(grep -nE 'inference-engine|droplet-jetson-ai' "$REPO_ROOT/$f" 2>/dev/null || true)
+    case "$f" in
+      *:*)
+        printf "  ${_RED}FAIL${_RESET}  %s — scanned path contains ':' (%s); scan output cannot be parsed unambiguously\n" "$label" "$f"
+        _record_result "$label" fail
+        return 1
+        ;;
+    esac
   done
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+
+    # Post-filter 1: if the line's only stale-name occurrence is
+    # `inference-engine.local` (the mDNS hostname), skip it. We do this by
+    # removing every `.local` suffix occurrence and re-grepping the residual
+    # for either bare pattern.
+    residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
+    if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
+      continue
+    fi
+
+    # Post-filter 2: per-line allowlist.
+    if _allowlisted "$f:$lineno" "$allowlist"; then
+      continue
+    fi
+
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -nHE 'inference-engine|droplet-jetson-ai' 2>/dev/null || true)
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no stale refs)\n" "$label" "${#files[@]}"
@@ -1852,6 +1906,7 @@ main() {
   # Parse args. Supports `--help`, `--full`, single subcommand, or nothing.
   local run_full=false
   local single_check=""
+  local list_scanned=false
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1861,6 +1916,10 @@ main() {
         ;;
       --full)
         run_full=true
+        shift
+        ;;
+      --list-scanned)
+        list_scanned=true
         shift
         ;;
       --)
@@ -1886,6 +1945,20 @@ main() {
   if [ ! -d "$REPO_ROOT/.git" ] && [ ! -f "$REPO_ROOT/.git" ]; then
     printf "${_RED}error:${_RESET} %s is not a git repo\n" "$REPO_ROOT" >&2
     return 3
+  fi
+
+  # Debug flag. Dump the surface set `stale-repo-names` scans and exit --
+  # nothing else is printed, so two runs can be diffed directly. This exists
+  # so a change to the scan machinery can be PROVEN not to change coverage
+  # (WARP-2456 restructured N per-file greps into one multi-file grep).
+  if [ "$list_scanned" = "true" ]; then
+    if [ -n "$single_check" ] && [ "$single_check" != "stale-repo-names" ]; then
+      printf "${_RED}error:${_RESET} --list-scanned is only implemented for stale-repo-names (got '%s')\n" \
+        "$single_check" >&2
+      return 2
+    fi
+    _stale_repo_names_surfaces
+    return 0
   fi
 
   printf "\n  ${_BOLD}Droplet ship-check${_RESET}  (repo: %s)\n" "$REPO_ROOT"
