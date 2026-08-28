@@ -306,10 +306,21 @@ export function createApp(
   app.use("/api", createIntegrationsRouter(prisma));
   // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
   // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
-  // and validates whatever `credentialFields` a provider declares. Mounted
-  // after the ERP router because both live under /api/integrations; the paths
-  // do not overlap (`/integrations/:provider/credentials` is three segments,
-  // every ERP route is two or ends in a literal verb).
+  // and validates whatever `credentialFields` a provider declares.
+  //
+  // WARP-2485 — this shares the /api/integrations prefix with
+  // `createIntegrationsRouter` above, and with nothing else: `createErpRouter`
+  // below owns /api/erp, a different prefix. Mount order is NOT what keeps the
+  // two apart, and neither mount is load-bearing on being second. The invariant
+  // is that their path sets are disjoint — no single URL can match a route in
+  // both — and while that holds either order behaves identically.
+  // `/integrations/:provider/credentials` ends in a literal `credentials`;
+  // the Eaglesoft routes are `/integrations`, `/integrations/eaglesoft`, and
+  // `/integrations/eaglesoft/<literal verb>`. If a route is ever added that one
+  // URL could match in both, mount order silently picks the winner and the
+  // loser becomes unreachable, so the disjointness is checked rather than
+  // asserted here: `routes/integrations-prefix.mount.test.ts` enumerates both
+  // routers' stacks and fails on any such pair.
   app.use("/api", createSaasCredentialsRouter(prisma));
   // WARP-2463 — admin-only read over the reconciliation sweep's STORED drift
   // report. Its own factory rather than a route on the integrations router:

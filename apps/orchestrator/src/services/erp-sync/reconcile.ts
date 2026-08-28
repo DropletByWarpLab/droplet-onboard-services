@@ -80,6 +80,30 @@ import { highestWatermark, isWatermarkAhead, isoInstant, watermarkValueOf } from
 /** Why a record the full read knows about was missing from the delta read. */
 export type ErpDriftClass = "missed-newer" | "watermark-behind";
 
+/**
+ * Strict ISO-8601 date / date-time. Deliberately NOT "whatever `new Date()`
+ * accepts": `new Date("1001")` is the year 1001, so a bare numeric invoice
+ * number would parse as a plausible timestamp and land in a column an
+ * operator reads as one. Anchored, fixed-width, and optional-time-only.
+ */
+const ISO_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/**
+ * Coerce a vendor marker to a timestamp, or `null` when it is not one.
+ *
+ * The single gate between a vendor's ordering token and anything that stores
+ * or displays it. Returning `null` for a non-timestamp marker loses nothing an
+ * operator was going to read — an opaque cursor tells them nothing — and it is
+ * what makes the drift record's PHI-free rule structural rather than a
+ * convention someone has to remember.
+ */
+export function markerTimestamp(marker: string | null | undefined): Date | null {
+  if (typeof marker !== "string" || !ISO_TIMESTAMP.test(marker)) return null;
+  const ms = Date.parse(marker);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
 /** Per-entity drift. Counts and the dataset name only. */
 export interface ErpEntityDrift {
   /** Canonical dataset name (`invoice`, `bill`) — not a record id. */
