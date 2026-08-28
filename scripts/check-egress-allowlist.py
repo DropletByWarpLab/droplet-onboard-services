@@ -76,6 +76,19 @@ CONFIG_FILES_FOR_BARE_HOSTS = re.compile(
     r"(^docker/docker-compose\.yml$)|(^openwrt/files/etc/config/)|(^\.env\.example$)"
 )
 
+# WARP-2217 — provider descriptors declare their destinations as BARE HOSTS in
+# an `egressHosts: [...]` array. Code files are otherwise exempt from bare-host
+# matching (prose noise), so without this the whole declaration would be
+# invisible to the gate and a descriptor could name an unregistered vendor host
+# with nothing going red.
+#
+# Collected as a small state machine rather than a single-line regex on purpose:
+# the array is prettier-formatted and wraps once it has more than two entries,
+# and a one-line pattern would silently stop matching the day a third host is
+# added — the exact failure mode this gate exists to prevent.
+EGRESS_HOSTS_OPEN_RE = re.compile(r"\begressHosts\b\s*:\s*\[")
+QUOTED_RE = re.compile(r"[\"']([^\"']+)[\"']")
+
 
 def tracked_files(root: str) -> list[str]:
     out = subprocess.run(["git", "-C", root, "ls-files"],
@@ -120,7 +133,25 @@ def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
         except OSError:
             continue
         bare_ok = bool(CONFIG_FILES_FOR_BARE_HOSTS.search(path))
+        # Open when we are inside an `egressHosts: [` array (WARP-2217).
+        in_egress_hosts = False
         for lineno, line in enumerate(lines, 1):
+            if in_egress_hosts or EGRESS_HOSTS_OPEN_RE.search(line):
+                tail = line
+                if not in_egress_hosts:
+                    tail = line[EGRESS_HOSTS_OPEN_RE.search(line).end():]
+                    in_egress_hosts = True
+                closing = tail.find("]")
+                scanned = tail if closing < 0 else tail[:closing]
+                for m in QUOTED_RE.finditer(scanned):
+                    host = m.group(1).strip().lower().rstrip(".")
+                    # Same internal-host filter every other extraction path
+                    # uses, so a fixture descriptor pointing at `.test` stays
+                    # out of scope by construction.
+                    if host and not is_internal_host(host):
+                        found[host].add((path, lineno))
+                if closing >= 0:
+                    in_egress_hosts = False
             for m in URL_RE.finditer(line):
                 host = m.group(1).lower().rstrip(".")
                 if not is_internal_host(host):
