@@ -317,13 +317,13 @@ export function createApp(
   // route whose guard is narrower than its neighbours' is safer as its own
   // registration than as an exception inside someone else's file.
   //
-  // `/integrations/drift/:connectionId` is three segments like WARP-2275's
-  // `/integrations/:provider/credentials` above, and they are disjoint in both
-  // directions: that one needs a literal `credentials` last, this one a literal
-  // `drift` second. The single shape both would accept is
-  // `/integrations/drift/credentials` — a connection whose cuid is the word
-  // "credentials" — which the mount order above resolves in favour of the
-  // credentials route.
+  // `/integrations/:connectionId/drift` is match-disjoint from every other
+  // route under /api/integrations — it is the only one whose LAST segment is
+  // `drift`, and the two-segment routes differ in arity — so this mount's
+  // POSITION is not load-bearing and reordering this block cannot change which
+  // handler serves a request. See the table in routes/erp-drift.ts. WARP-2485
+  // adds a test for exactly that property; `createErpDriftRouter` should join
+  // its ROUTERS list.
   app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships

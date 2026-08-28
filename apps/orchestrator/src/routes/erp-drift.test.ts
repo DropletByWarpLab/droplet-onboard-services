@@ -76,7 +76,7 @@ beforeEach(() => {
   recordActivityMock.mockReset();
 });
 
-describe("GET /api/integrations/drift/:connectionId — the guard", () => {
+describe("GET /api/integrations/:connectionId/drift — the guard", () => {
   it("carries requireRole AT REGISTRATION, not a check inside the handler", () => {
     // MUTATION: move the role check into the handler body (an `isAdmin(req)`
     // early-return) → no marked guard on the route stack → red.
@@ -95,7 +95,7 @@ describe("GET /api/integrations/drift/:connectionId — the guard", () => {
     // Guards against a vacuous sweep: an empty router would satisfy "every
     // route is guarded" while checking nothing.
     expect(routes).toHaveLength(1);
-    expect(routes[0].path).toBe("/integrations/drift/:connectionId");
+    expect(routes[0].path).toBe("/integrations/:connectionId/drift");
     expect(routes[0].stack.some((h) => isRoleGuard(h.handle))).toBe(true);
     // The guard runs BEFORE the handler.
     expect(routes[0].stack.findIndex((h) => isRoleGuard(h.handle))).toBe(0);
@@ -108,7 +108,7 @@ describe("GET /api/integrations/drift/:connectionId — the guard", () => {
     // audit chain the box is sold on.
     const prisma = prismaStub();
     const res = await request(buildApp({ id: "u-family", role: "family" }, prisma)).get(
-      "/api/integrations/drift/conn-1",
+      "/api/integrations/conn-1/drift",
     );
 
     expect(res.status).toBe(403);
@@ -128,7 +128,7 @@ describe("GET /api/integrations/drift/:connectionId — the guard", () => {
   it("denies a guest and a role-less session too", async () => {
     for (const user of [{ id: "u-guest", role: "guest" }, undefined]) {
       recordActivityMock.mockReset();
-      const res = await request(buildApp(user)).get("/api/integrations/drift/conn-1");
+      const res = await request(buildApp(user)).get("/api/integrations/conn-1/drift");
       expect(res.status).toBe(403);
       expect(recordActivityMock).toHaveBeenCalledTimes(1);
     }
@@ -137,7 +137,7 @@ describe("GET /api/integrations/drift/:connectionId — the guard", () => {
   it("admits owner and admin", async () => {
     for (const role of ["owner", "admin"]) {
       const res = await request(buildApp({ id: `u-${role}`, role })).get(
-        "/api/integrations/drift/conn-1",
+        "/api/integrations/conn-1/drift",
       );
       expect(res.status).toBe(200);
     }
@@ -145,14 +145,14 @@ describe("GET /api/integrations/drift/:connectionId — the guard", () => {
   });
 });
 
-describe("GET /api/integrations/drift/:connectionId — the payload", () => {
+describe("GET /api/integrations/:connectionId/drift — the payload", () => {
   it("returns drift for the requested connection only", async () => {
     const prisma = prismaStub([
       driftRow(),
       driftRow({ id: "d-2", connectionId: "conn-2", classification: "MISSED_NEWER" }),
     ]);
     const res = await request(buildApp({ id: "u-1", role: "admin" }, prisma)).get(
-      "/api/integrations/drift/conn-1",
+      "/api/integrations/conn-1/drift",
     );
 
     expect(res.status).toBe(200);
@@ -178,7 +178,7 @@ describe("GET /api/integrations/drift/:connectionId — the payload", () => {
     // 404 either, because "we have never swept this" is a real answer the hub
     // has to be able to render.
     const res = await request(buildApp({ id: "u-1", role: "admin" }, prismaStub([]))).get(
-      "/api/integrations/drift/conn-1",
+      "/api/integrations/conn-1/drift",
     );
     expect(res.status).toBe(200);
     expect(res.body.entries).toEqual([]);
@@ -191,7 +191,7 @@ describe("GET /api/integrations/drift/:connectionId — the payload", () => {
       driftRow({ classification: "MISSED_NEWER", missedCount: 2, incrementalCount: 10 }),
     ]);
     const res = await request(buildApp({ id: "u-1", role: "admin" }, prisma)).get(
-      "/api/integrations/drift/conn-1",
+      "/api/integrations/conn-1/drift",
     );
     const body = JSON.stringify(res.body);
     expect(body).not.toContain("INV-");
@@ -201,7 +201,7 @@ describe("GET /api/integrations/drift/:connectionId — the payload", () => {
 
   it("rejects a nonsense window rather than scanning on it", async () => {
     const res = await request(buildApp({ id: "u-1", role: "admin" })).get(
-      "/api/integrations/drift/conn-1?days=0",
+      "/api/integrations/conn-1/drift?days=0",
     );
     expect(res.status).toBe(400);
   });
@@ -209,11 +209,82 @@ describe("GET /api/integrations/drift/:connectionId — the payload", () => {
   it("defaults the window to 30 days", async () => {
     const prisma = prismaStub();
     await request(buildApp({ id: "u-1", role: "admin" }, prisma)).get(
-      "/api/integrations/drift/conn-1",
+      "/api/integrations/conn-1/drift",
     );
     const res = await request(buildApp({ id: "u-1", role: "admin" }, prisma)).get(
-      "/api/integrations/drift/conn-1",
+      "/api/integrations/conn-1/drift",
     );
     expect(res.body.windowDays).toBe(30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2485 — mount order must never be load-bearing
+// ---------------------------------------------------------------------------
+
+/**
+ * Two Express path patterns can match a common concrete path iff they have the
+ * same segment count and, at every position, either side is a `:param` or the
+ * two literals are equal. These routers use plain patterns only — no regex, no
+ * optional segments, no wildcards — so this is exact, not an approximation.
+ */
+function canMatchSamePath(a: string, b: string): boolean {
+  const as = a.split("/").filter(Boolean);
+  const bs = b.split("/").filter(Boolean);
+  if (as.length !== bs.length) return false;
+  return as.every((seg, i) => seg.startsWith(":") || bs[i].startsWith(":") || seg === bs[i]);
+}
+
+function pathsOf(router: unknown): string[] {
+  const stack = (router as { stack: Array<{ route?: { path: string } }> }).stack;
+  return stack.map((l) => l.route?.path).filter((p): p is string => Boolean(p));
+}
+
+describe("the drift route is match-disjoint from every /api/integrations sibling", () => {
+  it("shares no concrete path with the credentials or ERP routers", async () => {
+    // REGRESSION (WARP-2485). The first revision of this route was
+    // `/integrations/drift/:connectionId`, which overlapped WARP-2275's
+    // `/integrations/:provider/credentials` on the single concrete path
+    // `/integrations/drift/credentials` and leaned on MOUNT ORDER in app.ts to
+    // resolve it. A router whose correctness depends on where it was mounted
+    // breaks the moment someone reorders that file.
+    //
+    // MUTATION: restore the old `/integrations/drift/:connectionId` → the
+    // credentials pattern overlaps → red.
+    const { createSaasCredentialsRouter } = await import("./saas-credentials.js");
+    const { createIntegrationsRouter } = await import("./integrations.js");
+
+    const mine = pathsOf(createErpDriftRouter(prismaStub() as never));
+    const siblings = [
+      ...pathsOf(createSaasCredentialsRouter({} as never)),
+      ...pathsOf(createIntegrationsRouter({} as never)),
+    ];
+
+    // Guards against a vacuous sweep: an empty sibling list would make the
+    // disjointness assertion below true while comparing nothing.
+    expect(mine).toEqual(["/integrations/:connectionId/drift"]);
+    expect(siblings.length).toBeGreaterThanOrEqual(8);
+    expect(siblings).toContain("/integrations/:provider/credentials");
+
+    const overlaps = siblings.filter((s) => mine.some((m) => canMatchSamePath(m, s)));
+    expect(overlaps).toEqual([]);
+  });
+
+  it("recognises a real overlap, so the sweep above is not vacuous", () => {
+    // The matcher itself must be able to fail. Without this, a degraded
+    // `canMatchSamePath` that always returned false would make the disjointness
+    // assertion pass for every route the repo will ever add.
+    expect(
+      canMatchSamePath("/integrations/drift/:connectionId", "/integrations/:provider/credentials"),
+    ).toBe(true);
+    expect(
+      canMatchSamePath("/integrations/:connectionId/drift", "/integrations/:provider/credentials"),
+    ).toBe(false);
+    expect(
+      canMatchSamePath("/integrations/:connectionId/drift", "/integrations/eaglesoft/connect"),
+    ).toBe(false);
+    expect(
+      canMatchSamePath("/integrations/:connectionId/drift", "/integrations/credentials"),
+    ).toBe(false);
   });
 });

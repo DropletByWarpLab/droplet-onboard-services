@@ -1,7 +1,7 @@
 /**
  * WARP-2463 — the admin read surface over stored reconciliation drift.
  *
- *   GET /api/integrations/drift/:connectionId?days=30
+ *   GET /api/integrations/:connectionId/drift?days=30
  *
  * The hub's connection detail page asks one question of this route: has the
  * incremental path been trustworthy for this connection lately, and is it
@@ -30,10 +30,33 @@
  * and a guard narrower than its neighbours' is safer as its own registration
  * than as an exception inside someone else's file.
  *
- * No path collides. The integrations router serves `/integrations` and
- * `/integrations/eaglesoft[/...]`; WARP-2275's credentials router serves
- * `/integrations/:provider/credentials`, which needs a literal `credentials`
- * last where this needs a literal `drift` second.
+ * ## The path is match-disjoint from every sibling, so MOUNT ORDER IS NEVER
+ * ## LOAD-BEARING
+ *
+ * The trailing segment is the literal `drift`, and no other route under
+ * `/api/integrations` ends in it:
+ *
+ *   `/integrations`                            2 segments
+ *   `/integrations/eaglesoft`                  2 segments
+ *   `/integrations/credentials`                2 segments
+ *   `/integrations/eaglesoft/connect`          `connect`
+ *   `/integrations/eaglesoft/test`             `test`
+ *   `/integrations/eaglesoft/write-enable`     `write-enable`
+ *   `/integrations/eaglesoft/write-disable`    `write-disable`
+ *   `/integrations/eaglesoft/disconnect`       `disconnect`
+ *   `/integrations/:provider/credentials`      `credentials`   (WARP-2275)
+ *
+ * So no `:provider` value can shadow this route and this route can shadow
+ * none of them: a concrete path cannot end in both `drift` and `credentials`,
+ * and the two-segment routes differ in arity. This is a stronger property than
+ * "the mount order happens to resolve it" — a router whose correctness depends
+ * on where it was mounted breaks the moment someone reorders `app.ts`, which
+ * is exactly what WARP-2485 adds a test for.
+ *
+ * An earlier revision used `/integrations/drift/:connectionId`, which DID
+ * overlap `/integrations/:provider/credentials` on the single concrete path
+ * `/integrations/drift/credentials` and leaned on mount order to resolve it.
+ * Do not reintroduce a leading literal here.
  */
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
@@ -61,7 +84,7 @@ export function createErpDriftRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get(
-    "/integrations/drift/:connectionId",
+    "/integrations/:connectionId/drift",
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next) => {
       try {
