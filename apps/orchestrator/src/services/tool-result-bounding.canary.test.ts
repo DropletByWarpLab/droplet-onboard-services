@@ -63,6 +63,12 @@ const NOT_A_CURSOR: Record<string, string> = {
   next_step: "routes/setup.ts — the wizard's next screen name, not a pagination token",
   nextFireAt: "routes/scenes.ts + scene-schedule-ticker — WHEN a job runs next, a timestamp",
   nextAttemptAt: "m365/delta-cursor.service.ts — retry backoff timestamp, despite the file name",
+  erpSyncCursor:
+    "erp-sync/cursor.service.ts — the Prisma DELEGATE for the ErpSyncCursor table on the " +
+    "structural ErpCursorPrisma interface, not a paging token on any wire payload. The row it " +
+    "reaches does hold a resume position (its `watermark` column), but that never crosses a " +
+    "tool result: WARP-2218's poller is a cron job, not a tool. Adding it to CURSOR_KEYS would " +
+    "preserve a key that is never in a payload in the first place.",
   nextRole: "routes/access.ts + people.ts — the RBAC role being transitioned TO",
   nextValue: "routes/settings.ts — the setting value being written",
   nextParam: "file-search.service.ts — a parsed query-string parameter",
