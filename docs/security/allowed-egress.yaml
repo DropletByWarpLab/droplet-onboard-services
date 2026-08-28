@@ -581,6 +581,47 @@ entries:
     review_by: 2027-07-12
     code_refs: [services/erp-connector/src/api-connector.ts, services/erp-connector/src/api-auth.ts, apps/orchestrator/src/services/erp-provider.ts]
 
+  # kind: dynamic, NOT egress — and that is deliberate, not an oversight.
+  # Mailchimp's base URL is https:// + <dc> + .api.mailchimp.com + /3.0/, where
+  # <dc> is the datacenter suffix parsed out of the customer's own API key
+  # (".…-us14") at runtime. There is no hostname to write down: each customer's
+  # account lives in a different datacenter, so no static entry can cover it.
+  # docs/SECURITY.md:174-184 is explicit that runtime-configured destinations
+  # register as kind: dynamic with their config key, and :183-185 that "the
+  # static scan cannot see hostnames assembled at runtime".
+  #
+  # DO NOT "FIX" THIS INTO A STATIC ENTRY. A kind: egress entry with a wildcard
+  # or one sampled datacenter would be worse than useless — it would turn
+  # egress-gate green over a host that nothing constrains. Since a dynamic
+  # entry contributes NO host patterns to the scanner, this connector's source
+  # deliberately carries no https://…mailchimp.com literal either.
+  #
+  # THE ENFORCEMENT IS IN CODE, not here. assertSafeMailchimpBaseUrl() does
+  # exact-host equality against <dc>.api.mailchimp.com for the datacenter this
+  # connection stores — anchored, so "us14.api.mailchimp.com.evil.test" is
+  # refused — and it runs before any request object exists. Its tests assert on
+  # the injected fetch having ZERO calls. Treat that guard as the control this
+  # entry documents.
+  - id: mailchimp-marketing-api
+    kind: dynamic
+    service: erp-connector
+    config_key: IntegrationConnection.providerConfig.datacenter (parsed from the customer's API key suffix at intake)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Mailchimp Marketing API /3.0 — the audience-and-campaign cloud connector
+      (WARP-2379). Read-only: audiences and members, campaigns and their
+      reports, e-commerce stores and orders. Carries the customer's own
+      marketing contacts, fetched on request under a key the account owner
+      created and pasted; never ambient, never a background crawl. The host is
+      per-connection because Mailchimp shards accounts by datacenter, so the
+      code-side exact-host guard is the enforcement and this entry is the
+      registration and review record.
+    ticket: WARP-2379
+    added: 2026-08-27
+    review_by: 2027-08-27
+    code_refs: [services/erp-connector/src/mailchimp/connector.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress
