@@ -59,11 +59,23 @@
  * persists this report). A vendor's marker is an ORDERING TOKEN, not
  * necessarily a time: Stripe's cursors are object ids, and any vendor is free
  * to order by its own record key. So a marker never leaves this module as a
- * string — `markerTimestamp` coerces it, and a marker that is not a real
- * timestamp becomes `null`. That is why the persisted row cannot carry an
- * invoice number even for a vendor that orders by one: there is no path from a
- * raw marker to storage.
+ * string — `isoInstant` coerces it, and a marker that is not a real timestamp
+ * becomes `null`. That is why the persisted row cannot carry an invoice number
+ * even for a vendor that orders by one: there is no path from a raw marker to
+ * storage.
+ *
+ * ## One comparator, three questions (WARP-2495)
+ *
+ * The advance, `watermark-behind` and `missed-newer` all ask a question about
+ * the same two things — a row's position and the stored watermark — so they
+ * are all answered by `watermark.ts` on the value `watermarkValueOf` selects,
+ * and none of them compares strings. Splitting them was how the third came to
+ * disagree with the other two: WARP-2474 moved the watermark onto `updated_at`
+ * and left this module's `missed-newer` predicate reading the ORDERING key,
+ * which is `<= updated_at` in general, so rows modified after the watermark
+ * but issued before it were filtered out of the report.
  */
+import { highestWatermark, isWatermarkAhead, isoInstant, watermarkValueOf } from "./watermark.js";
 
 /** Why a record the full read knows about was missing from the delta read. */
 export type ErpDriftClass = "missed-newer" | "watermark-behind";
@@ -110,7 +122,7 @@ export interface ErpEntityDrift {
    *  this entity on this pass, which is itself the useful signal. */
   classes: ErpDriftClass[];
   /**
-   * Oldest marker among the missed records, as a TIMESTAMP (WARP-2463).
+   * Oldest position among the missed records, as a TIMESTAMP (WARP-2463).
    *
    * "How far back did the gap start" is the forensic question when an owner
    * reports that the assistant did not know about something. Computed here
@@ -118,8 +130,16 @@ export interface ErpEntityDrift {
    * exactly one implementation — a second copy in the persistence layer would
    * be free to disagree with this one, and the disagreement would be silent.
    *
-   * `null` when nothing was missed, and also when the missed records' markers
-   * are not timestamps at all. See `markerTimestamp`.
+   * Measured on the value the record was JUDGED missed on — `watermarkValueOf`,
+   * the same one the predicate and the advance use (WARP-2495). Reading the
+   * ordering key here instead would answer a different question from the one
+   * that selected the record: a row caught only because its `updated_at` moved
+   * would report `null` beside a `missedCount` of 1, which reads as "we cannot
+   * date the gap" when in fact we can.
+   *
+   * `null` when nothing was missed, and when the missed records have no ISO
+   * position at all — an opaque token is never a timestamp and must never be
+   * stored as one. See `watermark.ts`'s `isoInstant`.
    */
   earliestMissedAt: Date | null;
 }
@@ -136,24 +156,40 @@ export interface ErpDriftReport {
   driftDetected: boolean;
 }
 
-/** A row reduced to the two things reconciliation needs. Never the payload. */
+/** A row reduced to the three things reconciliation needs. Never the payload. */
 export interface RecordIdentity {
   sourceKey: string;
+  /** The dataset's declared ORDERING key. Kept under its own name rather than
+   *  merged with the one below, so a reader can always tell which of the two
+   *  a given watermark actually came from. */
   marker: string | null;
+  /** WARP-2464's canonical `updated_at`, or null when the dataset withholds
+   *  the column AND when a track leaves it present-and-undefined. The two are
+   *  normalised to the same value here so the preference downstream is a test
+   *  on a VALUE, never on a property's presence. */
+  updatedAt: string | null;
 }
 
 /**
- * Project a vendor row onto (id, marker) using the entity's DECLARED fields.
+ * Project a vendor row onto (id, marker, updated_at) using the entity's
+ * DECLARED fields.
  *
  * A row missing its declared id field is dropped rather than given a
  * synthesised one: a fabricated key would pair with nothing on the other side
  * of the diff and would be reported as drift on every single sweep, which
  * trains an operator to ignore the report.
+ *
+ * `updated_at` is read with the same undefined-or-null test the marker uses,
+ * and that is load-bearing (WARP-2474): QuickBooks Online and Desktop emit
+ * `updated_at: undefined` on their invoice and bill rows, so a presence test
+ * here would project the string `"undefined"` and it would become the stored
+ * watermark.
  */
 export function identify(
   rows: readonly unknown[],
   sourceKeyField: string,
   markerField: string,
+  updatedAtField: string,
 ): RecordIdentity[] {
   const out: RecordIdentity[] = [];
   for (const row of rows) {
@@ -162,22 +198,26 @@ export function identify(
     const key = rec[sourceKeyField];
     if (key === undefined || key === null || key === "") continue;
     const marker = rec[markerField];
+    const updatedAt = rec[updatedAtField];
     out.push({
       sourceKey: String(key),
       marker: marker === undefined || marker === null ? null : String(marker),
+      updatedAt: updatedAt === undefined || updatedAt === null ? null : String(updatedAt),
     });
   }
   return out;
 }
 
-/** The largest marker in a set, or null when nothing carried one. */
+/**
+ * The highest watermark position in a set, or null when nothing carried one.
+ *
+ * Not "the largest marker" since WARP-2474: each row offers its canonical
+ * `updated_at` when the vendor defined one and its ordering key otherwise, and
+ * the comparison is on parsed instants rather than on strings. `watermark.ts`
+ * holds the whole argument.
+ */
 export function highWaterMark(records: readonly RecordIdentity[]): string | null {
-  let best: string | null = null;
-  for (const r of records) {
-    if (r.marker === null) continue;
-    if (best === null || r.marker > best) best = r.marker;
-  }
-  return best;
+  return highestWatermark(records);
 }
 
 /**
@@ -199,12 +239,41 @@ export function diffForDrift(
   let earliestMissedAt: Date | null = null;
   for (const r of full) {
     if (seen.has(r.sourceKey)) continue;
-    // Strictly after: a record exactly at the watermark was already delivered
-    // by the run that set it, so counting it would report drift every sweep.
-    if (watermark !== null && (r.marker === null || r.marker <= watermark)) continue;
+    // The row's position, chosen exactly as the watermark's own advance
+    // chooses it. Bound ONCE and used for both the predicate below and the
+    // forensic timestamp under it, so the two cannot come to answer on
+    // different values (WARP-2495) — which is what happened when the predicate
+    // moved to `updated_at` and `earliestMissedAt` stayed on the ordering key.
+    const value = watermarkValueOf(r);
+    // Strictly after, on the SAME value the watermark advances on and through
+    // the SAME comparator `watermark-behind` uses (WARP-2495). Three
+    // consequences, each of which was a defect in the string compare this
+    // replaced:
+    //
+    //   - the row offers its `updated_at` when the vendor defined one, so a
+    //     document modified after the watermark is reported even though it was
+    //     ISSUED before it — the Xero/HubSpot case, and the reason a sweep
+    //     exists;
+    //   - a record exactly AT the watermark was already delivered by the run
+    //     that set it, so `isWatermarkAhead` being strict is what stops this
+    //     reporting drift on every sweep forever;
+    //   - an opaque token is never ordered. `ch_9zzz > ch_1aaa` has an answer
+    //     and the answer is meaningless, so the predicate declines to make the
+    //     call rather than manufacture a finding on every sweep of every
+    //     Stripe connection. A report an operator learns to ignore is worse
+    //     than none — the same trade `isWatermarkAhead` already makes for
+    //     `watermark-behind`.
+    //
+    // A null watermark filtered nothing, so absence from the incremental read
+    // is drift on its own evidence; `isWatermarkAhead` answers that too.
+    if (!isWatermarkAhead(value, watermark)) continue;
     missedCount += 1;
-    // Coerced HERE, so no caller ever sees the raw marker of a missed record.
-    const at = markerTimestamp(r.marker);
+    // Coerced HERE, so no caller ever sees a missed record's raw position.
+    // `isoInstant` is `null` for an opaque token, and that is the whole of
+    // WARP-2463's PHI rule: a vendor that orders by its record key cannot get
+    // an invoice number into a DateTime column, because there is no path from
+    // a raw position to storage that does not pass through this line.
+    const at = isoInstant(value);
     if (at !== null && (earliestMissedAt === null || at < earliestMissedAt)) {
       earliestMissedAt = at;
     }
@@ -212,8 +281,10 @@ export function diffForDrift(
 
   const fullHigh = highWaterMark(full);
   const incHigh = highWaterMark(incremental);
-  const watermarkBehind =
-    fullHigh !== null && (incHigh === null ? watermark === null || fullHigh > watermark : fullHigh > incHigh);
+  // WARP-2474 — measured against the SAME value the advance used, and with the
+  // same ISO-vs-opaque split: a lag between two opaque cursors is a
+  // lexicographic accident, not a finding.
+  const watermarkBehind = isWatermarkAhead(fullHigh, incHigh ?? watermark);
 
   const classes: ErpDriftClass[] = [];
   if (missedCount > 0) classes.push("missed-newer");

@@ -267,6 +267,32 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const LAST_MODIFIED_PROPERTY = "hs_lastmodifieddate";
 
 /**
+ * A requested-property list with {@link LAST_MODIFIED_PROPERTY} guaranteed
+ * present (WARP-2494).
+ *
+ * HubSpot returns only the properties a request names, and the modification
+ * stamp is this connector's filter, its sort key, its watermark AND the source
+ * of the canonical `updated_at` column. A caller naming its own properties is
+ * asking to ADD to what comes back, never to lose that.
+ *
+ * The previous `input.properties ?? [LAST_MODIFIED_PROPERTY]` read as a
+ * default and behaved as a replacement: `properties: ["email"]` returned rows
+ * carrying no stamp, {@link HubSpotConnector.toRecord} dropped every one of
+ * them, and the poll surfaced as an empty result or a
+ * {@link HubSpotWatermarkStallError} — never as "you forgot a property".
+ * Membership is checked rather than appended blindly, because a duplicated
+ * property is a request we did not mean.
+ */
+export function withLastModifiedProperty(
+  properties: readonly string[] | undefined,
+): readonly string[] {
+  if (properties === undefined || properties.length === 0) return [LAST_MODIFIED_PROPERTY];
+  return properties.includes(LAST_MODIFIED_PROPERTY)
+    ? properties
+    : [...properties, LAST_MODIFIED_PROPERTY];
+}
+
+/**
  * What this track is waiting on. Deliberately unlike the other tracks', so an
  * installer triaging this is not sent looking for a QuickBooks company, a
  * Stripe key, or a folder full of CSVs.
@@ -1062,6 +1088,20 @@ export interface HubSpotRecord {
   properties: Record<string, string | undefined>;
   /** Epoch ms parsed from `hs_lastmodifieddate`. */
   updatedAtMs: number;
+  /**
+   * The canonical `updated_at` column value: {@link updatedAtMs} as a full UTC
+   * ISO instant (WARP-2494).
+   *
+   * Named in snake_case against this file's convention BECAUSE it is a
+   * canonical COLUMN name rather than a field name — the same string
+   * `CANONICAL_COLUMNS` declares and `COLUMN_KIND` types as `timestamp` — and
+   * renaming it here would break the join it exists to make.
+   *
+   * Always defined: {@link HubSpotConnector.toRecord} drops a record whose
+   * `hs_lastmodifieddate` does not parse rather than defaulting it, so a
+   * record that exists has a modification time.
+   */
+  updated_at: string;
 }
 
 export interface HubSpotDeltaPollResult {
@@ -1471,7 +1511,7 @@ export class HubSpotConnector implements Connector {
     const { objectType } = input;
     if (this.backfillInFlight) throw new HubSpotBackfillInProgressError(objectType);
 
-    const properties = input.properties ?? [LAST_MODIFIED_PROPERTY];
+    const properties = withLastModifiedProperty(input.properties);
     const pagesPerAnchor = HUBSPOT_SEARCH_RESULT_CAP / HUBSPOT_SEARCH_PAGE_SIZE;
     const seen = new Map<string, HubSpotRecord>();
 
@@ -1571,7 +1611,9 @@ export class HubSpotConnector implements Connector {
           format: "CSV",
           objectType: input.objectType,
           exportName: `droplet-${input.objectType}-backfill`,
-          objectProperties: [...input.properties],
+          // The modification property is not optional here either: a CSV
+          // without it cannot produce `updated_at` for a single backfilled row.
+          objectProperties: [...withLastModifiedProperty(input.properties)],
         },
       });
       const exportId = typeof created.id === "string" ? created.id : String(created.id ?? "");
@@ -1787,7 +1829,11 @@ export class HubSpotConnector implements Connector {
     const updatedAtMs =
       stamp === undefined ? NaN : /^\d+$/.test(stamp) ? Number(stamp) : Date.parse(stamp);
     if (!Number.isFinite(updatedAtMs)) return null;
-    return { id, properties, updatedAtMs };
+    // WARP-2494 — the canonical column, from the vendor's own modification
+    // property. NOT `createdate`: a record that was created and never touched
+    // would otherwise advance a watermark that TRUSTS this column, and the
+    // edits that followed would stop being seen with nothing reporting a fault.
+    return { id, properties, updatedAtMs, updated_at: new Date(updatedAtMs).toISOString() };
   }
 
   /** The next offset HubSpot offers, or undefined when the window is done. */
