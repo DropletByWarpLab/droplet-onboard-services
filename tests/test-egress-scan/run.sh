@@ -337,6 +337,174 @@ run_entry_case "no_code_literal on a non-egress kind is a config error" 2 \
   "$YAML_MISPLACED" "apps/svc/src/files.ts" \
   'export const N = 1;'
 
+# =============================================================================
+# WARP-2468 — code_refs must live inside the scanner's own denial scope.
+# A path the denial pass would never read cannot be evidence that the entry is
+# used. Without this rule an entry stays green off an ADR that merely proposed
+# the destination, from design time through to a connector that never ships.
+# =============================================================================
+
+# The docs file DOES carry the literal, so the backing pass is satisfied — only
+# the scope rule can move this case.
+# Mutation: drop the scope check -> the backing pass is happy, exit 0, red.
+YAML_DOCS_REF=$(cat <<'YAML'
+version: 1
+entries:
+  - id: vendor-files
+    kind: egress
+    service: svc
+    destination:
+      hosts: [files.allowed-vendor.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: fixture
+    ticket: WARP-2468
+    code_refs: [docs/ADR-999-vendor.md]
+YAML
+)
+
+run_entry_case "scope: docs-only code_refs fails" 1 \
+  "$YAML_DOCS_REF" "docs/ADR-999-vendor.md" \
+  'The connector dials https://files.allowed-vendor.com for the file list.'
+
+# EVERY path must be in scope, not merely one of them — this is the shape
+# sso-oidc-idps had (config.ts + an onboarding doc). The in-scope ref carries
+# the literal, so the backing pass passes and only the scope rule fails it.
+# Mutation: check only entries whose refs are ALL out of scope -> exit 0, red.
+YAML_MIXED_REF=$(cat <<'YAML'
+version: 1
+entries:
+  - id: vendor-files
+    kind: egress
+    service: svc
+    destination:
+      hosts: [files.allowed-vendor.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: fixture
+    ticket: WARP-2468
+    code_refs: [apps/svc/src/files.ts, docs/ADR-999-vendor.md]
+YAML
+)
+
+run_entry_case "scope: one in-scope ref does not excuse a docs ref" 1 \
+  "$YAML_MIXED_REF" "apps/svc/src/files.ts" \
+  'export const FILES_BASE_URL = "https://files.allowed-vendor.com";'
+
+# A test file is excluded from the denial scan too (EXCLUDE_RE), so a fixture
+# host cannot vouch for an entry either. This is the m365-graph-api shape:
+# graph.microsoft.com exists in the repo ONLY inside .test.ts files.
+# Mutation: use a bare SCOPE_PREFIXES check instead of in_scope() -> exit 0, red.
+YAML_TEST_REF=$(cat <<'YAML'
+version: 1
+entries:
+  - id: vendor-files
+    kind: egress
+    service: svc
+    destination:
+      hosts: [files.allowed-vendor.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: fixture
+    ticket: WARP-2468
+    code_refs: [apps/svc/src/files.test.ts]
+YAML
+)
+
+run_entry_case "scope: a test-file code_ref cannot back an entry" 1 \
+  "$YAML_TEST_REF" "apps/svc/src/files.test.ts" \
+  'export const FILES_BASE_URL = "https://files.allowed-vendor.com";'
+
+# kind: reference exists precisely for doc/namespace hostnames, so pointing one
+# at a doc is correct. Asserted on its own so the scope rule cannot creep.
+# Mutation: apply the scope rule to reference kinds -> exit 1, red.
+YAML_REFERENCE_DOCS=$(cat <<'YAML'
+version: 1
+entries:
+  - id: vendor-doc-link
+    kind: reference
+    service: svc
+    destination:
+      hosts: [files.allowed-vendor.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: fixture
+    ticket: WARP-2468
+    code_refs: [docs/ADR-999-vendor.md]
+YAML
+)
+
+run_entry_case "scope: reference entry may cite a docs path" 0 \
+  "$YAML_REFERENCE_DOCS" "docs/ADR-999-vendor.md" \
+  'Namespace URL: https://files.allowed-vendor.com/schema'
+
+# ── The m365 shape: no_code_literal self-prunes when the client lands ────────
+# Same registry text both ways; only the fixture under services/ changes. This
+# is the acceptance criterion "adding a graph.microsoft.com literal to a
+# fixture under services/ makes the gate fail until the declaration is removed".
+
+YAML_M365_DECLARED=$(cat <<'YAML'
+version: 1
+entries:
+  - id: m365-graph-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [graph.microsoft.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: fixture
+    ticket: WARP-2468
+    code_refs: [services/m365/sync.ts]
+    no_code_literal: registered ahead of the WARP-2118 sync engine
+YAML
+)
+
+YAML_M365_UNDECLARED=$(cat <<'YAML'
+version: 1
+entries:
+  - id: m365-graph-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [graph.microsoft.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: fixture
+    ticket: WARP-2468
+    code_refs: [services/m365/sync.ts]
+YAML
+)
+
+# Before the client lands: nothing names the host, the declaration is true.
+run_entry_case "m365: declaration holds while no client exists" 0 \
+  "$YAML_M365_DECLARED" "services/m365/sync.ts" \
+  'export const GRAPH_BASE_URL = process.env.M365_GRAPH_BASE_URL;'
+
+# The client lands under services/ -> the declaration is now a false claim.
+# Mutation: make no_code_literal a permanent exemption -> exit 0, red.
+run_entry_case "m365: declaration fails once a services/ literal appears" 1 \
+  "$YAML_M365_DECLARED" "services/m365/sync.ts" \
+  'export const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";'
+
+# ...and removing the declaration is what makes it green again. Without this
+# row the case above could be satisfied by a gate that simply never passes.
+run_entry_case "m365: dropping the declaration restores green" 0 \
+  "$YAML_M365_UNDECLARED" "services/m365/sync.ts" \
+  'export const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";'
+
 echo
 echo "egress-scan tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

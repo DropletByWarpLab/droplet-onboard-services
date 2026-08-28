@@ -18,6 +18,11 @@ The gate runs in two opposite directions:
     mentioned only in a doc comment, or split into runtime-assembled parts —
     while CI stays green and the registry quietly stops describing what the
     code dials.
+  * SCOPE (WARP-2468, code_refs_scope_report) — every code_refs path of a
+    kind: egress entry must itself be in the denial scope below. A file the
+    denial pass would never read cannot be evidence that the entry is used,
+    so an ADR or a test fixture can no longer keep an entry green. kind:
+    reference is exempt: it exists for doc and namespace hostnames.
 
 Extraction rules (v1, deliberately conservative):
   * scheme URLs  — (https|http|wss|ws|ftp)://<host>  anywhere in scoped
@@ -272,6 +277,27 @@ def code_ref_literal_report(
     return False, None, refs, unreadable
 
 
+def code_refs_scope_report(entry: dict) -> list[str]:
+    """code_refs paths of `entry` that the denial pass would never read.
+
+    WARP-2468. The BACKING pass will happily accept a literal from any
+    tracked file, so `code_refs: [docs/ADR-041-...md]` made two M365 entries
+    look live off the ADR that merely *proposed* the destination — from
+    design time through to a connector that never ships.
+
+    The rule is the scanner's own `in_scope`, deliberately not a fresh copy
+    of SCOPE_PREFIXES, so the two directions can never drift apart. That
+    also excludes test files (EXCLUDE_RE): `graph.microsoft.com` exists in
+    this repo only inside `.test.ts` fixtures, and a fixture host proves
+    nothing about what the box dials either.
+
+    Applies to kind: egress only — kind: reference exists precisely for the
+    doc and namespace hostnames a docs path is the right citation for, and
+    kind: dynamic has no destination to trace. Callers enforce that.
+    """
+    return [r for r in (entry.get("code_refs") or []) if not in_scope(r)]
+
+
 def load_allowlist(root: str) -> tuple[list[dict], set[str]]:
     path = os.path.join(root, ALLOWLIST_PATH)
     try:
@@ -364,10 +390,20 @@ def main() -> int:
     # kind: dynamic is exempt BY DESIGN — its host comes from config_key at
     # runtime (docs/SECURITY.md:174-184), so no literal can exist. kind:
     # reference is not egress at all. Both keep their previous behaviour.
+    #
+    # WARP-2468 runs the SCOPE pass in the same loop: a code_refs path the
+    # denial scan would never read cannot be evidence of use, so it is a hard
+    # error even when the entry is otherwise backed by that very file.
     ref_failures: list[str] = []
+    scope_failures: list[str] = []
     for e in entries:
         if e["kind"] != "egress":
             continue
+        out_of_scope = code_refs_scope_report(e)
+        if out_of_scope:
+            scope_failures.append(
+                f"  {e['id']}: code_refs outside the denial scope: "
+                f"{', '.join(out_of_scope)}")
         satisfied, hit, refs, unreadable = code_ref_literal_report(root, e)
         declared = e.get("no_code_literal")
         hosts = ", ".join((e.get("destination") or {}).get("hosts") or [])
@@ -384,10 +420,34 @@ def main() -> int:
                 detail += f"\n    unreadable code_refs: {', '.join(unreadable)}"
             ref_failures.append(detail)
 
-    if not violations and not ref_failures:
+    if not violations and not ref_failures and not scope_failures:
         print(f"egress-gate OK — {len(found)} distinct hosts, all allowlisted "
               f"({len(entries)} registry entries).")
         return 0
+
+    if scope_failures:
+        print(f"\nEGRESS CODE_REFS OUT OF SCOPE: {len(scope_failures)} kind: "
+              f"egress entry/entries in\n{ALLOWLIST_PATH} cite a file the "
+              f"denial scan never reads\n", file=sys.stderr)
+        for detail in scope_failures:
+            print(detail, file=sys.stderr)
+        print(
+            "\ncode_refs is the evidence that a registered destination is\n"
+            "really dialled, so it has to point at code this gate itself\n"
+            "scans: apps/ services/ packages/ docker/ scripts/ openwrt/\n"
+            "proto/ schemas/ (or .env.example), and not a test file. An ADR\n"
+            "or a runbook proves only that somebody once proposed the host —\n"
+            "that is how an entry stays green all the way to a connector\n"
+            "that never ships. Resolve by:\n"
+            "  1. Repointing code_refs at the source file holding the URL.\n"
+            "  2. If no such file exists yet, keep the doc as a YAML comment\n"
+            "     and add a no_code_literal: reason instead — that one\n"
+            "     self-prunes the moment the real caller lands.\n"
+            "  3. If the host is not egress at all (XML namespace, doc link),\n"
+            "     it belongs under kind: reference, which may cite docs/.\n"
+            "Touching the allowlist needs security review (assign Romain).\n"
+            "See docs/SECURITY.md#egress and WARP-2468.\n",
+            file=sys.stderr)
 
     if ref_failures:
         print(f"\nEGRESS REGISTRY DRIFT: {len(ref_failures)} kind: egress "

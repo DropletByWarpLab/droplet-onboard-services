@@ -141,7 +141,10 @@ entries:
     ticket: WARP-243
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/config.ts, docs/ONBOARDING_SSO_OIDC.md]
+    # WARP-2468: docs/ONBOARDING_SSO_OIDC.md was listed here and is still the
+    # operator guide for this entry — but a doc the denial scan never reads
+    # cannot be evidence the host is dialled, so it lives in this comment now.
+    code_refs: [apps/orchestrator/src/config.ts]
 
   - id: calendar-location-autocomplete
     kind: egress
@@ -385,9 +388,19 @@ entries:
     ticket: WARP-2114
     added: 2026-08-19
     review_by: 2027-08-19
-    # Code lands in WARP-2115 (auth) and WARP-2118 (sync engine); this entry is
-    # registered with the ADR that authorises the class, ahead of the client.
-    code_refs: [docs/ADR-041-cloud-connector-class.md]
+    # WARP-2468: was docs/ADR-041-cloud-connector-class.md, which the denial
+    # scan never reads — the ADR that PROPOSED this host was keeping the entry
+    # green. Repointed at the sync-engine files the Graph client will live in.
+    # The ADR remains the authorising document; it is just not evidence of use.
+    code_refs: [apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
+    no_code_literal: >-
+      Registered ahead of its caller: the WARP-2118 sync engine has no HTTP
+      client yet, so nothing in apps/ or services/ names this host —
+      @microsoft/microsoft-graph-client is not a dependency, and the only
+      occurrences in the repo are .test.ts fixtures, which are out of the
+      scanner's scope. Self-pruning: the moment WARP-2118 lands a
+      graph.microsoft.com literal in a code_refs file, the gate fails on
+      this entry until this declaration is deleted. (WARP-2468 / WARP-2118)
 
   - id: m365-entra-login
     kind: egress
@@ -411,7 +424,12 @@ entries:
     ticket: WARP-2114
     added: 2026-08-19
     review_by: 2027-08-19
-    code_refs: [docs/ADR-041-cloud-connector-class.md]
+    # WARP-2468: was docs/ADR-041-cloud-connector-class.md. Unlike its sibling
+    # m365-graph-api this destination IS dialled today — WARP-2115 landed the
+    # MSAL client, entra-client.ts builds the authority from
+    # config.M365_AUTHORITY_HOST, and config.ts holds the host as a literal
+    # default. So it needs no no_code_literal declaration: the code backs it.
+    code_refs: [apps/orchestrator/src/config.ts, apps/orchestrator/src/services/m365/entra-client.ts]
 
   - id: quickbooks-online-api
     kind: egress
