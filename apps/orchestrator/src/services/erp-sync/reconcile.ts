@@ -59,39 +59,26 @@
  * persists this report). A vendor's marker is an ORDERING TOKEN, not
  * necessarily a time: Stripe's cursors are object ids, and any vendor is free
  * to order by its own record key. So a marker never leaves this module as a
- * string — `markerTimestamp` coerces it, and a marker that is not a real
- * timestamp becomes `null`. That is why the persisted row cannot carry an
- * invoice number even for a vendor that orders by one: there is no path from a
- * raw marker to storage.
+ * string — `isoInstant` coerces it, and a marker that is not a real timestamp
+ * becomes `null`. That is why the persisted row cannot carry an invoice number
+ * even for a vendor that orders by one: there is no path from a raw marker to
+ * storage.
+ *
+ * ## One comparator, three questions (WARP-2495)
+ *
+ * The advance, `watermark-behind` and `missed-newer` all ask a question about
+ * the same two things — a row's position and the stored watermark — so they
+ * are all answered by `watermark.ts` on the value `watermarkValueOf` selects,
+ * and none of them compares strings. Splitting them was how the third came to
+ * disagree with the other two: WARP-2474 moved the watermark onto `updated_at`
+ * and left this module's `missed-newer` predicate reading the ORDERING key,
+ * which is `<= updated_at` in general, so rows modified after the watermark
+ * but issued before it were filtered out of the report.
  */
-import { highestWatermark, isWatermarkAhead } from "./watermark.js";
+import { highestWatermark, isWatermarkAhead, isoInstant, watermarkValueOf } from "./watermark.js";
 
 /** Why a record the full read knows about was missing from the delta read. */
 export type ErpDriftClass = "missed-newer" | "watermark-behind";
-
-/**
- * Strict ISO-8601 date / date-time. Deliberately NOT "whatever `new Date()`
- * accepts": `new Date("1001")` is the year 1001, so a bare numeric invoice
- * number would parse as a plausible timestamp and land in a column an
- * operator reads as one. Anchored, fixed-width, and optional-time-only.
- */
-const ISO_TIMESTAMP =
-  /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
-
-/**
- * Coerce a vendor marker to a timestamp, or `null` when it is not one.
- *
- * The single gate between a vendor's ordering token and anything that stores
- * or displays it. Returning `null` for a non-timestamp marker loses nothing an
- * operator was going to read — an opaque cursor tells them nothing — and it is
- * what makes the drift record's PHI-free rule structural rather than a
- * convention someone has to remember.
- */
-export function markerTimestamp(marker: string | null | undefined): Date | null {
-  if (typeof marker !== "string" || !ISO_TIMESTAMP.test(marker)) return null;
-  const ms = Date.parse(marker);
-  return Number.isNaN(ms) ? null : new Date(ms);
-}
 
 /** Per-entity drift. Counts and the dataset name only. */
 export interface ErpEntityDrift {
@@ -120,7 +107,7 @@ export interface ErpEntityDrift {
    * be free to disagree with this one, and the disagreement would be silent.
    *
    * `null` when nothing was missed, and also when the missed records' markers
-   * are not timestamps at all. See `markerTimestamp`.
+   * are not timestamps at all. See `watermark.ts`'s `isoInstant`.
    */
   earliestMissedAt: Date | null;
 }
@@ -220,12 +207,31 @@ export function diffForDrift(
   let earliestMissedAt: Date | null = null;
   for (const r of full) {
     if (seen.has(r.sourceKey)) continue;
-    // Strictly after: a record exactly at the watermark was already delivered
-    // by the run that set it, so counting it would report drift every sweep.
-    if (watermark !== null && (r.marker === null || r.marker <= watermark)) continue;
+    // Strictly after, on the SAME value the watermark advances on and through
+    // the SAME comparator `watermark-behind` uses (WARP-2495). Three
+    // consequences, each of which was a defect in the string compare this
+    // replaced:
+    //
+    //   - the row offers its `updated_at` when the vendor defined one, so a
+    //     document modified after the watermark is reported even though it was
+    //     ISSUED before it — the Xero/HubSpot case, and the reason a sweep
+    //     exists;
+    //   - a record exactly AT the watermark was already delivered by the run
+    //     that set it, so `isWatermarkAhead` being strict is what stops this
+    //     reporting drift on every sweep forever;
+    //   - an opaque token is never ordered. `ch_9zzz > ch_1aaa` has an answer
+    //     and the answer is meaningless, so the predicate declines to make the
+    //     call rather than manufacture a finding on every sweep of every
+    //     Stripe connection. A report an operator learns to ignore is worse
+    //     than none — the same trade `isWatermarkAhead` already makes for
+    //     `watermark-behind`.
+    //
+    // A null watermark filtered nothing, so absence from the incremental read
+    // is drift on its own evidence; `isWatermarkAhead` answers that too.
+    if (!isWatermarkAhead(watermarkValueOf(r), watermark)) continue;
     missedCount += 1;
     // Coerced HERE, so no caller ever sees the raw marker of a missed record.
-    const at = markerTimestamp(r.marker);
+    const at = isoInstant(r.marker);
     if (at !== null && (earliestMissedAt === null || at < earliestMissedAt)) {
       earliestMissedAt = at;
     }
