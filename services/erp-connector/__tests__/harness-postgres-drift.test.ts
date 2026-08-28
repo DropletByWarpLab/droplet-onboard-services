@@ -52,7 +52,14 @@ const FLAT_SMOKE = flat(SMOKE_SQL);
  */
 function parseMockSchema(sql: string): IntrospectedTable[] {
   const tables: IntrospectedTable[] = [];
-  const tableRe = /CREATE TABLE\s+(\w+)\.(\w+)\s*\(([\s\S]*?)\n\);/g;
+  // Identifiers may be double-quoted: WARP-2280 added the `order` dataset, and
+  // `CREATE TABLE dba.order` is a syntax error in Postgres because `order` is
+  // reserved. The connector never has this problem — `resolveTable` quotes
+  // every identifier it emits — but the harness DDL is hand-written, so the
+  // parser has to read what valid DDL actually looks like. Without the optional
+  // quotes here the table is silently missing from the mock map and every read
+  // against it fails as "drift" that is really a parser gap.
+  const tableRe = /CREATE TABLE\s+"?(\w+)"?\."?(\w+)"?\s*\(([\s\S]*?)\n\);/g;
 
   for (const [, owner, name, body] of sql.matchAll(tableRe)) {
     const columns = body

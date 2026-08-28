@@ -549,5 +549,36 @@ describe("files-knowledge routes", () => {
       expect(callArgs.userId).toBe("alice");
       expect(callArgs.additionalUserIds).toEqual([UUID]);
     });
+
+    it("sends the bge-calibrated similarity floor to searchHybrid (WARP-2196)", async () => {
+      // The route's floor is a MODEL-SPECIFIC constant, and this pins the
+      // value that actually reaches the retriever rather than the literal in
+      // the module. Under bge-small-en-v1.5 nothing in the measured eval
+      // corpus scores below 0.344, so the pre-WARP-2196 value of 0.25 was an
+      // exact no-op here: the dashboard's headline file search shipped a
+      // cosine floor that rejected nothing. See
+      // services/similarity-floors.test.ts for the distributions.
+      embedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+      // mockImplementation, not mockResolvedValueOnce: the module shim above
+      // only forwards to searchHybridSpy once the spy has results or an
+      // implementation, and a queued `Once` value is neither — the call would
+      // fall through to searchByVectorSpy and never record its args.
+      searchHybridSpy.mockImplementation(async () => []);
+
+      const res = await request(dualApp).get(
+        "/api/files/knowledge/search?q=notes",
+      );
+      expect(res.status).toBe(200);
+
+      const args = searchHybridSpy.mock.calls[0][1] as {
+        minSimilarity: number;
+      };
+      expect(args.minSimilarity).toBe(0.63);
+      expect(args.minSimilarity).toBeGreaterThan(0.344);
+
+      // The spy is module-scoped; leaving an implementation on it would
+      // permanently divert every later test away from searchByVectorSpy.
+      searchHybridSpy.mockReset();
+    });
   });
 });

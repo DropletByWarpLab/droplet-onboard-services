@@ -109,7 +109,11 @@ const createPeerSchema = z.object({
  *      GET /host/uplink-ip (VPN home-mode P1.5). On single-box the WAN is
  *      HOST-owned so the summary reports wan.present:false — the bridge, which
  *      sees the host default route, supplies the egress source IP the summary
- *      can't.
+ *      can't. WARP-2183: this step is reached ONLY when the summary was read
+ *      successfully and affirmatively showed no WAN. If the summary could not
+ *      be read at all the shape is UNKNOWN, and the box's own uplink is not a
+ *      safe guess: behind an edge router it is a router-LAN address that no
+ *      home-mode peer can dial.
  *   3. Else null — surfaced honestly rather than minting a conf pointed at a
  *      wrong guess.
  *
@@ -122,16 +126,37 @@ const createPeerSchema = z.object({
 async function resolveHomeEndpointHost(): Promise<string | null> {
   const envFallback = (config.WIREGUARD_HOME_ENDPOINT_HOST ?? "").trim();
   let summary: Awaited<ReturnType<typeof fetchNetworkSummary>> | null = null;
+  let summaryOk = false;
   try {
     summary = await fetchNetworkSummary();
+    summaryOk = true;
   } catch (err) {
     logger.warn({ err }, "vpn: network summary unavailable for home-endpoint discovery");
   }
   // Only reach for the bridge when env + summary came up empty (single-box).
-  const fromSummary = pickHomeEndpoint({ envFallback, summary, bridgeIp: null });
+  const fromSummary = pickHomeEndpoint({ envFallback, summary, bridgeIp: null, summaryOk });
   if (fromSummary) return fromSummary;
+  // WARP-2183: the bridge answers with the BOX's own uplink IP, which is only a
+  // usable endpoint when the box itself owns the WAN. Behind a real edge router
+  // that address sits on the router's LAN (e.g. 192.168.9.195) and is
+  // unreachable from the household network a home-mode peer actually dials — so
+  // minting it would hand the user a conf that silently never handshakes.
+  //
+  // The distinction is "the summary says there is no WAN" (single-box: the
+  // uplink is host-owned, so the bridge is right) versus "the summary could not
+  // be read at all" (shape UNKNOWN). The old code conflated them, because a
+  // throw and a genuine present:false both arrive here as `summary === null`.
+  // A transient routing fault on an edge-router box therefore minted a conf
+  // pointed at an unreachable address; now it returns the same honest null the
+  // no-discovery path already does, and the route surfaces its 503.
+  if (!summaryOk) {
+    logger.warn(
+      "vpn: skipping host-uplink fallback — network summary unreadable, so the box's own uplink cannot be confirmed as the WAN edge",
+    );
+    return null;
+  }
   const bridgeIp = await fetchBridgeUplinkIp();
-  return pickHomeEndpoint({ envFallback, summary, bridgeIp });
+  return pickHomeEndpoint({ envFallback, summary, bridgeIp, summaryOk });
 }
 
 /**

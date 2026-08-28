@@ -10,6 +10,7 @@ import {
   domainOfTool,
   toolNamesForDomain,
 } from "./tool-selection.service.js";
+import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 
 const POOL = [
   "search_content",
@@ -251,5 +252,181 @@ describe("catalog helpers", () => {
     for (const name of CORE_TOOL_NAMES) {
       expect(domainOfTool(name)).toBeDefined();
     }
+  });
+});
+
+/**
+ * WARP-2443 / WARP-2444 — selection over a DYNAMIC universe.
+ *
+ * Before this change these tests were impossible to write: a
+ * runtime-registered tool has no TOOL_CATALOG entry, so `DOMAIN_BY_NAME`
+ * missed it and it was filtered out of every turn without erroring.
+ */
+describe("dynamic tool universe (WARP-2443)", () => {
+  const jiraSearch: RuntimeToolDescriptor = {
+    name: "jira_search_issues",
+    serverId: "atlassian",
+    domain: "pm",
+    domainSource: "server",
+    description: "Search Jira issues with JQL.",
+    inputSchema: { type: "object", properties: {} },
+  };
+  const slackSend: RuntimeToolDescriptor = {
+    name: "slack_send_message",
+    serverId: "slack",
+    domain: "team_chat",
+    domainSource: "server",
+    description: "Post a Slack message.",
+    inputSchema: { type: "object", properties: {} },
+  };
+  const REMOTE_POOL = [...POOL, "jira_search_issues", "slack_send_message"];
+
+  it("SELECTS a runtime-registered remote tool for a turn that needs it", () => {
+    // The headline acceptance criterion. The `pm` keyword rule matches
+    // "tickets"; the tool is eligible only because it was registered with a
+    // domain.
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "what tickets are still open on the tracker?",
+      pool: REMOTE_POOL,
+      conversationToolNames: [],
+      runtimeTools: [jiraSearch, slackSend],
+    });
+    expect(r.advertised).toContain("jira_search_issues");
+    expect(r.matchedDomains).toContain("pm");
+  });
+
+  it("MUTATION — strip the domain assignment and the remote tool becomes unselectable", () => {
+    // Reproduces the pre-WARP-2444 defect on demand: same turn, same pool,
+    // but no descriptor list, so the tool has no domain and is silently
+    // dropped. NO ERROR is raised — which is what made the bug invisible.
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "what tickets are still open on the tracker?",
+      pool: REMOTE_POOL,
+      conversationToolNames: [],
+      // runtimeTools deliberately omitted
+    });
+    expect(r.advertised).not.toContain("jira_search_issues");
+    expect(r.advertised).not.toContain("slack_send_message");
+  });
+
+  it("does not advertise a remote tool whose domain the turn did not match", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "what tickets are still open on the tracker?",
+      pool: REMOTE_POOL,
+      conversationToolNames: [],
+      runtimeTools: [jiraSearch, slackSend],
+    });
+    // Slack sits in team_chat, which this sentence does not match — so
+    // selection is doing real work rather than admitting every remote tool.
+    expect(r.advertised).not.toContain("slack_send_message");
+  });
+
+  it("continuity works across the dynamic half — a prior remote call re-opens its domain", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one after that?",
+      pool: REMOTE_POOL,
+      conversationToolNames: ["jira_search_issues"],
+      runtimeTools: [jiraSearch, slackSend],
+    });
+    // MUTATION: revert the continuity lookup to the static-only
+    // DOMAIN_BY_NAME and this goes red — a follow-up question loses the
+    // integration the previous turn just used.
+    expect(r.advertised).toContain("jira_search_issues");
+    expect(r.matchedDomains).toContain("pm");
+  });
+
+  it("the static catalog WINS a name collision — a remote server cannot repoint a local tool", () => {
+    // Trust decision: otherwise a remote server could move `control_device`
+    // into a domain some innocuous sentence matches. MUTATION: flip the
+    // coalesce order in resolveDomain and this goes red.
+    const hijack: RuntimeToolDescriptor = {
+      ...jiraSearch,
+      name: "control_device",
+      domain: "files",
+    };
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "show me my documents",
+      pool: POOL,
+      conversationToolNames: [],
+      runtimeTools: [hijack],
+    });
+    expect(r.advertised).not.toContain("control_device");
+    expect(domainOfTool("control_device", [hijack])).toBe("smart-home");
+  });
+
+  it("is a SUBSET of the pool even with remote tools present", () => {
+    // The standing invariant: selection narrows, never widens.
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "what tickets are open?",
+      pool: POOL, // no remote names in the pool
+      conversationToolNames: [],
+      runtimeTools: [jiraSearch, slackSend],
+    });
+    expect(r.advertised).not.toContain("jira_search_issues");
+    for (const n of r.advertised) expect(POOL).toContain(n);
+  });
+
+  it("is deterministic — same input, same subset", () => {
+    const call = () =>
+      selectAdvertisedTools({
+        mode: "domains",
+        userMessage: "any open tickets and did anyone post about them?",
+        pool: REMOTE_POOL,
+        conversationToolNames: [],
+        runtimeTools: [jiraSearch, slackSend],
+      });
+    expect(call().advertised).toEqual(call().advertised);
+  });
+
+  it("local-only selection is UNCHANGED when no runtime tools are supplied", () => {
+    // WARP-2443: "the local-only path produces the same selections it does
+    // today for a fixed corpus of turns."
+    const corpus = [
+      "show me my documents",
+      "turn off the kitchen lights",
+      "who was at the front door yesterday",
+      "is the wifi slow again",
+      "what do you remember about me",
+      "how much disk space is left",
+    ];
+    for (const userMessage of corpus) {
+      const withoutArg = selectAdvertisedTools({
+        mode: "domains",
+        userMessage,
+        pool: CAMERA_POOL,
+        conversationToolNames: [],
+      });
+      const withEmpty = selectAdvertisedTools({
+        mode: "domains",
+        userMessage,
+        pool: CAMERA_POOL,
+        conversationToolNames: [],
+        runtimeTools: [],
+      });
+      expect(withEmpty.advertised).toEqual(withoutArg.advertised);
+      expect(withEmpty.matchedDomains).toEqual(withoutArg.matchedDomains);
+    }
+  });
+
+  it("toolNamesForDomain spans both layers, catalog first", () => {
+    const names = toolNamesForDomain("pm", [jiraSearch]);
+    expect(names).toContain("pm_create_work_item"); // local
+    expect(names).toContain("jira_search_issues"); // remote
+    expect(names.indexOf("pm_create_work_item")).toBeLessThan(
+      names.indexOf("jira_search_issues"),
+    );
+    // Without the runtime list it is the catalog grouping, unchanged.
+    expect(toolNamesForDomain("pm")).not.toContain("jira_search_issues");
+  });
+
+  it("domainOfTool resolves remote names only when the runtime list is supplied", () => {
+    expect(domainOfTool("jira_search_issues")).toBeUndefined();
+    expect(domainOfTool("jira_search_issues", [jiraSearch])).toBe("pm");
   });
 });
