@@ -257,6 +257,18 @@ MD5/SHA-1/DES/small-RSA/TLS≤1.1 without a registered exception in
 [`docs/security/fips-exceptions.md`](security/fips-exceptions.md) — so the
 code is FIPS-clean even on boxes running with the knob OFF.
 
+**Naming a forbidden algorithm in a comment is not a violation.** The lint
+drops candidate lines whose first non-blank characters are `//`, `#`, `*`,
+`/*` or `*/` *before* it looks for an escape comment (`_strip_comment_only_lines`,
+WARP-2480), so a file can explain in place why it avoids a primitive without
+claiming a `fips:allowed:` reason-id it does not deserve. The strip is
+line-scoped and never reaches a code line: a prose mention buys no exemption
+for a real call site elsewhere in the file, a code line carrying a trailing
+comment stays a candidate, and `#` is a comment introducer only outside the
+JS/TS family — there it opens a private class field. If you need prose on a
+line that starts with none of those tokens (a `/* … */` continuation, say),
+prefix it with `*`.
+
 ## How CI keeps this honest
 
 | Layer | Where | What breaks the build |
