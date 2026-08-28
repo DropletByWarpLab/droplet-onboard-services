@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import exportClip from "../../../src/handlers/cameras/export-clip.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -10,9 +11,9 @@ import type { ToolContext } from "../../../src/types.js";
  * camera-discovery route that does not exist — every export 404'd.
  */
 function ctxWith(
-  orchestratorPost: ReturnType<typeof vi.fn>,
+  orchestratorPost: Mock,
   opts: { ncToken?: string; userId?: string } = {},
-): { ctx: ToolContext; camerasPost: ReturnType<typeof vi.fn> } {
+): { ctx: ToolContext; camerasPost: Mock } {
   const camerasPost = vi.fn();
   const ctx: ToolContext = {
     http: {
@@ -64,6 +65,7 @@ describe("export_clip", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("INVALID_ARGS");
     expect(r.error?.message).toBe("ends_at_must_be_after_starts_at");
     expect(post).not.toHaveBeenCalled();
@@ -78,6 +80,7 @@ describe("export_clip", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("INVALID_ARGS");
     expect(r.error?.message).toBe("export_window_exceeds_30_minutes");
     expect(post).not.toHaveBeenCalled();
@@ -142,6 +145,7 @@ describe("export_clip", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("EXPORT_FAILED");
     expect(r.error?.message).toBe("orchestrator returned 401");
   });

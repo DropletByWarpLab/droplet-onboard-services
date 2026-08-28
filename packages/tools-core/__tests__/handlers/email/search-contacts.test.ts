@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import searchContacts from "../../../src/handlers/email/search-contacts.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
   mocks: {
-    accountFindMany?: ReturnType<typeof vi.fn>;
-    messageFindMany?: ReturnType<typeof vi.fn>;
+    accountFindMany?: Mock;
+    messageFindMany?: Mock;
   },
   userId?: string,
 ): ToolContext {

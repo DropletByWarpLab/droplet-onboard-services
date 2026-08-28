@@ -6,10 +6,11 @@
  * stripped before it can reach the model. Tier-1 read.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listVpnPeers from "../../../src/handlers/network/list-vpn-peers.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorGet: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],
@@ -57,7 +58,7 @@ const PEERS = [
   },
 ];
 
-function jsonGet(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+function jsonGet(body: unknown, status = 200): Mock {
   return vi
     .fn()
     .mockImplementation(

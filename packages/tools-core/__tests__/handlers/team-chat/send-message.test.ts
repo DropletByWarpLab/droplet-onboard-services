@@ -10,6 +10,7 @@
  * attributes the message to the acting human, never `_service:mcp`.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import sendMessage from "../../../src/handlers/team-chat/send-message.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -32,10 +33,10 @@ const CONTACTS = {
 };
 
 function ctxWith(overrides: {
-  get?: ReturnType<typeof vi.fn>;
-  post?: ReturnType<typeof vi.fn>;
+  get?: Mock;
+  post?: Mock;
   userId?: string | undefined;
-}): { ctx: ToolContext; get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> } {
+}): { ctx: ToolContext; get: Mock; post: Mock } {
   const get = overrides.get ?? vi.fn(async () => res(200, CONTACTS));
   const post = overrides.post ?? vi.fn();
   const ctx = {
@@ -59,6 +60,7 @@ describe("team_chat_send_message", () => {
     const { ctx, get, post } = ctxWith({ userId: undefined });
     const r = await sendMessage.handler({ recipients: ["bob"], body: "hi" }, ctx);
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("AUTH_REQUIRED");
     expect(get).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
@@ -71,10 +73,12 @@ describe("team_chat_send_message", () => {
       ctx,
     );
     expect(both.ok).toBe(false);
+    if (both.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(both)}`);
     expect(both.error?.code).toBe("INVALID_ARGS");
 
     const neither = await sendMessage.handler({ body: "hi" }, ctx);
     expect(neither.ok).toBe(false);
+    if (neither.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(neither)}`);
     expect(neither.error?.code).toBe("INVALID_ARGS");
   });
 
@@ -82,6 +86,7 @@ describe("team_chat_send_message", () => {
     const { ctx, get } = ctxWith({});
     const empty = await sendMessage.handler({ recipients: ["bob"], body: "   " }, ctx);
     expect(empty.ok).toBe(false);
+    if (empty.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(empty)}`);
     expect(empty.error?.code).toBe("INVALID_ARGS");
 
     const long = await sendMessage.handler(
@@ -96,6 +101,7 @@ describe("team_chat_send_message", () => {
     const { ctx } = ctxWith({});
     const r = await sendMessage.handler({ recipients: ["alice"], body: "hi me" }, ctx);
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("INVALID_ARGS");
   });
 
@@ -104,6 +110,7 @@ describe("team_chat_send_message", () => {
     const body = "a".repeat(200);
     const r = await sendMessage.handler({ recipients: ["bob", "carol"], body }, ctx);
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("confirmation_required");
     // UX review: the approval copy names people, not login handles.
     expect(r.error?.message).toContain("Bob B");
@@ -117,6 +124,7 @@ describe("team_chat_send_message", () => {
     const get = vi.fn(async () => res(500, {}));
     const { ctx, post } = ctxWith({ get });
     const r = await sendMessage.handler({ recipients: ["bob"], body: "hi" }, ctx);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("bob");
     expect(post).not.toHaveBeenCalled();
@@ -136,6 +144,7 @@ describe("team_chat_send_message", () => {
       ctx,
     );
     expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
     expect(r.data).toMatchObject({
       type: "team_chat_send_message",
       threadId: "thread-9",
@@ -195,6 +204,7 @@ describe("team_chat_send_message", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("UNKNOWN_RECIPIENT");
     expect(r.error?.message).toContain("nobody");
     expect(post).not.toHaveBeenCalled();
@@ -227,6 +237,7 @@ describe("team_chat_send_message", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("NOT_FOUND");
   });
 
@@ -238,6 +249,7 @@ describe("team_chat_send_message", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
     expect(r.error?.message).toContain("500");
   });
@@ -257,6 +269,7 @@ describe("team_chat_send_message", () => {
       ctx1,
     );
     expect(r1.ok).toBe(false);
+    if (r1.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r1)}`);
     expect(r1.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
 
     // …and a parseable body missing the message envelope.
@@ -267,6 +280,7 @@ describe("team_chat_send_message", () => {
       ctx2,
     );
     expect(r2.ok).toBe(false);
+    if (r2.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r2)}`);
     expect(r2.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
   });
 });

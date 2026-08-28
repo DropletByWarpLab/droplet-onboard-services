@@ -1,0 +1,33 @@
+{
+  // WARP-329 class — `vitest` does not typecheck (esbuild strips types), and
+  // `tsconfig.json` excludes `__tests__`, so until this file existed NOT ONE
+  // of the 133 tests under `__tests__/` was ever seen by `tsc`: not by a bare
+  // `npx tsc` in the package, and not by `ship-check.sh tsc-full` (its phase 3
+  // runs each workspace's own tsconfig). PR #261 shipped a TS2322 in a test
+  // fixture through exactly this hole.
+  //
+  // It deliberately `extends` the package config rather than redeclaring the
+  // module settings, so tests are checked under the SAME flags the package
+  // actually builds with (`module: NodeNext` + no `"type": "module"` in
+  // package.json = CommonJS output). That is the whole point: relaxing
+  // `module` here to make `import.meta` legal would hide the TS1470 class this
+  // check exists to catch, and would put tools-core on the opposite convention
+  // from `apps/orchestrator`, whose tests live under `src/` and are already
+  // checked as CJS (see the note at
+  // `apps/orchestrator/src/__tests__/write-tools-derivation.guard.test.ts:25-28`).
+  //
+  // Only the three keys below are overridden:
+  //   - `noEmit`      — this is a check, not a build; `tsconfig.json` still
+  //                     owns the emit that produces `dist/`.
+  //   - `declaration` — off, because it cannot combine with `noEmit`.
+  //   - `rootDir`     — widened from `./src` to `.` so `__tests__/` is not
+  //                     reported as TS6059 "not under rootDir".
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "__tests__/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

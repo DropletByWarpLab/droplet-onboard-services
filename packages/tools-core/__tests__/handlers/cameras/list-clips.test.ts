@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listClips from "../../../src/handlers/cameras/list-clips.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -10,8 +11,8 @@ import type { ToolContext } from "../../../src/types.js";
 // assembled locally. Mocks target ctx.http.orchestrator; the camera-discovery
 // client must never be touched.
 function ctxWith(
-  orchestratorGet: ReturnType<typeof vi.fn>,
-  camerasGet: ReturnType<typeof vi.fn> = vi.fn(),
+  orchestratorGet: Mock,
+  camerasGet: Mock = vi.fn(),
 ): ToolContext {
   return {
     http: {
@@ -87,6 +88,7 @@ describe("list_clips", () => {
     const get = vi.fn().mockResolvedValue(new Response("{}", { status: 502 }));
     const r = await listClips.handler({}, ctxWith(get));
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("CLIPS_FAILED");
   });
 });
