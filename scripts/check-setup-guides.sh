@@ -37,6 +37,13 @@
 #         resolved path would pass a near-miss like `stripe-setup.md`, which
 #         is exactly the failure this is for.
 #
+#   4. A guide ships that the box cannot serve.
+#      -> ROUTE. `/help/integrations/<id>` renders the guide from a bundled
+#         `?raw` import (WARP-2490). The import list is hand-written — a
+#         static import is the only kind a bundler can inline — so a new
+#         guide can pass checks 1-3 and still be unreachable from the tile
+#         and the connect wizard that link to it.
+#
 # WHERE THE FACTS COME FROM
 # -------------------------
 # CLOUD_PROVIDERS and the pins below are pinned to the per-vendor table in
@@ -291,6 +298,44 @@ for md in "$DOCS_DIR"/*.md; do
   done
 done
 ok "checked $link_count relative link(s)"
+
+# --- 5. The guide is REACHABLE from the box --------------------------------
+#
+# WARP-2490. A guide that exists in git but is not bundled into the dashboard
+# is unreachable on the appliance: the tile and the connect wizard render a
+# `setupGuideHref` and the owner lands on a 404. That is the same class of
+# failure as a missing guide, and until this check existed nothing caught it —
+# checks 1-4 all pass on a file no route serves.
+#
+# Two things must hold, and the second is the one that rots: the route exists,
+# and every cloud guide is in the bundle's static import list. `?raw` imports
+# are the only kind a bundler can inline, so the list is hand-written and will
+# be forgotten. `integration-guides.test.ts` asserts the reverse direction
+# (bundle == directory) at vitest time; this is the cheap docs-PR-time half,
+# and `detect` is the one job that runs on every PR.
+
+hdr "route — every cloud guide is bundled into the dashboard"
+
+GUIDE_ROUTE="apps/web-dashboard/src/app/help/integrations/[provider]/page.tsx"
+GUIDE_BUNDLE="apps/web-dashboard/src/lib/integration-guides.ts"
+
+if [ ! -f "$GUIDE_ROUTE" ]; then
+  note "the guide route is missing ($GUIDE_ROUTE) — every setupGuideHref is a 404"
+else
+  ok "route present ($GUIDE_ROUTE)"
+fi
+
+if [ ! -f "$GUIDE_BUNDLE" ]; then
+  note "the guide bundle is missing ($GUIDE_BUNDLE)"
+else
+  for provider in $CLOUD_PROVIDERS; do
+    if grep -q "docs/integrations/$provider.md?raw" "$GUIDE_BUNDLE"; then
+      ok "$provider is bundled, reachable at /help/integrations/$provider"
+    else
+      note "$provider has a guide but is not imported in $GUIDE_BUNDLE — the link would 404 on the box"
+    fi
+  done
+fi
 
 # --- Verdict ---------------------------------------------------------------
 

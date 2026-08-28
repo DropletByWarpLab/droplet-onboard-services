@@ -239,29 +239,65 @@ describe("the SaaS credential resolver", () => {
       id: CONN,
       provider: STRIPE_PROVIDER,
       providerConfig: CONFIG.stripe,
-      apiCredentialsEnc: blob,
+      providerTokensEnc: blob,
     });
     expect(mat.cloudTokens?.resolveSaasSecret).toBeDefined();
     return expect(mat.cloudTokens!.resolveSaasSecret!("apiKey")).resolves.toBe(FAKE_STRIPE_KEY);
   });
 
-  it("reads apiCredentialsEnc, NOT providerTokensEnc", () => {
-    // The correction this ticket's risk note needs: ADR-042 §5 and WARP-2466
-    // both say `providerTokensEnc`, but WARP-2275 (#1817) shipped
-    // `apiCredentialsEnc` under `deriveSaasCredentialKey()`. A resolver reading
-    // the other column decrypts nothing — the exact failure the risk note was
-    // warning about, with the columns the other way round.
+  it("reads providerTokensEnc, NOT apiCredentialsEnc", () => {
+    // ADR-042 §5 is the authority and WARP-2453 (#1827) reconciled the
+    // configurator onto `providerTokensEnc`: it is the CLOUD-track credential
+    // column, sealed under `deriveSaasCredentialKey()` with the
+    // `saas-credential:<rowId>` AAD. `apiCredentialsEnc` is the Eaglesoft REST
+    // track's static {integrationKey,userId,password} triple under the older
+    // `encryptSecret`, on a LAN transport this resolver never touches — so a
+    // resolver reading it would decrypt nothing for a SaaS row.
     //
-    // Mutation: point the resolver at `providerTokensEnc` → no resolver is
-    // produced from this row at all → red.
+    // Mutation: point the resolver at `apiCredentialsEnc` → the second half
+    // goes red (no resolver from a providerTokensEnc row) AND the first half
+    // goes red (a resolver appears from an apiCredentialsEnc row).
     const blob = sealSaasCredentials(CONN, { apiKey: FAKE_STRIPE_KEY });
-    const wrongColumn = cloudMaterialFromRow({
+
+    const rightColumn = cloudMaterialFromRow({
       id: CONN,
       provider: STRIPE_PROVIDER,
       providerConfig: CONFIG.stripe,
       providerTokensEnc: blob,
     });
+    expect(rightColumn.cloudTokens?.resolveSaasSecret).toBeDefined();
+
+    const wrongColumn = cloudMaterialFromRow({
+      id: CONN,
+      provider: STRIPE_PROVIDER,
+      providerConfig: CONFIG.stripe,
+      apiCredentialsEnc: blob,
+    });
     expect(wrongColumn.cloudTokens?.resolveSaasSecret).toBeUndefined();
+  });
+
+  it("keeps the two providerTokensEnc writers disjoint by provider", () => {
+    // WARP-2453's argument, asserted rather than trusted. Two writers share
+    // this column: the ERP cloud track (QBO, Ascend) seals rotating OAuth
+    // material under `deriveErpCloudTokenKey()`, the SaaS tracks seal a pasted
+    // bundle under `deriveSaasCredentialKey()`. A row is ONE provider, so only
+    // one writer ever owns a blob — and the QBO/Ascend branches return before
+    // the generic SaaS branch is reached.
+    //
+    // Mutation: move the SaaS branch above the QBO branch → QuickBooks stops
+    // getting `resolveQbo` and gets a SaaS resolver instead → red.
+    const blob = sealSaasCredentials(CONN, { apiKey: FAKE_STRIPE_KEY });
+    const qbo = cloudMaterialFromRow({
+      id: CONN,
+      provider: "quickbooks-online",
+      providerConfig: { provider: "quickbooks-online", realmId: "r-1" },
+      providerTokensEnc: blob,
+    });
+    // A SaaS-sealed blob on a QuickBooks row yields no QBO tokens (it is not
+    // QBO's encoding) and no SaaS resolver either (QBO returns first). It
+    // fails closed as "no credential" — never as somebody else's.
+    expect(qbo.cloudTokens?.resolveSaasSecret).toBeUndefined();
+    expect(qbo.cloudTokens?.resolveQbo).toBeUndefined();
   });
 
   it("fails closed on a blob sealed for a different row", () => {
@@ -274,7 +310,7 @@ describe("the SaaS credential resolver", () => {
       id: "conn-b",
       provider: STRIPE_PROVIDER,
       providerConfig: CONFIG.stripe,
-      apiCredentialsEnc: blob,
+      providerTokensEnc: blob,
     });
     return expect(mat.cloudTokens!.resolveSaasSecret!("apiKey")).rejects.toThrow();
   });
@@ -287,7 +323,7 @@ describe("the SaaS credential resolver", () => {
       id: CONN,
       provider: HUBSPOT_PROVIDER,
       providerConfig: CONFIG.hubspot,
-      apiCredentialsEnc: blob,
+      providerTokensEnc: blob,
     });
     return expect(mat.cloudTokens!.resolveSaasSecret!("accessToken")).rejects.toBeInstanceOf(
       ConnectorBlockedError,
@@ -301,7 +337,7 @@ describe("the SaaS credential resolver", () => {
       id: CONN,
       provider: HUBSPOT_PROVIDER,
       providerConfig: CONFIG.hubspot,
-      apiCredentialsEnc: blob,
+      providerTokensEnc: blob,
     });
     return mat.cloudTokens!.resolveSaasSecret!("accessToken").then(
       () => expect.unreachable("should have rejected"),
@@ -321,7 +357,7 @@ describe("the SaaS credential resolver", () => {
       id: CONN,
       provider: MAILCHIMP_PROVIDER,
       providerConfig: CONFIG.mailchimp,
-      apiCredentialsEnc: blob,
+      providerTokensEnc: blob,
     });
     // Cast to the concrete class: `status()` is a Mailchimp method, not part
     // of the `Connector` interface every track implements.

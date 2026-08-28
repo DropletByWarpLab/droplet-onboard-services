@@ -53,6 +53,17 @@ export interface ConnectorMeta {
   /** One line: what connecting it does. */
   description: string;
   availability: ConnectorAvailability;
+  /**
+   * WARP-2342 — where the customer reads how to produce this provider's
+   * credential, carried through from the shared descriptor's catalog block.
+   *
+   * Rendered on the tile AND at the wizard's credential step, because a guide
+   * the customer cannot find is a guide they will not read. Optional HERE
+   * because the field is only *required* of a cloud track whose card is
+   * `available` — the descriptor type enforces that at the declaration site
+   * (`CloudProviderCatalogMeta`), which is the only place that can.
+   */
+  setupGuideHref?: string;
 }
 
 /** Resting write posture shown on the ERP hero. Read-only is the safe default. */
@@ -156,11 +167,20 @@ export interface ErpAccess {
   canConfirmWrites: boolean;
 }
 
-/** Input the connect wizard collects before provisioning. */
-export interface EaglesoftConnectInput {
+/**
+ * Input the connect wizard collects before provisioning, for ANY LAN-database
+ * track (WARP-2451).
+ *
+ * `scopes` is `string[]` rather than `ErpScope[]` on purpose: the wizard reads
+ * the offered scopes off the provider descriptor, which lives in
+ * `@droplet/shared-types` and cannot import this union. The correspondence is
+ * PINNED by a test (`connectors.test.ts`) instead of asserted by a cast —
+ * "types can lie" is the wave-1 lesson this follows.
+ */
+export interface LanConnectInput {
   host: string;
   port: number;
-  scopes: ErpScope[];
+  scopes: string[];
   enableWrites: boolean;
 }
 

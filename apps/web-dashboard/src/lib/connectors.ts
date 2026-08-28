@@ -51,6 +51,13 @@ export const CONNECTORS: ConnectorMeta[] = catalogDescriptors().flatMap((descrip
           category: descriptor.catalog.category,
           description: descriptor.catalog.description,
           availability: descriptor.catalog.availability,
+          // WARP-2342. Spread rather than assigned, so a card with no guide
+          // carries no KEY at all — `{ setupGuideHref: undefined }` would make
+          // "no guide declared" and "declared as nothing" the same object, and
+          // the pinned-catalog test could not tell them apart either.
+          ...(descriptor.catalog.setupGuideHref !== undefined
+            ? { setupGuideHref: descriptor.catalog.setupGuideHref }
+            : {}),
         },
       ]
     : [],
@@ -81,4 +88,15 @@ export function connectorCredentialFields(id: string): readonly CredentialFieldD
 export function providerKeyForConnector(id: string): string | undefined {
   const descriptor = descriptorForCatalogId(id);
   return descriptor && descriptor.track !== "catalog" ? descriptor.id : undefined;
+}
+
+/**
+ * The setup guide for a hub card, or undefined when the provider declares none.
+ *
+ * One read path for both surfaces that render it — the tile and the wizard's
+ * credential step — so the two cannot end up linking different places
+ * (WARP-2342).
+ */
+export function connectorSetupGuideHref(id: string): string | undefined {
+  return descriptorForCatalogId(id)?.catalog?.setupGuideHref;
 }

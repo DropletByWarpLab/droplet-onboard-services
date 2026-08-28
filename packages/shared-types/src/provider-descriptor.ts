@@ -211,17 +211,133 @@ export interface ProviderCatalogMeta {
   /** Sort position in the hub, pinned so the order survives a reordering of
    *  the descriptor declarations. */
   readonly order: number;
+  /**
+   * WARP-2342 — where the customer reads how to produce this provider's
+   * credential.
+   *
+   * Rendered by the hub card AND by the connect wizard at the credential-entry
+   * step, which is the moment the reader actually needs it. A guide the
+   * customer cannot find is a guide they will not read, and for a cloud
+   * provider the credential is created in a vendor console Warp Lab does not
+   * control — so an unreachable click-path is the connector being unusable,
+   * not a documentation nit.
+   *
+   * Declared `?` HERE but REQUIRED by the type below for a cloud track whose
+   * card is `available`; see {@link CloudProviderCatalogMeta}. Keeping the
+   * property optional on the base is what lets every reader say
+   * `catalog?.setupGuideHref` without narrowing first.
+   */
+  readonly setupGuideHref?: string;
 }
 
-/** Everything both apps need to know about one provider. */
-export interface ProviderDescriptor {
+/**
+ * The catalog block a CLOUD track may carry.
+ *
+ * A cloud provider's credential is created by the customer in a vendor console
+ * (ADR-042 §2), so `available` means "an SMB owner without an IT department is
+ * being asked to go and make one" — and that is not shippable without a guide.
+ * The union makes it a `tsc` error rather than a review note.
+ *
+ * `coming-soon` is deliberately exempt: such a card has no connect flow at all
+ * (the hub renders it disabled), so there is no moment of use to link from, and
+ * requiring a href would mean pointing at a guide that has not been written.
+ * `scripts/check-setup-guides.sh` owns the other half — that the guide named
+ * here exists and carries its six sections.
+ */
+export type CloudProviderCatalogMeta =
+  | (ProviderCatalogMeta & { readonly availability: "coming-soon" })
+  | (ProviderCatalogMeta & {
+      readonly availability: "available";
+      readonly setupGuideHref: string;
+    });
+
+/**
+ * One mutually exclusive way of authenticating a provider.
+ *
+ * Some vendors offer genuinely different credential shapes for the same
+ * account — Xero's Custom Connection versus a customer-owned PKCE app are
+ * different flows with different fields, not one flow with optional extras.
+ * Rendering the union of both paths' fields would ask for values that cannot
+ * exist together; rendering only the first would hide the other entirely.
+ *
+ * Variant fields are declared HERE, not in `credentialFields`: a field that is
+ * required on one path and meaningless on the other cannot be described by a
+ * single `required` flag. Read the two together through
+ * {@link credentialFieldsFor}.
+ */
+export interface CredentialVariant {
+  /** Stable id, persisted alongside the credential so a later edit reopens the
+   *  same path. Never derived from the label. */
+  readonly id: string;
+  readonly label: string;
+  /** One line telling the owner which path is theirs. */
+  readonly description?: string;
+  readonly fields: readonly CredentialFieldDef[];
+}
+
+/** One read scope the owner may grant on a LAN-database track. */
+export interface LanReadScope {
+  readonly id: string;
+  readonly label: string;
+  /** Short tag rendered beside the label — "PHI", "financial". */
+  readonly tag?: string;
+}
+
+/**
+ * How a LAN-database track provisions its own least-privilege account.
+ *
+ * PRESENCE of this block is what selects the connect wizard's LAN flow: find
+ * the server, run the one-off DBA script, choose read scopes, confirm. Absent,
+ * the wizard renders the generic credential form. It is a capability
+ * declaration, in the same shape as `rateLimit` and `catalog` above — not a
+ * status inferred from a missing row.
+ *
+ * Every string a person reads in that flow is here or on `displayName`, so a
+ * second LAN vendor is a descriptor, not a second wizard.
+ */
+export interface LanProvisioning {
+  /** The read-only database account Droplet creates, e.g. `droplet_ro`. */
+  readonly accountName: string;
+  /** The database the connection names, shown on the confirm step. */
+  readonly databaseName: string;
+  /** Port offered before the owner opens Advanced. */
+  readonly defaultPort: number;
+  /** Placeholder for the host field — an example, never a default. */
+  readonly hostPlaceholder: string;
+  /**
+   * The noun phrase used in the reachability result, e.g. `an Eaglesoft
+   * database`. Carried as data because the article is part of it and no
+   * template built from `displayName` gets "an" right for every vendor.
+   */
+  readonly reachableLabel: string;
+  /** The one-off DBA script, one line per array entry. Contains a PLACEHOLDER
+   *  where the generated password goes — never a credential. */
+  readonly script: readonly string[];
+  /** Read scopes offered on the scopes step, in render order. */
+  readonly scopes: readonly LanReadScope[];
+  /** The write opt-in, or absent when the track offers none. */
+  readonly writeOptIn?: {
+    readonly label: string;
+    /** The caution shown under the toggle. Off by default, always. */
+    readonly caution: string;
+  };
+}
+
+/** Everything both apps need to know about one provider, minus the two fields
+ *  whose legality depends on the track — see {@link ProviderDescriptor}. */
+interface ProviderDescriptorBase {
   /** The provider key persisted on `IntegrationConnection.provider` (free-text
    *  TEXT — a new key needs no migration; this registry is the only gate). */
   readonly id: string;
   readonly displayName: string;
   readonly category: string;
-  readonly track: ProviderTrack;
   readonly credentialFields: readonly CredentialFieldDef[];
+  /**
+   * Mutually exclusive authentication paths, when the vendor offers more than
+   * one. Absent on every shipped provider — one credential shape is the normal
+   * case, and an empty single-variant array would be ceremony.
+   */
+  readonly credentialVariants?: readonly CredentialVariant[];
   /**
    * Hostnames this track dials, as BARE HOSTS.
    *
@@ -272,7 +388,62 @@ export interface ProviderDescriptor {
    * a number invented here would be a guess wearing a policy's clothes.
    */
   readonly pollIntervalFloorMs?: number;
-  readonly catalog?: ProviderCatalogMeta;
+  /** Declared by a LAN track that provisions its own database account. */
+  readonly lanProvisioning?: LanProvisioning;
+}
+
+/**
+ * Everything both apps need to know about one provider.
+ *
+ * A union on `track` rather than a flat interface, for exactly one reason: a
+ * cloud provider offered on the hub must carry a setup-guide link, and that is
+ * a rule `tsc` can enforce at the declaration site. Every other property is
+ * shared, so readers still write `descriptor.egressHosts` without narrowing.
+ */
+export type ProviderDescriptor =
+  | (ProviderDescriptorBase & {
+      readonly track: "lan" | "catalog";
+      readonly catalog?: ProviderCatalogMeta;
+    })
+  | (ProviderDescriptorBase & {
+      readonly track: "cloud";
+      readonly catalog?: CloudProviderCatalogMeta;
+    });
+
+/**
+ * The variant a form is currently on, or `undefined` for a provider that
+ * declares none.
+ *
+ * An unknown id falls back to the FIRST variant rather than to nothing: a
+ * persisted variant id that no longer exists must still render a usable form,
+ * and an empty form would look like a provider that needs no credentials.
+ */
+export function credentialVariantFor(
+  descriptor: ProviderDescriptor | undefined,
+  variantId?: string,
+): CredentialVariant | undefined {
+  const variants = descriptor?.credentialVariants;
+  if (!variants || variants.length === 0) return undefined;
+  return variants.find((v) => v.id === variantId) ?? variants[0];
+}
+
+/**
+ * Every field a form must collect for one authentication path: the provider's
+ * common fields, then the chosen variant's.
+ *
+ * The ONLY function that answers "what does this form ask for". Rendering
+ * `credentialFields` directly is correct for a provider with no variants and
+ * silently wrong for one with them, which is why the read goes through here.
+ */
+export function credentialFieldsFor(
+  descriptor: ProviderDescriptor | undefined,
+  variantId?: string,
+): readonly CredentialFieldDef[] {
+  if (!descriptor) return [];
+  const variant = credentialVariantFor(descriptor, variantId);
+  return variant
+    ? [...descriptor.credentialFields, ...variant.fields]
+    : descriptor.credentialFields;
 }
 
 /**

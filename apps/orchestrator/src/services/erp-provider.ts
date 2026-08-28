@@ -389,22 +389,29 @@ export interface CloudConnectionRow {
   id: string;
   provider: string;
   providerConfig?: unknown;
-  providerTokensEnc?: string | null;
   /**
-   * WARP-2466 — the customer-supplied credential bundle, sealed by
-   * `saas-credential.service`.
+   * The cloud-track credential column, and the ONE the SaaS resolver reads.
    *
-   * A DIFFERENT column from `providerTokensEnc` and deliberately so. That one
-   * holds the ERP cloud track's rotating OAuth material under
-   * `deriveErpCloudTokenKey()`; this one holds pasted vendor credentials under
-   * `deriveSaasCredentialKey()`, AAD-bound to the row id. Sharing a column
-   * would make "which key opens this?" a question about the row's history —
-   * `saas-credential.service.ts`'s docstring makes the argument in full.
+   * ADR-042 §5 is the authority: a customer-supplied credential is sealed here
+   * under `deriveSaasCredentialKey()`, AAD-bound to the row id. WARP-2453
+   * (#1827) reconciled the configurator onto it after WARP-2275 had written
+   * `apiCredentialsEnc` — that column is the Eaglesoft REST track's static
+   * {integrationKey,userId,password} triple under the older `encryptSecret`,
+   * on a LAN transport this never touches.
    *
-   * Note both ADR-042 §5 and WARP-2466's own risk note say the credential
-   * lives in `providerTokensEnc`. They are out of date: WARP-2275 (#1817)
-   * shipped `apiCredentialsEnc`, and the resolver below reads what shipped.
+   * TWO WRITERS, disjoint by PROVIDER and each failing closed against the
+   * other. The ERP cloud track (QuickBooks Online, Dentrix Ascend) seals
+   * rotating OAuth material under `deriveErpCloudTokenKey()`; the SaaS tracks
+   * seal a pasted credential bundle under `deriveSaasCredentialKey()` with the
+   * `saas-credential:<rowId>` AAD. A row is one provider, so only one writer
+   * ever owns a given blob — and if the wrong opener is tried, GCM's tag check
+   * fails and the caller sees "no credential", never somebody else's. The
+   * branches below reflect that: QBO and Ascend return before the generic
+   * SaaS branch is reached.
    */
+  providerTokensEnc?: string | null;
+  /** The Eaglesoft REST triple. Read by the LAN path, never by the SaaS
+   *  resolver — a different transport with its own encryption vintage. */
   apiCredentialsEnc?: string | null;
 }
 
@@ -542,8 +549,8 @@ export function cloudMaterialFromRow(
   // resolver: an unrecognised key reaching this line means a row written by a
   // newer build, and `connectorForProvider` refuses it by name a moment later.
   const descriptor = providerDescriptor(row.provider);
-  if (descriptor?.track === "cloud" && row.apiCredentialsEnc) {
-    const blob = row.apiCredentialsEnc;
+  if (descriptor?.track === "cloud" && row.providerTokensEnc) {
+    const blob = row.providerTokensEnc;
     return {
       connectionId: row.id,
       providerConfig,
