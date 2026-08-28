@@ -247,6 +247,25 @@ if grep -q 'tests/integration/fips-stack.test.sh' "$TFY" && grep -q 'fips-stack'
 else
   fail "test-fips.yml does not wire tests/integration/fips-stack.test.sh"
 fi
+# WARP-2481: running the lint is worthless if nothing aggregates its result.
+# `fips-lint` used to be red on a PR that merged anyway, because a job in a
+# path-filtered workflow is not (and cannot be) a required status check. The
+# leg now lives in ci.yml and must stay wired into BOTH halves of the
+# `ci-summary` fan-in: `needs:` (so a failure propagates) and `check_leg` (so
+# a *skip* with a non-empty suite list also fails, i.e. fail-closed).
+# Mutation: drop either line from ci.yml and this test goes red.
+CIY="$REPO_ROOT/.github/workflows/ci.yml"
+if grep -qE '^[[:space:]]*needs:[[:space:]]*\[[^]]*fips[^]]*\]' "$CIY"; then
+  pass "ci.yml: ci-summary needs the fips leg"
+else
+  fail "ci.yml: ci-summary does not need the fips leg — a red lint would not block a merge (WARP-2481)"
+fi
+if grep -qE '^[[:space:]]*check_leg fips ' "$CIY"; then
+  pass "ci.yml: ci-summary check_leg covers the fips leg"
+else
+  fail "ci.yml: ci-summary has no check_leg for the fips leg — a skipped lint would pass (WARP-2481)"
+fi
+
 if [ -f "$REPO_ROOT/docs/fips.md" ]; then
   pass "docs/fips.md exists (referenced by ENVIRONMENT.md, .env.example, setup.sh)"
 else

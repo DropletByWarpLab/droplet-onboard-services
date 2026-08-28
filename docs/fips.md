@@ -203,7 +203,10 @@ instance initialized second lost, and its first TLS client crashed the boot.
 | db, nextcloud, broker, frigate, ollama, … (pulled images) | ❌ | untouched | `OPENSSL_CONF` points at a path that does not exist in these images; OpenSSL ignores a missing config file. |
 
 Application-source discipline is enforced separately and always-on:
-`scripts/test-fips.sh` (PR-blocking static lint) fails any PR introducing
+`scripts/test-fips.sh` — run by `ci.yml`'s `fips / static lint` leg, whose
+verdict reaches branch protection through the required `ci-summary` check
+(WARP-2481; before that it ran in `test-fips.yml`, went red, and blocked
+nothing) — fails any PR introducing
 MD5/SHA-1/DES/small-RSA/TLS≤1.1 without a registered exception in
 [`docs/security/fips-exceptions.md`](security/fips-exceptions.md) — so the
 code is FIPS-clean even on boxes running with the knob OFF.
@@ -212,8 +215,8 @@ code is FIPS-clean even on boxes running with the knob OFF.
 
 | Layer | Where | What breaks the build |
 |---|---|---|
-| Source lint | `test-fips.yml` → `fips-lint` (PR-blocking) | A non-FIPS algorithm in source without a registered escape |
+| Source lint | `ci.yml` → `fips / static lint`, fanned into the required `ci-summary` (WARP-2481) | A non-FIPS algorithm in source without a registered escape |
 | Build-time module gate | `docker-build.yml` (required check) | `fips.so` KATs fail, provider won't load, or MD5 survives in any image build |
 | Sabotage proof | `test-fips.yml` → `fips-sabotage` | Removing `fips.so` does *not* break the gate (i.e. the gate is a no-op) |
 | Full-stack activation | `test-fips.yml` → `fips-stack` (gated on FIPS option paths) | The stack fails to boot FIPS-enforcing end-to-end, the edge accepts ChaCha, MD5 works at runtime, or a non-provider service crash-loops |
-| Harness logic | `test-fips.yml` → `fips-lint` step | `tests/fips-stack-logic.test.sh` — the stack harness or the compose pins regress, even on Docker-less runners |
+| Harness logic | `ci.yml` → `fips / static lint` step | `tests/fips-stack-logic.test.sh` — the stack harness or the compose pins regress, even on Docker-less runners |

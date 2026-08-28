@@ -77,7 +77,14 @@ ceremony hasn't run), ~400 doomed runs/month.
    "orchestrator change breaks the setup.sh flow" class within 24h.
 6. **test-fips gates the fips-sabotage OpenSSL compile** on the same
    FIPS-option paths as fips-stack; only `fips-lint` (static, ~2 min)
-   runs on every code PR.
+   ran on every code PR.
+   *Superseded 2026-08-28 (WARP-2481):* `fips-lint` moved into `ci.yml` as
+   the `fips` leg (same `paths:`, so its own cost is unchanged), and
+   `test-fips.yml`'s trigger `paths:` were narrowed from the lint's broad
+   list to the FIPS-option paths the two remaining Docker jobs actually
+   gate on. Those two jobs used to spin up a runner and no-op (6–11 s each,
+   but billing rounds up: 2 min/event) on ~91% of PRs and 271 of 293
+   monthly main pushes. Net: **~-1,600 min/mo**.
 
 Modeled result at the same cadence: **~40k min/month** — inside the
 included tier, headroom to ~1.6× today's PR volume.
@@ -94,9 +101,11 @@ included tier, headroom to ~1.6× today's PR volume.
   copying any retired-trigger sibling (e.g. `switch-tests.yml`).
 - **Never add an unfiltered `pull_request:` trigger** to any job heavier
   than ~1 min. The only every-PR workflows are the ~1-min hygiene checks
-  (egress-gate, gitleaks, hadolint, semgrep, ci-coverage, codeql-trigger)
+  (egress-gate, gitleaks, hadolint, ci-coverage, codeql-trigger)
   and ci.yml's detect+summary. That list is closed — extending it is a
-  budget decision for Romain.
+  budget decision for Romain. (`semgrep` left this list in WARP-2481: it is
+  now an unfiltered *leg* of ci.yml, same trigger set and same ~1 billable
+  min, so the spend is unchanged — it just blocks merges now.)
 - **Widening a `paths:` list on docker-build / setup-e2e / test-fips is a
   spend decision.** These are the 20–60-min jobs; a glob like
   `apps/orchestrator/**` or `services/**` puts them on ~half of all PRs.

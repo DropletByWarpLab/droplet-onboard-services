@@ -5,8 +5,10 @@ Two layers defend that promise in CI:
 
 1. Long-standing invariant gates: `security-tests.yml`
    (`scripts/test-security.sh` — compose/secret hygiene, CORS, mem-limits,
-   OTA trust anchor) and `test-fips.yml` (`scripts/test-fips.sh` — banned
-   crypto algorithms, exceptions in `docs/security/fips-exceptions.md`).
+   OTA trust anchor) and `ci.yml`'s `fips` leg (`scripts/test-fips.sh` —
+   banned crypto algorithms, exceptions in
+   `docs/security/fips-exceptions.md`; moved out of `test-fips.yml` by
+   WARP-2481 so that it actually blocks a merge).
 2. The WARP-243 scanner lane (this document) plus the WARP-269 egress gate
    (see the Egress section).
 
@@ -20,7 +22,7 @@ file.
 | Workflow | Tool (pinned) | Blocks PRs? | Scope | Baseline / escape hatch |
 |---|---|---|---|---|
 | `gitleaks.yml` | gitleaks 8.30.1 | yes | working tree + PR commit range | `.gitleaks.toml` (test fixtures only) |
-| `semgrep.yml` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
+| `ci.yml` job `semgrep` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) — blocks via the required `ci-summary` fan-in since WARP-2481; before that it was red-but-advisory | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
 | `hadolint.yml` | hadolint 2.14.0 | yes | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
 | `docker-build.yml` (Trivy step) | trivy-action 0.36.0, **DB pinned by digest** | yes (fixable HIGH/CRITICAL not in baseline) | every image the PR rebuilds | `.trivyignore` baseline + `.github/trivy-db-version` (see [Trivy determinism](#trivy-determinism)) |
 | `codeql.yml` | CodeQL (JS/TS + Python + Actions) | no — advisory signal only (not a required check; no `code_scanning` ruleset rule exists — see [CodeQL ownership](#codeql)) | code paths + `.github/workflows/**` | GitHub per-PR alert diffing |

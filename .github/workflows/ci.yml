@@ -89,6 +89,7 @@ jobs:
       python-services: ${{ steps.plan.outputs.python-services }}
       python-matrix: ${{ steps.plan.outputs.python-matrix }}
       storage-suites: ${{ steps.plan.outputs.storage-suites }}
+      fips-suites: ${{ steps.plan.outputs.fips-suites }}
     steps:
       - uses: actions/checkout@v7
 
@@ -238,6 +239,37 @@ jobs:
               - "scripts/host/droplet-storage-pool.sh"
               - "tests/factory-reset-storage-wipe.test.sh"
               - "tests/storage-pool-destroy-superblock.test.sh"
+            # WARP-2481: the WARP-229 FIPS static source lint, moved here from
+            # test-fips.yml so its result reaches branch protection through
+            # ci-summary. This list is the EXACT `paths:` test-fips.yml used
+            # for the fips-lint job, so the leg fires on precisely the PRs it
+            # fired on before — no widening, no narrowing, delta ~0
+            # (docs/ci-cost-budget.md).
+            # `.github/workflows/test-fips.yml` stays in the list and is
+            # load-bearing, not vestigial: two of this leg's own suites GREP
+            # that file (fips-stack-logic.test.sh asserts the Docker-gated
+            # fips-stack job still wires tests/integration/fips-stack.test.sh),
+            # so gutting test-fips.yml has to turn this leg red.
+            fips:
+              - "apps/**"
+              - "services/**"
+              - "packages/**"
+              - "scripts/**"
+              - "docker/**"
+              - "docs/security/fips-exceptions.md"
+              - "docs/security/fips-allowed-algorithms.md"
+              - "tests/fips-sabotage.test.sh"
+              - "tests/fips-sabotage-logic.test.sh"
+              # WARP-2480/WARP-2481: the ONE addition to the inherited list.
+              # This leg's first step runs tests/test-fips-script/run.sh — the
+              # harness that gates the lint itself — but test-fips.yml never
+              # listed it, so a PR editing only that harness got no run at all.
+              # A few commits a year, so the spend is ~0.
+              - "tests/test-fips-script/**"
+              - "tests/nginx-fips.test.sh"
+              - "tests/fips-stack-logic.test.sh"
+              - "tests/integration/fips-stack.test.sh"
+              - ".github/workflows/test-fips.yml"
 
       - name: Decide which legs run
         id: plan
@@ -252,6 +284,7 @@ jobs:
             "voice-io","device-identity-svc","erp-sql-bridge",
             "inference-manager","doc-render"]
           ALL_STORAGE: '["storage"]'
+          ALL_FIPS: '["fips"]'
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
@@ -259,6 +292,7 @@ jobs:
             node=$(jq -c . <<<"$ALL_NODE")
             python=$(jq -c . <<<"$ALL_PYTHON")
             storage=$(jq -c . <<<"$ALL_STORAGE")
+            fips=$(jq -c . <<<"$ALL_FIPS")
           else
             if jq -e 'index("node-global")' <<<"$CHANGED" >/dev/null; then
               node=$(jq -c . <<<"$ALL_NODE")
@@ -276,6 +310,11 @@ jobs:
               storage=$(jq -c . <<<"$ALL_STORAGE")
             else
               storage="[]"
+            fi
+            if jq -e 'index("fips")' <<<"$CHANGED" >/dev/null; then
+              fips=$(jq -c . <<<"$ALL_FIPS")
+            else
+              fips="[]"
             fi
           fi
           # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
@@ -299,10 +338,12 @@ jobs:
             echo "python-services=$python"
             echo "python-matrix=$python_matrix"
             echo "storage-suites=$storage"
+            echo "fips-suites=$fips"
           } >> "$GITHUB_OUTPUT"
           echo "node legs: $node"
           echo "python legs: $python"
           echo "storage legs: $storage"
+          echo "fips legs: $fips"
 
   node:
     name: node / ${{ matrix.suite }}
@@ -615,6 +656,130 @@ jobs:
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
 
+  # WARP-229 FIPS 140-3 static SOURCE lint (scripts/test-fips.sh), moved here
+  # from test-fips.yml under WARP-2481. It lived in its own path-filtered
+  # workflow, which meant the job went red and the merge went through anyway:
+  # `fips-lint` was never a required context, and a path-filtered workflow
+  # cannot become one (docs/ci-required-checks.md — the WARP-2172 "Expected"
+  # trap). As a leg of ci.yml its verdict lands in `ci-summary`, which IS
+  # required on both rulesets. That is what makes the PR-BLOCKING claim in
+  # scripts/test-fips.sh true rather than aspirational.
+  #
+  # Distinct from the BUILD-TIME provider gate in docker-build.yml
+  # (install-fips-provider.sh KATs + positive/negative probes, fanned in via
+  # `docker-build ok`). This greps source for non-FIPS algorithms; it does NOT
+  # build images or check runtime enforcement. See scripts/test-fips.sh's
+  # header for the lint-vs-gate split.
+  #
+  # To register a new exception: add an entry under `exceptions:` in
+  # docs/security/fips-exceptions.md and reference it from source with a
+  # `fips:allowed: <id>` comment within +/-2 lines. Code review is the
+  # enforcement gate for new entries; the rationale and annual-review owner
+  # must be documented.
+  fips:
+    name: fips / static lint
+    needs: detect
+    # Same empty-list guard as the node/python/storage jobs above.
+    if: needs.detect.outputs.fips-suites != '[]'
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Pure static lint (no Docker, no pip/apt builds) — 15 min is
+    # a wide ceiling for a ~2 min suite.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run lint script's own unit tests
+        run: ./tests/test-fips-script/run.sh
+
+      - name: Run FIPS static lint (PR-blocking via ci-summary)
+        run: ./scripts/test-fips.sh
+
+      - name: Validate the FIPS-capable nginx gateway artifacts (WARP-1021)
+        # Docker-free: cipher-profile posture, entrypoint profile selection,
+        # compose + CI wiring. The image's own build-time self-test (provider
+        # KATs + nginx -t on both profiles) runs in docker-build.yml's
+        # gateway matrix leg.
+        run: bash tests/nginx-fips.test.sh
+
+      - name: Validate the sabotage-proof harness (Docker-free logic checks)
+        # WARP-316: asserts tests/fips-sabotage.test.sh encodes a real sabotage
+        # (build -> install -> rm fips.so -> assert provider gone) and skips
+        # cleanly without Docker. The Docker build itself runs in the
+        # fips-sabotage job, still in test-fips.yml.
+        run: bash tests/fips-sabotage-logic.test.sh
+
+      - name: Validate the FIPS stack harness (Docker-free logic checks)
+        # WARP-317: asserts tests/integration/fips-stack.test.sh encodes the
+        # real activation flow + assertions, that the compose file pins the
+        # FIPS boot gate OFF for non-provider images, and that the operator
+        # docs exist. The stack boot itself runs in the fips-stack job, still
+        # in test-fips.yml.
+        run: bash tests/fips-stack-logic.test.sh
+
+  # WARP-243 diff-aware SAST, moved here from semgrep.yml under WARP-2481 for
+  # the same reason as the fips leg: semgrep.yml's own header said it "runs
+  # unfiltered on every PR so it can be a required check", but it never became
+  # one — on PR #1815 semgrep was red, ci-summary was green, and the PR was
+  # mergeable. Folding it in is what closes that gap.
+  #
+  # DELIBERATELY NOT `detect`-GATED. Its value is scanning everything, and it
+  # was unfiltered before; a path filter here would be a coverage cut dressed
+  # up as a cost saving. `ci-summary` is passed a hard-coded non-empty suite
+  # list for this leg, so a skip can never be read as "nothing to do" —
+  # fail-closed, same contract as the filtered legs.
+  #
+  # BASELINE STRATEGY: diff-aware. `--baseline-commit <merge-base>` means only
+  # findings introduced by the PR block it; the 40 audited pre-existing
+  # findings on main (2026-07-04, 25 in prod code — burn-down tracked
+  # separately, see docs/SECURITY.md#semgrep) never fail anyone's PR.
+  # On main pushes the baseline is the parent sha (github.event.before) so a
+  # regression that somehow lands still turns main red without the whole
+  # backlog doing so.
+  semgrep:
+    name: semgrep / diff-aware SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # merge-base for --baseline-commit
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install semgrep 1.136.0 (pinned)
+        # semgrep 1.136.0 pulls a transitive opentelemetry-instrumentation
+        # that imports pkg_resources at load time. Python 3.12.13 runners no
+        # longer ship setuptools by default, and setuptools >= 81 removed
+        # pkg_resources entirely — so we pin setuptools < 81, which still
+        # bundles it (otherwise: ModuleNotFoundError: No module named
+        # 'pkg_resources' before semgrep scans anything).
+        run: pip install "setuptools<81" semgrep==1.136.0
+
+      - name: Resolve baseline commit
+        id: base
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=$(git merge-base origin/${{ github.base_ref }} HEAD)" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "sha=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Semgrep scan (blocks findings introduced by this change)
+        run: |
+          set -eu
+          BASELINE="${{ steps.base.outputs.sha }}"
+          ARGS=(--config p/owasp-top-ten --config .semgrep/ --metrics=off --error)
+          if [ -n "$BASELINE" ] && git cat-file -e "$BASELINE" 2>/dev/null; then
+            ARGS+=(--baseline-commit "$BASELINE")
+          fi
+          semgrep scan "${ARGS[@]}"
+
   # THE required check (WARP-968/969 merge policy). Runs even when legs fail
   # (`if: always()`) so it ALWAYS reports — no more PRs hung on "Expected".
   # Fails closed: a leg job may be skipped ONLY because detect proved its
@@ -625,7 +790,7 @@ jobs:
     name: ci-summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [detect, node, python, storage]
+    needs: [detect, node, python, storage, fips, semgrep]
     if: always()
     steps:
       - name: Report leg results
@@ -642,6 +807,9 @@ jobs:
           NODE_SUITES: ${{ needs.detect.outputs.node-suites }}
           PYTHON_SERVICES: ${{ needs.detect.outputs.python-services }}
           STORAGE_SUITES: ${{ needs.detect.outputs.storage-suites }}
+          FIPS_RESULT: ${{ needs.fips.result }}
+          FIPS_SUITES: ${{ needs.detect.outputs.fips-suites }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
         run: |
           set -eu
           fail=0
@@ -667,5 +835,10 @@ jobs:
           check_leg node "$NODE_RESULT" "$NODE_SUITES"
           check_leg python "$PYTHON_RESULT" "$PYTHON_SERVICES"
           check_leg storage "$STORAGE_RESULT" "$STORAGE_SUITES"
+          check_leg fips "$FIPS_RESULT" "$FIPS_SUITES"
+          # semgrep is unfiltered by design, so its suite list is a literal
+          # non-empty constant: there is no path change that makes "skipped"
+          # a legitimate outcome for it.
+          check_leg semgrep "$SEMGREP_RESULT" '["semgrep"]'
           [ "$fail" -eq 0 ] || exit 1
           echo "ci-summary — every triggered leg succeeded"
