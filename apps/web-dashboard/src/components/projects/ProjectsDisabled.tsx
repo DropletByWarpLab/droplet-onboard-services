@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { FolderKanban } from "lucide-react";
 import { mutate } from "swr";
 import { ShellPage } from "@/components/shell/ShellPage";

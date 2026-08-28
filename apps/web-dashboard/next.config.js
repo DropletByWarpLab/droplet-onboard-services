@@ -6,10 +6,11 @@ const nextConfig = {
   transpilePackages: ["@droplet/auth-policy"],
   // Monorepo: tell Next where the workspace root is so the standalone
   // file-trace walks up to the hoisted node_modules instead of stopping
-  // at apps/web-dashboard. In Next 14.2 this lives under `experimental`.
-  experimental: {
-    outputFileTracingRoot: path.join(__dirname, "../../"),
-  },
+  // at apps/web-dashboard. Top-level since Next 15 (it lived under
+  // `experimental` in 14.2; Next 15 ignores unknown experimental keys, so
+  // leaving it there would silently flatten the standalone layout that
+  // apps/web-dashboard/Dockerfile's COPY paths depend on).
+  outputFileTracingRoot: path.join(__dirname, "../../"),
   webpack: (config) => {
     // `@droplet/auth-policy` is authored for NodeNext (the orchestrator
     // consumes it), so its barrel uses explicit `.js` import extensions

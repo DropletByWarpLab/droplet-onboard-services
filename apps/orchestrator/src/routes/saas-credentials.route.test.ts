@@ -86,7 +86,7 @@ interface StubRow {
   id: string;
   provider: string;
   status: string;
-  apiCredentialsEnc: string | null;
+  providerTokensEnc: string | null;
   providerConfig: unknown;
   updatedAt: Date;
 }
@@ -104,7 +104,7 @@ function createPrismaStub(initial: StubRow | null) {
           id: ROW_ID,
           provider: String(data.provider),
           status: String(data.status),
-          apiCredentialsEnc: null,
+          providerTokensEnc: null,
           providerConfig: null,
           updatedAt: new Date(),
         };
@@ -147,7 +147,7 @@ function seededRow(): StubRow {
     id: ROW_ID,
     provider: FIXTURE.id,
     status: "CONNECTED",
-    apiCredentialsEnc: sealSaasCredentials(ROW_ID, { apiKey: SEEDED_SECRET }),
+    providerTokensEnc: sealSaasCredentials(ROW_ID, { apiKey: SEEDED_SECRET }),
     providerConfig: { provider: FIXTURE.id, accountId: "acct-1" },
     updatedAt: new Date("2026-08-27T00:00:00.000Z"),
   };
@@ -204,7 +204,7 @@ describe("RBAC — the guard is at registration, not inline", () => {
 
   it("does not persist anything when the caller is denied", async () => {
     const prisma = createPrismaStub(seededRow());
-    const before = prisma._row()?.apiCredentialsEnc;
+    const before = prisma._row()?.providerTokensEnc;
     const app = buildApp(prisma, {
       id: "44444444-4444-4444-8444-444444444444",
       username: "sam",
@@ -214,7 +214,7 @@ describe("RBAC — the guard is at registration, not inline", () => {
       .patch(`/api/integrations/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_x" } });
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
-    expect(prisma._row()?.apiCredentialsEnc).toBe(before);
+    expect(prisma._row()?.providerTokensEnc).toBe(before);
   });
 });
 
@@ -273,7 +273,7 @@ describe("GET — the redacted view", () => {
       true,
     );
     expect(JSON.stringify(res.body)).not.toContain(SEEDED_SECRET);
-    expect(JSON.stringify(res.body)).not.toContain("apiCredentialsEnc");
+    expect(JSON.stringify(res.body)).not.toContain("providerTokensEnc");
   });
 
   it("lists every cloud provider with an explicit state, configured or not", async () => {
@@ -290,9 +290,9 @@ describe("GET — the redacted view", () => {
 });
 
 describe("PATCH — three-way resolution against the persisted column", () => {
-  it("OMIT leaves apiCredentialsEnc byte-identical", async () => {
+  it("OMIT leaves providerTokensEnc byte-identical", async () => {
     const prisma = createPrismaStub(seededRow());
-    const before = prisma._row()?.apiCredentialsEnc;
+    const before = prisma._row()?.providerTokensEnc;
     const app = buildApp(prisma);
 
     const res = await request(app)
@@ -300,10 +300,10 @@ describe("PATCH — three-way resolution against the persisted column", () => {
       .send({ fields: { accountId: "acct-2" } });
 
     expect(res.status).toBe(200);
-    expect(prisma._row()?.apiCredentialsEnc).toBe(before);
+    expect(prisma._row()?.providerTokensEnc).toBe(before);
     // And the update call itself never carried the key.
     const data = prisma.integrationConnection.update.mock.calls[0][0].data;
-    expect(data).not.toHaveProperty("apiCredentialsEnc");
+    expect(data).not.toHaveProperty("providerTokensEnc");
   });
 
   it('EMPTY STRING clears the column and moves status to NOT_CONFIGURED', async () => {
@@ -315,7 +315,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
       .send({ fields: { apiKey: "" } });
 
     expect(res.status).toBe(200);
-    expect(prisma._row()?.apiCredentialsEnc).toBeNull();
+    expect(prisma._row()?.providerTokensEnc).toBeNull();
     expect(prisma._row()?.status).toBe("NOT_CONFIGURED");
     expect(res.body.state).toBe("NOT_CONFIGURED");
   });
@@ -329,9 +329,31 @@ describe("PATCH — three-way resolution against the persisted column", () => {
       .send({ fields: { apiKey: "rk_live_new" } });
 
     expect(res.status).toBe(200);
-    const blob = prisma._row()?.apiCredentialsEnc as string;
+    const blob = prisma._row()?.providerTokensEnc as string;
     expect(blob.startsWith("dcv1:")).toBe(true);
     expect(openSaasCredentials(ROW_ID, blob)).toEqual({ apiKey: "rk_live_new" });
+  });
+
+  it("writes ADR-042's column and never the Eaglesoft REST one", async () => {
+    // ADR-042 §5: a customer-supplied credential lives in `providerTokensEnc`,
+    // AAD-bound to the row id. `apiCredentialsEnc` is the Eaglesoft REST
+    // track's static triple under the older `encryptSecret` and belongs to a
+    // LAN transport this configurator never touches — writing there would put
+    // the credential where no cloud connector's TokenResolver looks for it.
+    //
+    // Mutation: point the route back at `data.apiCredentialsEnc` → both
+    // assertions go red.
+    const prisma = createPrismaStub(seededRow());
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .send({ fields: { apiKey: "rk_live_adr042" } });
+
+    expect(res.status).toBe(200);
+    const data = prisma.integrationConnection.update.mock.calls[0][0].data;
+    expect(data).toHaveProperty("providerTokensEnc");
+    expect(data).not.toHaveProperty("apiCredentialsEnc");
   });
 
   it("creates the row before sealing, so the AAD names a real connection", async () => {
@@ -344,7 +366,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
 
     expect(res.status).toBe(200);
     expect(prisma.integrationConnection.create).toHaveBeenCalled();
-    expect(openSaasCredentials(ROW_ID, prisma._row()?.apiCredentialsEnc as string)).toEqual({
+    expect(openSaasCredentials(ROW_ID, prisma._row()?.providerTokensEnc as string)).toEqual({
       apiKey: "rk_test_ok",
     });
   });

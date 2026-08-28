@@ -67,7 +67,7 @@
  *
  * ## The 10,000-record cap is answered by RE-ANCHORING, not deeper paging
  *
- * Delta reads are `POST /crm/v3/objects/{object}/search` filtered on
+ * Delta reads are `POST /crm/objects/<version>/{object}/search` filtered on
  * `hs_lastmodifieddate`, 200 records per page, with a **hard cap of 10,000
  * records per query**. Crossing it does not truncate politely — HubSpot answers
  * **HTTP 400**, which reads at a glance like a malformed filter and will cost
@@ -115,7 +115,7 @@
  * on a Free portal both 403. Saying "you have no marketing emails" would be the
  * same confident false statement in a different costume.
  *
- * ## Version pinning, and why this is built on v3 CRM objects
+ * ## Version pinning, and where the date actually goes
  *
  * HubSpot went date-based in March 2026, ships breaking changes twice a year,
  * and commits to an 18-month minimum support window — a standing upgrade
@@ -123,13 +123,27 @@
  * ({@link HUBSPOT_API_VERSION}) rather than a value scattered through route
  * strings.
  *
- * The choice inside that is not arbitrary: HubSpot v4, Associations v4
- * included, ends support on 2027-03-30 — inside this product's expected support
- * horizon. v3 CRM objects have no announced sunset. Association reads therefore
- * go through the v3 object route's `associations` block, and
- * `__tests__/hubspot.test.ts` fails the build if a v4 route literal ever
- * appears in this directory, because those endpoints are the ones a developer
- * reaches for first when wiring contact-to-deal links.
+ * Date-based versioning (DBV) puts that date **after the product group**, in
+ * the slot the semantic version used to occupy: `GET /crm/objects/<version>/
+ * contacts`, never `/<version>/crm/objects/contacts`. Getting that backwards
+ * 404s every call, and it is not a token swap — the object name moves ahead of
+ * the version, and one family changes product group outright. The per-family
+ * table on {@link HUBSPOT_API_ROUTES} is the record of what was verified
+ * against the published spec, and {@link hubspotPath} is the only place a path
+ * is built from it (WARP-2470).
+ *
+ * There is no default version and no version header: a path without a date is a
+ * different, LEGACY endpoint rather than the same one at a defaulted version.
+ * Legacy `v3` routes remain valid and unsunset, so this is a correctness fix
+ * rather than a deprecation race — but the two are different endpoints and the
+ * connector speaks only the documented, dated one.
+ *
+ * Associations are the one family kept off its own API: HubSpot v4,
+ * Associations v4 included, ends support on 2027-03-30 — inside this product's
+ * expected support horizon. Association reads therefore go through the object
+ * route's `associations` block, and `__tests__/hubspot.test.ts` fails the build
+ * if a v4 route literal ever appears in this directory, because those endpoints
+ * are the ones a developer reaches for first when wiring contact-to-deal links.
  *
  * ## Reads are wide; writes are two objects and a confirmation
  *
@@ -320,7 +334,7 @@ const HUBSPOT_DATASET_COLUMNS: Readonly<Record<string, readonly string[]>> = {
  * An ALLOWLIST enforced at request time by {@link assertReadableHubspotObject},
  * not a denylist of forbidden words asserted in a test. The Stripe track proved
  * by mutation why that distinction matters: request paths here are assembled at
- * runtime (`/crm/v3/objects/${objectType}`), so a forbidden literal need never
+ * runtime (`/crm/objects/<version>/${objectType}`), so a forbidden literal need never
  * appear in the source at all for the connector to dial a forbidden endpoint.
  *
  * Adding a resource is therefore a deliberate, visible edit to a named constant
@@ -670,14 +684,100 @@ export function assertHubspotPrivateAppToken(raw: unknown): string {
 }
 
 /**
+ * The API-name prefix of every route family this connector may dial.
+ *
+ * ## Why this is a table and not a string transform (WARP-2470)
+ *
+ * HubSpot's date-based versioning (DBV) puts the date AFTER the product group,
+ * where the semantic version used to sit: the documented pattern is
+ * `/api-name/<version>/resource`. Rewriting the legacy `/crm/v3/objects/…`
+ * paths this connector was first modelled on is therefore a REORDER, not a
+ * token swap — the object name moves ahead of the version — and a naive
+ * `v3 → <version>` substitution yields `/crm/<version>/objects/contacts`, which
+ * is a third wrong answer.
+ *
+ * A mechanical reorder is not enough either, because the rule does not hold for
+ * every family: custom object schemas move to a DIFFERENT product group
+ * entirely (`/crm/v3/schemas` → `/crm-object-schemas/<version>/schemas`), so
+ * any general `/A/v3/B/rest → /A/B/<version>/rest` transform would silently
+ * produce `/crm/schemas/<version>` and 404. That single exception is the reason
+ * this is an explicit, per-family allowlist rather than clever string surgery.
+ *
+ * ## The endpoint table — every route this connector can build
+ *
+ * Verified 2026-08-27 against the embedded OpenAPI fragment on each endpoint's
+ * own reference page under `developers.hubspot.com/docs/api-reference/latest/`.
+ * EVERY one of them declares **zero header parameters**: the version travels in
+ * the path and nowhere else, so there is no version header to set and no
+ * account-level default to pin. Each family below has a documented 2026-03
+ * path, so none of them needs to stay behind on a legacy `v3` route.
+ *
+ * | Connector call            | Documented 2026-03 path                                   | Legacy form it replaces                              | Spec |
+ * |---------------------------|-----------------------------------------------------------|------------------------------------------------------|------|
+ * | list / create objects     | `/crm/objects/<version>/{objectType}`                     | `/crm/v3/objects/{objectType}`                       | `crm-contacts-v2026-03.json` |
+ * | read one object           | `/crm/objects/<version>/{objectType}/{objectId}`          | `/crm/v3/objects/{objectType}/{objectId}`            | `crm-contacts-v2026-03.json` |
+ * | search objects (POST)     | `/crm/objects/<version>/{objectType}/search`              | `/crm/v3/objects/{objectType}/search`                | `crm-contacts-v2026-03.json` |
+ * | connect probe / owners    | `/crm/owners/<version>`                                   | `/crm/v3/owners`                                     | `crm-crm-owners-v2026-03.json` |
+ * | start an export (POST)    | `/crm/exports/<version>/export/async`                     | `/crm/v3/exports/export/async`                       | `crm-exports-v2026-03.json` |
+ * | export task status        | `/crm/exports/<version>/export/async/tasks/{taskId}/status` | `/crm/v3/exports/export/async/tasks/{taskId}/status` | `crm-exports-v2026-03.json` |
+ * | list marketing emails     | `/marketing/emails/<version>`                             | `/marketing/v3/emails`                               | `marketing-marketing-emails-v2026-03.json` |
+ * | list custom obj. schemas  | `/crm-object-schemas/<version>/schemas`                   | `/crm/v3/schemas`  ← product group renamed           | `crm-schemas-v2026-03.json` |
+ * | pipelines †               | `/crm/pipelines/<version>/{objectType}`                   | `/crm/v3/pipelines/{objectType}`                     | `crm-pipelines-v2026-03.json` |
+ * | properties †              | `/crm/properties/<version>/{objectType}`                  | `/crm/v3/properties/{objectType}`                    | `crm-properties-v2026-03.json` |
+ *
+ * † Named in {@link HUBSPOT_READABLE_RESOURCES} and parseable by
+ * {@link hubspotResourceOf}, but not dialed by any method today. They are
+ * carried here so the allowlist and the resource mapper stay in agreement, and
+ * so the first call site that needs one does not have to re-derive its shape.
+ *
+ * Associations are deliberately absent: the object read answers them as a block
+ * (`?associations=deals`), which is what keeps the v4 Associations API — whose
+ * support ends 2027-03-30 — out of this connector entirely.
+ */
+export const HUBSPOT_API_ROUTES = {
+  objects: "crm/objects",
+  owners: "crm/owners",
+  exports: "crm/exports",
+  marketingEmails: "marketing/emails",
+  objectSchemas: "crm-object-schemas",
+  pipelines: "crm/pipelines",
+  properties: "crm/properties",
+} as const;
+
+/** The families {@link hubspotPath} will build a path for. */
+export type HubspotApiName = keyof typeof HUBSPOT_API_ROUTES;
+
+/**
  * Build a request path under the pinned API version.
  *
  * The ONE place a HubSpot path is assembled, so the version pin cannot be
  * skipped by a call site that forgot about it, and so a change in how HubSpot
  * expresses the date-based version is a one-function edit.
+ *
+ * `api` is a KEY into {@link HUBSPOT_API_ROUTES} rather than a path fragment,
+ * which is what makes an undocumented route unrepresentable: a call site cannot
+ * hand this function a product group nobody wrote down, because the type has no
+ * member for one.
+ *
+ * @param api      which documented route family to build under.
+ * @param resource the path tail BELOW the version, with no leading slash
+ *                 (`"contacts/search"`, `"export/async"`). Empty for the
+ *                 families whose documented path ends at the version.
  */
-export function hubspotPath(rest: string): string {
-  return `/${HUBSPOT_API_VERSION}${rest}`;
+export function hubspotPath(api: HubspotApiName, resource = ""): string {
+  const apiName = HUBSPOT_API_ROUTES[api];
+  // Defence in depth behind the type: a JS caller, or a key deleted from the
+  // table while a call site still names it, must not assemble `/undefined/…`
+  // and put a token on the wire against it.
+  if (!apiName) {
+    throw new ConnectorBlockedError(
+      `"${String(api)}" is not a documented HubSpot route family`,
+      "every request path is built from HUBSPOT_API_ROUTES, which lists the route " +
+        "families verified against HubSpot's published 2026-03 OpenAPI. Adding one is a " +
+        "deliberate, reviewed change.",
+    );
+  }
+  return `/${apiName}/${HUBSPOT_API_VERSION}${resource === "" ? "" : `/${resource}`}`;
 }
 
 /**
@@ -692,38 +792,44 @@ export function hubspotPath(rest: string): string {
  * on an otherwise readable object.
  */
 export function hubspotResourceOf(path: string): string {
-  const segments = path.split("?")[0].split("/").filter(Boolean);
-  if (segments[0] !== HUBSPOT_API_VERSION) return "";
-  const rest = segments.slice(1);
+  const clean = path.split("?")[0];
 
-  if (rest[0] === "crm" && rest[1] === "v3") {
-    switch (rest[2]) {
+  for (const [family, apiName] of Object.entries(HUBSPOT_API_ROUTES) as [
+    HubspotApiName,
+    string,
+  ][]) {
+    // The version must sit exactly where the spec documents it — immediately
+    // after the product group. A path carrying the date anywhere else (the
+    // pre-WARP-2470 `/2026-03/crm/v3/…` shape included) matches no family and
+    // falls through to the deny-by-default return.
+    const prefix = `/${apiName}/${HUBSPOT_API_VERSION}`;
+    if (clean !== prefix && !clean.startsWith(`${prefix}/`)) continue;
+    const tail = clean.slice(prefix.length).split("/").filter(Boolean);
+
+    switch (family) {
       case "objects": {
-        const objectType = rest[3];
+        const objectType = tail[0];
         if (!objectType) return "";
-        const tail = rest[4];
+        const next = tail[1];
         // Only a read shape: the collection itself, its search endpoint, or one
         // record by its numeric id. Anything else is an action.
-        if (tail !== undefined && tail !== "search" && !/^\d+$/.test(tail)) return "";
-        if (rest.length > 5) return "";
+        if (next !== undefined && next !== "search" && !/^\d+$/.test(next)) return "";
+        if (tail.length > 2) return "";
         return `objects/${objectType}`;
       }
       case "exports":
-        return rest[3] === "export" && rest[4] === "async" ? "exports" : "";
+        return tail[0] === "export" && tail[1] === "async" ? "exports" : "";
       case "owners":
-        return "owners";
+        return tail.length === 0 ? "owners" : "";
+      case "marketingEmails":
+        return tail.length === 0 ? "marketing/emails" : "";
+      case "objectSchemas":
+        return tail.length === 1 && tail[0] === "schemas" ? "schemas" : "";
       case "pipelines":
         return "pipelines";
       case "properties":
         return "properties";
-      case "schemas":
-        return "schemas";
-      default:
-        return "";
     }
-  }
-  if (rest[0] === "marketing" && rest[1] === "v3" && rest[2] === "emails") {
-    return "marketing/emails";
   }
   return "";
 }
@@ -1212,7 +1318,7 @@ export class HubSpotConnector implements Connector {
     // A cheap, real read proves three things at once: the token works, it
     // carries the scopes we need, and egress to HubSpot is permitted. Owners is
     // the cheapest such read and is present on every tier.
-    await this.request("connect", hubspotPath("/crm/v3/owners"), { search: { limit: 1 } });
+    await this.request("connect", hubspotPath("owners"), { search: { limit: 1 } });
     this.fingerprint = computeSchemaFingerprint(this.tables());
   }
 
@@ -1314,7 +1420,7 @@ export class HubSpotConnector implements Connector {
     after: string | undefined,
     properties: readonly string[],
   ): Promise<Record<string, unknown>> {
-    return this.request("pollObjectChanges", hubspotPath(`/crm/v3/objects/${objectType}/search`), {
+    return this.request("pollObjectChanges", hubspotPath("objects", `${objectType}/search`), {
       method: "POST",
       governed: true,
       json: {
@@ -1458,7 +1564,7 @@ export class HubSpotConnector implements Connector {
     // connection that never syncs again.
     this.backfillInFlight = true;
     try {
-      const created = await this.request(op, hubspotPath("/crm/v3/exports/export/async"), {
+      const created = await this.request(op, hubspotPath("exports", "export/async"), {
         method: "POST",
         json: {
           exportType: "VIEW",
@@ -1476,7 +1582,7 @@ export class HubSpotConnector implements Connector {
         await this.sleep(this.backoffMs(attempt));
         const run = await this.request(
           op,
-          hubspotPath(`/crm/v3/exports/export/async/tasks/${exportId}/status`),
+          hubspotPath("exports", `export/async/tasks/${exportId}/status`),
         );
         const status = typeof run.status === "string" ? run.status : "";
         if (status === "COMPLETE") {
@@ -1513,14 +1619,14 @@ export class HubSpotConnector implements Connector {
   /**
    * The deals associated with one contact.
    *
-   * Resolved through the v3 object route's `associations` block rather than the
+   * Resolved through the object route's `associations` block rather than the
    * v4 association API, which ends support on 2027-03-30 — inside this
-   * product's support horizon. v3 CRM objects have no announced sunset.
+   * product's support horizon.
    */
   async listAssociatedDeals(contactId: string): Promise<string[]> {
     const body = await this.request(
       "listAssociatedDeals",
-      hubspotPath(`/crm/v3/objects/contacts/${contactId}`),
+      hubspotPath("objects", `contacts/${contactId}`),
       { search: { associations: "deals" } },
     );
     const associations = body.associations as
@@ -1540,14 +1646,14 @@ export class HubSpotConnector implements Connector {
    * not include them" call for different decisions.
    */
   async listMarketingEmails(): Promise<Record<string, unknown>[]> {
-    const body = await this.request("listMarketingEmails", hubspotPath("/marketing/v3/emails"));
+    const body = await this.request("listMarketingEmails", hubspotPath("marketingEmails"));
     return Array.isArray(body.results) ? (body.results as Record<string, unknown>[]) : [];
   }
 
   /** Custom object schemas — Enterprise only, and gated the same way. Read
    *  only: this connector never mutates a schema. */
   async listCustomObjectSchemas(): Promise<Record<string, unknown>[]> {
-    const body = await this.request("listCustomObjectSchemas", hubspotPath("/crm/v3/schemas"));
+    const body = await this.request("listCustomObjectSchemas", hubspotPath("objectSchemas", "schemas"));
     return Array.isArray(body.results) ? (body.results as Record<string, unknown>[]) : [];
   }
 
@@ -1600,7 +1706,7 @@ export class HubSpotConnector implements Connector {
     assertWritableHubspotObject(objectType);
     const body = await this.request(
       `create:${objectType}`,
-      hubspotPath(`/crm/v3/objects/${objectType}`),
+      hubspotPath("objects", objectType),
       {
         method: "POST",
         json: {

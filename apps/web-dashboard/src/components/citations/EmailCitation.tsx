@@ -28,7 +28,7 @@
  * `aria-modal` claim true. Guarded by citations/__tests__/EmailCitation.test.tsx.
  */
 
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type JSX } from "react";
 import { Mail } from "lucide-react";
 import type { EmailPartAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";

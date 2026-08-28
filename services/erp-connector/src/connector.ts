@@ -132,9 +132,14 @@ export class DatasetNotServedError extends Error {
  */
 export function assertDatasetsServed(
   provider: string,
+  // `readonly string[]`, not `readonly DatasetName[]`, and deliberately so:
+  // this is whatever the TRACK declares, and two shipped tracks declare names
+  // the vocabulary does not hold yet (see `Connector.servesDatasets`).
+  // `dependsOn` below stays on the union because it comes from the read-query
+  // registry, which is this package's own data and fully inside it.
   serves: readonly string[],
   queryName: string,
-  dependsOn: readonly string[],
+  dependsOn: readonly DatasetName[],
 ): void {
   const missing = dependsOn.filter((d) => !serves.includes(d));
   if (missing.length > 0) {
@@ -162,6 +167,29 @@ export interface Connector {
    * A track whose datasets depend on runtime configuration (export-drop, whose
    * datasets are whatever the practice actually exported) computes this; the
    * fixed-schema tracks hardcode it.
+   *
+   * ## Why this is `readonly string[]` and not `readonly DatasetName[]`
+   *
+   * WARP-2306 narrowed it to the union, on the reasoning that this is the ONE
+   * boundary where a track states what it can answer, so a name with no
+   * `CANONICAL_COLUMNS` entry ought to be a compile error rather than a
+   * read-time `rowsFor` miss. That reasoning still stands.
+   *
+   * It cannot be enforced yet, because the vocabulary and the shipped vendor
+   * tracks disagree on spelling: the HubSpot track declares `crm_contact`,
+   * `crm_company`, `crm_deal`, `crm_ticket` and `crm_engagement` while the
+   * vocabulary holds the flat `contact` / `company` / `deal` / `ticket`, and
+   * the Mailchimp track declares `ecommerce_order` against a flat `order`.
+   * Picking a winner is a vocabulary decision with three tracks' worth of
+   * blast radius, not a typing decision — it is WARP-2466's step 4, which
+   * reconciles the vendor names and then re-narrows this field. Deciding it
+   * here, inside the widening PR, would be the widening PR quietly making a
+   * second, larger call.
+   *
+   * So the guard is deferred, not dropped. Until WARP-2466 lands, an
+   * out-of-vocabulary dataset name still surfaces at read time as it always
+   * did. `assertDatasetsServed`'s `dependsOn` and `ReadQuery.dependsOnTables`
+   * remain on the union — the read-query registry is this package's own data.
    */
   readonly servesDatasets: readonly string[];
   /** Open the pooled read connection (brief §7.3). */

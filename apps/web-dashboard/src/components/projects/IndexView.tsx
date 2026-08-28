@@ -7,6 +7,8 @@ import { Avatar, EmptyBlock, Skel, usePerson } from "./bits";
 import { GROUP_ORDER, GROUP_BAR_COLOR } from "./config";
 import type { PmProject, PmSummary } from "./types";
 
+import type { JSX } from "react";
+
 function Kpi({
   eyebrow,
   value,

@@ -1,10 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import memoryExtractFact from "../../../src/handlers/memory/extract.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  create: ReturnType<typeof vi.fn>,
-  userId: string | undefined,
+  create: Mock,
+  // Optional, not `string | undefined`: five call sites below deliberately
+  // omit it to exercise the no-user path, and the explicit
+  // `ctxWith(create, undefined)` at the "rejects a write with no userId"
+  // case stays just as meaningful.
+  userId?: string,
 ): ToolContext {
   return {
     prisma: {

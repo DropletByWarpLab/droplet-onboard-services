@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getWifiSettings from "../../../src/handlers/network/get-wifi-settings.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

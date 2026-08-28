@@ -227,14 +227,6 @@ exits **4** with a message naming the required version and the remedy.
 check ran and failed. Never record a run that exited 4 as a passing gate —
 that conflation is exactly what WARP-2449 was filed about.
 
-Known limitation: `stale-repo-names` still aborts under stock bash 3.2
-(SIGTRAP) once the scanned tree passes a few hundred files. It is a bash
-3.2 defect, not a defect in the check, and it does not change what the
-check asserts. The other ten static checks — `tsc-full` and
-`lifecycle-naming` among them — run to completion on 3.2 and report their
-own verdicts normally. Run `stale-repo-names` under a newer bash or on
-Linux.
-
 ## 7. End state
 
 Push the branch, open/update the PR (repo squash-merges with the

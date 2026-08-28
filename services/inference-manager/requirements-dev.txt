@@ -3,3 +3,7 @@ pytest>=8.2.0
 pytest-asyncio>=0.23.0
 httpx>=0.27.0
 respx>=0.21.1
+
+# WARP-1948 — OSV floor for pytest's transitive pygments (see the matching
+# floor block in requirements.txt for rationale).
+pygments>=2.20.0

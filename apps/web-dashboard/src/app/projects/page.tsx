@@ -7,7 +7,7 @@
  * writes, and the same data the in-app AI reads/writes through the MCP tools.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type JSX } from "react";
 import Link from "next/link";
 import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";

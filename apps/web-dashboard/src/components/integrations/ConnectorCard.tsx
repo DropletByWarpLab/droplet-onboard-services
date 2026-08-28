@@ -15,6 +15,7 @@
 
 import { AlertTriangle } from "lucide-react";
 import { Badge } from "@/components/shell/primitives";
+import { disconnectedCredentialView } from "@/lib/credential-purge";
 import type { HubEntry } from "@/lib/hooks/useIntegrations";
 import { connectorIcon, statusView } from "./connector-visuals";
 
@@ -32,8 +33,9 @@ export function ConnectorCard({
 
   // A status exists only when the box actually reported one. "Still loading"
   // and "the read failed" are states of the request, not of the connection.
-  const status = state.kind === "reported" ? state.connection.status : null;
-  const sv = status ? statusView(status) : null;
+  const reported = state.kind === "reported" ? state.connection : null;
+  const status = reported ? reported.status : null;
+  const sv = reported ? statusView(reported.status, reported.credentialsPurged) : null;
 
   // WARP-2291: a tile the box reports an actual connection for cannot claim to
   // be coming soon — that would be the hub denying a connection that exists,
@@ -50,21 +52,42 @@ export function ConnectorCard({
   const errored = status === "ERROR";
   const pending = status === "PROVISIONING";
 
+  /**
+   * WARP-2483 — disconnected, and the credential is STILL on the row.
+   *
+   * The only state whose action is neither "connect" nor "nothing". The owner
+   * already asked for the key to be removed and it was not, so the tile has to
+   * offer that path again — running the setup wizard would store a *second*
+   * credential while the first one sits there, which is the opposite of what
+   * they asked for. Disconnect lives on the connector's own surface
+   * (`ManageSheet`), so this reuses the descriptor's `open` action and inherits
+   * its honesty: a connector with no detail surface renders the stated reason
+   * instead of a button that cannot finish the job.
+   */
+  // Computed from the reported flag, NOT read back off the badge `kind` the
+  // pill happens to use — a behaviour inferred from a presentation choice is
+  // one restyling away from silently changing what a button does.
+  const credentialRetained =
+    disconnectedCredentialView(status === "DISABLED", reported?.credentialsPurged)
+      ?.purged === false;
+
   // Connected and needs-attention tiles go to the detail surface; everything
   // else runs the setup flow. Whichever it is, the tile knows whether that
   // action can actually happen.
-  const usesOpen = isConnected || needsAttention;
+  const usesOpen = isConnected || needsAttention || credentialRetained;
   const action = usesOpen ? entry.open : entry.connect;
   const handler = usesOpen ? onOpen : onConnect;
   const label = isConnected
     ? "Open"
     : needsAttention
       ? "Fix connection"
-      : errored
-        ? "Retry"
-        : pending
-          ? "Resume setup"
-          : "Connect";
+      : credentialRetained
+        ? "Remove credential"
+        : errored
+          ? "Retry"
+          : pending
+            ? "Resume setup"
+            : "Connect";
   const primary = !usesOpen && !errored && !pending;
 
   return (
@@ -122,6 +145,19 @@ export function ConnectorCard({
       >
         {meta.description}
       </p>
+
+      {/* WARP-2483 — the state line. Only rendered when the box gave an answer
+          that the pill alone cannot carry; there is no placeholder for "we
+          weren't told", because a line of hedging reads as a problem. */}
+      {sv?.detail && (
+        <p
+          className="type-caption-1 text-label-tertiary"
+          style={{ margin: "-6px 0 16px" }}
+          data-testid="connector-state-line"
+        >
+          {sv.detail}
+        </p>
+      )}
 
       {state.kind === "error" && (
         <p className="type-caption-1 text-label-tertiary" style={{ margin: "0 0 12px" }} role="status">

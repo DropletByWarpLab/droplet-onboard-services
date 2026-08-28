@@ -99,8 +99,7 @@ export interface TransactionSeamOptions {
  */
 export type TransactionMock = Mock<
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  [fn: (tx: any) => Promise<unknown>, options?: unknown],
-  Promise<unknown>
+  (fn: (tx: any) => Promise<unknown>, options?: unknown) => Promise<unknown>
 >;
 
 export interface TransactionSeam {

@@ -44,6 +44,8 @@
  * vocabularies are set-equal AND mutually assignable at compile time, so a
  * dataset added on one side and not the other goes red rather than silently
  * splitting the vocabulary in two.
+ *
+ * Widened six → twenty alongside WARP-2280, with that drift test as the guard.
  */
 export const DATASET_NAMES = [
   // practice-management (WARP-1964)
@@ -54,10 +56,28 @@ export const DATASET_NAMES = [
   "invoice",
   "bill",
   "ap_summary",
+  // payments — Stripe (WARP-2280)
+  "charge",
+  "refund",
+  "payout",
+  "balance_transaction",
+  "subscription",
+  // CRM — HubSpot (WARP-2280)
+  "contact",
+  "company",
+  "deal",
+  "ticket",
+  // commerce — Shopify (WARP-2280)
+  "order",
+  "product",
+  "customer",
+  // marketing — Mailchimp (WARP-2280)
+  "campaign",
+  "audience",
 ] as const;
 
 /**
- * The closed union of six. A descriptor's `datasets` is typed with THIS, never
+ * The closed union of twenty. A descriptor's `datasets` is typed with THIS, never
  * `string[]`: the exhaustive `Record`s keyed by it (`DATASET_CATEGORY`,
  * `CANONICAL_COLUMNS`) only buy exhaustiveness while the union stays closed,
  * and a widened `string[]` throws that away silently.
