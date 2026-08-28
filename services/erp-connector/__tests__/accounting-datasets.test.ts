@@ -153,8 +153,15 @@ describe("the dataset vocabulary", () => {
 
   it("categorises every dataset", () => {
     // Mutation: add a dataset to DATASETS without a DATASET_CATEGORY entry → red.
+    //
+    // WARP-2280 widened the category VALUE union past practice|accounting. The
+    // alternative — dropping the value assertion and only checking the key is
+    // present — would have made this test survive a dataset filed under a
+    // typo'd category, which is the thing it exists to catch.
     for (const dataset of DATASETS) {
-      expect(DATASET_CATEGORY[dataset], dataset).toMatch(/^(practice|accounting)$/);
+      expect(DATASET_CATEGORY[dataset], dataset).toMatch(
+        /^(practice|accounting|payments|commerce|crm|marketing)$/,
+      );
     }
   });
 });

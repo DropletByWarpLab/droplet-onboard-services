@@ -255,8 +255,16 @@ export const STRIPE_MAX_RATE_LIMIT_RETRIES = 3;
  * one; giving them their own `DatasetName` means widening the closed union in
  * `../export-drop/profiles.ts`, which is shared surface and belongs with the
  * tool-registration ticket (WARP-2293), not here.
+ *
+ * WARP-2280 typed this `readonly DatasetName[]` rather than `readonly
+ * string[]`. The looser type was only ever a workaround for a six-name union
+ * that could not express what this track serves; `invoice` is in the twenty,
+ * so the annotation now costs nothing and buys the guarantee
+ * `vocabulary-contract.ts` asserts — a connector cannot declare a dataset
+ * outside the vocabulary. Note this does NOT widen what Stripe serves: the
+ * balance-transaction case above is unchanged and still waits on WARP-2293.
  */
-export const STRIPE_DATASETS: readonly string[] = ["invoice"];
+export const STRIPE_DATASETS: readonly DatasetName[] = ["invoice"];
 
 /**
  * What this track is waiting on. Deliberately unlike the other tracks', so an

@@ -350,6 +350,31 @@ const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   // identity: re-exporting must replace the vendor's row, not accumulate a
   // second one and double its balance.
   ap_summary: ["vendor_id"],
+
+  // WARP-2280 — the SaaS datasets key on their identifier ALONE, and that is a
+  // claim about the vendors rather than a relaxation of the ⚠ above. Every id
+  // here is issued by the vendor's own system and unique within it (Stripe
+  // `ch_…`, a HubSpot object id, a Shopify order id, a Mailchimp campaign id);
+  // none is a human-typed reference number like QuickBooks' `Num`, which is
+  // what made the accounting keys composite. If a vendor is ever found to
+  // reuse one of these, its key becomes composite here — not everywhere.
+  charge: ["charge_id"],
+  refund: ["refund_id"],
+  payout: ["payout_id"],
+  balance_transaction: ["balance_transaction_id"],
+  subscription: ["subscription_id"],
+  contact: ["contact_id"],
+  company: ["company_id"],
+  deal: ["deal_id"],
+  ticket: ["ticket_id"],
+  order: ["order_id"],
+  product: ["product_id"],
+  customer: ["customer_id"],
+  // A campaign is sent once; the send is the identity. An audience row is a
+  // current snapshot per list, so a re-export must REPLACE it — accumulating
+  // would double `member_count`, the marketing twin of doubling a balance.
+  campaign: ["campaign_id"],
+  audience: ["audience_id"],
 };
 
 /**
@@ -409,7 +434,12 @@ function projectRow(
         row[canonical] = iso;
         break;
       }
+      // WARP-2280: a count parses exactly as money does — the comma-tolerant
+      // numeric read — because `"1,234"` members is the same wrong string as
+      // `"1,234.56"` dollars. The kinds stay distinct because only one of them
+      // must carry a currency (`assertMoneyColumnsCarryCurrency`).
       case "money":
+      case "count":
         row[canonical] = parseMoney(raw);
         break;
       default:

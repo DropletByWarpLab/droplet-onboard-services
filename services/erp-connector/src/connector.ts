@@ -132,9 +132,9 @@ export class DatasetNotServedError extends Error {
  */
 export function assertDatasetsServed(
   provider: string,
-  serves: readonly string[],
+  serves: readonly DatasetName[],
   queryName: string,
-  dependsOn: readonly string[],
+  dependsOn: readonly DatasetName[],
 ): void {
   const missing = dependsOn.filter((d) => !serves.includes(d));
   if (missing.length > 0) {
@@ -162,8 +162,16 @@ export interface Connector {
    * A track whose datasets depend on runtime configuration (export-drop, whose
    * datasets are whatever the practice actually exported) computes this; the
    * fixed-schema tracks hardcode it.
+   *
+   * WARP-2306 narrowed this from `readonly string[]`. While it was `string[]`,
+   * the closed union and its exhaustive `Record`s bought nothing at the ONE
+   * boundary where a track states what it can answer: a connector could
+   * declare a dataset that no `CANONICAL_COLUMNS` entry existed for and `tsc`
+   * would not object, so the mismatch surfaced at read time as a `rowsFor`
+   * miss — which is the same "three different errors for one question" this
+   * field was created to end.
    */
-  readonly servesDatasets: readonly string[];
+  readonly servesDatasets: readonly DatasetName[];
   /** Open the pooled read connection (brief §7.3). */
   connect(): Promise<void>;
   close(): Promise<void>;
