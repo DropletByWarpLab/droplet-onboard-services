@@ -27,6 +27,15 @@ import {
   STRIPE_PRODUCTION_BASE_URL,
   STRIPE_PROVIDER,
   STRIPE_READABLE_COLLECTIONS,
+  STRIPE_ALLOWED_API_HOSTS,
+  STRIPE_ALLOWED_FILE_HOSTS,
+  STRIPE_FILES_BASE_URL,
+  STRIPE_REPORT_FAMILY_COLLECTIONS,
+  assertSafeStripeFileBaseUrl,
+  balanceTransactionRowsFromReport,
+  collectionForStripeReportType,
+  parseStripeReportCsv,
+  type StripeBalanceTransactionRow,
   EVENT_OBJECT_ROUTES,
   StripeAccessPolicyError,
   StripeConnector,
@@ -85,6 +94,9 @@ function stubFetch(routes: Route[]) {
         get: (k: string) => r.headers?.[k] ?? r.headers?.[k.toLowerCase()] ?? null,
       },
       json: async () => r.body ?? {},
+      // A report file is CSV, not JSON. A string body is served verbatim so a
+      // fixture can be a real CSV rather than something the stub re-encodes.
+      text: async () => (typeof r.body === "string" ? r.body : JSON.stringify(r.body ?? {})),
     } as unknown as Response;
   };
   return {
@@ -92,6 +104,16 @@ function stubFetch(routes: Route[]) {
     calls,
     /** Just the pathnames, which is what the allocation/backfill assertions are about. */
     paths: () => calls.map((c) => new URL(c.url).pathname),
+    /** Pathnames grouped by host — the allocation question is per-HOST, because
+     *  which host a call went to is what decides whether Stripe counts it. */
+    pathsByHost: () => {
+      const byHost = new Map<string, string[]>();
+      for (const c of calls) {
+        const u = new URL(c.url);
+        byHost.set(u.hostname, [...(byHost.get(u.hostname) ?? []), u.pathname]);
+      }
+      return byHost;
+    },
     headersOf: (i: number) =>
       (calls[i].init.headers ?? {}) as Record<string, string>,
   };
@@ -372,6 +394,7 @@ describe("Reporting-API backfill", () => {
           match: /\/v1\/reporting\/report_runs/,
           responses: [reportRun("pending"), reportRun("succeeded")].map((body) => ({ body })),
         },
+        { match: /files\.stripe\.com/, responses: [{ body: REPORT_CSV }] },
       ],
     });
 
@@ -383,7 +406,10 @@ describe("Reporting-API backfill", () => {
 
     expect(out.state).toBe("succeeded");
     expect(JSON.stringify(meter.snapshot())).toBe(before);
-    for (const p of f.paths()) {
+    // Every call to the ALLOCATION-METERED host is a Reporting-API path, which
+    // is the one family Stripe excludes from the allocation. The file download
+    // is not on this host at all — see the per-host test below.
+    for (const p of f.pathsByHost().get("api.stripe.com") ?? []) {
       expect(p.startsWith("/v1/reporting/report_runs")).toBe(true);
     }
     expect(f.calls[0].init.method).toBe("POST");
@@ -410,6 +436,284 @@ describe("Reporting-API backfill", () => {
     // Polled with backoff, not a hot loop.
     expect(sleeps.length).toBeGreaterThan(0);
     expect(Math.max(...sleeps)).toBeGreaterThan(Math.min(...sleeps));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Report-file retrieval from files.stripe.com (WARP-2450)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A connector wired for a three-interval historical load: the first run needs
+ *  a second poll, then two more runs succeed straight away, and each finished
+ *  run's file serves a different slice of the CSV. */
+function backfillHarness(meter?: ReadAllocationMeter) {
+  return connector({
+    meter,
+    routes: [
+      {
+        match: /\/v1\/reporting\/report_runs/,
+        responses: [
+          reportRun("pending"),
+          reportRun("succeeded", "file_1"),
+          reportRun("succeeded", "file_2"),
+          reportRun("succeeded", "file_3"),
+        ].map((body) => ({ body })),
+      },
+      {
+        match: /files\.stripe\.com/,
+        responses: [REPORT_CSV, REPORT_CSV_2, REPORT_CSV_3].map((body) => ({ body })),
+      },
+    ],
+  });
+}
+
+/** Three consecutive months of history, one report run each. */
+async function loadThreeIntervals(c: StripeConnector) {
+  const rows: StripeBalanceTransactionRow[] = [];
+  for (const month of [5, 6, 7]) {
+    const out = await c.runBackfill({
+      reportType: "balance_change_from_activity.itemized.3",
+      intervalStart: Math.floor(Date.UTC(2026, month - 1, 1) / 1000),
+      intervalEnd: Math.floor(Date.UTC(2026, month, 1) / 1000),
+    });
+    expect(out.state).toBe("succeeded");
+    if (out.state === "succeeded") rows.push(...out.rows);
+  }
+  return rows;
+}
+
+describe("report-file retrieval", () => {
+  it("loads a multi-interval historical backfill end to end and yields rows", async () => {
+    // The whole point of WARP-2450: before it, runBackfill drove the run to
+    // completion and returned a bare file reference, so a historical load
+    // produced ZERO rows however many report runs it made.
+    // Mutation: revert retrieval to returning the reference (drop the
+    // retrieveReportRows call, return rows: []) → red on the row count.
+    const { c, f } = backfillHarness();
+    const rows = await loadThreeIntervals(c);
+
+    expect(rows).toHaveLength(7);
+    expect(rows.map((r) => r.transaction_id)).toEqual([
+      "txn_1", "txn_2", "txn_3", "txn_4", "txn_5", "txn_6", "txn_7",
+    ]);
+    // The download URL is BUILT from the run's own file id, not followed from
+    // the file object's `url` field — so each interval fetched its own file.
+    // Mutation: hardcode one file id → red.
+    expect(f.pathsByHost().get("files.stripe.com")).toEqual([
+      "/v1/files/file_1/contents",
+      "/v1/files/file_2/contents",
+      "/v1/files/file_3/contents",
+    ]);
+  });
+
+  it("yields the SAME row shape the incremental path yields", async () => {
+    // A caller must not have to know which path a row arrived by. Compared
+    // against a live listBalanceTransactions() row rather than against a
+    // hardcoded key list, so the two cannot drift apart silently.
+    // Mutation: rename or drop any field in balanceTransactionRowsFromReport → red.
+    const { c } = backfillHarness();
+    const backfilled = await loadThreeIntervals(c);
+
+    const { c: c2 } = connector({
+      routes: [
+        {
+          match: /\/v1\/balance_transactions/,
+          responses: [
+            {
+              body: {
+                data: [
+                  {
+                    id: "txn_live",
+                    created: NOW_S,
+                    type: "charge",
+                    currency: "usd",
+                    amount: 1000,
+                    fee: 59,
+                    net: 941,
+                    status: "available",
+                  },
+                ],
+                has_more: false,
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const incremental = await c2.listBalanceTransactions();
+
+    expect(incremental).toHaveLength(1);
+    expect(Object.keys(backfilled[0]).sort()).toEqual(Object.keys(incremental[0]).sort());
+  });
+
+  it("spends NO read allocation anywhere in the backfill path — counted per host", async () => {
+    // Stripe excludes the Reporting API AND its files from the account's
+    // monthly read allocation; that exclusion is the entire reason bulk
+    // history routes this way. The assertion is per-HOST because the host is
+    // what decides whether Stripe counts a call: /v1/files/... served from
+    // api.stripe.com would be an ordinary, allocation-counted API read.
+    // Mutation: route retrieval through api.stripe.com (origin: this.baseUrl)
+    // → red on both the api.stripe.com path assertion and the files-host count.
+    const meter = new ReadAllocationMeter(STRIPE_DEFAULT_MONTHLY_READ_ALLOCATION, () => NOW);
+    const before = JSON.stringify(meter.snapshot());
+    const { c, f } = backfillHarness(meter);
+    await loadThreeIntervals(c);
+
+    expect(JSON.stringify(meter.snapshot())).toBe(before);
+    expect(meter.snapshot().spent).toBe(0);
+
+    const byHost = f.pathsByHost();
+    expect([...byHost.keys()].sort()).toEqual(["api.stripe.com", "files.stripe.com"]);
+    // Non-vacuous: the loop below would pass over an empty list.
+    expect(byHost.get("api.stripe.com")?.length).toBe(4);
+    expect(byHost.get("files.stripe.com")?.length).toBe(3);
+    for (const p of byHost.get("api.stripe.com") ?? []) {
+      expect(p.startsWith("/v1/reporting/report_runs")).toBe(true);
+    }
+    for (const p of byHost.get("files.stripe.com") ?? []) {
+      expect(p).toMatch(/^\/v1\/files\/file_\d+\/contents$/);
+    }
+  });
+
+  it("refuses an unregistered report-file host on ZERO fetch calls", async () => {
+    // Same promise the API guard makes, for the second host: the restricted
+    // key never leaves the box for a destination the registry has not screened.
+    // Mutation: add a wildcard (or files.stripe.evil.com) to
+    // STRIPE_ALLOWED_FILE_HOSTS → red, because construction then succeeds.
+    const f = stubFetch([{ match: /.*/, responses: [{ body: REPORT_CSV }] }]);
+    expect(
+      () =>
+        new StripeConnector(
+          {
+            credentialsSecretRef: "secret://stripe/acct_1Fixture",
+            filesBaseUrl: "https://files.stripe.evil.com",
+          },
+          { fetchImpl: f.impl, now: () => NOW, resolveApiKey: async () => KEY },
+        ),
+    ).toThrow(UnsafeStripeBaseUrlError);
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it("keeps the file host and the API host in SEPARATE sets, not one merged set", () => {
+    // Merging them would let an operator configure baseUrl: files.stripe.com
+    // and have the API guard wave it through, or the reverse.
+    // Mutation: make both guards read one combined set → red on all four.
+    expect(() => assertSafeStripeFileBaseUrl(STRIPE_FILES_BASE_URL)).not.toThrow();
+    expect(() => assertSafeStripeFileBaseUrl(STRIPE_PRODUCTION_BASE_URL)).toThrow(
+      UnsafeStripeBaseUrlError,
+    );
+    expect(() => assertSafeStripeBaseUrl(STRIPE_FILES_BASE_URL)).toThrow(
+      UnsafeStripeBaseUrlError,
+    );
+    expect([...STRIPE_ALLOWED_FILE_HOSTS]).toEqual(["files.stripe.com"]);
+    // Nothing new was admitted to the API set: WARP-2216 pins it to one host.
+    expect([...STRIPE_ALLOWED_API_HOSTS]).toEqual(["api.stripe.com"]);
+  });
+
+  it("keeps the file base URL a whole literal so the egress scanner can read it", () => {
+    // scripts/check-egress-allowlist.py binds a registry entry to a hostname it
+    // can literally see in tracked source. Composing this URL would leave the
+    // stripe-report-files entry matching nothing.
+    // Mutation: rewrite as `"https://files." + "stripe.com"` → red.
+    const src = readFileSync(stripeSourcePath("connector.ts"), "utf8");
+    expect(src).toContain('"https://files.stripe.com"');
+  });
+
+  it("refuses a report whose subject collection is off the allowlist, before any fetch", async () => {
+    // A payout-reconciliation report is a payouts read wearing a different
+    // URL. "No money movement" has to hold on the Reporting surface too, and
+    // it has to hold BEFORE the run is created — not at download time, by
+    // which point Stripe has already assembled the merchant's payout ledger.
+    // Mutation: add "payouts" to STRIPE_READABLE_COLLECTIONS → red.
+    expect(STRIPE_REPORT_FAMILY_COLLECTIONS.get("payout_reconciliation")).toBe("payouts");
+    expect(STRIPE_READABLE_COLLECTIONS.has("payouts")).toBe(false);
+
+    const { c, f } = backfillHarness();
+    await expect(
+      c.runBackfill({
+        reportType: "payout_reconciliation.itemized.5",
+        intervalStart: 1,
+        intervalEnd: 2,
+      }),
+    ).rejects.toBeInstanceOf(ConnectorBlockedError);
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it("refuses an UNRECOGNISED report family rather than assuming it harmless", () => {
+    // Mutation: return a default collection for an unknown family → red.
+    expect(() => collectionForStripeReportType("balance.summary.1")).not.toThrow();
+    expect(() => collectionForStripeReportType("something.new.1")).toThrow(
+      ConnectorBlockedError,
+    );
+    // Every family this connector claims to understand names a real collection.
+    for (const collection of STRIPE_REPORT_FAMILY_COLLECTIONS.values()) {
+      expect(collection).not.toBe("");
+    }
+  });
+
+  it("parses quoted, comma-bearing, CRLF report rows rather than splitting on commas", () => {
+    // Report rows carry merchant-authored text. A split(",") parser shifts
+    // every column after the first comma inside a quoted field, which is a
+    // wrong ledger rather than a failed read.
+    // Mutation: implement parseStripeReportCsv as line.split(",") → red.
+    const recs = parseStripeReportCsv(REPORT_CSV);
+    expect(recs).toHaveLength(2);
+    expect(recs[0].description).toBe('Acme, Inc. "monthly" plan');
+    // The BOM is stripped, so the first header name is usable as a key.
+    expect(recs[0].balance_transaction_id).toBe("txn_1");
+    expect(recs[0].net).toBe("9.41");
+  });
+
+  it("refuses a row whose field count disagrees with the header", () => {
+    // Padding or truncating attributes every value after the gap to the wrong
+    // column. Mutation: pad short rows with "" → red.
+    expect(() => parseStripeReportCsv(REPORT_HEADER + "txn_1,2026-05-01 12:00:00\r\n")).toThrow(
+      ConnectorBlockedError,
+    );
+  });
+
+  it("reads report amounts as MAJOR units — they are NOT the API's minor units", () => {
+    // The two ingestion paths differ: /v1/balance_transactions returns 1000 for
+    // ten dollars, the report CSV returns 10.00. Running the CSV through
+    // majorUnits() would divide a second time and understate the ledger 100x.
+    // Mutation: apply majorUnits() to the CSV amounts → red (10.00 → 0.1).
+    const rows = balanceTransactionRowsFromReport(parseStripeReportCsv(REPORT_CSV));
+    expect(rows[0].amount).toBe(10);
+    expect(rows[0].fee).toBe(0.59);
+    expect(rows[0].net).toBe(9.41);
+    // And a zero-decimal currency is not re-scaled either: JPY 5000 is ¥5000.
+    const jpy = balanceTransactionRowsFromReport(parseStripeReportCsv(REPORT_CSV_2));
+    expect(jpy[2].currency).toBe("jpy");
+    expect(jpy[2].amount).toBe(5000);
+  });
+
+  it("reads created_utc as UTC, not in the box's local zone", () => {
+    // `new Date("2026-05-01 12:00:00")` is parsed in the RUNNING PROCESS's
+    // local zone, so the same report would date a transaction differently on a
+    // box in Los Angeles and one in Berlin.
+    // Mutation: parse with `new Date(raw)` → red in any non-UTC zone.
+    const rows = balanceTransactionRowsFromReport(parseStripeReportCsv(REPORT_CSV));
+    expect(rows[0].created_at).toBe("2026-05-01T12:00:00.000Z");
+    expect(rows[1].created_at).toBe("2026-05-02T08:30:00.000Z");
+  });
+
+  it("refuses to call a succeeded run with no file reference a finished backfill", async () => {
+    // "succeeded, zero rows" reads as "your account has no history", which is a
+    // confident false statement about money.
+    // Mutation: return { state: "succeeded", rows: [] } instead of throwing → red.
+    const { c } = connector({
+      routes: [
+        {
+          match: /\/v1\/reporting\/report_runs/,
+          responses: [
+            { body: { id: "frr_9", object: "reporting.report_run", status: "succeeded", result: null } },
+          ],
+        },
+      ],
+    });
+    await expect(
+      c.runBackfill({ reportType: "balance.summary.1", intervalStart: 1, intervalEnd: 2 }),
+    ).rejects.toBeInstanceOf(ConnectorBlockedError);
   });
 });
 
@@ -969,12 +1273,39 @@ function payoutEvent() {
   };
 }
 
-function reportRun(status: string) {
+function reportRun(status: string, fileId = "file_1") {
   return {
     id: "frr_1",
     object: "reporting.report_run",
     status,
     report_type: "balance.summary.1",
-    result: status === "succeeded" ? { id: "file_1", object: "file" } : null,
+    result: status === "succeeded" ? { id: fileId, object: "file" } : null,
   };
 }
+
+/**
+ * A report file, shaped like `balance_change_from_activity.itemized.3`.
+ *
+ * Deliberately awkward, because real exports are: a UTF-8 BOM, CRLF line
+ * endings, and a merchant-authored description carrying both a comma and a
+ * doubled quote. All three break `split(",")`, and the failure mode is a
+ * silently mis-columned ledger rather than a thrown parse error.
+ */
+const REPORT_HEADER =
+  "\uFEFFbalance_transaction_id,created_utc,reporting_category,currency,gross,fee,net,status,description\r\n";
+
+const REPORT_CSV =
+  REPORT_HEADER +
+  'txn_1,2026-05-01 12:00:00,charge,usd,10.00,0.59,9.41,available,"Acme, Inc. ""monthly"" plan"\r\n' +
+  "txn_2,2026-05-02 08:30:00,charge,usd,25.00,1.03,23.97,available,plain row\r\n";
+
+const REPORT_CSV_2 =
+  REPORT_HEADER +
+  "txn_3,2026-06-01 09:00:00,charge,usd,5.00,0.45,4.55,available,june one\r\n" +
+  "txn_4,2026-06-02 09:00:00,adjustment,usd,-2.00,0.00,-2.00,available,june two\r\n" +
+  "txn_5,2026-06-03 09:00:00,charge,jpy,5000,150,4850,available,june three\r\n";
+
+const REPORT_CSV_3 =
+  REPORT_HEADER +
+  "txn_6,2026-07-01 09:00:00,charge,usd,1.00,0.33,0.67,available,july one\r\n" +
+  "txn_7,2026-07-02 09:00:00,charge,usd,2.00,0.36,1.64,available,july two\r\n";

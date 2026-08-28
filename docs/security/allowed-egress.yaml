@@ -480,12 +480,18 @@ entries:
       response. Nothing box-local is ever sent and nothing is sent
       opportunistically; the connector only ever dials out, because the box
       accepts no inbound connections and Stripe webhooks are therefore
-      structurally unavailable to it. ONE entry covers this connector
-      completely: api.stripe.com serves both the ordinary API and the Reporting
-      API (used for bulk backfill, which Stripe excludes from the account's read
-      allocation), and there is no separate token endpoint because there is no
-      OAuth dance — the merchant creates a RESTRICTED key (rk_live_/rk_test_)
-      in their own Stripe Workbench and it is presented directly. If a token
+      structurally unavailable to it. api.stripe.com serves both the ordinary
+      API and the Reporting API (used for bulk backfill, which Stripe excludes
+      from the account's read allocation), and there is no separate token
+      endpoint because there is no OAuth dance — the merchant creates a
+      RESTRICTED key (rk_live_/rk_test_) in their own Stripe Workbench and it
+      is presented directly. This entry is NOT the whole of the connector's
+      egress, though: a finished report run's CONTENTS are served from
+      files.stripe.com, a second host registered separately as
+      stripe-report-files (WARP-2450). An earlier revision of this text claimed
+      "ONE entry covers this connector completely" — that was true only while
+      backfill stopped at the file reference and did not download it, and it is
+      corrected here rather than left to mislead a reviewer. If a token
       endpoint is ever added it gets its own entry with data_class: none, as
       m365-entra-login does. READ-ONLY: the connector refuses every write, and
       no refund, payout or transfer surface exists in it at any tier. Like the
@@ -498,6 +504,49 @@ entries:
       10,000, so the connector enforces a 900s poll floor and a per-connection
       read meter.
     ticket: WARP-2215
+    added: 2026-08-27
+    review_by: 2027-08-27
+    code_refs: [services/erp-connector/src/stripe/connector.ts]
+
+  - id: stripe-report-files
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [files.stripe.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Stripe Reporting API RESULT FILES (ADR-041) — downloads the CSV a
+      finished report run produced, which is how the connector loads bulk
+      history. A SEPARATE entry from stripe-api on purpose: Stripe serves
+      report files from a different host, and WARP-2216 pins the stripe-api
+      entry's hosts to exactly [api.stripe.com], so widening that entry in
+      place would break an acceptance criterion that was written deliberately.
+      Registering the second host is the correct answer; dialing it unregistered
+      is not, which is why WARP-2215 shipped backfill stopping at the file
+      reference rather than doing either. Carries the merchant's LEDGER in the
+      response body — every balance change over the requested interval, one row
+      per transaction — so it is user-content-on-request exactly as stripe-api
+      is, and only ever on a backfill the owner's connected account triggered.
+      Nothing box-local is ever sent; the request carries the merchant's own
+      restricted key and nothing else, and the URL is built from a whole-string
+      literal in the connector rather than from the file object's own `url`
+      field, so a Stripe-supplied URL can never redirect this download at a
+      host the registry has not screened. GET only — there is no write surface
+      on this host at any tier. NOT allocation-metered: Stripe excludes the
+      Reporting API (and its files) from the account's monthly read allocation,
+      which is the entire reason bulk history routes this way instead of
+      paginating /v1/balance_transactions. Gated twice before a byte moves: the
+      report type's subject collection must be in STRIPE_READABLE_COLLECTIONS
+      (so a payout-reconciliation report is refused before the run is even
+      created) and the download path itself is re-checked against that same
+      allowlist. Read-through like the rest of the track — the rows are
+      returned to the caller and nothing is persisted, so this does not become
+      ErpEntityCache's or ErpSyncCursor's first writer (ADR-041 §4, WARP-2028).
+      Off until the owner connects an account.
+    ticket: WARP-2450
     added: 2026-08-27
     review_by: 2027-08-27
     code_refs: [services/erp-connector/src/stripe/connector.ts]
