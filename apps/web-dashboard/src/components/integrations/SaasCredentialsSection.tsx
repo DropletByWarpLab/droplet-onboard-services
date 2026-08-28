@@ -60,6 +60,13 @@ const STATE_COPY: Record<SaasConnectionState, { label: string; tone: "ok" | "war
     // stored, and it was refused. "Not connected" would send an admin to paste
     // the same key again.
     NEEDS_RECONNECT: { label: "Credential rejected — replace it", tone: "warn" },
+    // And the OTHER distinction WARP-2458 pulled apart: something a new key
+    // will not fix — a vendor-side refusal such as an IP access policy or a
+    // plan limit. "Replace it" here would send an admin to mint keys until
+    // one worked; the fix lives in the vendor's console, so that is where the
+    // copy points. Same "Can't connect" vocabulary as the hub tile
+    // (`connector-visuals.tsx`), so the two surfaces name one state one way.
+    ERROR: { label: "Can't connect — check the vendor's settings", tone: "warn" },
     DEGRADED: { label: "Connected, with recent errors", tone: "warn" },
     DRIFT_LOCKED: { label: "Locked — the vendor's data shape changed", tone: "warn" },
     // Split in two by `stateCopyFor` below — see WARP-2483. This entry is the

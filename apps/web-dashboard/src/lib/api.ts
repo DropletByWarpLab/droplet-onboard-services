@@ -8124,12 +8124,21 @@ export interface SaasCredentialField {
  * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
  * credential is not an absent one, and telling a person to "connect" when they
  * already did is how a broken connection stays broken.
+ *
+ * `ERROR` is deliberately distinct from `NEEDS_RECONNECT` (WARP-2458, mirrored
+ * here by WARP-2517): the service folds a persisted `ERROR` status straight
+ * through, and it means something a new key will not fix — a vendor-side
+ * refusal like an IP access policy or a plan limit. This union mirrors the
+ * orchestrator's `SaasConnectionState` in `saas-credential.service.ts`;
+ * dropping a member the box can send is how `STATE_COPY[view.state]` came to
+ * crash the credentials page on the very rows it exists to repair.
  */
 export type SaasConnectionState =
   | "NOT_CONFIGURED"
   | "PROVISIONING"
   | "CONNECTED"
   | "NEEDS_RECONNECT"
+  | "ERROR"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   | "DISABLED";

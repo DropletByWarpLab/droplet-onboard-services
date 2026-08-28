@@ -217,6 +217,30 @@ describe("connection state honesty", () => {
   });
 
   /**
+   * WARP-2517 — a persisted `ERROR` row must render, not crash.
+   *
+   * The box's own union has carried `ERROR` since WARP-2458 (the service
+   * folds status `ERROR` straight through), but the dashboard's mirror union
+   * lacked the member, so `STATE_COPY[view.state]` was `undefined` and the
+   * first `.label` threw — the one page for repairing a broken connection
+   * was the page a broken connection took down.
+   */
+  it("renders a persisted ERROR row instead of crashing on it", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...BILLING, state: "ERROR" as const },
+      CRM,
+    ]);
+    render(<SaasCredentialsSection />);
+
+    // Distinct from NEEDS_RECONNECT on purpose: ERROR is the state a NEW KEY
+    // WILL NOT FIX (a vendor-side refusal — an IP access policy, a plan
+    // limit), so the copy must not send the admin off to mint another one.
+    expect(await screen.findByText(/Can't connect/)).toBeInTheDocument();
+    expect(screen.queryByText(/Credential rejected/)).not.toBeInTheDocument();
+  });
+
+  /**
    * WARP-2483 — the same two disconnected states the hub tile shows.
    *
    * ADR-041 §2 promises that disconnecting removes the key. `DISABLED` alone
@@ -434,15 +458,12 @@ describe("hub and credentials page agree about the credential", () => {
     DEGRADED: "DEGRADED",
     DRIFT_LOCKED: "DRIFT_LOCKED",
     NEEDS_RECONNECT: "NEEDS_RECONNECT",
-    // KNOWN-STALE, deliberately. The service folds ERROR to "ERROR" since
-    // WARP-2458 removed the ERROR-means-reconnect inference, so the honest
-    // value here is "ERROR" — but the dashboard's own `SaasConnectionState`
-    // (`lib/api.ts`) is still the 7-member union without it, and `STATE_COPY`
-    // therefore has no ERROR entry. Correcting this line makes the suite throw
-    // `Cannot read properties of undefined (reading 'label')`, which is the
-    // real defect it would be papering over. Fix the union and the copy first;
-    // this line is the last step, not the first.
-    ERROR: "NEEDS_RECONNECT",
+    // Honest since WARP-2517 gave the dashboard union the `ERROR` member the
+    // service has folded straight through since WARP-2458. This line was
+    // deliberately KNOWN-STALE ("NEEDS_RECONNECT") until then, because
+    // correcting it ahead of the union crashed the suite on the missing
+    // `STATE_COPY` entry — the same crash a real persisted-ERROR row caused.
+    ERROR: "ERROR",
     DISABLED: "DISABLED",
   };
 
