@@ -221,17 +221,23 @@ The new chunker uses
 [`semantic-text-splitter`](https://github.com/benbrandt/text-splitter)
 (Rust-backed Python wheel, ~8 MB) driven by the embedder's actual
 HuggingFace tokenizer
-(`sentence-transformers/all-MiniLM-L6-v2`):
+(`BAAI/bge-small-en-v1.5` — WARP-2196; the repo org is resolved through
+`services/file-indexer/embedding_models.py`, never by prefixing the short
+model id, because bge does not live under `sentence-transformers/`):
 
 ```python
 from semantic_text_splitter import TextSplitter
 from tokenizers import Tokenizer
 
-tok = Tokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+tok = Tokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
 splitter = TextSplitter.from_huggingface_tokenizer(
     tok,
-    capacity=CHUNK_SIZE_TOKENS,                   # 512 real tokens
-    overlap=int(CHUNK_SIZE_TOKENS * 0.2),         # 102-token overlap
+    # WARP-2191: CHUNK_SIZE_TOKENS (512) is the WHOLE per-chunk embedder
+    # budget. The contextual header is prepended AFTER splitting, so its
+    # 64-token reservation comes out of the splitter's capacity —
+    # otherwise the header is pure overrun past the embedder window.
+    capacity=CHUNK_SIZE_TOKENS - CHUNK_HEADER_BUDGET_TOKENS,   # 448 body tokens
+    overlap=int(448 * 0.2),                                    # 89-token overlap
 )
 chunks = splitter.chunks(text)
 ```

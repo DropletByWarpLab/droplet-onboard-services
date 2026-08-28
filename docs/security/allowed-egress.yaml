@@ -24,8 +24,19 @@
 #   ticket        WARP reference that introduced/approved it
 #   added         YYYY-MM-DD
 #   review_by     next annual review date
-#   code_refs     representative files (scanner prints stale-entry notices
-#                 when hosts stop appearing anywhere)
+#   code_refs     the files that dial this destination. LOAD-BEARING since
+#                 WARP-2452: for kind: egress the gate fails unless one of
+#                 the entry's hosts appears here as a NON-COMMENT literal.
+#                 Keep base URLs as whole strings — a URL split across
+#                 concatenated parts, or named only in a comment, no longer
+#                 counts as backing.
+#   no_code_literal
+#                 (kind: egress only) one-line reason this destination can
+#                 have no repo literal — a third-party binary or SDK owns
+#                 it. Per-entry and reviewed; there is deliberately no
+#                 blanket exemption, because the list of exemptions is the
+#                 list of things the registry cannot prove. The gate also
+#                 fails if a literal DOES exist, so the list self-prunes.
 # =============================================================================
 version: 1
 policy:
@@ -85,6 +96,10 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [docker/docker-compose.yml]
+    no_code_literal: >-
+      The pinned cloudflare/cloudflared image resolves its own edge from the
+      tunnel token; no Droplet source names the host. Restates the purpose
+      field's "No repo literal" so the gate can check it. (WARP-2452)
 
   - id: overlay-stun-mapping
     kind: egress
@@ -144,7 +159,10 @@ entries:
     ticket: WARP-307
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/routes/calendar.ts]
+    # WARP-2452: was calendar.ts alone, where the host appears only in a
+    # comment. The literal lives in places.service.ts; calendar.ts is the
+    # route that proxies to it.
+    code_refs: [apps/orchestrator/src/services/places.service.ts, apps/orchestrator/src/routes/calendar.ts]
 
   - id: voice-geolocation
     kind: egress
@@ -237,6 +255,11 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/services/model-readiness.service.ts]
+    no_code_literal: >-
+      The Ollama daemon owns model-weight distribution and resolves this
+      itself; our code never names it. Already stated in this entry's own
+      purpose and in ADR-036 — declared so the gate can check it, and so it
+      stays a known hole rather than a silent one. (WARP-2452)
 
   - id: cloud-llm-providers-optin
     kind: egress
@@ -255,6 +278,10 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [services/ai-gateway/providers/anthropic_cloud.py, services/ai-gateway/providers/openai_cloud.py]
+    no_code_literal: >-
+      The LiteLLM SDK holds the base URLs; the providers pass only a model
+      id and an API key (see anthropic_cloud.py, which names no host).
+      Already stated in this entry's purpose. (WARP-2452)
 
   - id: ambient-weather-open-meteo
     kind: egress
@@ -436,6 +463,45 @@ entries:
     review_by: 2027-08-22
     code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
 
+  - id: stripe-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.stripe.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Stripe connector (ADR-041) — reads the merchant financial records of a
+      Stripe account the owner explicitly connected: balance transactions
+      (every inflow and outflow with its fee and its net), charges, customers,
+      invoices and subscriptions. Carries that financial content in the
+      response. Nothing box-local is ever sent and nothing is sent
+      opportunistically; the connector only ever dials out, because the box
+      accepts no inbound connections and Stripe webhooks are therefore
+      structurally unavailable to it. ONE entry covers this connector
+      completely: api.stripe.com serves both the ordinary API and the Reporting
+      API (used for bulk backfill, which Stripe excludes from the account's read
+      allocation), and there is no separate token endpoint because there is no
+      OAuth dance — the merchant creates a RESTRICTED key (rk_live_/rk_test_)
+      in their own Stripe Workbench and it is presented directly. If a token
+      endpoint is ever added it gets its own entry with data_class: none, as
+      m365-entra-login does. READ-ONLY: the connector refuses every write, and
+      no refund, payout or transfer surface exists in it at any tier. Like the
+      QuickBooks track and unlike the M365 one, it does NOT persist what it
+      reads — a payments ledger is answered read-through, so no synced copy
+      exists to encrypt and the connector does not become the first writer of
+      the unencrypted ErpEntityCache or of ErpSyncCursor (ADR-041 §4,
+      WARP-2028). Off until the owner connects an account. Metered by Stripe on
+      READS against a monthly account allocation whose guaranteed floor is
+      10,000, so the connector enforces a 900s poll floor and a per-connection
+      read meter.
+    ticket: WARP-2215
+    added: 2026-08-27
+    review_by: 2027-08-27
+    code_refs: [services/erp-connector/src/stripe/connector.ts]
+
   - id: quickbooks-online-oauth
     kind: egress
     service: orchestrator
@@ -458,6 +524,57 @@ entries:
     added: 2026-08-20
     review_by: 2027-08-20
     code_refs: [services/erp-connector/src/quickbooks/online-connector.ts]
+    no_code_literal: >-
+      Registered ahead of its caller (see purpose): the orchestrator OAuth
+      wiring that dials this endpoint is not written yet, and the connector
+      names the host only to record that it deliberately excludes it
+      (online-connector.ts:140). Drop this line when the caller lands with
+      the host as a literal. (WARP-2452)
+
+  - id: hubspot-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.hubapi.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      HubSpot CRM connector (ADR-041) — reads the customer-relationship records
+      of a HubSpot portal the owner explicitly connected: contacts, companies,
+      deals, tickets and the engagement objects (calls, emails, meetings, notes,
+      tasks), plus owners, pipelines and properties. Carries that customer
+      content in the response. Nothing box-local is ever sent and nothing is
+      sent opportunistically; the connector only ever dials out, because the box
+      accepts no inbound connections and HubSpot webhooks are therefore
+      structurally unavailable to it. ONE entry covers this connector
+      completely: api.hubapi.com serves the CRM object routes, the Search API
+      used for delta polling, and the Exports API used for bulk backfill, and
+      there is no separate token endpoint because there is no OAuth dance —
+      HubSpot supports no PKCE, so the customer's own super admin creates a
+      PRIVATE APP in their portal and its access token (pat-…) is presented
+      directly as a bearer credential. If a token endpoint is ever added it gets
+      its own entry with data_class: none, as m365-entra-login does. A completed
+      export is served from a signed URL on a DIFFERENT host; the connector
+      returns that reference rather than dialing it, because that host is not
+      registered here and downloading it is a separate decision with its own
+      security review. READ-MOSTLY: the only writes are notes and tasks behind
+      an explicit confirmation, and no deal-stage change, contact merge or
+      record deletion surface exists in the connector at any tier. Like the
+      QuickBooks and Stripe tracks and unlike the M365 one, it does NOT persist
+      what it reads — CRM reads are answered read-through, so no synced copy
+      exists to encrypt and the connector does not become the first writer of
+      the unencrypted ErpEntityCache or of ErpSyncCursor (ADR-041 §4,
+      WARP-2028). Off until the owner connects a portal. Metered by HubSpot on
+      the Search API at 5 requests per second per ACCOUNT — a ceiling that
+      cannot be raised at any tier and returns no rate-limit headers — so the
+      connector serialises Search behind an account-keyed governor and derives
+      its backoff from the 429 itself.
+    ticket: WARP-2317
+    added: 2026-08-27
+    review_by: 2027-08-27
+    code_refs: [services/erp-connector/src/hubspot/connector.ts]
 
   - id: ref-dentrix-ascend-spec
     kind: reference
@@ -671,6 +788,10 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [docker/docker-compose.yml, openwrt/singlebox-image/Dockerfile]
+    no_code_literal: >-
+      opkg inside the OpenWrt image build resolves its own mirror from the
+      distro's baked-in repo config; the build files only explain in a
+      comment why the stage needs network access. (WARP-2452)
 
   - id: image-pipeline-ubuntu
     kind: egress
