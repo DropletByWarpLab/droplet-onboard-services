@@ -25,9 +25,15 @@
  *
  * ## Mounted separately from `createIntegrationsRouter`
  *
- * Its own factory, under the same `/api/integrations` prefix. The integrations
- * router's routes are `/integrations` and `/integrations/eaglesoft[/...]`, so
- * `/integrations/drift/:connectionId` cannot collide with any of them.
+ * Its own factory, under the same `/api/integrations` prefix — because the
+ * integrations router's floor is family-and-up and this surface is owner/admin,
+ * and a guard narrower than its neighbours' is safer as its own registration
+ * than as an exception inside someone else's file.
+ *
+ * No path collides. The integrations router serves `/integrations` and
+ * `/integrations/eaglesoft[/...]`; WARP-2275's credentials router serves
+ * `/integrations/:provider/credentials`, which needs a literal `credentials`
+ * last where this needs a literal `drift` second.
  */
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";

@@ -8094,3 +8094,100 @@ export async function fetchAppDownloads(
     platforms: Array.isArray(parsed.platforms) ? parsed.platforms : [],
   };
 }
+
+// --- WARP-2275: the descriptor-driven SaaS credential configurator ---------
+//
+// Shapes mirror the orchestrator's `SaasCredentialView` exactly. Note what is
+// NOT here: there is no field for a secret's value. The read view carries
+// `hasValue` booleans and nothing more, so a stored credential never reaches
+// the browser at all — which is why the form can be safely rendered by anyone
+// who passes the admin gate without the page becoming a credential viewer.
+
+/** One credential field, as the WARP-2217 descriptor declares it. */
+export interface SaasCredentialField {
+  name: string;
+  label: string;
+  type: "string" | "positiveInteger";
+  required: boolean;
+  secret: boolean;
+  storage: "providerConfig" | "encrypted" | "column";
+  help: string | null;
+  /** Validation regex SOURCE. A hint for the form; the server is the refusal. */
+  pattern: string | null;
+  /** Whether a secret is stored. `null` for a non-secret field. */
+  hasValue: boolean | null;
+}
+
+/**
+ * Connection state, straight from the orchestrator.
+ *
+ * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
+ * credential is not an absent one, and telling a person to "connect" when they
+ * already did is how a broken connection stays broken.
+ */
+export type SaasConnectionState =
+  | "NOT_CONFIGURED"
+  | "PROVISIONING"
+  | "CONNECTED"
+  | "NEEDS_RECONNECT"
+  | "DEGRADED"
+  | "DRIFT_LOCKED"
+  | "DISABLED";
+
+export interface SaasCredentialView {
+  provider: string;
+  displayName: string;
+  category: string;
+  state: SaasConnectionState;
+  hasCredentials: boolean;
+  configured: boolean;
+  fields: SaasCredentialField[];
+  /** Non-secret field values only. */
+  values: Record<string, string | number>;
+  updatedAt: string | null;
+}
+
+export async function fetchSaasCredentials(): Promise<SaasCredentialView[]> {
+  const res = await authFetch(`${BASE}/api/integrations/credentials`);
+  if (!res.ok) throw new Error(`Failed to load integration credentials: ${res.status}`);
+  const body = await res.json();
+  return Array.isArray(body?.providers) ? body.providers : [];
+}
+
+/**
+ * Save a credential update.
+ *
+ * `fields` carries ONLY what the admin actually changed. That is the client
+ * half of the three-way rule: an omitted key keeps the stored secret, `""`
+ * clears it. Sending every field on every save — the obvious implementation —
+ * would either wipe secrets the form never had, or require the browser to hold
+ * them, and both are the bug this shape exists to avoid.
+ */
+export async function saveSaasCredential(
+  provider: string,
+  fields: Record<string, string | number>,
+): Promise<SaasCredentialView> {
+  const res = await authFetch(
+    `${BASE}/api/integrations/${encodeURIComponent(provider)}/credentials`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields }),
+    },
+  );
+  if (!res.ok) {
+    // The body may name which fields were refused; it never contains a value.
+    let detail = "";
+    try {
+      const body = await res.json();
+      const fieldErrors = body?.details?.fieldErrors as
+        | Record<string, string[]>
+        | undefined;
+      if (fieldErrors) detail = Object.values(fieldErrors).flat().join(" ");
+    } catch {
+      // A non-JSON error body is not worth a second failure mode.
+    }
+    throw new Error(detail || `Failed to save credentials: ${res.status}`);
+  }
+  return res.json();
+}

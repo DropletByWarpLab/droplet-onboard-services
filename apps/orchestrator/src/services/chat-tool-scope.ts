@@ -1,21 +1,73 @@
 /**
  * WARP-1424 (under the WARP-1423 tool-gap rollout) — default chat tool scope.
+ * WARP-2448 — retained alongside per-turn selection, deliberately. Read below
+ * before tuning either.
  *
- * The WARP-1423 rollout grows the registry from 94 to ~127 tools, and the
- * full registry serializes to ~85K chars (~21K tokens) of `tools[]` schemas —
- * it no longer fits the shipping single-box context window
- * (OLLAMA_CONTEXT_LENGTH=16384, the WARP-854 fix) at all, let alone alongside
- * the fixed system blocks (see base-prompt-budget.test.ts, the WARP-1118
- * canary). Advertising everything would push every owner chat turn into
- * degradeToFit (dropping the business + persona blocks) and beyond.
+ * ── the size problem this was born from ────────────────────────────
  *
- * So default chat advertises the registry MINUS this exclusion set — the
- * same per-turn scoping pattern the voice pipeline ships (WARP-1432,
- * VOICE_ALLOWED_TOOLS). Excluded here are the specialist/admin surfaces that
- * have dedicated dashboard UI or are power-user flows better driven through
- * an external MCP client (which still sees the FULL registry — this scope
- * applies only to the orchestrator's own chat advertisement, and an explicit
- * `allowed_tools` on the request always overrides it):
+ * The full registry serialises to far more `tools[]` than the shipping
+ * single-box context window holds (OLLAMA_CONTEXT_LENGTH=16384, the WARP-854
+ * fix), let alone alongside the fixed system blocks. Advertising everything
+ * would push every owner chat turn into degradeToFit (dropping the business +
+ * persona blocks) and beyond.
+ *
+ * This comment used to quote "94 → ~127 tools, ~85K chars (~21K tokens)".
+ * Those figures were already stale when WARP-2348 measured them, and any
+ * replacement literal would go stale the same way — the registry grew by three
+ * tools in the 54 commits between that ticket being researched and being
+ * picked up. So the numbers now live in ONE place, re-derived on every test
+ * run: `tool-budget.service.test.ts` measures the real serialisation and
+ * `base-prompt-budget.test.ts` holds the line in CI. Read them; do not
+ * re-inline a count here.
+ *
+ * ── TWO MECHANISMS, ONE PROBLEM — why both still exist ─────────────
+ *
+ * Per-turn selection (`tool-selection.service.ts`) also shrinks the prompt, so
+ * the obvious question is why this list survives it. They answer different
+ * questions and neither subsumes the other:
+ *
+ *   • THIS LIST IS POLICY. It is about what chat should be ABLE to do at all,
+ *     independent of the turn. "Chat must not be able to delete camera
+ *     evidence by default" is not a relevance judgement — it stays true on a
+ *     turn that is entirely about cameras, which is exactly the turn where a
+ *     relevance scorer would most want to advertise `delete_clip`.
+ *   • SELECTION IS RELEVANCE. It is about which of the permitted tools this
+ *     particular sentence needs, and it changes every turn.
+ *
+ * Collapsing policy into relevance would mean the only thing standing between
+ * a prompt-steered model and clip deletion is a keyword regex. So the layering
+ * is: this list narrows the POOL, then selection narrows the TURN. Selection
+ * can never re-admit what this list removed — the pool is its ceiling.
+ *
+ * KNOWN OVERLAP, documented rather than silently left (WARP-2448 AC: "no tool
+ * is unreachable for two different reasons at once without that being
+ * documented"). Measured, not assumed — `chat-tool-scope.test.ts` recomputes
+ * this on every run, so it cannot go stale the way the size numbers did:
+ *
+ *   • `notifications` — selection HAS a keyword rule (notify/alerts), and
+ *     BOTH of the domain's tools (`send_notification`, `list_notifications`)
+ *     are excluded here. The rule therefore advertises nothing on any turn.
+ *     A tool unreachable for two reasons at once; this is the documentation
+ *     that AC asks for.
+ *   • `pm` — WARP-2058 added the rule; nine of the ten local `pm_*` tools are
+ *     excluded here, but `pm_create_project` is NOT, so the rule does real
+ *     work today. WARP-2058's own comment ("not one pm_* tool was ever
+ *     advertised") is no longer accurate.
+ *   • `switch`, `erp` — fully excluded AND ruleless. Coherent: no rule
+ *     promises something the pool cannot deliver.
+ *
+ * None of these is fixed by deleting one side. The `notifications` and `pm`
+ * rules are what make REMOTE tools in those domains selectable once
+ * registered (Atlassian → `pm`, WARP-2316), because this list names LOCAL
+ * tools only and a remote tool never passes through it.
+ *
+ * ── what is excluded, and why ──────────────────────────────────────
+ *
+ * The specialist/admin surfaces that have dedicated dashboard UI or are
+ * power-user flows better driven through an external MCP client (which still
+ * sees the FULL registry — this scope applies only to the orchestrator's own
+ * chat advertisement, and an explicit `allowed_tools` on the request always
+ * overrides it):
  *
  *   - switch fabric + AP/network admin (VLANs, PoE, port-forwards, SSID/channel)
  *   - camera fleet admin (discovery/accept) and clip deletion (chat must not
@@ -28,6 +80,11 @@
  * chat and grows the wire payload — the WARP-1118 canary enforces the size
  * budget in CI, so that growth is always a deliberate, measured decision.
  * Names listed here that are not (yet) registered are inert.
+ *
+ * SCOPE: local registry tools only. Runtime-registered remote tools
+ * (WARP-2300) never pass through this list — their equivalent policy gate is
+ * per-server allowlisting (WARP-2321), which is a different mechanism in a
+ * different file for the same reason this one is not selection.
  */
 export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   // switch fabric (dashboard/installer surface)

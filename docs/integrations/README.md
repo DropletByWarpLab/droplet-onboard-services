@@ -3,7 +3,9 @@
 > **Audience:** anyone building, operating, or reviewing a Droplet integration.
 > **Scope:** the whole integration system — the generic connector framework that applies to **every** integration, with **Eaglesoft** as the first concrete provider.
 >
-> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — operator guide) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
+> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — setup guide, in two tracks) · [`credential-handling.md`](credential-handling.md) (what the box does with a pasted SaaS credential) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
+>
+> **Per-vendor customer setup guides (cloud/SaaS):** [`stripe.md`](stripe.md) · [`hubspot.md`](hubspot.md) · [`mailchimp.md`](mailchimp.md) · [`shopify.md`](shopify.md) · [`xero.md`](xero.md).
 
 ---
 
@@ -142,7 +144,7 @@ A write is **never applied without a confirmed request**. Intent (`createWriteRe
 Reads are safe; writing back into a live system of record is the sharp edge. Every layer is designed around that.
 
 1. **Read-only by default.** A new connection is read-only. Writes are a **per-practice, per-capability opt-in** (`writeEnabled`), off until explicitly enabled.
-2. **Least-privilege database access.** Droplet connects as **dedicated accounts it provisions inside the external database** — a `droplet_ro` (SELECT-only, the default) and, only when writes are enabled, a narrow `droplet_rw`. Never a shared/admin/default credential. See [`SETUP.md`](SETUP.md) §3 and [`eaglesoft.md`](eaglesoft.md).
+2. **Least-privilege database access.** Droplet connects as **dedicated accounts it provisions inside the external database** — a `droplet_ro` (SELECT-only, the default) and, only when writes are enabled, a narrow `droplet_rw`. Never a shared/admin/default credential. See [`SETUP.md`](SETUP.md) §2.3 ("The dedicated user in their database model") and [`eaglesoft.md`](eaglesoft.md). This applies to the **LAN track only** — a cloud/SaaS provider has no database in which to provision an account, and instead takes a credential the owner creates in the vendor's own console ([`SETUP.md`](SETUP.md) §3, [`credential-handling.md`](credential-handling.md)).
 3. **The assistant never emits SQL.** It invokes **named, parameterized commands** from the registries only. There is no "run this query" escape hatch against a live third-party system.
 4. **Financial / clinical / claim tables are never written.** `FORBIDDEN_WRITE_TABLES` makes them impossible targets. Writes are confined to a small, vetted, tested allow-list (e.g. an appointment reschedule).
 5. **The write outbox: create → confirm → apply → verify.** A proposed write is staged (`ErpWriteRequest`, `PENDING_CONFIRMATION`), a **human confirms** it (the dashboard's write-confirm modal — voice/LLM alone can never authorize a write), then the connector applies it in one transaction, then a verify-read checks the result. A blocked/failed apply is recorded `FAILED` — never a fake `APPLIED`.

@@ -1062,6 +1062,173 @@ COMMENTONLY
 }
 
 # =============================================================================
+# Test: the bash version floor says COULD NOT RUN, not "a check failed"
+# =============================================================================
+#
+# Bug class this guards (WARP-2449): ship-check.sh IS the pre-PR gate that
+# .claude/skills/preflight/SKILL.md and docs/integrations/ADD-A-PROVIDER.md
+# mandate, and for months it could not run on the primary dev Mac at all --
+# associative arrays need bash 4, macOS ships 3.2.57, and the script died with a
+# raw `declare: -A: invalid option`. Everybody who followed the documented
+# preflight exactly either noticed and skipped the gate or believed they had run
+# it. `lifecycle-naming` has no other runner, so a diff violating it was caught
+# by nothing before review.
+#
+# Two things had to become true. The script must run on bash 3.2 (the next test
+# owns that). And if a future edit legitimately raises the floor, the failure
+# must be an actionable sentence carrying an exit code that CANNOT be mistaken
+# for a gate that passed -- exit 4, never exit 1.
+#
+# Synthetic-copy pattern (no real-tree mutation): copy ship-check.sh, raise its
+# floor above every bash in existence so the guard fires whatever the host runs
+# -- 3.2 on the dev Mac, 5.x on ubuntu-latest -- and assert the code and the
+# message. Then MUTATE by deleting the guard and assert both disappear; without
+# that half, the test could be passing for some other reason.
+test_bash_version_guard_reports_could_not_run() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$tmp'" RETURN
+
+  local guarded="$tmp/guarded.sh"
+  local unguarded="$tmp/unguarded.sh"
+
+  sed 's/^MIN_BASH_MAJOR=3$/MIN_BASH_MAJOR=99/' "$SHIP_CHECK" > "$guarded"
+  if ! grep -q '^MIN_BASH_MAJOR=99$' "$guarded"; then
+    printf "    could not raise MIN_BASH_MAJOR — has the floor been renamed?\n" >&2
+    return 1
+  fi
+
+  local out rc
+  out="$(bash "$guarded" --help 2>&1)"
+  rc=$?
+
+  # 1. The reserved could-not-run code, and specifically NOT 1. Conflating the
+  #    two is the defect: a caller must never read "never executed" as "ran and
+  #    passed".
+  if [ "$rc" -ne 4 ]; then
+    printf "    expected exit 4 (could-not-run), got %d\n" "$rc" >&2
+    printf '%s\n' "$out" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # 2. The message names the requirement and how to satisfy it.
+  if ! printf '%s' "$out" | grep -q 'requires bash 99\.2 or newer'; then
+    printf "    message does not name the required bash version:\n" >&2
+    printf '%s\n' "$out" | sed 's/^/    | /' >&2
+    return 1
+  fi
+  if ! printf '%s' "$out" | grep -q 'brew install bash'; then
+    printf "    message does not state the remedy (brew install bash):\n" >&2
+    printf '%s\n' "$out" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # 3. And it is not the raw builtin error this ticket was filed about.
+  if printf '%s' "$out" | grep -q 'invalid option'; then
+    printf "    raw builtin error leaked past the guard:\n" >&2
+    printf '%s\n' "$out" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # 4. MUTATION: delete the guard block, keep the raised floor. Both the exit
+  #    code and the message must vanish. If either survives, this test is
+  #    measuring something other than the guard.
+  awk '
+    /^# --- Bash version floor \(WARP-2449\)/ { skip = 1 }
+    skip && /^fi$/                            { skip = 0; next }
+    !skip                                     { print }
+  ' "$guarded" > "$unguarded"
+
+  if grep -q '^MIN_BASH_MAJOR=' "$unguarded"; then
+    printf "    mutation did not remove the guard\n" >&2
+    return 1
+  fi
+
+  local mout mrc
+  mout="$(bash "$unguarded" --help 2>&1)"
+  mrc=$?
+  if [ "$mrc" -eq 4 ]; then
+    printf "    guard removed but exit 4 persists — test is not measuring the guard\n" >&2
+    return 1
+  fi
+  if printf '%s' "$mout" | grep -q 'brew install bash'; then
+    printf "    guard removed but its message persists\n" >&2
+    return 1
+  fi
+  return 0
+}
+
+# =============================================================================
+# Test: ship-check.sh stays runnable on stock macOS bash 3.2 (WARP-2449)
+# =============================================================================
+#
+# The original defect was one `declare -A` on line 115, and nothing in CI would
+# ever have caught it: every workflow runs on ubuntu-latest with bash 5, where
+# the script is green, while the machine the docs tell you to run it on could
+# not execute a single line of it.
+#
+# This test is therefore deliberately STATIC as well as dynamic. The static scan
+# fails on the bash 5 runner too, where an execution test cannot possibly notice
+# the problem; the dynamic half only runs where an old bash exists and catches
+# what a grep cannot see (bash 3.2 also cannot parse a `case` inside `$( )`, or
+# an apostrophe in a comment inside `$( )` — both of which this script contained
+# and both of which are fixed).
+_scan_bash4_only() {
+  # Associative arrays, mapfile/readarray, and ${x^^} / ${x,,} case conversion
+  # are all bash 4+.
+  grep -nE 'declare[[:space:]]+-A|local[[:space:]]+-A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' "$1" || true
+}
+
+test_ship_check_is_runnable_on_bash_3_2() {
+  local found
+  found="$(_scan_bash4_only "$SHIP_CHECK")"
+  if [ -n "$found" ]; then
+    printf "    bash-4-only syntax in ship-check.sh (macOS ships bash 3.2.57):\n" >&2
+    printf '%s\n' "$found" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # MUTATION: reintroduce an associative array into a copy. Without this the
+  # assertion above could be vacuously green.
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$tmp'" RETURN
+  cp "$SHIP_CHECK" "$tmp/mutated.sh"
+  printf 'declare -A REINTRODUCED=()\n' >> "$tmp/mutated.sh"
+  if [ -z "$(_scan_bash4_only "$tmp/mutated.sh")" ]; then
+    printf "    scan failed to flag a reintroduced associative array\n" >&2
+    return 1
+  fi
+
+  # Dynamic half: where a pre-4 bash exists, prove the real script parses and
+  # runs under it. Skipped (not failed) on a runner that only has bash 5 —
+  # the static scan above is the part that guards CI.
+  local old_bash_major
+  if [ ! -x /bin/bash ]; then
+    return 0
+  fi
+  old_bash_major="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 9)"
+  if [ "$old_bash_major" -ge 4 ]; then
+    printf "    (skip dynamic half: /bin/bash is %s, need <4 to exercise it)\n" \
+      "$(/bin/bash -c 'echo "$BASH_VERSION"')" >&2
+    return 0
+  fi
+
+  local out rc
+  out="$(/bin/bash "$SHIP_CHECK" --help 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf "    ship-check.sh --help failed under /bin/bash %s (exit %d):\n" \
+      "$(/bin/bash -c 'echo "$BASH_VERSION"')" "$rc" >&2
+    printf '%s\n' "$out" | sed 's/^/    | /' >&2
+    return 1
+  fi
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -1106,6 +1273,12 @@ _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
 
 _run_test "tls-invariants catches a factory-reset HQ-deregister regression (ADR-023 PR-3)" \
   test_tls_invariants_catches_deregister_regression
+
+_run_test "bash version floor reports COULD NOT RUN with its own exit code (WARP-2449)" \
+  test_bash_version_guard_reports_could_not_run
+
+_run_test "ship-check.sh is runnable on stock macOS bash 3.2 (WARP-2449)" \
+  test_ship_check_is_runnable_on_bash_3_2
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

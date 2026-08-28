@@ -71,6 +71,19 @@
 --        be "fixed" — doing so would drop the lexical-search index and the
 --        crypto-shred guarantee that rides on it.
 --
+--  6. FileContentChunk_embedding_hnsw_idx is dropped.
+--     -> PRISMA-INEXPRESSIBLE, permanent. WARP-2193 gave the vector arm an
+--        HNSW index (`USING hnsw (embedding vector_cosine_ops)`, migration
+--        20260826120000). `embedding` is `Unsupported("vector(384)")` and
+--        Prisma has no datamodel syntax for an index on one, let alone for
+--        the hnsw access method — so `migrate diff` proposes removing it on
+--        every run, forever, exactly as it already does for the GIN index in
+--        entry 5. It must never be "fixed": doing so drops the only ANN index
+--        on the corpus and returns every semantic search to a sequential
+--        scan. That is not hypothetical — it is what happened between
+--        20260425220000 (which dropped the predecessor IVFFlat index as
+--        generated collateral) and WARP-2193, unnoticed for four months.
+--
 -- UPDATING THIS FILE
 -- ------------------
 -- Do not hand-edit below the sentinel. Run:
@@ -94,6 +107,9 @@ ALTER TABLE "Department" DROP CONSTRAINT "Department_parentId_fkey";
 
 -- DropIndex
 DROP INDEX "Department_parentId_idx";
+
+-- DropIndex
+DROP INDEX "FileContentChunk_embedding_hnsw_idx";
 
 -- DropIndex
 DROP INDEX "FileContentChunk_text_tsv_idx";

@@ -56,6 +56,20 @@ import {
   type QboTokens,
   type AscendToken,
 } from "@droplet/erp-connector";
+// WARP-2217 — the declarative provider registry. Provider identity, credential
+// field definitions, egress hosts, datasets and rate-limit policy are DATA in
+// `@droplet/shared-types`, read by this module AND by the dashboard's connector
+// catalog, so the two can no longer hold divergent ideas of what a provider is.
+import {
+  providerDescriptor,
+  buildableProviderIds,
+  cloudProviderIds,
+  parseProviderConfigWith,
+  providerConfigNumber,
+  providerConfigString,
+  type ProviderConfig,
+  type ProviderDescriptor,
+} from "@droplet/shared-types";
 
 /** The flagship direct-SQL provider (framework provider #1). */
 export const EAGLESOFT_PROVIDER = "eaglesoft";
@@ -70,29 +84,27 @@ export const EAGLESOFT_API_PROVIDER = "eaglesoft-api";
  * an operator profile can introduce one at runtime. Use
  * {@link isKnownErpProvider}, which covers both, rather than testing membership
  * here.
+ *
+ * WARP-2217 — DERIVED from the descriptor registry rather than hand-written.
+ * Catalog-only descriptors (hub cards with no shipped transport) are excluded,
+ * so a placeholder can never be named by a connection row. Pinned against the
+ * pre-change literal list by a set-equality test: dropping a descriptor goes
+ * red rather than silently un-shipping a provider.
  */
-export const KNOWN_ERP_PROVIDERS: readonly string[] = [
-  EAGLESOFT_PROVIDER,
-  EAGLESOFT_API_PROVIDER,
-  // WARP-2137 — the ADR-041 cloud tracks. They reach a vendor SaaS rather than
-  // a box on the practice LAN, so `host` is unused and the account is named by
-  // `providerConfig` instead. Both connectors shipped with their packages
-  // (WARP-2109 / WARP-2127) but had no key mapped here, which made
-  // `validateProvider` reject them and left them unreachable from the API.
-  QUICKBOOKS_ONLINE_PROVIDER,
-  DENTRIX_ASCEND_PROVIDER,
-];
+export const KNOWN_ERP_PROVIDERS: readonly string[] = buildableProviderIds();
 
 /** The cloud tracks, which take their account identity from `providerConfig`
  *  and their credentials from `providerTokensEnc` rather than from the LAN
- *  columns. Used to decide whether a row needs cloud material resolved. */
-export const CLOUD_ERP_PROVIDERS: readonly string[] = [
-  QUICKBOOKS_ONLINE_PROVIDER,
-  DENTRIX_ASCEND_PROVIDER,
-];
+ *  columns. Used to decide whether a row needs cloud material resolved.
+ *
+ *  WARP-2217 — derived from the descriptors' `track`, not hand-maintained
+ *  alongside the list above. The cloud/LAN distinction is preserved as a
+ *  descriptor field rather than erased: a cloud row genuinely needs different
+ *  material resolved, so a caller has to be able to ask. */
+export const CLOUD_ERP_PROVIDERS: readonly string[] = cloudProviderIds();
 
 export function isCloudErpProvider(provider: string): boolean {
-  return CLOUD_ERP_PROVIDERS.includes(provider);
+  return providerDescriptor(provider)?.track === "cloud";
 }
 
 /**
@@ -120,7 +132,10 @@ export function loadOperatorExportProfiles(): { profiles: ExportProfile[]; error
 /** True for a provider key this factory can build — either direct-connection
  *  track, or an export-drop key for a vendor we have a profile for. */
 export function isKnownErpProvider(provider: string): boolean {
-  if (KNOWN_ERP_PROVIDERS.includes(provider)) return true;
+  // Read the registry live rather than the import-time snapshot above, so a
+  // descriptor registered at runtime is admitted without a restart.
+  const descriptor = providerDescriptor(provider);
+  if (descriptor) return descriptor.track !== "catalog";
   if (!vendorFromExportProvider(provider)) return false;
   return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }
@@ -257,20 +272,10 @@ export function apiMaterialFromRow(row: ApiConnectionRow): Pick<
 // WARP-2137 — cloud-track connection material.
 // ---------------------------------------------------------------------------
 
-/** The validated shape of `IntegrationConnection.providerConfig`, discriminated
- *  by the row's provider. A cloud track cannot address an account without it. */
-export type ProviderConfig =
-  | { provider: typeof QUICKBOOKS_ONLINE_PROVIDER; realmId: string; baseUrl?: string; callCeiling?: number }
-  | {
-      provider: typeof DENTRIX_ASCEND_PROVIDER;
-      organizationId: string;
-      locationId?: string;
-      baseUrl?: string;
-    };
-
-function optionalString(v: unknown): string | undefined {
-  return typeof v === "string" && v.trim() !== "" ? v : undefined;
-}
+/** The validated shape of `IntegrationConnection.providerConfig`. Defined in
+ *  `@droplet/shared-types` and re-exported here so existing importers of this
+ *  module are unaffected by where it moved. */
+export type { ProviderConfig };
 
 /**
  * Narrow a persisted `providerConfig` for `provider`.
@@ -279,52 +284,31 @@ function optionalString(v: unknown): string | undefined {
  * the same reason: a row written by an older build, by hand, or for a different
  * provider must not be handed to a connector as though it were a contract.
  *
- * Returns undefined when the value is absent, malformed, or missing the
- * identifier the track cannot work without (`realmId` / `organizationId`). The
- * factory reads undefined as "not configured" and constructs the connector in
- * its blocked state, so the connection degrades to ERP_NOT_CONNECTED instead of
- * calling Intuit with an empty company id and collecting an opaque 4xx.
+ * Returns undefined when the value is absent, malformed, missing the identifier
+ * the track cannot work without (`realmId` / `organizationId`), or belongs to a
+ * provider that has no `providerConfig` concept at all. The factory reads
+ * undefined as "not configured" and constructs the connector in its blocked
+ * state, so the connection degrades to ERP_NOT_CONNECTED instead of calling
+ * Intuit with an empty company id and collecting an opaque 4xx.
  *
- * `callCeiling` is accepted only as a positive integer: a zero or negative
- * ceiling would either block every read or, read as falsy, silently restore the
- * default — both worse than ignoring a nonsense value and using the default
- * deliberately.
+ * WARP-2217 — the per-provider `switch` is gone. Field-by-field validation now
+ * walks the descriptor's `credentialFields`, so a new provider's rules are
+ * declared once alongside the form that collects them instead of being
+ * re-implemented in a new case arm. `erp-provider.equivalence.test.ts` pins
+ * this against the switch's captured behaviour, fixture by fixture, including
+ * every rejection path — that table was written and watched pass BEFORE the
+ * switch was deleted, and it is the whole safety argument for this change.
+ *
+ * The behaviours that table locks in, so a later edit does not quietly lose
+ * them: strings are validated but NOT trimmed; a required field that is absent,
+ * blank or the wrong type rejects the whole config; an optional one is simply
+ * dropped (a nonsense `callCeiling` must not block a connection that is
+ * otherwise fine, and must not silently restore the default while the row looks
+ * configured); every declared field is emitted as a key in declaration order,
+ * present even when undefined, because a persisted config is JSON.
  */
 export function parseProviderConfig(provider: string, value: unknown): ProviderConfig | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const v = value as Record<string, unknown>;
-
-  if (provider === QUICKBOOKS_ONLINE_PROVIDER) {
-    const realmId = optionalString(v.realmId);
-    if (!realmId) return undefined;
-    const rawCeiling = v.callCeiling;
-    const callCeiling =
-      typeof rawCeiling === "number" && Number.isInteger(rawCeiling) && rawCeiling > 0
-        ? rawCeiling
-        : undefined;
-    return {
-      provider: QUICKBOOKS_ONLINE_PROVIDER,
-      realmId,
-      baseUrl: optionalString(v.baseUrl),
-      callCeiling,
-    };
-  }
-
-  if (provider === DENTRIX_ASCEND_PROVIDER) {
-    const organizationId = optionalString(v.organizationId);
-    if (!organizationId) return undefined;
-    return {
-      provider: DENTRIX_ASCEND_PROVIDER,
-      organizationId,
-      // Optional by design: without a location the connector still serves the
-      // schedule and patients and refuses only the AR read, which is more
-      // useful than refusing the whole connection.
-      locationId: optionalString(v.locationId),
-      baseUrl: optionalString(v.baseUrl),
-    };
-  }
-
-  return undefined;
+  return parseProviderConfigWith(providerDescriptor(provider), value);
 }
 
 /** Encrypt a cloud track's tokens for `providerTokensEnc`. AAD-bound to the
@@ -395,18 +379,64 @@ export interface CloudConnectionRow {
  * effect without a restart; the spend resets in that case, which is the honest
  * reading of "a new ceiling was chosen deliberately".
  */
-const callBudgets = new Map<string, { budget: CallBudget; ceiling: number }>();
+const callBudgets = new Map<
+  string,
+  { budget: CallBudget; ceiling: number; periodMs: number | undefined }
+>();
 
 export function sharedCallBudget(
   connectionId: string,
   ceiling: number,
   now: () => number = () => Date.now(),
+  /** Budget period. Undefined keeps `CallBudget`'s own 30-day default, which is
+   *  what every caller got before the descriptor supplied one. */
+  periodMs?: number,
 ): CallBudget {
   const existing = callBudgets.get(connectionId);
-  if (existing && existing.ceiling === ceiling) return existing.budget;
-  const budget = new CallBudget(ceiling, now);
-  callBudgets.set(connectionId, { budget, ceiling });
+  if (existing && existing.ceiling === ceiling && existing.periodMs === periodMs) {
+    return existing.budget;
+  }
+  const budget = new CallBudget(ceiling, now, periodMs);
+  callBudgets.set(connectionId, { budget, ceiling, periodMs });
   return budget;
+}
+
+/**
+ * WARP-2217 — the metered-call policy, read from the descriptor.
+ *
+ * The ceiling used to be a bare `DEFAULT_CALL_CEILING` constant reached for at
+ * the QuickBooks branch of the factory, which meant a second metered provider
+ * would have had to add a second constant and a second branch. It is now a
+ * per-provider `rateLimit` on the descriptor, with the operator override named
+ * by the descriptor too (`ceilingOverrideField`) so the override cannot drift
+ * away from the field definition that validates it.
+ *
+ * The shipped values are UNCHANGED and pinned by a table test — this is a move,
+ * not a retune. `DEFAULT_CALL_CEILING` survives as the last resort so a
+ * descriptor that loses its `rateLimit` degrades to today's number rather than
+ * to an unmetered connection.
+ */
+function meteredBudgetFor(
+  descriptor: ProviderDescriptor | undefined,
+  config: ProviderConfig | undefined,
+  connectionId: string | undefined,
+): { ceiling: number; budget: CallBudget | undefined } {
+  const rateLimit = descriptor?.rateLimit;
+  const override = rateLimit?.ceilingOverrideField
+    ? providerConfigNumber(config, rateLimit.ceilingOverrideField)
+    : undefined;
+  const ceiling = override ?? rateLimit?.callCeiling ?? DEFAULT_CALL_CEILING;
+  return {
+    ceiling,
+    // The budget must OUTLIVE this connector — see sharedCallBudget. With no
+    // connection id (the `test()` path, which has no row yet) there is no
+    // identity to key a shared budget by, so none is injected and the connector
+    // falls back to its own per-instance one. That path performs a validation
+    // handshake, not a metered read loop.
+    budget: connectionId
+      ? sharedCallBudget(connectionId, ceiling, undefined, rateLimit?.periodMs)
+      : undefined,
+  };
 }
 
 /** Drop a connection's budget — call when the connection is deleted, so a
@@ -497,115 +527,61 @@ export function dispatcherForCa(caPem: string | undefined): unknown {
   return new Agent({ connect: { ca: caPem } });
 }
 
-/** Build the Connector for `sel.provider`. Unknown providers fall back to the
- *  SQL connector (the framework default) so a stray value can never route to a
- *  surprise transport. */
-export function connectorForProvider(sel: ConnectorSelector): Connector {
-  // WARP-1964 — the export-drop track. Matched on the `-export` suffix rather
-  // than an enumerated list because the vendor set is open: an operator profile
-  // can add one without a release.
-  const exportVendor = vendorFromExportProvider(sel.provider);
-  if (exportVendor) {
-    const { profiles, error } = loadOperatorExportProfiles();
-    return new ExportDropConnector(
-      {
-        vendor: exportVendor,
-        // Operator configuration only. `sel.host` is ignored on this track:
-        // the share is mounted by the host, so the practice's file server is
-        // named in the mount, not in a connection row we would then have to
-        // trust with a path.
-        root: config.ERP_EXPORT_DROP_ROOT,
-        // `subdirectory` is intentionally left unset. The connector supports it
-        // (with containment validation) for a future per-practice layout, but
-        // no connection column means "which folder" today, and borrowing
-        // `databaseName` would collide with its "PattersonPM" default and send
-        // every export connection looking for a folder that does not exist.
-      },
-      { profiles, configError: error ?? undefined },
-    );
-  }
+// ---------------------------------------------------------------------------
+// WARP-2217 — the connector factory registry.
+//
+// This replaces the if-chain that used to dispatch on `sel.provider`. Each
+// provider's construction lives in one registered function keyed by its
+// descriptor id, so adding a vendor is registering one more entry rather than
+// editing a chain every other vendor PR is also editing.
+//
+// The factories are kept HERE rather than on the descriptor on purpose: a
+// descriptor is pure data shipped to the browser, and a closure that constructs
+// a `@droplet/erp-connector` class would drag a server-only package across the
+// dashboard's RSC boundary — a break neither `tsc` nor `vitest` can see.
+// ---------------------------------------------------------------------------
 
-  // WARP-2137 — the ADR-041 cloud tracks. Both run IN-PROCESS, not in the
-  // erp-sql-bridge sidecar: that sidecar exists to isolate a NATIVE driver, and
-  // an HTTPS API needs none (ADR-041, and the eaglesoft-api precedent above).
-  //
-  // Each is constructed from `providerConfig` and, when present, a resolver
-  // over the decrypted token blob. An absent config or absent tokens leaves the
-  // connector's own blocked resolver in place — the same honest-degradation
-  // rule the REST track follows — so a half-configured connection reports
-  // ERP_NOT_CONNECTED rather than reaching a vendor with a missing identifier.
-  if (sel.provider === QUICKBOOKS_ONLINE_PROVIDER) {
-    const cfg = sel.providerConfig?.provider === QUICKBOOKS_ONLINE_PROVIDER ? sel.providerConfig : undefined;
-    const ceiling = cfg?.callCeiling ?? DEFAULT_CALL_CEILING;
-    // Unlike DentrixAscendConnector, QuickBooksOnlineConnector does NOT
-    // validate its realm id — an empty one builds fine and produces the URL
-    // `/v3/company//query`, so an unconfigured row would spend a METERED call
-    // asking Intuit about a company that does not exist. Refuse here, where the
-    // row is known to be unconfigured, and refuse as a ConnectorBlockedError so
-    // the read degrades to ERP_NOT_CONNECTED like every other absent-material
-    // path rather than surfacing as a fault.
-    if (!cfg?.realmId) {
-      throw new ConnectorBlockedError(
-        "construct (no QuickBooks company id configured)",
-        QBO_TRACK_REMEDIATION,
-      );
-    }
-    return new QuickBooksOnlineConnector(
-      {
-        realmId: cfg.realmId,
-        baseUrl: cfg.baseUrl,
-        credentialsSecretRef: sel.secretRef ?? "",
-        callCeiling: ceiling,
-      },
-      {
-        resolveTokens: sel.cloudTokens?.resolveQbo,
-        persistTokens: sel.cloudTokens?.persistQbo,
-        // The budget must OUTLIVE this connector — see sharedCallBudget. With
-        // no connection id (the `test()` path, which has no row yet) there is
-        // no identity to key a shared budget by, so none is injected and the
-        // connector falls back to its own per-instance one. That path performs
-        // a validation handshake, not a metered read loop.
-        budget: sel.connectionId ? sharedCallBudget(sel.connectionId, ceiling) : undefined,
-      },
-    );
-  }
+/** What a factory is handed. The config is ALREADY narrowed to this provider,
+ *  so no factory re-checks whose config it was given. */
+export interface ConnectorBuildContext {
+  readonly selector: ConnectorSelector;
+  /** The descriptor for `selector.provider`. Absent only for the export-drop
+   *  track, whose keys are an open family rather than enumerated descriptors. */
+  readonly descriptor?: ProviderDescriptor;
+  /** The row's validated `providerConfig`, or undefined when the row carries
+   *  none / carries one belonging to a different provider. */
+  readonly config?: ProviderConfig;
+}
 
-  if (sel.provider === DENTRIX_ASCEND_PROVIDER) {
-    const cfg = sel.providerConfig?.provider === DENTRIX_ASCEND_PROVIDER ? sel.providerConfig : undefined;
-    return new DentrixAscendConnector(
-      {
-        organizationId: cfg?.organizationId ?? "",
-        locationId: cfg?.locationId,
-        baseUrl: cfg?.baseUrl,
-        credentialsSecretRef: sel.secretRef ?? "",
-      },
-      { resolveToken: sel.cloudTokens?.resolveAscend },
-    );
-  }
+export type ConnectorFactory = (ctx: ConnectorBuildContext) => Connector;
 
-  if (sel.provider === EAGLESOFT_API_PROVIDER) {
-    const credentials = sel.apiCredentials;
-    return new EaglesoftApiConnector(
-      {
-        host: sel.host,
-        httpsPort: sel.port ?? DEFAULT_API_HTTPS_PORT,
-        // Pointer only — the label that appears in logs and audit rows. The
-        // cleartext arrives out-of-band via `apiCredentials` below and is never
-        // written into the config object.
-        credentialsSecretRef: sel.secretRef ?? "",
-        routeMap: sel.apiRouteMap,
-      },
-      {
-        dispatcher: dispatcherForCa(sel.apiCaCert),
-        // Only wire a resolver when credentials were actually resolved. Leaving
-        // it undefined keeps the connector's own `blockedSecretResolver`, so an
-        // unconfigured connection blocks honestly instead of authenticating
-        // with empty strings and getting an opaque 401.
-        resolveSecret: credentials ? async () => credentials : undefined,
-      },
-    );
-  }
-  return new EaglesoftConnector(
+const connectorFactories = new Map<string, ConnectorFactory>();
+
+/**
+ * Register a provider's connector factory.
+ *
+ * The extension seam that makes AC #7 true: a sixth provider is one descriptor
+ * plus one registration plus its egress allowlist entries — this module is not
+ * edited at all. Exercised in-repo by the fixture provider in
+ * `erp-provider.descriptor.test.ts`.
+ */
+export function registerConnectorFactory(provider: string, factory: ConnectorFactory): void {
+  connectorFactories.set(provider, factory);
+}
+
+/** Drop a registration. Test seam, so a fixture provider does not leak into the
+ *  next file's registry. */
+export function unregisterConnectorFactory(provider: string): void {
+  connectorFactories.delete(provider);
+}
+
+/**
+ * The SQL track (framework provider #1), and the historical default shape.
+ *
+ * No longer the fallback for an unrecognised key — see `connectorForProvider`.
+ */
+registerConnectorFactory(EAGLESOFT_PROVIDER, ({ selector: sel }) =>
+  new EaglesoftConnector(
     {
       host: sel.host,
       port: sel.port ?? DEFAULT_PORT,
@@ -620,5 +596,161 @@ export function connectorForProvider(sel: ConnectorSelector): Connector {
       // which is the accurate remediation for a box with no bridge deployed.
       bridgeUrl: config.ERP_SQL_BRIDGE_URL || undefined,
     },
+  ),
+);
+
+/** The Patterson official-REST track (Innovation Connection, HTTPS :9888). */
+registerConnectorFactory(EAGLESOFT_API_PROVIDER, ({ selector: sel }) => {
+  const credentials = sel.apiCredentials;
+  return new EaglesoftApiConnector(
+    {
+      host: sel.host,
+      httpsPort: sel.port ?? DEFAULT_API_HTTPS_PORT,
+      // Pointer only — the label that appears in logs and audit rows. The
+      // cleartext arrives out-of-band via `apiCredentials` below and is never
+      // written into the config object.
+      credentialsSecretRef: sel.secretRef ?? "",
+      routeMap: sel.apiRouteMap,
+    },
+    {
+      dispatcher: dispatcherForCa(sel.apiCaCert),
+      // Only wire a resolver when credentials were actually resolved. Leaving
+      // it undefined keeps the connector's own `blockedSecretResolver`, so an
+      // unconfigured connection blocks honestly instead of authenticating with
+      // empty strings and getting an opaque 401.
+      resolveSecret: credentials ? async () => credentials : undefined,
+    },
   );
+});
+
+// WARP-2137 — the ADR-041 cloud tracks. Both run IN-PROCESS, not in the
+// erp-sql-bridge sidecar: that sidecar exists to isolate a NATIVE driver, and
+// an HTTPS API needs none (ADR-041, and the eaglesoft-api precedent above).
+//
+// Each is constructed from `providerConfig` and, when present, a resolver over
+// the decrypted token blob. An absent config or absent tokens leaves the
+// connector's own blocked resolver in place — the same honest-degradation rule
+// the REST track follows — so a half-configured connection reports
+// ERP_NOT_CONNECTED rather than reaching a vendor with a missing identifier.
+registerConnectorFactory(QUICKBOOKS_ONLINE_PROVIDER, ({ selector: sel, descriptor, config: cfg }) => {
+  const realmId = providerConfigString(cfg, "realmId");
+  // Unlike DentrixAscendConnector, QuickBooksOnlineConnector does NOT validate
+  // its realm id — an empty one builds fine and produces the URL
+  // `/v3/company//query`, so an unconfigured row would spend a METERED call
+  // asking Intuit about a company that does not exist. Refuse here, where the
+  // row is known to be unconfigured, and refuse as a ConnectorBlockedError so
+  // the read degrades to ERP_NOT_CONNECTED like every other absent-material
+  // path rather than surfacing as a fault.
+  if (!realmId) {
+    throw new ConnectorBlockedError(
+      "construct (no QuickBooks company id configured)",
+      QBO_TRACK_REMEDIATION,
+    );
+  }
+  const { ceiling, budget } = meteredBudgetFor(descriptor, cfg, sel.connectionId);
+  return new QuickBooksOnlineConnector(
+    {
+      realmId,
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+      credentialsSecretRef: sel.secretRef ?? "",
+      callCeiling: ceiling,
+    },
+    {
+      resolveTokens: sel.cloudTokens?.resolveQbo,
+      persistTokens: sel.cloudTokens?.persistQbo,
+      budget,
+    },
+  );
+});
+
+registerConnectorFactory(DENTRIX_ASCEND_PROVIDER, ({ selector: sel, config: cfg }) =>
+  new DentrixAscendConnector(
+    {
+      // Empty rather than refused here: unlike QuickBooks, this connector
+      // validates its own Organization-ID at construction and blocks, so
+      // duplicating the refusal would just move the same message.
+      organizationId: providerConfigString(cfg, "organizationId") ?? "",
+      locationId: providerConfigString(cfg, "locationId"),
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+      credentialsSecretRef: sel.secretRef ?? "",
+    },
+    { resolveToken: sel.cloudTokens?.resolveAscend },
+  ),
+);
+
+/**
+ * WARP-1964 — the export-drop track.
+ *
+ * Matched on the `-export` SUFFIX rather than by descriptor id because the
+ * vendor set is genuinely open: an operator profile can introduce
+ * `<vendor>-export` at runtime, with no release and therefore no descriptor.
+ * It is the one provider family that cannot be enumerated, which is why it
+ * resolves before the registry rather than living in it.
+ */
+const exportDropFactory: ConnectorFactory = ({ selector: sel }) => {
+  const { profiles, error } = loadOperatorExportProfiles();
+  return new ExportDropConnector(
+    {
+      vendor: vendorFromExportProvider(sel.provider) ?? "",
+      // Operator configuration only. `sel.host` is ignored on this track: the
+      // share is mounted by the host, so the practice's file server is named in
+      // the mount, not in a connection row we would then have to trust with a
+      // path.
+      root: config.ERP_EXPORT_DROP_ROOT,
+      // `subdirectory` is intentionally left unset. The connector supports it
+      // (with containment validation) for a future per-practice layout, but no
+      // connection column means "which folder" today, and borrowing
+      // `databaseName` would collide with its "PattersonPM" default and send
+      // every export connection looking for a folder that does not exist.
+    },
+    { profiles, configError: error ?? undefined },
+  );
+};
+
+function connectorFactoryFor(provider: string): ConnectorFactory | undefined {
+  if (vendorFromExportProvider(provider)) return exportDropFactory;
+  return connectorFactories.get(provider);
+}
+
+/** Remediation for a row naming a provider this build cannot construct. Says
+ *  what to do (re-connect the integration) rather than naming an internal
+ *  registry the owner has never heard of. */
+const UNKNOWN_PROVIDER_REMEDIATION =
+  "this connection names an integration this version of Droplet does not ship — " +
+  "reconnect it from the Integrations page, or update the appliance if it was " +
+  "connected on a newer build";
+
+/**
+ * Build the Connector for `sel.provider` — a single registry lookup.
+ *
+ * WARP-2217 — an unknown provider now THROWS. It used to fall through to the
+ * SQL connector, on the reasoning that a stray value should not reach a
+ * surprise transport. But the fallback WAS a surprise transport: a row naming
+ * anything unrecognised got a SQL Anywhere connector pointed at that row's
+ * `host`, and reported its failure as an Eaglesoft failure. Absence is never a
+ * silent success (the no-guessing-state rule), so it is refused by name.
+ *
+ * It is a `ConnectorBlockedError` rather than a bare `Error` deliberately: both
+ * call sites already treat that as ERP_NOT_CONNECTED, so a stale row degrades
+ * to "this integration isn't connected" instead of a 500. Neither call site can
+ * reach here in normal operation — `integrations.service` rejects an unknown
+ * provider at `resolveProvider` before ever building, and `erp.service` builds
+ * from a row whose provider passed that gate — so this is the belt to that
+ * braces, for a row written by an older or newer build.
+ */
+export function connectorForProvider(sel: ConnectorSelector): Connector {
+  const factory = connectorFactoryFor(sel.provider);
+  if (!factory) {
+    throw new ConnectorBlockedError(
+      `construct (unknown ERP provider "${sel.provider}")`,
+      UNKNOWN_PROVIDER_REMEDIATION,
+    );
+  }
+  return factory({
+    selector: sel,
+    descriptor: providerDescriptor(sel.provider),
+    // Narrowed once, here, rather than in every factory: a config belonging to
+    // a different provider is no config at all.
+    config: sel.providerConfig?.provider === sel.provider ? sel.providerConfig : undefined,
+  });
 }
