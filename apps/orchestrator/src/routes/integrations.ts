@@ -16,6 +16,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import {
   createIntegrationsService,
   type ConnectInput,
@@ -103,7 +104,7 @@ export function createIntegrationsRouter(prisma: PrismaClient): Router {
   );
 
   const provisionBody =
-    (fn: (input: ConnectInput) => Promise<unknown>) =>
+    (fn: (input: ConnectInput, req: Request) => Promise<unknown>) =>
     async (req: Request, res: Response, next: (e?: unknown) => void) => {
       try {
         const parsed = connectSchema.safeParse(req.body);
@@ -113,7 +114,7 @@ export function createIntegrationsRouter(prisma: PrismaClient): Router {
             .json({ error: "Invalid request", details: parsed.error.flatten() });
           return;
         }
-        res.json(await fn(parsed.data as ConnectInput));
+        res.json(await fn(parsed.data as ConnectInput, req));
       } catch (err) {
         if (!handleErpError(res, err)) next(err);
       }
@@ -122,7 +123,11 @@ export function createIntegrationsRouter(prisma: PrismaClient): Router {
   router.post(
     "/integrations/eaglesoft/connect",
     requireRole("owner", "admin"),
-    provisionBody((input) => svc.connect(input)),
+    // WARP-2283: the actor is threaded through so `connect()`'s consent record
+    // names who connected, not just that something did.
+    provisionBody((input, req) =>
+      svc.connect(input, { actor: actorFromRequest(req as never) }),
+    ),
   );
   router.post(
     "/integrations/eaglesoft/test",

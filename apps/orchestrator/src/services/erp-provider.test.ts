@@ -4,6 +4,7 @@
  * these assertions are offline.
  */
 import { describe, it, expect } from "vitest";
+import { ConnectorBlockedError } from "@droplet/erp-connector";
 import {
   connectorForProvider,
   isKnownErpProvider,
@@ -39,9 +40,46 @@ describe("erp-provider dual-track factory", () => {
     expect(c.provider).toBe("eaglesoft-api");
   });
 
-  it("falls back to the SQL connector for an unknown provider (never a surprise transport)", () => {
-    const c = connectorForProvider({ provider: "mystery", host: "10.0.0.5" });
-    expect(c.provider).toBe("eaglesoft");
+  it("REFUSES an unknown provider instead of falling back to SQL (WARP-2217)", () => {
+    // This used to return an EaglesoftConnector, on the reasoning that a stray
+    // value must not reach a surprise transport. The fallback WAS the surprise
+    // transport: a row naming anything unrecognised got a SQL Anywhere
+    // connector aimed at that row's `host`, and reported its failure as an
+    // Eaglesoft failure. Absence is never a silent success.
+    //
+    // Mutation: make `connectorForProvider` return `undefined` (or restore the
+    // SQL fallback) for a miss and this goes red.
+    expect(() => connectorForProvider({ provider: "mystery", host: "10.0.0.5" })).toThrow(
+      ConnectorBlockedError,
+    );
+    expect(() => connectorForProvider({ provider: "mystery", host: "10.0.0.5" })).toThrow(
+      /unknown ERP provider "mystery"/,
+    );
+  });
+
+  it("refuses the empty provider and a catalog-only placeholder for the same reason", () => {
+    // `opendental` HAS a descriptor — it is a hub card with no shipped
+    // transport. Having a descriptor must not make it buildable, or a
+    // placeholder becomes a connectable integration by accident.
+    expect(() => connectorForProvider({ provider: "", host: "h" })).toThrow(ConnectorBlockedError);
+    expect(() => connectorForProvider({ provider: "opendental", host: "h" })).toThrow(
+      ConnectorBlockedError,
+    );
+    expect(isKnownErpProvider("opendental")).toBe(false);
+  });
+
+  it("degrades a refusal to ERP_NOT_CONNECTED rather than a fault", () => {
+    // ConnectorBlockedError specifically, not a bare Error: both call sites
+    // already map it to "this integration isn't connected", so a row written by
+    // an older or newer build shows the owner something actionable instead of a
+    // 500.
+    try {
+      connectorForProvider({ provider: "mystery", host: "10.0.0.5" });
+      expect.unreachable("connectorForProvider must throw for an unknown provider");
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe("CONNECTOR_BLOCKED");
+      expect((err as { remediation?: string }).remediation).toBeTruthy();
+    }
   });
 });
 

@@ -243,6 +243,55 @@ export {
   type TokenResolver,
 } from "./quickbooks/online-connector.js";
 
+// WARP-2215 — Stripe: the payments track. Read-through over a merchant-created
+// RESTRICTED key (never a secret key), with the pinned Stripe-Version on every
+// request, a 900s poll floor, and no money-movement surface at any tier.
+export {
+  StripeConnector,
+  ReadAllocationMeter,
+  InvalidStripeCredentialError,
+  StripeAccessPolicyError,
+  StripeEventGapError,
+  StripePollIntervalError,
+  StripeQuotaExhaustedError,
+  StripeReauthorizationRequiredError,
+  UnsafeStripeBaseUrlError,
+  assertReadableStripeCollection,
+  assertSafeStripeBaseUrl,
+  assertStripePollIntervalSeconds,
+  assertStripeRestrictedKey,
+  blockedStripeKeyResolver,
+  majorUnits as stripeMajorUnits,
+  EVENT_OBJECT_ROUTES as STRIPE_EVENT_OBJECT_ROUTES,
+  STRIPE_ALLOWED_API_HOSTS,
+  STRIPE_API_VERSION,
+  STRIPE_BACKFILL_MAX_ATTEMPTS,
+  STRIPE_BACKOFF_BASE_MS,
+  STRIPE_DATASETS,
+  STRIPE_DEFAULT_MONTHLY_READ_ALLOCATION,
+  STRIPE_EVENT_CURSOR_LAG_MS,
+  STRIPE_EVENT_RETENTION_MS,
+  STRIPE_IP_POLICY_REMEDIATION,
+  STRIPE_MAX_PAGES,
+  STRIPE_MAX_RATE_LIMIT_RETRIES,
+  STRIPE_MIN_POLL_INTERVAL_SECONDS,
+  STRIPE_PRODUCTION_BASE_URL,
+  STRIPE_PROVIDER,
+  STRIPE_READABLE_COLLECTIONS,
+  STRIPE_RESTRICTED_KEY_PATTERN,
+  STRIPE_TRACK_REMEDIATION,
+  type StripeBackfillResult,
+  type StripeBalanceTransactionRow,
+  type StripeChangeRecord,
+  type StripeConnectionState,
+  type StripeConnectorConfig,
+  type StripeConnectorDeps,
+  type StripeCredentialRejection,
+  type StripeEventPollResult,
+  type StripeKeyResolver,
+  type StripeStatus,
+} from "./stripe/connector.js";
+
 // WARP-2127 — Dentrix Ascend: the cloud dental PMS, read over Henry Schein
 // One's published Public API. This is the Dentrix surface that CAN be written
 // honestly — the on-premise Developer Program withholds its schema as policy,
@@ -307,6 +356,63 @@ export {
   type XmlElement,
   type XmlLimits,
 } from "./quickbooks/xml.js";
+
+// WARP-2317 — HubSpot: the CRM track. Read-through over a customer-created
+// PRIVATE APP token (never OAuth — HubSpot has no PKCE), pinned to the
+// date-based API version on v3 CRM object routes, with an ACCOUNT-keyed 5 req/s
+// Search governor, watermark re-anchoring at the 10,000-record cap, Exports for
+// bulk history, and writes limited to confirmed notes and tasks.
+export {
+  HubSpotConnector,
+  SearchRateGovernor,
+  HubSpotBackfillInProgressError,
+  HubSpotCapabilityUnavailableError,
+  HubSpotConfirmationRequiredError,
+  HubSpotQuotaExhaustedError,
+  HubSpotReauthorizationRequiredError,
+  HubSpotSearchRateLimitedError,
+  HubSpotSuperAdminRevokedError,
+  HubSpotWatermarkStallError,
+  InvalidHubspotCredentialError,
+  UnsafeHubspotBaseUrlError,
+  assertHubspotPrivateAppToken,
+  assertReadableHubspotObject,
+  assertSafeHubspotBaseUrl,
+  assertWritableHubspotObject,
+  blockedHubspotTokenResolver,
+  hubspotPath,
+  hubspotResourceOf,
+  resetSearchGovernors,
+  searchGovernorForPortal,
+  HUBSPOT_ALLOWED_API_HOSTS,
+  HUBSPOT_API_VERSION,
+  HUBSPOT_BACKFILL_MAX_ATTEMPTS,
+  HUBSPOT_BACKOFF_BASE_MS,
+  HUBSPOT_DATASETS,
+  HUBSPOT_MAX_RATE_LIMIT_RETRIES,
+  HUBSPOT_MAX_REANCHORS,
+  HUBSPOT_PRIVATE_APP_TOKEN_PATTERN,
+  HUBSPOT_PRODUCTION_BASE_URL,
+  HUBSPOT_PROVIDER,
+  HUBSPOT_READABLE_RESOURCES,
+  HUBSPOT_SEARCH_CONSISTENCY_OVERLAP_MS,
+  HUBSPOT_SEARCH_MAX_REQUESTS_PER_SECOND,
+  HUBSPOT_SEARCH_PAGE_SIZE,
+  HUBSPOT_SEARCH_RESULT_CAP,
+  HUBSPOT_SUPER_ADMIN_REMEDIATION,
+  HUBSPOT_TIER_GATED_RESOURCES,
+  HUBSPOT_TRACK_REMEDIATION,
+  HUBSPOT_WRITABLE_OBJECTS,
+  type HubSpotBackfillResult,
+  type HubSpotConnectionState,
+  type HubSpotConnectorConfig,
+  type HubSpotConnectorDeps,
+  type HubSpotDeltaPollResult,
+  type HubSpotRecord,
+  type HubSpotStatus,
+  type HubspotCredentialRejection,
+  type HubspotTokenResolver,
+} from "./hubspot/connector.js";
 
 // WARP-2379 — Mailchimp: the audience-and-campaign track. Read-through over a
 // customer-created Marketing API key whose "-us14" suffix SELECTS THE HOST, so
