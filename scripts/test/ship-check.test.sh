@@ -99,6 +99,71 @@ _assert_check_passes() {
   return 0
 }
 
+# --- Isolated git index (WARP-2479) ------------------------------------------
+#
+# The `exec-bits` tests mutate a REAL tracked file's index mode with
+# `git update-index --chmod=…`. That command does not edit a mode bit in
+# place: it rewrites the whole index entry from the CURRENT WORKING-TREE
+# CONTENT. So if the caller has an unstaged edit to the target file, the
+# mutation silently STAGES that edit, and the `--chmod=+x` restore only puts
+# the mode back — the staged content stays. Measured on 2026-08-28:
+#
+#   $ printf '…\n' >> scripts/test/ship-check.sh   # unstaged edit
+#   $ git diff --cached --quiet -- scripts/test/ship-check.sh; echo $?
+#   0                                              # dirty-guard below says OK
+#   $ bash scripts/test/ship-check.test.sh         # 14/15
+#   $ git diff --cached --stat
+#    scripts/test/ship-check.sh | 2 ++             # staged by nobody
+#
+# Two consequences, both bad. The next run trips the "already staged —
+# refusing to mutate" guard and reports a spurious red (measured: 13/15,
+# `exec-bits catches chmod-stripped tracked script`). And any `git commit -a`
+# afterwards commits a half-finished edit the author never staged — which is
+# exactly the situation an agent editing ship-check.sh is in when it runs the
+# harness. The dirty-guard cannot catch this: it compares INDEX to HEAD, and
+# an unstaged edit leaves those identical.
+#
+# Fix: point every git command in the test — and the ship-check.sh child it
+# spawns, which reads the index via `git ls-files --stage` — at a THROWAWAY
+# COPY of the index via GIT_INDEX_FILE. The caller's index is then never
+# opened for writing, so there is nothing to restore and nothing to leak.
+# `git worktree add` would also work but checks out the whole monorepo; a
+# 100 KB index copy is the cheap equivalent. `git stash` is not an option —
+# the stash stack is shared across every worktree of this repo.
+_ISOLATED_INDEX_FILE=""
+
+# Redirect git to a disposable copy of the caller's index. Returns non-zero
+# (without exporting anything) if the copy could not be made, so a caller
+# that checks the return value never proceeds to mutate the real index.
+_isolated_index_begin() {
+  local real_index
+  # --git-path resolves the per-worktree index for LINKED worktrees
+  # (.git/worktrees/<name>/index), not just .git/index.
+  real_index="$(cd "$REPO_ROOT_REAL" && git rev-parse --git-path index 2>/dev/null)" || return 1
+  [ -n "$real_index" ] || return 1
+  case "$real_index" in
+    /*) ;;
+    *) real_index="$REPO_ROOT_REAL/$real_index" ;;
+  esac
+  [ -f "$real_index" ] || return 1
+
+  _ISOLATED_INDEX_FILE="$(mktemp "${TMPDIR:-/tmp}/ship-check-index.XXXXXX")" || return 1
+  cp "$real_index" "$_ISOLATED_INDEX_FILE" || return 1
+  export GIT_INDEX_FILE="$_ISOLATED_INDEX_FILE"
+  return 0
+}
+
+# Drop the disposable index and put git back on the caller's. Safe to call
+# when _isolated_index_begin was never run or failed.
+_isolated_index_end() {
+  unset GIT_INDEX_FILE
+  if [ -n "$_ISOLATED_INDEX_FILE" ]; then
+    rm -f "$_ISOLATED_INDEX_FILE"
+    _ISOLATED_INDEX_FILE=""
+  fi
+  return 0
+}
+
 # =============================================================================
 # Test: tsc-full catches WARP-329 class (test fixture missing required fields)
 # =============================================================================
@@ -535,8 +600,11 @@ test_shellcheck_catches_new_sc2034_violation() {
 #
 # Synthetic regression: strip the exec bit from a tracked script via
 # `git update-index --chmod=-x` and assert the exec-bits check fails.
-# Restore via `git update-index --chmod=+x` on RETURN — works even on
-# Windows where filesystem chmod is a no-op.
+# The mutation lands on a DISPOSABLE COPY of the index (GIT_INDEX_FILE,
+# see _isolated_index_begin) which is deleted on RETURN, so there is no
+# restore step and the caller's index is never written (WARP-2479). The
+# index — not the filesystem bit — is the canonical signal, so this works
+# on Windows where chmod is a no-op.
 #
 # Why scripts/test/ship-check.sh (and not e.g. scripts/setup.sh)? Because
 # the check's allowlist (see run_check_exec_bits in ship-check.sh)
@@ -562,8 +630,14 @@ test_exec_bits_catches_chmod_stripped() {
     return 1
   fi
 
-  # shellcheck disable=SC2064  # capture path values at trap-set time
-  trap "(cd '$REPO_ROOT_REAL' && git update-index --chmod=+x '$target_rel') 2>/dev/null || true" RETURN EXIT
+  # Every git command below — and the ship-check.sh child, which reads the
+  # index through `git ls-files --stage` — now writes to a disposable copy.
+  # The caller's index is never opened for writing (WARP-2479).
+  if ! _isolated_index_begin; then
+    printf "    could not create an isolated git index — refusing to mutate the real one\n" >&2
+    return 1
+  fi
+  trap '_isolated_index_end' RETURN EXIT
 
   # 1. Sanity: passes on the unmutated tree (100755 from commit 1 of WARP-487).
   if ! _assert_check_passes "$REPO_ROOT_REAL" exec-bits; then
@@ -609,8 +683,8 @@ test_exec_bits_catches_chmod_stripped() {
 # 100644.
 #
 # Synthetic regression: identical mechanism to the WARP-487 test —
-# `git update-index --chmod=-x <openwrt/scripts/upgrade-router.sh>`,
-# assert the check fails, restore via `--chmod=+x` on RETURN. The
+# `git update-index --chmod=-x <openwrt/scripts/upgrade-router.sh>` on a
+# disposable index copy, assert the check fails, drop the copy on RETURN. The
 # script is OPERATOR-FACING (its --help documents `./scripts/upgrade-
 # router.sh <firmware-image>` as the canonical invocation), so the
 # canonical-invocation rationale from WARP-487 applies one-for-one.
@@ -631,8 +705,12 @@ test_exec_bits_catches_chmod_stripped_openwrt() {
     return 1
   fi
 
-  # shellcheck disable=SC2064  # capture path values at trap-set time
-  trap "(cd '$REPO_ROOT_REAL' && git update-index --chmod=+x '$target_rel') 2>/dev/null || true" RETURN EXIT
+  # Same disposable-index isolation as the WARP-487 test (WARP-2479).
+  if ! _isolated_index_begin; then
+    printf "    could not create an isolated git index — refusing to mutate the real one\n" >&2
+    return 1
+  fi
+  trap '_isolated_index_end' RETURN EXIT
 
   # 1. Sanity: passes on the unmutated tree (100755 from commit 1 of WARP-489).
   if ! _assert_check_passes "$REPO_ROOT_REAL" exec-bits; then
@@ -1229,11 +1307,83 @@ test_ship_check_is_runnable_on_bash_3_2() {
 }
 
 # =============================================================================
+# Test: the suite leaves the caller's git index exactly as it found it
+# =============================================================================
+#
+# WARP-2479. The `exec-bits` cases mutate index modes with
+# `git update-index`, which rewrites the entry from current working-tree
+# content — so before the GIT_INDEX_FILE isolation above, running the suite
+# with an unstaged edit in the tree STAGED that edit and left it staged.
+# Measured on the pre-fix harness: run 1 → 14/15 and
+# `git diff --cached --stat` reporting `scripts/test/ship-check.sh | 2 ++`;
+# run 2 → 13/15, the extra red being the harness's own "already staged —
+# refusing to mutate" guard. The danger is not the spurious red, it is a
+# subsequent `git commit -a` shipping content the author never staged.
+#
+# This test compares the FULL index listing captured before the first case
+# ran against the listing now. `git ls-files -s` prints `<mode> <object>
+# <stage>\t<path>` for every entry, so it catches a changed mode, a changed
+# blob, an added path and a removed path alike. It is deliberately a
+# BEFORE/AFTER comparison rather than a bare `git diff --cached --quiet`,
+# which asks a different question — "is the index clean?" — and would go red
+# for a developer who legitimately had staged work before invoking the suite,
+# even though the suite touched nothing. The ticket's literal
+# `git diff --cached --quiet` is asserted too, but only when the index was
+# in fact clean on entry, where the two questions coincide.
+#
+# Mutation: drop the `_isolated_index_begin` call from either exec-bits case
+# and run the suite with any unstaged edit in the tree → red here.
+test_harness_leaves_caller_index_untouched() {
+  if [ ! -f "$_INDEX_SNAPSHOT_AT_START" ]; then
+    printf "    no index snapshot captured at suite start\n" >&2
+    return 1
+  fi
+
+  local now rc
+  now="$(mktemp "${TMPDIR:-/tmp}/ship-check-index-after.XXXXXX")" || return 1
+  (cd "$REPO_ROOT_REAL" && git ls-files -s) > "$now" 2>/dev/null
+
+  if ! diff -u "$_INDEX_SNAPSHOT_AT_START" "$now" > "$now.diff" 2>&1; then
+    printf "    the suite modified the caller's git index:\n" >&2
+    head -20 "$now.diff" | sed 's/^/    | /' >&2
+    rm -f "$now" "$now.diff"
+    return 1
+  fi
+  rm -f "$now" "$now.diff"
+
+  # The ticket's literal assertion. Only meaningful when the caller handed
+  # us a clean index — otherwise their own staged work would fail it.
+  if [ "$_INDEX_CLEAN_AT_START" = "true" ]; then
+    (cd "$REPO_ROOT_REAL" && git diff --cached --quiet 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf "    index was clean at suite start but 'git diff --cached --quiet' now exits %d\n" "$rc" >&2
+      (cd "$REPO_ROOT_REAL" && git diff --cached --stat) | sed 's/^/    | /' >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
 printf "  Real repo: %s\n" "$REPO_ROOT_REAL"
 printf "  ──────────────────────────────────\n"
+
+# Snapshot the caller's index BEFORE any case runs, so the final test can
+# prove the suite gave it back unchanged (WARP-2479). Captured here rather
+# than inside the test so it records the true pre-suite state. Removed at
+# the foot of the driver rather than via an EXIT trap, because several test
+# bodies set their own `trap … RETURN EXIT` and would clobber it.
+_INDEX_SNAPSHOT_AT_START="$(mktemp "${TMPDIR:-/tmp}/ship-check-index-before.XXXXXX")"
+(cd "$REPO_ROOT_REAL" && git ls-files -s) > "$_INDEX_SNAPSHOT_AT_START" 2>/dev/null
+if (cd "$REPO_ROOT_REAL" && git diff --cached --quiet 2>/dev/null); then
+  _INDEX_CLEAN_AT_START=true
+else
+  _INDEX_CLEAN_AT_START=false
+fi
 
 _run_test "tsc-full catches WARP-329 fixture regression" \
   test_tsc_full_catches_fixture_regression
@@ -1279,6 +1429,13 @@ _run_test "bash version floor reports COULD NOT RUN with its own exit code (WARP
 
 _run_test "ship-check.sh is runnable on stock macOS bash 3.2 (WARP-2449)" \
   test_ship_check_is_runnable_on_bash_3_2
+
+# MUST stay last: it asserts every case above gave the caller's index back
+# untouched (WARP-2479).
+_run_test "suite leaves the caller's git index untouched (WARP-2479)" \
+  test_harness_leaves_caller_index_untouched
+
+rm -f "$_INDEX_SNAPSHOT_AT_START"
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
