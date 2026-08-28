@@ -56,9 +56,29 @@
  *                — and it can never be reported as ahead of, or behind,
  *                anything.
  *
- * `reconcile.ts`'s `markerTimestamp` (WARP-2463, PR #1829) coerces markers for
- * the same reason on the persistence side. When that lands, it should delegate
- * to {@link isoInstant} rather than carry a second copy of the pattern.
+ * WARP-2463's `markerTimestamp` carried a second copy of the pattern for the
+ * same reason on the persistence side. WARP-2495 unified them: {@link
+ * isoInstant} is the only ISO gate in this directory, and the drift record
+ * coerces through it too. A second copy is not a style problem — the two would
+ * have been free to disagree about what counts as a timestamp, and the
+ * disagreement would have been silent.
+ *
+ * ## Three questions, one comparator (WARP-2495)
+ *
+ * Everything that asks about a row's position relative to a watermark asks it
+ * here, on the value {@link watermarkValueOf} selects:
+ *
+ *   advance            {@link highestWatermark} over the read's rows.
+ *   watermark-behind   {@link isWatermarkAhead}, full's high mark vs the
+ *                      incremental's.
+ *   missed-newer       {@link isWatermarkAhead}, one unseen row vs the stored
+ *                      watermark (`reconcile.ts`'s `diffForDrift`).
+ *
+ * They were not always one path, and the split is what let them disagree:
+ * WARP-2474 moved the first two onto `updated_at` and left `missed-newer`
+ * comparing the ORDERING key against the new watermark. Since `updated_at >=
+ * issued_at` in general, a row modified after the watermark but issued before
+ * it compared as already-delivered and was dropped from the report.
  */
 
 /**
@@ -152,15 +172,22 @@ export function highestWatermark(records: readonly WatermarkCandidate[]): string
 /**
  * Is `candidate` strictly ahead of `reference`?
  *
- * The one comparison `watermark-behind` is measured with, so it takes the same
- * values {@link highestWatermark} produces and applies the same ISO-vs-opaque
- * split.
+ * The one comparison BOTH drift classes are measured with — `watermark-behind`
+ * between two high-water marks, and `missed-newer` between one unseen row and
+ * the stored watermark (WARP-2495) — so it takes the same values {@link
+ * highestWatermark} produces and applies the same ISO-vs-opaque split.
  *
- * `false` when either side is opaque. Not "unknown, so assume drift": a lag
- * reported from a lexicographic accident would fire on every sweep of every
+ * `false` when either side is opaque. Not "unknown, so assume drift": a
+ * finding built on a lexicographic accident would fire on every sweep of every
  * Stripe connection, and a drift report that cries wolf teaches an operator to
  * ignore the one that matters. `reconcile.ts` says as much about fabricated
- * keys, for the same reason.
+ * keys, for the same reason. Both callers need that answer to be the same one,
+ * which is the argument for them sharing this function rather than each
+ * deciding what an unorderable pair means.
+ *
+ * Strict is load-bearing for `missed-newer`: a record sitting EXACTLY at the
+ * watermark was already delivered by the run that set it, so `>=` would report
+ * it as drift on every sweep forever.
  */
 export function isWatermarkAhead(candidate: string | null, reference: string | null): boolean {
   if (candidate === null) return false;

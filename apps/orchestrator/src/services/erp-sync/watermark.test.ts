@@ -265,6 +265,157 @@ describe("diffForDrift — watermark-behind", () => {
 });
 
 // ---------------------------------------------------------------------------
+// missed-newer — WARP-2495
+// ---------------------------------------------------------------------------
+
+describe("diffForDrift — missed-newer", () => {
+  it("reports a record whose `updated_at` is after the watermark though its ordering key is not", () => {
+    // *** THE CASE THIS TICKET NAMES ***
+    // `issued_at (2026-08-10) < watermark (2026-08-20) < updated_at
+    // (2026-08-26)`. Once WARP-2474 made the watermark an `updated_at`, the
+    // predicate was still comparing the row's ORDERING key against it, and
+    // `updated_at >= issued_at` in general — so every row whose modification
+    // is newer than the watermark but whose issue date is older was filtered
+    // out of the report. The sweep under-reported drift in exactly the
+    // direction a sweep exists to catch.
+    //
+    // MUTATION: restore the string compare
+    // `if (watermark !== null && (r.marker === null || r.marker <= watermark)) continue;`
+    // → "2026-08-10T00:00:00Z" <= "2026-08-20T00:00:00Z", the row is skipped,
+    // missedCount is 0 → red.
+    const drift = diffForDrift(
+      "invoice",
+      "2026-08-20T00:00:00Z",
+      project([]),
+      project([
+        {
+          invoice_id: "INV-1",
+          issued_at: "2026-08-10T00:00:00Z",
+          updated_at: "2026-08-26T00:00:00Z",
+        },
+      ]),
+    );
+    expect(drift.missedCount).toBe(1);
+    expect(drift.classes).toContain("missed-newer");
+  });
+
+  it("compares the record against the watermark as instants, not as strings", () => {
+    // The same offset pair every other comparison here rides. The record's
+    // value is an hour LATER than the watermark and a character-position
+    // EARLIER, so a string compare skips it and reports no drift at all.
+    //
+    // MUTATION: `r.marker <= watermark` on the raw strings → the row is
+    // skipped → missedCount 0 → red.
+    const drift = diffForDrift(
+      "invoice",
+      LATER_STRING_EARLIER_INSTANT,
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: EARLIER_STRING_LATER_INSTANT }]),
+    );
+    expect(drift.missedCount).toBe(1);
+  });
+
+  it("never orders two opaque tokens — no finding either way", () => {
+    // The Stripe shape: the ordering token IS an object id. `ch_9zzz` vs
+    // `ch_1aaa` has a lexicographic ANSWER and it means nothing, so the
+    // predicate must not consult it — the same call `watermark-behind`
+    // already refuses to make. A report an operator learns to ignore is worse
+    // than none, and here it would fire on every sweep of every Stripe
+    // connection.
+    //
+    // MUTATION: `r.marker <= watermark` → "ch_9zzz" > "ch_1aaa" is true, the
+    // row is counted → missedCount 1 → red.
+    const drift = diffForDrift(
+      "invoice",
+      "ch_1aaa",
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "ch_9zzz" }]),
+    );
+    expect(drift.missedCount).toBe(0);
+    expect(drift.classes).not.toContain("missed-newer");
+
+    // ...and the mirror image, so "opaque is never ordered" is asserted rather
+    // than a coincidence of which token happens to sort higher. A string
+    // compare answers these two OPPOSITELY; the predicate answers both the
+    // same way.
+    const mirrored = diffForDrift(
+      "invoice",
+      "ch_9zzz",
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "ch_1aaa" }]),
+    );
+    expect(mirrored.missedCount).toBe(0);
+  });
+
+  it("does not order an opaque record against an ISO watermark, or the reverse", () => {
+    // A mixed pair is still unorderable, and the two halves must agree.
+    // "INV-2" sorts ABOVE "2026-…" as a string, so a string compare reports
+    // the first of these as drift and the second as clean.
+    const opaqueRecord = diffForDrift(
+      "invoice",
+      "2026-08-20T00:00:00Z",
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "INV-2" }]),
+    );
+    const opaqueWatermark = diffForDrift(
+      "invoice",
+      "INV-2",
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "2026-08-26T00:00:00Z" }]),
+    );
+    expect(opaqueRecord.missedCount).toBe(0);
+    expect(opaqueWatermark.missedCount).toBe(0);
+  });
+
+  it("still filters out a record the vendor correctly withheld", () => {
+    // The negative case, so the four above are not vacuously true: a row at or
+    // before the watermark was already delivered by the run that set it.
+    // MUTATION: make the comparison non-strict (`>=` on the instants) → the
+    // row sitting EXACTLY at the watermark is reported → drift on every sweep,
+    // forever → red.
+    const before = diffForDrift(
+      "invoice",
+      "2026-08-20T00:00:00Z",
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "2026-08-10T00:00:00Z" }]),
+    );
+    const exactly = diffForDrift(
+      "invoice",
+      "2026-08-20T00:00:00Z",
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "2026-08-20T00:00:00Z" }]),
+    );
+    expect(before.missedCount).toBe(0);
+    expect(exactly.missedCount).toBe(0);
+    expect(before.classes).toEqual([]);
+  });
+
+  it("reports everything the incremental read omitted when there is no watermark yet", () => {
+    // A null watermark filtered nothing, so absence from the incremental read
+    // is drift on its own evidence and needs no comparison at all.
+    const drift = diffForDrift(
+      "invoice",
+      null,
+      project([]),
+      project([{ invoice_id: "INV-1", issued_at: "2026-08-10T00:00:00Z" }]),
+    );
+    expect(drift.missedCount).toBe(1);
+  });
+
+  it("does not report a record the incremental read DID return", () => {
+    // Presence in A is checked before the watermark is consulted at all.
+    const rows = project([
+      {
+        invoice_id: "INV-1",
+        issued_at: "2026-08-10T00:00:00Z",
+        updated_at: "2026-08-26T00:00:00Z",
+      },
+    ]);
+    expect(diffForDrift("invoice", "2026-08-20T00:00:00Z", rows, rows).missedCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // identify — the projection the preference reads
 // ---------------------------------------------------------------------------
 
