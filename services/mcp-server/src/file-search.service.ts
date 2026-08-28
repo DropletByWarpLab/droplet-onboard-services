@@ -517,7 +517,22 @@ export async function rerankPassages(
 
 export const SEARCH_HYBRID_DEFAULT_PER_ARM_K = 100;
 export const SEARCH_HYBRID_DEFAULT_LIMIT = 10;
-export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.3;
+/**
+ * WARP-2196 — 0.3 -> 0.65, recalibrated for bge-small-en-v1.5.
+ *
+ * This file is the deliberate mirror of
+ * `apps/orchestrator/src/services/file-search.service.ts` (see the WARP-1637
+ * note on `ScoreKind` there), and this constant is the LLM tool path's copy
+ * of the same cosine floor. It has to move in lockstep: leaving it at 0.3
+ * would fix the dashboard's search while the agent's `search_content` kept
+ * shipping a floor that, under bge, rejects nothing at all — the lowest score
+ * across every measured pair is +0.344.
+ *
+ * Derivation and the full score distributions:
+ * `apps/orchestrator/src/services/similarity-floors.test.ts` and
+ * docs/RAG_RE_EMBED_RUNBOOK.md §8.
+ */
+export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.65;
 
 export interface SearchHybridRerankOption {
   redis: RedisLike;
