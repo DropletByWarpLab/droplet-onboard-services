@@ -12,6 +12,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { recordActivity } from "./activity.singleton.js";
+import {
+  confirmationActivityParams,
+  confirmedEvent,
+  interceptorEventFromContent,
+} from "./confirmation-audit.js";
 
 import type { PrivateEnhancement } from "@droplet/tools-core";
 
@@ -143,6 +148,33 @@ export class McpClientService {
       }).catch(() => {
         // Recorder already swallows internally; defence-in-depth.
       });
+
+      // WARP-2352 — a SECOND, distinct row when the WARP-2305 interceptor
+      // acted: a challenge issued, a token refused, a runtime deny, or a
+      // confirmation consumed. The row above records that a dispatch
+      // happened; this one records what the confirmation gate decided,
+      // so an operator can answer "what was approved and what was
+      // refused" without inferring it from tool names.
+      //
+      // Same single writer (`activity.service.ts` record()), no second
+      // write path. Never carries tool arguments — see
+      // `confirmation-audit.ts`.
+      const content = (res as { content?: { type: string; text?: string }[] } | undefined)
+        ?.content;
+      const confirmationEvent =
+        (content ? interceptorEventFromContent(content) : null) ??
+        confirmedEvent({
+          tool: name,
+          presentedToken: typeof context?.confirmationToken === "string",
+          isError,
+        });
+      if (confirmationEvent) {
+        void recordActivity(
+          confirmationActivityParams(confirmationEvent, { userId: context?.userId }),
+        ).catch(() => {
+          // Recorder already swallows internally; defence-in-depth.
+        });
+      }
     }
     return {
       content: (res!.content ?? []) as { type: string; text?: string }[],
@@ -187,6 +219,24 @@ export interface McpCallContext {
    * ignores it (restrictive guest default applies there).
    */
   userRole?: string;
+  /**
+   * WARP-2305 — a confirmation token minted by the dispatch-path
+   * interceptor, forwarded as `_meta.confirmationToken`.
+   *
+   * `_meta` rather than a tool argument for the same reason `ncToken`
+   * lives here: it is protocol metadata, not payload. That also keeps it
+   * clear of every tool's `additionalProperties: false` input schema and
+   * keeps the interceptor's argument-binding hash over untouched
+   * arguments.
+   *
+   * DELIBERATELY NOT SET BY THE AGENT LOOP. The token is returned to the
+   * caller in the challenge and comes back from the human approval
+   * surface (the WARP-640 dashboard confirm chip). If the agent loop
+   * re-attached a token it had just been handed, the model would be
+   * approving its own writes — which is precisely the hole WARP-2305
+   * closes. See `docs/tool-confirmation-contract.md`.
+   */
+  confirmationToken?: string;
   /**
    * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
    * paraphrase vectors, filename filter, search overrides). Set by the
