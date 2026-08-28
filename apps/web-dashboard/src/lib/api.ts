@@ -8139,7 +8139,24 @@ export interface SaasCredentialView {
   displayName: string;
   category: string;
   state: SaasConnectionState;
+  /**
+   * Whether EVERY declared secret is stored — an `every()`, so a provider
+   * declaring two with one stored reports `false`. It answers "is this
+   * connection usable", NOT "was the credential removed" (WARP-2489).
+   */
   hasCredentials: boolean;
+  /**
+   * WARP-2489 — whether the credential material was actually removed from the
+   * row, straight from the box, derived there by the same `credentialsPurgedFor`
+   * that builds `IntegrationConnection.credentialsPurged` for the hub.
+   *
+   * OPTIONAL for the same reason it is optional on `IntegrationConnection`
+   * (`erp-types.ts`): this interface mirrors a JSON payload rather than being
+   * one, and a response that does not carry the key must not be read as either
+   * answer. `undefined` means "the box said nothing", which is a third fact and
+   * renders as neither sentence.
+   */
+  credentialsPurged?: boolean;
   configured: boolean;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
