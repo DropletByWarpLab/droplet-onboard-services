@@ -53,7 +53,7 @@ import {
   resetSearchGovernors,
 } from "../src/hubspot/connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
-import { DATASETS } from "../src/export-drop/profiles.js";
+import { CANONICAL_COLUMNS, COLUMN_KIND, DATASETS } from "../src/export-drop/profiles.js";
 
 /** 2026-08-27T12:00:00Z, the wall clock every test starts on. */
 const NOW = Date.UTC(2026, 7, 27, 12, 0, 0);
@@ -1378,11 +1378,106 @@ async function expectCapability(call: () => Promise<unknown>, tier: string): Pro
   expect(Array.isArray(caught)).toBe(false);
 }
 
+describe("updated_at — the canonical modification time (WARP-2494)", () => {
+  const MODIFIED_MS = Date.UTC(2026, 7, 20, 9, 30, 0);
+
+  it("emits updated_at as a UTC ISO instant parsed from hs_lastmodifieddate", async () => {
+    // `hs_lastmodifieddate` is a PROPERTY on the object (it is the Search
+    // filter and sort key at connector.ts:1430/1438, and the fixture carries it
+    // inside `properties`), and it arrives as epoch milliseconds. The canonical
+    // column is a full UTC ISO instant, matching every other track.
+    // Mutation: drop the `updated_at` mapping from toRecord → red (undefined).
+    // Mutation: parse `createdate` instead → red (2026-07-21, not 2026-08-20).
+    const { c } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    const out = await c.pollObjectChanges({ objectType: "contacts", watermark: 0 });
+    expect(out.records).toHaveLength(1);
+    expect(out.records[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+    // The creation time is present on the record and is a DIFFERENT instant, so
+    // the assertion above cannot pass by coincidence.
+    expect(out.records[0].properties.createdate).not.toBe(
+      String(MODIFIED_MS),
+    );
+  });
+
+  it("every produced updated_at parses as an ISO instant (COLUMN_KIND.timestamp)", async () => {
+    // Mutation: emit the raw epoch-ms string instead of the ISO form → red.
+    const { c } = connector({
+      routes: searchRoute([record("c-1", MODIFIED_MS), record("c-2", MODIFIED_MS + 1000)]),
+    });
+    const out = await c.pollObjectChanges({ objectType: "contacts", watermark: 0 });
+    expect(out.records).toHaveLength(2);
+    for (const r of out.records) {
+      expect(typeof r.updated_at).toBe("string");
+      // Round-trips: a real UTC ISO instant, not merely something parseable.
+      expect(new Date(r.updated_at).toISOString()).toBe(r.updated_at);
+    }
+  });
+
+  it("requests hs_lastmodifieddate even when the caller names its own properties", async () => {
+    // A caller asking for `["email"]` is not asking to LOSE the modification
+    // stamp — but a plain `??` fallback gives exactly that, and `toRecord` then
+    // drops every returned row for want of a parseable stamp. The failure
+    // surfaces as an empty poll or a watermark stall, never as "you forgot a
+    // property", which is why this is asserted on the outgoing REQUEST.
+    // Mutation: restore `input.properties ?? [LAST_MODIFIED_PROPERTY]` → red.
+    const { c, f } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    await c.pollObjectChanges({
+      objectType: "contacts",
+      watermark: 0,
+      properties: ["email"],
+    });
+    const body = f.bodyOf(0);
+    expect(body.properties).toContain("hs_lastmodifieddate");
+    expect(body.properties).toContain("email");
+  });
+
+  it("does not ask for hs_lastmodifieddate twice when the caller already named it", async () => {
+    // Mutation: append unconditionally instead of checking membership → red.
+    const { c, f } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    await c.pollObjectChanges({
+      objectType: "contacts",
+      watermark: 0,
+      properties: ["hs_lastmodifieddate", "email"],
+    });
+    const asked = f.bodyOf(0).properties as string[];
+    expect(asked.filter((x) => x === "hs_lastmodifieddate")).toHaveLength(1);
+  });
+
+  it("a caller-supplied property list still yields rows, not a watermark stall", async () => {
+    // The end-to-end consequence of the bug above, stated as behaviour: before
+    // the fix this threw HubSpotWatermarkStallError with zero records.
+    // Mutation: restore the `??` fallback → red.
+    const { c } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    const out = await c.pollObjectChanges({
+      objectType: "contacts",
+      watermark: 0,
+      properties: ["email"],
+    });
+    expect(out.records).toHaveLength(1);
+    expect(out.records[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+  });
+
+  it("puts hs_lastmodifieddate in a backfill export's property list too", async () => {
+    // An Exports CSV without the modification column cannot produce updated_at
+    // for a single backfilled row.
+    // Mutation: send `[...input.properties]` verbatim → red.
+    const { c, f } = connector({ routes: exportRoutes() });
+    await c.runBackfill({ objectType: "contacts", properties: ["email"] });
+    const body = f.bodyOf(0);
+    expect(body.objectProperties).toContain("hs_lastmodifieddate");
+    expect(body.objectProperties).toContain("email");
+  });
+});
+
 function record(id: string, modifiedAtMs: number) {
   return {
     id,
     properties: {
       hs_lastmodifieddate: String(modifiedAtMs),
+      // Thirty days BEFORE the modification stamp, on purpose: a projection
+      // that reaches for the creation time instead of the modification time
+      // must not be able to pass by coincidence (WARP-2494).
+      createdate: String(modifiedAtMs - 30 * 24 * 60 * 60 * 1000),
       email: `${id}@example.test`,
     },
   };
@@ -1508,3 +1603,385 @@ async function drivePolls(c: HubSpotConnector, n: number): Promise<void> {
     await c.pollObjectChanges({ objectType: "contacts", watermark: i });
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Canonical row mappers (WARP-2497)
+//
+// `runRead` threw by design until this story, so every dataset this track
+// declares produced raw vendor JSON and no canonical rows at all — WARP-2218's
+// scheduled sync ran, reported success, and landed nothing.
+//
+// The properties below are what "a row mapper" has to mean, and each is
+// asserted for EVERY served dataset rather than for a representative one,
+// because the failure mode is per-dataset: a mapper that forgets `currency` on
+// `deal` is invisible to a `contact` test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** ISO-8601 as `canonicalInstant` emits it: always UTC, always milliseconds. */
+const UTC_INSTANT = /^-?\d{4,}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/** 2026-08-20T09:30:00Z — the modification stamp every fixture below shares. */
+const MODIFIED_MS = Date.UTC(2026, 7, 20, 9, 30, 0);
+/** Thirty days earlier, so a mapper reaching for `createdate` where it wants
+ *  `hs_lastmodifieddate` cannot pass by coincidence. */
+const CREATED_MS = MODIFIED_MS - 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * One vendor record per served dataset, in HubSpot's own property spellings.
+ *
+ * Every fixture carries `hs_object_source` and `hs_all_owner_ids` — properties
+ * this product never asked for. They are the leak detector: a mapper written as
+ * `{ ...record.properties, ... }` passes a key-set test that only checks the
+ * canonical names are PRESENT, and fails the one below that checks nothing else
+ * is.
+ */
+const HUBSPOT_FIXTURES: ReadonlyArray<{
+  dataset: string;
+  readQuery: string;
+  properties: Record<string, string>;
+}> = [
+  {
+    dataset: "contact",
+    readQuery: "find_contact",
+    properties: {
+      createdate: String(CREATED_MS),
+      firstname: "Ada",
+      lastname: "Lovelace",
+      email: "ada@example.test",
+      associatedcompanyid: "co-77",
+      lifecyclestage: "customer",
+      hs_object_source: "IMPORT",
+      hs_all_owner_ids: "9911",
+    },
+  },
+  {
+    dataset: "company",
+    readQuery: "get_company",
+    properties: {
+      createdate: String(CREATED_MS),
+      name: "Analytical Engines Ltd",
+      domain: "engines.example.test",
+      hs_object_source: "IMPORT",
+      hs_all_owner_ids: "9911",
+    },
+  },
+  {
+    dataset: "deal",
+    readQuery: "get_deals_by_stage",
+    properties: {
+      createdate: String(CREATED_MS),
+      closedate: String(MODIFIED_MS + 86_400_000),
+      dealname: "Difference Engine renewal",
+      dealstage: "presentationscheduled",
+      // A grouped decimal, which is what a portal with a formatting locale
+      // returns: `Number("1,500.00")` is NaN, so a mapper that skips the
+      // comma-tolerant read drops the amount silently.
+      amount: "1,500.00",
+      deal_currency_code: "USD",
+      hs_object_source: "IMPORT",
+      hs_all_owner_ids: "9911",
+    },
+  },
+  {
+    dataset: "ticket",
+    readQuery: "get_tickets_by_status",
+    properties: {
+      createdate: String(CREATED_MS),
+      closed_date: String(MODIFIED_MS + 3_600_000),
+      subject: "Punch card reader jams",
+      hs_pipeline_stage: "open",
+      hs_ticket_priority: "HIGH",
+      hs_object_source: "IMPORT",
+      hs_all_owner_ids: "9911",
+    },
+  },
+  {
+    dataset: "engagement",
+    readQuery: "get_engagements",
+    properties: {
+      hs_timestamp: String(MODIFIED_MS - 7_200_000),
+      hs_object_source: "IMPORT",
+      hs_all_owner_ids: "9911",
+    },
+  },
+];
+
+/** A Search stub answering every object type from one fixture record. */
+function fixtureSearchRoute(properties: Record<string, string>): Route[] {
+  return [
+    {
+      match: /\/search$/,
+      responses: [
+        {
+          body: {
+            total: 1,
+            results: [
+              {
+                id: "rec-1",
+                properties: { ...properties, hs_lastmodifieddate: String(MODIFIED_MS) },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ];
+}
+
+describe("canonical row mappers", () => {
+  for (const fx of HUBSPOT_FIXTURES) {
+    it(`${fx.dataset}: emits EXACTLY the canonical columns, no more and no fewer`, async () => {
+      // Mutation A (drop): delete `case "currency":` from `hubspotLookup`, or
+      //   remove a name from CANONICAL_COLUMNS.deal → the key set shrinks → red.
+      // Mutation B (leak): make the mapper spread the property bag
+      //   (`{ ...record.properties, ...row }`) → `hs_object_source` and
+      //   `hs_all_owner_ids` appear → red.
+      // The two mutations are opposite directions and BOTH are caught, which a
+      // `toContain`-style assertion would not do.
+      const { c } = connector({ routes: fixtureSearchRoute(fx.properties) });
+      const rows = (await c.runRead(fx.readQuery, {})) as Record<string, unknown>[];
+
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(Object.keys(row).sort()).toEqual(
+          [...CANONICAL_COLUMNS[fx.dataset as never]].sort(),
+        );
+      }
+    });
+
+    it(`${fx.dataset}: every value matches its COLUMN_KIND`, async () => {
+      // Mutation: drop the `money`/`count` branch from projectCanonicalRow → the
+      // deal row's amount is the string "1,500.00" → red. A money column read as
+      // text serialises an amount as a grouped string and breaks every aggregate
+      // over it, which is exactly the defect COLUMN_KIND exists for.
+      const { c } = connector({ routes: fixtureSearchRoute(fx.properties) });
+      const rows = (await c.runRead(fx.readQuery, {})) as Record<string, unknown>[];
+
+      for (const row of rows) {
+        for (const [column, value] of Object.entries(row)) {
+          if (value === undefined) continue;
+          switch (COLUMN_KIND[column]) {
+            case "timestamp":
+              expect(String(value), `${fx.dataset}.${column}`).toMatch(UTC_INSTANT);
+              break;
+            case "money":
+            case "count":
+              expect(typeof value, `${fx.dataset}.${column}`).toBe("number");
+              break;
+            default:
+              expect(typeof value, `${fx.dataset}.${column}`).toBe("string");
+              break;
+          }
+        }
+      }
+    });
+  }
+
+  it("fills every column HubSpot has a property for, so the shape is not vacuously right", async () => {
+    // A key-set test passes just as well on a mapper that returns every column
+    // undefined. This is the other half: the values below come from four
+    // DIFFERENT places — the object id, a property, a RENAMED property, and the
+    // already-parsed modification stamp — so a mapper that lost any one of
+    // those routes is caught.
+    // Mutation: map `name` from `p.name` on deals (instead of `p.dealname`) →
+    //           undefined → red.
+    const fx = HUBSPOT_FIXTURES.find((f) => f.dataset === "deal")!;
+    const { c } = connector({ routes: fixtureSearchRoute(fx.properties) });
+    const [row] = (await c.runRead("get_deals_by_stage", {})) as Record<string, unknown>[];
+
+    expect(row).toMatchObject({
+      deal_id: "rec-1",
+      created_at: new Date(CREATED_MS).toISOString(),
+      name: "Difference Engine renewal",
+      stage: "presentationscheduled",
+      amount: 1500,
+      currency: "USD",
+      updated_at: new Date(MODIFIED_MS).toISOString(),
+    });
+  });
+
+  it("takes updated_at from hs_lastmodifieddate, never from createdate", async () => {
+    // The WARP-2494 contract, restated at the ROW level: a watermark trusts
+    // this column, so a record created and never touched must not advance it.
+    // Mutation: `case "updated_at": return p.createdate;` → red.
+    const fx = HUBSPOT_FIXTURES.find((f) => f.dataset === "contact")!;
+    const { c } = connector({ routes: fixtureSearchRoute(fx.properties) });
+    const [row] = (await c.runRead("find_contact", {})) as Record<string, unknown>[];
+
+    expect(row.updated_at).toBe(new Date(MODIFIED_MS).toISOString());
+    expect(row.updated_at).not.toBe(row.created_at);
+  });
+
+  it("unions all five engagement object types and labels each with its type", async () => {
+    // `engagement` is the one dataset that is not one HubSpot object: a
+    // timeline activity is a call, an email, a meeting, a note or a task.
+    // Mutation: drop "tasks" from HUBSPOT_DATASET_OBJECT_TYPES.engagement →
+    //           four rows come back → red. Mutation: return a constant for
+    //           `type` → the set collapses to one value → red.
+    const { c, f } = connector({
+      routes: [
+        {
+          match: /\/search$/,
+          handler: (url) => {
+            const kind = /objects\/([a-z]+)\/search/.exec(url)?.[1] ?? "?";
+            return {
+              body: {
+                total: 1,
+                results: [
+                  {
+                    id: `${kind}-1`,
+                    properties: {
+                      hs_lastmodifieddate: String(MODIFIED_MS),
+                      hs_timestamp: String(MODIFIED_MS - 7_200_000),
+                    },
+                  },
+                ],
+              },
+            };
+          },
+        },
+      ],
+    });
+
+    const rows = (await c.runRead("get_engagements", {})) as Record<string, unknown>[];
+
+    expect(rows).toHaveLength(5);
+    expect(new Set(rows.map((r) => r.type))).toEqual(
+      new Set(["call", "email", "meeting", "note", "task"]),
+    );
+    // Five object types means five searches, each against its own endpoint.
+    expect(new Set(f.searchCalls().map((call) => new URL(call.url).pathname)).size).toBe(5);
+  });
+
+  it("passes `since` to HubSpot as the hs_lastmodifieddate floor", async () => {
+    // The poller's watermark has to reach the VENDOR, not be applied to rows
+    // after a full enumeration — otherwise every tick re-reads the whole portal
+    // and the incremental path is incremental in name only.
+    // Mutation: ignore `params.since` (the shipped `_params` signature) → the
+    //           filter floor is 0 → red.
+    const fx = HUBSPOT_FIXTURES.find((f) => f.dataset === "contact")!;
+    const { c, f } = connector({ routes: fixtureSearchRoute(fx.properties) });
+
+    await c.runRead("find_contact", { since: "2026-08-19T00:00:00Z" });
+
+    const body = f.bodyOf(0);
+    expect(body.filterGroups[0].filters[0].propertyName).toBe("hs_lastmodifieddate");
+    expect(Number(body.filterGroups[0].filters[0].value)).toBe(Date.UTC(2026, 7, 19));
+  });
+
+  it("requests the properties each dataset's row is actually built from", async () => {
+    // HubSpot returns ONLY the properties a request names, so an unrequested
+    // property is an unfillable column — and one that fails silently, because
+    // the row still has the key.
+    // Mutation: drop "deal_currency_code" from HUBSPOT_DATASET_PROPERTIES.deal
+    //           → red here, and the deal row's `currency` goes undefined.
+    const fx = HUBSPOT_FIXTURES.find((f) => f.dataset === "deal")!;
+    const { c, f } = connector({ routes: fixtureSearchRoute(fx.properties) });
+
+    await c.runRead("get_deals_by_stage", {});
+
+    const asked = f.bodyOf(0).properties as string[];
+    for (const p of [
+      "createdate",
+      "closedate",
+      "dealname",
+      "dealstage",
+      "amount",
+      "deal_currency_code",
+    ]) {
+      expect(asked, `deal must request ${p}`).toContain(p);
+    }
+    // Still guaranteed by withLastModifiedProperty, not by this table.
+    expect(asked).toContain("hs_lastmodifieddate");
+  });
+
+  it("filters on a supplied param and enumerates without one", async () => {
+    // The registry's queries carry mandatory filters written for the SQL track;
+    // the sync runner passes `{}` and wants the dataset enumerated. Both have to
+    // work off one read name.
+    // Mutation: make the stage filter unconditional → the `{}` call returns
+    //           nothing → red.
+    const routes: Route[] = [
+      {
+        match: /\/search$/,
+        responses: [
+          {
+            body: {
+              total: 2,
+              results: [
+                {
+                  id: "d-1",
+                  properties: {
+                    hs_lastmodifieddate: String(MODIFIED_MS),
+                    dealstage: "closedwon",
+                    amount: "10",
+                  },
+                },
+                {
+                  id: "d-2",
+                  properties: {
+                    hs_lastmodifieddate: String(MODIFIED_MS),
+                    dealstage: "qualified",
+                    amount: "20",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+
+    const all = (await connector({ routes }).c.runRead("get_deals_by_stage", {})) as Record<
+      string,
+      unknown
+    >[];
+    expect(all.map((r) => r.deal_id).sort()).toEqual(["d-1", "d-2"]);
+
+    const filtered = (await connector({ routes }).c.runRead("get_deals_by_stage", {
+      stage: "closedwon",
+    })) as Record<string, unknown>[];
+    expect(filtered.map((r) => r.deal_id)).toEqual(["d-1"]);
+  });
+
+  it("reproduces each read's documented ORDER BY", async () => {
+    // `get_deals_by_stage` is `ORDER BY amount DESC, deal_id`. Sorting ascending
+    // and reversing would also reverse the id tiebreak.
+    // Mutation: drop the descending pass → red.
+    const routes: Route[] = [
+      {
+        match: /\/search$/,
+        responses: [
+          {
+            body: {
+              total: 3,
+              results: ["a", "b", "c"].map((id, i) => ({
+                id,
+                properties: {
+                  hs_lastmodifieddate: String(MODIFIED_MS),
+                  dealstage: "qualified",
+                  amount: String([100, 300, 200][i]),
+                },
+              })),
+            },
+          },
+        ],
+      },
+    ];
+    const rows = (await connector({ routes }).c.runRead("get_deals_by_stage", {})) as Record<
+      string,
+      unknown
+    >[];
+    expect(rows.map((r) => r.deal_id)).toEqual(["b", "c", "a"]);
+  });
+
+  it("still refuses a read whose dataset this track does not serve", async () => {
+    // The capability statement WARP-2466 established must survive the mappers:
+    // `[]` from get_open_invoices reads as "you are owed nothing".
+    // Mutation: drop the assertDatasetsServed call → the switch's default throws
+    //           a blocked error instead of DatasetNotServedError → red.
+    const { c, f } = connector();
+    await expect(c.runRead("get_open_invoices", {})).rejects.toBeInstanceOf(DatasetNotServedError);
+    expect(f.calls).toHaveLength(0);
+  });
+});

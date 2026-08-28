@@ -339,7 +339,7 @@ export async function readExportBytes(path: string, maxBytes: number): Promise<B
  * with a `degraded-dedup` diagnostic. See the key construction in
  * `scanDropDirectory`.
  */
-const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
+export const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   appointment: ["appt_id"],
   patient: ["patient_id"],
   account: ["account_id"],
