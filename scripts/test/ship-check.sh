@@ -227,10 +227,11 @@ EXAMPLES
 
 CHECKS
 
-  tsc-full              Run `npx tsc --noEmit` in every workspace that ships
-                        a Dockerfile (orchestrator, web-dashboard, tools-core,
-                        mcp-server, fips-selftest). Prisma generate runs first
-                        so orchestrator's `@prisma/client` import resolves.
+  tsc-full              Run `npx tsc --noEmit` in every TypeScript workspace
+                        (orchestrator, web-dashboard, tools-core, fips-selftest,
+                        shared-types, mcp-server, erp-connector). Prisma
+                        generate runs first so orchestrator's `@prisma/client`
+                        import resolves.
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
@@ -441,11 +442,14 @@ run_check_tsc_full() {
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
   local ws
+  local checked=0
   local failed_workspaces=()
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
+           packages/shared-types services/mcp-server services/erp-connector; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.json" ]; then
       continue
     fi
+    checked=$((checked + 1))
     if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit 2>&1)"; then
       failed_workspaces+=("$ws")
       printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s\n" "$label" "$ws"
@@ -471,7 +475,8 @@ run_check_tsc_full() {
   # Opt-in by file existence rather than a second hardcoded list, so a
   # workspace joins this pass by adding the config — no edit here required.
   local tested=0
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
+           packages/shared-types services/mcp-server services/erp-connector; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
       continue
     fi
@@ -495,7 +500,7 @@ run_check_tsc_full() {
     return 1
   fi
 
-  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces, %d with tests)\n" "$label" "$tested"
+  printf "  ${_GREEN}PASS${_RESET}  %s (%d workspaces, %d with tests)\n" "$label" "$checked" "$tested"
   _record_result "$label" pass
   return 0
 }

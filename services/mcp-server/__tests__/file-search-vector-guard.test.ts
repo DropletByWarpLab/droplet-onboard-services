@@ -5,6 +5,7 @@
  * vector BEFORE it can be joined into `'[...]'::vector`.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { searchByVector, searchHybrid } from "../src/file-search.service.js";
 
@@ -14,7 +15,7 @@ import { searchByVector, searchHybrid } from "../src/file-search.service.js";
 // callback a tx client whose $queryRawUnsafe is the SAME spy: `raw` still
 // sees every SQL statement either way. Returns an empty result set so the
 // happy path resolves.
-function prismaStub(): { client: PrismaClient; raw: ReturnType<typeof vi.fn> } {
+function prismaStub(): { client: PrismaClient; raw: Mock } {
   const raw = vi.fn(async () => [] as unknown[]);
   const client = {
     $queryRawUnsafe: raw,
