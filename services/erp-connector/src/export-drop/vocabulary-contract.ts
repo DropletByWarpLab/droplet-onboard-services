@@ -31,6 +31,7 @@ import type { ReadQuery } from "../read-queries.js";
 import {
   CANONICAL_COLUMNS,
   DATASET_CATEGORY,
+  DATASETS,
   REQUIRED_CANONICAL,
   type DatasetCategory,
   type DatasetName,
@@ -84,15 +85,36 @@ const _columnsAreTotal: (d: DatasetName) => readonly string[] = (d) => CANONICAL
 /** Mutation: make REQUIRED_CANONICAL partial, or drop an entry → tsc red. */
 const _requiredIsTotal: (d: DatasetName) => readonly string[] = (d) => REQUIRED_CANONICAL[d];
 
-// ── the union is load-bearing at the two boundaries that use it ─────────────
+// ── the union at the two capability boundaries ──────────────────────────────
+
+/**
+ * Every name in the vocabulary is a legal capability declaration — the
+ * direction that survived #1816's temporary loosening, and the precondition
+ * the refusal below tightens onto.
+ *
+ * Mutation: retype `servesDatasets` to anything `DatasetName` is not
+ * assignable to (`readonly DatasetCategory[]`, `readonly number[]`) → this
+ * assignment fails → tsc red.
+ */
+const _servesVocabulary: Connector["servesDatasets"] = DATASETS;
 
 /** WARP-2306: a track declares capability with dataset names, not strings. */
 const _servesKnown: Connector["servesDatasets"] = ["invoice", "charge"];
 
 // @ts-expect-error -- a connector may not declare a dataset outside the union.
+//
+// #1816 could not assert this: the shipped HubSpot and Mailchimp tracks
+// declared vendor spellings (`crm_contact`, Mailchimp's own `contact`) that
+// the vocabulary did not hold, so the field had to stay `readonly string[]`
+// and this fixture came out. WARP-2466's reconciliation settled every one of
+// those names by column shape, so the field is back on the union and the
+// refusal is assertable again — which is what the ticket's acceptance
+// criterion "tsc rejects a name outside the union" means.
+//
 // Mutation: revert `servesDatasets` to `readonly string[]` → this directive
 // becomes unused → tsc red. That mutation is exactly the defect WARP-2306
-// removed, so it is the one this file most needs to catch.
+// removed and #1816 had to reintroduce, so it is the one this file most needs
+// to catch.
 const _servesUnknown: Connector["servesDatasets"] = ["not_a_dataset"];
 
 /** WARP-2308: a read query declares its datasets with the same union. */
@@ -119,6 +141,7 @@ export const DATASET_VOCABULARY_CONTRACT: readonly unknown[] = [
   _categoryIsTotal,
   _columnsAreTotal,
   _requiredIsTotal,
+  _servesVocabulary,
   _servesKnown,
   _servesUnknown,
   _dependsKnown,

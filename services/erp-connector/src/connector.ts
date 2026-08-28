@@ -132,6 +132,9 @@ export class DatasetNotServedError extends Error {
  */
 export function assertDatasetsServed(
   provider: string,
+  // `readonly DatasetName[]` again as of WARP-2466. #1816 deferred this to
+  // "WARP-2466's step 4, which reconciles the vendor names and then re-narrows
+  // this field" — that reconciliation has now landed, so the guard is on.
   serves: readonly DatasetName[],
   queryName: string,
   dependsOn: readonly DatasetName[],
@@ -170,6 +173,20 @@ export interface Connector {
    * would not object, so the mismatch surfaced at read time as a `rowsFor`
    * miss — which is the same "three different errors for one question" this
    * field was created to end.
+   *
+   * WARP-2280 (#1816) had to relax it again for one release, because the
+   * shipped vendor tracks and the vocabulary disagreed on spelling — HubSpot
+   * declared `crm_contact`, Mailchimp declared its own `contact` — and picking
+   * a winner was a vocabulary decision with three tracks' blast radius rather
+   * than a typing one. That PR deferred it explicitly to "WARP-2466's step 4,
+   * which reconciles the vendor names and then re-narrows this field".
+   *
+   * WARP-2466 did the reconciliation by comparing canonical column lists (the
+   * decision table is in `export-drop/profiles.ts`'s docstring), so the
+   * disagreement is gone and the narrowing is back on. It is now true that a
+   * track cannot declare a dataset the vocabulary does not hold — enforced by
+   * `tsc`, with the `@ts-expect-error` fixture in `vocabulary-contract.ts` as
+   * the proof it still bites.
    */
   readonly servesDatasets: readonly DatasetName[];
   /** Open the pooled read connection (brief §7.3). */
