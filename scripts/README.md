@@ -187,6 +187,34 @@ Checks: container status, PostgreSQL, Nextcloud DB, Redis, MQTT, orchestrator AP
 
 ---
 
+## Rebuilding the RAG corpus (`rag-re-embed.sh`)
+
+```bash
+./scripts/rag-re-embed.sh --dry-run   # report only, deletes nothing
+./scripts/rag-re-embed.sh             # interactive: type REBUILD to confirm
+./scripts/rag-re-embed.sh -y          # unattended
+```
+
+Deletes `FileContentChunk` + `FileIndexStatus` in one transaction so the
+file-indexer rebuilds every vector with the currently-configured
+`EMBEDDING_MODEL`. Needed whenever the embedding model changes — vectors from
+two different models are not comparable even at equal width, and pgvector will
+compare them anyway without erroring.
+
+Deliberately **not** a Prisma migration: the rebuild is CPU-bound and can run
+for hours, so an operator picks the window rather than `migrate deploy` picking
+it at the next reboot. Skipping it is safe, not silent — the file-indexer's
+startup guard (`services/file-indexer/corpus_state.py`) refuses to write new
+chunks into a corpus a different model built, keeps serving reads, and logs the
+recovery command.
+
+The script does **not** restart the file-indexer and does **not** replay brain
+uploads; both are printed as next steps. Safe to re-run.
+
+Full procedure, verification and rollback: `docs/RAG_RE_EMBED_RUNBOOK.md`.
+
+---
+
 ## Local validation (ship-check)
 
 ```bash
