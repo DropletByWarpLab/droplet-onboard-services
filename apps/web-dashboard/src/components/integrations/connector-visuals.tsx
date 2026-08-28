@@ -20,6 +20,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { BadgeKind } from "@/components/shell/primitives";
+import { disconnectedCredentialView } from "@/lib/credential-purge";
 import type { IntegrationStatus } from "@/lib/erp-types";
 
 /**
@@ -46,6 +47,18 @@ export interface StatusView {
   label: string;
   kind: BadgeKind;
   icon: LucideIcon;
+  /**
+   * WARP-2483 — a full state line for the cases where the pill alone cannot
+   * carry the fact.
+   *
+   * It sits under the tile's description rather than inside the badge for a
+   * concrete reason: `.badge` is `flex-shrink: 0`
+   * (`droplet-shell.css:179-180`), so a sixty-character label would push the
+   * connector's name out of its own card. The `·`-joined sentence in a line of
+   * its own is the shape the hub already uses for exactly this — see the
+   * Connected strip's "Connected · synced … · read-only".
+   */
+  detail?: string;
 }
 
 /**
@@ -68,8 +81,34 @@ export interface StatusView {
  * The `default` is for a status a newer box invents. It reads as "look at
  * this", never as healthy: an unclassifiable state rendered as fine is exactly
  * how a broken connection stays invisible.
+ *
+ * `DISABLED` splits in two on `credentialsPurged` (WARP-2483). Both halves
+ * reuse tokens that already exist — `muted` for the finished state, `warn` for
+ * the one that still owes the owner an action — because "the key you asked us
+ * to delete is still here" is a mild, actionable fact, not an error, and
+ * `danger` would put a red pill on a connection that is behaving correctly.
+ * No token is added to `design-and-style` for this.
  */
-export function statusView(status: IntegrationStatus): StatusView {
+export function statusView(
+  status: IntegrationStatus,
+  /** The box's own answer, or `undefined` when it did not give one. */
+  credentialsPurged?: boolean,
+): StatusView {
+  const disconnected = disconnectedCredentialView(
+    status === "DISABLED",
+    credentialsPurged,
+  );
+  if (disconnected) {
+    return disconnected.purged
+      ? { label: "Disconnected", kind: "muted", icon: Plug, detail: disconnected.line }
+      : {
+          label: "Disconnected",
+          kind: "warn",
+          icon: AlertTriangle,
+          detail: disconnected.line,
+        };
+  }
+
   switch (status) {
     case "CONNECTED":
       return { label: "Connected", kind: "ok", icon: CheckCircle2 };
@@ -88,6 +127,9 @@ export function statusView(status: IntegrationStatus): StatusView {
     case "PROVISIONING":
       return { label: "Setting up", kind: "warn", icon: Clock };
     case "DISABLED":
+      // The box answered DISABLED but said nothing about the credential. The
+      // resting wording stands: claiming either "removed" or "still stored"
+      // here would be the dashboard inventing an answer it was not given.
       return { label: "Turned off", kind: "muted", icon: Plug };
     case "NOT_CONFIGURED":
       return { label: "Not connected", kind: "muted", icon: Plug };
