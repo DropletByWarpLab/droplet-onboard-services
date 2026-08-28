@@ -39,6 +39,12 @@ vi.mock("../config.js", () => ({
 import { createIntegrationsRouter } from "./integrations.js";
 import { createSaasCredentialsRouter } from "./saas-credentials.js";
 import { createErpRouter } from "./erp.js";
+// WARP-2500 — the third router under this prefix, which the header above asks
+// the lander of PR #1829 to add. It is here now because WARP-2500 introduces
+// the first `/integrations/:provider/<verb>` patterns, and `:provider` is
+// exactly the shape that could swallow `/integrations/:connectionId/drift`.
+// Enumerating it is what turns "they don't overlap" from a claim into a check.
+import { createErpDriftRouter } from "./erp-drift.js";
 
 /** None of these factories touch Prisma while registering routes; the stub is
  *  only here so the constructors get the shape they expect. */
@@ -48,6 +54,7 @@ const ROUTERS: ReadonlyArray<{ name: string; router: Router }> = [
   { name: "createIntegrationsRouter", router: createIntegrationsRouter(prisma) },
   { name: "createSaasCredentialsRouter", router: createSaasCredentialsRouter(prisma) },
   { name: "createErpRouter", router: createErpRouter(prisma) },
+  { name: "createErpDriftRouter", router: createErpDriftRouter(prisma) },
 ];
 
 interface Registered {
@@ -132,8 +139,28 @@ describe("routers sharing the /api/integrations prefix", () => {
       ROUTES.filter((r) => r.owner === name).map((r) => `${r.method} ${r.path}`);
 
     expect(byOwner("createIntegrationsRouter")).toEqual(
-      expect.arrayContaining(["get /integrations", "get /integrations/eaglesoft"]),
+      expect.arrayContaining([
+        "get /integrations",
+        "get /integrations/eaglesoft",
+        // WARP-2500 — the provider-scoped lifecycle verbs. Pinned by NAME as
+        // well as swept by the pairwise checks below: the sweep can only find
+        // a collision among routes that exist, so a refactor that dropped
+        // these would make the disjointness checks pass by having nothing
+        // left to collide.
+        "post /integrations/:provider/disconnect",
+        "post /integrations/:provider/write-enable",
+        "post /integrations/:provider/write-disable",
+        // The deprecated Eaglesoft literal aliases, kept for one release.
+        // Listed so their eventual REMOVAL is a deliberate edit to this
+        // expectation rather than a silent deletion nothing notices.
+        "post /integrations/eaglesoft/disconnect",
+        "post /integrations/eaglesoft/write-enable",
+        "post /integrations/eaglesoft/write-disable",
+      ]),
     );
+    expect(byOwner("createErpDriftRouter")).toEqual([
+      "get /integrations/:connectionId/drift",
+    ]);
     expect(byOwner("createSaasCredentialsRouter")).toEqual(
       expect.arrayContaining([
         "get /integrations/credentials",
@@ -161,5 +188,61 @@ describe("routers sharing the /api/integrations prefix", () => {
         `${a.owner}'s "${a.path}" and ${b.owner}'s "${b.path}"`,
     );
     expect(collisions).toEqual([]);
+  });
+
+  /**
+   * WARP-2500 — the specific shadow this ticket had to rule out, named.
+   *
+   * The sweep above is method-scoped: it only pairs routes that share a verb,
+   * because that is all mount order can arbitrate. That is correct for
+   * "which handler serves this request", and NOT enough for this ticket's
+   * acceptance criterion, which is that `:provider` must not shadow
+   * `credentials` or `drift` — a property that has to survive somebody later
+   * adding `POST /integrations/:provider/credentials`.
+   *
+   * So this checks the stronger, method-BLIND property for the three new
+   * patterns: no concrete URL matches one of them and one of the neighbours'
+   * routes, whatever the verb. It holds because the parameter sits in the
+   * MIDDLE and the last segment is a literal, and no URL ends in two
+   * different literals at once.
+   *
+   * The set under test is DISCOVERED — every parameterised route this router
+   * registers — rather than a hardcoded list of the three. A hardcoded list
+   * would make any rename fail the list check before the collision check ever
+   * ran, so the collision check itself would never be shown to work.
+   *
+   * Mutation: change `/integrations/:provider/disconnect`'s last segment to
+   * `credentials`. All three parameterised routes are still registered, so the
+   * non-vacuity guard below still passes, and the method-scoped sweep above
+   * stays green because the credential routes are GET/PATCH and this one is
+   * POST. This test goes red, naming `/integrations/<provider>/credentials` as
+   * the URL that now matches two routers — which is the real-world failure:
+   * a POST to it would reach the ERP router, and a later attempt to add
+   * `POST /integrations/:provider/credentials` would be dead on arrival.
+   */
+  it("keeps :provider from shadowing credentials or drift, in ANY method", () => {
+    const mine = ROUTES.filter(
+      (r) =>
+        r.owner === "createIntegrationsRouter" &&
+        r.segments.some((s) => s.startsWith(":")),
+    );
+    // Not vacuous: the parameterised routes must actually exist. Three paths,
+    // whatever they are called — the point is that the sweep below has real
+    // patterns to work on, not that they still have the names above.
+    expect(new Set(mine.map((r) => r.path)).size).toBe(3);
+
+    const neighbours = ROUTES.filter((r) => r.owner !== "createIntegrationsRouter");
+    expect(neighbours.length).toBeGreaterThan(0);
+
+    const shadowed = mine.flatMap((a) =>
+      neighbours
+        .filter((b) => canCollide(a.segments, b.segments))
+        .map(
+          (b) =>
+            `${collidingUrl(a.segments, b.segments)} matches "${a.path}" and ` +
+            `${b.owner}'s "${b.path}"`,
+        ),
+    );
+    expect(shadowed).toEqual([]);
   });
 });
