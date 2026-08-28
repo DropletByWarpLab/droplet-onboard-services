@@ -288,16 +288,39 @@ describe("among candidates that fit, the one that DELIVERS MORE wins", () => {
   });
 });
 
-describe("control envelopes ride a static rail, not the reducer", () => {
+describe("control envelopes bound JSON-safely, never a raw slice (WARP-2525)", () => {
   it("passes a normal envelope through untouched", () => {
     const env = JSON.stringify({ status: "error", error: { code: "REPEATED_CALL" } });
     expect(boundControlEnvelopeForModel(env)).toBe(env);
   });
 
-  it("slices at the static cap and nowhere else", () => {
-    expect(boundControlEnvelopeForModel("y".repeat(CONTROL_ENVELOPE_CAP_CHARS + 500)).length).toBe(
-      CONTROL_ENVELOPE_CAP_CHARS,
-    );
+  it("bounds an oversize JSON envelope to VALID JSON under the envelope cap", () => {
+    // The previous rail was `text.slice(0, 4000)` — the exact defect this
+    // module exists to fix for tool results: cutting JSON at a character
+    // count yields invalid JSON and deletes every field after the cut.
+    const env = JSON.stringify({
+      status: "error",
+      error: {
+        code: "FORBIDDEN_TOOL",
+        detail: "x".repeat(CONTROL_ENVELOPE_CAP_CHARS * 2),
+      },
+    });
+    const out = boundControlEnvelopeForModel(env);
+    expect(out.length).toBeLessThanOrEqual(CONTROL_ENVELOPE_CAP_CHARS);
+    const parsed = JSON.parse(out) as Record<string, unknown>; // must not throw
+    // The envelope's own identity survives — only the oversize detail shrank.
+    expect(parsed.status).toBe("error");
+    const m = parsed[TRUNCATION_MARKER_KEY] as Record<string, unknown>;
+    expect(m).toBeDefined();
+    // The marker is honest about WHICH cap did the cutting.
+    expect(m.cap_chars).toBe(CONTROL_ENVELOPE_CAP_CHARS);
+    expect(m.tool).toBe("control_envelope");
+  });
+
+  it("wraps an oversize non-JSON envelope instead of cutting it mid-string", () => {
+    const out = boundControlEnvelopeForModel("y".repeat(CONTROL_ENVELOPE_CAP_CHARS + 500));
+    expect(out.length).toBeLessThanOrEqual(CONTROL_ENVELOPE_CAP_CHARS);
+    expect(() => JSON.parse(out)).not.toThrow();
   });
 });
 
@@ -371,6 +394,35 @@ describe("a cursor is recomputed only from numbers the PRODUCER published", () =
       }),
     );
     expect(out.next_offset).toBe((out.content as string).length);
+  });
+
+  it("keeps a VERIFIED recompute when a sibling cursor fails and is deleted (WARP-2525)", () => {
+    // One level, two cursor-shaped keys: `next_offset` recomputes against the
+    // producer's own published base (0 + delivered), `cursor` is an opaque
+    // string nothing can verify. The sweep used to delete EVERY cursor-shaped
+    // key at the level the moment ONE failed — throwing away the one resume
+    // point this pass had just checked against the producer's own numbers.
+    // Only the keys that actually failed may go (plus the accounting group a
+    // survivor could use to reconstruct a FAILED cursor).
+    const out = bounded(
+      JSON.stringify({
+        content: "C".repeat(9000),
+        offset: 0,
+        next_offset: 9000,
+        cursor: "opaque-resume-token-under-40ch",
+      }),
+    );
+    // The verified recompute survives, still arithmetically honest.
+    expect(typeof out.next_offset).toBe("number");
+    expect(out.next_offset).toBe((out.content as string).length);
+    // The key that actually failed is deleted…
+    expect(out).not.toHaveProperty("cursor");
+    // …and the accounting group still goes with it: `offset` would let the
+    // model reconstruct the DELETED cursor, and that reconstruction is wrong.
+    expect(out).not.toHaveProperty("offset");
+    const m = out[TRUNCATION_MARKER_KEY] as Record<string, unknown>;
+    expect(m.recomputed_keys).toContain("next_offset");
+    expect(m.removed_keys).toContain("cursor");
   });
 
   it("will not let a BYTE total corroborate a CHARACTER cursor", () => {
