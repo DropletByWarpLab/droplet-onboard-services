@@ -22,7 +22,12 @@
  *    stores a cleartext password (brief §7.4, invariant 10).
  *  • Every writeEnabled flip writes an append-only `ErpAuditLog` row (§14).
  */
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
+// A VALUE import, unlike the type-only one above: `Prisma.DbNull` is the
+// only way to null a nullable `Json` column — plain `null` is a type error
+// (`NullableJsonNullValueInput`). Same shape as `activity.service.ts:23-24`
+// and `routes/cameras.ts:973`.
+import { Prisma } from "@prisma/client";
 import { ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "./activity.singleton.js";
@@ -113,6 +118,20 @@ export interface IntegrationSummary {
    * token or an absent row.
    */
   needsReconnect: boolean;
+  /**
+   * WARP-2453 — whether this connection's credentials have actually been
+   * removed, so the hub can render "disconnected, credentials removed"
+   * distinctly from "disabled by policy, key still on the row".
+   *
+   * Derived from two EXPLICIT persisted facts — the `status` enum column and
+   * whether either credential column holds a blob — never from a null standing
+   * in for a state. The distinction is load-bearing: a row DISABLED by a build
+   * that predates the purge still holds its credential, and claiming otherwise
+   * would be the dashboard asserting something false about the box.
+   *
+   * `false`, never omitted, for an unconfigured provider: nothing was purged.
+   */
+  credentialsPurged: boolean;
 }
 
 /** The five `ErpSyncState` members, mirrored for the API surface. */
@@ -282,6 +301,38 @@ export interface IntegrationsService {
   disconnect(ctx: { actor: string }): Promise<IntegrationDetail>;
 }
 
+/**
+ * WARP-2453 — has this connection's credential material actually been removed?
+ *
+ * True only for a row that is explicitly DISABLED **and** holds neither
+ * credential blob. Both halves are required: DISABLED alone is what
+ * `origin/stage` gave a caller who clicked Disconnect while the key stayed
+ * decryptable in Postgres, and an empty credential column alone is just an
+ * unconfigured connection.
+ *
+ * WARP-2489 — module scope and EXPORTED, because it is now the one derivation
+ * every surface reads. `buildCredentialView` in `saas-credential.service.ts`
+ * calls this exact function rather than answering the question a second time
+ * from `hasCredentials`, which asks something else: `hasCredentials` is an
+ * `every()` over the descriptor's DECLARED secrets, so a provider with two of
+ * them and one stored reports `false` while that one is still sealed on the
+ * row. Two derivations of "was the key removed" are two chances to tell an
+ * owner opposite things on two pages of the same product, and the half that
+ * drifted was the reassuring one.
+ *
+ * Both credential columns are REQUIRED parameters rather than optional ones. A
+ * caller that narrowed its `select` and dropped `apiCredentialsEnc` would
+ * otherwise read `undefined` as "no blob" and claim a purge because the column
+ * was never loaded. That has to be a compile error, not a rendered sentence.
+ */
+export function credentialsPurgedFor(row: {
+  status: string;
+  apiCredentialsEnc: string | null;
+  providerTokensEnc: string | null;
+}): boolean {
+  return row.status === "DISABLED" && !row.apiCredentialsEnc && !row.providerTokensEnc;
+}
+
 export function createIntegrationsService(
   prisma: IntegrationsPrisma,
   deps: IntegrationsServiceDeps = {},
@@ -341,6 +392,9 @@ export function createIntegrationsService(
         // credential, the other had one that stopped working.
         syncState: null,
         needsReconnect: false,
+        // Nothing was ever stored, so nothing was purged. Explicit `false`,
+        // never an omitted key — absence must not read as "unknown".
+        credentialsPurged: false,
       };
     }
     const lastSynced = row.lastHealthyAt ? row.lastHealthyAt.toISOString() : null;
@@ -361,6 +415,7 @@ export function createIntegrationsService(
       lastHealthyAt: lastSynced,
       syncState: sync.syncState,
       needsReconnect: sync.needsReconnect,
+      credentialsPurged: credentialsPurgedFor(row),
     };
   }
 
@@ -416,6 +471,7 @@ export function createIntegrationsService(
           // a different fact from any of the five states.
           syncState: sync.syncState,
           needsReconnect: sync.needsReconnect,
+          credentialsPurged: row ? credentialsPurgedFor(row) : false,
         };
       });
     },
@@ -602,12 +658,57 @@ export function createIntegrationsService(
       return toDetail(updated);
     },
 
+    /**
+     * Disconnect the connection and PURGE what it was holding.
+     *
+     * ADR-041 §2 is explicit that this is not a flag flip: *"Disconnecting must
+     * be equally real: it revokes and purges the stored tokens, not merely
+     * flips a flag."* Until WARP-2453 this function wrote
+     * `{ status: "DISABLED", writeEnabled: false }` and nothing else, so an
+     * owner who clicked Disconnect got a row that READ as disconnected while
+     * `apiCredentialsEnc` and `providerTokensEnc` stayed decryptable in
+     * Postgres — and ADR-042 §6 notes these credentials mostly never expire, so
+     * "indefinitely" is the literal duration. `m365-auth.service.ts`
+     * `disconnect()` is the same operation done correctly and is the shape
+     * copied here.
+     *
+     * Everything describing THIS connection's identity or secrets goes: both
+     * credential columns, the provider config, the discovered route map, the
+     * pinned CA, the introspected schema fingerprint, and the last-healthy
+     * timestamp (a freshness claim about data we can no longer fetch).
+     *
+     * The ROW stays, with its explicit `DISABLED` status and its `provider`.
+     * Deleting it would make "disconnected" something a later reader infers
+     * from absence, which is exactly what the enum column exists to prevent.
+     *
+     * ONE `update`, not two. A crash between a status flip and a separate purge
+     * would leave a row reading DISABLED while still holding a live credential
+     * — precisely the lie being fixed, made durable.
+     *
+     * What this does NOT do: revoke at the vendor. We cannot rotate what we did
+     * not mint (ADR-042 §6); the customer revokes in their own console and the
+     * setup guides say so. And it does not touch `secretRef` — ADR-041 §4
+     * forbids becoming the unimplemented secret store's first writer
+     * (WARP-2028), and the column is a non-null pending pointer regardless.
+     */
     async disconnect(ctx) {
       const row = await findRow();
       if (!row) return toDetail(null); // idempotent — nothing to disconnect
       const updated = await prisma.integrationConnection.update({
         where: { id: row.id },
-        data: { status: "DISABLED", writeEnabled: false },
+        data: {
+          status: "DISABLED",
+          writeEnabled: false,
+          // --- the purge, in the SAME write as the status flip -------------
+          apiCredentialsEnc: null,
+          providerTokensEnc: null,
+          providerConfig: Prisma.DbNull,
+          apiRouteMap: Prisma.DbNull,
+          apiCaCert: null,
+          schemaHash: null,
+          schemaVersion: null,
+          lastHealthyAt: null,
+        },
       });
       await prisma.erpAuditLog.create({
         data: {
@@ -615,7 +716,14 @@ export function createIntegrationsService(
           actor: ctx.actor,
           action: "disconnect",
           entity: "integration",
-          scope: { provider: EAGLESOFT_PROVIDER },
+          // `purged` is a literal, not a computed flag: the very `update` above
+          // is what nulls the columns, so re-deriving it here would only be
+          // this function checking its own arithmetic. The marker exists so an
+          // auditor can tell a disconnect that purged from one written by a
+          // build that did not. It is a BOOLEAN and nothing else — the values
+          // never appear, because an append-only, exportable audit row is the
+          // worst possible second home for a credential (rule 19).
+          scope: { provider: EAGLESOFT_PROVIDER, purged: true },
         },
       });
       return toDetail(updated);

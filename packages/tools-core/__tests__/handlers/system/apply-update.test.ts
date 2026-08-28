@@ -10,13 +10,14 @@
  * (the apply may already be restarting services underneath us).
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import applyUpdate from "../../../src/handlers/system/apply-update.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  mocks: { get?: ReturnType<typeof vi.fn>; post?: ReturnType<typeof vi.fn> },
+  mocks: { get?: Mock; post?: Mock },
   role?: Role,
-): { ctx: ToolContext; get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> } {
+): { ctx: ToolContext; get: Mock; post: Mock } {
   const get = mocks.get ?? vi.fn();
   const post = mocks.post ?? vi.fn();
   const ctx: ToolContext = {
@@ -49,7 +50,7 @@ const PENDING_ROW = {
 };
 
 /** GET /api/updates/status payload with a verified pending row. */
-function statusGet(pending: unknown = PENDING_ROW): ReturnType<typeof vi.fn> {
+function statusGet(pending: unknown = PENDING_ROW): Mock {
   return vi.fn().mockResolvedValue(
     new Response(
       JSON.stringify({
@@ -65,7 +66,7 @@ function statusGet(pending: unknown = PENDING_ROW): ReturnType<typeof vi.fn> {
   );
 }
 
-function postResponse(status: number, body: unknown): ReturnType<typeof vi.fn> {
+function postResponse(status: number, body: unknown): Mock {
   return vi
     .fn()
     .mockResolvedValue(new Response(JSON.stringify(body), { status }));

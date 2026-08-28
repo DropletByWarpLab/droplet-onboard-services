@@ -41,6 +41,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import type { JSX } from "react";
+
 export const ICONS: Record<string, LucideIcon> = {
   plus: Plus,
   refresh: RefreshCw,

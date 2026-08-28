@@ -78,11 +78,11 @@ function cursorRow(over: Record<string, unknown> = {}) {
 
 interface Harness {
   prisma: any;
-  recorder: { record: ReturnType<typeof vi.fn<any, any>> };
-  connector: Connector & { runRead: ReturnType<typeof vi.fn<any, any>> };
+  recorder: { record: ReturnType<typeof vi.fn<(...args: any[]) => any>> };
+  connector: Connector & { runRead: ReturnType<typeof vi.fn<(...args: any[]) => any>> };
   budget: {
-    assertHeadroom: ReturnType<typeof vi.fn<any, any>>;
-    record: ReturnType<typeof vi.fn<any, any>>;
+    assertHeadroom: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+    record: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
   };
 }
 

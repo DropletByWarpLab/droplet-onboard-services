@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import readFile from "../../../src/handlers/files/read-file.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  get: ReturnType<typeof vi.fn>,
+  get: Mock,
   opts: { ncToken?: string; userId?: string } = {},
 ): ToolContext {
   return {
@@ -13,6 +14,7 @@ function ctxWith(
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      orchestrator: {} as ToolContext["http"]["orchestrator"],
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
@@ -232,7 +234,7 @@ type PageData = {
 };
 
 async function readPage(
-  get: ReturnType<typeof vi.fn>,
+  get: Mock,
   path: string,
   offset?: number,
 ): Promise<PageData> {
@@ -245,7 +247,7 @@ async function readPage(
 }
 
 /** Page from 0 to exhaustion, exactly as the model is told to. */
-async function readToEnd(get: ReturnType<typeof vi.fn>, path: string) {
+async function readToEnd(get: Mock, path: string) {
   const pages: PageData[] = [];
   let offset: number | null = 0;
   // Bounded so a next_offset that never advances fails as a test rather

@@ -118,6 +118,7 @@ vi.mock("../services/brain-memory.service.js", () => ({
 }));
 
 import { createPublicAuthRouter } from "./auth.js";
+import { authRateLimit } from "../middleware/rate-limit.js";
 import * as nc from "../services/nextcloud.client.js";
 import { config } from "../config.js";
 import { readUserEmail } from "../services/user-directory.service.js";
@@ -200,7 +201,19 @@ function buildApp(prismaMock: any) {
   return app;
 }
 
+// CodeQL js/missing-rate-limiting sweep — the routes under test now carry the
+// shared express-rate-limit presets (module singletons, MemoryStore keyed on
+// req.ip). Every request in this file comes from supertest's loopback, which the
+// limiter keys as "127.0.0.1" (`::ffff:127.0.0.1` from
+// __tests__/supertest-loopback.setup.ts is IPv4-mapped, so ipKeyGenerator
+// collapses it to the v4 form), so the file as a whole would exhaust the 20/min
+// auth budget. Reset that one bucket before each test; no single test sends
+// more than the budget, and the Redis lockouts under test are untouched.
+const RATE_LIMIT_TEST_KEY = "127.0.0.1";
+
 beforeEach(() => {
+  authRateLimit.resetKey(RATE_LIMIT_TEST_KEY);
+
   vi.clearAllMocks();
   (nc.ncInstallAndCreateAdmin as any).mockClear();
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");

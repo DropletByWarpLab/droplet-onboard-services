@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import acceptDiscoveredCamera from "../../../src/handlers/cameras/accept-discovered-camera.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithPost(post: Mock): ToolContext {
   return {
     // WARP-1847: the handler goes through the orchestrator now, not Prisma. A
     // live candidate's id is `mac:<MAC>` — there is no camera row to update, and

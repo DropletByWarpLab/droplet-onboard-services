@@ -32,7 +32,7 @@ export function FanControls({ device, onCommand }: FanControlsProps) {
   const activeMode = modeEnum != null ? MODE_BY_ENUM[modeEnum] : undefined;
 
   const [localPct, setLocalPct] = useState(speed ?? 0);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const handleSlider = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {

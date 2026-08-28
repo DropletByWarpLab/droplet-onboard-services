@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import { useAuth } from "@/lib/auth";
+import { disconnectedCredentialView } from "@/lib/credential-purge";
 import {
   fetchSaasCredentials,
   saveSaasCredential,
@@ -61,8 +62,59 @@ const STATE_COPY: Record<SaasConnectionState, { label: string; tone: "ok" | "war
     NEEDS_RECONNECT: { label: "Credential rejected — replace it", tone: "warn" },
     DEGRADED: { label: "Connected, with recent errors", tone: "warn" },
     DRIFT_LOCKED: { label: "Locked — the vendor's data shape changed", tone: "warn" },
+    // Split in two by `stateCopyFor` below — see WARP-2483. This entry is the
+    // wording for a box that gave no answer either way.
     DISABLED: { label: "Turned off", tone: "idle" },
   };
+
+/**
+ * WARP-2483 — the state line, with `DISABLED` split on whether the credential
+ * actually went.
+ *
+ * ADR-041 §2's promise is that disconnecting removes the key, and this is the
+ * one page in the product where a person hands one over. A flat "Turned off"
+ * is true of both a connection whose credential was destroyed and one whose
+ * credential is still decryptable in Postgres — opposite facts, and the second
+ * is the one that still owes the admin an action.
+ *
+ * WARP-2489 — the presence half is `credentialsPurged`, the box's own answer.
+ * It was `!hasCredentials`, and that is a different question:
+ * `hasCredentials` is an `every()` over the DECLARED secret fields, so a
+ * provider declaring two with one stored reports `false` while that one is
+ * still sealed on the row. The page then told an admin the key had been
+ * destroyed — the dashboard asserting something false about the box, in the
+ * place the promise is made. Only the box can answer it, because only the box
+ * can see both credential columns; `credentialsPurgedFor` in
+ * `integrations.service.ts` is the single derivation, and the hub tile
+ * (`connector-visuals.tsx` `statusView`) reads the very same field, so the two
+ * surfaces cannot describe one row two ways.
+ *
+ * `undefined` is a THIRD answer and stays one: a box that sent no purge fact
+ * gets the neutral "Turned off" from `STATE_COPY`, never a guess.
+ * `!hasCredentials` could not express that — it is always a boolean, so the
+ * old code claimed one of the two sentences even when it had been told
+ * nothing.
+ *
+ * Nothing new about the secret reaches the browser to support any of this: the
+ * view type still has no field that could carry a value, a prefix or a length,
+ * and this function receives only booleans.
+ *
+ * `tone` reuses the existing three-way union — the finished state rests at
+ * `idle`, the unfinished one at `warn`. No colour is added.
+ */
+export function stateCopyFor(view: SaasCredentialView): {
+  label: string;
+  tone: "ok" | "warn" | "idle";
+} {
+  const disconnected = disconnectedCredentialView(
+    view.state === "DISABLED",
+    view.credentialsPurged,
+  );
+  if (!disconnected) return STATE_COPY[view.state];
+  return disconnected.purged
+    ? { label: disconnected.line, tone: "idle" }
+    : { label: disconnected.line, tone: "warn" };
+}
 
 const inputClass =
   "w-full px-3 py-2 type-footnote focus:outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-shadow";
@@ -106,7 +158,7 @@ function ProviderForm({
 
   const busy = status.kind === "saving" && status.provider === view.provider;
   const justSaved = status.kind === "saved" && status.provider === view.provider;
-  const stateCopy = STATE_COPY[view.state];
+  const stateCopy = stateCopyFor(view);
 
   async function submit() {
     const fields: Record<string, string> = {};
