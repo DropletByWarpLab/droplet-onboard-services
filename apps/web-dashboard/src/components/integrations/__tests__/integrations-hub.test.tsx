@@ -50,11 +50,17 @@ vi.mock("@/components/shell/ShellPage", () => ({
   ),
 }));
 
-// The wizard is a five-step form with its own suite. Here it only has to be
-// observably open or shut, so "did the click do something" is unambiguous.
+// The wizard is descriptor-driven and has its own suite (WARP-2451). Here it
+// only has to be observably open or shut AND to report WHICH provider it was
+// opened for, so "did the click do something" and "did it do the right thing"
+// are both unambiguous.
 vi.mock("@/components/integrations/ConnectWizard", () => ({
-  ConnectWizard: ({ open }: { open: boolean }) =>
-    open ? <div data-testid="connect-wizard">wizard</div> : null,
+  ConnectWizard: ({ catalogId }: { catalogId: string | null }) =>
+    catalogId ? (
+      <div data-testid="connect-wizard" data-provider={catalogId}>
+        wizard
+      </div>
+    ) : null,
 }));
 
 /**
@@ -95,7 +101,7 @@ const ACME: ProviderDescriptor = {
     availability: "available",
   },
   providerKeys: ["acme-pms", "acme-pms-export"],
-  connect: { kind: "wizard" },
+  connect: { kind: "wizard", catalogId: "acme-pms" },
   open: { kind: "route", href: "/integrations/acme-pms" },
 };
 
@@ -240,7 +246,10 @@ describe("hub dispatch", () => {
 
     expect(screen.queryByTestId("connect-wizard")).toBeNull();
     fireEvent.click(within(tile(container, "Acme PMS")).getByRole("button"));
-    expect(screen.getByTestId("connect-wizard")).toBeTruthy();
+    // WARP-2451: opening the wizard is not enough — it must open for THIS
+    // provider. A wizard that opens for whoever is hardcoded is the same class
+    // of defect one layer down.
+    expect(screen.getByTestId("connect-wizard").dataset.provider).toBe("acme-pms");
   });
 
   /**
@@ -259,14 +268,35 @@ describe("hub dispatch", () => {
     expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
   });
 
-  it("the Eaglesoft tile opens the connect wizard", async () => {
+  it("the Eaglesoft tile opens the connect wizard, for Eaglesoft", async () => {
     vi.mocked(fetchIntegrations).mockResolvedValue([conn("eaglesoft", "NOT_CONFIGURED")]);
     const { container } = renderHub();
     await screen.findByText("Eaglesoft");
 
     expect(screen.queryByTestId("connect-wizard")).toBeNull();
     fireEvent.click(within(tile(container, "Eaglesoft")).getByRole("button"));
-    expect(screen.getByTestId("connect-wizard")).toBeTruthy();
+    expect(screen.getByTestId("connect-wizard").dataset.provider).toBe("eaglesoft");
+  });
+
+  /**
+   * Two tiles, one wizard component: opening the second must not show the
+   * first's form.
+   *
+   * Mutation: keep a boolean `wizardOpen` and drop `action.catalogId` from the
+   * dispatch (the shipped shape) → red, because the wizard then has no way to
+   * report a provider at all.
+   */
+  it("opens each tile's own flow, not the first one's", async () => {
+    extraDescriptors.push(ACME);
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+
+    fireEvent.click(within(tile(container, "Eaglesoft")).getByRole("button"));
+    expect(screen.getByTestId("connect-wizard").dataset.provider).toBe("eaglesoft");
+
+    fireEvent.click(within(tile(container, "Acme PMS")).getByRole("button"));
+    expect(screen.getByTestId("connect-wizard").dataset.provider).toBe("acme-pms");
   });
 
   /**

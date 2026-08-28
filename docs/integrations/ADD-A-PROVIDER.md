@@ -98,13 +98,25 @@ The MCP server picks tools up automatically; the orchestrator's `WRITE_TOOLS` is
 
 ## 6. Add dashboard metadata
 
-The hub renders a provider from static metadata — `apps/web-dashboard/src/lib/connectors.ts`:
+The hub's catalog is **derived** from your provider's `ProviderDescriptor` (WARP-2217, `packages/shared-types/src/provider-registry.ts`) — `apps/web-dashboard/src/lib/connectors.ts` reads it and holds no provider list of its own. Declare the `catalog` block:
 
 ```ts
-{ id, name, category, description, availability: "available" | "coming-soon" }
+catalog: {
+  id, name, category, description,
+  availability: "available" | "coming-soon",
+  order,                 // sort position on the hub, pinned
+}
 ```
 
-Live connection **status** is merged in from `GET /api/integrations`; this file is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
+Live connection **status** is merged in from `GET /api/integrations`; the descriptor is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
+
+**The connect wizard is descriptor-driven (WARP-2451).** It renders whatever `credentialFields` you declare, in the shapes the v1 vendors actually span:
+
+- **one pasted secret** — one field, `secret: true`, an optional `pattern`;
+- **a pair** — two fields, only the secret one masked;
+- **a discriminated choice** — declare `credentialVariants`, each with its own `fields`; the wizard renders the chosen path's fields only, and sends the chosen `credentialVariant` id alongside them. Fields common to every path stay in `credentialFields`.
+
+A descriptor that declares `lanProvisioning` instead gets the LAN-database flow (find the server → provision the read-only account → choose read scopes → confirm). That block carries every string the flow shows: `accountName`, `databaseName`, `defaultPort`, `hostPlaceholder`, `reachableLabel`, the one-off DBA `script`, the read `scopes`, and the optional `writeOptIn`. **`ConnectWizard.tsx` names no vendor and a test asserts it** — if a provider needs special handling there, the descriptor is under-specified and that is the bug to fix.
 
 > **A cloud/SaaS provider also needs a customer setup guide** at `docs/integrations/<id>.md`, listed in `SETUP.md` §3.3, before it can ship. The credential is created by the customer in a vendor console we do not control, so an undocumented click-path is the connector being unusable rather than an inconvenience. `scripts/check-setup-guides.sh` enforces coverage, the six required sections, the per-vendor fact pins and link integrity, and runs on every PR. Start from an existing guide — [`stripe.md`](stripe.md) is the simplest, [`xero.md`](xero.md) the one with the most qualification gates — and link the shared [`credential-handling.md`](credential-handling.md) rather than paraphrasing it. **WARP-2342** will add a `setupGuideHref` field to the metadata shape above so the guide is reachable from the hub; until it lands, the guide is reachable only from `SETUP.md`.
 

@@ -29,7 +29,10 @@ import { writeModeOf } from "@/lib/erp-types";
 export default function IntegrationsPage() {
   const router = useRouter();
   const { entries, connected, error, refresh } = useIntegrations();
-  const [wizardOpen, setWizardOpen] = useState(false);
+  // WHICH tile opened the wizard, not merely THAT one did (WARP-2451). A
+  // boolean could only ever open one vendor's form, which is the whole defect
+  // one layer down from the dispatch WARP-2291 fixed.
+  const [wizardFor, setWizardFor] = useState<string | null>(null);
   const [blocked, setBlocked] = useState<{ name: string; reason: string } | null>(null);
 
   /**
@@ -45,7 +48,7 @@ export default function IntegrationsPage() {
         return;
       case "wizard":
         setBlocked(null);
-        setWizardOpen(true);
+        setWizardFor(action.catalogId);
         return;
       case "unavailable":
         setBlocked({ name: e.meta.name, reason: action.reason });
@@ -163,8 +166,8 @@ export default function IntegrationsPage() {
       </p>
 
       <ConnectWizard
-        open={wizardOpen}
-        onClose={() => setWizardOpen(false)}
+        catalogId={wizardFor}
+        onClose={() => setWizardFor(null)}
         onConnected={() => refresh()}
       />
     </ShellPage>

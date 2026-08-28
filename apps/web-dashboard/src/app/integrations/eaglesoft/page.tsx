@@ -135,7 +135,11 @@ export default function EaglesoftPage() {
       )}
 
       {/* Modals & panels */}
-      <ConnectWizard open={wizardOpen} onClose={() => setWizardOpen(false)} onConnected={refresh} />
+      <ConnectWizard
+        catalogId={wizardOpen ? "eaglesoft" : null}
+        onClose={() => setWizardOpen(false)}
+        onConnected={refresh}
+      />
       <ManageSheet
         open={manageOpen}
         onClose={() => setManageOpen(false)}

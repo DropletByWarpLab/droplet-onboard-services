@@ -209,6 +209,78 @@ export interface ProviderCatalogMeta {
   readonly order: number;
 }
 
+/**
+ * One mutually exclusive way of authenticating a provider.
+ *
+ * Some vendors offer genuinely different credential shapes for the same
+ * account — Xero's Custom Connection versus a customer-owned PKCE app are
+ * different flows with different fields, not one flow with optional extras.
+ * Rendering the union of both paths' fields would ask for values that cannot
+ * exist together; rendering only the first would hide the other entirely.
+ *
+ * Variant fields are declared HERE, not in `credentialFields`: a field that is
+ * required on one path and meaningless on the other cannot be described by a
+ * single `required` flag. Read the two together through
+ * {@link credentialFieldsFor}.
+ */
+export interface CredentialVariant {
+  /** Stable id, persisted alongside the credential so a later edit reopens the
+   *  same path. Never derived from the label. */
+  readonly id: string;
+  readonly label: string;
+  /** One line telling the owner which path is theirs. */
+  readonly description?: string;
+  readonly fields: readonly CredentialFieldDef[];
+}
+
+/** One read scope the owner may grant on a LAN-database track. */
+export interface LanReadScope {
+  readonly id: string;
+  readonly label: string;
+  /** Short tag rendered beside the label — "PHI", "financial". */
+  readonly tag?: string;
+}
+
+/**
+ * How a LAN-database track provisions its own least-privilege account.
+ *
+ * PRESENCE of this block is what selects the connect wizard's LAN flow: find
+ * the server, run the one-off DBA script, choose read scopes, confirm. Absent,
+ * the wizard renders the generic credential form. It is a capability
+ * declaration, in the same shape as `rateLimit` and `catalog` above — not a
+ * status inferred from a missing row.
+ *
+ * Every string a person reads in that flow is here or on `displayName`, so a
+ * second LAN vendor is a descriptor, not a second wizard.
+ */
+export interface LanProvisioning {
+  /** The read-only database account Droplet creates, e.g. `droplet_ro`. */
+  readonly accountName: string;
+  /** The database the connection names, shown on the confirm step. */
+  readonly databaseName: string;
+  /** Port offered before the owner opens Advanced. */
+  readonly defaultPort: number;
+  /** Placeholder for the host field — an example, never a default. */
+  readonly hostPlaceholder: string;
+  /**
+   * The noun phrase used in the reachability result, e.g. `an Eaglesoft
+   * database`. Carried as data because the article is part of it and no
+   * template built from `displayName` gets "an" right for every vendor.
+   */
+  readonly reachableLabel: string;
+  /** The one-off DBA script, one line per array entry. Contains a PLACEHOLDER
+   *  where the generated password goes — never a credential. */
+  readonly script: readonly string[];
+  /** Read scopes offered on the scopes step, in render order. */
+  readonly scopes: readonly LanReadScope[];
+  /** The write opt-in, or absent when the track offers none. */
+  readonly writeOptIn?: {
+    readonly label: string;
+    /** The caution shown under the toggle. Off by default, always. */
+    readonly caution: string;
+  };
+}
+
 /** Everything both apps need to know about one provider. */
 export interface ProviderDescriptor {
   /** The provider key persisted on `IntegrationConnection.provider` (free-text
@@ -216,8 +288,13 @@ export interface ProviderDescriptor {
   readonly id: string;
   readonly displayName: string;
   readonly category: string;
-  readonly track: ProviderTrack;
   readonly credentialFields: readonly CredentialFieldDef[];
+  /**
+   * Mutually exclusive authentication paths, when the vendor offers more than
+   * one. Absent on every shipped provider — one credential shape is the normal
+   * case, and an empty single-variant array would be ceremony.
+   */
+  readonly credentialVariants?: readonly CredentialVariant[];
   /**
    * Hostnames this track dials, as BARE HOSTS.
    *
@@ -242,7 +319,46 @@ export interface ProviderDescriptor {
    * a number invented here would be a guess wearing a policy's clothes.
    */
   readonly pollIntervalFloorMs?: number;
+  /** Declared by a LAN track that provisions its own database account. */
+  readonly lanProvisioning?: LanProvisioning;
+  readonly track: ProviderTrack;
   readonly catalog?: ProviderCatalogMeta;
+}
+
+/**
+ * The variant a form is currently on, or `undefined` for a provider that
+ * declares none.
+ *
+ * An unknown id falls back to the FIRST variant rather than to nothing: a
+ * persisted variant id that no longer exists must still render a usable form,
+ * and an empty form would look like a provider that needs no credentials.
+ */
+export function credentialVariantFor(
+  descriptor: ProviderDescriptor | undefined,
+  variantId?: string,
+): CredentialVariant | undefined {
+  const variants = descriptor?.credentialVariants;
+  if (!variants || variants.length === 0) return undefined;
+  return variants.find((v) => v.id === variantId) ?? variants[0];
+}
+
+/**
+ * Every field a form must collect for one authentication path: the provider's
+ * common fields, then the chosen variant's.
+ *
+ * The ONLY function that answers "what does this form ask for". Rendering
+ * `credentialFields` directly is correct for a provider with no variants and
+ * silently wrong for one with them, which is why the read goes through here.
+ */
+export function credentialFieldsFor(
+  descriptor: ProviderDescriptor | undefined,
+  variantId?: string,
+): readonly CredentialFieldDef[] {
+  if (!descriptor) return [];
+  const variant = credentialVariantFor(descriptor, variantId);
+  return variant
+    ? [...descriptor.credentialFields, ...variant.fields]
+    : descriptor.credentialFields;
 }
 
 /**

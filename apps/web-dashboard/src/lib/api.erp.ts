@@ -10,8 +10,8 @@
 
 import { apiFetch, type ApiFetchOptions } from "./hooks/apiFetch";
 import type {
-  EaglesoftConnectInput,
   EaglesoftDetail,
+  LanConnectInput,
   IntegrationConnection,
   PatientResult,
   PatientSummary,
@@ -87,13 +87,24 @@ export interface ConnectionTestResult {
   message?: string;
 }
 
-/** Non-destructive reachability probe against host:port. */
-export async function testEaglesoftConnection(
-  input: Pick<EaglesoftConnectInput, "host" | "port">,
+/**
+ * Non-destructive reachability probe against host:port, for ANY LAN-database
+ * track (WARP-2451).
+ *
+ * The provider key is a PARAMETER rather than a literal in the path. It was a
+ * literal while exactly one LAN provider existed, which made the connect
+ * wizard un-generalisable without also rewriting its network calls — and a
+ * wizard that renders a second vendor's fields but posts to the first vendor's
+ * endpoint is worse than one that refuses. `encodeURIComponent` because the
+ * key is free-text TEXT on the row, not a closed union.
+ */
+export async function testLanConnection(
+  provider: string,
+  input: Pick<LanConnectInput, "host" | "port">,
 ): Promise<ConnectionTestResult> {
   // Backend returns { ok, reason, message } — adapt to { reachable, message }.
   const r = await apiFetch<{ ok: boolean; reason?: string; message?: string }>(
-    "/api/integrations/eaglesoft/test",
+    `/api/integrations/${encodeURIComponent(provider)}/test`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -104,14 +115,18 @@ export async function testEaglesoftConnection(
 }
 
 /** Runs provisioning + verification and lands the connection CONNECTED. */
-export function connectEaglesoft(
-  input: EaglesoftConnectInput,
+export function connectLanProvider(
+  provider: string,
+  input: LanConnectInput,
 ): Promise<EaglesoftDetail> {
-  return apiFetch<EaglesoftDetail>("/api/integrations/eaglesoft/connect", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return apiFetch<EaglesoftDetail>(
+    `/api/integrations/${encodeURIComponent(provider)}/connect`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 /** The write kill-switch / opt-in. */

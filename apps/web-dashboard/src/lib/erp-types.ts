@@ -143,11 +143,20 @@ export interface ErpAccess {
   canConfirmWrites: boolean;
 }
 
-/** Input the connect wizard collects before provisioning. */
-export interface EaglesoftConnectInput {
+/**
+ * Input the connect wizard collects before provisioning, for ANY LAN-database
+ * track (WARP-2451).
+ *
+ * `scopes` is `string[]` rather than `ErpScope[]` on purpose: the wizard reads
+ * the offered scopes off the provider descriptor, which lives in
+ * `@droplet/shared-types` and cannot import this union. The correspondence is
+ * PINNED by a test (`connectors.test.ts`) instead of asserted by a cast —
+ * "types can lie" is the wave-1 lesson this follows.
+ */
+export interface LanConnectInput {
   host: string;
   port: number;
-  scopes: ErpScope[];
+  scopes: string[];
   enableWrites: boolean;
 }
 
