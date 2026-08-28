@@ -180,9 +180,20 @@ in review, no exceptions. Hostnames that are not egress (XML namespaces,
 doc links) register as `kind: reference`; runtime-configured destinations
 (user mail servers, fleet HQ URL) as `kind: dynamic` with their config key.
 
-Limits: the static scan cannot see hostnames assembled at runtime — that is
-what WARP-268's runtime audit is for; reviewers should treat dynamic URL
-construction toward the network as a smell requiring a `dynamic` entry.
+The registry must also stay honest in the other direction. A `kind: egress`
+entry's `code_refs` are load-bearing: one of its hosts has to appear there as
+a non-comment literal, or the entry carries a one-line `no_code_literal:`
+reason naming who owns the destination instead (WARP-2452). Those paths must
+themselves be inside the scan's own scope — a `docs/` path cannot be evidence
+that a host is dialled, because the scan never reads it (WARP-2468).
+
+Limits: the static scan cannot see a hostname whose every part is assembled at
+runtime — that is what WARP-268's runtime audit is for; reviewers should treat
+dynamic URL construction toward the network as a smell requiring a `dynamic`
+entry. It CAN now see the common half of that pattern: since WARP-2467 a bare
+hostname in a code string literal is extracted just like a full URL, so
+`const H = "api.vendor.com"` followed by `fetch(\`https://${H}/v1\`)` no longer
+passes unregistered.
 
 # Supply-chain security — signing & verification {#supply-chain}
 

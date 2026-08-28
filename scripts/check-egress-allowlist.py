@@ -28,10 +28,25 @@ Extraction rules (v1, deliberately conservative):
   * scheme URLs  — (https|http|wss|ws|ftp)://<host>  anywhere in scoped
     files, including comments (a commented-out endpoint is one uncomment
     away from egress; allowlisting it as kind: reference is cheap).
-  * bare hosts   — dotted hostnames in CONFIG files only
-    (docker/docker-compose.yml, openwrt/files/etc/config/*, .env.example):
-    code files are exempt from bare-host matching to avoid prose noise.
+  * bare hosts   — dotted hostnames, in two shapes:
+      - CONFIG files (docker/docker-compose.yml, openwrt/files/etc/config/*,
+        .env.example) hand over the whole raw line: a host there is a
+        setting, and there is no prose to be noisy about.
+      - CODE files hand over their STRING-LITERAL contents, comments
+        stripped (WARP-2467). Code used to be exempt entirely, which meant
+        the only shape enforced in code was a literal scheme URL, so
+        `const H = "api.evil-corp.io"` plus a runtime-assembled fetch
+        passed. The prose noise that exemption dodged is handled by the
+        PATTERN filters below instead — there are no file exemptions.
+    Either way a host must end in a BARE_HOST_TLDS suffix, except inside a
+    provider descriptor's egressHosts array (WARP-2217), which takes any.
   * public IPv4  — any non-private IP literal in scoped files.
+
+Bare-host noise filters, all PATTERNS (WARP-2467): RFC 2606 reserved names,
+`@scope/name` npm identifiers, the domain half of a sample email address in
+placeholder copy (unless the literal carries a scheme, so `https://user@host/`
+still denies), and Python triple-quoted blocks, which are prose. A scheme URL
+in a comment or docstring still denies — that pass reads raw lines.
 
 Scope: git-tracked files under apps/ services/ packages/ docker/ scripts/
 openwrt/ proto/ schemas/ plus root .env.example — minus tests, fixtures,
@@ -100,6 +115,19 @@ INTERNAL_HOST_RE = re.compile(
 CONFIG_FILES_FOR_BARE_HOSTS = re.compile(
     r"(^docker/docker-compose\.yml$)|(^openwrt/files/etc/config/)|(^\.env\.example$)"
 )
+
+# WARP-2217 — provider descriptors declare their destinations as BARE HOSTS in
+# an `egressHosts: [...]` array. Code files are otherwise exempt from bare-host
+# matching (prose noise), so without this the whole declaration would be
+# invisible to the gate and a descriptor could name an unregistered vendor host
+# with nothing going red.
+#
+# Collected as a small state machine rather than a single-line regex on purpose:
+# the array is prettier-formatted and wraps once it has more than two entries,
+# and a one-line pattern would silently stop matching the day a third host is
+# added — the exact failure mode this gate exists to prevent.
+EGRESS_HOSTS_OPEN_RE = re.compile(r"\begressHosts\b\s*:\s*\[")
+QUOTED_RE = re.compile(r"[\"']([^\"']+)[\"']")
 
 # ── BACKING pass: which comment syntax applies to a code_refs file ──────────
 C_COMMENT_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go",
@@ -222,7 +250,30 @@ def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
         # Bare hosts: a whole raw line in config files, string-literal
         # contents only in code files (WARP-2467). See bare_host_sources.
         bare_src = bare_host_sources(path, lines)
+        # Open when we are inside an `egressHosts: [` array (WARP-2217).
+        # KEPT after WARP-2467 generalised bare-host matching, because it is
+        # strictly stronger inside these arrays: a descriptor entry is taken
+        # whatever its TLD, where the general path requires a BARE_HOST_TLDS
+        # suffix. A descriptor host on an unusual TLD is caught here and
+        # nowhere else, so the two paths are additive, not redundant.
+        in_egress_hosts = False
         for lineno, line in enumerate(lines, 1):
+            if in_egress_hosts or EGRESS_HOSTS_OPEN_RE.search(line):
+                tail = line
+                if not in_egress_hosts:
+                    tail = line[EGRESS_HOSTS_OPEN_RE.search(line).end():]
+                    in_egress_hosts = True
+                closing = tail.find("]")
+                scanned = tail if closing < 0 else tail[:closing]
+                for m in QUOTED_RE.finditer(scanned):
+                    host = m.group(1).strip().lower().rstrip(".")
+                    # Same internal-host filter every other extraction path
+                    # uses, so a fixture descriptor pointing at `.test` stays
+                    # out of scope by construction.
+                    if host and not is_internal_host(host):
+                        found[host].add((path, lineno))
+                if closing >= 0:
+                    in_egress_hosts = False
             for m in URL_RE.finditer(line):
                 host = m.group(1).lower().rstrip(".")
                 if not is_internal_host(host):

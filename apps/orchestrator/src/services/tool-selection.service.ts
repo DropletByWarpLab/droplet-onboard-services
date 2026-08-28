@@ -1,25 +1,81 @@
 /**
  * 2026-07-21 agent-budgets spec §3 — relevance-based tool selection.
+ * WARP-2443 / WARP-2444 — extended to a DYNAMIC tool universe.
  *
- * The owner-role chat loop advertises every in-scope tool schema on every
- * turn (~11k tokens of the 16k window — see chat-tool-scope.ts / WARP-1424),
- * which both starves history/memory of context and measurably degrades tool
- * CHOICE on small local models (the WARP-1334 skips-retrieval class). This
- * service narrows the advertisement per-turn.
+ * The owner-role chat loop once advertised every in-scope tool schema on
+ * every turn, which both starves history/memory of context and measurably
+ * degrades tool CHOICE on small local models (the WARP-1334 skips-retrieval
+ * class). This service narrows the advertisement per-turn.
  *
- * Deterministic by design: keyword rules → ToolDomain groups. No embedding
- * call, no second LLM call — the single-box has no latency budget for
- * either. Wrong guesses self-heal in the agent loop (a filtered-but-allowed
- * call expands its domain next iteration; see llm-agent.service.ts).
+ * ── the strategy, stated (WARP-2442) ───────────────────────────────
+ *
+ * RELEVANCE SIGNAL: case-insensitive keyword rules over the latest user
+ * message, mapping to `ToolDomain` groups, unioned with the domains of tools
+ * already called in this conversation (continuity).
+ *
+ * Chosen over the alternatives on latency and determinism, not on accuracy:
+ *
+ *   • Embedding similarity over tool descriptions — needs an embedding call
+ *     on the critical path of every turn. The single-box shares one GPU
+ *     between inference and indexing; a second model round-trip per turn is
+ *     not affordable.
+ *   • An LLM "which tools do I need" pre-pass — doubles time-to-first-token
+ *     and, on a 20B local model, is itself the thing that gets tool choice
+ *     wrong. Using the failing faculty to fix its own failure.
+ *   • Static per-role shelves — cannot respond to the turn at all, which is
+ *     the entire problem.
+ *
+ * Keyword rules are worse at ranking and better at everything else that
+ * matters here: zero added latency, deterministic (WARP-2443 requires the
+ * same input to yield the same subset), and inspectable — a wrong selection
+ * is a regex someone can read, not an embedding nobody can.
+ *
+ * AMBIGUITY / TIEBREAK: there is no ranking and therefore no tiebreak to get
+ * wrong. Every matched domain is admitted WHOLE. A sentence matching three
+ * domains advertises all three; a sentence matching none falls back to the
+ * floor alone. The bias is deliberate and asymmetric — a false-positive
+ * domain costs a few hundred schema tokens, a false NEGATIVE costs a whole
+ * iteration to self-heal — so the rules are written generously and the budget
+ * gate (tool-budget.service.ts) is what stops generosity becoming overflow.
+ *
+ * FLOOR: {@link CORE_TOOL_NAMES}, an explicit named set, not an emergent
+ * property of the scoring. It is applied by name before any domain logic and
+ * cannot be outvoted by relevance.
+ *
+ * TARGET SUBSET SIZE: derived, not chosen. `toolAdvertisementCeilingTokens()`
+ * computes window − OUTPUT_RESERVE − fixed blocks; at the shipping 16384
+ * window that is ~12.4K tokens for `tools[]`, and the measured mean tool
+ * serialises to ~700 chars (~176 tokens), so a turn's ceiling is roughly 70
+ * tools. Floor ∪ one domain sits far under it — the largest single domain
+ * plus the floor measures well inside budget (see base-prompt-budget.test.ts,
+ * which asserts the real number rather than this prose).
+ *
+ * Wrong guesses self-heal in the agent loop (a filtered-but-allowed call
+ * expands its domain next iteration; see llm-agent.service.ts).
+ *
+ * ── the dynamic half (WARP-2443) ───────────────────────────────────
+ *
+ * The taxonomy was `TOOL_CATALOG` and nothing else, which was correct while
+ * the tool universe was fixed at build time. It is not correct once a remote
+ * MCP server registers tools at runtime (WARP-2300): such a tool has no
+ * catalog entry, so `DOMAIN_BY_NAME` misses it, so it is NEVER SELECTED — and
+ * it never errors either, so the symptom is an agent that quietly declines to
+ * use an integration the operator can see is connected.
+ *
+ * Selection therefore reads a two-layer universe: the static catalog, plus an
+ * optional list of `RuntimeToolDescriptor`s supplied by the caller. The static
+ * catalog WINS on a name collision — a remote server must not be able to
+ * repoint a local tool's domain by registering the same name.
+ *
+ * When no runtime tools are supplied (the shipping state until WARP-2300
+ * lands) the behaviour is byte-identical to the pre-WARP-2443 implementation.
  *
  * INVARIANT: the result is always a subset of `pool`. RBAC narrowing
  * (narrowAllowedToolsForRole / WRITE_TOOLS) has already been applied to the
  * pool before this runs; this layer must never widen it.
- *
- * The taxonomy is tools-core's TOOL_CATALOG (registry-derived, completeness
- * CI-enforced by catalog.test.ts) — never a parallel list that can drift.
  */
 import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
+import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 
 export type ToolSelectionMode = "off" | "domains";
 
@@ -29,9 +85,49 @@ const DOMAIN_BY_NAME: ReadonlyMap<string, ToolDomain> = new Map(
 );
 
 /**
- * Always advertised (when present in the pool): retrieval + memory-read.
- * These are the tools nearly every knowledge turn needs, and the eval's
- * worst failure class is the model NOT reaching for them.
+ * Resolve a tool name's domain across the two-layer universe.
+ *
+ * Static catalog first, runtime second. That order is a trust decision, not a
+ * performance one: a runtime tool arrives from outside the box, and letting it
+ * shadow a registered name would let a remote server move a local tool into a
+ * domain the turn happens to match. `runtime-tool-registry.service.ts` has the
+ * matching rationale for its own precedence chain.
+ */
+function resolveDomain(
+  name: string,
+  runtimeDomains?: ReadonlyMap<string, ToolDomain>,
+): ToolDomain | undefined {
+  return DOMAIN_BY_NAME.get(name) ?? runtimeDomains?.get(name);
+}
+
+/** Index a runtime descriptor list by name. First registration wins, matching
+ *  `RuntimeToolRegistry.list()`'s stable server-then-declaration order. */
+function indexRuntimeDomains(
+  runtimeTools: readonly RuntimeToolDescriptor[] | undefined,
+): ReadonlyMap<string, ToolDomain> | undefined {
+  if (!runtimeTools?.length) return undefined;
+  const m = new Map<string, ToolDomain>();
+  for (const t of runtimeTools) if (!m.has(t.name)) m.set(t.name, t.domain);
+  return m;
+}
+
+/**
+ * THE FLOOR (WARP-2442) — always advertised when present in the pool,
+ * regardless of what the relevance rules say: retrieval + memory-read.
+ *
+ * An explicit named set, deliberately not an emergent property of the
+ * scoring. These are the tools nearly every knowledge turn needs, and the
+ * eval's worst failure class is the model NOT reaching for them — a turn that
+ * cannot search or read is broken rather than merely narrow, so no relevance
+ * signal is permitted to vote them out.
+ *
+ * `selectAdvertisedTools` applies this by NAME before any domain logic, which
+ * is what makes the guarantee unconditional. The floor is still bounded by
+ * `pool`: RBAC has already narrowed the pool, and selection never widens it.
+ *
+ * Kept small on purpose — the floor is paid on every single turn, so each
+ * addition is permanent context cost. `base-prompt-budget.test.ts` measures
+ * floor ∪ largest-domain, so growing this set moves that number.
  */
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "search_content",
@@ -51,8 +147,17 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  * Keyword/intent rules → domains. Case-insensitive test against the latest
  * user message. Deliberately generous: a false-positive domain costs a few
  * hundred schema tokens; a false NEGATIVE costs an iteration (self-heal).
- * pm / erp / switch have no rules — they're excluded from default chat
- * scope (chat-tool-scope.ts) and reachable via explicit allowed_tools.
+ *
+ * TWO-LAYER NOTE (WARP-2448): matching a domain here does not by itself make
+ * a tool reachable. `chat-tool-scope.ts` removes whole groups from the POOL
+ * before selection runs, so a rule can match a domain whose local tools were
+ * all excluded upstream and legitimately advertise nothing — `pm` is exactly
+ * that case today, and `erp`/`switch` have no rules at all. The two layers
+ * answer different questions (policy vs relevance) and the interaction is
+ * asserted by `chat-tool-scope.test.ts` rather than left for someone to
+ * rediscover. Remote tools registered into such a domain are NOT affected:
+ * the exclusion list names local tools, so an Atlassian `pm` tool matched by
+ * the `pm` rule is advertised even though every local `pm_*` tool is not.
  *
  * WARP-1921 — vocabulary widened from the original WARP-1207 cut, which was
  * written from the TOOL NAMES rather than from how people talk. The tell:
@@ -104,28 +209,71 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   { pattern: /\b(storage|disks?|drives?|updates?|system|health|audit|cpu|ram|gpu|memory usage|backups?|uptime|logs?|disk space|how much (room|space))\b/i, domains: ["system"] },
 ];
 
-export function domainOfTool(name: string): ToolDomain | undefined {
-  return DOMAIN_BY_NAME.get(name);
-}
+/**
+ * A tool name's domain. `runtimeTools` extends the lookup to the dynamic half
+ * of the universe; omit it for a local-only question (the pre-WARP-2443
+ * signature, kept working for every existing caller).
+ */
+/**
+ * Every domain some keyword rule can match. Exported so the policy/relevance
+ * overlap is ASSERTABLE rather than a comment someone has to trust: a domain
+ * with a rule but no in-scope tools advertises nothing, and
+ * `chat-tool-scope.test.ts` recomputes that set on every run so a new dead
+ * overlap fails CI instead of shipping (WARP-2448).
+ */
+export const RULED_DOMAINS: ReadonlySet<ToolDomain> = new Set(
+  DOMAIN_RULES.flatMap((r) => r.domains),
+);
 
-export function toolNamesForDomain(domain: ToolDomain): string[] {
-  return TOOL_CATALOG.filter((e) => e.domain === domain).map((e) => e.name);
+export function domainOfTool(
+  name: string,
+  runtimeTools?: readonly RuntimeToolDescriptor[],
+): ToolDomain | undefined {
+  return resolveDomain(name, indexRuntimeDomains(runtimeTools));
 }
 
 /**
- * Compute the per-turn advertised subset: core set ∪ rule-matched domains ∪
+ * Every tool name in a domain, across both layers. Runtime tools are appended
+ * after the catalog's, so the agent loop's self-heal branch expands a remote
+ * tool's whole domain the same way it expands a local one's.
+ */
+export function toolNamesForDomain(
+  domain: ToolDomain,
+  runtimeTools?: readonly RuntimeToolDescriptor[],
+): string[] {
+  const local = TOOL_CATALOG.filter((e) => e.domain === domain).map(
+    (e) => e.name,
+  );
+  if (!runtimeTools?.length) return local;
+  const seen = new Set(local);
+  const remote = runtimeTools
+    .filter((t) => t.domain === domain && !seen.has(t.name))
+    .map((t) => t.name);
+  return [...local, ...remote];
+}
+
+/**
+ * Compute the per-turn advertised subset: floor ∪ rule-matched domains ∪
  * domains of tools already called in this conversation (continuity). Pure —
  * no I/O, no clock, safe to call per turn.
+ *
+ * `runtimeTools` supplies the dynamic half. Absent or empty, this behaves
+ * exactly as it did before WARP-2443 — the local-only path is unchanged, so
+ * any shift in agent behaviour is attributable to the new universe rather
+ * than to a refactor.
  */
 export function selectAdvertisedTools(opts: {
   mode: ToolSelectionMode;
   userMessage: string;
   pool: string[];
   conversationToolNames: string[];
+  /** WARP-2443 — runtime-registered tools with no TOOL_CATALOG entry. */
+  runtimeTools?: readonly RuntimeToolDescriptor[];
 }): { advertised: string[]; matchedDomains: ToolDomain[] } {
   if (opts.mode === "off") {
     return { advertised: opts.pool, matchedDomains: [] };
   }
+  const runtimeDomains = indexRuntimeDomains(opts.runtimeTools);
   const domains = new Set<ToolDomain>();
   for (const rule of DOMAIN_RULES) {
     if (rule.pattern.test(opts.userMessage)) {
@@ -133,12 +281,12 @@ export function selectAdvertisedTools(opts: {
     }
   }
   for (const name of opts.conversationToolNames) {
-    const d = DOMAIN_BY_NAME.get(name);
+    const d = resolveDomain(name, runtimeDomains);
     if (d) domains.add(d);
   }
   const advertised = opts.pool.filter((name) => {
     if (CORE_TOOL_NAMES.has(name)) return true;
-    const d = DOMAIN_BY_NAME.get(name);
+    const d = resolveDomain(name, runtimeDomains);
     return d !== undefined && domains.has(d);
   });
   return { advertised, matchedDomains: [...domains] };

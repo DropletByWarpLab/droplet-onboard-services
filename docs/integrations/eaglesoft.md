@@ -45,7 +45,7 @@ The SAP SQL Anywhere client is **license-governed** — vendor the **Developer E
 
 ## 3. Provisioning — Droplet's accounts
 
-Droplet provisions its own least-privilege accounts inside `PattersonPM` (see [`SETUP.md`](SETUP.md) §3):
+Droplet provisions its own least-privilege accounts inside `PattersonPM` (see [`SETUP.md`](SETUP.md) §2.3, "The dedicated user in their database model"):
 
 - **`droplet_ro`** — `SELECT` only.
 - **`droplet_rw`** — narrow, created empty, grants added per enabled write capability.

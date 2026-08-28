@@ -68,10 +68,48 @@
 #   1  one or more checks failed
 #   2  invalid CLI args or required tool missing
 #   3  setup precondition failure (not in a git repo, etc.)
+#   4  the harness itself COULD NOT RUN (interpreter too old). Deliberately
+#      distinct from 1 so no caller can read "never executed" as "executed
+#      and passed" -- see the bash version floor below (WARP-2449).
 #
 # WARP-482, WARP-487, WARP-494.
 # =============================================================================
 set -euo pipefail
+
+# --- Bash version floor (WARP-2449) ------------------------------------------
+# This script is written to the feature set of bash 3.2 -- the version macOS has
+# shipped since 2007 and, for GPLv3 licensing reasons, will never update. That
+# is a deliberate constraint, not an accident: this script IS the pre-PR gate
+# that .claude/skills/preflight/SKILL.md and docs/integrations/ADD-A-PROVIDER.md
+# mandate, so it has to be runnable on the primary dev Mac. For months it was
+# not: associative arrays (the bash-4-only `-A` option to `declare`) made it die
+# at line 115 with a raw `declare: -A: invalid option`, so the documented gate
+# was silently skipped by everyone who followed the docs exactly.
+#
+# The floor is ASSERTED rather than assumed, so the next edit that reaches for a
+# newer builtin fails with an actionable sentence instead of a builtin error. If
+# you introduce a dependency on a newer bash, raise MIN_BASH_MAJOR/MIN_BASH_MINOR
+# in the SAME commit -- never leave the floor lying about what the script needs.
+EXIT_CANNOT_RUN=4
+MIN_BASH_MAJOR=3
+MIN_BASH_MINOR=2
+_bash_major="${BASH_VERSINFO[0]:-0}"
+_bash_minor="${BASH_VERSINFO[1]:-0}"
+if [ "$_bash_major" -lt "$MIN_BASH_MAJOR" ] ||
+   { [ "$_bash_major" -eq "$MIN_BASH_MAJOR" ] && [ "$_bash_minor" -lt "$MIN_BASH_MINOR" ]; }; then
+  printf 'error: ship-check.sh COULD NOT RUN -- it requires bash %s.%s or newer.\n' \
+    "$MIN_BASH_MAJOR" "$MIN_BASH_MINOR" >&2
+  printf '       Interpreter in use: %s\n' "${BASH_VERSION:-not bash}" >&2
+  printf '       macOS ships bash 3.2.57 as /bin/bash and cannot upgrade it in place.\n' >&2
+  printf '       Install a current bash and put it ahead of /bin on PATH:\n' >&2
+  printf '\n' >&2
+  printf '         brew install bash\n' >&2
+  printf '\n' >&2
+  printf '       Exit code %s means COULD NOT RUN. It is deliberately different from\n' "$EXIT_CANNOT_RUN" >&2
+  printf '       exit 1 ("ran, a check failed"), so this can never be mistaken for a\n' >&2
+  printf '       gate that passed.\n' >&2
+  exit "$EXIT_CANNOT_RUN"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Honour REPO_ROOT if the caller (typically the test harness) has already
@@ -111,8 +149,40 @@ FULL_ONLY_CHECKS=(
   docker-build-smoke
 )
 
-# Per-check result tracking. Keys = check name, values = "pass"/"fail"/"skip".
-declare -A CHECK_RESULTS=()
+# Per-check result tracking. Two parallel indexed arrays rather than one
+# associative array: bash 3.2 (the stock macOS interpreter, see the version
+# floor above) has no associative arrays, and this script has to run there.
+# CHECK_RESULT_NAMES[i] is the check name, CHECK_RESULT_VALUES[i] its
+# "pass"/"fail"/"skip". Iteration order is therefore insertion order, which is
+# ALL_CHECKS order -- deterministic, unlike an associative array's hash order.
+CHECK_RESULT_NAMES=()
+CHECK_RESULT_VALUES=()
+
+# Upsert one check's result. Linear scan: the registry is a dozen entries and
+# each check records exactly once, so the cost is noise next to running tsc.
+_record_result() {
+  local name="$1" value="$2" i
+  for ((i = 0; i < ${#CHECK_RESULT_NAMES[@]}; i++)); do
+    if [ "${CHECK_RESULT_NAMES[$i]}" = "$name" ]; then
+      CHECK_RESULT_VALUES[$i]="$value"
+      return 0
+    fi
+  done
+  CHECK_RESULT_NAMES+=("$name")
+  CHECK_RESULT_VALUES+=("$value")
+}
+
+# Membership test for the small per-line allowlists further down. $1 is the
+# key, $2 a newline-delimited list of keys. Whole-line, literal match (the key
+# is quoted inside the case pattern, so glob metacharacters in a path cannot
+# widen it), and an empty list correctly matches nothing.
+_allowlisted() {
+  local key="$1" list="$2"
+  case $'\n'"$list" in
+    *$'\n'"$key"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
 
 usage() {
   cat <<'USAGE'
@@ -327,7 +397,7 @@ run_check_tsc_full() {
     if ! out="$(cd "$REPO_ROOT" && npm run -w @droplet/orchestrator db:generate 2>&1)"; then
       printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
       printf '%s\n' "$out" | sed 's/^/    | /' >&2
-      CHECK_RESULTS[$label]=fail
+      _record_result "$label" fail
       return 1
     fi
   fi
@@ -340,7 +410,7 @@ run_check_tsc_full() {
     if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
       printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
       printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
-      CHECK_RESULTS[$label]=fail
+      _record_result "$label" fail
       return 1
     fi
   done
@@ -368,12 +438,12 @@ run_check_tsc_full() {
   done
 
   if [ "$rc" -ne 0 ]; then
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces)\n" "$label"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -383,12 +453,12 @@ run_check_compose_config() {
 
   if [ ! -f "$compose" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$compose"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
   if ! command -v docker >/dev/null 2>&1; then
     printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH (required for `compose config`)\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -401,7 +471,7 @@ run_check_compose_config() {
     env_file="$REPO_ROOT/.env"
   else
     printf "  ${_RED}FAIL${_RESET}  %s — neither .env.example nor .env found at repo root\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -410,12 +480,12 @@ run_check_compose_config() {
     printf "  ${_RED}FAIL${_RESET}  %s — `docker compose config` rejected the merged tree\n" "$label"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (env-file: %s)\n" "$label" "${env_file#$REPO_ROOT/}"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -445,7 +515,7 @@ run_check_compose_env_shadow() {
 
   if [ ! -f "$compose" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$compose"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -473,12 +543,12 @@ run_check_compose_env_shadow() {
     printf "        Each resolves against the project .env, NOT the env_file above it.\n"
     printf "        If that file lacks the key the value becomes \"\" and OVERWRITES the\n"
     printf "        real one (WARP-1860). Delete the line — env_file already carries it.\n"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s — no credential is shadowed by an empty substitution\n" "$label"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -505,12 +575,12 @@ run_check_frigate_env_scan() {
 
   if [ ! -f "$cfg" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$cfg"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
   if [ ! -f "$env_example" ] && [ ! -f "$REPO_ROOT/.env" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — neither .env.example nor .env found at repo root\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -533,7 +603,7 @@ run_check_frigate_env_scan() {
           | sed 's/=$//'
       fi
       # 2. scripts/lib/secrets.sh — the boot-time heredoc writes these
-      #    into .env every fresh provisioning, so they're always present
+      #    into .env every fresh provisioning, so they are always present
       #    at Frigate start time on a real device.
       if [ -f "$secrets_sh" ]; then
         sed 's/#.*$//' "$secrets_sh" \
@@ -582,7 +652,7 @@ run_check_frigate_env_scan() {
 
   if [ -z "$matches" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (no {VAR} substitutions in config)\n" "$label"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -602,7 +672,7 @@ run_check_frigate_env_scan() {
     local ref_count
     ref_count="$(printf '%s\n' "$matches" | wc -l | tr -d ' ')"
     printf "  ${_GREEN}PASS${_RESET}  %s (%d reference(s) all resolved)\n" "$label" "$ref_count"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -612,7 +682,7 @@ run_check_frigate_env_scan() {
   printf "    | refs raise KeyError and the container restart-loops the stack.\n" >&2
   printf "    | Either remove the offending block from docker/frigate/config.yml\n" >&2
   printf "    | or seed the variable in scripts/lib/secrets.sh / .env.example.\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -656,7 +726,7 @@ run_check_shellcheck() {
     printf "    | This check FAILS (not skips) by design — the gate must\n" >&2
     printf "    | catch the local-dns.sh class of regressions, and that\n" >&2
     printf "    | requires shellcheck running.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -678,7 +748,7 @@ run_check_shellcheck() {
 
   if [ "${#targets[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no target scripts found\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -696,7 +766,7 @@ run_check_shellcheck() {
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s))\n" "$label" "${#targets[@]}"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -708,7 +778,7 @@ run_check_shellcheck() {
     printf "    | (... %d more lines suppressed; run shellcheck --severity=warning directly)\n" \
       "$((total - 40))" >&2
   fi
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -734,7 +804,7 @@ run_check_matter_env_allowlist() {
 
   if [ ! -f "$security_sh" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — scripts/test-security.sh not found\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -753,13 +823,13 @@ run_check_matter_env_allowlist() {
   if [ -z "$matter_line" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — MATTER_* allowlist line missing from test-security.sh output\n" "$label"
     printf "    | (Has Test 7 changed shape? Check scripts/test-security.sh.)\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   if printf '%s' "$matter_line" | grep -q 'PASS'; then
     printf "  ${_GREEN}PASS${_RESET}  %s (delegated to scripts/test-security.sh)\n" "$label"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -770,7 +840,7 @@ run_check_matter_env_allowlist() {
   printf '%s\n' "$out" | tail -25 | sed 's/^/    | /' >&2
   printf "    | (Use DROPLET_MATTER_* prefix for new env vars — see\n" >&2
   printf "    |  apps/orchestrator/src/config.ts for full rationale.)\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -867,7 +937,7 @@ run_check_exec_bits() {
     printf '%s' "$missing_files" >&2
     printf "    | Either restore the file(s) or update the required[] array\n" >&2
     printf "    | in run_check_exec_bits if the script was intentionally removed.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -877,12 +947,12 @@ run_check_exec_bits() {
     printf "    | The working-tree bit is unreliable cross-platform; the INDEX\n" >&2
     printf "    | mode is the canonical signal. Run the suggested\n" >&2
     printf "    | git update-index --chmod=+x command(s) and re-commit.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s) all 100755 in index)\n" "$label" "${#required[@]}"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -1002,20 +1072,23 @@ run_check_stale_repo_names() {
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
-  # Per-line allowlist. Keys are "<repo-relative-path>:<lineno>"; each
-  # value is documented above next to the corresponding rationale.
-  # Lookup is O(1) via an associative array.
-  declare -A allowlist
-  allowlist["docker/docker-compose.yml:7"]=1
-  allowlist["docker/docker-compose.yml:10"]=1
-  allowlist["scripts/verify.sh:161"]=1
-  allowlist["scripts/verify.sh:164"]=1
-  allowlist["services/voice-io/TESTING.md:171"]=1
-  allowlist["services/ops-console/README.md:58"]=1
+  # Per-line allowlist. Entries are "<repo-relative-path>:<lineno>"; each is
+  # documented above next to the corresponding rationale. Held as a
+  # newline-delimited list and matched by _allowlisted -- bash 3.2 has no
+  # associative arrays (see the version floor at the top of this file). Only
+  # lines that already matched the stale-name grep reach the lookup, so the
+  # linear scan over six entries costs nothing.
+  local allowlist=""
+  allowlist+="docker/docker-compose.yml:7"$'\n'
+  allowlist+="docker/docker-compose.yml:10"$'\n'
+  allowlist+="scripts/verify.sh:161"$'\n'
+  allowlist+="scripts/verify.sh:164"$'\n'
+  allowlist+="services/voice-io/TESTING.md:171"$'\n'
+  allowlist+="services/ops-console/README.md:58"$'\n'
 
   # Run grep -nE per file, post-filter for the .local exemption and the
   # per-line allowlist, collect violations.
@@ -1042,7 +1115,7 @@ run_check_stale_repo_names() {
       fi
 
       # Post-filter 2: per-line allowlist.
-      if [ -n "${allowlist[$f:$lineno]:-}" ]; then
+      if _allowlisted "$f:$lineno" "$allowlist"; then
         continue
       fi
 
@@ -1052,7 +1125,7 @@ run_check_stale_repo_names() {
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no stale refs)\n" "$label" "${#files[@]}"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -1069,7 +1142,7 @@ run_check_stale_repo_names() {
   printf "    | If your reference belongs in the allowlist (compose project\n" >&2
   printf "    | name / container labels / etc.), add it to the per-line\n" >&2
   printf "    | allowlist in run_check_stale_repo_names with rationale.\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1168,7 +1241,7 @@ run_check_lifecycle_naming() {
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -1176,7 +1249,10 @@ run_check_lifecycle_naming() {
   # Empty since WARP-850 retired the grandfathered prose mentions. The
   # declaration stays so the lookup below keeps working when a future
   # (owner-tracked) entry is added.
-  declare -A allowlist
+  # Newline-delimited rather than an associative array because bash 3.2 has
+  # none (see the version floor at the top of this file). Append a future
+  # entry with:  allowlist+="path/to/file.sh:123"$'\n'
+  local allowlist=""
 
   # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
   # the token re-scan, so they're allowed wherever they appear (robust to
@@ -1213,7 +1289,7 @@ run_check_lifecycle_naming() {
       fi
 
       # Tier 2: explicit per-line comment allowlist.
-      if [ -n "${allowlist[$f:$lineno]:-}" ]; then
+      if _allowlisted "$f:$lineno" "$allowlist"; then
         continue
       fi
 
@@ -1235,7 +1311,7 @@ run_check_lifecycle_naming() {
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no NEW lifecycle-stage naming)\n" "$label" "${#files[@]}"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -1253,7 +1329,7 @@ run_check_lifecycle_naming() {
   printf "    | from old boxes) or another tracked exception, add it to the\n" >&2
   printf "    | grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
   printf "    | retirement owner — never as a silent exception.\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1351,10 +1427,10 @@ run_check_tls_invariants() {
 
   if [ "$failures" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ release/deregister)\n" "$label"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1404,7 +1480,7 @@ run_check_image_pipeline() {
   if [ -n "$missing" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — pipeline file(s) missing\n" "$label"
     printf '%b' "$missing" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -1475,12 +1551,12 @@ run_check_image_pipeline() {
   fi
 
   if [ "$failures" -gt 0 ]; then
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (build-image non-stub; schema + sample manifest valid; scripts clean)\n" "$label"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -1525,14 +1601,14 @@ run_check_docker_build_smoke() {
 
   if ! command -v docker >/dev/null 2>&1; then
     printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
   if ! docker info >/dev/null 2>&1; then
     printf "  ${_RED}FAIL${_RESET}  %s — docker daemon not reachable\n" "$label"
     printf "    | On macOS: start Docker Desktop.\n" >&2
     printf "    | On Linux: ensure /var/run/docker.sock is accessible.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -1561,7 +1637,14 @@ run_check_docker_build_smoke() {
   # --skip-build / --skip-drivers paths actually invokes docker
   # afterward.
   local inner_script
-  inner_script=$(cat <<'INNER'
+  # Read the heredoc straight into the variable instead of capturing `cat` in a
+  # command substitution: bash 3.2 cannot parse a `case` statement inside a
+  # command substitution -- not even one that is only heredoc text -- and the
+  # docker shim below is a `case`. macOS ships bash 3.2 and this script has to
+  # run there (WARP-2449). `read -d ''` consumes to EOF and returns 1 when it
+  # gets there, hence the `|| true` under `set -e`. Unlike `$()` it keeps the
+  # trailing newline; harmless, the value is only ever passed to `bash -c`.
+  IFS= read -r -d '' inner_script <<'INNER' || true
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -1664,7 +1747,6 @@ su - droplet-test -c '
     --skip-drivers
 '
 INNER
-)
 
   # Both-and cleanup: --rm on `docker run` is the SIGKILL safety net (the
   # RETURN trap above doesn't fire on SIGKILL or on a shell kill -9, so
@@ -1691,7 +1773,7 @@ INNER
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (setup.sh ran clean on %s)\n" "$label" "$image"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -1699,7 +1781,7 @@ INNER
   # Tail the output (head 80 lines is enough to see the failure phase
   # and the immediate context; full output is reproducible by hand).
   printf '%s\n' "$out" | tail -80 | sed 's/^/    | /' >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1733,11 +1815,11 @@ _dispatch_check() {
 
 # Render the summary block. Exit code = number of FAIL results (capped at 1).
 _summarize() {
-  local pass=0 fail=0 skip=0 name result
+  local pass=0 fail=0 skip=0 result i
   printf "\n"
   printf "  ──────────────────────────────────\n"
-  for name in "${!CHECK_RESULTS[@]}"; do
-    result="${CHECK_RESULTS[$name]}"
+  for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+    result="${CHECK_RESULT_VALUES[$i]}"
     case "$result" in
       pass) pass=$((pass + 1)) ;;
       fail) fail=$((fail + 1)) ;;
@@ -1756,9 +1838,9 @@ _summarize() {
 
   if [ "$fail" -gt 0 ]; then
     printf "${_RED}FAILED${_RESET} checks:\n" >&2
-    for name in "${!CHECK_RESULTS[@]}"; do
-      if [ "${CHECK_RESULTS[$name]}" = "fail" ]; then
-        printf "  - %s\n" "$name" >&2
+    for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+      if [ "${CHECK_RESULT_VALUES[$i]}" = "fail" ]; then
+        printf "  - %s\n" "${CHECK_RESULT_NAMES[$i]}" >&2
       fi
     done
     return 1
