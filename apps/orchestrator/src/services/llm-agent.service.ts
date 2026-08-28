@@ -64,6 +64,8 @@ import {
   domainOfTool,
   toolNamesForDomain,
 } from "./tool-selection.service.js";
+import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+import { assertToolAdvertisementFitsBudget } from "./tool-budget.service.js";
 import {
   ITERATION_MIN_HEADROOM,
   OUTPUT_RESERVE,
@@ -1251,11 +1253,45 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         typeof lastUser?.content === "string" ? lastUser.content : "",
       pool: filtered.map((t) => t.name),
       conversationToolNames,
+      // WARP-2443 — the dynamic half of the universe. Empty until WARP-2300
+      // registers a remote server, and selection is byte-identical to its
+      // pre-WARP-2443 behaviour while it is.
+      runtimeTools: runtimeToolRegistry.list(),
     });
     const selected = new Set(sel.advertised);
     activeTools = filtered.filter((t) => selected.has(t.name));
   }
   let tools = activeTools.map(toSpec);
+  // WARP-2445 — the assembled advertisement must FIT, and an over-budget one
+  // must be loud. There is no truncation branch here on purpose: trimming
+  // tools until the request fits loses capability silently, and the resulting
+  // degradation gets attributed to model quality rather than to the budget.
+  //
+  // Gated on selection being ON. `TOOL_SELECTION_MODE=off` is the documented
+  // diagnostic/rollback path that deliberately advertises the whole chat pool,
+  // which has not fitted the window since WARP-1893 (measured: the full pool
+  // is ~14K tokens against a ~12.4K tools[] ceiling). That mode leans on the
+  // runtime degradeToFit gate by design, so throwing here would break the
+  // rollback lever rather than protect it. This gate polices SELECTION's
+  // output; when there is no selection there is nothing for it to police.
+  //
+  // Headroom, measured at this SHA: the worst single-domain turn is ~3.2K
+  // tokens and the worst four-domain turn ~8.0K, both far under the ceiling.
+  // The realistic route to tripping this is CONTINUITY ACCUMULATION — a long
+  // conversation touching many domains grows `conversationToolNames` and so
+  // the matched-domain set. That is precisely the case worth a loud failure
+  // rather than a quiet one.
+  if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+    assertToolAdvertisementFitsBudget({
+      specs: tools,
+      contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+      logContext: {
+        model: req.model,
+        selectionMode: req.tool_selection_mode,
+        poolSize: filtered.length,
+      },
+    });
+  }
   // WARP-642 — the exact set of tool names the model was advertised this
   // turn. Used to catch hallucinated tool names (e.g. gpt-oss:20b inventing
   // `knowledge_base_search` instead of the real `search_content`) BEFORE we
@@ -1811,9 +1847,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           // tell the model to retry: one lost iteration, not a failed turn.
           // Deliberately NOT counted as a guard hit (the model named a real
           // tool) and not a real dispatch either.
-          const domain = domainOfTool(call.function.name);
+          // WARP-2443 — resolve across BOTH layers, so a remote tool the
+          // model named self-heals by expanding its domain exactly as a local
+          // one does. Without the runtime list a remote tool would fall to
+          // the single-name branch and the rest of its server stays hidden.
+          const runtimeTools = runtimeToolRegistry.list();
+          const domain = domainOfTool(call.function.name, runtimeTools);
           const domainNames = new Set(
-            domain ? toolNamesForDomain(domain) : [call.function.name],
+            domain
+              ? toolNamesForDomain(domain, runtimeTools)
+              : [call.function.name],
           );
           const keep = new Set([
             ...advertisedNames,
