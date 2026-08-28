@@ -782,12 +782,20 @@ run_check_shellcheck() {
   # `source` directives so cross-file undeclared-var detection works AND
   # so the analyzer doesn't bail on dynamic-path sources we can't
   # statically resolve (the `source "$libdir/x"` pattern in setup.sh).
+  #
+  # WARP-2492: the `&& rc=0 || rc=$?` tail is load-bearing, not noise. This
+  # script runs `set -euo pipefail`, and shellcheck exits non-zero precisely
+  # when it has findings to report. As a BARE assignment the non-zero status
+  # propagates and `set -e` kills the script AT THIS LINE — before the FAIL
+  # banner, before the finding list. The operator got exit 1 and a header,
+  # and never learned which file or which code. An AND-OR list is exempt from
+  # `set -e`, so the status lands in rc and the reporting path below runs.
+  # Same shape the image-pipeline check already used for its own capture.
   local out rc
   out="$(shellcheck \
     --severity=warning \
     --external-sources \
-    "${targets[@]}" 2>&1)"
-  rc=$?
+    "${targets[@]}" 2>&1)" && rc=0 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s))\n" "$label" "${#targets[@]}"
@@ -1909,14 +1917,18 @@ INNER
   # which mangles the `-v <src>:<dst>:<opts>` syntax. On Linux/macOS
   # the variable is unset and ignored. See
   #   https://github.com/moby/moby/issues/24029#issuecomment-292499324
+  # WARP-2492: `&& rc=0 || rc=$?`, not a bare assignment. `docker run` exits
+  # non-zero exactly in the case this check exists to report, and under this
+  # script's `set -e` a bare assignment would abort here — losing the FAIL
+  # banner and the container output that says WHY setup.sh failed. This check
+  # is `--full` only, so that path is rarely walked and the loss went unseen.
   local out rc
   out="$(MSYS_NO_PATHCONV=1 docker run \
     --rm \
     --name "$container_name" \
     -v "$REPO_ROOT:/repo:ro" \
     "$image" \
-    bash -c "$inner_script" 2>&1)"
-  rc=$?
+    bash -c "$inner_script" 2>&1)" && rc=0 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (setup.sh ran clean on %s)\n" "$label" "$image"

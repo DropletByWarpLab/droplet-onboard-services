@@ -671,6 +671,120 @@ test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
 }
 
 # =============================================================================
+# Test: the shellcheck check REPORTS its findings, not just a non-zero exit
+# =============================================================================
+#
+# Bug class this guards (WARP-2492). `ship-check.sh` runs `set -euo pipefail`.
+# `run_check_shellcheck` captured findings with a BARE assignment:
+#
+#     out="$(shellcheck … )"
+#     rc=$?
+#
+# ShellCheck exits non-zero exactly when it has something to report, so under
+# `set -e` that assignment killed the script AT THAT LINE — before the FAIL
+# banner and before the captured findings were printed. The operator got exit
+# 1 and a bare header, and never learned which file or which code. Measured on
+# the parent commit with a directive-shaped comment planted in scripts/lib:
+# stdout was three lines of header, stderr empty, rc 1; `bash -x` showed
+# execution stopping immediately after `out='…'` with the SC1073/SC1072 text
+# captured and never emitted.
+#
+# Especially bad after WARP-2477, which made the gate lint itself and its own
+# harness: a lint that now reads 3.3k more lines of bash would have reported
+# nothing it found.
+#
+# The fix is the `&& rc=0 || rc=$?` tail — an AND-OR list is exempt from
+# `set -e` — which is the shape the image-pipeline check already used.
+#
+# This case asserts the TWO PROPERTIES SEPARATELY, because the bug moved only
+# one of them: the exit code was always correct, it was the OUTPUT that
+# vanished. A test that only checked `rc != 0` (as _assert_check_fails does)
+# passed happily throughout the entire defect — which is why neither of the
+# two existing shellcheck cases ever caught it.
+#
+#   1. non-zero exit          — was ALREADY true before the fix
+#   2. finding text on stdout — was FALSE before the fix
+#
+# Mutation: restore the bare capture. Assertion 2 goes red while assertion 1
+# stays green.
+#
+# The plant is a throwaway file in scripts/lib/ (which the check globs), never
+# git-added, removed on RETURN — and the whole case runs under the disposable
+# index from WARP-2479, so nothing it does can reach the caller's real index.
+test_shellcheck_reports_findings_not_just_exit_code() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+
+  local plant_rel="scripts/lib/zzz-warp-2492-fixture.sh"
+  local plant="$REPO_ROOT_REAL/$plant_rel"
+
+  if [ -e "$plant" ]; then
+    printf "    fixture path already exists: %s\n" "$plant_rel" >&2
+    return 1
+  fi
+
+  if ! _isolated_index_begin; then
+    printf "    could not create an isolated git index — refusing to proceed\n" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2064  # capture the path value at trap-set time
+  trap "rm -f '$plant'; _isolated_index_end" RETURN EXIT
+
+  # 1. Sanity: the gate is green before we plant anything.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" shellcheck; then
+    printf "    baseline shellcheck failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Plant a file the scripts/lib/*.sh glob picks up, carrying a comment
+  #    whose first word is the bare token `shellcheck` — SC1073/SC1072, error
+  #    severity. Assembled at runtime so this harness file does not itself
+  #    contain a directive-shaped comment.
+  {
+    printf '#!/bin/bash\n'
+    printf '# %s is a static analysis tool for shell scripts\n' "shellcheck"
+    printf 'echo warp-2492-fixture\n'
+  } > "$plant"
+
+  if [ ! -s "$plant" ]; then
+    printf "    fixture plant no-op — %s is empty or missing\n" "$plant_rel" >&2
+    return 1
+  fi
+
+  local output rc
+  output="$(REPO_ROOT="$REPO_ROOT_REAL" bash "$SHIP_CHECK" shellcheck 2>&1)" && rc=0 || rc=$?
+
+  # ASSERTION 1 — non-zero exit. True both before and after the fix.
+  if [ "$rc" -eq 0 ]; then
+    printf "    expected non-zero exit from the shellcheck check, got 0\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # ASSERTION 2 — the findings actually reach the operator. This is the one
+  # the bare capture broke: the check died before printing anything.
+  if ! printf '%s' "$output" | grep -q 'SC1073'; then
+    printf "    the check exited %d but never reported its findings —\n" "$rc" >&2
+    printf "    no SC1073 in the output. A capture under 'set -e' is\n" >&2
+    printf "    swallowing the reporting path (WARP-2492).\n" >&2
+    printf "    captured output was:\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  # And the FAIL banner itself, so a bare stack trace cannot satisfy the above.
+  if ! printf '%s' "$output" | grep -q 'FAIL.*shellcheck'; then
+    printf "    findings present but the FAIL banner is missing from the output\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Test: exec-bits catches a chmod-stripped tracked script
 # =============================================================================
 #
@@ -1560,6 +1674,9 @@ _run_test "shellcheck catches new SC2034 violation in scripts/lib (WARP-486)" \
 
 _run_test "shellcheck lints the gate itself and catches a directive-shaped comment (WARP-2477)" \
   test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment
+
+_run_test "shellcheck check reports its findings, not just a non-zero exit (WARP-2492)" \
+  test_shellcheck_reports_findings_not_just_exit_code
 
 _run_test "docker-build-smoke shim rejects unknown docker subcommand" \
   test_docker_build_smoke_shim_rejects_unknown_subcommand
