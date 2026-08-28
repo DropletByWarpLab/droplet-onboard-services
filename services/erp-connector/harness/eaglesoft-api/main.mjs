@@ -22,6 +22,14 @@ const tls = process.env.MOCK_ES_TLS !== "0";
 
 const box = await startMockEaglesoftApi({ port, hostname, tls, quiet: false });
 
+// CodeQL js/clear-text-logging (#222): never echo the password, fixture or
+// not — this banner is what ends up pasted into tickets and CI logs. Say
+// where it comes from instead; the value is DEV_CREDENTIALS in fixture.mjs
+// unless MOCK_ES_PASSWORD overrides it.
+const passwordSource = process.env.MOCK_ES_PASSWORD
+  ? "<redacted: set via MOCK_ES_PASSWORD>"
+  : "<redacted: fixture default, see DEV_CREDENTIALS in fixture.mjs>";
+
 console.log(`
   Dummy Eaglesoft API box (SYNTHETIC — not Patterson's real contract)
 
@@ -31,7 +39,7 @@ console.log(`
     CA cert       ${box.caCertPath ?? "(TLS disabled)"}
     Credentials   integrationKey=${box.credentials.integrationKey}
                   userId=${box.credentials.userId}
-                  password=${box.credentials.password}
+                  password=${passwordSource}
 
   Fault injection (make the box misbehave):
     curl -sk -X PUT ${box.url}/__control/faults -H 'content-type: application/json' \\

@@ -19,6 +19,7 @@ import {
 } from "@droplet/shared-types";
 
 import { __setColumnCryptoKeyForTest } from "./column-crypto.service.js";
+import { credentialsPurgedFor } from "./integrations.service.js";
 import {
   buildCredentialView,
   openSaasCredentials,
@@ -122,6 +123,10 @@ function rowWith(overrides: Partial<SaasConnectionRow> = {}): SaasConnectionRow 
     id: ROW_ID,
     provider: FIXTURE.id,
     status: "PROVISIONING",
+    providerTokensEnc: null,
+    // The Eaglesoft REST track's column. Explicitly null rather than absent:
+    // "was this credential purged" reads BOTH columns, and a fixture that
+    // omitted one would answer the question with a column it never set.
     apiCredentialsEnc: null,
     providerConfig: { provider: FIXTURE.id, accountId: "acct-1", region: "us" },
     updatedAt: new Date("2026-08-27T00:00:00.000Z"),
@@ -130,7 +135,7 @@ function rowWith(overrides: Partial<SaasConnectionRow> = {}): SaasConnectionRow 
 }
 
 function sealedRow(secrets: Record<string, string>, overrides: Partial<SaasConnectionRow> = {}) {
-  return rowWith({ apiCredentialsEnc: sealSaasCredentials(ROW_ID, secrets), ...overrides });
+  return rowWith({ providerTokensEnc: sealSaasCredentials(ROW_ID, secrets), ...overrides });
 }
 
 beforeEach(() => {
@@ -155,8 +160,11 @@ describe("buildCredentialView — redaction", () => {
     // habit of shipping whatever column the schema grows next.
     expect(json).not.toContain(SEEDED_SECRET);
     expect(json).not.toContain("OTHER-SEEDED-VALUE");
-    expect(json).not.toContain("apiCredentialsEnc");
+    // Both encrypted columns, not just the one this path writes: the view is
+    // built from a row that could carry either, and a spread would ship both.
     expect(json).not.toContain("providerTokensEnc");
+    expect(json).not.toContain("apiCredentialsEnc");
+    expect(Object.keys(view)).not.toContain("providerTokensEnc");
     expect(Object.keys(view)).not.toContain("apiCredentialsEnc");
   });
 
@@ -174,7 +182,7 @@ describe("buildCredentialView — redaction", () => {
   });
 
   it("reports hasValue false after a clear", () => {
-    const view = buildCredentialView(FIXTURE, rowWith({ apiCredentialsEnc: null }));
+    const view = buildCredentialView(FIXTURE, rowWith({ providerTokensEnc: null }));
     expect(view.fields.find((f) => f.name === "apiKey")?.hasValue).toBe(false);
     expect(view.hasCredentials).toBe(false);
   });
@@ -234,6 +242,109 @@ describe("saasConnectionState — honesty", () => {
   });
 });
 
+/**
+ * WARP-2489 — the purge fact `/integrations/credentials` renders.
+ *
+ * WARP-2483 gave that page its "credential removed" line and fed it
+ * `!hasCredentials`. Those are different questions. `hasCredentials` is an
+ * `every()` over the descriptor's DECLARED secrets, so a provider with two of
+ * them and one stored answers `false` — and the page then told an admin the key
+ * had been destroyed while it was still sealed on the row, on the one screen in
+ * the product where ADR-041 §2's promise is made to the person it is made to.
+ *
+ * `FIXTURE` declares exactly that shape. WARP-2483's own suite exercised a
+ * ONE-secret fixture, where `!hasCredentials` and "the blob is gone" coincide,
+ * which is why it was green over a defect.
+ *
+ * The view now carries the box's own answer, from `credentialsPurgedFor` — the
+ * same call the hub's payload is built from, not a second implementation of it.
+ */
+describe("buildCredentialView — credentialsPurged", () => {
+  it("refuses to claim a purge while one of two declared secrets is still stored", () => {
+    // The fixture WARP-2483's suite lacked: FIXTURE declares `apiKey` AND
+    // `webhookSecret`; only `apiKey` is sealed here.
+    const row = sealedRow({ apiKey: SEEDED_SECRET }, { status: "DISABLED" });
+    const view = buildCredentialView(FIXTURE, row);
+
+    // The two booleans genuinely disagree at this row, and the disagreement IS
+    // the defect: the old code read the left one as the answer to the right
+    // one's question.
+    expect(view.hasCredentials).toBe(false);
+    // Mutation: `credentialsPurged: !hasCredentials` → true → red, and an
+    // admin is told a key was destroyed that Postgres can still open.
+    expect(view.credentialsPurged).toBe(false);
+  });
+
+  it("reports the purge when the row holds neither credential blob", () => {
+    const view = buildCredentialView(
+      FIXTURE,
+      rowWith({ status: "DISABLED", providerTokensEnc: null, apiCredentialsEnc: null }),
+    );
+    // Mutation: hardcode `false` → red. The finished state has to be sayable
+    // too, or the page can never confirm the purge actually happened.
+    expect(view.credentialsPurged).toBe(true);
+  });
+
+  it("counts the column hasCredentials never looks at", () => {
+    // `hasCredentials` is computed from `providerTokensEnc` alone. A DISABLED
+    // row still holding `apiCredentialsEnc` has NOT been purged, the hub
+    // already says so, and the page must not contradict it.
+    const view = buildCredentialView(
+      FIXTURE,
+      rowWith({
+        status: "DISABLED",
+        providerTokensEnc: null,
+        apiCredentialsEnc: "dcv1:leftover-eaglesoft-blob",
+      }),
+    );
+    expect(view.hasCredentials).toBe(false);
+    // Mutation: drop `apiCredentialsEnc` from the predicate → true → red.
+    expect(view.credentialsPurged).toBe(false);
+  });
+
+  it("is false for a connection nobody disconnected, and for one never configured", () => {
+    const connected = buildCredentialView(
+      FIXTURE,
+      sealedRow(
+        { apiKey: SEEDED_SECRET, webhookSecret: "OTHER-SEEDED-VALUE" },
+        { status: "CONNECTED" },
+      ),
+    );
+    expect(connected.hasCredentials).toBe(true);
+    expect(connected.credentialsPurged).toBe(false);
+
+    // Nothing was ever stored, so nothing went. Explicit `false`, never an
+    // omitted key — absence must not read as "unknown" on the wire.
+    const absent = buildCredentialView(FIXTURE, null);
+    // Mutation: drop the `status === "DISABLED"` half of the predicate → a
+    // provider nobody ever configured claims its credential was removed → red.
+    expect(absent.credentialsPurged).toBe(false);
+    expect(Object.keys(absent)).toContain("credentialsPurged");
+  });
+
+  it("gives the same answer the hub's payload does, from the same call", () => {
+    // Not "kept in sync" — the same function. Mutation: re-derive it inside
+    // `buildCredentialView` from `hasCredentials` and the one-of-two row goes
+    // red while every other row in this table stays green, which is precisely
+    // how the defect survived review.
+    const rows: SaasConnectionRow[] = [
+      sealedRow({ apiKey: SEEDED_SECRET }, { status: "DISABLED" }),
+      sealedRow({ apiKey: SEEDED_SECRET, webhookSecret: "OTHER-SEEDED-VALUE" }, {
+        status: "DISABLED",
+      }),
+      rowWith({ status: "DISABLED", providerTokensEnc: null }),
+      rowWith({ status: "DISABLED", apiCredentialsEnc: "dcv1:leftover-eaglesoft-blob" }),
+      sealedRow({ apiKey: SEEDED_SECRET }, { status: "CONNECTED" }),
+      rowWith({ status: "ERROR" }),
+    ];
+    for (const row of rows) {
+      expect(buildCredentialView(FIXTURE, row).credentialsPurged).toBe(
+        credentialsPurgedFor(row),
+      );
+    }
+  });
+});
+
 describe("resolveCredentialUpdate — the three-way rule", () => {
   it("OMIT keeps the stored ciphertext byte-identical", () => {
     const row = sealedRow({ apiKey: SEEDED_SECRET });
@@ -241,7 +352,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
 
     // Mutation: treat an omitted field as a clear, and this goes red — the
     // column would be set to null by an admin who only edited the region.
-    expect(resolved.apiCredentialsEnc).toBeUndefined();
+    expect(resolved.providerTokensEnc).toBeUndefined();
     expect(resolved.hasSecret).toBe(true);
     expect(resolved.cleared).toBe(false);
   });
@@ -250,7 +361,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     const row = sealedRow({ apiKey: SEEDED_SECRET });
     const resolved = resolveCredentialUpdate(FIXTURE, row, { apiKey: "" }, ROW_ID);
 
-    expect(resolved.apiCredentialsEnc).toBeNull();
+    expect(resolved.providerTokensEnc).toBeNull();
     expect(resolved.hasSecret).toBe(false);
     expect(resolved.cleared).toBe(true);
     expect(statusAfterCredentialUpdate("CONNECTED", resolved.hasSecret)).toBe(
@@ -262,8 +373,8 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     const row = sealedRow({ apiKey: "rk_test_old" });
     const resolved = resolveCredentialUpdate(FIXTURE, row, { apiKey: "rk_live_new" }, ROW_ID);
 
-    expect(resolved.apiCredentialsEnc).toBeTypeOf("string");
-    expect(openSaasCredentials(ROW_ID, resolved.apiCredentialsEnc as string)).toEqual({
+    expect(resolved.providerTokensEnc).toBeTypeOf("string");
+    expect(openSaasCredentials(ROW_ID, resolved.providerTokensEnc as string)).toEqual({
       apiKey: "rk_live_new",
     });
   });
@@ -274,9 +385,9 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     const omitted = resolveCredentialUpdate(FIXTURE, row, {}, ROW_ID);
     const emptied = resolveCredentialUpdate(FIXTURE, row, { apiKey: "" }, ROW_ID);
 
-    expect(omitted.apiCredentialsEnc).toBeUndefined();
-    expect(emptied.apiCredentialsEnc).toBeNull();
-    expect(omitted.apiCredentialsEnc).not.toBe(emptied.apiCredentialsEnc);
+    expect(omitted.providerTokensEnc).toBeUndefined();
+    expect(emptied.providerTokensEnc).toBeNull();
+    expect(omitted.providerTokensEnc).not.toBe(emptied.providerTokensEnc);
   });
 
   it("clears ONE secret without disturbing the other", () => {
@@ -285,7 +396,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
 
     expect(resolved.hasSecret).toBe(true);
     expect(resolved.cleared).toBe(false);
-    expect(openSaasCredentials(ROW_ID, resolved.apiCredentialsEnc as string)).toEqual({
+    expect(openSaasCredentials(ROW_ID, resolved.providerTokensEnc as string)).toEqual({
       apiKey: "rk_live_keep",
     });
   });

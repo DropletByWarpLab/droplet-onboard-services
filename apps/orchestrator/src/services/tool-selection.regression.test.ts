@@ -91,9 +91,13 @@ interface Turn {
 }
 
 /**
- * The corpus. 14 turns spanning 12 domains, of which 3 require a remote tool.
+ * The corpus. 19 turns, of which 4 require a remote tool — the last four
+ * added by WARP-2454, which fixed the rules that used to miss them.
  * Phrased as real sentences; the required tool is named from the shipping
  * catalog, so a turn goes red the moment selection stops reaching it.
+ *
+ * The coverage floor is asserted below rather than stated here, so growing
+ * the corpus does not require remembering to update a count in a comment.
  */
 const TURNS: Turn[] = [
   {
@@ -173,6 +177,38 @@ const TURNS: Turn[] = [
     message: "and post that where the team will see it",
     requires: "slack_send_message",
     priorCalls: ["slack_send_message"],
+    remote: true,
+  },
+  // ── WARP-2454 — the four sentences this harness pinned as GAPS ─────────
+  //
+  // These four were carried below as assertions that selection MISSED them,
+  // with a message saying a red would be good news. It was. They are now
+  // ordinary turns, which is the whole point of having pinned them: a gap
+  // recorded only in a report evaporates, a gap recorded as a test gets
+  // promoted the day someone fixes it.
+  {
+    label: "files / a document named by what it IS, not by the word 'document'",
+    message: "where did I put the signed lease agreement?",
+    requires: "search_files",
+  },
+  {
+    label: "calendar / availability phrased as 'am I free'",
+    message: "am I free Thursday afternoon?",
+    requires: "list_events",
+  },
+  {
+    label: "email / 'reply', which the old `replied?` alternation never matched",
+    message: "did the accountant ever reply about the VAT return?",
+    requires: "email_search",
+  },
+  {
+    // The counterpart to the continuity turn above, and the reason both are
+    // kept: this one has NO priorCalls, so it can only be carried by the new
+    // keyword rule. Delete that rule and this goes red while the continuity
+    // turn stays green — which is what proves they test different paths.
+    label: "REMOTE team-chat keyword / fresh turn, no continuity",
+    message: "post that in the team slack channel",
+    requires: "slack_send_message",
     remote: true,
   },
 ];
@@ -292,70 +328,92 @@ describe("WARP-2447 — selection never drops the tool the turn needed", () => {
 });
 
 /**
- * KNOWN GAPS this harness surfaced — recorded, not fixed.
+ * WARP-2454 — THE GAPS THIS HARNESS PINNED, NOW CLOSED.
  *
- * Building the corpus above turned up three sentences that a household would
- * plainly type and that today's keyword rules do not match at all. They are
- * the same class of defect as the WARP-1921 "people" gap and the WARP-2058
- * missing-`pm`-rule gap: the turn advertises the floor and nothing else, the
- * model has no way to answer, and there is no error anywhere.
+ * Building the corpus for WARP-2348 turned up sentences a household would
+ * plainly type that the keyword rules did not match at all — the same class
+ * of defect as the WARP-1921 "people" gap and the WARP-2058 missing-`pm`-rule
+ * gap: the turn advertises the floor and nothing else, the model has no way
+ * to answer, and there is no error anywhere.
  *
- * They are PRE-EXISTING and out of WARP-2348's scope — this story is about
- * per-turn selection over an over-subscribed window and a dynamic universe,
- * not about widening the local vocabulary. Fixing them here would also mean
- * shipping a behaviour change nobody asked for inside a budget story.
+ * They were out of WARP-2348's scope, so rather than being left in a report
+ * to evaporate they were pinned as assertions of CURRENT (broken) behaviour,
+ * each carrying the note "a red here is GOOD NEWS". WARP-2454 turned them
+ * red on purpose and they have been promoted into `TURNS` above.
  *
- * But leaving them only in a report means they evaporate. So they are pinned
- * as assertions of CURRENT behaviour. When someone widens the rules, these go
- * red — which is the prompt to delete the entry and move the sentence up into
- * `TURNS` where it belongs. A red here is GOOD NEWS.
+ * What remains here is the other half of each fix — the NEGATIVES. They are
+ * the reason this block was inverted rather than deleted. Every one of these
+ * four defects could have been "fixed" by a rule wide enough to match its
+ * sentence and half the language besides, and a rule that over-matches is not
+ * a fixed rule: it is the same silent cost moved from "the tool is missing"
+ * to "the window is full of tools the turn never needed". These assertions
+ * are what stop the next widening from going too far.
  */
-describe("known selection gaps (pre-existing, recorded not fixed)", () => {
-  const gaps = [
-    {
-      label: "files — a document named by what it IS, not by the word 'document'",
-      message: "where did I put the signed lease agreement?",
-      wants: "search_files",
-      why: "the files rule lists container words (files/docs/pdf/invoices) but no rule matches a document named only by its subject.",
-    },
-    {
-      label: "calendar — availability phrased as 'am I free'",
-      message: "am I free Thursday afternoon?",
-      wants: "list_events",
-      why: "the calendar rule has the literal 'free time' but not bare 'free', so the most natural availability question misses.",
-    },
-    {
-      label: "email — 'reply' (the regex only matches 'replied')",
-      message: "did the accountant ever reply about the VAT return?",
-      wants: "email_search",
-      why: "the email rule's `replied?` alternation matches 'replied' and 'replie' but NOT 'reply' or 'replies'. Almost certainly meant to be repl(y|ies|ied).",
-    },
-  ];
+describe("WARP-2454 — the closed gaps stayed closed, and stayed narrow", () => {
+  const advertisedFor = (message: string, priorCalls: string[] = []) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage: message,
+      pool: POOL_WITH_REMOTE,
+      conversationToolNames: priorCalls,
+      runtimeTools: REMOTE_TOOLS,
+    }).advertised;
 
-  for (const g of gaps) {
-    it(`STILL MISSES: ${g.label}`, () => {
-      const advertised = selectAdvertisedTools({
-        mode: "domains",
-        userMessage: g.message,
-        pool: POOL_WITH_REMOTE,
-        conversationToolNames: [],
-        runtimeTools: REMOTE_TOOLS,
-      }).advertised;
-      expect(
-        advertised,
-        `GOOD NEWS IF RED: "${g.message}" now reaches ${g.wants}. ` +
-          `Reason it did not: ${g.why} Move this case into TURNS and delete ` +
-          `it from the gap list.`,
-      ).not.toContain(g.wants);
-    });
-  }
+  it.each([
+    // Each pair is [sentence that MUST NOT reach the domain, the tool that
+    // proves it]. The sentences are chosen to sit just outside the rule that
+    // was widened, which is where an over-widening shows up first.
+    ["is the free trial still on?", "list_events", "calendar/free"],
+    ["how much free space is left on the drive?", "list_events", "calendar/free"],
+    ["find me a good plumber", "search_files", "files/subject"],
+    ["what channel is the game on tonight?", "slack_send_message", "team_chat"],
+    ["I need a thread that matches the blue cushion", "slack_send_message", "team_chat"],
+  ])("%s does not drag in %s (%s)", (message, tool) => {
+    expect(
+      advertisedFor(message as string),
+      `"${message}" pulled in ${tool} — the rule widened too far`,
+    ).not.toContain(tool as string);
+  });
 
-  it("the email rule's `replied?` alternation is the specific bug named above", () => {
-    // Isolated so the diagnosis is not folded into a selection assertion:
-    // this is a regex defect, independent of any pool or turn.
-    const emailRule = /\b(e-?mails?|inbox|newsletters?|unread|spam|replied?|sent)\b/i;
-    expect(emailRule.test("did she reply")).toBe(false);
-    expect(emailRule.test("any replies")).toBe(false);
-    expect(emailRule.test("she replied")).toBe(true);
+  it("the email rule matches every form of reply a person writes", () => {
+    // Was: an isolated assertion that `\b(...|replied?|...)\b` FAILED on
+    // "reply" and "replies" — the specific regex defect, kept out of a
+    // selection assertion so the diagnosis stayed legible.
+    //
+    // Now it exercises the SHIPPED rule instead of a copy of it. The old
+    // form duplicated the pattern into the test, which is exactly how a test
+    // and the rule it guards drift apart; going through
+    // `selectAdvertisedTools` means this cannot pass while the real rule is
+    // broken. MUTATION: restore `replied?` and the first two go red.
+    for (const message of [
+      "did she ever reply to that?",
+      "any replies from the landlord?",
+      "she replied last week",
+      "is he still replying on that one?",
+    ]) {
+      expect(advertisedFor(message), `"${message}" missed the email domain`).toContain(
+        "email_search",
+      );
+    }
+  });
+
+  it("team_chat's keyword path and continuity path are independent", () => {
+    // The pairing the ticket asks for, asserted in one place: the fresh turn
+    // is carried by the rule, the follow-up is carried by continuity, and
+    // the follow-up's own words match no team_chat rule. Delete the rule and
+    // only the first of these goes red.
+    expect(advertisedFor("post that in the team slack channel")).toContain(
+      "slack_send_message",
+    );
+    expect(
+      advertisedFor("and post that where the team will see it"),
+      "the continuity turn's own wording must NOT match the keyword rule, " +
+        "or it stops isolating the continuity path",
+    ).not.toContain("slack_send_message");
+    expect(
+      advertisedFor("and post that where the team will see it", [
+        "slack_send_message",
+      ]),
+    ).toContain("slack_send_message");
   });
 });

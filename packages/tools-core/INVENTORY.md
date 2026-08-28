@@ -77,7 +77,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | set_port_vlan | switch | Assign a switch port to a VLAN (tagged/untagged). | true | true | gateway |
 | get_switch_poe | switch | PoE power-delivery status per port. | false | false | gateway |
 | set_port_poe | switch | Enable/disable PoE on a port. | true | true | gateway |
-| detect_wan_port | switch | Auto-detect which switch port is the WAN uplink. | true | false | gateway |
+| detect_wan_port | switch | Auto-detect which switch port is the WAN uplink. | true | true | gateway |
 | setup_camera_ports | switch | One-click VLAN + port setup for cameras. | true | true | gateway |
 | create_event | calendar | Create a calendar event on the user's local Droplet calendar. | true | false | orchestrator |
 | list_events | calendar | List calendar events in a time range. | false | false | orchestrator |

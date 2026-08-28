@@ -16,17 +16,29 @@
  *
  * Shape, and why each piece is the shape it is:
  *
- *   - **Secrets live in `apiCredentialsEnc`**, sealed with column-crypto's
- *     `deriveSaasCredentialKey()` and AAD-bound to the row id, so a blob copied
- *     to another connection fails closed instead of authenticating as the wrong
- *     company. NOT `providerTokensEnc`: that column is the ERP cloud track's
- *     rotating OAuth material under a different key with a different lifecycle,
- *     and sharing a column would make "which key opens this?" a question about
- *     the row's history. The two encodings are distinguishable anyway — this
- *     one is always `dcv1:`-prefixed, the legacy Eaglesoft triple is not.
- *   - **Non-secret fields live in `providerConfig`**, validated through the
- *     descriptor's own `parseProviderConfigWith`, so the orchestrator and the
- *     dashboard cannot disagree about what a valid config is.
+ *   - **Secrets live in `providerTokensEnc`** (`schema.prisma:4396`), sealed
+ *     with column-crypto's `deriveSaasCredentialKey()` and AAD-bound to the row
+ *     id, so a blob copied to another connection fails closed instead of
+ *     authenticating as the wrong company. This is ADR-042 §5, and it is the
+ *     doctrine rather than a preference: `providerTokensEnc` is the CLOUD-track
+ *     credential column, and it is what the connectors' `TokenResolver` reads.
+ *     NOT `apiCredentialsEnc` (`:4353`) — that column is the Eaglesoft REST
+ *     track's static {integrationKey,userId,password} triple under the older
+ *     `encryptSecret`, on a LAN transport this configurator never touches.
+ *     An earlier pass of this file wrote `apiCredentialsEnc` because the
+ *     subtasks named it; ADR-042 is the authority and the column was corrected.
+ *
+ *     The two writers of `providerTokensEnc` stay disjoint by PROVIDER, and
+ *     each fails closed against the other's blobs: the ERP cloud track seals
+ *     under `deriveErpCloudTokenKey()` with the bare row id as AAD, this path
+ *     under `deriveSaasCredentialKey()` with a `saas-credential:` AAD, so
+ *     neither can open the other's ciphertext — it reads as "no credential",
+ *     never as a wrong one.
+ *   - **Non-secret connection facts live in `providerConfig`** (`:4383`) —
+ *     ADR-042 §5 again — validated through the descriptor's own
+ *     `parseProviderConfigWith`, so the orchestrator and the dashboard cannot
+ *     disagree about what a valid config is. Never inside the encrypted blob,
+ *     and never re-derived per request.
  *   - **The read view is assembled field by field.** Never `{ ...row }`. A
  *     spread ships every future column — including the next encrypted one
  *     somebody adds — straight to the browser, and does it silently.
@@ -48,6 +60,7 @@ import {
   isEncryptedColumn,
   saasCredentialAad,
 } from "./column-crypto.service.js";
+import { credentialsPurgedFor } from "./integrations.service.js";
 
 /** The `IntegrationStatus` values this service reads and writes. Mirrors the
  *  Prisma enum; kept as a local union so the service is testable against a
@@ -94,6 +107,19 @@ export interface SaasConnectionRow {
   id: string;
   provider: string;
   status: string;
+  /** ADR-042 §5 — where a customer-supplied credential lives. */
+  providerTokensEnc: string | null;
+  /**
+   * WARP-2489 — the Eaglesoft REST track's column. This service never reads a
+   * credential OUT of it (that is `erp-provider.ts`'s static triple under the
+   * older `encryptSecret`), but "has this connection's credential material
+   * been removed" is a question about the ROW, and the row has two credential
+   * columns. Answering it from `providerTokensEnc` alone would let the
+   * credentials page report a purge that the hub — reading both — denies.
+   *
+   * Required, not optional: a caller that narrows its `select` and drops the
+   * column must fail to compile rather than silently claim a purge.
+   */
   apiCredentialsEnc: string | null;
   providerConfig: unknown;
   updatedAt?: Date | null;
@@ -133,8 +159,31 @@ export interface SaasCredentialView {
   category: string;
   /** Explicit — a provider with no row reports NOT_CONFIGURED, never `null`. */
   state: SaasConnectionState;
-  /** Whether ANY secret field is stored. The per-field truth is in `fields`. */
+  /**
+   * Whether EVERY declared secret field is stored — an `every()`, not an
+   * `any()`. It answers "is this connection usable", which is what `state` is
+   * derived from.
+   *
+   * It is emphatically NOT the answer to "was the credential removed"
+   * (WARP-2489): a provider declaring two secrets with one stored reports
+   * `false` here while that one is still sealed on the row. Read
+   * {@link SaasCredentialView.credentialsPurged} for that question.
+   */
   hasCredentials: boolean;
+  /**
+   * WARP-2489 — whether this connection's credential material has actually
+   * been removed from the row, so `/integrations/credentials` can say
+   * "disconnected · credential removed" only when it is true.
+   *
+   * Produced by `credentialsPurgedFor` — the SAME call that builds the hub's
+   * `IntegrationSummary.credentialsPurged`, so the two surfaces cannot give an
+   * owner opposite answers about the same row. It reads the explicit `status`
+   * enum and both credential columns; it is never inferred from a null, and
+   * never from `hasCredentials`.
+   *
+   * `false`, never omitted, for an unconfigured provider: nothing was purged.
+   */
+  credentialsPurged: boolean;
   configured: boolean;
   fields: SaasCredentialFieldView[];
   /** Current values of the NON-secret fields only. Secrets never appear here. */
@@ -268,16 +317,19 @@ export function buildCredentialView(
   row: SaasConnectionRow | null,
 ): SaasCredentialView {
   const storedSecrets: Record<string, string> = (() => {
-    if (!row?.apiCredentialsEnc) return {};
-    // A legacy non-`dcv1:` blob (the pre-descriptor Eaglesoft triple) is not
-    // ours to read; report no SaaS credential rather than guessing at a format.
-    if (!isEncryptedColumn(row.apiCredentialsEnc)) return {};
+    if (!row?.providerTokensEnc) return {};
+    // A non-`dcv1:` blob is not ours to read; report no SaaS credential rather
+    // than guessing at a format.
+    if (!isEncryptedColumn(row.providerTokensEnc)) return {};
     try {
-      return openSaasCredentials(row.id, row.apiCredentialsEnc);
+      return openSaasCredentials(row.id, row.providerTokensEnc);
     } catch {
-      // Unreadable after a factory reset regenerated DEVICE_SECRET_KEY. The
-      // credential is gone in every sense that matters, so it reads as absent —
-      // which routes the person to "paste it again", the only thing that works.
+      // Two cases, both correctly "absent": a factory reset regenerated
+      // DEVICE_SECRET_KEY, or the blob is the ERP cloud track's OAuth material
+      // sealed under `deriveErpCloudTokenKey()` — a different key and a
+      // different AAD, so it fails the GCM tag check here. Either way the
+      // credential is gone in every sense that matters, which routes the person
+      // to "paste it again", the only thing that works.
       return {};
     }
   })();
@@ -314,6 +366,19 @@ export function buildCredentialView(
     category: descriptor.category,
     state: saasConnectionState(row?.status ?? "NOT_CONFIGURED", hasCredentials),
     hasCredentials,
+    // WARP-2489 — the box's own answer, from the hub's own derivation. NOT
+    // `!hasCredentials`, which is an `every()` over the declared secrets and
+    // goes false the moment one of two is missing while the other is still
+    // sealed right here on this row.
+    //
+    // A row that does not exist is NOT_CONFIGURED, so the predicate returns
+    // false through its `status === "DISABLED"` half — nothing was stored, so
+    // nothing was purged. Spelling the absent row out as an explicit
+    // all-null NOT_CONFIGURED keeps that a stated fact rather than a
+    // conclusion drawn from `null`.
+    credentialsPurged: credentialsPurgedFor(
+      row ?? { status: "NOT_CONFIGURED", apiCredentialsEnc: null, providerTokensEnc: null },
+    ),
     configured: row !== null,
     fields,
     values,
@@ -327,7 +392,7 @@ export function buildCredentialView(
 export interface ResolvedCredentialUpdate {
   /** The blob to persist, `null` to clear the column, or `undefined` to leave
    *  it exactly as it is (byte-identical — the "omit = keep" case). */
-  apiCredentialsEnc: string | null | undefined;
+  providerTokensEnc: string | null | undefined;
   /** The `providerConfig` JSON to persist, or `undefined` to leave it. */
   providerConfig: Record<string, string | number> | undefined;
   /** True when at least one secret field ends up stored. Audited as a boolean
@@ -363,9 +428,9 @@ export function resolveCredentialUpdate(
   const fieldErrors: Record<string, string[]> = {};
 
   const stored: Record<string, string> = (() => {
-    if (!row?.apiCredentialsEnc || !isEncryptedColumn(row.apiCredentialsEnc)) return {};
+    if (!row?.providerTokensEnc || !isEncryptedColumn(row.providerTokensEnc)) return {};
     try {
-      return openSaasCredentials(row.id, row.apiCredentialsEnc);
+      return openSaasCredentials(row.id, row.providerTokensEnc);
     } catch {
       return {};
     }
@@ -444,7 +509,7 @@ export function resolveCredentialUpdate(
   const hasSecret = remaining > 0;
 
   return {
-    apiCredentialsEnc: !touchedSecret
+    providerTokensEnc: !touchedSecret
       ? undefined // omit = keep: the column is not in the update at all
       : hasSecret
         ? sealSaasCredentials(connectionId, nextSecrets)

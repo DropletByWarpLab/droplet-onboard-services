@@ -146,15 +146,23 @@ describe("describeToolError — message_excerpt is envelope-only and scrubbed", 
   });
 
   it("drops an excerpt that still looks like key material after redaction", () => {
+    // A PEM whose END delimiter falls outside the pre-redaction bound
+    // (MAX_REDACT_INPUT = 64k) cannot be matched by the block rule — the
+    // excerpt must be dropped rather than shipped half-scrubbed.
+    //
+    // The body is laid out as real PEM is — 64-column base64 lines — not as
+    // one 200k-character run. `redactSecrets`' sensitive-key rule starts with
+    // `[A-Za-z0-9_.-]*`, which is quadratic over a single unbroken
+    // alphanumeric run: the 64k window costs ~17 s on Node 26 (measured
+    // outside vitest too), blowing the 10 s budget, versus ~4 ms line-wrapped.
+    // Only the "no END within the bound" property is under test here.
+    const body = Array.from({ length: 3200 }, () => "A".repeat(64)).join("\n");
     const d = describeWire(
       JSON.stringify({
         status: "error",
         error: {
           code: "NC_REQUEST_FAILED",
-          // A PEM whose END delimiter falls outside the pre-redaction bound
-          // cannot be matched by the block rule — the excerpt must be dropped
-          // rather than shipped half-scrubbed.
-          message: `-----BEGIN RSA PRIVATE KEY-----\n${"A".repeat(200_000)}`,
+          message: `-----BEGIN RSA PRIVATE KEY-----\n${body}`,
         },
       }),
       { includeExcerpt: true },

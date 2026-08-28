@@ -4508,6 +4508,122 @@ model ErpSyncCursor {
   @@index([connectionId])
 }
 
+/// What one reconciliation sweep found for one (connection, entity)
+/// (WARP-2463). An EXPLICIT enum, and the row is written on EVERY sweep —
+/// including a clean one — so "no drift" is a stored fact rather than the
+/// absence of a row. Absence must never be the signal: a sweep that never
+/// ran and a sweep that found nothing are opposite answers to "is the
+/// incremental path trustworthy for this vendor", and only a row can tell
+/// them apart.
+///
+/// `reconcile.ts` emits TWO independent drift classes and both can fire on
+/// the same pass, so the co-occurrence is enumerated as its own member
+/// rather than left to a nullable second column. One column fully determines
+/// what the sweep found; there is no pair of fields a reader has to combine
+/// (and no combination a reader can get wrong).
+enum ErpDriftClassification {
+  /// The full re-enumeration found nothing the incremental read had missed,
+  /// and its high-water mark was not ahead. The incremental path was
+  /// trustworthy for this entity on this pass — the signal that justifies
+  /// lengthening the sweep cadence, and the reason a zero-drift sweep still
+  /// writes a row.
+  NONE
+  /// Records the full read returned that the incremental read did not, with
+  /// a marker STRICTLY AFTER the watermark. The vendor's own filter said
+  /// nothing had changed and a full read disagreed — the HubSpot (eventually
+  /// consistent Search) and Stripe (no guaranteed event ordering) class.
+  MISSED_NEWER
+  /// The full read's high-water mark is ahead of the incremental read's: the
+  /// incremental path is running behind the account and every subsequent tick
+  /// inherits the gap. The Xero class, where `UpdatedDateUTC` does not move on
+  /// a DueDate / SentToContact / contact-balance change.
+  WATERMARK_BEHIND
+  /// Both of the above on the same pass. Enumerated explicitly because the
+  /// model stores ONE row per (connection, entity) per sweep, so a single
+  /// column has to be able to say "both" — and because dropping either half
+  /// would misreport the diagnosis, which is the whole product of this table.
+  MISSED_NEWER_AND_WATERMARK_BEHIND
+}
+
+/// One reconciliation sweep's finding for one (connection, entity)
+/// (WARP-2463).
+///
+/// WARP-2218 built the sweep and the drift report it emits, but the report
+/// reached only a log line and an ActivityRow scope. Log retention on the box
+/// is not designed as a data store, so the one question the sweep exists to
+/// answer — *has the incremental path been trustworthy for this vendor, and
+/// is it getting better or worse* — had no queryable answer. This model is
+/// that answer.
+///
+/// ## Counts and timestamps ONLY
+///
+/// The same PHI-free rule the audit scope obeys, and here it is structural
+/// rather than a convention: there is no column a record identifier, a
+/// customer name, an amount or an email could land in. `watermarkAt` and
+/// `earliestMissedAt` are `DateTime`, NOT the vendor's raw marker string —
+/// a vendor whose ordering key is the record id (Stripe cursors are object
+/// ids) would otherwise put an invoice number in this table through a column
+/// that looks like a timestamp. A marker that is not a real timestamp is
+/// stored as NULL, which loses nothing an operator was going to read anyway.
+///
+/// This table is a diagnostics artefact. A diagnostics artefact full of
+/// invoice numbers is a customer-content export wearing a different label.
+model ErpDriftRecord {
+  id String @id @default(cuid())
+
+  /// The `IntegrationConnection` this sweep covered. A plain column, matching
+  /// `ErpSyncCursor.connectionId` — no Prisma relation, so no foreign key and
+  /// no back-relation churn on `IntegrationConnection`.
+  connectionId String
+
+  /// Vendor key (`xero`, `stripe`, ...). Denormalised deliberately: the
+  /// question this table exists to answer is asked PER VENDOR ("has the
+  /// incremental path been trustworthy for Xero this month"), and a vendor key
+  /// is a product identifier, not customer content.
+  provider String
+
+  /// Canonical dataset name (`invoice`, `bill`) — never a record id.
+  entity String
+
+  /// When the sweep ran. Every row one sweep writes shares this instant, which
+  /// is what makes "was that whole sweep clean" a groupable question.
+  sweepAt DateTime
+
+  /// Explicit outcome. No default: every writer states what it found, so a row
+  /// can never mean "nobody set this".
+  classification ErpDriftClassification
+
+  /// Records the full read returned that the incremental read did not, with a
+  /// marker after the watermark. 0 on a clean sweep, and that 0 is the point.
+  missedCount Int @default(0)
+
+  /// Rows the full re-enumeration returned. The DENOMINATOR: 3 missed out of
+  /// 4 and 3 missed out of 40,000 are not the same health signal, and
+  /// `missedCount` alone cannot tell them apart.
+  fullCount Int @default(0)
+
+  /// Rows the incremental read returned in the same pass.
+  incrementalCount Int @default(0)
+
+  /// The position the incremental read was issued FROM, as a timestamp.
+  /// NULL when the cursor had never synced, or when the vendor's marker is not
+  /// a timestamp at all — see the PHI note above.
+  watermarkAt DateTime?
+
+  /// Oldest marker among the missed records. Answers "how far back did the gap
+  /// start", which is the forensic question when an owner reports the
+  /// assistant did not know about something. NULL when nothing was missed.
+  earliestMissedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// The endpoint's query: one connection, most recent first, over a window.
+  @@index([connectionId, sweepAt])
+  /// The retention trim's query, and the only one that scans across
+  /// connections.
+  @@index([sweepAt])
+}
+
 /// Read-model cache row (brief §10.2). A convenience/uptime layer, NEVER the
 /// system of record — every cached view is timestamped in the UI ("as of N
 /// min ago"). `payload` PHI is encrypted at rest by the application layer.

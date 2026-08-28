@@ -430,3 +430,174 @@ describe("dynamic tool universe (WARP-2443)", () => {
     expect(domainOfTool("jira_search_issues", [jiraSearch])).toBe("pm");
   });
 });
+
+/**
+ * WARP-2454 — the four keyword rules that missed the phrasing people
+ * actually use.
+ *
+ * Every case below is a whole sentence someone would type, never a word
+ * lifted out of the pattern (the discipline this file has enforced since
+ * WARP-1921). Each fix is paired with its NEGATIVE, and the negatives are
+ * load-bearing rather than decorative: all four of these defects could be
+ * "fixed" by a rule so wide it advertises the domain on turns that have
+ * nothing to do with it, and a wider rule is not a better one — `files` is
+ * the largest domain in the catalog and a Slack catalog registered into
+ * `team_chat` is the largest remote one, so an over-match is paid in window
+ * on every unrelated turn.
+ */
+describe("WARP-2454 — keyword rules vs. natural phrasing", () => {
+  const EMAIL_POOL = [...POOL, "email_search", "email_read"];
+  const CALENDAR_POOL = [...POOL, "list_events", "create_event"];
+  const FILES_POOL = [...POOL, "search_files", "list_recent_files"];
+  const CHAT_POOL = [
+    ...POOL,
+    "team_chat_send_message",
+    "team_chat_send_meeting_invite",
+  ];
+
+  const advertisedFor = (
+    userMessage: string,
+    pool: string[],
+    conversationToolNames: string[] = [],
+  ) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames,
+    }).advertised;
+
+  // ── 1. email: `replied?` never matched `reply` or `replies` ────────────
+  //
+  // The original alternative was "replie" plus an optional "d": it matched
+  // `replied` and the non-word `replie`, and missed both forms a person
+  // actually types. MUTATION for this whole group: restore `replied?` in
+  // tool-selection.service.ts and every positive below goes red.
+  describe("email — reply / replies / replied / replying all reach the inbox", () => {
+    it.each([
+      "did the accountant ever reply about the VAT return?",
+      "any replies from the landlord about the deposit?",
+      "she replied to me last Tuesday, can you find it",
+      "is he still replying on that thread from last week?",
+    ])("%s selects the email domain", (message) => {
+      expect(advertisedFor(message, EMAIL_POOL)).toContain("email_search");
+    });
+
+    it("does not match the non-word `replie` the old alternation admitted", () => {
+      // Not pedantry: it is the direct evidence the alternation was
+      // rewritten rather than merely widened with another optional letter.
+      // `repl(y|ies|ied|ying)` rejects it; `replied?` accepted it.
+      expect(advertisedFor("replie", EMAIL_POOL)).not.toContain("email_search");
+    });
+  });
+
+  // ── 2. team_chat had NO rule at all ───────────────────────────────────
+  describe("team_chat — reachable from a fresh turn, not only by continuity", () => {
+    it("selects team_chat for an explicit Slack post, with no prior turn", () => {
+      // MUTATION: delete the team_chat rule and this goes red. The whole
+      // point is the FRESH turn: `conversationToolNames` is empty, so
+      // continuity cannot be what carries it.
+      expect(
+        advertisedFor("post that in the team slack channel", CHAT_POOL),
+      ).toContain("team_chat_send_message");
+    });
+
+    it("selects team_chat for the standup thread question, with no prior turn", () => {
+      expect(
+        advertisedFor("what did Sam say in the standup thread?", CHAT_POOL),
+      ).toContain("team_chat_send_message");
+    });
+
+    it("stays narrow — a TV channel and a sewing thread are not team chat", () => {
+      // The trade-off the rule's comment records, asserted. Bare `channel`
+      // and bare `thread` are the two words that would have made this rule
+      // easy and wrong; a 15-tool Slack catalog riding on "what channel is
+      // the game on" is the cost being avoided.
+      for (const message of [
+        "what channel is the game on tonight?",
+        "I need a thread that matches the blue cushion",
+        "can you open the garage door",
+      ]) {
+        expect(
+          advertisedFor(message, CHAT_POOL),
+          `"${message}" should not advertise team chat`,
+        ).not.toContain("team_chat_send_message");
+      }
+    });
+
+    it("continuity still reaches team_chat when the keyword rule does not", () => {
+      // Paired with the mutation above: deleting the team_chat RULE must
+      // leave this green. That is what proves the two tests above measure
+      // the keyword path and not the continuity path.
+      expect(
+        advertisedFor("and post that where the team will see it", CHAT_POOL, [
+          "team_chat_send_message",
+        ]),
+      ).toContain("team_chat_send_message");
+    });
+  });
+
+  // ── 3. calendar: the `free time` literal missed "am I free Thursday" ───
+  describe("calendar — availability is bounded to a temporal cue", () => {
+    it.each([
+      "am I free Thursday afternoon?",
+      "am I free on Friday?",
+      "have I got anything, or am I free tomorrow",
+      "are we available next week for the handover",
+      // The determiner is allowed between preposition and cue, which is what
+      // makes this one match. ACCEPTED FALSE POSITIVE, recorded rather than
+      // hidden: "is the parking free at the weekend" matches too. The
+      // availability reading is the dominant one for this shape, and a
+      // stray calendar domain costs five schemas — cheaper than missing the
+      // question a person actually asks most weeks.
+      "am I free at the weekend?",
+    ])("%s selects the calendar domain", (message) => {
+      expect(advertisedFor(message, CALENDAR_POOL)).toContain("list_events");
+    });
+
+    it("does NOT fire on 'free' with no temporal cue", () => {
+      // MUTATION: replace the bounded rule with a bare \bfree\b and every
+      // one of these goes red. This is the guard the ticket asks for — the
+      // reason the fix is not simply "add free to the alternation".
+      for (const message of [
+        "is the free trial still on?",
+        "how much free space is left on the drive",
+        "feel free to move things around in there",
+      ]) {
+        expect(
+          advertisedFor(message, CALENDAR_POOL),
+          `"${message}" should not advertise the calendar`,
+        ).not.toContain("list_events");
+      }
+    });
+  });
+
+  // ── 4. files: a document named by its SUBJECT, not by a container word ─
+  describe("files — documents named by what they are", () => {
+    it.each([
+      "find the signed lease agreement",
+      "where did I put the signed lease agreement?",
+      "can you dig out the contract from the roofer",
+      "I need the insurance certificate for the van",
+    ])("%s selects the files domain", (message) => {
+      expect(advertisedFor(message, FILES_POOL)).toContain("search_files");
+    });
+
+    it("does NOT fire on a retrieval verb with no document in the sentence", () => {
+      // MUTATION: swap the document-noun vocabulary for a bare
+      // find|locate|where-is verb fallback and these go red. `files` is the
+      // largest domain in the catalog (20 tools), so a verb fallback is the
+      // single most expensive over-match available.
+      for (const message of [
+        "find me a good plumber",
+        "where is the nearest petrol station",
+        "look for someone who can fix the boiler",
+      ]) {
+        expect(
+          advertisedFor(message, FILES_POOL),
+          `"${message}" should not advertise the files domain`,
+        ).not.toContain("search_files");
+      }
+    });
+  });
+});

@@ -53,8 +53,8 @@ export function ColorControls({ device, onCommand, size = "sm" }: ColorControlsP
   const [feedback, setFeedback] = useState<WheelFeedback>(
     device.connectionState === "connected" ? "idle" : "offline",
   );
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
-  const failTimer = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const failTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const offline = device.connectionState !== "connected";
 

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import commissionDevice from "../../../src/handlers/smart-home/commission-device.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(commission: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(commission: Mock): ToolContext {
   return {
     matter: {
       listDevices: vi.fn(),
@@ -10,6 +11,7 @@ function ctxWith(commission: ReturnType<typeof vi.fn>): ToolContext {
       sendCommand: vi.fn(),
       discover: vi.fn(),
       commission,
+      decommission: vi.fn(),
       getAuditLog: vi.fn(),
     },
     prisma: {} as ToolContext["prisma"],

@@ -196,9 +196,15 @@ Full rationale: WARP-1670; device-side trust model: `docs/SECURITY.md`.
   the orchestrator's MCP-backed agent loop. `GET /api/llm/tools` proxies
   `mcp-client.service.ts → listTools()` so the wire shape matches what
   off-host MCP clients see.
-- **Adding a new tool:** use the **`add-llm-tool`** skill (handler →
-  registry entry with `requiresWrite`/`requiresConfirmation` → unit
-  test; MCP server and RBAC pick it up automatically).
+- **Adding a new tool:** use the **`add-llm-tool`** skill, and follow its
+  site table rather than this bullet. It is materially more than a
+  handler plus a registry entry — the catalog (domain + home copy), the
+  `TOOL_ROUTES` manifest, `INVENTORY.md`, the registry test's expected
+  name list, the default chat scope, and a prompt-budget measurement all
+  gate it, and the table is derived from those gates by
+  `packages/tools-core/__tests__/add-llm-tool-skill.test.ts` so it cannot
+  fall behind them again (WARP-2496). MCP-server pickup and RBAC
+  write-intent do still follow automatically from `requiresWrite`.
 
 ## Ollama call path (chat vs lifecycle)
 

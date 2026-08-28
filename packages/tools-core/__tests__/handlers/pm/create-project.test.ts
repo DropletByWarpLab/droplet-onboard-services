@@ -30,7 +30,9 @@ const apiProject = {
   workspaceSlug: "home",
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("pm_create_project", () => {
   // A project is a durable, user-visible container. A tool that creates

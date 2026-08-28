@@ -91,6 +91,7 @@ jobs:
       storage-suites: ${{ steps.plan.outputs.storage-suites }}
       fips-suites: ${{ steps.plan.outputs.fips-suites }}
       hadolint-suites: ${{ steps.plan.outputs.hadolint-suites }}
+      ship-check-suites: ${{ steps.plan.outputs.ship-check-suites }}
     steps:
       - uses: actions/checkout@v7
 
@@ -288,6 +289,18 @@ jobs:
               - "**/Dockerfile*"
               - "Dockerfile*"
               - ".hadolint.yaml"
+            # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
+            # mandated by the preflight skill but was executed by NO
+            # workflow — all eight `ship-check` mentions under .github/ were
+            # comments — so its bash-3.2 parse breakage reached stage with
+            # nobody noticing. Scoped to the gate itself: deliberately NOT
+            # widened to scripts/** or tests/**, which would put this leg on
+            # a large share of PRs for no added signal
+            # (docs/ci-cost-budget.md — widening a filter is a spend
+            # decision, not a style decision).
+            ship-check:
+              - "scripts/test/**"
+              - ".claude/skills/preflight/**"
 
       - name: Decide which legs run
         id: plan
@@ -304,6 +317,7 @@ jobs:
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'
           ALL_HADOLINT: '["hadolint"]'
+          ALL_SHIP_CHECK: '["ship-check"]'
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
@@ -313,6 +327,7 @@ jobs:
             storage=$(jq -c . <<<"$ALL_STORAGE")
             fips=$(jq -c . <<<"$ALL_FIPS")
             hadolint=$(jq -c . <<<"$ALL_HADOLINT")
+            ship_check=$(jq -c . <<<"$ALL_SHIP_CHECK")
           else
             if jq -e 'index("node-global")' <<<"$CHANGED" >/dev/null; then
               node=$(jq -c . <<<"$ALL_NODE")
@@ -340,6 +355,10 @@ jobs:
               hadolint=$(jq -c . <<<"$ALL_HADOLINT")
             else
               hadolint="[]"
+            if jq -e 'index("ship-check")' <<<"$CHANGED" >/dev/null; then
+              ship_check=$(jq -c . <<<"$ALL_SHIP_CHECK")
+            else
+              ship_check="[]"
             fi
           fi
           # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
@@ -365,12 +384,14 @@ jobs:
             echo "storage-suites=$storage"
             echo "fips-suites=$fips"
             echo "hadolint-suites=$hadolint"
+            echo "ship-check-suites=$ship_check"
           } >> "$GITHUB_OUTPUT"
           echo "node legs: $node"
           echo "python legs: $python"
           echo "storage legs: $storage"
           echo "fips legs: $fips"
           echo "hadolint legs: $hadolint"
+          echo "ship-check legs: $ship_check"
 
   node:
     name: node / ${{ matrix.suite }}
@@ -894,6 +915,74 @@ jobs:
           mapfile -t files < <(git ls-files '*Dockerfile*')
           echo "Linting ${#files[@]} Dockerfiles"
           /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+  # WARP-2455: the pre-PR gate's own gate. scripts/test/ship-check.sh is
+  # mandated by the preflight skill, but until this leg NO workflow executed
+  # it — all eight `ship-check` mentions under .github/ were comments of the
+  # form "warning severity to match ship-check's bar". That is how three
+  # bash-3.2 parse blockers (`declare -A`, an apostrophe in a `#` comment
+  # inside `$( )`, a `case` inside `$( )`) reached stage: every reviewer
+  # assumed the gate had run, and no machine ever ran it. `lifecycle-naming`
+  # in particular still has no other runner.
+  # This is the parse + self-test half ONLY. Running the full ship-check
+  # (tsc-full etc.) here would duplicate the node/python legs and cost real
+  # minutes — see docs/ci-cost-budget.md and WARP-2455's out-of-scope list.
+  shipcheck:
+    name: ship-check / parse + self-test
+    needs: detect
+    # Same empty-list guard as the node/python/storage jobs above.
+    if: needs.detect.outputs.ship-check-suites != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # The runner's own bash (5.x) — the floor ship-check is written for.
+      - name: Parse under the runner's bash 5
+        run: |
+          set -eu
+          bash --version | head -1
+          bash -n scripts/test/ship-check.sh
+          bash -n scripts/test/ship-check.test.sh
+
+      # The dev-Mac floor: macOS ships bash 3.2.57 and Homebrew bash is NOT
+      # assumed (WARP-2449). A construct that parses under 5.x but not 3.2 is
+      # invisible to every other check in this repo, and the parse check is
+      # what would have caught all three WARP-2449 blockers. The official
+      # `bash:3.2` image is ~15 MB, so this costs seconds, not minutes.
+      # A Docker Hub pull failure is infrastructure, not a code defect — it
+      # warns and skips; a real parse failure below is fatal.
+      - name: Parse under bash 3.2 (the dev-Mac floor)
+        run: |
+          set -eu
+          if ! docker pull bash:3.2 >/dev/null 2>&1; then
+            echo "::warning::could not pull bash:3.2 (Docker Hub rate limit?) - 3.2 parse check skipped"
+            exit 0
+          fi
+          docker run --rm -v "$PWD/scripts/test:/w:ro" bash:3.2 bash -c '
+            set -eu
+            bash --version | head -1
+            bash -n /w/ship-check.sh
+            bash -n /w/ship-check.test.sh
+          '
+
+      # --help must work on a machine that has run no setup — it is the first
+      # thing an operator (or an agent) types.
+      - name: ship-check --help
+        run: bash scripts/test/ship-check.sh --help
+
+      # The self-test's compose-config case shells out to `docker compose
+      # config`, which resolves the merged tree's `env_file: ../.env`
+      # directives and fails if that file is absent. .env is .gitignored, so
+      # a fresh checkout never has one. Seed it from the tracked example, or
+      # the self-test goes red on the runner for a reason that has nothing to
+      # do with the change under test. (compose-config itself still reads
+      # .env.example for values — see run_check_compose_config.)
+      - name: Seed .env for the compose-config case
+        run: cp .env.example .env
+
+      - name: Run the ship-check self-test
+        run: bash scripts/test/ship-check.test.sh
+
 
   # THE required check (WARP-968/969 merge policy). Runs even when legs fail
   # (`if: always()`) so it ALWAYS reports — no more PRs hung on "Expected".
@@ -905,7 +994,7 @@ jobs:
     name: ci-summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [detect, node, python, storage, fips, semgrep, gitleaks, hadolint]
+    needs: [detect, node, python, storage, fips, semgrep, gitleaks, hadolint, shipcheck]
     if: always()
     steps:
       - name: Report leg results
@@ -928,6 +1017,8 @@ jobs:
           GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
           HADOLINT_RESULT: ${{ needs.hadolint.result }}
           HADOLINT_SUITES: ${{ needs.detect.outputs.hadolint-suites }}
+          SHIPCHECK_RESULT: ${{ needs.shipcheck.result }}
+          SHIPCHECK_SUITES: ${{ needs.detect.outputs.ship-check-suites }}
         run: |
           set -eu
           fail=0
@@ -962,5 +1053,6 @@ jobs:
           # treatment as semgrep. A secret can land in any file.
           check_leg gitleaks "$GITLEAKS_RESULT" '["gitleaks"]'
           check_leg hadolint "$HADOLINT_RESULT" "$HADOLINT_SUITES"
+          check_leg ship-check "$SHIPCHECK_RESULT" "$SHIPCHECK_SUITES"
           [ "$fail" -eq 0 ] || exit 1
           echo "ci-summary — every triggered leg succeeded"

@@ -9,18 +9,42 @@ export function normalizeEmail(email: string): string {
 // Pragmatic client-side check; the orchestrator's Zod `.email()` is the
 // authority. Mirrors the shape the backend accepts closely enough to drive
 // the live checklist without false greens.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+//
+// Shape: `<local>@<domain>`, no whitespace, exactly one `@`, and the domain
+// has a `.` that is neither its first nor its last character. The dot rule
+// is checked by index rather than as `[^\s@]+\.[^\s@]+` — that class also
+// matches `.`, so a long dotted domain backtracks quadratically (CodeQL
+// js/polynomial-redos). Accepts exactly the same strings as before.
+const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+$/;
 export function isValidEmail(email: string): boolean {
-  return EMAIL_RE.test(normalizeEmail(email));
+  const normalized = normalizeEmail(email);
+  if (!EMAIL_SHAPE_RE.test(normalized)) return false;
+  const domain = normalized.slice(normalized.indexOf("@") + 1);
+  const dot = domain.indexOf(".", 1);
+  return dot > 0 && dot < domain.length - 1;
+}
+
+const SEPARATORS = new Set(["-", "_", "."]);
+
+/** Trim leading/trailing separators by index. The anchored-run form
+ *  (`[-_.]+$`) re-scans the run from every start offset, so a long
+ *  separator-only local-part is quadratic (CodeQL js/polynomial-redos). */
+function trimSeparators(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && SEPARATORS.has(s.charAt(start))) start++;
+  while (end > start && SEPARATORS.has(s.charAt(end - 1))) end--;
+  return s.slice(start, end);
 }
 
 /** Slugify the email local-part into the conservative Nextcloud-safe charset. */
 export function baseUserIdFromEmail(email: string): string {
   const local = normalizeEmail(email).split("@")[0] ?? "";
-  let s = local
-    .replace(/[^a-z0-9._-]+/g, "-") // drop @, +, unicode, etc.
-    .replace(/[-_.]{2,}/g, "-") // collapse runs of separators
-    .replace(/^[-_.]+|[-_.]+$/g, ""); // trim leading/trailing separators
+  let s = trimSeparators(
+    local
+      .replace(/[^a-z0-9._-]+/g, "-") // drop @, +, unicode, etc.
+      .replace(/[-_.]{2,}/g, "-"), // collapse runs of separators
+  );
   if (s.length < USERID_MIN) s = "user";
   if (s.length > USERID_MAX) s = s.slice(0, USERID_MAX);
   return s;

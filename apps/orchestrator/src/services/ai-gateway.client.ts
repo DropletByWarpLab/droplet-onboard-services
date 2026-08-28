@@ -255,7 +255,10 @@ export async function saveKey(
   apiKey: string,
   userId?: string
 ): Promise<void> {
-  const res = await internalFetch(`${BASE_URL}/ai/keys/${provider}`, {
+  // CodeQL js/request-forgery: `provider` is `req.params.provider` from
+  // routes/llm.ts; encode it so it can only ever be one path segment of the
+  // gateway URL (same as every other caller of internalFetch does).
+  const res = await internalFetch(`${BASE_URL}/ai/keys/${encodeURIComponent(provider)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(userId) },
     body: JSON.stringify({ api_key: apiKey }),
@@ -285,7 +288,7 @@ export async function deleteKey(
   provider: string,
   userId?: string
 ): Promise<void> {
-  const res = await internalFetch(`${BASE_URL}/ai/keys/${provider}`, {
+  const res = await internalFetch(`${BASE_URL}/ai/keys/${encodeURIComponent(provider)}`, {
     method: "DELETE",
     headers: authHeaders(userId),
     signal: timeout(),
