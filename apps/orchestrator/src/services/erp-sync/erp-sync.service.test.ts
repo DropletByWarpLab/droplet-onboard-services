@@ -341,6 +341,84 @@ describe("runIncrementalTick", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Which value the watermark advances on (WARP-2474)
+// ---------------------------------------------------------------------------
+
+describe("watermark source", () => {
+  /** A vendor that fills WARP-2464's canonical column: the documents were
+   *  issued in August and MODIFIED afterwards. */
+  const ROWS_WITH_UPDATED_AT = INVOICE_ROWS.map((r, i) => ({
+    ...r,
+    updated_at: i === 0 ? "2026-08-24T00:00:00Z" : "2026-08-25T00:00:00Z",
+  }));
+
+  /** The QuickBooks Online / Desktop invoice+bill shape: the canonical column
+   *  is PRESENT on every row and carries `undefined`, exactly as `status`
+   *  does on the same builders. */
+  const QUICKBOOKS_ROWS = INVOICE_ROWS.map((r) => ({
+    ...r,
+    updated_at: undefined as string | undefined,
+  }));
+
+  it("advances on `updated_at` when the vendor supplies one", async () => {
+    // The defect: an incremental pull keyed on `issued_at` re-reads every row
+    // whose only change is a vendor-side modification — the exact case
+    // WARP-2464 added the column for.
+    // MUTATION: build the watermark from `spec.markerField` alone → the
+    // cursor stops at 2026-08-20 → red.
+    const h = harness({ read: async () => ROWS_WITH_UPDATED_AT });
+    await runnerFor(h).runIncrementalTick();
+    expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-25T00:00:00Z");
+  });
+
+  it("reads the next tick from the `updated_at` it advanced to", async () => {
+    // The advance is only worth anything if the vendor read inherits it.
+    const h = harness({ read: async () => ROWS_WITH_UPDATED_AT });
+    const runner = runnerFor(h);
+    await runner.runIncrementalTick();
+    h.connector.runRead.mockClear();
+    await runner.runIncrementalTick();
+    expect(h.connector.runRead).toHaveBeenCalledWith("get_open_invoices", {
+      since: "2026-08-25T00:00:00Z",
+    });
+  });
+
+  it("falls back to the ordering key, NON-NULL, when `updated_at` is undefined", async () => {
+    // *** THE CASE THE TICKET IS WRITTEN AROUND ***
+    // QBO and QBD serve invoice/bill from hand-written row builders that emit
+    // `updated_at: undefined`. A fallback that tests COLUMN PRESENCE reads
+    // that as "there is an updated_at" and regresses this track to a null —
+    // or, once stringified, to the literal "undefined" — watermark.
+    //
+    // MUTATION: in `identify`, project the column with a presence test
+    // (`updatedAtField in rec ? String(...) : null`) → the stored watermark
+    // becomes the string "undefined" → red.
+    const h = harness({ read: async () => QUICKBOOKS_ROWS });
+    await runnerFor(h).runIncrementalTick();
+    const watermark = h.prisma.__cursor("cur-1")!.watermark;
+    expect(watermark).toBe("2026-08-20T00:00:00Z");
+    expect(watermark).not.toBeNull();
+    expect(watermark).not.toBe("undefined");
+  });
+
+  it("falls back for a dataset whose rows carry no `updated_at` column at all", async () => {
+    // The seven datasets WARP-2464 deliberately withheld the column from.
+    const h = harness();
+    await runnerFor(h).runIncrementalTick();
+    expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-20T00:00:00Z");
+  });
+
+  it("adopts the sweep's `updated_at` high-water mark too", async () => {
+    // The sweep repairs a watermark left behind, so it must repair it to the
+    // same kind of value the tick advances to — otherwise the two legs fight
+    // over the cursor every day.
+    const h = harness({ read: async () => ROWS_WITH_UPDATED_AT });
+    await runnerFor(h).runReconciliationSweep();
+    expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-25T00:00:00Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 

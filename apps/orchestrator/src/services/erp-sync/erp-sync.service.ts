@@ -363,7 +363,18 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       const params = cursor.watermark === null ? {} : { since: cursor.watermark };
       const rows = await readEntity(connector, budget, spec.readQuery, params);
 
-      const records = identify(rows, spec.sourceKeyField, spec.markerField);
+      const records = identify(
+        rows,
+        spec.sourceKeyField,
+        spec.markerField,
+        spec.updatedAtField,
+      );
+      // WARP-2474 — the position advances on the vendor's own `updated_at`
+      // when the track defines one and on the ordering key otherwise, decided
+      // per row inside `highWaterMark`. A row edited after it was issued moves
+      // only the former, so a watermark built from the ordering key alone
+      // re-reads it on every tick forever.
+      //
       // Never regress the watermark: an empty page must not reset the position
       // to null and re-enumerate the whole account on the next tick.
       const next = highWaterMark(records) ?? cursor.watermark;
@@ -496,8 +507,18 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
             // Re-enumerate. NO watermark. This is the load-bearing line.
             const fullRows = await readEntity(connector, budget, spec.readQuery, {});
 
-            const incremental = identify(incrementalRows, spec.sourceKeyField, spec.markerField);
-            const full = identify(fullRows, spec.sourceKeyField, spec.markerField);
+            const incremental = identify(
+              incrementalRows,
+              spec.sourceKeyField,
+              spec.markerField,
+              spec.updatedAtField,
+            );
+            const full = identify(
+              fullRows,
+              spec.sourceKeyField,
+              spec.markerField,
+              spec.updatedAtField,
+            );
             entityDrift.push(diffForDrift(entity, watermark, incremental, full));
 
             // The sweep saw the whole account, so its high-water mark is the

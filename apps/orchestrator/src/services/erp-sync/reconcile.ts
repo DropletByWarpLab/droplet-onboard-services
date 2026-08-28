@@ -55,6 +55,7 @@
  * report full of invoice numbers would be a customer-content export wearing a
  * diagnostics label.
  */
+import { highestWatermark, isWatermarkAhead } from "./watermark.js";
 
 /** Why a record the full read knows about was missing from the delta read. */
 export type ErpDriftClass = "missed-newer" | "watermark-behind";
@@ -90,24 +91,40 @@ export interface ErpDriftReport {
   driftDetected: boolean;
 }
 
-/** A row reduced to the two things reconciliation needs. Never the payload. */
+/** A row reduced to the three things reconciliation needs. Never the payload. */
 export interface RecordIdentity {
   sourceKey: string;
+  /** The dataset's declared ORDERING key. Kept under its own name rather than
+   *  merged with the one below, so a reader can always tell which of the two
+   *  a given watermark actually came from. */
   marker: string | null;
+  /** WARP-2464's canonical `updated_at`, or null when the dataset withholds
+   *  the column AND when a track leaves it present-and-undefined. The two are
+   *  normalised to the same value here so the preference downstream is a test
+   *  on a VALUE, never on a property's presence. */
+  updatedAt: string | null;
 }
 
 /**
- * Project a vendor row onto (id, marker) using the entity's DECLARED fields.
+ * Project a vendor row onto (id, marker, updated_at) using the entity's
+ * DECLARED fields.
  *
  * A row missing its declared id field is dropped rather than given a
  * synthesised one: a fabricated key would pair with nothing on the other side
  * of the diff and would be reported as drift on every single sweep, which
  * trains an operator to ignore the report.
+ *
+ * `updated_at` is read with the same undefined-or-null test the marker uses,
+ * and that is load-bearing (WARP-2474): QuickBooks Online and Desktop emit
+ * `updated_at: undefined` on their invoice and bill rows, so a presence test
+ * here would project the string `"undefined"` and it would become the stored
+ * watermark.
  */
 export function identify(
   rows: readonly unknown[],
   sourceKeyField: string,
   markerField: string,
+  updatedAtField: string,
 ): RecordIdentity[] {
   const out: RecordIdentity[] = [];
   for (const row of rows) {
@@ -116,22 +133,26 @@ export function identify(
     const key = rec[sourceKeyField];
     if (key === undefined || key === null || key === "") continue;
     const marker = rec[markerField];
+    const updatedAt = rec[updatedAtField];
     out.push({
       sourceKey: String(key),
       marker: marker === undefined || marker === null ? null : String(marker),
+      updatedAt: updatedAt === undefined || updatedAt === null ? null : String(updatedAt),
     });
   }
   return out;
 }
 
-/** The largest marker in a set, or null when nothing carried one. */
+/**
+ * The highest watermark position in a set, or null when nothing carried one.
+ *
+ * Not "the largest marker" since WARP-2474: each row offers its canonical
+ * `updated_at` when the vendor defined one and its ordering key otherwise, and
+ * the comparison is on parsed instants rather than on strings. `watermark.ts`
+ * holds the whole argument.
+ */
 export function highWaterMark(records: readonly RecordIdentity[]): string | null {
-  let best: string | null = null;
-  for (const r of records) {
-    if (r.marker === null) continue;
-    if (best === null || r.marker > best) best = r.marker;
-  }
-  return best;
+  return highestWatermark(records);
 }
 
 /**
@@ -160,8 +181,10 @@ export function diffForDrift(
 
   const fullHigh = highWaterMark(full);
   const incHigh = highWaterMark(incremental);
-  const watermarkBehind =
-    fullHigh !== null && (incHigh === null ? watermark === null || fullHigh > watermark : fullHigh > incHigh);
+  // WARP-2474 — measured against the SAME value the advance used, and with the
+  // same ISO-vs-opaque split: a lag between two opaque cursors is a
+  // lexicographic accident, not a finding.
+  const watermarkBehind = isWatermarkAhead(fullHigh, incHigh ?? watermark);
 
   const classes: ErpDriftClass[] = [];
   if (missedCount > 0) classes.push("missed-newer");
