@@ -20,6 +20,7 @@ import {
   Cpu,
   FolderOpen,
   HardDrive,
+  KeyRound,
   Lock,
   Network,
   Plug,
@@ -629,6 +630,8 @@ const PILL_ICON = {
   lock: Lock,
   refresh: RefreshCw,
   plug: Plug,
+  // WARP-2458 — NEEDS_RECONNECT. A key, because the action is pasting one.
+  key: KeyRound,
 } as const;
 
 export function IntegrationsBody({ now }: { now: Date | null }) {

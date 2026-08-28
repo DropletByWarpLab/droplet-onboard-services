@@ -58,6 +58,9 @@ export type IntegrationStatusName =
   | "CONNECTED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
+  // WARP-2458 — the persisted enum finally carries what `SaasConnectionState`
+  // below could only derive, so the two unions in this file now agree.
+  | "NEEDS_RECONNECT"
   | "ERROR"
   | "DISABLED";
 

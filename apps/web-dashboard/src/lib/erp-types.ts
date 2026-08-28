@@ -16,6 +16,7 @@ export type IntegrationStatus =
   | "CONNECTED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
+  | "NEEDS_RECONNECT"
   | "ERROR"
   | "DISABLED";
 

@@ -529,11 +529,16 @@ describe("loading, fetch-error and not-configured are three states", () => {
   /**
    * Fixing the status merge made five of the seven `IntegrationStatus` values
    * reachable in the hub for the first time. None may fall through to a
-   * default that reads as healthy.
+   * default that reads as healthy. WARP-2458 adds the eighth,
+   * `NEEDS_RECONNECT`, which is the one this rule was written for: it is where
+   * a revoked credential lands, and before it existed such a connection
+   * rendered as "Connected".
    *
    * Mutation: fold DRIFT_LOCKED back into DEGRADED's "Needs attention" → red.
+   * Mutation: delete the NEEDS_RECONNECT case so it falls through to
+   * `statusView`'s `default` → the tile reads "Unknown state" → red.
    */
-  it("gives all seven IntegrationStatus values their own rendering", async () => {
+  it("gives all eight IntegrationStatus values their own rendering", async () => {
     vi.mocked(fetchIntegrations).mockResolvedValue([
       conn("eaglesoft", "CONNECTED"),
       conn("dentrix-ascend", "DEGRADED"),
@@ -542,6 +547,7 @@ describe("loading, fetch-error and not-configured are three states", () => {
       conn("m365", "PROVISIONING"),
       conn("aaa-export", "DISABLED"),
       conn("zzz-export", "NOT_CONFIGURED"),
+      conn("mmm-export", "NEEDS_RECONNECT"),
     ]);
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
@@ -554,10 +560,37 @@ describe("loading, fetch-error and not-configured are three states", () => {
       ["M365", "Setting up"],
       ["Aaa Export", "Turned off"],
       ["Zzz Export", "Not connected"],
+      ["Mmm Export", "Paste a new key"],
     ];
     for (const [name, label] of labels) {
       expect(within(tile(container, name)).getByText(label), `${name} → ${label}`).toBeTruthy();
     }
-    expect(new Set(labels.map(([, l]) => l)).size).toBe(7);
+    expect(new Set(labels.map(([, l]) => l)).size).toBe(8);
+  });
+
+  /**
+   * The triple ADR-042 §6 requires to stay pairwise distinguishable. All three
+   * look identical to a "does a credential decrypt?" check and mean opposite
+   * things to the person reading the dashboard: one was never set up, one was
+   * turned off on purpose, one is broken and waiting for a human to act.
+   *
+   * Mutation: give NEEDS_RECONNECT either of the other two labels → red.
+   */
+  it("keeps DISABLED, NOT_CONFIGURED and NEEDS_RECONNECT pairwise distinct", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("aaa-export", "DISABLED"),
+      conn("zzz-export", "NOT_CONFIGURED"),
+      conn("mmm-export", "NEEDS_RECONNECT"),
+    ]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Mmm Export"));
+
+    const seen = ["Aaa Export", "Zzz Export", "Mmm Export"].map(
+      (n) => tile(container, n).textContent ?? "",
+    );
+    expect(seen.some((t) => t.includes("Turned off"))).toBe(true);
+    expect(seen.some((t) => t.includes("Not connected"))).toBe(true);
+    expect(seen.some((t) => t.includes("Paste a new key"))).toBe(true);
+    expect(new Set(seen).size).toBe(3);
   });
 });

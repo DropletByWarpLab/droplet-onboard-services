@@ -24,21 +24,25 @@ const ALL: IntegrationStatusName[] = [
   "CONNECTED",
   "DEGRADED",
   "DRIFT_LOCKED",
+  "NEEDS_RECONNECT",
   "ERROR",
   "DISABLED",
 ];
 
 const NOW = new Date("2026-08-14T09:41:00.000Z");
 
-describe("PILL — all seven statuses stay distinct", () => {
+describe("PILL — all eight statuses stay distinct", () => {
   it("covers every status", () => {
     for (const s of ALL) expect(PILL[s]).toBeDefined();
-    expect(Object.keys(PILL)).toHaveLength(7);
+    // WARP-2458 added the eighth. Mutation: add a member to the union and
+    // not to PILL → red, because `Record<IntegrationStatusName, …>` and this
+    // count disagree.
+    expect(Object.keys(PILL)).toHaveLength(8);
   });
 
   it("gives each status its own label — none collapsed into another", () => {
     const labels = ALL.map((s) => PILL[s].label);
-    expect(new Set(labels).size).toBe(7);
+    expect(new Set(labels).size).toBe(8);
   });
 
   it("uses the brief's exact copy", () => {
@@ -49,6 +53,9 @@ describe("PILL — all seven statuses stay distinct", () => {
     expect(PILL.PROVISIONING.label).toBe("Setting up");
     expect(PILL.DISABLED.label).toBe("Turned off");
     expect(PILL.NOT_CONFIGURED.label).toBe("Not connected");
+    // Names the ACTION, not the symptom: the one thing the owner can do
+    // about a revoked credential is go and paste a new one.
+    expect(PILL.NEEDS_RECONNECT.label).toBe("Paste a new key");
   });
 
   it("pairs every pill with an icon — status is never colour alone", () => {
@@ -57,8 +64,11 @@ describe("PILL — all seven statuses stay distinct", () => {
 });
 
 describe("statusWeight — problems first", () => {
-  it("orders the three problem states ahead of everything healthy", () => {
-    const problems = ["ERROR", "DRIFT_LOCKED", "DEGRADED"] as const;
+  it("orders the four problem states ahead of everything healthy", () => {
+    // NEEDS_RECONNECT joins the problems (WARP-2458): a revoked credential is
+    // something the owner must act on, so burying it below CONNECTED rows is
+    // exactly the "hunt for the broken one" this ordering exists to prevent.
+    const problems = ["ERROR", "DRIFT_LOCKED", "NEEDS_RECONNECT", "DEGRADED"] as const;
     const rest = ["CONNECTED", "PROVISIONING", "DISABLED", "NOT_CONFIGURED"] as const;
     for (const p of problems) {
       for (const r of rest) {
@@ -70,6 +80,10 @@ describe("statusWeight — problems first", () => {
   it("puts ERROR ahead of every other problem", () => {
     expect(statusWeight("ERROR")).toBeLessThan(statusWeight("DRIFT_LOCKED"));
     expect(statusWeight("ERROR")).toBeLessThan(statusWeight("DEGRADED"));
+    expect(statusWeight("ERROR")).toBeLessThan(statusWeight("NEEDS_RECONNECT"));
+    // A throttle clears itself; a revoked credential waits for a person. The
+    // one that needs a human sorts first. Mutation: swap the two weights → red.
+    expect(statusWeight("NEEDS_RECONNECT")).toBeLessThan(statusWeight("DEGRADED"));
   });
 
   it("sorts an unknown status WITH the problems, not last", () => {

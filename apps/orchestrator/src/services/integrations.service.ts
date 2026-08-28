@@ -54,6 +54,10 @@ export type IntegrationStatusName =
   | "CONNECTED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
+  // WARP-2458 — the eighth member. ADR-041 §5 names it mandatory; a revoked
+  // customer credential is neither "never configured" nor "broken", and a
+  // surface reading only `status` must not render it as healthy.
+  | "NEEDS_RECONNECT"
   | "ERROR"
   | "DISABLED";
 
