@@ -75,6 +75,49 @@ def test_xlsx_does_not_coerce_a_numeric_looking_string():
     assert ws["A2"].value == "01234"
 
 
+def test_xlsx_neutralises_formula_leading_strings():
+    """A string cell whose first non-whitespace character is = + - @ must
+    reopen as an INERT string, never a live formula (CWE-1236).
+
+    Cell values are LLM- or user-supplied, so `=HYPERLINK(...)` written
+    verbatim executes the moment the workbook opens. Mirrors the dashboard
+    CSV export guard (apps/web-dashboard/src/lib/audit-csv.ts, WARP-1031):
+    a leading apostrophe makes spreadsheet apps render the value as text,
+    and they trim leading space/tab/CR before deciding a cell is a formula,
+    so whitespace-prefixed leaders are neutralised too.
+    """
+    from openpyxl import load_workbook
+
+    payload = '=HYPERLINK("http://evil.example","click")'
+    data = renderers.render_xlsx(
+        [{
+            "columns": ["A"],
+            "rows": [[payload], ["\t=cmd|' /C calc'!A0"], ["+1 (555) 0100"], ["@user"], ["-offset"]],
+        }]
+    )
+    ws = load_workbook(io.BytesIO(data)).worksheets[0]
+    assert ws["A2"].value == "'" + payload
+    assert ws["A2"].data_type != "f"
+    assert ws["A3"].value == "'\t=cmd|' /C calc'!A0"
+    assert ws["A4"].value == "'+1 (555) 0100"
+    assert ws["A5"].value == "'@user"
+    assert ws["A6"].value == "'-offset"
+
+
+def test_xlsx_formula_guard_leaves_plain_values_untouched():
+    """Numbers stay numbers (so they can be summed) and ordinary strings are
+    byte-identical — the guard fires only on formula leaders."""
+    from openpyxl import load_workbook
+
+    data = renderers.render_xlsx(
+        [{"columns": ["A", "B", "C"], "rows": [["plain text", 42, -3.5]]}]
+    )
+    ws = load_workbook(io.BytesIO(data)).worksheets[0]
+    assert ws["A2"].value == "plain text"
+    assert ws["B2"].value == 42
+    assert ws["C2"].value == -3.5
+
+
 def test_xlsx_sanitises_an_illegal_sheet_name():
     from openpyxl import load_workbook
 
