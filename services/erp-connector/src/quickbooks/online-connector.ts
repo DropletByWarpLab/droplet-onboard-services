@@ -830,6 +830,13 @@ export class QuickBooksOnlineConnector implements Connector {
           amount: QuickBooksOnlineConnector.money(r.TotalAmt),
           balance: QuickBooksOnlineConnector.money(r.Balance),
           status: undefined as string | undefined,
+          // WARP-2464 — declared canonical, present-and-undefined here. QBO
+          // does carry `MetaData.LastUpdatedTime`, but this track does not
+          // request or map it yet, and an undefined column is what tells a
+          // watermark to fall back to its ordering key. Filling it with
+          // `TxnDate` instead would be a creation time wearing a modification
+          // time's name, which is the one thing this column must never be.
+          updated_at: undefined as string | undefined,
         }));
         return sortByKey(sortByKey(rows.filter(isOpen), "invoice_id"), "due_at");
       }
@@ -844,6 +851,8 @@ export class QuickBooksOnlineConnector implements Connector {
           amount: QuickBooksOnlineConnector.money(r.TotalAmt),
           balance: QuickBooksOnlineConnector.money(r.Balance),
           status: undefined as string | undefined,
+          // WARP-2464 — see `get_open_invoices`.
+          updated_at: undefined as string | undefined,
         }));
         return sortByKey(sortByKey(rows.filter(isOpen), "bill_id"), "due_at");
       }

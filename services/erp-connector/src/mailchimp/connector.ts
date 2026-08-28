@@ -921,7 +921,20 @@ export interface MailchimpMemberPage {
 }
 
 const MAILCHIMP_DATASET_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  audience_member: ["contact_id", "email_address", "status", "last_changed", "opt_in_time"],
+  // `updated_at` (WARP-2494) is the CANONICAL modification column, from the
+  // member's own `last_changed`. Both are listed: the vendor field is what the
+  // delta filter keys on and what an operator recognises, the canonical column
+  // is what a watermark reads. A Mailchimp audience member IS a list member,
+  // which is why this dataset can honestly carry the column while `campaign`
+  // cannot. (WARP-2466 renamed the dataset `contact` -> `audience_member`.)
+  audience_member: [
+    "contact_id",
+    "email_address",
+    "status",
+    "last_changed",
+    "opt_in_time",
+    "updated_at",
+  ],
   campaign: ["campaign_id", "title", "status", "send_time", "emails_sent"],
   ecommerce_order: ["order_id", "store_id", "customer_id", "order_total", "processed_at"],
 };
@@ -1350,13 +1363,39 @@ export class MailchimpConnector implements Connector {
       },
       filters.pageSize ?? MAILCHIMP_MAX_PAGE_SIZE,
     );
-    // The watermark is RETURNED, never persisted here (ADR-041 §4).
+    // The watermark is RETURNED, never persisted here (ADR-041 §4). It stays
+    // the vendor's OWN string, because it is fed straight back as
+    // `since_last_changed`; the canonical form below is a separate column, not
+    // a replacement for it.
     let watermark: string | undefined;
     for (const r of rows) {
       const t = r.last_changed;
       if (typeof t === "string" && (watermark === undefined || t > watermark)) watermark = t;
     }
-    return { rows, watermark };
+    // WARP-2494 — the canonical `updated_at`, projected onto a COPY so the
+    // fetched payload is never mutated.
+    const projected = rows.map((r) => ({
+      ...r,
+      updated_at: MailchimpConnector.instant(r.last_changed),
+    }));
+    return { rows: projected, watermark };
+  }
+
+  /**
+   * Mailchimp emits ISO-8601 date-times with an explicit offset
+   * (`2026-08-20T09:30:00+00:00`). Normalised to a full UTC instant so a row is
+   * byte-identical to every other track's — `COLUMN_KIND.updated_at` is one
+   * column across all of them, and two spellings of one moment in it is the
+   * kind of difference a watermark comparison silently gets wrong.
+   *
+   * Absent stays absent and unparseable stays absent: a member with no
+   * `last_changed` has no honest modification time, and inventing one would
+   * advance a watermark that TRUSTS this column.
+   */
+  private static instant(v: unknown): string | undefined {
+    if (typeof v !== "string" || v.trim() === "") return undefined;
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? new Date(t).toISOString() : undefined;
   }
 
   /**
