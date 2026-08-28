@@ -42,6 +42,11 @@ export type ToolDomain =
   | "memory"
   | "pm"
   | "erp"
+  // WARP-2497 — the connected SaaS accounts (Stripe / HubSpot / Mailchimp).
+  // Its own domain rather than a slot under `erp`: `erp` is the on-prem
+  // practice-management connector, and the dashboard gates the two
+  // separately (`erp` reach is a connector grant, `cloud` a tool grant).
+  | "cloud"
   | "business"
   | "system"
   | "data"
@@ -197,6 +202,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "erp_get_ar_summary",
     "erp_schedule_appointment",
   ],
+  // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
+  cloud: ["cloud_query_dataset"],
   business: ["business_profile_get"],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
@@ -382,6 +389,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_find_patient: "Look up a patient in your practice software",
   erp_get_ar_summary: "See what patients still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
+  // Cloud connectors (Stripe / HubSpot / Mailchimp)
+  cloud_query_dataset:
+    "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
   // Business (business-knowledge profile)
   business_profile_get: "Look up what Droplet knows about your business",
   // Team chat (Messages)

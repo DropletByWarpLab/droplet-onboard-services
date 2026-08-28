@@ -274,6 +274,49 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
   { pattern: /\b(business|company|opening hours|customers?)\b/i, domains: ["business"] },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
+  // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
+  //
+  // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454
+  // for `team_chat`, in its most expensive form: an owner could paste a Stripe
+  // key, watch the row go CONNECTED, see charges sync — and the assistant
+  // still could not answer "what did we bill last week", because the only
+  // domain the data lived in was `erp`, which is excluded from chat AND
+  // ruleless. Registering the tool without this rule would have advertised it
+  // exactly never.
+  //
+  // THE TRADE-OFF, RECORDED. This domain costs ONE tool, so the size argument
+  // that made `team_chat` narrow does not apply with the same force — an
+  // over-match here costs ~1.2K chars, not fifteen schemas. What it does cost
+  // is ANSWER QUALITY: a turn that drags a Stripe reader into a question about
+  // the household is a turn where the model has a plausible wrong tool in
+  // reach. So the bias is still narrow, and four words are deliberately NOT
+  // claimed even though this domain genuinely serves their datasets:
+  //   • `ticket` — `pm` owns it (WARP-2058). HubSpot tickets are reachable via
+  //     `crm`/`hubspot`; stealing the bare word would drag a SaaS reader into
+  //     every project-tracker sentence.
+  //   • `company`, `customers` — `business` owns both, and `business_profile_get`
+  //     is the right answer to "what are our opening hours".
+  //   • `newsletter` — `email` owns it, and it means the inbox far more often
+  //     than a Mailchimp campaign.
+  //   • `contact` — `search_contacts` is the on-box answer to "find Dana's
+  //     number"; a CRM lookup is what `crm`/`hubspot` is for.
+  // Losing those is the deliberate half of the trade, pinned by negatives in
+  // tool-selection.service.test.ts.
+  //
+  // TWO words are taken bare knowingly, and the distinction matters: the four
+  // above are dropped because ANOTHER DOMAIN OWNS THEM, which is a collision.
+  // `bill` and `deal` are merely ambiguous ENGLISH, which is not:
+  //   • `bill` — "what did we bill last week" is the sentence this whole story
+  //     exists to answer, and no qualifier covers it without covering nothing
+  //     else. The cost is a false positive on the given name "Bill".
+  //   • `deal` — first written as `(sales|open|won|…) deals?`, which the test
+  //     sentence "which deals did we win in Q2?" then failed: the qualifier is
+  //     rarely adjacent to the noun in a real question. Narrowing that a
+  //     person cannot phrase their way into is not narrowness, it is a rule
+  //     that does not work. The cost is "that's a good deal".
+  // Both cost ONE 842-char schema on a turn that did not want it, which is the
+  // cheap direction to be wrong in. Neither steals a word another rule needs.
+  { pattern: /\b(stripe|hubspot|mailchimp|crm|invoices?|invoicing|bill|billed|billing|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.
