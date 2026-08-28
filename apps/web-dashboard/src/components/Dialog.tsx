@@ -180,7 +180,7 @@ export function Dialog({
   const prefersReducedMotion = useReducedMotion();
   // Stable identity on the open-dialog stack (F1). A ref, not state — the
   // token never changes for this component instance.
-  const stackTokenRef = useRef<symbol>();
+  const stackTokenRef = useRef<symbol | undefined>(undefined);
   if (stackTokenRef.current === undefined) stackTokenRef.current = Symbol("dialog");
 
   // Register on the open-dialog stack while open. Nested dialogs mount

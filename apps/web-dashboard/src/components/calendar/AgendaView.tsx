@@ -60,7 +60,7 @@ function formatTime(iso: string, allDay: boolean): string {
 function PasscodeChip({ link }: { link: NonNullable<ReturnType<typeof parseMeetingLink>> }) {
   const passcode = useMemo(() => meetingPasscode(link), [link]);
   const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
   if (!passcode) return null;
