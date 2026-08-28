@@ -182,10 +182,25 @@ doc links) register as `kind: reference`; runtime-configured destinations
 
 The registry must also stay honest in the other direction. A `kind: egress`
 entry's `code_refs` are load-bearing: one of its hosts has to appear there as
-a non-comment literal, or the entry carries a one-line `no_code_literal:`
-reason naming who owns the destination instead (WARP-2452). Those paths must
-themselves be inside the scan's own scope — a `docs/` path cannot be evidence
-that a host is dialled, because the scan never reads it (WARP-2468).
+a non-comment literal, or the entry carries a `no_code_literal:` reason naming
+who owns the destination instead (WARP-2452). That reason is checked **per
+host** since WARP-2487, and may be written either as one string covering every
+host of the entry or as a `{host: reason}` mapping — an entry with one
+SDK-owned host and one the code really dials was previously impossible to
+describe truthfully. Those paths must themselves be inside the scan's own
+scope — a `docs/` path cannot be evidence that a host is dialled, because the
+scan never reads it (WARP-2468). Entry ids must be unique; YAML does not
+object to two blocks sharing one, so the gate does (WARP-2487).
+
+**What counts as a hostname** is the Public Suffix List, vendored at
+`scripts/data/public_suffix_list.dat` and refreshed by
+`scripts/fetch-public-suffix-list.sh` (WARP-2487). It replaces a fifteen-entry
+TLD tuple that was, since WARP-2467, the gate for code as well as config — so
+a destination on `.sh`, `.app` or `.xyz` was invisible until somebody
+remembered to widen the tuple. The scanner never fetches the list: it runs
+offline in CI and on the box, reads the committed snapshot, and
+`--check-psl-freshness` fails once that snapshot's own `VERSION` line is more
+than 180 days old.
 
 Limits: the static scan cannot see a hostname whose every part is assembled at
 runtime — that is what WARP-268's runtime audit is for; reviewers should treat
@@ -193,7 +208,12 @@ dynamic URL construction toward the network as a smell requiring a `dynamic`
 entry. It CAN now see the common half of that pattern: since WARP-2467 a bare
 hostname in a code string literal is extracted just like a full URL, so
 `const H = "api.vendor.com"` followed by `fetch(\`https://${H}/v1\`)` no longer
-passes unregistered.
+passes unregistered. Two bounded blind spots come with the wider suffix list,
+both deliberate and both visible in a diff: a destination whose name equals a
+tracked file's basename is read as a filename, and a bare host on a
+non-legacy TLD is only taken when it is written as a *value* — the whole
+string literal or the whole right-hand side of a config setting — rather than
+as a word inside running text.
 
 # Supply-chain security — signing & verification {#supply-chain}
 

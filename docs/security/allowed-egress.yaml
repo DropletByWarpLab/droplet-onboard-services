@@ -31,12 +31,27 @@
 #                 concatenated parts, or named only in a comment, no longer
 #                 counts as backing.
 #   no_code_literal
-#                 (kind: egress only) one-line reason this destination can
-#                 have no repo literal — a third-party binary or SDK owns
-#                 it. Per-entry and reviewed; there is deliberately no
-#                 blanket exemption, because the list of exemptions is the
-#                 list of things the registry cannot prove. The gate also
-#                 fails if a literal DOES exist, so the list self-prunes.
+#                 (kind: egress only) reason this destination can have no
+#                 repo literal — a third-party binary or SDK owns it.
+#                 Reviewed, and deliberately never blanket: the list of
+#                 exemptions is the list of things the registry cannot
+#                 prove. The gate fails if a literal DOES exist, so it
+#                 self-prunes.
+#                 PER HOST since WARP-2487, in either of two shapes:
+#                   no_code_literal: <reason>          covers every host
+#                   no_code_literal: {<host>: <reason>} covers those hosts
+#                 The mapping exists because a MIXED entry was previously
+#                 inexpressible: with two hosts, one SDK-owned and one
+#                 dialled by our own code, declaring the flag failed (a
+#                 literal exists) and omitting it passed (some host is
+#                 backed) while nothing accounted for the SDK-owned half.
+#                 A mapping key that is not one of the entry's own hosts is
+#                 a config error (exit 2), not a silent no-op.
+#
+#   ids must be UNIQUE. Two list items may legally carry the same `id:` as
+#   far as YAML is concerned, and PR #1828 shipped two byte-identical
+#   `hubspot-api` blocks under a green "OK — 41 registry entries". The gate
+#   now fails on a duplicate id and prints both line numbers (WARP-2487).
 # =============================================================================
 version: 1
 policy:
@@ -263,6 +278,14 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/services/model-readiness.service.ts]
+    # WARP-2487: the one occurrence of this host in the repo is
+    # services/inference-manager/runtime/base.py:190, inside a DOCSTRING
+    # explaining that Ollama resolves names against it. That is prose about
+    # the daemon's behaviour, not a call — the file is not a code_ref of this
+    # entry and does not dial the host — so the declaration below is true per
+    # host, not merely true on average. Recorded here because per-host
+    # checking makes the question askable and the answer should be written
+    # down rather than rediscovered.
     no_code_literal: >-
       The Ollama daemon owns model-weight distribution and resolves this
       itself; our code never names it. Already stated in this entry's own
@@ -286,6 +309,14 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [services/ai-gateway/providers/anthropic_cloud.py, services/ai-gateway/providers/openai_cloud.py]
+    # WARP-2487: api.anthropic.com also appears at
+    # services/egress-audit/allowlist.py:14 — inside the module DOCSTRING, as
+    # the worked example of this very schema. Prose about the registry
+    # format, in a file that is not a code_ref here and dials nothing. The
+    # declaration below holds for BOTH hosts: neither provider names a base
+    # URL, so the string form (which covers every host of the entry) is the
+    # accurate shape. The host->reason mapping form exists for entries where
+    # that is not true.
     no_code_literal: >-
       The LiteLLM SDK holds the base URLs; the providers pass only a model
       id and an API key (see anthropic_cloud.py, which names no host).
@@ -901,7 +932,65 @@ entries:
     review_by: 2027-07-04
     code_refs: [scripts/fetch-oui.sh]
 
+  - id: ci-public-suffix-list
+    kind: egress
+    service: ci
+    destination:
+      hosts: [publicsuffix.org]
+      ports: [443]
+      protocol: https
+    phase: ci
+    data_class: none
+    purpose: >-
+      Refresh of the vendored Public Suffix List snapshot
+      (scripts/data/public_suffix_list.dat), which decides what the egress
+      gate itself treats as a hostname. Fetched by a human or a scheduled
+      job and committed; the scanner never goes to the network — it runs
+      offline in CI and on the appliance. Upstream states this is the only
+      supported URL for the list.
+    ticket: WARP-2487
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [scripts/fetch-public-suffix-list.sh]
+
   # ── reference-only (hostnames in the repo that are NOT egress) ──────────
+  # WARP-2487: the gate now decides what a hostname is from the Public
+  # Suffix List instead of a fifteen-entry TLD tuple, which is what makes a
+  # destination on `.sh`/`.app`/`.xyz` visible at all. The cost is that ~1,440
+  # delegated TLDs include ordinary English words, so a dotted identifier key
+  # written as a whole string literal is indistinguishable FROM A HOSTNAME by
+  # any structural rule — `wireless.channel` and `vendor.channel` are the same
+  # shape. Filtering it in code would need a rule that also hides real
+  # destinations, so these are registered instead, by exact name: each token
+  # below is spelled out, so `evil.chat` still denies. Same idea as
+  # ref-xml-namespaces, which registers namespace identifiers.
+  #
+  # Measured: this is the entire residue. Widening the gate to the full
+  # suffix list took pristine stage from 69 hosts to 459 unfiltered, and to
+  # 76 with the pattern filters — of which these seven are the only ones not
+  # already registered, and none is a destination.
+  - id: ref-dotted-identifier-keys
+    kind: reference
+    service: repo
+    destination:
+      hosts: [ai.model.chat, ble.hci.id, brain-memory.zip, ops.services,
+              service.health, wireless.channel, workspace.name]
+    purpose: >-
+      Dotted identifier keys whose last label collides with a delegated TLD
+      (.chat .id .zip .services .health .channel .name). None is a
+      destination and the box never resolves any of them: two WorkspaceSetting
+      keys (ai.model.chat, workspace.name), a matter.js environment variable
+      name (ble.hci.id), a Python logger name (ops.services), an analytics
+      metric name (service.health), an OpenWrt UCI command name
+      (wireless.channel), and the filename the dashboard hands the browser
+      for a brain-memory export (brain-memory.zip).
+    ticket: WARP-2487
+    added: 2026-08-28
+    review_by: 2027-08-28
+    code_refs: [apps/orchestrator/src/services/workspace-settings.service.ts,
+                apps/orchestrator/src/routes/network-wifi.routes.ts,
+                services/matter-controller/src/ble.ts]
+
   - id: ref-xml-namespaces
     kind: reference
     service: repo

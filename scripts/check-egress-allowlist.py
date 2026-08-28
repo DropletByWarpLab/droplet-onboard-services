@@ -23,6 +23,9 @@ The gate runs in two opposite directions:
     denial pass would never read cannot be evidence that the entry is used,
     so an ADR or a test fixture can no longer keep an entry green. kind:
     reference is exempt: it exists for doc and namespace hostnames.
+  * INTEGRITY (WARP-2487, duplicate_id_report) — two entries may not share
+    an id. YAML permits it, so PR #1828 shipped two identical `hubspot-api`
+    blocks under a green summary line.
 
 Extraction rules (v1, deliberately conservative):
   * scheme URLs  — (https|http|wss|ws|ftp)://<host>  anywhere in scoped
@@ -30,23 +33,36 @@ Extraction rules (v1, deliberately conservative):
     away from egress; allowlisting it as kind: reference is cheap).
   * bare hosts   — dotted hostnames, in two shapes:
       - CONFIG files (docker/docker-compose.yml, openwrt/files/etc/config/*,
-        .env.example) hand over the whole raw line: a host there is a
-        setting, and there is no prose to be noisy about.
+        .env.example) hand over the whole raw line.
       - CODE files hand over their STRING-LITERAL contents, comments
         stripped (WARP-2467). Code used to be exempt entirely, which meant
         the only shape enforced in code was a literal scheme URL, so
         `const H = "api.evil-corp.io"` plus a runtime-assembled fetch
         passed. The prose noise that exemption dodged is handled by the
         PATTERN filters below instead — there are no file exemptions.
-    Either way a host must end in a BARE_HOST_TLDS suffix, except inside a
-    provider descriptor's egressHosts array (WARP-2217), which takes any.
+    What counts as a hostname is the PUBLIC SUFFIX LIST (WARP-2487,
+    scripts/data/public_suffix_list.dat), not a hand-kept TLD tuple: a
+    candidate must sit under a real ICANN suffix with at least one label of
+    its own. A provider descriptor's egressHosts array (WARP-2217) is
+    stricter still and takes any dotted token.
   * public IPv4  — any non-private IP literal in scoped files.
 
-Bare-host noise filters, all PATTERNS (WARP-2467): RFC 2606 reserved names,
-`@scope/name` npm identifiers, the domain half of a sample email address in
-placeholder copy (unless the literal carries a scheme, so `https://user@host/`
-still denies), and Python triple-quoted blocks, which are prose. A scheme URL
-in a comment or docstring still denies — that pass reads raw lines.
+Bare-host noise filters, all PATTERNS (WARP-2467/2487) — there are no file
+exemptions, because exempting a file reopens the hole one directory at a
+time:
+  * RFC 2606 reserved names, in two independent layers;
+  * `@scope/name` npm identifiers — a host cannot start with `@`;
+  * the domain half of a sample email address in placeholder copy, but only
+    when the literal carries no scheme, so `https://user@host/` still denies;
+  * Python triple-quoted blocks, which are prose;
+  * the basename of any git-tracked file, derived from the repo itself, so
+    `setup.sh` and `internal-mtls.md` are filenames rather than hosts;
+  * SQL `--` comments, which the walker did not know about and which read
+    back as source.
+Beyond those, a candidate needs one of two confidences: a legacy
+high-signal TLD, or a value-shaped position. See LEGACY_HIGH_SIGNAL_TLDS.
+A scheme URL in a comment or docstring still denies — that pass reads raw
+lines.
 
 Scope: git-tracked files under apps/ services/ packages/ docker/ scripts/
 openwrt/ proto/ schemas/ plus root .env.example — minus tests, fixtures,
@@ -59,6 +75,7 @@ RFC-2606 reserved TLDs (.test/.example/.invalid/.localhost), .local, .lan,
 
 Usage:
   python3 scripts/check-egress-allowlist.py [--repo-root DIR] [--list-hosts]
+  python3 scripts/check-egress-allowlist.py --check-psl-freshness
 Exit codes: 0 clean, 1 violation(s), 2 usage/config error.
 """
 from __future__ import annotations
@@ -94,8 +111,30 @@ TEXT_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".sh", ".yml",
 
 URL_RE = re.compile(r"(?:https?|wss?|ftp)://([A-Za-z0-9._-]+\.[A-Za-z]{2,})")
 BARE_HOST_RE = re.compile(r"\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b")
-BARE_HOST_TLDS = (".com", ".org", ".net", ".io", ".ai", ".co", ".dev",
-                  ".goog", ".cloud", ".us", ".uk", ".de", ".fr", ".eu")
+
+# ── WARP-2487: what counts as a hostname is the Public Suffix List ──────────
+# Until this ticket a candidate was a host only if it ended in one of fifteen
+# hand-kept TLDs. #1831 (WARP-2467) made that tuple load-bearing for CODE and
+# not just config, at which point every destination outside it — vendor.sh,
+# vendor.app, vendor.xyz — was invisible in the denial direction, and stayed
+# invisible until somebody remembered to widen a tuple. A gate whose coverage
+# is a list someone has to remember to extend is not a gate.
+#
+# The snapshot is vendored (scripts/data/public_suffix_list.dat, refreshed by
+# scripts/fetch-public-suffix-list.sh) and read from THIS FILE'S directory,
+# never from --repo-root: the scanner runs offline, in CI and on the box, and
+# must never make a network call. It is also read outside the repo scope in
+# tests, which hand --repo-root a synthetic tree that has no snapshot.
+PSL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "data", "public_suffix_list.dat")
+# The list is updated several times a week upstream, so a snapshot whose own
+# VERSION line is half a year old means the refresh has stopped, not that the
+# internet stopped issuing TLDs. Checked by --check-psl-freshness, which the
+# scanner's own test suite runs; NOT by the PR gate, which stays deterministic.
+PSL_MAX_AGE_DAYS = 180
+PSL_VERSION_RE = re.compile(r"^//\s*VERSION:\s*(\d{4})-(\d{2})-(\d{2})")
+PSL_ICANN_BEGIN = "// ===BEGIN ICANN DOMAINS==="
+PSL_ICANN_END = "// ===END ICANN DOMAINS==="
 # WARP-2467 noise filters. PATTERNS, never file exemptions — exempting a file
 # reopens the hole this closes, one directory at a time.
 #   * an npm scoped package (`@droplet/tools-core`) can never be a hostname
@@ -104,6 +143,46 @@ BARE_HOST_TLDS = (".com", ".org", ".net", ".io", ".ai", ".co", ".dev",
 #     `https://user@host/` still denies.
 EMAIL_LOCALPART_RE = re.compile(r"[A-Za-z0-9._%+-]+@$")
 IPV4_RE = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3})\b")
+
+# ── WARP-2487: the two confidences a bare-host candidate can carry ──────────
+# The PSL makes ~1,440 TLDs matchable where fifteen were before, and most of
+# the newly matchable ones are ordinary English words — `.name`, `.id`,
+# `.map`, `.zone`, `.md`, `.sh`, `.py`. Measured on pristine stage, turning it
+# on unfiltered took the repo from 69 hosts to 459.
+#
+# So a candidate is taken when EITHER holds:
+#
+#   1. its suffix is one of the fifteen LEGACY_HIGH_SIGNAL_TLDS — the exact
+#      set this gate keyed on before, so nothing it used to see is lost, in
+#      prose and comments included;
+#   2. it is VALUE-SHAPED: the candidate is the whole string literal, or the
+#      whole right-hand side of a config assignment, give or take a scheme-less
+#      leading dot and a trailing port or path. That is the shape a
+#      destination is actually written in, and the shape the repo's own
+#      whole-string-URL convention produces.
+#
+# The tuple is therefore a FLOOR, never a ceiling: deleting it can only make
+# the scanner stricter, never blinder — the opposite of its old role, where it
+# was the sole gate and every unlisted TLD was invisible. `vendor.sh`,
+# `vendor.app` and `vendor.xyz` in a code literal are all value-shaped, so
+# they deny; `wireless.channel` inside a call argument list, or `setup.sh` in
+# a sentence, are not.
+LEGACY_HIGH_SIGNAL_TLDS = (".com", ".org", ".net", ".io", ".ai", ".co",
+                           ".dev", ".goog", ".cloud", ".us", ".uk", ".de",
+                           ".fr", ".eu")
+# Decoration a destination may carry and still be "the value": a leading
+# wildcard/suffix dot (`".hs1api.com"` is the Ascend guard constant verbatim),
+# a userinfo `@`, and surrounding quotes the walker did not consume.
+VALUE_LEAD_RE = re.compile(r"^[\s\"'`*.@]*$")
+# ...and after it, nothing, or a port/path/query/fragment. A trailing DOT is
+# deliberately NOT allowed: `` `firewall.zone.${zone}` `` is a namespace
+# prefix assembled at runtime, which is WARP-268's problem, not this pass's.
+VALUE_TAIL_RE = re.compile(r"^(:\d+)?([/?#].*)?$", re.S)
+VALUE_TAIL_TRIM_RE = re.compile(r"[\s\"'`)\]}]+$")
+# `KEY=value`, `key: value`, `- KEY=value` (compose env lists), and OpenWrt
+# UCI's `option name 'value'` / `list name 'value'`.
+CONFIG_ASSIGN_RE = re.compile(r"^-?\s*[A-Za-z_][A-Za-z0-9_.\[\]-]*\s*[:=]\s*(.*)$")
+CONFIG_UCI_RE = re.compile(r"^(?:option|list)\s+\S+\s+'?([^']*)'?\s*$")
 
 INTERNAL_HOST_RE = re.compile(
     r"(\.(test|example|invalid|localhost|local|lan|internal)$)"
@@ -156,6 +235,132 @@ def in_scope(path: str) -> bool:
             or base.startswith(".env") or "/etc/config/" in path)
 
 
+def load_public_suffixes(path: str = PSL_PATH):
+    """(rules, wildcards, exceptions) from the vendored PSL — ICANN only.
+
+    The PRIVATE DOMAINS section is deliberately EXCLUDED. It registers
+    suffixes like `github.io` and `s3.amazonaws.com`, and a public suffix is
+    by definition not itself a registrable name — so honouring the private
+    section would make `github.io` and `s3.amazonaws.com` stop being hosts.
+    In a denial gate that is a false NEGATIVE, the one direction this scanner
+    may never fail in. ICANN-only keeps them registrable and therefore
+    detectable, and costs nothing: no ICANN rule is a destination.
+    """
+    rules: set[str] = set()
+    wildcards: set[str] = set()
+    exceptions: set[str] = set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            in_icann = False
+            for line in fh:
+                s = line.strip()
+                if s == PSL_ICANN_BEGIN:
+                    in_icann = True
+                    continue
+                if s == PSL_ICANN_END:
+                    break
+                if not in_icann or not s or s.startswith("//"):
+                    continue
+                s = s.lower()
+                if s.startswith("!"):
+                    exceptions.add(s[1:])
+                elif s.startswith("*."):
+                    wildcards.add(s[2:])
+                else:
+                    rules.add(s)
+    except OSError as exc:
+        print(f"ERROR: cannot read the vendored Public Suffix List at "
+              f"{path}: {exc}\nRun scripts/fetch-public-suffix-list.sh to "
+              f"restore it.", file=sys.stderr)
+        sys.exit(2)
+    if not rules:
+        print(f"ERROR: {path} yielded no ICANN rules — the snapshot is "
+              f"truncated or the section markers changed. Refusing to run "
+              f"with an empty suffix set, which would make every bare host "
+              f"invisible.", file=sys.stderr)
+        sys.exit(2)
+    return rules, wildcards, exceptions
+
+
+_PSL_CACHE = None
+
+
+def public_suffixes():
+    global _PSL_CACHE
+    if _PSL_CACHE is None:
+        _PSL_CACHE = load_public_suffixes()
+    return _PSL_CACHE
+
+
+def public_suffix_of(host: str, psl=None) -> str | None:
+    """Longest matching ICANN public suffix of `host`, or None.
+
+    The published algorithm ends with "if no rules match, the prevailing rule
+    is `*`". That default is deliberately NOT implemented here. Under it every
+    dotted token has a public suffix, so `run.sh`, `main.py` and `foo.bar`
+    would all be registrable domains and the PSL would filter nothing. What
+    this scanner needs is the narrower question the list can actually answer:
+    is the right-hand side a suffix somebody really delegates? So an explicit
+    rule must match, or the token is not a hostname.
+    """
+    rules, wildcards, exceptions = psl if psl is not None else public_suffixes()
+    labels = host.split(".")
+    # Exception rules (`!www.ck`) win over every other rule; the suffix is the
+    # matched rule minus its leftmost label.
+    for i in range(len(labels)):
+        if ".".join(labels[i:]) in exceptions:
+            return ".".join(labels[i + 1:]) or None
+    # i ascending walks longest candidate first, so the first hit is the
+    # longest match — which is what the algorithm asks for.
+    for i in range(len(labels)):
+        candidate = labels[i:]
+        joined = ".".join(candidate)
+        if joined in rules:
+            return joined
+        if len(candidate) > 1 and ".".join(candidate[1:]) in wildcards:
+            return joined
+    return None
+
+
+def is_registrable_domain(host: str, psl=None) -> bool:
+    """Is `host` a name under a real public suffix, rather than a filename?
+
+    Replaces the fifteen-entry BARE_HOST_TLDS tuple this gate used to key on
+    (WARP-2487). Two conditions, both necessary:
+
+      * an ICANN rule matches — so `1.2.3.tar`, `package-lock.json` and
+        `styles.module.css` are not hosts, because `tar`/`json`/`css` are not
+        delegated;
+      * at least one label sits to the LEFT of that suffix — so `co.uk` and
+        `com.au` are not destinations, only names registered under them are.
+    """
+    suffix = public_suffix_of(host, psl)
+    if suffix is None:
+        return False
+    return host.count(".") > suffix.count(".")
+
+
+def psl_snapshot_date(path: str = PSL_PATH) -> str | None:
+    """The snapshot's own `// VERSION: YYYY-MM-DD_...` date, or None.
+
+    Upstream stamps it, so freshness is read from the DATA rather than from a
+    header we would have to remember to hand-edit — a hand-edited date can
+    claim a currency the rules do not have, which is the one failure mode a
+    staleness check exists to catch.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                m = PSL_VERSION_RE.match(line.strip())
+                if m:
+                    return "-".join(m.groups())
+                if line.strip() == PSL_ICANN_BEGIN:
+                    break
+    except OSError:
+        return None
+    return None
+
+
 def is_internal_host(host: str) -> bool:
     return bool(INTERNAL_HOST_RE.search(host))
 
@@ -189,6 +394,52 @@ def is_package_specifier(literal: str) -> bool:
     """
     lit = literal.strip()
     return lit.startswith("@") and "/" in lit
+
+
+def config_value_of(text: str, path: str) -> str:
+    """The right-hand side of `text`, if it is a config assignment.
+
+    Only config files reach the bare-host matcher as WHOLE RAW LINES, so only
+    they need this: in a code file the "value" is the string literal the
+    walker already isolated.
+    """
+    if not CONFIG_FILES_FOR_BARE_HOSTS.search(path):
+        return text
+    s = text.strip()
+    m = CONFIG_UCI_RE.match(s)
+    if m:
+        return m.group(1).strip()
+    m = CONFIG_ASSIGN_RE.match(s)
+    if m:
+        return m.group(1).strip().strip("'\"")
+    return s
+
+
+def is_value_shaped(host: str, text: str, path: str) -> bool:
+    """Is `host` written as the VALUE of `text`, rather than a word in it?
+
+    The second of the two confidences described at LEGACY_HIGH_SIGNAL_TLDS,
+    and the one that lets the gate see a destination on any of the ~1,440
+    delegated TLDs without drowning in `run.sh` and `item.name`.
+
+    Accepts `"api.vendor.sh"`, `".hs1api.com"`, `GEO_HOST=api.vendor.sh`,
+    `option server 'api.vendor.sh'`, `"api.vendor.sh:8443/v1"`. Rejects
+    `"see scripts/setup.sh for details"`, and `${item.name}` in a template
+    literal, where the `${` before the candidate is not decoration a
+    destination could carry. Rejects a trailing dot on purpose; see
+    VALUE_TAIL_RE.
+
+    Measured on the whole repo: this is the load-bearing filter. Without it
+    the wider suffix list takes 184 hosts instead of 77.
+    """
+    value = config_value_of(text, path)
+    at = value.find(host)
+    if at < 0:
+        return False
+    if not VALUE_LEAD_RE.match(value[:at]):
+        return False
+    tail = VALUE_TAIL_TRIM_RE.sub("", value[at + len(host):])
+    return bool(VALUE_TAIL_RE.match(tail))
 
 
 def is_email_domain(literal: str, start: int) -> bool:
@@ -227,8 +478,8 @@ def bare_host_sources(path: str, lines: list[str]) -> list[list[str]]:
     """
     if CONFIG_FILES_FOR_BARE_HOSTS.search(path):
         return [[line] for line in lines]
-    slashes, hashes = comment_styles(path)
-    per_line = string_literal_lines("".join(lines), slashes, hashes)
+    slashes, hashes, dashes = comment_styles(path)
+    per_line = string_literal_lines("".join(lines), slashes, hashes, dashes)
     # scan_source preserves newlines, so per_line tracks `lines` — but a file
     # with no trailing newline, or one ending mid-literal, can come up short.
     while len(per_line) < len(lines):
@@ -236,8 +487,28 @@ def bare_host_sources(path: str, lines: list[str]) -> list[list[str]]:
     return per_line
 
 
+def repo_file_basenames(files: list[str]) -> set[str]:
+    """Lowercased basenames of every tracked file (WARP-2487).
+
+    A filename filter DERIVED from the repository, so it needs no upkeep and
+    cannot rot: `setup.sh`, `internal-mtls.md` and `config.py` stop being
+    hostnames because this repo really contains files with those names, and
+    the moment one is deleted the filter stops covering it.
+
+    It replaces the alternative — an extension denylist — which the ticket
+    rules out and which would be actively wrong: `.sh`, `.app` and `.py` are
+    delegated TLDs, so denylisting them is the blind spot WARP-2487 exists to
+    close. Accepted limit, bounded and reviewable: a destination whose name
+    equals a tracked file's basename goes unseen. That takes a file called
+    `vendor.sh` sitting in the tree next to the connector that dials
+    `vendor.sh`, which is a diff a reviewer reads.
+    """
+    return {os.path.basename(p).lower() for p in files}
+
+
 def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
     found: dict[str, set[tuple[str, int]]] = defaultdict(set)
+    basenames = repo_file_basenames(files)
     for path in files:
         if not in_scope(path):
             continue
@@ -285,7 +556,13 @@ def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
                     if is_email_domain(chunk, m.start()):
                         continue
                     host = m.group(1).lower()
-                    if host.endswith(BARE_HOST_TLDS) and not is_internal_host(host):
+                    if not is_registrable_domain(host) or is_internal_host(host):
+                        continue
+                    if host in basenames:
+                        continue
+                    # The two confidences — see LEGACY_HIGH_SIGNAL_TLDS.
+                    if (host.endswith(LEGACY_HIGH_SIGNAL_TLDS)
+                            or is_value_shaped(host, chunk, path)):
                         found[host].add((path, lineno))
             for m in IPV4_RE.finditer(line):
                 if is_public_ip(m.group(1)):
@@ -293,16 +570,26 @@ def extract(root: str, files: list[str]) -> dict[str, set[tuple[str, int]]]:
     return found
 
 
-def comment_styles(path: str) -> tuple[bool, bool]:
-    """(slash_comments, hash_comments) applicable to `path`."""
+def comment_styles(path: str) -> tuple[bool, bool, bool]:
+    """(slash_comments, hash_comments, dash_comments) applicable to `path`.
+
+    `.sql` had NEITHER style until WARP-2487, so a migration's whole `--`
+    header was read as source. Because `'` is SQL's string delimiter, an
+    apostrophe in that prose left the walker inside a phantom string for the
+    rest of the file and the SQL body came back as "literal contents" — which
+    is how `req.user.id` and `ai.model.chat` turned up as destinations. Both
+    directions get this: a hostname in a SQL comment must not back an entry
+    either.
+    """
     base = os.path.basename(path)
     slashes = path.endswith(C_COMMENT_SUFFIXES)
     hashes = (path.endswith(HASH_COMMENT_SUFFIXES) or "Dockerfile" in base
               or base.startswith(".env") or "." not in base)
-    return slashes, hashes
+    dashes = path.endswith(".sql")
+    return slashes, hashes, dashes
 
 
-def scan_source(text: str, slashes: bool, hashes: bool):
+def scan_source(text: str, slashes: bool, hashes: bool, dashes: bool = False):
     """Walk `text` yielding (char, in_string) for every NON-comment char.
 
     The single source-walking primitive both directions share. WARP-2452
@@ -390,22 +677,30 @@ def scan_source(text: str, slashes: bool, hashes: bool):
             while i < n and text[i] != "\n":
                 i += 1
             continue
+        # SQL line comment (WARP-2487). `--` inside a literal is protected by
+        # the quote tracking above, exactly as `//` and `#` already are.
+        if dashes and ch == "-" and i + 1 < n and text[i + 1] == "-":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
         yield ch, False
         i += 1
 
 
-def strip_comments(text: str, slashes: bool, hashes: bool) -> str:
+def strip_comments(text: str, slashes: bool, hashes: bool,
+                   dashes: bool = False) -> str:
     """Comment-free `text`, for the BACKING pass (WARP-2452).
 
     A hostname in prose must not vouch for a registry entry. See
     scan_source for the walker and its accepted limits.
     """
-    if not slashes and not hashes:
+    if not slashes and not hashes and not dashes:
         return text
-    return "".join(ch for ch, _ in scan_source(text, slashes, hashes))
+    return "".join(ch for ch, _ in scan_source(text, slashes, hashes, dashes))
 
 
-def string_literal_lines(text: str, slashes: bool, hashes: bool) -> list[list[str]]:
+def string_literal_lines(text: str, slashes: bool, hashes: bool,
+                         dashes: bool = False) -> list[list[str]]:
     """Per line (1-based index - 1), the string literals it contains.
 
     The DENIAL pass's bare-host extractor (WARP-2467) works on this instead
@@ -423,7 +718,7 @@ def string_literal_lines(text: str, slashes: bool, hashes: bool) -> list[list[st
     """
     out: list[list[str]] = [[]]
     current: list[str] = []
-    for ch, in_string in scan_source(text, slashes, hashes):
+    for ch, in_string in scan_source(text, slashes, hashes, dashes):
         if ch == "\n":
             if current:
                 out[-1].append("".join(current))
@@ -456,20 +751,50 @@ def host_literal_in(host: str, text: str) -> bool:
     return host in text
 
 
+def declared_hosts(entry: dict) -> dict[str, str]:
+    """{host: reason} that `entry`'s no_code_literal covers (WARP-2487).
+
+    The declaration used to be one string for the whole entry, which made a
+    MIXED entry inexpressible. `cloud-llm-providers-optin` registers two
+    hosts; if LiteLLM owned one of them and our own client dialled the other,
+    declaring the flag would fail (a literal exists) and omitting it would
+    pass (some host is backed) while nothing accounted for the SDK-owned one.
+    Neither state is the truth, so the registry could only be wrong.
+
+    Two accepted shapes, and the string form is unchanged:
+      * `no_code_literal: <reason>`        — covers EVERY host of the entry.
+      * `no_code_literal: {host: reason}`  — covers exactly the named hosts.
+    """
+    declared = entry.get("no_code_literal")
+    hosts = [h.lower() for h in (entry.get("destination") or {}).get("hosts") or []]
+    if declared is None:
+        return {}
+    if isinstance(declared, dict):
+        return {str(h).lower(): str(r) for h, r in declared.items()}
+    return {h: str(declared) for h in hosts}
+
+
 def code_ref_literal_report(
     root: str, entry: dict
-) -> tuple[bool, str | None, list[str], list[str]]:
-    """(satisfied, matched_host, refs_checked, unreadable_refs) for an entry.
+) -> tuple[list[str], list[str], list[str]]:
+    """(backed_hosts, refs_checked, unreadable_refs) for an entry.
 
-    Satisfied when ANY host of the entry appears as a non-comment literal in
-    ANY of its code_refs — the per-entry question the stale-entry notice has
-    always asked, promoted to enforcement. Per-HOST would be stronger but
-    fails honest entries whose extra hosts are redirect targets never named
-    in code (e.g. objects.githubusercontent.com); see WARP-2452 notes.
+    PER HOST since WARP-2487 — the loop used to return on the first hit, so
+    an entry with two hosts only ever reported one of them and the caller
+    could not tell a fully-backed entry from a half-backed one.
+
+    The ENTRY is still satisfied when ANY host is backed. Per-host
+    *satisfaction* would fail honest entries whose extra hosts are redirect
+    targets never named in code (objects.githubusercontent.com); that
+    WARP-2452 judgement stands. What is now per host is the `no_code_literal`
+    CLAIM, which is a statement about a specific destination and was never
+    really an entry-level fact.
     """
     hosts = [h.lower() for h in (entry.get("destination") or {}).get("hosts") or []]
     refs = entry.get("code_refs") or []
     unreadable: list[str] = []
+    backed: list[str] = []
+    bodies: list[str] = []
     for ref in refs:
         try:
             with open(os.path.join(root, ref), encoding="utf-8",
@@ -478,12 +803,12 @@ def code_ref_literal_report(
         except OSError:
             unreadable.append(ref)
             continue
-        slashes, hashes = comment_styles(ref)
-        body = strip_comments(raw, slashes, hashes)
-        for host in hosts:
-            if host_literal_in(host, body):
-                return True, host, refs, unreadable
-    return False, None, refs, unreadable
+        slashes, hashes, dashes = comment_styles(ref)
+        bodies.append(strip_comments(raw, slashes, hashes, dashes))
+    for host in hosts:
+        if any(host_literal_in(host, body) for body in bodies):
+            backed.append(host)
+    return backed, refs, unreadable
 
 
 def code_refs_scope_report(entry: dict) -> list[str]:
@@ -507,11 +832,57 @@ def code_refs_scope_report(entry: dict) -> list[str]:
     return [r for r in (entry.get("code_refs") or []) if not in_scope(r)]
 
 
-def load_allowlist(root: str) -> tuple[list[dict], set[str]]:
+def entry_id_lines(text: str) -> dict[str, list[int]]:
+    """{entry id: [1-based line numbers]} straight from the YAML nodes.
+
+    yaml.safe_load throws line information away, and a duplicate `id:` is not
+    a duplicate MAPPING key — it is two perfectly valid list items that happen
+    to name the same slug — so nothing in the parser objects. PR #1828 carried
+    two byte-identical `hubspot-api` blocks and the gate printed
+    `OK — 41 registry entries`. Line numbers come from the node stream rather
+    than a regex over the raw text so the report stays right whatever
+    indentation or flow style an entry is written in.
+    """
+    lines: dict[str, list[int]] = defaultdict(list)
+    try:
+        root_node = yaml.compose(text)
+    except yaml.YAMLError:
+        return {}
+    if root_node is None:
+        return {}
+    for key, value in getattr(root_node, "value", []):
+        if getattr(key, "value", None) != "entries":
+            continue
+        for item in getattr(value, "value", []):
+            for k, v in getattr(item, "value", []):
+                if getattr(k, "value", None) == "id":
+                    lines[str(v.value)].append(v.start_mark.line + 1)
+    return dict(lines)
+
+
+def duplicate_id_report(entries: list[dict], text: str) -> list[str]:
+    """One formatted failure line per id that appears more than once."""
+    seen: dict[str, int] = defaultdict(int)
+    for e in entries:
+        seen[str(e.get("id"))] += 1
+    at = entry_id_lines(text)
+    out: list[str] = []
+    for entry_id, count in sorted(seen.items()):
+        if count < 2:
+            continue
+        where = at.get(entry_id) or []
+        located = (", ".join(f"{ALLOWLIST_PATH}:{n}" for n in where)
+                   if where else "(line numbers unavailable)")
+        out.append(f"  {entry_id}: declared {count} times — {located}")
+    return out
+
+
+def load_allowlist(root: str) -> tuple[list[dict], set[str], list[str]]:
     path = os.path.join(root, ALLOWLIST_PATH)
     try:
         with open(path, encoding="utf-8") as fh:
-            doc = yaml.safe_load(fh)
+            text = fh.read()
+        doc = yaml.safe_load(text)
     except OSError as exc:
         print(f"ERROR: cannot read {ALLOWLIST_PATH}: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -533,10 +904,27 @@ def load_allowlist(root: str) -> tuple[list[dict], set[str]]:
                       f"no_code_literal, which only applies to kind: egress",
                       file=sys.stderr)
                 sys.exit(2)
-            if not isinstance(declared, str) or not declared.strip():
+            hosts = [h.lower()
+                     for h in (e.get("destination") or {}).get("hosts") or []]
+            if isinstance(declared, dict):
+                # Per-host form (WARP-2487). A key that is not one of the
+                # entry's own hosts exempts nothing and reads as though it
+                # does, so it is a config error rather than a silent no-op.
+                for host, reason in declared.items():
+                    if str(host).lower() not in hosts:
+                        print(f"ERROR: entry '{e['id']}' declares "
+                              f"no_code_literal for '{host}', which is not "
+                              f"one of its destination.hosts", file=sys.stderr)
+                        sys.exit(2)
+                    if not isinstance(reason, str) or not reason.strip():
+                        print(f"ERROR: entry '{e['id']}' no_code_literal["
+                              f"'{host}'] must be a non-empty reason naming "
+                              f"who owns the destination", file=sys.stderr)
+                        sys.exit(2)
+            elif not isinstance(declared, str) or not declared.strip():
                 print(f"ERROR: entry '{e['id']}' no_code_literal must be a "
-                      f"non-empty reason naming who owns the destination",
-                      file=sys.stderr)
+                      f"non-empty reason naming who owns the destination, or "
+                      f"a host->reason mapping", file=sys.stderr)
                 sys.exit(2)
         if e["kind"] == "dynamic":
             if not e.get("config_key"):
@@ -550,7 +938,52 @@ def load_allowlist(root: str) -> tuple[list[dict], set[str]]:
                   f"destination.hosts", file=sys.stderr)
             sys.exit(2)
         patterns.update(h.lower() for h in hosts)
-    return entries, patterns
+    return entries, patterns, duplicate_id_report(entries, text)
+
+
+def check_psl_freshness(path: str, today: str | None = None) -> int:
+    """Drift gate for the vendored Public Suffix List (WARP-2487).
+
+    The snapshot decides what the whole bare-host pass treats as a hostname,
+    so it is exactly the kind of committed artefact this repo requires an
+    explicit drift gate for rather than trust. Age is read from the
+    snapshot's OWN `// VERSION: YYYY-MM-DD_...` line, which upstream stamps —
+    not from a header we would maintain by hand and could therefore refresh
+    without refreshing the data, and not from the file's mtime, which a fresh
+    clone resets to checkout time and would report as permanently current.
+
+    Offline by construction. `--today` exists so the suite can pin both sides
+    of the boundary against a fixed snapshot instead of a fixture whose date
+    is computed from the clock it is being compared to.
+    """
+    from datetime import date
+
+    stamped = psl_snapshot_date(path)
+    if stamped is None:
+        print(f"ERROR: {path} has no '// VERSION: YYYY-MM-DD' line — cannot "
+              f"tell how old the suffix list is. Re-run "
+              f"scripts/fetch-public-suffix-list.sh.", file=sys.stderr)
+        return 2
+    try:
+        snapshot = date(*(int(p) for p in stamped.split("-")))
+        now = date(*(int(p) for p in today.split("-"))) if today else date.today()
+    except (TypeError, ValueError) as exc:
+        print(f"ERROR: bad date ({exc})", file=sys.stderr)
+        return 2
+    age = (now - snapshot).days
+    if age > PSL_MAX_AGE_DAYS:
+        print(f"PUBLIC SUFFIX LIST STALE: {path}\nis dated {stamped}, "
+              f"{age} days old (limit {PSL_MAX_AGE_DAYS}).\n\n"
+              f"The list decides what this gate treats as a hostname, so a "
+              f"stale snapshot\nmeans destinations on newly delegated TLDs "
+              f"are invisible to the denial pass.\nRefresh it:\n"
+              f"  ./scripts/fetch-public-suffix-list.sh\n"
+              f"then commit the result. The PR needs security review (assign "
+              f"Romain).", file=sys.stderr)
+        return 1
+    print(f"public-suffix snapshot OK — dated {stamped}, {age} days old "
+          f"(limit {PSL_MAX_AGE_DAYS}).")
+    return 0
 
 
 def host_allowed(host: str, patterns: set[str]) -> bool:
@@ -564,7 +997,19 @@ def main() -> int:
     ap.add_argument("--repo-root", default=None)
     ap.add_argument("--list-hosts", action="store_true",
                     help="print every extracted host and exit 0")
+    ap.add_argument("--check-psl-freshness", action="store_true",
+                    help="fail if the vendored Public Suffix List snapshot is "
+                         f"older than {PSL_MAX_AGE_DAYS} days (offline; reads "
+                         "the snapshot's own VERSION line)")
+    ap.add_argument("--psl-path", default=PSL_PATH,
+                    help="snapshot to check (tests point this at a fixture)")
+    ap.add_argument("--today", default=None,
+                    help="YYYY-MM-DD to measure the snapshot's age against; "
+                         "defaults to the real date")
     args = ap.parse_args()
+
+    if args.check_psl_freshness:
+        return check_psl_freshness(args.psl_path, args.today)
 
     root = args.repo_root or subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -577,7 +1022,7 @@ def main() -> int:
             print(f"{host}  ({len(locs)} refs, e.g. {locs[0][0]}:{locs[0][1]})")
         return 0
 
-    entries, patterns = load_allowlist(root)
+    entries, patterns, dup_failures = load_allowlist(root)
 
     violations = {h: found[h] for h in found if not host_allowed(h, patterns)}
 
@@ -613,26 +1058,58 @@ def main() -> int:
             scope_failures.append(
                 f"  {e['id']}: code_refs outside the denial scope: "
                 f"{', '.join(out_of_scope)}")
-        satisfied, hit, refs, unreadable = code_ref_literal_report(root, e)
-        declared = e.get("no_code_literal")
-        hosts = ", ".join((e.get("destination") or {}).get("hosts") or [])
-        if satisfied and declared:
+        backed, refs, unreadable = code_ref_literal_report(root, e)
+        declared = declared_hosts(e)
+        all_hosts = [h.lower()
+                     for h in (e.get("destination") or {}).get("hosts") or []]
+        hosts = ", ".join(all_hosts)
+        # PER HOST (WARP-2487). Two independent questions, and the old
+        # per-entry flag conflated them:
+        #   * a declared host that IS a literal — the claim is false, and now
+        #     EVERY such host is named, not just whichever the loop hit first;
+        #   * an undeclared host with nothing backing the entry at all.
+        contradicted = [h for h in backed if h in declared]
+        unexcused = [h for h in all_hosts if h not in backed and h not in declared]
+        if contradicted:
             ref_failures.append(
-                f"  {e['id']}: declares no_code_literal, but '{hit}' IS a "
+                f"  {e['id']}: declares no_code_literal for "
+                f"{', '.join(repr(h) for h in contradicted)}, but "
+                f"{'they are' if len(contradicted) > 1 else 'it is'} a "
                 f"non-comment\n    literal in its code_refs — drop the "
-                f"declaration, the code backs it.")
-        elif not satisfied and not declared:
+                f"declaration for {'those hosts' if len(contradicted) > 1 else 'that host'}"
+                f", the code backs "
+                f"{'them' if len(contradicted) > 1 else 'it'}.")
+        elif not backed and unexcused:
             detail = (f"  {e['id']}: no host of [{hosts}] appears as a "
                       f"non-comment literal\n    in code_refs: "
-                      f"{', '.join(refs) if refs else '(none listed)'}")
+                      f"{', '.join(refs) if refs else '(none listed)'}"
+                      f"\n    undeclared: {', '.join(unexcused)}")
             if unreadable:
                 detail += f"\n    unreadable code_refs: {', '.join(unreadable)}"
             ref_failures.append(detail)
 
-    if not violations and not ref_failures and not scope_failures:
+    if (not violations and not ref_failures and not scope_failures
+            and not dup_failures):
         print(f"egress-gate OK — {len(found)} distinct hosts, all allowlisted "
               f"({len(entries)} registry entries).")
         return 0
+
+    if dup_failures:
+        print(f"\nDUPLICATE ALLOWLIST ENTRY: {len(dup_failures)} id(s) in "
+              f"{ALLOWLIST_PATH}\ndeclared more than once\n", file=sys.stderr)
+        for detail in dup_failures:
+            print(detail, file=sys.stderr)
+        print(
+            "\nAn id is the registry's handle for one reviewed destination:\n"
+            "docs cite it, review comments cite it, and a future entry-level\n"
+            "rule keys on it. Two blocks sharing one id means half the pair is\n"
+            "invisible — YAML is happy, both blocks load, and a reviewer\n"
+            "reading the file sees whichever they scroll to first. That is how\n"
+            "PR #1828 shipped two 'hubspot-api' blocks under a green\n"
+            "`OK -- 41 registry entries`. Resolve by deleting the duplicate,\n"
+            "or by giving the second destination its own id and purpose.\n"
+            "Touching the allowlist needs security review (assign Romain).\n",
+            file=sys.stderr)
 
     if scope_failures:
         print(f"\nEGRESS CODE_REFS OUT OF SCOPE: {len(scope_failures)} kind: "
