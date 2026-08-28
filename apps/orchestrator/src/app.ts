@@ -12,6 +12,7 @@ import {
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
@@ -22,6 +23,7 @@ import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
+import { createErpDriftRouter } from "./routes/erp-drift.js";
 import { createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -115,6 +117,14 @@ import {
 } from "./services/workspace-settings.service.js";
 import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
 import { createLogger } from "./lib/logger.js";
+
+// One limiter for the process (module scope, not per createApp): tests build
+// several apps and express-rate-limit warns when a MemoryStore is created
+// repeatedly from the same call site.
+const authenticatedApiRateLimit = createRateLimit("authenticated-api", {
+  windowMs: 60_000,
+  limit: 1_200,
+});
 
 export function createApp(
   prisma: PrismaClient,
@@ -243,6 +253,18 @@ export function createApp(
   // along for the workspace-module intersection (modules.service).
   initEffectiveAccess(prisma, config);
 
+  // CodeQL js/missing-rate-limiting — per-client ceiling on the whole
+  // authenticated surface, mounted right before authMiddleware so the public
+  // routers above keep their own tighter presets. Keyed on the real client:
+  // nginx sets X-Forwarded-For on the /api leg and `trust proxy` is 1. The
+  // budget is a DoS backstop, NOT a policy limit: 1,200/min = 20 req/s
+  // sustained per IP, ~10x the dashboard's steady state (widgets poll at
+  // 10-60 s) and comfortably above its worst legitimate burst (page-load
+  // fan-out, a folder of thumbnails ≈ 100 requests). Each internal service
+  // principal (mcp-server, email-indexer, routing, …) comes from its own
+  // container IP so they don't share a bucket with a browser.
+  app.use(authenticatedApiRateLimit);
+
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
@@ -305,11 +327,36 @@ export function createApp(
   app.use("/api", createIntegrationsRouter(prisma));
   // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
   // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
-  // and validates whatever `credentialFields` a provider declares. Mounted
-  // after the ERP router because both live under /api/integrations; the paths
-  // do not overlap (`/integrations/:provider/credentials` is three segments,
-  // every ERP route is two or ends in a literal verb).
+  // and validates whatever `credentialFields` a provider declares.
+  //
+  // WARP-2485 — this shares the /api/integrations prefix with
+  // `createIntegrationsRouter` above, and with nothing else: `createErpRouter`
+  // below owns /api/erp, a different prefix. Mount order is NOT what keeps the
+  // two apart, and neither mount is load-bearing on being second. The invariant
+  // is that their path sets are disjoint — no single URL can match a route in
+  // both — and while that holds either order behaves identically.
+  // `/integrations/:provider/credentials` ends in a literal `credentials`;
+  // the Eaglesoft routes are `/integrations`, `/integrations/eaglesoft`, and
+  // `/integrations/eaglesoft/<literal verb>`. If a route is ever added that one
+  // URL could match in both, mount order silently picks the winner and the
+  // loser becomes unreachable, so the disjointness is checked rather than
+  // asserted here: `routes/integrations-prefix.mount.test.ts` enumerates both
+  // routers' stacks and fails on any such pair.
   app.use("/api", createSaasCredentialsRouter(prisma));
+  // WARP-2463 — admin-only read over the reconciliation sweep's STORED drift
+  // report. Its own factory rather than a route on the integrations router:
+  // that router's floor is family-and-up, this surface is owner/admin, and a
+  // route whose guard is narrower than its neighbours' is safer as its own
+  // registration than as an exception inside someone else's file.
+  //
+  // `/integrations/:connectionId/drift` is match-disjoint from every other
+  // route under /api/integrations — it is the only one whose LAST segment is
+  // `drift`, and the two-segment routes differ in arity — so this mount's
+  // POSITION is not load-bearing and reordering this block cannot change which
+  // handler serves a request. See the table in routes/erp-drift.ts. WARP-2485
+  // adds a test for exactly that property; `createErpDriftRouter` should join
+  // its ROUTERS list.
+  app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
   // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.

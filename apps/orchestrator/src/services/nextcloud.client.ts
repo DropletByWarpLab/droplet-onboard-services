@@ -1833,8 +1833,18 @@ export async function ncDirExists(
 
 // ── Trash ──
 
+// CodeQL js/request-forgery (#127–#130): `user` is raw request input — for
+// the MCP service principal it is the X-Nextcloud-User header (routes/files.ts
+// getUser) — so it MUST be percent-encoded exactly as webdavUrl() does. Encoded
+// it can only ever name a trashbin namespace; raw, a `../`, `?` or `#` would
+// re-target the request to a different path on the Nextcloud host.
 function trashUrl(user: string, sub: string): string {
-  return `${config.NEXTCLOUD_URL}/remote.php/dav/trashbin/${user}/${sub}`;
+  return `${config.NEXTCLOUD_URL}/remote.php/dav/trashbin/${encodeURIComponent(user)}/${sub}`;
+}
+
+// CodeQL js/request-forgery (#131–#132): same contract for the versions endpoint.
+function versionsUrl(user: string, sub: string): string {
+  return `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${encodeURIComponent(user)}/${sub}`;
 }
 
 /**
@@ -1930,7 +1940,7 @@ export async function ncListVersions(
   user: string,
   fileId: number
 ): Promise<FileVersionInfo[]> {
-  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/versions/${fileId}`;
+  const url = versionsUrl(user, `versions/${fileId}`);
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
@@ -1961,8 +1971,8 @@ export async function ncRestoreVersion(
   fileId: number,
   versionId: string
 ): Promise<void> {
-  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/versions/${fileId}/${encodeURIComponent(versionId)}`;
-  const destination = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/restore/target`;
+  const url = versionsUrl(user, `versions/${fileId}/${encodeURIComponent(versionId)}`);
+  const destination = versionsUrl(user, "restore/target");
   const resp = await fetch(url, {
     method: "MOVE",
     headers: { ...davHeaders(token), Destination: destination },

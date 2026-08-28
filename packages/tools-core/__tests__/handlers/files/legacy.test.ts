@@ -8,6 +8,7 @@
 // path traversal, base64 strictness, root refusal) carry over unchanged.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { getTool } from "../../../src/index.js";
 import type { ToolContext } from "../../../src/types.js";
@@ -20,8 +21,8 @@ interface CtxOpts {
   ncToken?: string;
   embedText?: ToolContext["embedText"];
   searchHybrid?: ToolContext["searchHybrid"];
-  ncPost?: ReturnType<typeof vi.fn>;
-  ncDelete?: ReturnType<typeof vi.fn>;
+  ncPost?: Mock;
+  ncDelete?: Mock;
   prisma?: ToolContext["prisma"];
 }
 
@@ -41,6 +42,7 @@ function makeCtx(opts: CtxOpts = {}) {
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      orchestrator: {} as ToolContext["http"]["orchestrator"],
     },
     matter: {} as ToolContext["matter"],
     embedText: opts.embedText,

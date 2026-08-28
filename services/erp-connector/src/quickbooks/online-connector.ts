@@ -80,6 +80,7 @@ import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
 import { sortByKey, sumMoneyWithGaps } from "../api-dto.js";
 import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
+import { utcInstant } from "./timestamp.js";
 
 /** Provider key for this track. */
 export const QUICKBOOKS_ONLINE_PROVIDER = "quickbooks-online";
@@ -355,7 +356,7 @@ export interface QuickBooksOnlineDeps {
 /** The accounting datasets a QuickBooks company carries. Note what is absent:
  *  a dental practice's schedule. A QBO connection has no appointments and
  *  saying so is a capability, not a failure. */
-export const QBO_DATASETS: readonly string[] = ["invoice", "bill", "ap_summary"];
+export const QBO_DATASETS: readonly DatasetName[] = ["invoice", "bill", "ap_summary"];
 
 /**
  * The connection-state vocabulary ADR-041 §5 fixes for every cloud connector.
@@ -610,7 +611,7 @@ export class QuickBooksOnlineConnector implements Connector {
     return QBO_DATASETS.map((dataset) => ({
       name: dataset,
       owner: "qbo",
-      columns: CANONICAL_COLUMNS[dataset as DatasetName].map((name) => ({ name, type: "text" })),
+      columns: CANONICAL_COLUMNS[dataset].map((name) => ({ name, type: "text" })),
     }));
   }
 
@@ -795,6 +796,17 @@ export class QuickBooksOnlineConnector implements Connector {
     return `${v}T00:00:00.000Z`;
   }
 
+  /** WARP-2475 — the modification time, from `MetaData.LastUpdatedTime`.
+   *  Intuit documents `MetaData` on every entity, so an absent one is a
+   *  contract deviation rather than a normal case — but it is handled as data,
+   *  not as a fault: one odd document must not fail the whole read and take a
+   *  practice's payables with it. Offset-qualified ISO in, UTC instant out;
+   *  see `timestamp.ts` for why anything else becomes undefined. */
+  private static updatedAt(v: unknown): string | undefined {
+    if (!v || typeof v !== "object") return undefined;
+    return utcInstant((v as Record<string, unknown>).LastUpdatedTime);
+  }
+
   private static ref(v: unknown): string | undefined {
     if (!v || typeof v !== "object") return undefined;
     const r = v as Record<string, unknown>;
@@ -830,6 +842,9 @@ export class QuickBooksOnlineConnector implements Connector {
           amount: QuickBooksOnlineConnector.money(r.TotalAmt),
           balance: QuickBooksOnlineConnector.money(r.Balance),
           status: undefined as string | undefined,
+          // WARP-2475 — the modification time. No request change was needed:
+          // the query is `SELECT *`, so `MetaData` already arrives.
+          updated_at: QuickBooksOnlineConnector.updatedAt(r.MetaData),
         }));
         return sortByKey(sortByKey(rows.filter(isOpen), "invoice_id"), "due_at");
       }
@@ -844,6 +859,8 @@ export class QuickBooksOnlineConnector implements Connector {
           amount: QuickBooksOnlineConnector.money(r.TotalAmt),
           balance: QuickBooksOnlineConnector.money(r.Balance),
           status: undefined as string | undefined,
+          // WARP-2475 — see `get_open_invoices`.
+          updated_at: QuickBooksOnlineConnector.updatedAt(r.MetaData),
         }));
         return sortByKey(sortByKey(rows.filter(isOpen), "bill_id"), "due_at");
       }

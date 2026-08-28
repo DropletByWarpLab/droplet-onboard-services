@@ -167,7 +167,10 @@ describe("roster extensions", () => {
     render(<UsersPage />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
     // Priya carries her custom role's name; Sam carries the Guest tier label.
-    expect(screen.getByText("Finance")).toBeInTheDocument();
+    // The roles list loads on its own chain (listAccessRoles → setAccessRoles),
+    // independent of the roster fetch awaited above, so the custom name is
+    // awaited rather than assumed to have committed alongside the roster.
+    expect(await screen.findByText("Finance")).toBeInTheDocument();
     expect(screen.getByText("Guest")).toBeInTheDocument();
     expect(screen.getByText("Owner")).toBeInTheDocument();
     expect(screen.queryByText("Family")).not.toBeInTheDocument();

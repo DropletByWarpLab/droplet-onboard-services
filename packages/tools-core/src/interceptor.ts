@@ -24,7 +24,7 @@ import {
   type ConfirmationRedeemFailure,
   type ConfirmationTokenStore,
 } from "./confirmation-token.js";
-import type { ToolResult } from "./types.js";
+import type { ConfirmationOwner, ToolResult } from "./types.js";
 
 /**
  * The minimum a tool must declare to be intercepted.
@@ -39,6 +39,25 @@ export interface InterceptableTool {
   requiresConfirmation: boolean;
   requiresWrite?: boolean;
   inputSchema?: unknown;
+  /**
+   * WARP-2472 — which layer asks the user. Optional here for the same
+   * reason `requiresWrite` is: a remote MCP tool under WARP-320 declares
+   * neither, and a tool we did not author has no orchestrator route of
+   * ours to own its confirmation. Absent resolves to `"interceptor"`,
+   * the fail-closed answer.
+   */
+  confirmationOwner?: ConfirmationOwner;
+}
+
+/**
+ * The ONE place the `"interceptor"` default is applied (WARP-2472).
+ *
+ * Read the owner through this, never off the field: a second reader that
+ * spells the default itself is how "the field is optional" quietly turns
+ * into two disagreeing answers.
+ */
+export function confirmationOwnerOf(tool: InterceptableTool): ConfirmationOwner {
+  return tool.confirmationOwner ?? "interceptor";
 }
 
 export interface DenyReason {
@@ -184,7 +203,40 @@ export function createToolCallInterceptor(opts?: {
         return { kind: "proceed", args, confirmationConsumed: false };
       }
 
-      // 3. Token presented → verify and spend. This is the strong path:
+      // 3. WARP-2472 — THE ROUTE OWNS THIS ONE. Stand down.
+      //
+      //    Nine tools relay a 202 from an orchestrator route that runs
+      //    its own Tier-2 gate. Challenging here as well asked the user
+      //    twice for one action, and the route's second challenge is
+      //    unanswerable from chat: its token is redeemable only by the
+      //    dashboard confirm endpoint (`/api/network/command/confirm`),
+      //    which `tool-routes.ts` marks `dashboardOnly`, and `share_clip`
+      //    goes further and 403s the `_service:mcp` principal on the
+      //    inline path ON PURPOSE — an agent re-presenting the token it
+      //    was just handed is the agent approving its own write.
+      //
+      //    So this is a skip, never a forward. Nothing of ours is handed
+      //    to the route, because there is nothing a route would accept:
+      //    `evaluateNetworkCommand` takes no confirmation input at all.
+      //    The route's existing gate is left as the single prompt —
+      //    which is the pre-WARP-2305 behaviour, now written down instead
+      //    of being an accident of who happened to check first.
+      //
+      //    NOT a weakening: no write becomes reachable that was not
+      //    already reachable, and no approval is fabricated. The call
+      //    proceeds to a route that will itself refuse it unconfirmed.
+      //    `confirmationConsumed` stays false, so no confirmation audit
+      //    row claims this interceptor approved anything.
+      //
+      //    Deliberately BELOW the deny tier: no approval, from any layer,
+      //    makes a blocked action allowed. Full rule + the drift gate that
+      //    keeps a declaration honest: `docs/tool-confirmation-contract.md`
+      //    §13.
+      if (confirmationOwnerOf(tool) === "route") {
+        return { kind: "proceed", args, confirmationConsumed: false };
+      }
+
+      // 4. Token presented → verify and spend. This is the strong path:
       //    the caller held a 256-bit secret bound to this exact call.
       const presented = meta?.confirmationToken;
       if (typeof presented === "string" && presented.length > 0) {
@@ -199,7 +251,7 @@ export function createToolCallInterceptor(opts?: {
         };
       }
 
-      // 4. LEGACY PATH — `confirmed: true` against a LIVE CHALLENGE.
+      // 5. LEGACY PATH — `confirmed: true` against a LIVE CHALLENGE.
       //
       //    Why this exists: in the chat surface nothing can carry a token
       //    back. `_meta` is set by the orchestrator; the model is what
@@ -232,7 +284,7 @@ export function createToolCallInterceptor(opts?: {
         // approval, and must not read as one.
       }
 
-      // 5. Challenge. NO WRITE HAPPENS: the caller returns this outcome
+      // 6. Challenge. NO WRITE HAPPENS: the caller returns this outcome
       //    without ever invoking the handler.
       const minted = tokens.mint(tool.name, args, now);
       return {

@@ -37,6 +37,14 @@ export type SyncResult =
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024; // 50 MB — pathological feeds rejected
 
+/** The four entities a CalDAV server escapes inside `<calendar-data>` text.
+ *  Decoded in ONE pass (CodeQL js/double-escaping): a chain of replaces
+ *  that turns `&amp;` into `&` before `&quot;` re-exposes an escaped
+ *  `&amp;quot;` as `&quot;` and the next step decodes it to `"` — a literal
+ *  `&quot;` in a DESCRIPTION could never round-trip. */
+const XML_ENTITY_RE = /&(lt|gt|amp|quot);/g;
+const XML_ENTITIES: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: "\"" };
+
 function basicAuthHeader(user: string, pass: string): string {
   return "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 }
@@ -152,10 +160,7 @@ export async function syncCalendarSource(opts: FetchOptions): Promise<SyncResult
       const inner = block
         .replace(/^<(?:[a-zA-Z0-9]+:)?calendar-data[^>]*>/, "")
         .replace(/<\/(?:[a-zA-Z0-9]+:)?calendar-data>$/, "")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, "\"");
+        .replace(XML_ENTITY_RE, (_m, name: string) => XML_ENTITIES[name] ?? _m);
       allEvents.push(...parseIcs(inner));
     }
     return { ok: true, events: allEvents };

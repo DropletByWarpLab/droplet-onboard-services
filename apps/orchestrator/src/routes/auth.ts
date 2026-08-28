@@ -129,6 +129,11 @@ import {
 } from "@droplet/auth-policy";
 import { createLogger } from "../lib/logger.js";
 import { browserMarkerHeader } from "../lib/browser-context.js";
+import {
+  authRateLimit,
+  sensitiveRateLimit,
+  standardRateLimit,
+} from "../middleware/rate-limit.js";
 
 /** WARP-456: caller IP for auth audit rows. Uses Express's proxy-aware
  *  `req.ip` — `trust proxy` is set in app.ts, so behind the nginx gateway
@@ -695,7 +700,12 @@ export function createPublicAuthRouter(
   });
 
   // ── Initial setup: create the first admin user ──
-  router.post("/auth/setup", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — `authRateLimit` (20/min/IP) is the
+  // outer per-IP ceiling on every credential-verifying handler in this file;
+  // the Redis lockouts (`ratelimit:login:*`, change-password lock) stay the
+  // account-level source of truth. Token issuance gets `sensitiveRateLimit`,
+  // cheap redirects / logout get `standardRateLimit`.
+  router.post("/auth/setup", authRateLimit, async (req, res, next) => {
     try {
       const parsed = setupSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -955,7 +965,7 @@ export function createPublicAuthRouter(
   // argon2id hash (password.service), and only then provision/refresh the
   // downstream Nextcloud session for WebDAV. Nextcloud no longer
   // authenticates — it's a downstream-provisioned account.
-  router.post("/auth/login", async (req, res, next) => {
+  router.post("/auth/login", authRateLimit, async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1401,7 +1411,7 @@ export function createPublicAuthRouter(
   });
 
   // ── OAuth2: Redirect to Nextcloud authorization ──
-  router.get("/auth/authorize", async (req, res) => {
+  router.get("/auth/authorize", standardRateLimit, async (req, res) => {
     if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
       res.status(400).json({ error: "OAuth2 is not configured. Set AUTH_MODE=oauth2 and provide OAUTH2_CLIENT_ID." });
       return;
@@ -1424,7 +1434,7 @@ export function createPublicAuthRouter(
   });
 
   // ── OAuth2: Handle callback ──
-  router.get("/auth/callback", async (req, res, next) => {
+  router.get("/auth/callback", authRateLimit, async (req, res, next) => {
     try {
       if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
         res.status(400).json({ error: "OAuth2 is not configured" });
@@ -1499,7 +1509,7 @@ export function createPublicAuthRouter(
   });
 
   // ── Refresh: exchange refresh token for new access token ──
-  router.post("/auth/refresh", async (req, res, next) => {
+  router.post("/auth/refresh", sensitiveRateLimit, async (req, res, next) => {
     try {
       // ADR-008: native clients (iOS / Android / Tauri Win) POST the
       // refresh token in the JSON body since they can't read httpOnly
@@ -1820,7 +1830,7 @@ export function createPublicAuthRouter(
     }
   });
 
-  router.post("/auth/invites/accept/:token", async (req, res, next) => {
+  router.post("/auth/invites/accept/:token", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(404).json({ error: "Invite not found" });
@@ -2276,7 +2286,7 @@ export function createProtectedAuthRouter(
   // (ADR-013): the built-in argon2id hash is the auth source of truth, so the
   // change lands on `User.passwordHash` directly. Nextcloud is mirrored
   // downstream for WebDAV but is NOT consulted for the gate.
-  router.post("/auth/change-password", async (req, res, next) => {
+  router.post("/auth/change-password", authRateLimit, async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2528,7 +2538,7 @@ export function createProtectedAuthRouter(
   // recovery codes — returned ONCE in this response and never again. A
   // verify against an already-enabled factor is a re-challenge (e.g. a
   // step-up) and returns no new codes.
-  router.post("/auth/totp/verify", async (req, res, next) => {
+  router.post("/auth/totp/verify", authRateLimit, async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2704,7 +2714,7 @@ export function createProtectedAuthRouter(
   });
 
   // ── Logout: denylist refresh token + clear cookies ──
-  router.post("/auth/logout", async (req, res, next) => {
+  router.post("/auth/logout", standardRateLimit, async (req, res, next) => {
     try {
       // Denylist the JWT refresh token so it can't be reused
       const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];

@@ -2,7 +2,7 @@
 
 // Board · List · placeholder views + the work-item card.
 
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { PmIcon } from "./icons";
 import {
   PriorityFlag,
