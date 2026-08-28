@@ -32,8 +32,8 @@
  *   - hardcode the tool list → the provenance guard reds
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { TOOLS } from "../src/registry.js";
 import {
   confirmationOwnerOf,
@@ -278,7 +278,11 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
 
 describe("provenance guard — the list must stay derived (WARP-2322)", () => {
   it("this file derives its tool list from the flag and contains no hardcoded roster", () => {
-    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    // `__filename`, not `import.meta.url`: this package builds to CommonJS,
+    // where `import.meta` is a TS1470 error (see the same note in
+    // `tool-routes.test.ts`). Both spell "this file" and `vitest` defines
+    // `__filename` in its CJS-interop module scope.
+    const source = readFileSync(__filename, "utf8");
 
     // The derivation itself must be present.
     expect(source).toContain("filter((t) => t.requiresConfirmation)");
@@ -295,7 +299,7 @@ describe("provenance guard — the list must stay derived (WARP-2322)", () => {
 });
 
 /** Minimal ToolContext for the end-to-end handler run below. */
-function memoryCtx(findUnique: ReturnType<typeof vi.fn>, update: ReturnType<typeof vi.fn>): ToolContext {
+function memoryCtx(findUnique: Mock, update: Mock): ToolContext {
   return {
     prisma: { memoryFact: { findUnique, update } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],

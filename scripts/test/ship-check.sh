@@ -221,6 +221,15 @@ CHECKS
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
+                        Then runs a SECOND pass, `npx tsc --noEmit -p
+                        tsconfig.test.json`, in each of those workspaces that
+                        ships one. A workspace's `tsconfig.json` is a BUILD
+                        config and may legitimately exclude its tests — as
+                        `packages/tools-core` did, leaving all 133 of its
+                        `__tests__/` files unchecked by anything, since
+                        `vitest` strips types without checking them. A
+                        workspace joins this pass by adding the file; there is
+                        no second list to keep in sync.
 
   compose-config        Run `docker compose config --quiet` against
                         docker/docker-compose.yml using .env.example (falls
@@ -437,12 +446,42 @@ run_check_tsc_full() {
     fi
   done
 
+  # Phase 4: SECOND pass over the same workspaces for the ones that ship a
+  # `tsconfig.test.json`. A workspace's own `tsconfig.json` is a BUILD config:
+  # it scopes to what gets emitted, so `packages/tools-core` excluded
+  # `__tests__` and phase 3 above therefore never type-checked a single one of
+  # its 133 test files. That is the exact hole PR #261 (WARP-329) shipped a
+  # TS2322 test fixture through, and `vitest` cannot close it because esbuild
+  # strips types without checking them.
+  #
+  # Opt-in by file existence rather than a second hardcoded list, so a
+  # workspace joins this pass by adding the config — no edit here required.
+  local tested=0
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+    if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
+      continue
+    fi
+    tested=$((tested + 1))
+    if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit -p tsconfig.test.json 2>&1)"; then
+      failed_workspaces+=("$ws (tests)")
+      printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s tests\n" "$label" "$ws"
+      printf '%s\n' "$out" | head -20 | sed 's/^/    | /' >&2
+      local extra_t
+      extra_t=$(printf '%s\n' "$out" | wc -l)
+      if [ "$extra_t" -gt 20 ]; then
+        printf "    | (... %d more lines suppressed; cd %s && npx tsc --noEmit -p tsconfig.test.json)\n" \
+          "$((extra_t - 20))" "$ws" >&2
+      fi
+      rc=1
+    fi
+  done
+
   if [ "$rc" -ne 0 ]; then
     _record_result "$label" fail
     return 1
   fi
 
-  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces)\n" "$label"
+  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces, %d with tests)\n" "$label" "$tested"
   _record_result "$label" pass
   return 0
 }
