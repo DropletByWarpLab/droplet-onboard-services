@@ -645,10 +645,20 @@ STUB
   chmod +x "$USTUB/systemd-cryptenroll"
   # apt-get: logs every call; "installs" the userspace only when
   # STUB_APT_HEALS=1. Always exits 0 — proving the script re-checks
-  # cryptenroll instead of trusting apt's exit code.
+  # cryptenroll instead of trusting apt's exit code. STUB_APT_LOCKED=1
+  # instead models apt-daily/unattended-upgrades holding the dpkg frontend
+  # lock across first boot: every install fails exactly as a lock timeout
+  # does, so BOTH hardened attempts (and their index refreshes) are driven.
   cat > "$USTUB/apt-get" <<STUB
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "\$*" >> "$UCMD"
+if [ "\${STUB_APT_LOCKED:-0}" = "1" ]; then
+  case " \$* " in
+    *" install "*)
+      echo "E: Could not get lock /var/lib/dpkg/lock-frontend." >&2
+      exit 100 ;;
+  esac
+fi
 if [ "\${STUB_APT_HEALS:-0}" = "1" ]; then
   case " \$* " in *" install "*) : > "$UWORK/tss2-installed" ;; esac
 fi
@@ -697,6 +707,46 @@ STUB
   printf '%s' "$uout" | grep -qi 'TPM2 userspace' \
     && pass "refusal message names the TPM2 userspace (distinct from the no-chip error)" \
     || fail "refusal message does not name the TPM2 userspace: $(printf '%s' "$uout" | tail -2 | tr '\n' ' ')"
+
+  # (1b) dpkg lock held (apt-daily / unattended-upgrades racing first boot):
+  # the self-heal must (a) refresh the possibly-stale seed apt indexes BEFORE
+  # the first install attempt, (b) carry a dpkg lock timeout on EVERY apt-get
+  # call — apt's default Lock::Timeout is 0 = fail immediately, so a transient
+  # lock fluke here hard-exits 2, which scripts/lib/luks.sh downgrades to a
+  # buried warning = a box shipped with NO encryption-at-rest — and (c) STILL
+  # hard-fail once both hardened attempts genuinely cannot supply the tss2
+  # stack (a truly missing userspace keeps failing the provision: WARP-2101).
+  : > "$UCMD"; rm -f "$UWORK/tss2-installed"
+  lrc=0
+  env "${uenv[@]}" STUB_APT_LOCKED=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1 || lrc=$?
+  if [ "$lrc" -eq 2 ]; then
+    pass "genuinely-unhealable userspace still refuses (exit 2) under a held dpkg lock [WARP-2101]"
+  else
+    fail "held-dpkg-lock run: wrong exit code ($lrc) — the hardened self-heal must still hard-fail"
+  fi
+  if grep -q 'luksFormat' "$UCMD" || grep -q 'lvcreate' "$UCMD"; then
+    fail "held-dpkg-lock run touched LVM/LUKS — must abort before creating anything"
+  else
+    pass "held-dpkg-lock run created nothing (abort still lands pre-format)"
+  fi
+  upd_line="$(grep -nE '^apt-get .*update' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  inst_line="$(grep -nE '^apt-get .*install' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  if [ -n "$upd_line" ] && [ -n "$inst_line" ] && [ "$upd_line" -lt "$inst_line" ]; then
+    pass "apt indexes refreshed (update) BEFORE the first install attempt [WARP-2101 review]"
+  else
+    fail "no apt-get update before the first install attempt (upd=${upd_line:-none} inst=${inst_line:-none}) — a stale seed index fails the install outright"
+  fi
+  inst_count="$(grep -cE '^apt-get .*install' "$UCMD" || true)"
+  if [ "${inst_count:-0}" -ge 2 ]; then
+    pass "both install attempts still made under the lock (retry preserved)"
+  else
+    fail "only ${inst_count:-0} install attempt(s) under the lock — the retry was lost"
+  fi
+  if grep -E '^apt-get ' "$UCMD" | grep -qv 'DPkg::Lock::Timeout=60'; then
+    fail "apt-get call(s) missing -o DPkg::Lock::Timeout=60: $(grep -E '^apt-get ' "$UCMD" | grep -v 'DPkg::Lock::Timeout=60' | head -2 | tr '\n' ' ')"
+  else
+    pass "every apt-get call waits on the dpkg lock (-o DPkg::Lock::Timeout=60) [WARP-2101 review]"
+  fi
 
   # (2) apt CAN supply it → provision self-heals and completes the full flow.
   : > "$UCMD"; rm -f "$UWORK/tss2-installed"

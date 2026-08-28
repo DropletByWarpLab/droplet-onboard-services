@@ -107,11 +107,20 @@ _require_tpm2_userspace() {
   log "TPM2 userspace (tss2 libraries) missing — systemd-cryptenroll cannot drive the TPM."
   log "Attempting self-install: $TSS2_PKGS"
   if command -v "$APT_GET" >/dev/null 2>&1; then
+    # Unattended first boot races apt-daily/unattended-upgrades for
+    # /var/lib/dpkg/lock-frontend (apt's default Lock::Timeout is 0 = fail
+    # immediately), and the seed image can carry stale/absent apt indexes —
+    # so refresh the indexes up front and wait up to 60s for the dpkg lock on
+    # EVERY apt call, or a transient lock fluke fails this function (exit 2
+    # below) and ships a box with no encryption-at-rest. Every call stays
+    # best-effort (|| true): the authoritative gate is the userspace re-check
+    # below, which still hard-fails when the tss2 stack is genuinely missing.
+    "$APT_GET" -o DPkg::Lock::Timeout=60 update -y >/dev/null 2>&1 || true
     # shellcheck disable=SC2086  # TSS2_PKGS is a deliberate word-split list
-    DEBIAN_FRONTEND=noninteractive "$APT_GET" install -y $TSS2_PKGS \
-      || { "$APT_GET" update -y >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive "$APT_GET" -o DPkg::Lock::Timeout=60 install -y $TSS2_PKGS \
+      || { "$APT_GET" -o DPkg::Lock::Timeout=60 update -y >/dev/null 2>&1 || true
            # shellcheck disable=SC2086
-           DEBIAN_FRONTEND=noninteractive "$APT_GET" install -y $TSS2_PKGS || true; }
+           DEBIAN_FRONTEND=noninteractive "$APT_GET" -o DPkg::Lock::Timeout=60 install -y $TSS2_PKGS || true; }
   fi
   if droplet_tpm_userspace_ok; then
     log "TPM2 userspace installed — continuing"
