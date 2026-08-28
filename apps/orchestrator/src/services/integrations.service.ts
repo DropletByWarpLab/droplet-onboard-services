@@ -25,6 +25,8 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "./activity.singleton.js";
+import type { ActivityActor } from "./activity.service.js";
 import { ErpError } from "./erp-error.js";
 import {
   connectorForProvider,
@@ -177,10 +179,23 @@ function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
   });
 }
 
+/**
+ * Who is connecting.
+ *
+ * WARP-2283 — optional so the 293 existing call sites keep compiling, but the
+ * route SHOULD pass it: under ADR-041 §2 connecting is the consent record, and
+ * a consent record with no actor answers "was this allowed?" but not "by whom",
+ * which is the question an audit is for. Absent, the row is attributed to the
+ * box itself rather than being silently dropped.
+ */
+export interface ConnectContext {
+  actor?: ActivityActor;
+}
+
 export interface IntegrationsService {
   list(): Promise<IntegrationSummary[]>;
   getEaglesoft(): Promise<IntegrationDetail>;
-  connect(input: ConnectInput): Promise<IntegrationDetail>;
+  connect(input: ConnectInput, ctx?: ConnectContext): Promise<IntegrationDetail>;
   test(input: ConnectInput): Promise<TestResult>;
   setWriteEnabled(
     enabled: boolean,
@@ -271,7 +286,7 @@ export function createIntegrationsService(
       return toDetail(await findRow());
     },
 
-    async connect(input) {
+    async connect(input, ctx) {
       const provider = resolveProvider(input.provider);
       // Upsert-by-hand: reuse the existing row if present so we never orphan a
       // second connection for the same provider.
@@ -321,6 +336,43 @@ export function createIntegrationsService(
             },
           });
 
+      /**
+       * WARP-2283 — the consent record.
+       *
+       * `connect()` persists a customer's encrypted credentials and, until this
+       * story, wrote NO activity row at all: the moment a credential entered
+       * the box was the one moment nothing observed. ADR-041 §2 makes
+       * connecting itself the consent event, so this is a compliance gap, not a
+       * nicety.
+       *
+       * Emitted from ONE place covering all three outcomes — CONNECTED, blocked
+       * (row stays PROVISIONING) and ERROR — because all three persisted the
+       * credential; only an exception before this point writes nothing, which
+       * is correct, since nothing was stored. Rows are written and the outcome
+       * is known, so it is after the effect, never a prediction of it.
+       */
+      const auditConnect = async (detail: IntegrationDetail): Promise<IntegrationDetail> => {
+        await recordActivity({
+          kind: "system",
+          severity: detail.status === "ERROR" ? "warn" : "info",
+          sourceIcon: "plug",
+          what: "Integration connected",
+          sub: provider,
+          actor: ctx?.actor ?? { type: "system", id: null },
+          refs: {
+            provider,
+            status: detail.status,
+            writeEnabled,
+            // WHETHER credentials were supplied — never the credentials. The
+            // triple is already sealed into `apiCredentialsEnc`; a second copy
+            // in an append-only, exportable audit row would be a durable
+            // cleartext leak that no rotation could recall.
+            hasSecret: input.apiCredentials !== undefined,
+          },
+        });
+        return detail;
+      };
+
       const connector = connectorFor(provider, input);
       try {
         await connector.connect();
@@ -331,7 +383,7 @@ export function createIntegrationsService(
           where: { id: base.id },
           data: { status: "CONNECTED", lastHealthyAt: new Date() },
         });
-        return toDetail(connected);
+        return await auditConnect(toDetail(connected));
       } catch (err) {
         if (err instanceof ConnectorBlockedError) {
           // HONEST degradation: the connector can't reach the ERP yet (SQL:
@@ -342,7 +394,7 @@ export function createIntegrationsService(
             { provider },
             "connect blocked: connector not reachable / not yet wired; status stays PROVISIONING",
           );
-          return toDetail(base);
+          return await auditConnect(toDetail(base));
         }
         // A genuine, unexpected failure → explicit ERROR status.
         logger.error({ err }, "eaglesoft connect failed");
@@ -350,7 +402,7 @@ export function createIntegrationsService(
           where: { id: base.id },
           data: { status: "ERROR" },
         });
-        return toDetail(errored);
+        return await auditConnect(toDetail(errored));
       } finally {
         await connector.close().catch(() => {});
       }

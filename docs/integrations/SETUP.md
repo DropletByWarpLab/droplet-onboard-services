@@ -117,3 +117,60 @@ After setup, confirm:
 5. Audit rows are being written (`Activity` / the audit log) with **no** patient names or PHI in the scope.
 
 *(While a provider's live driver is still being finished, steps 2–4 run against a copy database, not production — see [`eaglesoft.md`](eaglesoft.md).)*
+
+---
+
+## 8. Cloud / SaaS connectors — pasting a credential (WARP-2275)
+
+Everything above describes a system **on your own network**: Droplet reaches a server you can point at, and it provisions its own read-only account inside it. A cloud connector is a different shape and needs a different setup step.
+
+A SaaS vendor holds your data on their side, so there is no host to name and no account for Droplet to create. Instead you create a credential **in your own vendor account** and paste it into Droplet once.
+
+### Where to do it
+
+`Integrations → Credentials` in the sidebar. **Owner and admin only** — the page is not shown to, and the API refuses, any other role.
+
+The form is generated from what each connector declares it needs, so it shows exactly the fields that vendor requires and nothing else. Fields marked with `*` are required.
+
+### What Droplet does with what you paste
+
+| | |
+|---|---|
+| **At rest** | Encrypted on the box with a key derived for this purpose alone, and cryptographically bound to the connection row it belongs to — a credential blob copied to another connection fails to decrypt rather than authenticating as the wrong account. |
+| **On screen** | Never shown again. Once saved, the field reads *"Saved — replace to change"*. Droplet cannot show you the value back, and neither can anyone with access to the dashboard. |
+| **In the audit log** | Every save, replacement and clear is recorded with **whether** a credential is set — never the value, a prefix, a length, or a hash of it. |
+| **On a factory reset** | Destroyed. The device key is regenerated, which makes every stored credential permanently unreadable even if the database rows survive. You re-paste after a reset. |
+
+### Editing without retyping the secret
+
+Leave a saved credential field **blank** to keep it. That is what lets you correct an account id or a region without having to find the original key again.
+
+To **remove** a credential, clear the field explicitly (submit it empty). The connection then reports *Not connected* rather than continuing to claim it works.
+
+### Reading the connection state honestly
+
+The state shown next to each connector distinguishes cases that look alike but need different actions from you:
+
+| State | What it means | What to do |
+|---|---|---|
+| **Not connected** | No credential is stored. | Paste one. |
+| **Checking the connection** | A credential is stored; Droplet has not yet confirmed the vendor accepts it. | Wait. |
+| **Connected** | Working. | Nothing. |
+| **Credential rejected — replace it** | A credential **is** stored and the vendor refused it — revoked, expired, or wrong scope. | Create a new one at the vendor and paste it. Re-pasting the same key will not help. |
+| **Turned off** | An operator disabled this connector. | Re-enable it if you want it back. |
+
+The fourth row is the one that matters most. Droplet will never show an empty result and call it success — a broken connection says so.
+
+### Per-vendor setup guides
+
+Each cloud connector gets its own page under `docs/integrations/`, written to the skeleton in [`vendor-setup-template.md`](vendor-setup-template.md) so the guides stay comparable. Vendor pages land with their own connector work; this section is the index they join.
+
+<!-- Per-vendor guides are added here as each connector ships. Each entry links
+     a file in this directory; a link that does not resolve is a broken promise
+     to a customer standing in front of a form asking for a credential. -->
+
+_No cloud connectors have shipped a customer setup guide yet._
+
+### Who obtains the credential
+
+For every SaaS connector currently planned, **the customer creates the credential in their own vendor account** — Droplet never asks you for a Warp Lab key, and Warp Lab never holds yours. Where a connector instead requires Warp Lab to register or publish an application with the vendor, that is a fleet-wide commitment and is stated explicitly on that vendor's own page. Each page must answer this question rather than leave it implied.

@@ -21,6 +21,7 @@ import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -302,6 +303,13 @@ export function createApp(
   // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
   // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
   app.use("/api", createIntegrationsRouter(prisma));
+  // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
+  // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
+  // and validates whatever `credentialFields` a provider declares. Mounted
+  // after the ERP router because both live under /api/integrations; the paths
+  // do not overlap (`/integrations/:provider/credentials` is three segments,
+  // every ERP route is two or ends in a literal verb).
+  app.use("/api", createSaasCredentialsRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
   // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.
