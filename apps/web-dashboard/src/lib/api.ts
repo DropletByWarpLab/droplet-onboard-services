@@ -3696,23 +3696,23 @@ export async function runSceneConfirmed(
   return res.json();
 }
 
-/** WARP-2469 — the outcome of an in-chat tool approval. */
+/**
+ * WARP-2469 — the outcome of an in-chat tool approval.
+ *
+ * Deliberately WITHOUT the interceptor's bound token. Approving flips the
+ * challenge to `approved` in the orchestrator's store, and the agent loop
+ * that redeems the token runs SERVER-SIDE on `/api/llm/chat` for every
+ * caller — this dashboard and a raw API client alike. The loop claims the
+ * grant from that store itself and attaches the token via `_meta` when the
+ * model re-issues the call, so no client ever needs the secret; returning
+ * it would hand a live single-use write capability to whatever holds the
+ * HTTP response, for nothing.
+ */
 export interface ToolConfirmationOutcome {
   challengeId: string;
   status: "approved" | "denied";
   tool: string;
-  /**
-   * The interceptor's bound token, present only on `approved`.
-   *
-   * The chat client does NOT need to do anything with it — the agent
-   * loop claims its own copy from the orchestrator's approval store and
-   * attaches it via `_meta` when the model re-issues the call. It is
-   * returned because the route is a general approval surface (an API
-   * client driving `/api/llm/chat` directly has no agent loop to claim
-   * on its behalf), and because a response that says "approved" while
-   * withholding the thing approval produces is a worse contract.
-   */
-  confirmationToken?: string;
+  /** Epoch ms until which the loop can still claim the approved grant. */
   expiresAt?: number;
 }
 

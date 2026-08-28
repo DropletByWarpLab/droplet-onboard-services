@@ -138,7 +138,7 @@ describe("POST /api/llm/confirm/:challengeId — RBAC at registration", () => {
 });
 
 describe("POST /api/llm/confirm/:challengeId — approve", () => {
-  it("returns the bound token to an owner and audits the approval", async () => {
+  it("approves for an owner WITHOUT returning the bound token, and audits it", async () => {
     const challengeId = seedChallenge();
     const res = await request(appAs("owner"))
       .post(`/api/llm/confirm/${challengeId}`)
@@ -149,8 +149,15 @@ describe("POST /api/llm/confirm/:challengeId — approve", () => {
       challengeId,
       status: "approved",
       tool: WRITE_TOOL,
-      confirmationToken: "interceptor-secret-token",
     });
+    // The interceptor's secret STAYS server-side. The agent loop that
+    // redeems it runs on `/api/llm/chat` for every caller — browser or
+    // raw API client alike — and claims its own copy from the approval
+    // store, so no client ever needs the token and none may hold it.
+    // MUTATION (re-add `confirmationToken: approved.token` to the
+    // response): both assertions below go red.
+    expect(res.body).not.toHaveProperty("confirmationToken");
+    expect(JSON.stringify(res.body)).not.toContain("interceptor-secret-token");
 
     const approvals = recordActivity.mock.calls
       .map((c) => c[0] as { refs?: { confirmation?: string; name?: string } })

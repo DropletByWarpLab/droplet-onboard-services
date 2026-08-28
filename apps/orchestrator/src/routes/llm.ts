@@ -221,6 +221,34 @@ function logPollutedAnswer(
   );
 }
 
+/**
+ * WARP-2469 / WARP-2486 — scrub the interceptor's confirmation secret from
+ * a trace entry before the NON-STREAMING path persists the trace or returns
+ * it to the client.
+ *
+ * A WARP-2305 challenge carries its single-use token in `error.details`
+ * (nested under `interceptor` AND flat, for the WARP-640 chip), and the
+ * agent loop's trace holds the raw payload. The streaming path already
+ * egresses only an opaque `challengeId` (llm-agent.service.ts registers the
+ * challenge and never forwards the token); this closes the same hole on the
+ * blocking path, where the full trace rides both `liveToolCalls` (persisted)
+ * and the response body. Only an INTERCEPTOR challenge is scrubbed — a
+ * WARP-640 scene challenge's flat token is the client-facing "Approve & run"
+ * handle by design and passes through untouched.
+ */
+function scrubInterceptorChallenge(result: unknown): unknown {
+  const r = result as {
+    status?: unknown;
+    error?: { details?: { interceptor?: { outcome?: unknown } } };
+  } | null;
+  if (r?.status !== "confirmation_required") return result;
+  if (r.error?.details?.interceptor?.outcome !== "confirmation_required") {
+    return result;
+  }
+  const { details: _details, ...error } = r.error as Record<string, unknown>;
+  return { ...(r as Record<string, unknown>), error };
+}
+
 // /llm/chat accepts tool-role messages on replay so a client can resume a
 // session that already went through the agent loop. tool_call_id / tool_calls
 // are optional so plain chat callers don't have to care.
@@ -2027,6 +2055,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
+        // WARP-2486 — scrub interceptor confirmation secrets from the
+        // trace BEFORE anything downstream reads it: `liveToolCalls`
+        // (persisted below) and the `res.json` body both carry
+        // `result.trace`.
+        result = {
+          ...result,
+          trace: result.trace.map((t) => ({
+            ...t,
+            result: scrubInterceptorChallenge(t.result),
+          })),
+        };
         logBlankAnswer(result, conversationId, assistantMessageId);
         logPollutedAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
@@ -2507,11 +2546,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   //     the chat dispatch path uses, so approval and execution cannot
   //     disagree about what a tier may do.
   //
-  // The response body carries the bound token. That is deliberate and is
-  // not an escalation: it is single-use, TTL-bounded, and authorises
-  // exactly the call the caller just approved. The agent loop claims its
-  // own copy from the store, so the chat client never needs to echo it
-  // back (see `chat-approval.service.ts`).
+  // The response body deliberately does NOT carry the bound token. The
+  // agent loop that redeems it runs server-side on `/api/llm/chat` for
+  // EVERY caller — the dashboard and a raw API client alike — and claims
+  // the grant from the approval store itself, attaching the token via
+  // `_meta` when the model re-issues the call (see
+  // `chat-approval.service.ts`). No client ever needs the secret, so
+  // returning it would hand a live single-use write capability to
+  // whatever holds the HTTP response, for nothing.
   const confirmDecisionSchema = z.object({
     decision: z.enum(["approve", "deny"]),
   });
@@ -2610,7 +2652,6 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           challengeId,
           status: "approved",
           tool: approved.tool,
-          confirmationToken: approved.token,
           expiresAt: approved.expiresAt,
         });
       } catch (err) {
