@@ -252,7 +252,10 @@ reaching for a workaround:
 | db, nextcloud, broker, frigate, ollama, … (pulled images) | ❌ | untouched | `OPENSSL_CONF` points at a path that does not exist in these images; OpenSSL ignores a missing config file. |
 
 Application-source discipline is enforced separately and always-on:
-`scripts/test-fips.sh` (PR-blocking static lint) fails any PR introducing
+`scripts/test-fips.sh` — run by `ci.yml`'s `fips / static lint` leg, whose
+verdict reaches branch protection through the required `ci-summary` check
+(WARP-2481; before that it ran in `test-fips.yml`, went red, and blocked
+nothing) — fails any PR introducing
 MD5/SHA-1/DES/small-RSA/TLS≤1.1 without a registered exception in
 [`docs/security/fips-exceptions.md`](security/fips-exceptions.md) — so the
 code is FIPS-clean even on boxes running with the knob OFF.
@@ -273,8 +276,18 @@ prefix it with `*`.
 
 | Layer | Where | What breaks the build |
 |---|---|---|
-| Source lint | `test-fips.yml` → `fips-lint` (PR-blocking) | A non-FIPS algorithm in source without a registered escape |
-| Build-time module gate | `docker-build.yml` (required check) | `fips.so` KATs fail, provider won't load, or MD5 survives in any image build |
+| Source lint | `ci.yml` → `fips / static lint`, fanned into the required `ci-summary` (WARP-2481) | A non-FIPS algorithm in source without a registered escape |
+| Build-time module gate | `docker-build.yml` → `docker-build ok` — **advisory**, not a required check (WARP-2172/WARP-2493) | `fips.so` KATs fail, provider won't load, or MD5 survives in any image build |
 | Sabotage proof | `test-fips.yml` → `fips-sabotage` | Removing `fips.so` does *not* break the gate (i.e. the gate is a no-op) |
 | Full-stack activation | `test-fips.yml` → `fips-stack` (gated on FIPS option paths) | The stack fails to boot FIPS-enforcing end-to-end, the edge accepts ChaCha, MD5 works at runtime, or a non-provider service crash-loops |
-| Harness logic | `test-fips.yml` → `fips-lint` step | `tests/fips-stack-logic.test.sh` — the stack harness or the compose pins regress, even on Docker-less runners |
+| Harness logic | `ci.yml` → `fips / static lint` step | `tests/fips-stack-logic.test.sh` — the stack harness or the compose pins regress, even on Docker-less runners |
+
+**"Breaks the build" is not the same as "blocks the merge."** Per the one-line
+rule in [`docs/ci-required-checks.md`](ci-required-checks.md#the-one-line-rule) —
+*a check blocks a merge only if it is a `ci-summary` leg, or is itself a
+required context* — only the two `ci.yml` rows above are merge-blocking. The
+`docker-build.yml` and `test-fips.yml` rows fail their own job and nothing
+else: both workflows are path-filtered, so neither can be a required context
+as written. `docs/security/fips-ci-gate-required.md` explains why the
+build-time gate is genuinely sound and still does not block, and names the two
+routes that would change that.
