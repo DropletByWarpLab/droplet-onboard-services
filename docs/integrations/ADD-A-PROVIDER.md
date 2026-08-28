@@ -111,6 +111,13 @@ catalog: {
 
 `setupGuideHref` is where the customer reads how to produce the credential. It is **not optional for an `available` cloud card** — `ProviderDescriptor`'s cloud arm requires it, so omitting it is a `tsc` error at the declaration site, not a review note. A `coming-soon` card is exempt: it has no connect flow, so there is no moment of use to link from. LAN tracks are exempt for the same reason the guide gate is cloud-only — there is no vendor console involved.
 
+**The value is always `/help/integrations/<providerId>`** (WARP-2490). That route serves `docs/integrations/<providerId>.md` from a **bundled** `?raw` import — the markdown is inlined into the JS at build time and the page prerenders static, so the guide opens on a box whose browser has no route to the internet. An external link would break exactly the promise the appliance is sold on. Two consequences when you add a guide:
+
+1. **Add the import** to `apps/web-dashboard/src/lib/integration-guides.ts`. A static import is the only kind a bundler can inline, so the list is hand-written; `scripts/check-setup-guides.sh` fails if a cloud provider's guide is missing from it, and `integration-guides.test.ts` fails if the bundle and `docs/integrations/*.md` disagree in either direction.
+2. **The drift gate** in that same test asserts every descriptor's `setupGuideHref` resolves to a page `generateStaticParams` emits — so a descriptor pointing at a guide nobody wrote goes red instead of shipping a 404 to the one screen where the owner is stuck.
+
+Cross-guide links keep working: the renderer rewrites `credential-handling.md#anchor` to `/help/integrations/credential-handling#anchor` and gives headings GitHub-compatible ids. A link this build cannot serve (`../ADR-041-…`) renders as plain text rather than as an anchor to nowhere.
+
 Live connection **status** is merged in from `GET /api/integrations`; the descriptor is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
 
 **The connect wizard is descriptor-driven (WARP-2451).** It renders whatever `credentialFields` you declare, in the shapes the v1 vendors actually span:
