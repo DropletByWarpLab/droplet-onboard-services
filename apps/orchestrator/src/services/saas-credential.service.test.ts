@@ -122,7 +122,7 @@ function rowWith(overrides: Partial<SaasConnectionRow> = {}): SaasConnectionRow 
     id: ROW_ID,
     provider: FIXTURE.id,
     status: "PROVISIONING",
-    apiCredentialsEnc: null,
+    providerTokensEnc: null,
     providerConfig: { provider: FIXTURE.id, accountId: "acct-1", region: "us" },
     updatedAt: new Date("2026-08-27T00:00:00.000Z"),
     ...overrides,
@@ -130,7 +130,7 @@ function rowWith(overrides: Partial<SaasConnectionRow> = {}): SaasConnectionRow 
 }
 
 function sealedRow(secrets: Record<string, string>, overrides: Partial<SaasConnectionRow> = {}) {
-  return rowWith({ apiCredentialsEnc: sealSaasCredentials(ROW_ID, secrets), ...overrides });
+  return rowWith({ providerTokensEnc: sealSaasCredentials(ROW_ID, secrets), ...overrides });
 }
 
 beforeEach(() => {
@@ -155,8 +155,11 @@ describe("buildCredentialView — redaction", () => {
     // habit of shipping whatever column the schema grows next.
     expect(json).not.toContain(SEEDED_SECRET);
     expect(json).not.toContain("OTHER-SEEDED-VALUE");
-    expect(json).not.toContain("apiCredentialsEnc");
+    // Both encrypted columns, not just the one this path writes: the view is
+    // built from a row that could carry either, and a spread would ship both.
     expect(json).not.toContain("providerTokensEnc");
+    expect(json).not.toContain("apiCredentialsEnc");
+    expect(Object.keys(view)).not.toContain("providerTokensEnc");
     expect(Object.keys(view)).not.toContain("apiCredentialsEnc");
   });
 
@@ -174,7 +177,7 @@ describe("buildCredentialView — redaction", () => {
   });
 
   it("reports hasValue false after a clear", () => {
-    const view = buildCredentialView(FIXTURE, rowWith({ apiCredentialsEnc: null }));
+    const view = buildCredentialView(FIXTURE, rowWith({ providerTokensEnc: null }));
     expect(view.fields.find((f) => f.name === "apiKey")?.hasValue).toBe(false);
     expect(view.hasCredentials).toBe(false);
   });
@@ -270,7 +273,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
 
     // Mutation: treat an omitted field as a clear, and this goes red — the
     // column would be set to null by an admin who only edited the region.
-    expect(resolved.apiCredentialsEnc).toBeUndefined();
+    expect(resolved.providerTokensEnc).toBeUndefined();
     expect(resolved.hasSecret).toBe(true);
     expect(resolved.cleared).toBe(false);
   });
@@ -279,7 +282,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     const row = sealedRow({ apiKey: SEEDED_SECRET });
     const resolved = resolveCredentialUpdate(FIXTURE, row, { apiKey: "" }, ROW_ID);
 
-    expect(resolved.apiCredentialsEnc).toBeNull();
+    expect(resolved.providerTokensEnc).toBeNull();
     expect(resolved.hasSecret).toBe(false);
     expect(resolved.cleared).toBe(true);
     expect(statusAfterCredentialUpdate("CONNECTED", resolved.hasSecret)).toBe(
@@ -291,8 +294,8 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     const row = sealedRow({ apiKey: "rk_test_old" });
     const resolved = resolveCredentialUpdate(FIXTURE, row, { apiKey: "rk_live_new" }, ROW_ID);
 
-    expect(resolved.apiCredentialsEnc).toBeTypeOf("string");
-    expect(openSaasCredentials(ROW_ID, resolved.apiCredentialsEnc as string)).toEqual({
+    expect(resolved.providerTokensEnc).toBeTypeOf("string");
+    expect(openSaasCredentials(ROW_ID, resolved.providerTokensEnc as string)).toEqual({
       apiKey: "rk_live_new",
     });
   });
@@ -303,9 +306,9 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     const omitted = resolveCredentialUpdate(FIXTURE, row, {}, ROW_ID);
     const emptied = resolveCredentialUpdate(FIXTURE, row, { apiKey: "" }, ROW_ID);
 
-    expect(omitted.apiCredentialsEnc).toBeUndefined();
-    expect(emptied.apiCredentialsEnc).toBeNull();
-    expect(omitted.apiCredentialsEnc).not.toBe(emptied.apiCredentialsEnc);
+    expect(omitted.providerTokensEnc).toBeUndefined();
+    expect(emptied.providerTokensEnc).toBeNull();
+    expect(omitted.providerTokensEnc).not.toBe(emptied.providerTokensEnc);
   });
 
   it("clears ONE secret without disturbing the other", () => {
@@ -314,7 +317,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
 
     expect(resolved.hasSecret).toBe(true);
     expect(resolved.cleared).toBe(false);
-    expect(openSaasCredentials(ROW_ID, resolved.apiCredentialsEnc as string)).toEqual({
+    expect(openSaasCredentials(ROW_ID, resolved.providerTokensEnc as string)).toEqual({
       apiKey: "rk_live_keep",
     });
   });
