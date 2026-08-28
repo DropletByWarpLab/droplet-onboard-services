@@ -10,11 +10,20 @@
  * credentialsPurged apps/web-dashboard/src` returned nothing.
  *
  * Two surfaces have to say the same sentence — the hub tile's status pill
- * (WARP-2291) and `/integrations/credentials` (WARP-2275) — and they read the
- * fact from two different payloads (`IntegrationSummary.credentialsPurged` and
- * `SaasCredentialView.hasCredentials`). Copy that has to match across two
- * payloads is copy that drifts, so both call {@link disconnectedCredentialView}
- * and neither owns a string.
+ * (WARP-2291) and `/integrations/credentials` (WARP-2275) — and they arrive
+ * carrying two different payloads (`IntegrationSummary` and
+ * `SaasCredentialView`). Copy that has to match across two payloads is copy
+ * that drifts, so both call {@link disconnectedCredentialView} and neither
+ * owns a string.
+ *
+ * WARP-2489 — and both now pass it the SAME fact, `credentialsPurged`, which
+ * the box derives once in `credentialsPurgedFor`. The credentials page used to
+ * pass `!hasCredentials` instead, which answers a different question:
+ * `hasCredentials` is an `every()` over the provider's DECLARED secret fields,
+ * so a provider with two of them and one stored answered `false` and the page
+ * announced a purge that had not happened. Sharing the sentence was never
+ * enough on its own — the two surfaces had to be answering the same question
+ * before identical wording meant anything.
  *
  * ## The third case, which is the point
  *

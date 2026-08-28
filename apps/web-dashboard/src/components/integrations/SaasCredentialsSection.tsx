@@ -77,18 +77,38 @@ const STATE_COPY: Record<SaasConnectionState, { label: string; tone: "ok" | "war
  * credential is still decryptable in Postgres — opposite facts, and the second
  * is the one that still owes the admin an action.
  *
- * The presence half is `hasCredentials`, the same `hasX` boolean the whole
- * surface already runs on. Nothing new about the secret reaches the browser to
- * support this: the view type has no field that could carry a value, a prefix
- * or a length, and this function receives only the boolean.
+ * WARP-2489 — the presence half is `credentialsPurged`, the box's own answer.
+ * It was `!hasCredentials`, and that is a different question:
+ * `hasCredentials` is an `every()` over the DECLARED secret fields, so a
+ * provider declaring two with one stored reports `false` while that one is
+ * still sealed on the row. The page then told an admin the key had been
+ * destroyed — the dashboard asserting something false about the box, in the
+ * place the promise is made. Only the box can answer it, because only the box
+ * can see both credential columns; `credentialsPurgedFor` in
+ * `integrations.service.ts` is the single derivation, and the hub tile
+ * (`connector-visuals.tsx` `statusView`) reads the very same field, so the two
+ * surfaces cannot describe one row two ways.
+ *
+ * `undefined` is a THIRD answer and stays one: a box that sent no purge fact
+ * gets the neutral "Turned off" from `STATE_COPY`, never a guess.
+ * `!hasCredentials` could not express that — it is always a boolean, so the
+ * old code claimed one of the two sentences even when it had been told
+ * nothing.
+ *
+ * Nothing new about the secret reaches the browser to support any of this: the
+ * view type still has no field that could carry a value, a prefix or a length,
+ * and this function receives only booleans.
  *
  * `tone` reuses the existing three-way union — the finished state rests at
- * `idle`, the unfinished one at `warn`. WARP-2483 adds no colour.
+ * `idle`, the unfinished one at `warn`. No colour is added.
  */
-function stateCopyFor(view: SaasCredentialView): { label: string; tone: "ok" | "warn" | "idle" } {
+export function stateCopyFor(view: SaasCredentialView): {
+  label: string;
+  tone: "ok" | "warn" | "idle";
+} {
   const disconnected = disconnectedCredentialView(
     view.state === "DISABLED",
-    !view.hasCredentials,
+    view.credentialsPurged,
   );
   if (!disconnected) return STATE_COPY[view.state];
   return disconnected.purged

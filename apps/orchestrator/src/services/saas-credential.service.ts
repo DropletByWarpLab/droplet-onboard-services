@@ -60,6 +60,7 @@ import {
   isEncryptedColumn,
   saasCredentialAad,
 } from "./column-crypto.service.js";
+import { credentialsPurgedFor } from "./integrations.service.js";
 
 /** The `IntegrationStatus` values this service reads and writes. Mirrors the
  *  Prisma enum; kept as a local union so the service is testable against a
@@ -108,6 +109,18 @@ export interface SaasConnectionRow {
   status: string;
   /** ADR-042 §5 — where a customer-supplied credential lives. */
   providerTokensEnc: string | null;
+  /**
+   * WARP-2489 — the Eaglesoft REST track's column. This service never reads a
+   * credential OUT of it (that is `erp-provider.ts`'s static triple under the
+   * older `encryptSecret`), but "has this connection's credential material
+   * been removed" is a question about the ROW, and the row has two credential
+   * columns. Answering it from `providerTokensEnc` alone would let the
+   * credentials page report a purge that the hub — reading both — denies.
+   *
+   * Required, not optional: a caller that narrows its `select` and drops the
+   * column must fail to compile rather than silently claim a purge.
+   */
+  apiCredentialsEnc: string | null;
   providerConfig: unknown;
   updatedAt?: Date | null;
 }
@@ -146,8 +159,31 @@ export interface SaasCredentialView {
   category: string;
   /** Explicit — a provider with no row reports NOT_CONFIGURED, never `null`. */
   state: SaasConnectionState;
-  /** Whether ANY secret field is stored. The per-field truth is in `fields`. */
+  /**
+   * Whether EVERY declared secret field is stored — an `every()`, not an
+   * `any()`. It answers "is this connection usable", which is what `state` is
+   * derived from.
+   *
+   * It is emphatically NOT the answer to "was the credential removed"
+   * (WARP-2489): a provider declaring two secrets with one stored reports
+   * `false` here while that one is still sealed on the row. Read
+   * {@link SaasCredentialView.credentialsPurged} for that question.
+   */
   hasCredentials: boolean;
+  /**
+   * WARP-2489 — whether this connection's credential material has actually
+   * been removed from the row, so `/integrations/credentials` can say
+   * "disconnected · credential removed" only when it is true.
+   *
+   * Produced by `credentialsPurgedFor` — the SAME call that builds the hub's
+   * `IntegrationSummary.credentialsPurged`, so the two surfaces cannot give an
+   * owner opposite answers about the same row. It reads the explicit `status`
+   * enum and both credential columns; it is never inferred from a null, and
+   * never from `hasCredentials`.
+   *
+   * `false`, never omitted, for an unconfigured provider: nothing was purged.
+   */
+  credentialsPurged: boolean;
   configured: boolean;
   fields: SaasCredentialFieldView[];
   /** Current values of the NON-secret fields only. Secrets never appear here. */
@@ -330,6 +366,19 @@ export function buildCredentialView(
     category: descriptor.category,
     state: saasConnectionState(row?.status ?? "NOT_CONFIGURED", hasCredentials),
     hasCredentials,
+    // WARP-2489 — the box's own answer, from the hub's own derivation. NOT
+    // `!hasCredentials`, which is an `every()` over the declared secrets and
+    // goes false the moment one of two is missing while the other is still
+    // sealed right here on this row.
+    //
+    // A row that does not exist is NOT_CONFIGURED, so the predicate returns
+    // false through its `status === "DISABLED"` half — nothing was stored, so
+    // nothing was purged. Spelling the absent row out as an explicit
+    // all-null NOT_CONFIGURED keeps that a stated fact rather than a
+    // conclusion drawn from `null`.
+    credentialsPurged: credentialsPurgedFor(
+      row ?? { status: "NOT_CONFIGURED", apiCredentialsEnc: null, providerTokensEnc: null },
+    ),
     configured: row !== null,
     fields,
     values,
