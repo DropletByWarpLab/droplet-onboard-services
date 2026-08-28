@@ -112,6 +112,7 @@ import {
 } from "./services/activity.singleton.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
+import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
 import { runNightlyChainVerification } from "./services/audit-verify.service.js";
@@ -1258,6 +1259,28 @@ async function main() {
       },
       { lockKey: "droplet:erp-connector-reconciliation" },
     );
+
+    // WARP-2463 — retention for the sweep's STORED drift report.
+    //
+    // The sweep writes one row per (connection, entity) per pass, INCLUDING a
+    // clean pass, so the table grows on a fixed schedule forever and needs a
+    // trim by construction. Its own leg at 03:30 rather than a line in the
+    // 03:00 daily-purge handler: that handler runs every retention sweep on
+    // the box inside ONE 60 s advisory-lock transaction, and adding a table
+    // spends from the same budget (see audit-retention-purge.service.ts, which
+    // is mostly an argument about exactly that). 03:30 continues the 03:00 /
+    // 03:15 spacing that keeps the legs off each other's lock pool.
+    //
+    // Window read at BOOT, like the two schedules above — never at module
+    // import, so `up -d --force-recreate` is enough to change it.
+    registerErpDriftRetention(cronRuntime, prisma as never, {
+      retentionDays: config.DROPLET_ERP_DRIFT_RETENTION_DAYS,
+      onTrimmed: (result) => {
+        if (result.deleted > 0 || result.skipped) {
+          logger.info(result, "erp drift record retention trim");
+        }
+      },
+    });
   }
 
   // Start Express on top of a raw http.Server so we can attach the

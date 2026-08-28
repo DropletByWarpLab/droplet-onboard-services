@@ -22,6 +22,7 @@ import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
+import { createErpDriftRouter } from "./routes/erp-drift.js";
 import { createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -310,6 +311,20 @@ export function createApp(
   // do not overlap (`/integrations/:provider/credentials` is three segments,
   // every ERP route is two or ends in a literal verb).
   app.use("/api", createSaasCredentialsRouter(prisma));
+  // WARP-2463 — admin-only read over the reconciliation sweep's STORED drift
+  // report. Its own factory rather than a route on the integrations router:
+  // that router's floor is family-and-up, this surface is owner/admin, and a
+  // route whose guard is narrower than its neighbours' is safer as its own
+  // registration than as an exception inside someone else's file.
+  //
+  // `/integrations/:connectionId/drift` is match-disjoint from every other
+  // route under /api/integrations — it is the only one whose LAST segment is
+  // `drift`, and the two-segment routes differ in arity — so this mount's
+  // POSITION is not load-bearing and reordering this block cannot change which
+  // handler serves a request. See the table in routes/erp-drift.ts. WARP-2485
+  // adds a test for exactly that property; `createErpDriftRouter` should join
+  // its ROUTERS list.
+  app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
   // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.

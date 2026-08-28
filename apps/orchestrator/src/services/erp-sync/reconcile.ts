@@ -50,15 +50,48 @@
  *
  * ## What the report may contain
  *
- * Counts and dataset names. Never a record identifier, a customer name, an
- * amount or an email — the report is an operator-facing artefact and a drift
- * report full of invoice numbers would be a customer-content export wearing a
- * diagnostics label.
+ * Counts, dataset names and TIMESTAMPS. Never a record identifier, a customer
+ * name, an amount or an email — the report is an operator-facing artefact and
+ * a drift report full of invoice numbers would be a customer-content export
+ * wearing a diagnostics label.
+ *
+ * "Timestamps" is load-bearing rather than incidental (WARP-2463, which
+ * persists this report). A vendor's marker is an ORDERING TOKEN, not
+ * necessarily a time: Stripe's cursors are object ids, and any vendor is free
+ * to order by its own record key. So a marker never leaves this module as a
+ * string — `markerTimestamp` coerces it, and a marker that is not a real
+ * timestamp becomes `null`. That is why the persisted row cannot carry an
+ * invoice number even for a vendor that orders by one: there is no path from a
+ * raw marker to storage.
  */
 import { highestWatermark, isWatermarkAhead } from "./watermark.js";
 
 /** Why a record the full read knows about was missing from the delta read. */
 export type ErpDriftClass = "missed-newer" | "watermark-behind";
+
+/**
+ * Strict ISO-8601 date / date-time. Deliberately NOT "whatever `new Date()`
+ * accepts": `new Date("1001")` is the year 1001, so a bare numeric invoice
+ * number would parse as a plausible timestamp and land in a column an
+ * operator reads as one. Anchored, fixed-width, and optional-time-only.
+ */
+const ISO_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/**
+ * Coerce a vendor marker to a timestamp, or `null` when it is not one.
+ *
+ * The single gate between a vendor's ordering token and anything that stores
+ * or displays it. Returning `null` for a non-timestamp marker loses nothing an
+ * operator was going to read — an opaque cursor tells them nothing — and it is
+ * what makes the drift record's PHI-free rule structural rather than a
+ * convention someone has to remember.
+ */
+export function markerTimestamp(marker: string | null | undefined): Date | null {
+  if (typeof marker !== "string" || !ISO_TIMESTAMP.test(marker)) return null;
+  const ms = Date.parse(marker);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
 
 /** Per-entity drift. Counts and the dataset name only. */
 export interface ErpEntityDrift {
@@ -77,6 +110,19 @@ export interface ErpEntityDrift {
   /** Which classes fired. Empty means the incremental path was trustworthy for
    *  this entity on this pass, which is itself the useful signal. */
   classes: ErpDriftClass[];
+  /**
+   * Oldest marker among the missed records, as a TIMESTAMP (WARP-2463).
+   *
+   * "How far back did the gap start" is the forensic question when an owner
+   * reports that the assistant did not know about something. Computed here
+   * rather than by the caller so the "which records are missed" predicate has
+   * exactly one implementation — a second copy in the persistence layer would
+   * be free to disagree with this one, and the disagreement would be silent.
+   *
+   * `null` when nothing was missed, and also when the missed records' markers
+   * are not timestamps at all. See `markerTimestamp`.
+   */
+  earliestMissedAt: Date | null;
 }
 
 /** What one sweep of one connection found. */
@@ -171,12 +217,18 @@ export function diffForDrift(
   const seen = new Set(incremental.map((r) => r.sourceKey));
 
   let missedCount = 0;
+  let earliestMissedAt: Date | null = null;
   for (const r of full) {
     if (seen.has(r.sourceKey)) continue;
     // Strictly after: a record exactly at the watermark was already delivered
     // by the run that set it, so counting it would report drift every sweep.
     if (watermark !== null && (r.marker === null || r.marker <= watermark)) continue;
     missedCount += 1;
+    // Coerced HERE, so no caller ever sees the raw marker of a missed record.
+    const at = markerTimestamp(r.marker);
+    if (at !== null && (earliestMissedAt === null || at < earliestMissedAt)) {
+      earliestMissedAt = at;
+    }
   }
 
   const fullHigh = highWaterMark(full);
@@ -197,6 +249,7 @@ export function diffForDrift(
     missedCount,
     watermarkBehind,
     classes,
+    earliestMissedAt,
   };
 }
 
