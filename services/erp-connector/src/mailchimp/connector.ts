@@ -104,8 +104,8 @@ import {
 import { getReadQuery } from "../read-queries.js";
 import { assertTargetAllowed, getWriteCommand } from "../write-commands.js";
 import { computeSchemaFingerprint, type IntrospectedTable } from "../schema-map.js";
+import { md5Hex } from "./md5.js";
 import type { DatasetName } from "../export-drop/profiles.js";
-import { createHash } from "node:crypto";
 
 /** Provider key for this track. */
 export const MAILCHIMP_PROVIDER = "mailchimp";
@@ -129,6 +129,26 @@ export const MAILCHIMP_API_HOST_SUFFIX = ".api.mailchimp.com";
 export const MAILCHIMP_API_BASE_PATH = "/3.0";
 
 /**
+ * Escape every regular-expression metacharacter in a literal string.
+ *
+ * Hoisted out of {@link MAILCHIMP_ALLOWED_HOST_PATTERN} (WARP-2379 review,
+ * CodeQL "Incomplete string escaping or encoding"). The previous form escaped
+ * only `.`, which was *correct for today's input* — the suffix constant is a
+ * compile-time literal containing nothing but dots and letters — but correct
+ * for an accidental reason. Escaping the full metacharacter set makes the
+ * guard right for a reason that survives the constant changing: if
+ * {@link MAILCHIMP_API_HOST_SUFFIX} ever gained a `-`, a `+` or a `$`, a
+ * dot-only escape would silently produce a pattern that means something other
+ * than the literal it was built from.
+ *
+ * The class is the standard one, and `\\` is first so an inserted backslash is
+ * not re-escaped by a later alternative.
+ */
+export function escapeRegExpLiteral(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * The ONLY host shape this connector will ever send an API key to.
  *
  * Two letters and one or two digits — `us14`, `us6`, `eu1` — followed by the
@@ -136,11 +156,13 @@ export const MAILCHIMP_API_BASE_PATH = "/3.0";
  * an unanchored or `endsWith` check accepts `us14.api.mailchimp.com.evil.test`,
  * which is the attack this guard exists to stop.
  *
- * Built from {@link MAILCHIMP_API_HOST_SUFFIX} rather than re-typed so the
- * literal and the guard cannot drift apart.
+ * Built from {@link MAILCHIMP_API_HOST_SUFFIX} through
+ * {@link escapeRegExpLiteral} rather than re-typed, so the literal and the
+ * guard cannot drift apart and the suffix is matched as TEXT rather than as a
+ * pattern.
  */
 export const MAILCHIMP_ALLOWED_HOST_PATTERN = new RegExp(
-  `^[a-z]{2}\\d{1,2}${MAILCHIMP_API_HOST_SUFFIX.replace(/\./g, "\\.")}$`,
+  `^[a-z]{2}\\d{1,2}${escapeRegExpLiteral(MAILCHIMP_API_HOST_SUFFIX)}$`,
 );
 
 /**
@@ -709,9 +731,20 @@ export function assertEcommerceOrderParams(params: Record<string, unknown>): voi
  * agreed with the vendor. It authenticates nothing and protects nothing, so its
  * cryptographic weakness is not in scope; there is also no alternative, since
  * the API keys members by this exact digest.
+ *
+ * The digest comes from {@link md5Hex} — an arithmetic RFC 1321 implementation
+ * — and DELIBERATELY NOT from `node:crypto`. MD5 is not a FIPS 140-3 approved
+ * algorithm, so on a box running with `DROPLET_FIPS_MODE=1` the OpenSSL FIPS
+ * provider refuses to construct it and the `node:crypto` MD5 constructor throws
+ * `ERR_OSSL_EVP_UNSUPPORTED` before any request goes out. `erp-connector` ships
+ * inside the `orchestrator` image, which is one of the six provider-carrying
+ * images that enforce FIPS (`docs/fips.md`, "Scope — which services enforce"),
+ * so a `node:crypto` digest here means a FIPS customer's member lookups fail
+ * outright while list and campaign reads keep working — the connector
+ * half-works, with an error that reads like a crypto bug (WARP-2460).
  */
 export function subscriberHash(email: string): string {
-  return createHash("md5").update(email.trim().toLowerCase()).digest("hex");
+  return md5Hex(email.trim().toLowerCase());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

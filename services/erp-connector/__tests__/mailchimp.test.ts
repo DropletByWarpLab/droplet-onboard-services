@@ -24,6 +24,7 @@ import { describe, it, expect } from "vitest";
 import {
   ConnectionSemaphore,
   InvalidMailchimpCredentialError,
+  MAILCHIMP_ALLOWED_HOST_PATTERN,
   MAILCHIMP_API_BASE_PATH,
   MAILCHIMP_API_HOST_SUFFIX,
   MAILCHIMP_API_USE_POLICY_OBLIGATIONS,
@@ -47,6 +48,7 @@ import {
   assertMailchimpDatacenter,
   assertReadableMailchimpResource,
   assertSafeMailchimpBaseUrl,
+  escapeRegExpLiteral,
   mailchimpBaseUrlFor,
   parseMailchimpApiKey,
   subscriberHash,
@@ -328,6 +330,41 @@ describe("runtime-assembled host guard", () => {
     expect(src).toContain('"/3.0"');
   });
 
+  it("escapes EVERY regex metacharacter, not only the dot", () => {
+    // Stefan's review / CodeQL "Incomplete string escaping or encoding": the
+    // previous inline escape handled `.` alone. That was right for today's
+    // constant by luck rather than by construction — this makes it right by
+    // construction.
+    // Mutation: narrow the class back to /\./g -> red for every character
+    // below except `.`.
+    for (const meta of [".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\"]) {
+      const escaped = escapeRegExpLiteral(meta);
+      expect(escaped).toBe(`\\${meta}`);
+      // The escaped form matches that literal character and nothing else.
+      expect(new RegExp(`^${escaped}$`).test(meta)).toBe(true);
+    }
+    // A dot stays a LITERAL dot, never the any-character wildcard.
+    expect(escapeRegExpLiteral("a.b")).toBe("a\\.b");
+    expect(new RegExp(`^${escapeRegExpLiteral("a.b")}$`).test("axb")).toBe(false);
+    expect(new RegExp(`^${escapeRegExpLiteral("a.b")}$`).test("a.b")).toBe(true);
+  });
+
+  it("still refuses the suffix attack now that the escaping is hoisted", () => {
+    // Regression guard for the CodeQL fix: hoisting the escape must not have
+    // weakened the anchored host check.
+    // Mutation: drop the ^ / $ anchors from MAILCHIMP_ALLOWED_HOST_PATTERN
+    // -> red.
+    expect(MAILCHIMP_ALLOWED_HOST_PATTERN.test(`${DC}${MAILCHIMP_API_HOST_SUFFIX}`)).toBe(true);
+    expect(
+      MAILCHIMP_ALLOWED_HOST_PATTERN.test(`${DC}${MAILCHIMP_API_HOST_SUFFIX}.evil.test`),
+    ).toBe(false);
+    // And the dot before "api" is matched literally, not as a wildcard.
+    expect(MAILCHIMP_ALLOWED_HOST_PATTERN.test("us14xapi.mailchimp.com")).toBe(false);
+    expect(() =>
+      assertSafeMailchimpBaseUrl(`https://${DC}${MAILCHIMP_API_HOST_SUFFIX}.evil.test`, DC),
+    ).toThrow(UnsafeMailchimpBaseUrlError);
+  });
+
   it("carries NO https:// mailchimp literal, because a dynamic entry registers no hosts", () => {
     // `scripts/check-egress-allowlist.py` collects no host patterns from a
     // `kind: dynamic` entry (it `continue`s past destination.hosts), so a
@@ -478,7 +515,13 @@ describe("subscriber hash", () => {
     // Mutation: drop `.toLowerCase()` → red.
     const mixed = "Camille.Moreau@Example.TEST";
     const lowered = mixed.toLowerCase();
+    // `subscriberHash` itself no longer uses node:crypto — MD5 is refused by the
+    // FIPS provider (WARP-2460). node:crypto MD5 stays HERE on purpose, as the
+    // independent oracle the pure implementation is checked against; asserting
+    // against our own digest would be vacuous. Test runs are never FIPS.
+    // fips:allowed: mailchimp-subscriber-hash
     expect(subscriberHash(mixed)).toBe(createHash("md5").update(lowered).digest("hex"));
+    // fips:allowed: mailchimp-subscriber-hash
     expect(subscriberHash(mixed)).not.toBe(createHash("md5").update(mixed).digest("hex"));
     expect(subscriberHash(mixed)).toBe(subscriberHash(lowered));
   });

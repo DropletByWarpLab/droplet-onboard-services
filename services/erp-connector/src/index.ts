@@ -416,6 +416,7 @@ export {
   type HubspotCredentialRejection,
   type HubspotTokenResolver,
 } from "./hubspot/connector.js";
+
 // WARP-2379 — Mailchimp: the audience-and-campaign track. Read-through over a
 // customer-created Marketing API key whose "-us14" suffix SELECTS THE HOST, so
 // the base URL is assembled at runtime and the egress CI scanner cannot see it.
@@ -435,6 +436,7 @@ export {
   assertReadableMailchimpResource,
   assertSafeMailchimpBaseUrl,
   blockedMailchimpKeyResolver,
+  escapeRegExpLiteral as escapeMailchimpRegExpLiteral,
   mailchimpBaseUrlFor,
   parseMailchimpApiKey,
   subscriberHash as mailchimpSubscriberHash,
