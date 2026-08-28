@@ -19,10 +19,15 @@
  *      care as it does.
  *   2. **Ships off; owner consent is the enabling event.** With no key
  *      resolved the connector blocks honestly rather than half-authenticating.
- *   3. **Every destination registered.** `api.stripe.com` is in
- *      `docs/security/allowed-egress.yaml` as `user-content-on-request`, and
- *      {@link STRIPE_ALLOWED_API_HOSTS} accepts exactly that host, so nothing
- *      the registry has not screened is dialable.
+ *   3. **Every destination registered.** This track dials TWO hosts, each with
+ *      its own `docs/security/allowed-egress.yaml` entry and its own security
+ *      review: `api.stripe.com` (`stripe-api`, WARP-2215) for the ordinary and
+ *      Reporting APIs, and `files.stripe.com` (`stripe-report-files`,
+ *      WARP-2450) for a finished report run's CSV. They are guarded by two
+ *      SEPARATE exact-match sets — {@link STRIPE_ALLOWED_API_HOSTS} and
+ *      {@link STRIPE_ALLOWED_FILE_HOSTS} — rather than one merged set, so the
+ *      file host can never be used as an API base or the reverse, and nothing
+ *      the registry has not screened is dialable either way.
  *   4. **Persistence: none.** ADR-041 §4 warns that the encryption
  *      `ErpEntityCache` promises is NOT implemented (WARP-2028). This track is
  *      therefore read-through and writes nothing — not `ErpEntityCache`, not
@@ -125,11 +130,31 @@ export const STRIPE_PROVIDER = "stripe";
  * literally see. Assembling the host at runtime silently blinds the egress
  * gate while leaving the code working, which is the worst of both.
  *
- * One host covers everything this connector does: the ordinary API and the
- * Reporting API both live here, and there is no token endpoint because there
- * is no OAuth dance — a restricted key is presented directly.
+ * This host covers every API call the connector makes: the ordinary API and
+ * the Reporting API both live here, and there is no token endpoint because
+ * there is no OAuth dance — a restricted key is presented directly. It does
+ * NOT cover a finished report run's FILE, which Stripe serves from
+ * {@link STRIPE_FILES_BASE_URL}.
  */
 export const STRIPE_PRODUCTION_BASE_URL = "https://api.stripe.com";
+
+/**
+ * Where Stripe serves a finished report run's contents.
+ *
+ * A genuinely different host from the API, and the reason WARP-2215 shipped
+ * `runBackfill` stopping at the file reference: `docs/security/
+ * allowed-egress.yaml` is `policy.default: deny`, WARP-2216's acceptance
+ * criterion pins the `stripe-api` entry to exactly `[api.stripe.com]`, and
+ * dialing an unregistered host is not something a connector may do quietly.
+ * It now has its OWN registry entry (`stripe-report-files`, WARP-2450) with
+ * its own security review, which is the correct way to add a destination.
+ *
+ * A WHOLE-STRING LITERAL for the same reason the API base is one:
+ * `scripts/check-egress-allowlist.py` is a static text scanner over tracked
+ * source and can only bind a hostname it literally sees. Do not compose this
+ * from parts.
+ */
+export const STRIPE_FILES_BASE_URL = "https://files.stripe.com";
 
 /**
  * The pinned API version, sent on EVERY request.
@@ -160,6 +185,21 @@ export const STRIPE_API_VERSION = "2026-08-26.dahlia";
  */
 export const STRIPE_ALLOWED_API_HOSTS: ReadonlySet<string> = new Set(
   [STRIPE_PRODUCTION_BASE_URL].map((u) => new URL(u).hostname),
+);
+
+/**
+ * The only hosts a report FILE will be downloaded from — a SIBLING set, not a
+ * widening of the API set.
+ *
+ * Two sets rather than one merged set is deliberate. Merging them would let an
+ * operator point `baseUrl` at the report-file host and have the ordinary
+ * API guard wave it through, or the reverse; each guard should admit exactly
+ * the host its registry entry screened and nothing else. It also keeps
+ * WARP-2216's acceptance criterion — `stripe-api` pinned to exactly
+ * `api.stripe.com` — visibly true in code as well as in the yaml.
+ */
+export const STRIPE_ALLOWED_FILE_HOSTS: ReadonlySet<string> = new Set(
+  [STRIPE_FILES_BASE_URL].map((u) => new URL(u).hostname),
 );
 
 /**
@@ -226,8 +266,8 @@ export const STRIPE_DATASETS: readonly string[] = ["invoice"];
 export const STRIPE_TRACK_REMEDIATION =
   "needs a Stripe restricted API key (rk_live_… or rk_test_…, created by the merchant in " +
   "their own Stripe Workbench with the required resources set to Read) stored on the " +
-  "integration row, and api.stripe.com allowed in allowed-egress.yaml — this connector " +
-  "leaves the customer LAN";
+  "integration row, and both api.stripe.com and files.stripe.com allowed in " +
+  "allowed-egress.yaml — this connector leaves the customer LAN";
 
 /**
  * The remediation for a key whose IP/ASN access policy no longer matches this
@@ -393,6 +433,27 @@ export class StripeEventGapError extends Error {
  * key.
  */
 export function assertSafeStripeBaseUrl(raw: string): string {
+  return assertSafeStripeUrl(raw, STRIPE_ALLOWED_API_HOSTS, "Stripe API");
+}
+
+/**
+ * The same guard, applied to the report-FILE host.
+ *
+ * Identical strictness by construction — it is the same function body, given a
+ * different registered set — so the download host can never end up screened
+ * more loosely than the API host. Passing the API host here fails, and passing
+ * the file host to {@link assertSafeStripeBaseUrl} fails, because the two sets
+ * are siblings rather than one merged set.
+ */
+export function assertSafeStripeFileBaseUrl(raw: string): string {
+  return assertSafeStripeUrl(raw, STRIPE_ALLOWED_FILE_HOSTS, "Stripe report-file");
+}
+
+function assertSafeStripeUrl(
+  raw: string,
+  allowed: ReadonlySet<string>,
+  what: string,
+): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -406,8 +467,8 @@ export function assertSafeStripeBaseUrl(raw: string): string {
     throw new UnsafeStripeBaseUrlError("the URL carries userinfo");
   }
   const host = url.hostname.toLowerCase();
-  if (!STRIPE_ALLOWED_API_HOSTS.has(host)) {
-    throw new UnsafeStripeBaseUrlError(`"${host}" is not a registered Stripe API host`);
+  if (!allowed.has(host)) {
+    throw new UnsafeStripeBaseUrlError(`"${host}" is not a registered ${what} host`);
   }
   // The URL parser drops an explicit :443 (the https default), so any port
   // left standing is one the egress registry does not declare.
@@ -555,6 +616,9 @@ export interface StripeConnectorConfig {
   credentialsSecretRef: string;
   /** API base. Operator-configured, and guarded on construction. */
   baseUrl?: string;
+  /** Report-file base. Operator-configured, guarded on construction against
+   *  its OWN registered set — never against the API set. */
+  filesBaseUrl?: string;
   /** Per-connection monthly read allocation. Defaults to Stripe's floor. */
   monthlyReadAllocation?: number;
 }
@@ -631,10 +695,33 @@ export interface StripeEventPollResult {
  *  class state and never collapses into "finished, no rows". */
 export type StripeBackfillResult =
   | { state: "in_progress"; reportRunId: string; attempts: number; detail: string }
-  | { state: "succeeded"; reportRunId: string; fileId: string | null; detail: string }
+  | {
+      state: "succeeded";
+      reportRunId: string;
+      fileId: string;
+      /** The report's contents, in the SAME shape `listBalanceTransactions()`
+       *  yields, so a caller cannot tell which path a row arrived by. */
+      rows: StripeBalanceTransactionRow[];
+      detail: string;
+    }
   | { state: "failed"; reportRunId: string; detail: string };
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+/** What one outbound Stripe call needs to know about itself. */
+interface StripeRequestOptions {
+  /** Whether Stripe counts this against the account's read allocation. */
+  metered: boolean;
+  /** Which registered host to dial. Defaults to the API base; the only other
+   *  value is the report-file base. Both are validated at construction. */
+  origin?: string;
+  search?: Record<string, string | number | undefined>;
+  method?: "GET" | "POST";
+  form?: Record<string, string | number>;
+  /** Defaults to JSON. A report file is CSV, and asking for JSON there would
+   *  be a request we do not mean. */
+  accept?: string;
+}
 
 /**
  * Currencies Stripe holds with no minor unit (a JPY "amount" of 5000 is ¥5000,
@@ -703,7 +790,63 @@ export const STRIPE_READABLE_COLLECTIONS: ReadonlySet<string> = new Set([
   // The Reporting API — excluded from the read allocation, and how bulk
   // history is loaded. Two segments, so it is matched as a whole.
   "reporting/report_runs",
+  // The Files API on files.stripe.com, from which a finished report run's CSV
+  // is downloaded (WARP-2450). Present so the download path is subject to this
+  // allowlist like every other path, NOT as a general file surface: the only
+  // URL the connector ever builds here is /v1/files/<id>/contents for a file
+  // id a report run of an ALLOWED subject collection produced.
+  "files",
 ]);
+
+/**
+ * Report-type family → the collection whose rows that family reports on.
+ *
+ * The family is the segment before the first dot of a Stripe report type:
+ * `balance_change_from_activity.itemized.3` is the `balance_change_from_activity`
+ * family. Mapping the family to a collection is what lets
+ * {@link assertReadableStripeCollection} decide a report run the same way it
+ * decides an ordinary request path — otherwise "no money movement" would hold
+ * for the REST surface and quietly not hold for the Reporting one, since a
+ * payout-reconciliation CSV is a payouts read wearing a different URL.
+ *
+ * The money-movement families are listed HERE, mapped to the collection they
+ * actually read, rather than omitted. Omitting them would make the refusal
+ * indistinguishable from "unknown report type"; naming them states plainly
+ * that they exist, that this connector knows what they read, and that the
+ * allowlist — not this table — is what refuses them. Adding `payouts` to
+ * {@link STRIPE_READABLE_COLLECTIONS} is the single edit that would let one
+ * through, and it turns three tests red.
+ */
+export const STRIPE_REPORT_FAMILY_COLLECTIONS: ReadonlyMap<string, string> = new Map([
+  ["balance", "balance_transactions"],
+  ["balance_change_from_activity", "balance_transactions"],
+  ["ending_balance_reconciliation", "balance_transactions"],
+  ["payout_reconciliation", "payouts"],
+  ["connected_account_balance_change_from_activity", "balance_transactions"],
+]);
+
+/**
+ * The collection a report type reads, or a refusal.
+ *
+ * An UNKNOWN family is refused rather than assumed harmless. A report type
+ * this connector has never heard of could read anything, and "we did not
+ * recognise it so we let it through" is the shape of every allowlist that
+ * turned out not to be one.
+ */
+export function collectionForStripeReportType(reportType: string): string {
+  const family = reportType.split(".")[0] ?? "";
+  const collection = STRIPE_REPORT_FAMILY_COLLECTIONS.get(family);
+  if (collection === undefined) {
+    throw new ConnectorBlockedError(
+      `refusing the Stripe report type "${reportType}"`,
+      "its family is not in STRIPE_REPORT_FAMILY_COLLECTIONS, so this connector cannot " +
+        "say which collection the report would read. An unrecognised report type is " +
+        "refused rather than assumed harmless — add the family to that map, with the " +
+        "collection it reads, in a reviewed change.",
+    );
+  }
+  return collection;
+}
 
 /**
  * Event-type prefix → the REST collection the object is re-fetched from.
@@ -758,6 +901,190 @@ export function assertReadableStripeCollection(path: string): void {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Report files (WARP-2450)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse a Stripe report CSV into records keyed by header name.
+ *
+ * RFC 4180 rather than `split(",")`: report rows carry merchant-authored text
+ * (a customer name, a statement descriptor, an invoice memo) which routinely
+ * contains commas and quotes, and a naive split silently shifts every column
+ * after the first offending field — producing a ledger that is wrong rather
+ * than a parse that fails. Handles quoted fields, doubled quotes inside them,
+ * embedded newlines, CRLF and a UTF-8 BOM.
+ *
+ * Rows with a different field count from the header are a contract violation,
+ * not something to pad or truncate: a short row means a column was lost and
+ * every value after it is attributed to the wrong name.
+ */
+export function parseStripeReportCsv(text: string): Record<string, string>[] {
+  const rows = splitCsvRows(text.replace(/^\uFEFF/, ""));
+  const header = rows.shift();
+  if (!header || header.length === 0 || (header.length === 1 && header[0] === "")) return [];
+  return rows.map((cells, i) => {
+    if (cells.length !== header.length) {
+      throw new ConnectorBlockedError(
+        `Stripe report row ${i + 1} has ${cells.length} fields, header has ${header.length}`,
+        "the CSV does not match its own header. Refusing to interpret it rather than " +
+          "padding or truncating — a misaligned row attributes every value after the gap " +
+          "to the wrong column, which is a wrong ledger rather than a failed read.",
+      );
+    }
+    const rec: Record<string, string> = {};
+    header.forEach((name, j) => {
+      rec[name] = cells[j];
+    });
+    return rec;
+  });
+}
+
+/** One pass over the text, tracking whether we are inside a quoted field. */
+function splitCsvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch !== '"') {
+        field += ch;
+      } else if (text[i + 1] === '"') {
+        // A doubled quote inside a quoted field is one literal quote.
+        field += '"';
+        i += 1;
+      } else {
+        quoted = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      quoted = true;
+    } else if (ch === ",") {
+      row.push(field);
+      field = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i += 1;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += ch;
+    }
+  }
+  // A file that does not end in a newline still has a final row.
+  if (field !== "" || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * Column aliases, because the balance report families do not agree on names.
+ *
+ * Longest-lived first in each list; the first present column wins. Listing the
+ * alternatives explicitly beats guessing at a prefix, which would happily bind
+ * `net` to `net_available_on`.
+ */
+const REPORT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  id: ["balance_transaction_id", "id"],
+  created: ["created", "created_utc"],
+  type: ["reporting_category", "type", "balance_transaction_type"],
+  currency: ["currency"],
+  gross: ["gross", "amount"],
+  fee: ["fee"],
+  net: ["net"],
+  status: ["status", "balance_transaction_status"],
+};
+
+function column(rec: Record<string, string>, field: keyof typeof REPORT_COLUMNS): string | undefined {
+  for (const name of REPORT_COLUMNS[field]) {
+    const v = rec[name];
+    if (v !== undefined && v !== "") return v;
+  }
+  return undefined;
+}
+
+/**
+ * A report CSV's timestamp as an ISO instant.
+ *
+ * Two shapes appear: an epoch-seconds integer (`created`) and a UTC wall-clock
+ * string (`created_utc`, `2026-05-01 12:00:00`). The second one is a trap —
+ * `new Date("2026-05-01 12:00:00")` is parsed in the RUNNING PROCESS's local
+ * zone, so the same report read on a box in Los Angeles and a box in Berlin
+ * would date the same transaction seven hours apart. Stripe documents these
+ * columns as UTC, so they are assembled with `Date.UTC` from the parts rather
+ * than handed to the permissive parser.
+ */
+function reportInstant(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  if (/^\d+$/.test(raw)) {
+    return new Date(Number(raw) * 1000).toISOString();
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(raw);
+  if (!m) return undefined;
+  const ms = Date.UTC(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6]),
+  );
+  return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+}
+
+/**
+ * A report CSV amount.
+ *
+ * Report files carry amounts in MAJOR units already — `10.00` is ten dollars,
+ * where the REST API's `1000` for the same charge is a thousand cents. Running
+ * these through {@link majorUnits} would divide a second time and understate
+ * the whole ledger by 100x, so this is deliberately NOT that function. The
+ * asymmetry between the two ingestion paths is the reason both get their own
+ * conversion rather than sharing one.
+ */
+function reportAmount(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Map report records onto the SAME row shape the incremental path yields.
+ *
+ * `listBalanceTransactions()` and a backfill must produce interchangeable
+ * rows, or a caller has to know which path a row came from to read it — and
+ * the whole point of backfill is to seed the same ledger the poller then keeps
+ * current. Rows with no transaction id are dropped: a ledger row that cannot
+ * be keyed cannot be deduplicated against the poller's output.
+ */
+export function balanceTransactionRowsFromReport(
+  records: readonly Record<string, string>[],
+): StripeBalanceTransactionRow[] {
+  const rows: StripeBalanceTransactionRow[] = [];
+  for (const rec of records) {
+    const id = column(rec, "id");
+    if (id === undefined) continue;
+    rows.push({
+      transaction_id: id,
+      created_at: reportInstant(column(rec, "created")),
+      type: column(rec, "type"),
+      currency: column(rec, "currency"),
+      amount: reportAmount(column(rec, "gross")),
+      fee: reportAmount(column(rec, "fee")),
+      net: reportAmount(column(rec, "net")),
+      status: column(rec, "status"),
+    });
+  }
+  return rows;
+}
+
 export class StripeConnector implements Connector {
   readonly provider = STRIPE_PROVIDER;
   readonly servesDatasets = STRIPE_DATASETS;
@@ -767,6 +1094,7 @@ export class StripeConnector implements Connector {
   private readonly fetchImpl?: FetchLike;
   private readonly timeoutMs: number;
   private readonly baseUrl: string;
+  private readonly filesBaseUrl: string;
   private readonly meter: ReadAllocationMeter;
   private readonly sleep: (ms: number) => Promise<void>;
 
@@ -786,6 +1114,12 @@ export class StripeConnector implements Connector {
     // dial should fail to build, loudly, rather than look fine until the first
     // read ships a key.
     this.baseUrl = assertSafeStripeBaseUrl(config.baseUrl ?? STRIPE_PRODUCTION_BASE_URL);
+    // Guarded at construction too, and against its own set: a connection that
+    // names an unregistered download host must fail to build rather than look
+    // fine until a backfill finishes and ships the key to it.
+    this.filesBaseUrl = assertSafeStripeFileBaseUrl(
+      config.filesBaseUrl ?? STRIPE_FILES_BASE_URL,
+    );
     this.meter =
       deps.meter ??
       new ReadAllocationMeter(
@@ -809,24 +1143,55 @@ export class StripeConnector implements Connector {
   }
 
   /**
-   * One request.
+   * One request whose response is JSON.
    *
    * `metered` decides whether it counts against the account's read allocation:
-   * true for ordinary `/v1/*` reads, FALSE for the Reporting API, which Stripe
-   * excludes. The headroom check happens before the URL is even built, so an
-   * exhausted allocation costs no network at all — the test asserts on the
-   * injected fetch having zero calls, not on the return value.
+   * true for ordinary `/v1/*` reads, FALSE for the Reporting API and its
+   * files, which Stripe excludes. The headroom check happens before the URL is
+   * even built, so an exhausted allocation costs no network at all — the test
+   * asserts on the injected fetch having zero calls, not on the return value.
    */
   private async request(
     op: string,
     path: string,
-    opts: {
-      metered: boolean;
-      search?: Record<string, string | number | undefined>;
-      method?: "GET" | "POST";
-      form?: Record<string, string | number>;
-    },
+    opts: StripeRequestOptions,
   ): Promise<Record<string, unknown>> {
+    const res = await this.send(op, path, opts);
+    try {
+      return (await res.json()) as Record<string, unknown>;
+    } catch (err) {
+      throw this.blocked(op, `unparseable Stripe response: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * One request whose body is not JSON — a report file's CSV.
+   *
+   * Shares {@link StripeConnector.send} with every other call, so the
+   * collection allowlist, the `Stripe-Version` pin, the no-redirect rule, the
+   * 429 backoff and the 401/403 classification are the same machinery rather
+   * than a second implementation that drifts.
+   */
+  private async requestText(
+    op: string,
+    path: string,
+    opts: StripeRequestOptions,
+  ): Promise<string> {
+    const res = await this.send(op, path, opts);
+    try {
+      return await res.text();
+    } catch (err) {
+      throw this.blocked(op, `unreadable Stripe response body: ${(err as Error).message}`);
+    }
+  }
+
+  /** Everything both request kinds share, up to and including the status
+   *  classification and the allocation record. */
+  private async send(
+    op: string,
+    path: string,
+    opts: StripeRequestOptions,
+  ): Promise<Response> {
     assertReadableStripeCollection(path);
     if (opts.metered) this.meter.assertHeadroom();
     const apiKey = await this.key();
@@ -835,7 +1200,11 @@ export class StripeConnector implements Connector {
     for (const [k, v] of Object.entries(opts.search ?? {})) {
       if (v !== undefined) qs.set(k, String(v));
     }
-    const url = `${this.baseUrl}${path}${qs.toString() ? `?${qs}` : ""}`;
+    // `origin` defaults to the API base. The ONLY other value it ever takes is
+    // the report-file base, and both were validated at construction against
+    // their own registered host set — so no request can reach an origin the
+    // egress registry has not screened.
+    const url = `${opts.origin ?? this.baseUrl}${path}${qs.toString() ? `?${qs}` : ""}`;
 
     const doFetch = this.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     if (!doFetch) throw this.blocked(op, "no fetch implementation available");
@@ -856,7 +1225,7 @@ export class StripeConnector implements Connector {
             // NON-NEGOTIABLE, on every request kind. Without it the response is
             // served at the merchant's Workbench-changeable account default.
             "Stripe-Version": STRIPE_API_VERSION,
-            Accept: "application/json",
+            Accept: opts.accept ?? "application/json",
             ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
           },
           ...(body ? { body } : {}),
@@ -905,11 +1274,7 @@ export class StripeConnector implements Connector {
 
       // Recorded only on a 2xx, and only for allocation-counted paths.
       if (opts.metered) this.meter.record();
-      try {
-        return (await res.json()) as Record<string, unknown>;
-      } catch (err) {
-        throw this.blocked(op, `unparseable Stripe response: ${(err as Error).message}`);
-      }
+      return res;
     }
   }
 
@@ -1216,13 +1581,20 @@ export class StripeConnector implements Connector {
    * "backfill finished, no rows", which would be a confident false statement
    * about money.
    *
-   * Retrieving the finished file's CONTENTS is deliberately not done here: the
-   * file is served from a different host (`files.stripe.com`), which is not in
-   * `docs/security/allowed-egress.yaml` and would need its own entry and its
-   * own security review. This method takes the run to completion and returns
-   * the file reference; downloading it is a follow-up with an egress decision
-   * attached, and refusing to dial an unregistered host is the correct default
-   * rather than an oversight.
+   * The finished file's CONTENTS come from `files.stripe.com` (WARP-2450),
+   * which is a second host with its own `docs/security/allowed-egress.yaml`
+   * entry and its own security review. WARP-2215 shipped this method stopping
+   * at the file reference because that host was unregistered at the time and
+   * neither dialing it quietly nor widening WARP-2216's pinned `stripe-api`
+   * entry was acceptable; registering it separately is what unblocked the
+   * download, and the URL is built from a whole-string literal here rather
+   * than followed from the file object's own `url` field, so a Stripe-supplied
+   * value cannot point this request anywhere.
+   *
+   * The report TYPE is checked against the same collection allowlist every
+   * request path is checked against, BEFORE the run is created. A
+   * payout-reconciliation report is a payouts read wearing a different URL,
+   * and "no money movement" has to hold on the Reporting surface too.
    */
   async runBackfill(input: {
     reportType: string;
@@ -1230,6 +1602,9 @@ export class StripeConnector implements Connector {
     intervalEnd: number;
   }): Promise<StripeBackfillResult> {
     const op = "runBackfill";
+    // Refused before the run is created, so a report this connector may not
+    // read costs no network at all — the test asserts zero fetch calls.
+    assertReadableStripeCollection(`/v1/${collectionForStripeReportType(input.reportType)}`);
     // `metered: false` throughout — this is the exclusion the whole design
     // rests on, and the test asserts the meter snapshot is byte-identical
     // across a full backfill.
@@ -1249,13 +1624,25 @@ export class StripeConnector implements Connector {
     for (let attempt = 0; attempt < STRIPE_BACKFILL_MAX_ATTEMPTS; attempt += 1) {
       const status = typeof run.status === "string" ? run.status : "";
       if (status === "succeeded") {
+        const fileId = StripeConnector.idOf(run.result);
+        if (fileId === null) {
+          // A succeeded run with no file reference is a broken contract, and
+          // the one thing that must NOT happen here is returning it as
+          // succeeded-with-no-rows. That reads as "your history is empty".
+          throw new ConnectorBlockedError(
+            `${op}: Stripe reported report run ${runId} succeeded but returned no file`,
+            "the run cannot be retrieved without a file reference. Refusing to report " +
+              "this as a finished backfill — a backfill that loaded nothing is not the " +
+              "same fact as an account with no history.",
+          );
+        }
+        const rows = await this.retrieveReportRows(op, input.reportType, fileId);
         return {
           state: "succeeded",
           reportRunId: runId,
-          fileId: StripeConnector.idOf(run.result),
-          detail:
-            "the report run finished; retrieving its file contents needs files.stripe.com " +
-            "registered in allowed-egress.yaml first",
+          fileId,
+          rows,
+          detail: `the report run finished and its file yielded ${rows.length} rows`,
         };
       }
       if (status === "failed") {
@@ -1282,6 +1669,39 @@ export class StripeConnector implements Connector {
         `the report run was still building after ${STRIPE_BACKFILL_MAX_ATTEMPTS} polls. ` +
         `It has NOT failed and no data is missing — poll this run id again shortly.`,
     };
+  }
+
+  /**
+   * Download a finished report run's CSV and map it onto ledger rows.
+   *
+   * Three properties this method has to hold, in order:
+   *
+   *   1. **The collection allowlist gates it, again.** `runBackfill` already
+   *      checked the report type before creating the run; this re-checks it
+   *      here so the guard travels with the DOWNLOAD rather than living only
+   *      at one call site, and then the `/v1/files/...` path goes through the
+   *      same guard as every other request path.
+   *   2. **The URL is built, never followed.** The file object carries its own
+   *      `url` field. Using it would let a Stripe-side value — or anything
+   *      that ever impersonated one — choose where a request carrying the
+   *      merchant's restricted key goes. The base is a literal validated at
+   *      construction against {@link STRIPE_ALLOWED_FILE_HOSTS}.
+   *   3. **Nothing here is allocation-metered.** Stripe excludes the Reporting
+   *      API and its files, which is the whole reason bulk history takes this
+   *      route; `metered: false` is what makes that true in code.
+   */
+  private async retrieveReportRows(
+    op: string,
+    reportType: string,
+    fileId: string,
+  ): Promise<StripeBalanceTransactionRow[]> {
+    assertReadableStripeCollection(`/v1/${collectionForStripeReportType(reportType)}`);
+    const csv = await this.requestText(op, `/v1/files/${fileId}/contents`, {
+      metered: false,
+      origin: this.filesBaseUrl,
+      accept: "text/csv",
+    });
+    return balanceTransactionRowsFromReport(parseStripeReportCsv(csv));
   }
 
   // ── State ─────────────────────────────────────────────────────────────────
