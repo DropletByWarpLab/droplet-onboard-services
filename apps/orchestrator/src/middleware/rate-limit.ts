@@ -1,4 +1,8 @@
-import { rateLimit, type RateLimitRequestHandler } from "express-rate-limit";
+import {
+  ipKeyGenerator,
+  rateLimit,
+  type RateLimitRequestHandler,
+} from "express-rate-limit";
 
 /**
  * Shared request rate limiters (CodeQL `js/missing-rate-limiting` sweep,
@@ -49,6 +53,12 @@ function preset(
     standardHeaders: "draft-8",
     legacyHeaders: false,
     message: RATE_LIMIT_MESSAGE,
+    // The default key generator throws when `req.ip` is undefined (socket
+    // torn down mid-request, or a test that nulls it), and with draft-8
+    // headers that TypeError turns into a 500 instead of a pass-through.
+    // Fall back to the socket address, then a shared bucket.
+    keyGenerator: (req) =>
+      ipKeyGenerator(req.ip ?? req.socket?.remoteAddress ?? "unknown"),
     // One counter per preset, not per route: a client hammering login *and*
     // MFA shares the auth budget, which is the point.
     identifier: `droplet-${name}`,

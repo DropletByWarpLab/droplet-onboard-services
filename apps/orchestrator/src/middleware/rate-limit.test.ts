@@ -30,4 +30,18 @@ describe("rate-limit middleware", () => {
     await request(app).get("/b").set("X-Forwarded-For", "10.0.0.1").expect(429);
     await request(app).get("/b").set("X-Forwarded-For", "10.0.0.2").expect(200);
   });
+
+  it("does not 500 when req.ip is undefined", async () => {
+    const app = express();
+    app.use((req, _res, next) => {
+      Object.defineProperty(req, "ip", { value: undefined });
+      next();
+    });
+    app.get("/t", createRateLimit("test-c", { windowMs: 60_000, limit: 1 }), (_req, res) => {
+      res.json({ ok: true });
+    });
+
+    await request(app).get("/t").expect(200);
+    await request(app).get("/t").expect(429);
+  });
 });
