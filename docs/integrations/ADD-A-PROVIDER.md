@@ -106,6 +106,8 @@ The hub renders a provider from static metadata — `apps/web-dashboard/src/lib/
 
 Live connection **status** is merged in from `GET /api/integrations`; this file is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
 
+> **A cloud/SaaS provider also needs a customer setup guide** at `docs/integrations/<id>.md`, listed in `SETUP.md` §3.3, before it can ship. The credential is created by the customer in a vendor console we do not control, so an undocumented click-path is the connector being unusable rather than an inconvenience. `scripts/check-setup-guides.sh` enforces coverage, the six required sections, the per-vendor fact pins and link integrity, and runs on every PR. Start from an existing guide — [`stripe.md`](stripe.md) is the simplest, [`xero.md`](xero.md) the one with the most qualification gates — and link the shared [`credential-handling.md`](credential-handling.md) rather than paraphrasing it. **WARP-2342** will add a `setupGuideHref` field to the metadata shape above so the guide is reachable from the hub; until it lands, the guide is reachable only from `SETUP.md`.
+
 ---
 
 ## 7. Wire the build graph (don't skip this — it's a silent CI-redder)
