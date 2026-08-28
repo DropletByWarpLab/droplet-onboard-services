@@ -355,6 +355,7 @@ jobs:
               hadolint=$(jq -c . <<<"$ALL_HADOLINT")
             else
               hadolint="[]"
+            fi
             if jq -e 'index("ship-check")' <<<"$CHANGED" >/dev/null; then
               ship_check=$(jq -c . <<<"$ALL_SHIP_CHECK")
             else
