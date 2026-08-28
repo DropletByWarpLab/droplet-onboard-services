@@ -341,6 +341,10 @@ export const HNSW_EF_SEARCH_CEILING = 1000;
  * `Math.trunc(limit) * OVERSCAN` can itself overflow to Infinity for an
  * absurd `limit`; the clamp wraps the MULTIPLY rather than the input so it
  * catches that too.
+ *
+ * WARP-2524: mirrored — constants, helper and transaction discipline — in
+ * `services/mcp-server/src/file-search.service.ts`, the `search_content`
+ * copy of this arm. If these numbers move, move both.
  */
 export function hnswEfSearchFor(limit: number): number {
   const wanted = Number.isFinite(limit)

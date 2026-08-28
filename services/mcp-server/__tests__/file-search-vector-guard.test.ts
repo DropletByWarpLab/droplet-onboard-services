@@ -8,11 +8,22 @@ import { describe, it, expect, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { searchByVector, searchHybrid } from "../src/file-search.service.js";
 
-// Minimal prisma stub: searchByVector/searchByLexical only call
-// $queryRawUnsafe. Returns an empty result set so the happy path resolves.
+// Minimal prisma stub. searchByLexical calls $queryRawUnsafe directly;
+// searchByVector routes its SELECT through $transaction (WARP-2524 — SET
+// LOCAL hnsw.ef_search needs a transaction scope), so the stub hands the
+// callback a tx client whose $queryRawUnsafe is the SAME spy: `raw` still
+// sees every SQL statement either way. Returns an empty result set so the
+// happy path resolves.
 function prismaStub(): { client: PrismaClient; raw: ReturnType<typeof vi.fn> } {
   const raw = vi.fn(async () => [] as unknown[]);
-  return { client: { $queryRawUnsafe: raw } as unknown as PrismaClient, raw };
+  const client = {
+    $queryRawUnsafe: raw,
+    $transaction: vi.fn(
+      async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ $queryRawUnsafe: raw, $executeRawUnsafe: vi.fn(async () => 0) }),
+    ),
+  } as unknown as PrismaClient;
+  return { client, raw };
 }
 
 const baseParams = {
