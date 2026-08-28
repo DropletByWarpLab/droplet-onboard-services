@@ -60,11 +60,53 @@ const CATALOG_BEFORE = [
   },
 ];
 
+/**
+ * WARP-2466 — the three WARP-2214 SaaS vendors, appended after the historical
+ * four. Kept separate from `CATALOG_BEFORE` for the same reason the
+ * orchestrator's descriptor test keeps its `_BEFORE` anchors separate: that
+ * list is a record of what shipped before the refactor, and folding new cards
+ * into it turns a regression anchor into a running total.
+ */
+const CATALOG_WARP_2214 = [
+  {
+    id: "stripe",
+    name: "Stripe",
+    category: "Payments",
+    description:
+      "Payments, refunds and payouts read straight from Stripe — never money movement.",
+    availability: "available",
+  },
+  {
+    id: "hubspot",
+    name: "HubSpot",
+    category: "CRM",
+    description: "Contacts, companies, deals and tickets from your CRM — read on request.",
+    availability: "available",
+  },
+  {
+    id: "mailchimp",
+    name: "Mailchimp",
+    category: "Marketing",
+    description:
+      "Audiences, campaign performance and attributed orders — read from Mailchimp.",
+    availability: "available",
+  },
+];
+
 describe("the derived catalog is byte-identical to the hand-written one", () => {
-  it("renders the same four cards, same copy, same order", () => {
+  it("still renders the original four cards first, same copy, same order", () => {
     // Order is part of it: the Claude Design handoff is Eaglesoft · Dentrix ·
     // QuickBooks · Open Dental, and the hub renders CONNECTORS in array order.
-    expect(CONNECTORS).toEqual(CATALOG_BEFORE);
+    // Asserted as a PREFIX so the pre-change surface stays pinned exactly while
+    // new cards can only ever be appended.
+    // Mutation: reorder the descriptors or edit a card's copy → red.
+    expect(CONNECTORS.slice(0, CATALOG_BEFORE.length)).toEqual(CATALOG_BEFORE);
+  });
+
+  it("appends the three WARP-2214 vendors, in hub order", () => {
+    // Mutation: change a `catalog.order` so a SaaS card lands among the
+    // practice cards → red.
+    expect(CONNECTORS.slice(CATALOG_BEFORE.length)).toEqual(CATALOG_WARP_2214);
   });
 
   it("keeps every id inside the ConnectorId union the rest of the hub uses", () => {
@@ -74,8 +116,11 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     expect(CONNECTORS.map((c) => c.id).sort()).toEqual([
       "dentrix",
       "eaglesoft",
+      "hubspot",
+      "mailchimp",
       "opendental",
       "quickbooks",
+      "stripe",
     ]);
   });
 
@@ -131,10 +176,41 @@ describe("credential fields come from the shared descriptor, not from this file"
 
   it("never exposes a secret VALUE — only the shape of the field", () => {
     // A descriptor describes what to ask for; it must never carry what was
-    // answered. Serialising the whole catalog is the cheapest way to assert it.
+    // answered.
+    //
+    // WARP-2466 fixed a real bug in this assertion. It was
+    // `/password|token|secret["']?\s*:\s*["'][^"']/i`, and JS alternation
+    // binds looser than concatenation — so it read as `password` OR `token` OR
+    // `secret:"…"`, and fired on the bare word "token" ANYWHERE. That is not
+    // what the comment above claims it checks: it made a field NAMED
+    // `accessToken`, or a help string containing the word "token",
+    // indistinguishable from a leaked value. The group is now explicit.
     const serialised = JSON.stringify(
       CONNECTORS.map((c) => connectorCredentialFields(c.id)),
     );
-    expect(serialised).not.toMatch(/password|token|secret["']?\s*:\s*["'][^"']/i);
+    // Mutation: add `value: "hunter2"` to any descriptor field → red.
+    expect(serialised).not.toMatch(/(password|token|secret)["']?\s*:\s*["'][^"']/i);
+
+    // Stronger than a regex, and the assertion the comment actually wants: a
+    // field object may carry ONLY the declared shape keys. A value smuggled
+    // under any name at all — not just one the regex thought to look for —
+    // fails here.
+    // Mutation: add any key to a descriptor's credential field → red.
+    const allowed = new Set([
+      "name",
+      "label",
+      "type",
+      "required",
+      "secret",
+      "storage",
+      "pattern",
+      "help",
+    ]);
+    for (const c of CONNECTORS) {
+      for (const field of connectorCredentialFields(c.id)) {
+        const extra = Object.keys(field).filter((k) => !allowed.has(k));
+        expect(extra, `${c.id}.${field.name} carries non-shape keys`).toEqual([]);
+      }
+    }
   });
 });

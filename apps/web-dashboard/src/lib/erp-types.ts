@@ -22,7 +22,19 @@ export type IntegrationStatus =
 
 /** Providers the hub knows about. Eaglesoft ships first; the rest are the
  *  framework placeholders that make the hub read as N-provider, not one-off. */
-export type ConnectorId = "eaglesoft" | "dentrix" | "opendental" | "quickbooks";
+export type ConnectorId =
+  | "eaglesoft"
+  | "dentrix"
+  | "opendental"
+  | "quickbooks"
+  // WARP-2466 — the WARP-2214 SaaS vendors. The union stays CLOSED and
+  // hand-maintained on purpose: `connectors.test.ts` pins the ids derived from
+  // the shared descriptors against these literals, so a descriptor introducing
+  // a card id the rest of the hub cannot address goes red rather than
+  // rendering a tile nothing can route to.
+  | "stripe"
+  | "hubspot"
+  | "mailchimp";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

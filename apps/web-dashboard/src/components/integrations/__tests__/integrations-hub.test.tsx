@@ -226,6 +226,41 @@ describe("hub dispatch", () => {
   });
 
   /**
+   * WARP-2466 — the same dispatch contract, on the three SHIPPED vendors.
+   *
+   * The test above proves dispatch works for a vendor registered by the test
+   * itself. That was the only way to prove it while Eaglesoft was the sole
+   * `available` descriptor — and wave 1 recorded exactly this trap: a
+   * regression test that is vacuously green because the shipped data cannot
+   * make the defect observable.
+   *
+   * Stripe, HubSpot and Mailchimp are `available` in the SHIPPED registry, so
+   * this version needs no fixture at all. Mutation: reinstate
+   * `if (e.meta.id === "eaglesoft")` on `connectConnector` and all three go
+   * red against production data.
+   */
+  it("dispatches Connect for the three shipped SaaS vendors", async () => {
+    for (const name of ["Stripe", "HubSpot", "Mailchimp"]) {
+      vi.mocked(fetchIntegrations).mockResolvedValue([]);
+      push.mockReset();
+      const { container, unmount } = renderHub();
+      await waitFor(() => expect(renderedNames(container)).toContain(name));
+
+      const card = tile(container, name);
+      const button = within(card).getByRole("button");
+      expect((button as HTMLButtonElement).disabled, `${name}'s action is disabled`).toBe(false);
+
+      fireEvent.click(button);
+      const acted =
+        push.mock.calls.length > 0 ||
+        within(container).queryByTestId("connect-wizard") !== null ||
+        within(container).queryByTestId("hub-blocked-reason") !== null;
+      expect(acted, `clicking ${name}'s "${button.textContent}" did nothing`).toBe(true);
+      unmount();
+    }
+  });
+
+  /**
    * The mutation this whole story exists to kill, made observable.
    *
    * Mutation: `const connectConnector = (e) => { if (e.meta.id === <one
@@ -394,6 +429,14 @@ describe("entries are the union of the catalog and the response", () => {
       "Dentrix",
       "QuickBooks",
       "Open Dental",
+      // WARP-2466 — the three WARP-2214 SaaS vendors. They appear here with no
+      // hub code change at all: the grid is DERIVED from the descriptor
+      // catalog (#1809 + #1808), so registering a descriptor is what puts a
+      // tile on the page. Mutation: delete a `catalog` block from one of the
+      // three descriptors → red.
+      "Stripe",
+      "HubSpot",
+      "Mailchimp",
     ]);
   });
 
@@ -418,6 +461,14 @@ describe("entries are the union of the catalog and the response", () => {
       "Dentrix",
       "QuickBooks",
       "Open Dental",
+      // WARP-2466 — the three WARP-2214 SaaS vendors. They appear here with no
+      // hub code change at all: the grid is DERIVED from the descriptor
+      // catalog (#1809 + #1808), so registering a descriptor is what puts a
+      // tile on the page. Mutation: delete a `catalog` block from one of the
+      // three descriptors → red.
+      "Stripe",
+      "HubSpot",
+      "Mailchimp",
       "Generic Export",
       "M365",
     ]);
@@ -442,10 +493,21 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Four catalog tiles absorb four of the rows; the two the catalog knows
-    // nothing about each get their own.
-    expect(tiles(container)).toHaveLength(6);
-    for (const name of ["Eaglesoft", "Dentrix", "QuickBooks", "Open Dental", "M365", "Something Nobody Wrote A Tile For"]) {
+    // Seven catalog tiles (four original + the three WARP-2214 vendors) absorb
+    // four of the rows; the two the catalog knows nothing about each get their
+    // own.
+    expect(tiles(container)).toHaveLength(9);
+    for (const name of [
+      "Eaglesoft",
+      "Dentrix",
+      "QuickBooks",
+      "Open Dental",
+      "Stripe",
+      "HubSpot",
+      "Mailchimp",
+      "M365",
+      "Something Nobody Wrote A Tile For",
+    ]) {
       expect(renderedNames(container), `${name} vanished`).toContain(name);
     }
   });

@@ -37,6 +37,7 @@
  * than restating any of it.
  */
 
+import { descriptorForCatalogId } from "@droplet/shared-types";
 import { CONNECTORS } from "@/lib/connectors";
 import { providerName } from "@/app/reports/connectors";
 import type { ConnectorMeta } from "@/lib/erp-types";
@@ -93,8 +94,36 @@ const DETAIL_ROUTES: Readonly<Record<string, string>> = {
   eaglesoft: "/integrations/eaglesoft",
 };
 
-/** Tiles whose Connect opens the in-dashboard wizard today. */
+/** Tiles whose Connect opens the in-dashboard wizard today.
+ *
+ *  Kept to Eaglesoft: the wizard collects a host, a port and a database name,
+ *  which is a LAN track's shape and nothing else's. A SaaS vendor pointed at
+ *  it would be asked for the IP address of Stripe. */
 const WIZARD_CONNECT: readonly string[] = ["eaglesoft"];
+
+/**
+ * WARP-2275's descriptor-driven credential configurator (#1817). One page, one
+ * component, every provider — it renders whatever `credentialFields` the
+ * descriptor declares, so a vendor needs no page of its own.
+ */
+const CREDENTIALS_ROUTE = "/integrations/credentials";
+
+/**
+ * Does this card's track take a pasted customer credential?
+ *
+ * Asked of the DESCRIPTOR, not of a vendor list: any provider with a secret
+ * field stored `encrypted` is configured by pasting something, and that is
+ * exactly what the configurator page collects. A hardcoded list of the three
+ * WARP-2214 vendors here would be the fourth hand-edit site WARP-2217 deleted,
+ * reintroduced in a new file.
+ */
+function usesCredentialConfigurator(catalogId: string): boolean {
+  const descriptor = descriptorForCatalogId(catalogId);
+  return (
+    descriptor?.track === "cloud" &&
+    descriptor.credentialFields.some((f) => f.secret && f.storage === "encrypted")
+  );
+}
 
 const COMING_SOON_REASON = "Available in a future update.";
 const NO_CONNECT_FLOW_REASON =
@@ -119,7 +148,9 @@ function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
       ? { kind: "unavailable", reason: COMING_SOON_REASON }
       : WIZARD_CONNECT.includes(meta.id)
         ? { kind: "wizard" }
-        : { kind: "unavailable", reason: NO_CONNECT_FLOW_REASON };
+        : usesCredentialConfigurator(meta.id)
+          ? { kind: "route", href: `${CREDENTIALS_ROUTE}?provider=${meta.id}` }
+          : { kind: "unavailable", reason: NO_CONNECT_FLOW_REASON };
 
   return {
     meta,
