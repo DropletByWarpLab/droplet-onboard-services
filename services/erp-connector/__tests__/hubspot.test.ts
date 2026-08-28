@@ -1371,11 +1371,106 @@ async function expectCapability(call: () => Promise<unknown>, tier: string): Pro
   expect(Array.isArray(caught)).toBe(false);
 }
 
+describe("updated_at — the canonical modification time (WARP-2494)", () => {
+  const MODIFIED_MS = Date.UTC(2026, 7, 20, 9, 30, 0);
+
+  it("emits updated_at as a UTC ISO instant parsed from hs_lastmodifieddate", async () => {
+    // `hs_lastmodifieddate` is a PROPERTY on the object (it is the Search
+    // filter and sort key at connector.ts:1430/1438, and the fixture carries it
+    // inside `properties`), and it arrives as epoch milliseconds. The canonical
+    // column is a full UTC ISO instant, matching every other track.
+    // Mutation: drop the `updated_at` mapping from toRecord → red (undefined).
+    // Mutation: parse `createdate` instead → red (2026-07-21, not 2026-08-20).
+    const { c } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    const out = await c.pollObjectChanges({ objectType: "contacts", watermark: 0 });
+    expect(out.records).toHaveLength(1);
+    expect(out.records[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+    // The creation time is present on the record and is a DIFFERENT instant, so
+    // the assertion above cannot pass by coincidence.
+    expect(out.records[0].properties.createdate).not.toBe(
+      String(MODIFIED_MS),
+    );
+  });
+
+  it("every produced updated_at parses as an ISO instant (COLUMN_KIND.timestamp)", async () => {
+    // Mutation: emit the raw epoch-ms string instead of the ISO form → red.
+    const { c } = connector({
+      routes: searchRoute([record("c-1", MODIFIED_MS), record("c-2", MODIFIED_MS + 1000)]),
+    });
+    const out = await c.pollObjectChanges({ objectType: "contacts", watermark: 0 });
+    expect(out.records).toHaveLength(2);
+    for (const r of out.records) {
+      expect(typeof r.updated_at).toBe("string");
+      // Round-trips: a real UTC ISO instant, not merely something parseable.
+      expect(new Date(r.updated_at).toISOString()).toBe(r.updated_at);
+    }
+  });
+
+  it("requests hs_lastmodifieddate even when the caller names its own properties", async () => {
+    // A caller asking for `["email"]` is not asking to LOSE the modification
+    // stamp — but a plain `??` fallback gives exactly that, and `toRecord` then
+    // drops every returned row for want of a parseable stamp. The failure
+    // surfaces as an empty poll or a watermark stall, never as "you forgot a
+    // property", which is why this is asserted on the outgoing REQUEST.
+    // Mutation: restore `input.properties ?? [LAST_MODIFIED_PROPERTY]` → red.
+    const { c, f } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    await c.pollObjectChanges({
+      objectType: "contacts",
+      watermark: 0,
+      properties: ["email"],
+    });
+    const body = f.bodyOf(0);
+    expect(body.properties).toContain("hs_lastmodifieddate");
+    expect(body.properties).toContain("email");
+  });
+
+  it("does not ask for hs_lastmodifieddate twice when the caller already named it", async () => {
+    // Mutation: append unconditionally instead of checking membership → red.
+    const { c, f } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    await c.pollObjectChanges({
+      objectType: "contacts",
+      watermark: 0,
+      properties: ["hs_lastmodifieddate", "email"],
+    });
+    const asked = f.bodyOf(0).properties as string[];
+    expect(asked.filter((x) => x === "hs_lastmodifieddate")).toHaveLength(1);
+  });
+
+  it("a caller-supplied property list still yields rows, not a watermark stall", async () => {
+    // The end-to-end consequence of the bug above, stated as behaviour: before
+    // the fix this threw HubSpotWatermarkStallError with zero records.
+    // Mutation: restore the `??` fallback → red.
+    const { c } = connector({ routes: searchRoute([record("c-1", MODIFIED_MS)]) });
+    const out = await c.pollObjectChanges({
+      objectType: "contacts",
+      watermark: 0,
+      properties: ["email"],
+    });
+    expect(out.records).toHaveLength(1);
+    expect(out.records[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+  });
+
+  it("puts hs_lastmodifieddate in a backfill export's property list too", async () => {
+    // An Exports CSV without the modification column cannot produce updated_at
+    // for a single backfilled row.
+    // Mutation: send `[...input.properties]` verbatim → red.
+    const { c, f } = connector({ routes: exportRoutes() });
+    await c.runBackfill({ objectType: "contacts", properties: ["email"] });
+    const body = f.bodyOf(0);
+    expect(body.objectProperties).toContain("hs_lastmodifieddate");
+    expect(body.objectProperties).toContain("email");
+  });
+});
+
 function record(id: string, modifiedAtMs: number) {
   return {
     id,
     properties: {
       hs_lastmodifieddate: String(modifiedAtMs),
+      // Thirty days BEFORE the modification stamp, on purpose: a projection
+      // that reaches for the creation time instead of the modification time
+      // must not be able to pass by coincidence (WARP-2494).
+      createdate: String(modifiedAtMs - 30 * 24 * 60 * 60 * 1000),
       email: `${id}@example.test`,
     },
   };

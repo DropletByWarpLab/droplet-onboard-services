@@ -735,6 +735,115 @@ describe("contact and campaign delta reads", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// `updated_at` — WARP-2494
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("updated_at on the contact dataset", () => {
+  /**
+   * One list member, as Mailchimp serves it. `last_changed` and `timestamp_opt`
+   * are deliberately DIFFERENT instants: a projection reaching for the opt-in
+   * time — this dataset's nearest thing to a creation stamp — must not be able
+   * to pass by coincidence.
+   */
+  function member(over: { id?: string; last_changed?: string | null } = {}) {
+    const row: Record<string, unknown> = {
+      id: over.id ?? "m1",
+      email_address: `${over.id ?? "m1"}@example.test`,
+      status: "subscribed",
+      timestamp_opt: "2026-01-15T08:00:00+00:00",
+    };
+    if (over.last_changed !== null) {
+      row.last_changed = over.last_changed ?? "2026-08-20T09:30:00+00:00";
+    }
+    return row;
+  }
+
+  function memberRoute(members: Record<string, unknown>[]) {
+    return [{ match: /members/, responses: [{ body: { members } }] }];
+  }
+
+  it("emits updated_at as a UTC ISO instant from the member's last_changed", async () => {
+    // A Mailchimp `contact` IS a list member, and `last_changed` is the field
+    // the API's own `since_last_changed` delta filter keys on — so it is the
+    // one honest modification time this dataset has.
+    // Mutation: drop the `updated_at` projection → red (undefined).
+    // Mutation: project `timestamp_opt` instead → red (2026-01-15, not 08-20).
+    const { c } = connector({ routes: memberRoute([member()]) });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+    // The opt-in time is still on the row, and is a different instant.
+    expect(rows[0].timestamp_opt).toBe("2026-01-15T08:00:00+00:00");
+  });
+
+  it("normalises the vendor's +00:00 offset form to a Z instant", async () => {
+    // Mailchimp emits `2026-08-20T09:30:00+00:00`; every other track produces a
+    // full `…Z` instant, and `COLUMN_KIND.updated_at` is one column across all
+    // of them. Passing the vendor string through leaves two spellings of one
+    // moment in one column.
+    // Mutation: assign `last_changed` verbatim → red.
+    const { c } = connector({
+      routes: memberRoute([member({ last_changed: "2026-08-20T09:30:00+00:00" })]),
+    });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBe("2026-08-20T09:30:00.000Z");
+    expect(rows[0].updated_at).not.toBe(rows[0].last_changed);
+  });
+
+  it("carries a non-UTC offset across to the correct UTC instant", async () => {
+    // Mutation: slice the string instead of parsing it → red (it would keep
+    // the wall-clock time and silently drop the offset).
+    const { c } = connector({
+      routes: memberRoute([member({ last_changed: "2026-08-20T09:30:00-07:00" })]),
+    });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBe("2026-08-20T16:30:00.000Z");
+  });
+
+  it("leaves updated_at undefined — never guessed — when last_changed is absent", async () => {
+    // Absent source stays absent. Falling back to the opt-in time would put
+    // another field's timestamp here under this one's name.
+    // Mutation: fall back to `timestamp_opt` → red.
+    const { c } = connector({ routes: memberRoute([member({ last_changed: null })]) });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBeUndefined();
+    // Present-and-undefined, not missing: an unmapped canonical column is still
+    // a declared column.
+    expect("updated_at" in rows[0]).toBe(true);
+  });
+
+  it("leaves updated_at undefined when last_changed does not parse", async () => {
+    // Mutation: emit the unparseable string verbatim → red.
+    const { c } = connector({
+      routes: memberRoute([member({ last_changed: "not-a-date" })]),
+    });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows[0].updated_at).toBeUndefined();
+  });
+
+  it("every produced updated_at parses as an ISO instant (COLUMN_KIND.timestamp)", async () => {
+    // Mutation: emit the epoch number instead of the ISO string → red.
+    const { c } = connector({ routes: memberRoute([memberPage(0, 3).members].flat()) });
+    const { rows } = await c.listMembers("list_1");
+    expect(rows).toHaveLength(3);
+    for (const r of rows) {
+      expect(typeof r.updated_at).toBe("string");
+      expect(new Date(r.updated_at as string).toISOString()).toBe(r.updated_at);
+    }
+  });
+
+  it("does not disturb the returned watermark, which stays the vendor's own form", async () => {
+    // The watermark is fed straight back as `since_last_changed`, so it must
+    // remain the string Mailchimp gave us — normalising it here would change an
+    // outgoing filter this ticket has no business touching.
+    // Mutation: set the watermark from `updated_at` → red.
+    const { c } = connector({ routes: [{ match: /members/, responses: [{ body: memberPage(0, 3) }] }] });
+    const { watermark } = await c.listMembers("list_1");
+    expect(watermark).toBe("2026-08-03T00:00:00+00:00");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // E-commerce — a DECLARED full scan (WARP-2400)
 // ─────────────────────────────────────────────────────────────────────────────
 
