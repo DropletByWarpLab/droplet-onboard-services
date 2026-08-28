@@ -85,6 +85,43 @@ run_case "public IP literal fails" 1 \
   "apps/svc/src/client.ts" \
   'export const u = "http://8.8.8.8/api";'
 
+# ── WARP-2217: provider-descriptor egressHosts ──────────────────────────────
+# A descriptor declares its destinations as BARE hosts, and code files are
+# otherwise exempt from bare-host matching. Without these the declaration would
+# be invisible to the gate and a descriptor could name an unregistered vendor
+# host with nothing going red.
+
+run_case "descriptor egressHosts: allowlisted host passes" 0 \
+  "packages/shared-types/src/provider-registry.ts" \
+  '  egressHosts: ["api.allowed-vendor.com"],'
+
+run_case "descriptor egressHosts: unlisted host fails" 1 \
+  "packages/shared-types/src/provider-registry.ts" \
+  '  egressHosts: ["telemetry.evil-corp.io"],'
+
+# The array wraps once it holds more than two entries. A single-line regex
+# would silently stop matching the day a third host is added — which is the
+# exact drift this gate exists to catch, so the multi-line form is asserted.
+run_case "descriptor egressHosts: unlisted host on a WRAPPED array fails" 1 \
+  "packages/shared-types/src/provider-registry.ts" \
+  '    egressHosts: [
+      "api.allowed-vendor.com",
+      // a comment between entries, as prettier leaves them
+      "telemetry.evil-corp.io",
+    ],
+    datasets: ["invoice"],'
+
+# Everything after the closing bracket is ordinary code again — a hostname in a
+# later comment must not be attributed to the array.
+run_case "descriptor egressHosts: closing bracket ends the array" 0 \
+  "packages/shared-types/src/provider-registry.ts" \
+  '  egressHosts: ["api.allowed-vendor.com"],
+  // unrelated prose mentioning evil-corp.io should not be extracted'
+
+run_case "descriptor egressHosts: empty array is not a violation" 0 \
+  "packages/shared-types/src/provider-registry.ts" \
+  '  egressHosts: [],'
+
 # The denial pass reads comments ON PURPOSE — a commented-out endpoint is one
 # uncomment away from egress. Pinned here so the WARP-2452 comment stripping
 # can never leak into this direction.
