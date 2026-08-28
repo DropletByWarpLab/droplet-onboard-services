@@ -71,10 +71,20 @@ describe("ConnectorCard", () => {
     ...over,
   });
 
+  // WARP-2291: the card renders an explicit ConnectionState and carries the
+  // dispatch its buttons perform. `reported` is the state these two cases
+  // were always describing — a status the box actually told us about.
+  const entry = (m: ConnectorMeta, connection: IntegrationConnection) => ({
+    meta: m,
+    state: { kind: "reported" as const, connection },
+    connect: { kind: "wizard" as const },
+    open: { kind: "route" as const, href: "/integrations/eaglesoft" },
+  });
+
   it("an available connector shows Connect", () => {
     render(
       <ConnectorCard
-        entry={{ meta: meta({}), connection: { provider: "eaglesoft", status: "NOT_CONFIGURED", writeEnabled: false } }}
+        entry={entry(meta({}), { provider: "eaglesoft", status: "NOT_CONFIGURED", writeEnabled: false })}
         onConnect={vi.fn()}
         onOpen={vi.fn()}
       />,
@@ -85,10 +95,10 @@ describe("ConnectorCard", () => {
   it("a coming-soon connector shows Coming soon and no action button", () => {
     render(
       <ConnectorCard
-        entry={{
-          meta: meta({ id: "dentrix", name: "Dentrix", availability: "coming-soon" }),
-          connection: { provider: "dentrix", status: "NOT_CONFIGURED", writeEnabled: false },
-        }}
+        entry={entry(
+          meta({ id: "dentrix", name: "Dentrix", availability: "coming-soon" }),
+          { provider: "dentrix", status: "NOT_CONFIGURED", writeEnabled: false },
+        )}
         onConnect={vi.fn()}
         onOpen={vi.fn()}
       />,

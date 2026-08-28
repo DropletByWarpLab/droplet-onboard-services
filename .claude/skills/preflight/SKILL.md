@@ -210,7 +210,32 @@ then patch/replay locally.
 - Every changed line traces to the ticket (surgical-changes rule,
   CLAUDE.md §3).
 
-## 6. End state
+## 6. Ship-check gate
+
+`./scripts/test/ship-check.sh` is the repo's pre-PR gate. Run
+`tsc-full` and `lifecycle-naming` before every PR — `lifecycle-naming`
+has no other runner (it is not one of the `ci.yml` legs), so a diff that
+violates the ADR-018 naming rule is caught by nothing else before review.
+
+**Interpreter prerequisite: bash 3.2 or newer.** The script is written to
+the bash 3.2 feature set — the version macOS still ships as `/bin/bash` —
+so it runs on the dev Mac as-is, with no `brew install bash` needed
+(WARP-2449). It asserts that floor at startup: on an older interpreter it
+exits **4** with a message naming the required version and the remedy.
+
+**Exit 4 means COULD NOT RUN, not "a check failed."** Only exit 1 means a
+check ran and failed. Never record a run that exited 4 as a passing gate —
+that conflation is exactly what WARP-2449 was filed about.
+
+Known limitation: `stale-repo-names` still aborts under stock bash 3.2
+(SIGTRAP) once the scanned tree passes a few hundred files. It is a bash
+3.2 defect, not a defect in the check, and it does not change what the
+check asserts. The other ten static checks — `tsc-full` and
+`lifecycle-naming` among them — run to completion on 3.2 and report their
+own verdicts normally. Run `stale-repo-names` under a newer bash or on
+Linux.
+
+## 7. End state
 
 Push the branch, open/update the PR (repo squash-merges with the
 `(#NNN)` suffix), and put the preflight evidence — suites run, results
