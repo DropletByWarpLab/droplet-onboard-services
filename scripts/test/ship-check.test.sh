@@ -1035,6 +1035,76 @@ test_lifecycle_naming_catches_new_poc_token() {
 }
 
 # =============================================================================
+# Test: lifecycle-naming catches STRUCTURAL dev/test framing, and still
+#       honours the Tier 1 grandfather (WARP-2478)
+# =============================================================================
+#
+# The test above covers the primary token class (`poc` / `prototype`). The
+# check has a SECOND, independent scan for structural lifecycle framing —
+# `profiles: ["dev"]`, `COMPOSE_PROFILES=test`, `--some-flag-dev` — which had
+# no regression coverage at all. WARP-2478 rewrote both scans from a per-file
+# `while read < <(grep …)` loop (the shape that SIGTRAPs bash 3.2 at scale,
+# see WARP-2456) into single multi-file passes, and in doing so folded the
+# structural scan's TWO greps into one ERE alternation. An error in that
+# union would silently drop a whole violation class while every existing
+# test stayed green — so this test pins it.
+#
+# It is two-sided in both directions that matter:
+#   * a grandfathered legacy identifier alone must still PASS (proving the
+#     Tier 1 strip-then-rescan survived the rewrite of the parse), and
+#   * a structural dev-profile entry must FAIL.
+#
+# Mutations that turn this red:
+#   * drop the `profiles:…"(dev|test|prototype)"` half of the structural
+#     alternation  -> step 3 goes green.
+#   * drop the grandfathered_tokens strip -> step 2 goes red.
+test_lifecycle_naming_structural_and_grandfather() {
+  local compose_rel="docker/docker-compose.yml"
+  local compose="$REPO_ROOT_REAL/$compose_rel"
+
+  if [ ! -f "$compose" ]; then
+    printf "    compose file missing: %s\n" "$compose" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$compose_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
+    printf "    baseline lifecycle-naming failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Grandfather side: a line whose ONLY lifecycle token is the legacy
+  #    host-net identifier must still pass. Tier 1 strips the known token and
+  #    re-scans the residual; `droplet--host-net` carries no lifecycle token,
+  #    so there is nothing left to flag.
+  printf '\n# WARP-2478 test mutation: do not commit. droplet-poc-host-net\n' >> "$compose"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    grandfather mutation no-op — compose file unchanged\n" >&2
+    return 1
+  fi
+
+  if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
+    printf "    grandfathered droplet-poc-host-net was flagged as a violation —\n" >&2
+    printf "    the Tier 1 strip-then-rescan is not working\n" >&2
+    return 1
+  fi
+
+  # 3. Structural side: a dev-named compose profile. Not a `poc`/`prototype`
+  #    token at all, so ONLY the structural scan can catch it.
+  printf '  profiles: ["dev"]\n' >> "$compose"
+
+  _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
+}
+
+# =============================================================================
 # Test: image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)
 # =============================================================================
 #
@@ -1505,6 +1575,9 @@ _run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)"
 
 _run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
   test_lifecycle_naming_catches_new_poc_token
+
+_run_test "lifecycle-naming catches structural dev/test framing and honours the grandfather (WARP-2478)" \
+  test_lifecycle_naming_structural_and_grandfather
 
 _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
