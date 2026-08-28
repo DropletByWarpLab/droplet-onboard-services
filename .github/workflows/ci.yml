@@ -90,6 +90,7 @@ jobs:
       python-matrix: ${{ steps.plan.outputs.python-matrix }}
       storage-suites: ${{ steps.plan.outputs.storage-suites }}
       fips-suites: ${{ steps.plan.outputs.fips-suites }}
+      hadolint-suites: ${{ steps.plan.outputs.hadolint-suites }}
     steps:
       - uses: actions/checkout@v7
 
@@ -270,6 +271,23 @@ jobs:
               - "tests/fips-stack-logic.test.sh"
               - "tests/integration/fips-stack.test.sh"
               - ".github/workflows/test-fips.yml"
+            # WARP-2493: hadolint, moved here from hadolint.yml so its result
+            # reaches branch protection through ci-summary.
+            # hadolint.yml had NO trigger path filter — it ran on every PR and
+            # linted `git ls-files '*Dockerfile*'`. A `detect` filter is sound
+            # here (and it is not one in name only): the job's verdict is a
+            # pure function of the tracked Dockerfiles plus .hadolint.yaml, so
+            # a PR touching neither cannot change the result — it can only
+            # re-report the base branch's verdict. Scoping it is therefore a
+            # cost saving with no loss of signal, unlike path-filtering a
+            # diff-aware scanner. `Dockerfile*` is listed alongside
+            # `**/Dockerfile*` because picomatch's `**/` does not match a
+            # repo-root file (there is none today; this keeps a future one
+            # gated).
+            hadolint:
+              - "**/Dockerfile*"
+              - "Dockerfile*"
+              - ".hadolint.yaml"
 
       - name: Decide which legs run
         id: plan
@@ -285,6 +303,7 @@ jobs:
             "inference-manager","doc-render"]
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'
+          ALL_HADOLINT: '["hadolint"]'
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
@@ -293,6 +312,7 @@ jobs:
             python=$(jq -c . <<<"$ALL_PYTHON")
             storage=$(jq -c . <<<"$ALL_STORAGE")
             fips=$(jq -c . <<<"$ALL_FIPS")
+            hadolint=$(jq -c . <<<"$ALL_HADOLINT")
           else
             if jq -e 'index("node-global")' <<<"$CHANGED" >/dev/null; then
               node=$(jq -c . <<<"$ALL_NODE")
@@ -315,6 +335,11 @@ jobs:
               fips=$(jq -c . <<<"$ALL_FIPS")
             else
               fips="[]"
+            fi
+            if jq -e 'index("hadolint")' <<<"$CHANGED" >/dev/null; then
+              hadolint=$(jq -c . <<<"$ALL_HADOLINT")
+            else
+              hadolint="[]"
             fi
           fi
           # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
@@ -339,11 +364,13 @@ jobs:
             echo "python-matrix=$python_matrix"
             echo "storage-suites=$storage"
             echo "fips-suites=$fips"
+            echo "hadolint-suites=$hadolint"
           } >> "$GITHUB_OUTPUT"
           echo "node legs: $node"
           echo "python legs: $python"
           echo "storage legs: $storage"
           echo "fips legs: $fips"
+          echo "hadolint legs: $hadolint"
 
   node:
     name: node / ${{ matrix.suite }}
@@ -780,6 +807,94 @@ jobs:
           fi
           semgrep scan "${ARGS[@]}"
 
+  # WARP-243 secret scan, moved here from gitleaks.yml under WARP-2493 for the
+  # same reason as the fips/semgrep legs (WARP-2481): gitleaks.yml's header
+  # said it ran "unfiltered on every PR so it can be a required check", but it
+  # never became one. docs/SECURITY.md listed it as "Blocks PRs? yes"; it did
+  # not. Only ci-summary, egress-gate and the title lint are required.
+  #
+  # DELIBERATELY NOT `detect`-GATED: a secret can be added in any file, so
+  # there is no honest path filter. ci-summary is passed a hard-coded
+  # non-empty suite list for this leg, so a skip is never read as "nothing to
+  # do" — fail-closed, same contract as the filtered legs.
+  #
+  # Two passes:
+  #   1. Working-tree scan: any secret present in the files as they would
+  #      merge (config-allowlisted test fixtures excluded — .gitleaks.toml).
+  #   2. PR-commit-range scan: catches a secret committed then "removed" in
+  #      a later commit of the same PR (it would still live in history).
+  # Full-history scans are deliberately NOT run here: main's history has 112
+  # known fixture findings (audited 2026-07-04) and rewriting history is not
+  # on the table. History is gated from this point forward by pass 2.
+  #
+  # Uses the pinned gitleaks binary, NOT gitleaks/gitleaks-action: the action
+  # requires a paid GITLEAKS_LICENSE for organization repos; the MIT binary
+  # does not.
+  #
+  # NOTE: this is the SECOND of two independent secret gates. GitHub's push
+  # protection rejects known vendor token shapes at `git push`, before CI runs
+  # at all, and no .gitleaks.toml entry affects it. A fixture shaped like a
+  # real vendor key must be composed from parts at runtime (WARP-2379).
+  gitleaks:
+    name: gitleaks / secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # pass 2 scans the full PR commit range
+
+      - name: Install gitleaks v8.30.1 (pinned, checksummed)
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+
+      - name: Scan working tree
+        run: /tmp/gitleaks dir . --config .gitleaks.toml --no-banner --redact --exit-code 1
+
+      - name: Scan PR commit range (added-then-removed secrets)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -eu
+          /tmp/gitleaks git . --config .gitleaks.toml --no-banner --redact --exit-code 1 \
+            --log-opts "origin/${{ github.base_ref }}..HEAD"
+
+  # WARP-243 Dockerfile lint over every tracked Dockerfile (27 at time of
+  # writing — the git ls-files glob keeps the list live, so a new service's
+  # Dockerfile is gated automatically). Moved here from hadolint.yml under
+  # WARP-2493; docs/SECURITY.md claimed it blocked PRs and it did not.
+  # Baseline rationale lives in .hadolint.yaml.
+  #
+  # Unlike gitleaks this leg IS `detect`-gated — see the filter comment above
+  # for why that is sound rather than a coverage cut.
+  hadolint:
+    name: hadolint / Dockerfile lint
+    needs: detect
+    # Same empty-list guard as the node/python/storage/fips jobs above.
+    if: needs.detect.outputs.hadolint-suites != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install hadolint v2.14.0 (pinned, checksummed)
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  /tmp/hadolint" | sha256sum -c -
+          chmod +x /tmp/hadolint
+
+      - name: Lint all tracked Dockerfiles
+        run: |
+          set -eu
+          mapfile -t files < <(git ls-files '*Dockerfile*')
+          echo "Linting ${#files[@]} Dockerfiles"
+          /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+
   # THE required check (WARP-968/969 merge policy). Runs even when legs fail
   # (`if: always()`) so it ALWAYS reports — no more PRs hung on "Expected".
   # Fails closed: a leg job may be skipped ONLY because detect proved its
@@ -790,7 +905,7 @@ jobs:
     name: ci-summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [detect, node, python, storage, fips, semgrep]
+    needs: [detect, node, python, storage, fips, semgrep, gitleaks, hadolint]
     if: always()
     steps:
       - name: Report leg results
@@ -810,6 +925,9 @@ jobs:
           FIPS_RESULT: ${{ needs.fips.result }}
           FIPS_SUITES: ${{ needs.detect.outputs.fips-suites }}
           SEMGREP_RESULT: ${{ needs.semgrep.result }}
+          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
+          HADOLINT_RESULT: ${{ needs.hadolint.result }}
+          HADOLINT_SUITES: ${{ needs.detect.outputs.hadolint-suites }}
         run: |
           set -eu
           fail=0
@@ -840,5 +958,9 @@ jobs:
           # non-empty constant: there is no path change that makes "skipped"
           # a legitimate outcome for it.
           check_leg semgrep "$SEMGREP_RESULT" '["semgrep"]'
+          # gitleaks is unfiltered by design — same literal-suite-list
+          # treatment as semgrep. A secret can land in any file.
+          check_leg gitleaks "$GITLEAKS_RESULT" '["gitleaks"]'
+          check_leg hadolint "$HADOLINT_RESULT" "$HADOLINT_SUITES"
           [ "$fail" -eq 0 ] || exit 1
           echo "ci-summary — every triggered leg succeeded"

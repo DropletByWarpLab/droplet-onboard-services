@@ -12,6 +12,11 @@ names it — happened a third time with `fips-lint` and `semgrep` (WARP-2481).
 This file is the inventory that makes the next drift visible without an API
 call.
 
+> **WARP-2493, 2026-08-28.** `docs/SECURITY.md`'s scanner table separately
+> claimed `gitleaks`, `hadolint` and Trivy blocked PRs. None did. `gitleaks`
+> and `hadolint` are now `ci.yml` legs; Trivy is documented honestly as
+> advisory. That table now carries the one-line rule above.
+>
 > **WARP-229 history, corrected.** `test-fips.yml`'s header called the FIPS
 > static lint "PR-BLOCKING" from 2026-05-10. It never was: `fips-lint` was
 > never a required context and, living in a path-filtered workflow, could not
@@ -56,14 +61,24 @@ being named in a ruleset. Legs today:
 | `storage` | `storage / shell unit tests` | `detect` path filter |
 | `fips` | `fips / static lint` | `detect` path filter (WARP-2481) |
 | `semgrep` | `semgrep / diff-aware SAST` | **unfiltered — runs on every PR** (WARP-2481) |
+| `gitleaks` | `gitleaks / secret scan` | **unfiltered — runs on every PR** (WARP-2493) |
+| `hadolint` | `hadolint / Dockerfile lint` | `detect` path filter (WARP-2493) |
 
 **Adding a leg to `ci.yml` changes what blocks a merge.** That is the intended
 mechanism, and it is why the leg list is not a style choice: `ci-summary` is
 only as honest as the surface it aggregates, and it fails closed — a leg may
 report `skipped` only when `detect` proved its suite list `[]`.
 
-`semgrep` is passed a hard-coded non-empty suite list, so "skipped" can never
-be read as "nothing to do" for it.
+`semgrep` and `gitleaks` are passed a hard-coded non-empty suite list, so
+"skipped" can never be read as "nothing to do" for them.
+
+### The one-line rule
+
+**A check blocks a merge only if it is a `ci-summary` leg, or is itself a
+required context.** Everything else is advisory no matter how red it goes, and
+no amount of "PR-blocking" in a workflow header changes that. When you write
+that a gate blocks, name which of the two mechanisms it uses — if you cannot,
+it does not block.
 
 ### The WARP-2481 correction
 
@@ -147,7 +162,7 @@ when reading the result:
 ## Not required, and why
 
 `codeql / javascript-typescript`, `codeql / python`, `codeql / actions`,
-`CodeQL`, `gitleaks`, `hadolint`, `ci-coverage`, `docker-build ok`, and the
+`CodeQL`, `ci-coverage`, `docker-build ok`, and the
 per-service `*-tests.yml` workflows are advisory. Most are path-filtered, so
 requiring them as-is would hit the trap above. `docs/SECURITY.md` and
 `codeql.yml` claimed CodeQL was merge-blocking via a ruleset `code_scanning`
@@ -155,8 +170,24 @@ rule; no such rule exists on either ruleset (corrected under WARP-2167).
 Whether any of them *should* block is a live decision — make it deliberately,
 and update this table in the same change.
 
-`semgrep` was on this list until WARP-2481 and is no longer: it is now the
-`semgrep / diff-aware SAST` leg of `ci.yml` and blocks through `ci-summary`.
+`semgrep` was on this list until WARP-2481, and `gitleaks` + `hadolint` until
+WARP-2493. All three are now `ci.yml` legs and block through `ci-summary`.
+
+### `docker-build ok` / Trivy — a job status that still does not block {#trivy}
+
+Worth separating from CodeQL, because the reason differs. Trivy's verdict is an
+**ordinary job exit status** (`exit-code: "1"` in `docker-build.yml`; no SARIF
+upload, no `security-events` permission), and it already fans into the stable
+`docker-build ok` check. That fan-in is correct. What is missing is that
+`docker-build ok` is not a required context — and cannot be while
+`docker-build.yml` is path-filtered, which is the trap described below.
+
+Folding it into `ci-summary` would mean moving the entire 13-image build matrix
+into `ci.yml`; that is a real cost decision, not a wiring fix, and WARP-2493
+deliberately did not do it. The cheaper route is safe shape 2 below. Note
+`docs/security/fips-ci-gate-required.md` still instructs adding
+`docker-build ok` as a required context — following it today would hang every
+out-of-scope PR on "Expected" (WARP-2172).
 
 ### CodeQL is advisory and **cannot** be folded into `ci-summary` {#codeql}
 
