@@ -863,6 +863,48 @@ describe("registerCursors", () => {
     await runnerFor(h).registerCursors();
     expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
   });
+
+  // WARP-2533 — the entity loop is filtered by what the provider's descriptor
+  // says the track SERVES. Before this, every CONNECTED connection got an
+  // `invoice` and a `bill` cursor, so a healthy HubSpot connection's first
+  // tick asked it for a dataset it will never have, `DatasetNotServedError`
+  // was classified FATAL, the cursor parked FAILED, and `foldSyncState`
+  // rendered the connection as a failed sync forever.
+
+  it("registers ZERO cursors for a CONNECTED hubspot connection — it serves neither dataset", async () => {
+    const h = harness({
+      connections: [connectionRow({ provider: "hubspot", secretRef: null })],
+    });
+    await runnerFor(h).registerCursors();
+    expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
+  });
+
+  it("registers invoice ONLY for stripe — its descriptor serves no bill", async () => {
+    const h = harness({
+      connections: [connectionRow({ provider: "stripe", secretRef: null })],
+    });
+    await runnerFor(h).registerCursors();
+    const entities = h.prisma.erpSyncCursor.upsert.mock.calls.map(
+      (c: any[]) => c[0].where.connectionId_entity.entity,
+    );
+    expect(entities).toEqual(["invoice"]);
+  });
+
+  it("keeps BOTH cursors for an SQL-track provider — its served set is runtime-computed", async () => {
+    // The lan track's descriptor lists only the practice datasets, but the
+    // export-drop connector genuinely serves invoices and bills when the
+    // practice's export carries them — the served set is computed from the
+    // export, not declared. Filtering lan tracks by the descriptor would
+    // silently stop the accounting sync the track shipped with.
+    const h = harness({
+      connections: [connectionRow({ provider: "eaglesoft" })],
+    });
+    await runnerFor(h).registerCursors();
+    const entities = h.prisma.erpSyncCursor.upsert.mock.calls.map(
+      (c: any[]) => c[0].where.connectionId_entity.entity,
+    );
+    expect(entities).toEqual(["invoice", "bill"]);
+  });
 });
 
 // A guard the story's out-of-scope boundary depends on: this service moves
