@@ -143,6 +143,9 @@ The moment the **orchestrator imports your connector package**, the build graph 
 - **No mock-database integration tests** (team rule — a prior mock/prod divergence incident). DB-touching paths stay stubbed + unit-tested, or run against a **real** database.
 - **The copy-DB harness** (`services/erp-connector/harness/`, WARP-1106): a PostgreSQL mock (`Variant A`, runs in CI now) and a real-engine template (`Variant B`, needs the provider's dev-edition binaries). It runs the connector's **actual built SQL** against a synthetic schema to prove reads/writes/guards before a live driver exists. Use it as the live target for a new provider's driver.
 - **Gate:** `./scripts/test/ship-check.sh tsc-full` (typecheck all workspaces) + `lifecycle-naming`. Run before every PR.
+  - **Interpreter prerequisite: bash 3.2+.** The script targets the bash 3.2 feature set — the version macOS ships as `/bin/bash` — so it runs on the dev Mac unchanged; no `brew install bash` (WARP-2449). On an older interpreter it exits **4** with a message naming the requirement and the remedy.
+  - **Exit 4 means COULD NOT RUN, not "a check failed"** (only exit 1 means that). A run that exited 4 is not a passing gate — say so rather than reporting the gate as clean.
+  - Known limitation: `stale-repo-names` aborts under stock bash 3.2 (SIGTRAP) on trees past a few hundred files — a bash 3.2 defect, not a change in what the check asserts. `tsc-full` and `lifecycle-naming`, the two this gate requires, both run to completion on 3.2 and report their own verdicts normally.
 
 ---
 
