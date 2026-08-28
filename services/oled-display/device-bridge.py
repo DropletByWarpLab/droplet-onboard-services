@@ -364,6 +364,12 @@ _factory_reset_proc = None
 # ---------------------------------------------------------------------------
 
 def _run(cmd, timeout=15):
+    # argv list, shell=False — nothing is ever interpolated into a shell string.
+    # CodeQL py/command-line-injection (#65) traces three request-derived
+    # arguments to this call; each is allow-listed at its call site BEFORE it
+    # gets here (collect_logs: _LOGS_SERVICE_RE, run_set_public_fqdn:
+    # _valid_public_fqdn, run_set_box_name: _valid_box_name), and the host
+    # scripts they reach validate again.
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
@@ -3001,6 +3007,25 @@ def _spawn_detached(cmd):
         return None, str(e)
 
 
+# Allow-listed shape for the informational factory-reset context fields
+# (CodeQL py/command-line-injection #66). jobId is a cuid (`ResetJob.id`);
+# targetName is boxDisplayName() — the validated box-name slug, else the
+# public FQDN, else the LAN fallback host — which the owner typed to confirm.
+# ASCII word characters and `._:-`, bounded — nothing legitimate is excluded,
+# nothing else reaches the host script's argv.
+_RESET_CONTEXT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def _reset_context_field(key, value):
+    """The allow-listed value, or "". Logged by KEY only — never the value."""
+    if isinstance(value, str) and _RESET_CONTEXT_RE.fullmatch(value):
+        return value
+    if value not in ("", None):
+        logger.warning(
+            "factory reset: dropping out-of-shape %s from the job context", key)
+    return ""
+
+
 def run_factory_reset(params):
     """Dispatch an owner-confirmed factory reset to the host script, DETACHED.
 
@@ -3013,11 +3038,16 @@ def run_factory_reset(params):
     `ok` means the wipe was LAUNCHED, not that it finished: a factory reset
     cannot report completion (the stack it would report through is being wiped).
     """
-    job_id = str((params or {}).get("jobId", ""))
-    payload = json.dumps({
-        "jobId": job_id,
-        "targetName": (params or {}).get("targetName", ""),
-    })
+    # CodeQL py/command-line-injection (#66): both fields come off the request
+    # body and end up in the host script's argv (as one JSON string — never a
+    # shell; see _spawn_detached). They are informational only — the script
+    # pulls jobId out for its log line and wipes the box regardless — so an
+    # out-of-shape value is dropped to "" and logged rather than refusing the
+    # reset over a cosmetic field. What reaches argv is always allow-listed.
+    job_id = _reset_context_field("jobId", (params or {}).get("jobId", ""))
+    target_name = _reset_context_field(
+        "targetName", (params or {}).get("targetName", ""))
+    payload = json.dumps({"jobId": job_id, "targetName": target_name})
     global _factory_reset_proc
     # Serialize the spawn decision (mirrors run_set_hostapd's _HOSTAPD_LOCK). Two
     # threads racing here would each launch the wipe — two `docker compose down
@@ -3095,6 +3125,9 @@ LOGS_SCRIPT = os.environ.get(
 # journald history.
 _LOGS_MIN_HOURS = 1
 _LOGS_MAX_HOURS = 168  # 7 days
+# Service-filter allow-list: 1–64 ASCII word characters / hyphens, no leading
+# dash (see collect_logs). Compose service names all fit; nothing else passes.
+_LOGS_SERVICE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
 
 
 def collect_logs(window_hours, service):
@@ -3114,13 +3147,14 @@ def collect_logs(window_hours, service):
     # Pass the service filter only when it is a sane, shell-safe token. The
     # orchestrator already validates it, but the bridge is defense-in-depth: an
     # empty/garbage value becomes "" (the script treats that as "all services").
-    # A leading dash is rejected explicitly: `isalnum()` after stripping "-"/"_"
-    # still accepts a flag-shaped value like "--orchestrator", which would reach
-    # droplet-collect-logs.sh as an option argument rather than a service name.
+    # The gate is an explicit ASCII allow-list (CodeQL py/command-line-injection
+    # #65 — this value reaches the host script's argv): no leading dash, so a
+    # flag-shaped value like "--orchestrator" cannot reach
+    # droplet-collect-logs.sh as an option argument rather than a service name;
+    # and a fixed character class rather than `str.isalnum()`, which is
+    # Unicode-aware and let non-ASCII "letters" through.
     svc = service if (isinstance(service, str)
-                      and not service.startswith("-")
-                      and service.replace("-", "").replace("_", "").isalnum()
-                      and 0 < len(service) <= 64) else ""
+                      and _LOGS_SERVICE_RE.fullmatch(service)) else ""
     cmd = [LOGS_SCRIPT, str(hours), svc]
     try:
         # Collecting + redacting logs across services can take a moment on a busy
