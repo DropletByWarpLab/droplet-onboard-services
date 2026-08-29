@@ -21,7 +21,7 @@ import { ManageSheet } from "@/components/erp/ManageSheet";
 import { NewAppointmentDialog } from "@/components/erp/NewAppointmentDialog";
 import { WriteConfirmModal } from "@/components/erp/WriteConfirmModal";
 import { useEaglesoft, useEaglesoftSchedule, useErpAccess } from "@/lib/hooks/useEaglesoft";
-import { setEaglesoftWrites, disconnectEaglesoft } from "@/lib/api.erp";
+import { setProviderWrites, disconnectProvider } from "@/lib/api.erp";
 import { formatDayLabel, syncedAgo } from "@/lib/erp-format";
 import { writeModeOf, type AppointmentWriteRequest } from "@/lib/erp-types";
 
@@ -53,9 +53,16 @@ export default function EaglesoftPage() {
   const otherDay = useEaglesoftSchedule(showData && !isToday ? day.toISOString().slice(0, 10) : null);
   const entries = isToday ? schedule : otherDay.entries;
 
+  // WARP-2500 — both verbs are addressed to `connection.provider`, the key the
+  // row itself carries, rather than to a hardcoded "eaglesoft". This page is
+  // reached only for the Eaglesoft connection today, so the VALUE is the same;
+  // what changes is that the value now comes from the connection being acted
+  // on. When a second surface reuses these handlers, it cannot silently act on
+  // the wrong connector, and the request no longer depends on the deprecated
+  // literal alias routes.
   async function toggleWrites(next: boolean) {
     try {
-      await setEaglesoftWrites(next);
+      await setProviderWrites(connection.provider, next);
     } catch {
       /* backend not wired yet — surfaced elsewhere; refresh keeps UI honest */
     }
@@ -63,7 +70,7 @@ export default function EaglesoftPage() {
   }
   async function disconnect() {
     try {
-      await disconnectEaglesoft();
+      await disconnectProvider(connection.provider);
     } catch {
       /* no-op if backend absent */
     }

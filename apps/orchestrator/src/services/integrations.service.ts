@@ -33,6 +33,16 @@ import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import { ErpError } from "./erp-error.js";
+// WARP-2466 — the ADR-041 §5 mapping. These two are the only things that
+// decide a row's status after a probe, and neither has an input that produces
+// PROVISIONING. The zero-arg wrapper serves the success path; the catch calls
+// the classifier directly, because the wrapper's `undefined` means "resolved"
+// and a rejection VALUE of `undefined` must not be read as one.
+import {
+  integrationStatusForHealthFailure,
+  statusAfterHealthProbe,
+} from "./cloud-connection-state.js";
+import { providerDescriptor } from "@droplet/shared-types";
 import {
   connectorForProvider,
   encodeApiCredentials,
@@ -42,6 +52,11 @@ import {
   EAGLESOFT_API_PROVIDER,
   type ResolvedApiCredentials,
 } from "./erp-provider.js";
+// WARP-2482 — the sync side owns what a cursor reset MEANS; this service owns
+// WHEN one happens. Exposed as a single call so the credential lifecycle never
+// hand-writes the cursor field set (see `UNSTARTED_ERP_CURSOR`).
+import { resetCursorsForConnection } from "./erp-sync/cursor.service.js";
+import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 const logger = createLogger("integrations-service");
 
@@ -59,6 +74,10 @@ export type IntegrationStatusName =
   | "CONNECTED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
+  // WARP-2458 — the eighth member. ADR-041 §5 names it mandatory; a revoked
+  // customer credential is neither "never configured" nor "broken", and a
+  // surface reading only `status` must not render it as healthy.
+  | "NEEDS_RECONNECT"
   | "ERROR"
   | "DISABLED";
 
@@ -206,9 +225,17 @@ export interface IntegrationsServiceDeps {
 
 /** Minimal Prisma surface this service needs (structural — tests pass a stub). */
 type IntegrationsPrisma = Pick<PrismaClient, "integrationConnection" | "erpAuditLog"> &
+  // WARP-2482 — the credential lifecycle spans two models (the connection row
+  // and its cursors), so the paths that move both need a real transaction.
+  // NOT optional, and not `(fn) => fn(self)`-shaped: taking the genuine
+  // `PrismaClient["$transaction"]` is what types the callback's `tx` as the
+  // full transactional client, which is why `resetCursorsForConnection(tx, …)`
+  // below needs no cast and no optional-chaining.
+  Pick<PrismaClient, "$transaction"> &
   // WARP-2218 — optional so every existing test stub keeps working; a stub
   // without it reports "no cursor registered", which is the honest answer for
-  // a store that has none.
+  // a store that has none. This covers the READ paths only; the reset inside
+  // `disconnect()` goes through `tx`, where the model is always present.
   Partial<Pick<PrismaClient, "erpSyncCursor">>;
 
 /**
@@ -259,6 +286,36 @@ function resolveProvider(provider: string | undefined): string {
   return provider;
 }
 
+/**
+ * WARP-2500 — the same admission check for the LIFECYCLE calls, with no
+ * `undefined` branch and a 404-class code.
+ *
+ * Deliberately separate from `resolveProvider` above rather than a flag on it,
+ * for two reasons:
+ *
+ *  • **No default.** `resolveProvider` legitimately has one — `connect()` and
+ *    `test()` are reached from a wizard that has always meant Eaglesoft when
+ *    it said nothing. Disconnect and the write toggle are the opposite case:
+ *    the provider comes off the URL, so "absent" is a routing bug, not a
+ *    default. Sharing one function would have meant sharing the default, and
+ *    the default IS the defect this ticket fixes.
+ *
+ *  • **404, not 400.** An unknown provider here names a resource that does not
+ *    exist rather than a malformed body — and the acceptance criterion is that
+ *    it must be an error at all, never a silent no-op that reports some other
+ *    provider's status. `NOT_FOUND` maps to 404 in `ErpError.defaultStatusFor`.
+ *
+ * Read through `isKnownErpProvider` (live registry) rather than the
+ * import-time `KNOWN_ERP_PROVIDERS` snapshot, so an operator-authored export
+ * profile registered at runtime can be disconnected without a restart.
+ */
+function requireKnownProvider(provider: string): string {
+  if (!isKnownErpProvider(provider)) {
+    throw ErpError.notFound(`ERP provider "${provider}"`);
+  }
+  return provider;
+}
+
 function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
   // Dual-track selection lives in erp-provider.ts; the SQL branch is unchanged.
   // The REST material comes straight off the ConnectInput here (rather than the
@@ -294,11 +351,30 @@ export interface IntegrationsService {
   getEaglesoft(): Promise<IntegrationDetail>;
   connect(input: ConnectInput, ctx?: ConnectContext): Promise<IntegrationDetail>;
   test(input: ConnectInput): Promise<TestResult>;
+  /**
+   * WARP-2500 — `provider` is EXPLICIT and has no default.
+   *
+   * It used to be absent entirely, and the row was found by a `findRow()`
+   * whose parameter defaulted to `EAGLESOFT_PROVIDER`. `connect()` accepts
+   * every provider `isKnownErpProvider` admits, so from WARP-2466 onward a
+   * Stripe / HubSpot / Mailchimp / QuickBooks row could be created that this
+   * function could never reach: it read the Eaglesoft row, found none, and
+   * returned `NOT_CONFIGURED` — for a DIFFERENT provider than the caller
+   * asked about — having written nothing.
+   *
+   * A default is what made that reachable, so there is no default. The
+   * argument order puts `ctx` first to match `connect(input, ctx)`'s habit of
+   * leading with the call's subject, and every parameter has a distinct type
+   * (object / string / boolean) so a mis-ordered call is a compile error
+   * rather than a silent provider swap.
+   */
   setWriteEnabled(
-    enabled: boolean,
     ctx: { actor: string },
+    provider: string,
+    enabled: boolean,
   ): Promise<IntegrationDetail>;
-  disconnect(ctx: { actor: string }): Promise<IntegrationDetail>;
+  /** WARP-2500 — provider-scoped; see {@link IntegrationsService.setWriteEnabled}. */
+  disconnect(ctx: { actor: string }, provider: string): Promise<IntegrationDetail>;
 }
 
 /**
@@ -339,8 +415,18 @@ export function createIntegrationsService(
 ): IntegrationsService {
   const connectorFor = deps.connectorFor ?? defaultConnectorFor;
 
-  /** The single connection row for a provider, or null. Provider-scoped. */
-  async function findRow(provider: string = EAGLESOFT_PROVIDER) {
+  /**
+   * The single connection row for a provider, or null. Provider-scoped.
+   *
+   * WARP-2500 — the parameter used to default to `EAGLESOFT_PROVIDER`. Every
+   * caller that forgot to pass one therefore read the Eaglesoft row while
+   * believing it had read the caller's, which is how `disconnect()` and
+   * `setWriteEnabled()` came to be unable to touch any other provider. The
+   * default is gone so that omitting the provider is a compile error, not a
+   * silent redirect; `getEaglesoft()` passes the constant explicitly, which is
+   * honest — that route IS Eaglesoft-specific.
+   */
+  async function findRow(provider: string) {
     return prisma.integrationConnection.findFirst({
       where: { provider },
     });
@@ -372,12 +458,24 @@ export function createIntegrationsService(
       syncState: null,
       needsReconnect: false,
     },
+    /**
+     * WARP-2500 — which provider the caller ASKED about, used only when there
+     * is no row.
+     *
+     * The unconfigured branch below used to hardcode `EAGLESOFT_PROVIDER`, so
+     * `disconnect(ctx, "stripe")` against a box with no Stripe row answered
+     * `{ provider: "eaglesoft", status: "NOT_CONFIGURED" }` — a reply about a
+     * provider nobody asked about, which the dashboard then rendered as the
+     * Stripe tile's state. It stays defaulted to the Eaglesoft constant so the
+     * legacy Eaglesoft-specific detail route keeps its exact wire shape.
+     */
+    providerWhenAbsent: string = EAGLESOFT_PROVIDER,
   ): IntegrationDetail {
     if (!row) {
       // Explicit constant — NOT derived from the absence of a row. The hub /
-      // detail surfaces render "connect Eaglesoft" from this status.
+      // detail surfaces render "connect <provider>" from this status.
       return {
-        provider: EAGLESOFT_PROVIDER,
+        provider: providerWhenAbsent,
         status: "NOT_CONFIGURED",
         configured: false,
         writeEnabled: false,
@@ -477,7 +575,9 @@ export function createIntegrationsService(
     },
 
     async getEaglesoft() {
-      return detailFor(await findRow());
+      // Explicit, not defaulted (WARP-2500): this route genuinely is about
+      // Eaglesoft, and saying so beats inheriting it from a parameter default.
+      return detailFor(await findRow(EAGLESOFT_PROVIDER));
     },
 
     async connect(input, ctx) {
@@ -503,20 +603,47 @@ export function createIntegrationsService(
           : {}),
         ...(input.apiCaCert !== undefined ? { apiCaCert: input.apiCaCert } : {}),
       };
-      const base = existing
-        ? await prisma.integrationConnection.update({
-            where: { id: existing.id },
-            data: {
-              host: input.host,
-              port: input.port ?? null,
-              databaseName,
-              secretRef,
-              writeEnabled,
-              status: "PROVISIONING",
-              ...apiMaterial,
-            },
-          })
-        : await prisma.integrationConnection.create({
+      const baseData = {
+        host: input.host,
+        port: input.port ?? null,
+        databaseName,
+        secretRef,
+        writeEnabled,
+        // `as const` because this object is no longer written inline: without
+        // it the literal widens to `string` and stops satisfying Prisma's
+        // `IntegrationStatus` enum input.
+        status: "PROVISIONING" as const,
+        ...apiMaterial,
+      };
+
+      /**
+       * WARP-2482 — a reconnect FROM DISABLED starts from reset cursors.
+       *
+       * Gated on the explicit `DISABLED` enum, never on "the credential
+       * columns look empty". Both halves of that gate matter:
+       *
+       *  • Only DISABLED. Re-running `connect()` on a CONNECTED row is how an
+       *    owner changes a host or rotates a key on a LIVE connection, and
+       *    wiping the watermarks there would silently re-enumerate the entire
+       *    account for an edit that changed nothing about the position.
+       *  • Every DISABLED row, including one that still holds a credential.
+       *    `disconnect()` now resets on the way out, so this is normally a
+       *    no-op — but a row disabled by a build that predates this change
+       *    still carries its stale watermarks and its latched
+       *    `needsReconnect`, and this is the one place that repairs it. It
+       *    also covers the case the position argument rests on: the grant
+       *    being pasted here is a NEW one, and a position earned by the old
+       *    one is not a claim we can stand behind.
+       *
+       * Same transaction as the status flip, for the mirror of the reason
+       * `disconnect()` gives: a reset that commits without the flip rewinds a
+       * connection that is still disabled, and a flip that commits without the
+       * reset puts the hub back to advertising `needsReconnect` on a
+       * connection that just reconnected.
+       */
+      const persistBase = async () => {
+        if (!existing) {
+          return prisma.integrationConnection.create({
             data: {
               provider,
               status: "PROVISIONING",
@@ -529,6 +656,25 @@ export function createIntegrationsService(
               ...apiMaterial,
             },
           });
+        }
+        if (existing.status !== "DISABLED") {
+          // One write, already atomic. A transaction around it would buy
+          // nothing and would cost every existing caller a `$transaction`.
+          return prisma.integrationConnection.update({
+            where: { id: existing.id },
+            data: baseData,
+          });
+        }
+        return prisma.$transaction(async (tx) => {
+          const row = await tx.integrationConnection.update({
+            where: { id: existing.id },
+            data: baseData,
+          });
+          await resetCursorsForConnection(tx, existing.id);
+          return row;
+        }, SERIALIZABLE_TX);
+      };
+      const base = await persistBase();
 
       /**
        * WARP-2283 — the consent record.
@@ -568,18 +714,42 @@ export function createIntegrationsService(
       };
 
       const connector = connectorFor(provider, input);
+      /**
+       * WARP-2466 — cloud tracks are PROBED; LAN tracks are not.
+       *
+       * The split is the descriptor's `track`, not a vendor comparison, and it
+       * is load-bearing in both directions.
+       *
+       * A LAN track that raises `ConnectorBlockedError` has not been probed at
+       * all: the SQL driver or the discovered route map is absent, nothing was
+       * dialed, and the row genuinely is mid-provisioning. Leaving it at
+       * PROVISIONING is the honest answer and is what the branch below has
+       * always done.
+       *
+       * A CLOUD track is the case WARP-2275's implementer flagged — "the state
+       * mapping and NEEDS_RECONNECT are implemented and tested; no prober
+       * drives them" — where a freshly pasted key sat at PROVISIONING forever
+       * because nothing ever asked the vendor whether it worked. Here the probe
+       * completes, so the row MUST move: `statusAfterHealthProbe` has no input
+       * that yields PROVISIONING, which makes that a property of the code
+       * rather than a rule this call site has to remember.
+       */
+      const isCloudTrack = providerDescriptor(provider)?.track === "cloud";
       try {
         await connector.connect();
         await connector.introspect();
-        // The live path is unreachable in this slice, so this branch is not hit
-        // today — but when the driver lands it flips the row to CONNECTED.
+        // The probe itself. Rejecting rather than returning `{ ok: false }` is
+        // the connectors' blocked-boundary contract — a caller that ignores a
+        // return value cannot ignore a rejection — so a successful call here
+        // IS the evidence the credential works.
+        await connector.health();
         const connected = await prisma.integrationConnection.update({
           where: { id: base.id },
-          data: { status: "CONNECTED", lastHealthyAt: new Date() },
+          data: { status: statusAfterHealthProbe(), lastHealthyAt: new Date() },
         });
         return await auditConnect(toDetail(connected));
       } catch (err) {
-        if (err instanceof ConnectorBlockedError) {
+        if (err instanceof ConnectorBlockedError && !isCloudTrack) {
           // HONEST degradation: the connector can't reach the ERP yet (SQL:
           // driver + copy DB absent; API: vendor creds + discovered /help routes
           // absent). We do NOT fake CONNECTED — the row stays PROVISIONING so
@@ -590,7 +760,27 @@ export function createIntegrationsService(
           );
           return await auditConnect(toDetail(base));
         }
-        // A genuine, unexpected failure → explicit ERROR status.
+        if (isCloudTrack) {
+          // Classified, never guessed. A reauthorize-class rejection becomes
+          // NEEDS_RECONNECT so the owner is told to paste a new key; a throttle
+          // becomes DEGRADED so they are not; an access-policy or plan refusal
+          // becomes ERROR because a new key would not fix it. The classifier
+          // has no branch that can return CONNECTED — which is why this is
+          // `integrationStatusForHealthFailure` and NOT
+          // `statusAfterHealthProbe(err)`: the wrapper reads an `undefined`
+          // argument as its no-argument success convention, so a
+          // `Promise.reject(undefined)` out of `health()` would have recorded
+          // a failed probe as a healthy row. In a catch block the failure is a
+          // fact; only its classification is in question.
+          const status = integrationStatusForHealthFailure(err);
+          logger.info({ provider, status }, "cloud connect probe failed; status classified");
+          const probed = await prisma.integrationConnection.update({
+            where: { id: base.id },
+            data: { status },
+          });
+          return await auditConnect(toDetail(probed));
+        }
+        // A genuine, unexpected failure on a LAN track → explicit ERROR status.
         logger.error({ err }, "eaglesoft connect failed");
         const errored = await prisma.integrationConnection.update({
           where: { id: base.id },
@@ -634,9 +824,37 @@ export function createIntegrationsService(
       }
     },
 
-    async setWriteEnabled(enabled, ctx) {
-      const row = await findRow();
-      if (!row) throw ErpError.notConfigured(EAGLESOFT_PROVIDER);
+    /**
+     * The per-practice write opt-in / kill-switch, for ONE provider.
+     *
+     * ## WARP-2500 — why the provider is a parameter
+     *
+     * This used to read `findRow()` (defaulting to Eaglesoft) and stamp
+     * `EAGLESOFT_PROVIDER` into the audit scope. Both halves were wrong once
+     * `connect()` began admitting cloud providers:
+     *
+     *  • On a box with a `stripe` row and no `eaglesoft` row, enabling writes
+     *    for Stripe threw `NOT_CONFIGURED` naming Eaglesoft.
+     *  • On a box with BOTH, it flipped the Eaglesoft row's `writeEnabled`
+     *    while the caller, the route and the UI all said Stripe — and wrote an
+     *    audit row that agreed with the mistake, so the audit could not be used
+     *    to discover it.
+     *
+     * The `writeEnabled` column is one of the two inputs to the WARP-2465
+     * connector-grant axis: `effective-access.service.ts`'s
+     * `connectionLevels()` keys `read` / `read_write` off it PER PROVIDER, then
+     * `min()`s it against the role's `AccessRoleConnectorGrant`. That fold was
+     * already provider-scoped; what it never received was a per-provider input,
+     * because only the Eaglesoft row's flag could ever move. Making this
+     * function provider-scoped is what puts the other providers on that axis.
+     */
+    async setWriteEnabled(ctx, provider, enabled) {
+      // Validate BEFORE the read. An unknown provider must 404 rather than
+      // fall through to "no row found", which is a different fact and, on a
+      // box where the key is a typo of a real one, a misleading one.
+      const scoped = requireKnownProvider(provider);
+      const row = await findRow(scoped);
+      if (!row) throw ErpError.notConfigured(scoped);
 
       const updated = await prisma.integrationConnection.update({
         where: { id: row.id },
@@ -644,14 +862,17 @@ export function createIntegrationsService(
       });
 
       // Append-only audit of the opt-in flip (invariant 11 / §14). The kill-
-      // switch is a security-relevant event; who flipped it is recorded.
+      // switch is a security-relevant event; who flipped it is recorded — and
+      // WHICH connector it was flipped for, taken from the row that was
+      // actually written rather than from a constant that used to be able to
+      // disagree with it.
       await prisma.erpAuditLog.create({
         data: {
           connectionId: row.id,
           actor: ctx.actor,
           action: enabled ? "write-enable" : "write-disable",
           entity: "integration",
-          scope: { provider: EAGLESOFT_PROVIDER, writeEnabled: enabled },
+          scope: { provider: row.provider, writeEnabled: enabled },
         },
       });
 
@@ -685,48 +906,106 @@ export function createIntegrationsService(
      * would leave a row reading DISABLED while still holding a live credential
      * — precisely the lie being fixed, made durable.
      *
+     * ## WARP-2482 — the cursors go with it, in the same transaction
+     *
+     * The purge above stops at `IntegrationConnection`, and this connection's
+     * `ErpSyncCursor` rows outlived the credential that earned them. Because
+     * `foldSyncState` reads `state` and `needsReconnect` across them,
+     * `detailFor()` and `list()` kept folding a dead credential's last words
+     * into a purged connection's summary — the hub telling an owner to
+     * re-authorize a connection there is nothing left to re-authorize with,
+     * and reporting `syncState: "FAILED"` for a sync that is not running.
+     *
+     * `resetCursorsForConnection` is the sync side's own definition of what
+     * "unstarted" means, so this lifecycle never hand-writes that field set;
+     * it also documents the deliberate decision to RETAIN the WARP-2463 drift
+     * records rather than delete them.
+     *
+     * It runs inside the SAME transaction as the purge for the same reason the
+     * purge is one `update`: two transactions can half-commit. The order of
+     * the two failures is not symmetric, and both are wrong —
+     *   • purge commits, reset does not → credentials gone, cursors still
+     *     claiming `needsReconnect`. The defect, now unfixable by retrying,
+     *     because a second `disconnect()` finds a row it considers already
+     *     purged.
+     *   • reset commits, purge does not → a live, connected connection is
+     *     silently rewound to position zero and re-enumerates the account.
+     * The transaction is SERIALIZABLE because this is a read-then-write: the
+     * decision to purge is taken from the row read at the top, and a connect
+     * committing in between would otherwise have its fresh credential purged
+     * by a disconnect that never saw it.
+     *
      * What this does NOT do: revoke at the vendor. We cannot rotate what we did
      * not mint (ADR-042 §6); the customer revokes in their own console and the
      * setup guides say so. And it does not touch `secretRef` — ADR-041 §4
      * forbids becoming the unimplemented secret store's first writer
      * (WARP-2028), and the column is a non-null pending pointer regardless.
      */
-    async disconnect(ctx) {
-      const row = await findRow();
-      if (!row) return toDetail(null); // idempotent — nothing to disconnect
-      const updated = await prisma.integrationConnection.update({
-        where: { id: row.id },
-        data: {
-          status: "DISABLED",
-          writeEnabled: false,
-          // --- the purge, in the SAME write as the status flip -------------
-          apiCredentialsEnc: null,
-          providerTokensEnc: null,
-          providerConfig: Prisma.DbNull,
-          apiRouteMap: Prisma.DbNull,
-          apiCaCert: null,
-          schemaHash: null,
-          schemaVersion: null,
-          lastHealthyAt: null,
-        },
-      });
-      await prisma.erpAuditLog.create({
-        data: {
-          connectionId: row.id,
-          actor: ctx.actor,
-          action: "disconnect",
-          entity: "integration",
-          // `purged` is a literal, not a computed flag: the very `update` above
-          // is what nulls the columns, so re-deriving it here would only be
-          // this function checking its own arithmetic. The marker exists so an
-          // auditor can tell a disconnect that purged from one written by a
-          // build that did not. It is a BOOLEAN and nothing else — the values
-          // never appear, because an append-only, exportable audit row is the
-          // worst possible second home for a credential (rule 19).
-          scope: { provider: EAGLESOFT_PROVIDER, purged: true },
-        },
-      });
-      return toDetail(updated);
+    async disconnect(ctx, provider) {
+      // WARP-2500 — validated BEFORE the transaction opens. An unknown
+      // provider is a 404 and must not cost a SERIALIZABLE transaction, and
+      // must never reach the `if (!row) return null` idempotence branch below:
+      // that branch is how an unreachable provider used to look exactly like
+      // an already-disconnected one.
+      const scoped = requireKnownProvider(provider);
+      const purge = await prisma.$transaction(async (tx) => {
+        // Read inside the transaction, not before it. Outside, the row this
+        // decision rests on is not covered by the isolation that protects the
+        // write, and SERIALIZABLE has nothing to conflict on.
+        const row = await tx.integrationConnection.findFirst({
+          where: { provider: scoped },
+        });
+        if (!row) return null; // idempotent — nothing to disconnect
+        const updated = await tx.integrationConnection.update({
+          where: { id: row.id },
+          data: {
+            status: "DISABLED",
+            writeEnabled: false,
+            // --- the purge, in the SAME write as the status flip -------------
+            apiCredentialsEnc: null,
+            providerTokensEnc: null,
+            providerConfig: Prisma.DbNull,
+            apiRouteMap: Prisma.DbNull,
+            apiCaCert: null,
+            schemaHash: null,
+            schemaVersion: null,
+            lastHealthyAt: null,
+          },
+        });
+        const cursorsReset = await resetCursorsForConnection(tx, row.id);
+        await tx.erpAuditLog.create({
+          data: {
+            connectionId: row.id,
+            actor: ctx.actor,
+            action: "disconnect",
+            entity: "integration",
+            // `purged` is a literal, not a computed flag: the very `update`
+            // above is what nulls the columns, so re-deriving it here would
+            // only be this function checking its own arithmetic. The marker
+            // exists so an auditor can tell a disconnect that purged from one
+            // written by a build that did not. It is a BOOLEAN and nothing
+            // else — the values never appear, because an append-only,
+            // exportable audit row is the worst possible second home for a
+            // credential (rule 19).
+            //
+            // `cursorsReset` is a COUNT for the same reason: it says how much
+            // sync position was repudiated, and an entity name is the closest
+            // thing to customer content this row could otherwise acquire.
+            // WARP-2500 — read off the ROW that was purged, not off a
+            // constant. An audit whose provider is hardcoded cannot be used to
+            // find out that the wrong provider was purged, which is precisely
+            // the question this row exists to answer.
+            scope: { provider: row.provider, purged: true, cursorsReset },
+          },
+        });
+        return updated;
+      }, SERIALIZABLE_TX);
+      // Idempotent — no row meant no write, no reset and no audit. The reply
+      // still names the provider the caller ASKED about (WARP-2500): saying
+      // "eaglesoft is NOT_CONFIGURED" to someone who asked about Stripe is a
+      // wrong answer wearing a correct one's clothes.
+      if (!purge) return toDetail(null, undefined, scoped);
+      return toDetail(purge);
     },
   };
 }

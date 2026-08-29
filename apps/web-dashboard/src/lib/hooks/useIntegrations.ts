@@ -49,11 +49,21 @@ export interface ConnectedEntry extends HubEntry {
   state: { kind: "reported"; connection: IntegrationConnection };
 }
 
-/** Statuses that count as "connected" for the hub's Connected strip. */
+/**
+ * Statuses that count as "connected" for the hub's Connected strip.
+ *
+ * `NEEDS_RECONNECT` belongs here (WARP-2458) even though nothing is working
+ * through it right now: the owner DID set this integration up, and the strip is
+ * where they will look for it. Filtering it out would move a broken connection
+ * back to the catalog and read as "you never connected this" — which is the
+ * NOT_CONFIGURED confusion ADR-042 §6 requires stay impossible. It appears here
+ * carrying its own "Paste a new key" pill, which is the whole point.
+ */
 const LIVE_STATUSES: IntegrationStatus[] = [
   "CONNECTED",
   "DEGRADED",
   "DRIFT_LOCKED",
+  "NEEDS_RECONNECT",
 ];
 
 /**

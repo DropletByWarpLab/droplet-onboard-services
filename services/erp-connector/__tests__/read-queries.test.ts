@@ -279,6 +279,42 @@ const TABLES: IntrospectedTable[] = [
       { name: "unsubscribe_count", type: "integer" },
     ],
   },
+  // WARP-2466 — the three shapes the HubSpot/Mailchimp reconciliation added.
+  {
+    name: "engagement",
+    owner: "dba",
+    columns: [
+      { name: "engagement_id", type: "varchar" },
+      { name: "occurred_at", type: "timestamp" },
+      { name: "type", type: "varchar" },
+      { name: "contact_id", type: "varchar" },
+      { name: "deal_id", type: "varchar" },
+    ],
+  },
+  {
+    name: "audience_member",
+    owner: "dba",
+    columns: [
+      { name: "audience_member_id", type: "varchar" },
+      { name: "audience_id", type: "varchar" },
+      { name: "email", type: "varchar" },
+      { name: "subscription_status", type: "varchar" },
+      { name: "opted_in_at", type: "timestamp" },
+      { name: "last_changed_at", type: "timestamp" },
+    ],
+  },
+  {
+    name: "ecommerce_order",
+    owner: "dba",
+    columns: [
+      { name: "ecommerce_order_id", type: "varchar" },
+      { name: "store_id", type: "varchar" },
+      { name: "customer_id", type: "varchar" },
+      { name: "total_amount", type: "numeric" },
+      { name: "currency", type: "varchar" },
+      { name: "processed_at", type: "timestamp" },
+    ],
+  },
 ];
 
 const map = buildSchemaMap(TABLES);
@@ -312,6 +348,9 @@ describe("read-query registry", () => {
         "find_customer",
         "get_campaign_performance",
         "get_audiences",
+        "get_engagements",
+        "get_audience_members",
+        "get_ecommerce_orders",
       ].sort(),
     );
   });

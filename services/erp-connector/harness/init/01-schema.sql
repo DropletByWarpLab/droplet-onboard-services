@@ -320,6 +320,39 @@ CREATE TABLE dba.audience (
   unsubscribe_count  integer
 );
 
+-- WARP-2466 — a CRM timeline activity. No status and nothing to resolve: it is
+-- a thing that HAPPENED, which is why it is not a ticket.
+CREATE TABLE dba.engagement (
+  engagement_id varchar(64) PRIMARY KEY,
+  occurred_at   timestamp,
+  type          varchar(30),
+  contact_id    varchar(64),
+  deal_id       varchar(64)
+);
+
+-- WARP-2466 — one person's MEMBERSHIP of one audience. `subscription_status`
+-- is the column the row exists for: mailing somebody who unsubscribed is the
+-- one unrecoverable mistake this dataset can cause.
+CREATE TABLE dba.audience_member (
+  audience_member_id  varchar(64) PRIMARY KEY,
+  audience_id         varchar(64),
+  email               varchar(200),
+  subscription_status varchar(30),
+  opted_in_at         timestamp,
+  last_changed_at     timestamp
+);
+
+-- WARP-2466 — a purchase as a MARKETING platform recorded it. No tax, no
+-- refund and no fulfillment state, which is exactly why it is not `order`.
+CREATE TABLE dba.ecommerce_order (
+  ecommerce_order_id varchar(64) PRIMARY KEY,
+  store_id           varchar(64),
+  customer_id        varchar(64),
+  total_amount       numeric(14,2),
+  currency           varchar(3),
+  processed_at       timestamp
+);
+
 -- Watermark trigger: bump last_modified on every UPDATE (mimics the SQL
 -- Anywhere DEFAULT TIMESTAMP column the connector discovers + guards on).
 CREATE OR REPLACE FUNCTION dba.touch_last_modified() RETURNS trigger AS $$

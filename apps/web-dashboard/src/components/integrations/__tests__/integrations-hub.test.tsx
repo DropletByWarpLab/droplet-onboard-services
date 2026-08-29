@@ -237,6 +237,41 @@ describe("hub dispatch", () => {
   });
 
   /**
+   * WARP-2466 — the same dispatch contract, on the three SHIPPED vendors.
+   *
+   * The test above proves dispatch works for a vendor registered by the test
+   * itself. That was the only way to prove it while Eaglesoft was the sole
+   * `available` descriptor — and wave 1 recorded exactly this trap: a
+   * regression test that is vacuously green because the shipped data cannot
+   * make the defect observable.
+   *
+   * Stripe, HubSpot and Mailchimp are `available` in the SHIPPED registry, so
+   * this version needs no fixture at all. Mutation: reinstate
+   * `if (e.meta.id === "eaglesoft")` on `connectConnector` and all three go
+   * red against production data.
+   */
+  it("dispatches Connect for the three shipped SaaS vendors", async () => {
+    for (const name of ["Stripe", "HubSpot", "Mailchimp"]) {
+      vi.mocked(fetchIntegrations).mockResolvedValue([]);
+      push.mockReset();
+      const { container, unmount } = renderHub();
+      await waitFor(() => expect(renderedNames(container)).toContain(name));
+
+      const card = tile(container, name);
+      const button = within(card).getByRole("button");
+      expect((button as HTMLButtonElement).disabled, `${name}'s action is disabled`).toBe(false);
+
+      fireEvent.click(button);
+      const acted =
+        push.mock.calls.length > 0 ||
+        within(container).queryByTestId("connect-wizard") !== null ||
+        within(container).queryByTestId("hub-blocked-reason") !== null;
+      expect(acted, `clicking ${name}'s "${button.textContent}" did nothing`).toBe(true);
+      unmount();
+    }
+  });
+
+  /**
    * The mutation this whole story exists to kill, made observable.
    *
    * Mutation: `const connectConnector = (e) => { if (e.meta.id === <one
@@ -488,6 +523,14 @@ describe("entries are the union of the catalog and the response", () => {
       "Dentrix",
       "QuickBooks",
       "Open Dental",
+      // WARP-2466 — the three WARP-2214 SaaS vendors. They appear here with no
+      // hub code change at all: the grid is DERIVED from the descriptor
+      // catalog (#1809 + #1808), so registering a descriptor is what puts a
+      // tile on the page. Mutation: delete a `catalog` block from one of the
+      // three descriptors → red.
+      "Stripe",
+      "HubSpot",
+      "Mailchimp",
     ]);
   });
 
@@ -512,6 +555,14 @@ describe("entries are the union of the catalog and the response", () => {
       "Dentrix",
       "QuickBooks",
       "Open Dental",
+      // WARP-2466 — the three WARP-2214 SaaS vendors. They appear here with no
+      // hub code change at all: the grid is DERIVED from the descriptor
+      // catalog (#1809 + #1808), so registering a descriptor is what puts a
+      // tile on the page. Mutation: delete a `catalog` block from one of the
+      // three descriptors → red.
+      "Stripe",
+      "HubSpot",
+      "Mailchimp",
       "Generic Export",
       "M365",
     ]);
@@ -536,10 +587,21 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Four catalog tiles absorb four of the rows; the two the catalog knows
-    // nothing about each get their own.
-    expect(tiles(container)).toHaveLength(6);
-    for (const name of ["Eaglesoft", "Dentrix", "QuickBooks", "Open Dental", "M365", "Something Nobody Wrote A Tile For"]) {
+    // Seven catalog tiles (four original + the three WARP-2214 vendors) absorb
+    // four of the rows; the two the catalog knows nothing about each get their
+    // own.
+    expect(tiles(container)).toHaveLength(9);
+    for (const name of [
+      "Eaglesoft",
+      "Dentrix",
+      "QuickBooks",
+      "Open Dental",
+      "Stripe",
+      "HubSpot",
+      "Mailchimp",
+      "M365",
+      "Something Nobody Wrote A Tile For",
+    ]) {
       expect(renderedNames(container), `${name} vanished`).toContain(name);
     }
   });
@@ -623,11 +685,16 @@ describe("loading, fetch-error and not-configured are three states", () => {
   /**
    * Fixing the status merge made five of the seven `IntegrationStatus` values
    * reachable in the hub for the first time. None may fall through to a
-   * default that reads as healthy.
+   * default that reads as healthy. WARP-2458 adds the eighth,
+   * `NEEDS_RECONNECT`, which is the one this rule was written for: it is where
+   * a revoked credential lands, and before it existed such a connection
+   * rendered as "Connected".
    *
    * Mutation: fold DRIFT_LOCKED back into DEGRADED's "Needs attention" → red.
+   * Mutation: delete the NEEDS_RECONNECT case so it falls through to
+   * `statusView`'s `default` → the tile reads "Unknown state" → red.
    */
-  it("gives all seven IntegrationStatus values their own rendering", async () => {
+  it("gives all eight IntegrationStatus values their own rendering", async () => {
     vi.mocked(fetchIntegrations).mockResolvedValue([
       conn("eaglesoft", "CONNECTED"),
       conn("dentrix-ascend", "DEGRADED"),
@@ -636,6 +703,7 @@ describe("loading, fetch-error and not-configured are three states", () => {
       conn("m365", "PROVISIONING"),
       conn("aaa-export", "DISABLED"),
       conn("zzz-export", "NOT_CONFIGURED"),
+      conn("mmm-export", "NEEDS_RECONNECT"),
     ]);
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
@@ -648,11 +716,120 @@ describe("loading, fetch-error and not-configured are three states", () => {
       ["M365", "Setting up"],
       ["Aaa Export", "Turned off"],
       ["Zzz Export", "Not connected"],
+      ["Mmm Export", "Paste a new key"],
     ];
     for (const [name, label] of labels) {
       expect(within(tile(container, name)).getByText(label), `${name} → ${label}`).toBeTruthy();
     }
-    expect(new Set(labels.map(([, l]) => l)).size).toBe(7);
+    expect(new Set(labels.map(([, l]) => l)).size).toBe(8);
+  });
+
+  /**
+   * The triple ADR-042 §6 requires to stay pairwise distinguishable. All three
+   * look identical to a "does a credential decrypt?" check and mean opposite
+   * things to the person reading the dashboard: one was never set up, one was
+   * turned off on purpose, one is broken and waiting for a human to act.
+   *
+   * Mutation: give NEEDS_RECONNECT either of the other two labels → red.
+   */
+  it("keeps DISABLED, NOT_CONFIGURED and NEEDS_RECONNECT pairwise distinct", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("aaa-export", "DISABLED"),
+      conn("zzz-export", "NOT_CONFIGURED"),
+      conn("mmm-export", "NEEDS_RECONNECT"),
+    ]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Mmm Export"));
+
+    const seen = ["Aaa Export", "Zzz Export", "Mmm Export"].map(
+      (n) => tile(container, n).textContent ?? "",
+    );
+    expect(seen.some((t) => t.includes("Turned off"))).toBe(true);
+    expect(seen.some((t) => t.includes("Not connected"))).toBe(true);
+    expect(seen.some((t) => t.includes("Paste a new key"))).toBe(true);
+    expect(new Set(seen).size).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Disconnected credentials — WARP-2483
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-041 §2 promises that disconnecting removes the key. WARP-2453 made that
+ * true and put the answer on the wire as `credentialsPurged`; nothing rendered
+ * it, so the promise was kept in Postgres and invisible on the surface it was
+ * made on.
+ *
+ * The two booleans are not decoration. `true` closes the loop — the owner is
+ * told the thing they asked for happened. `false` is the honest admission that
+ * a row disabled by a build predating the purge still holds its credential,
+ * and it is the one that still owes them an action.
+ */
+describe("a disconnected tile says whether the credential was actually removed", () => {
+  /** Render one DISABLED Acme tile and hand back its text. */
+  async function disconnectedTileText(
+    over: Partial<IntegrationConnection>,
+  ): Promise<string> {
+    extraDescriptors.length = 0;
+    extraDescriptors.push(ACME);
+    push.mockReset();
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("acme-pms", "DISABLED", over),
+    ]);
+    const { container, unmount } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+    const text = tile(container, "Acme PMS").textContent ?? "";
+    unmount();
+    return text;
+  }
+
+  /**
+   * Mutation: drop `credentialsPurged` from `statusView`'s DISABLED branch →
+   * red on the sentence.
+   */
+  it("renders the purged state in the canonical words", async () => {
+    const text = await disconnectedTileText({ credentialsPurged: true });
+    expect(text).toContain("Disconnected · credential removed");
+    expect(text).not.toContain("still stored");
+  });
+
+  it("renders the not-purged state, and says what to do about it", async () => {
+    const text = await disconnectedTileText({ credentialsPurged: false });
+    expect(text).toContain(
+      "Disconnected · credential still stored — reconnect or remove",
+    );
+  });
+
+  /**
+   * THE mutation the ticket names, as a test: ignore the flag and both renders
+   * become the same DOM.
+   *
+   * Asserted on the whole tile rather than on one string, so it stays red for
+   * *any* way of ignoring the flag — dropping the argument, collapsing the two
+   * branches, or rendering one sentence for both.
+   */
+  it("the two booleans do not produce the same tile", async () => {
+    const purged = await disconnectedTileText({ credentialsPurged: true });
+    const retained = await disconnectedTileText({ credentialsPurged: false });
+    expect(purged).not.toEqual(retained);
+  });
+
+  /**
+   * The third case, and the reason the flag is optional in the dashboard's
+   * mirror of the payload: a response that carries no purge fact must be
+   * rendered as neither answer.
+   *
+   * Mutation: default the missing flag to `false` (or to `true`) → red,
+   * because the tile then makes a claim about a credential nobody asked the
+   * box about. Note this is the one branch where being wrong is unsafe in the
+   * *reassuring* direction.
+   */
+  it("claims nothing when the box reported no purge fact at all", async () => {
+    const text = await disconnectedTileText({});
+    expect(text).toContain("Turned off");
+    expect(text).not.toContain("credential removed");
+    expect(text).not.toContain("credential still stored");
   });
 });
 

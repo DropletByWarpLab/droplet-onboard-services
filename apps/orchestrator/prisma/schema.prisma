@@ -4326,14 +4326,39 @@ model DeviceUpdate {
 /// Connection status for an ERP integration. Explicit lifecycle (brief §12):
 /// NOT_CONFIGURED → PROVISIONING → CONNECTED, with DEGRADED (transient sync
 /// failure, §15), DRIFT_LOCKED (schema fingerprint mismatch froze writes,
-/// invariant 9), ERROR (unrecoverable), and DISABLED (operator turned it off).
+/// invariant 9), NEEDS_RECONNECT (the customer's credential died and only a
+/// person pasting a new one fixes it), ERROR (unrecoverable), and DISABLED
+/// (operator turned it off).
+///
+/// NEEDS_RECONNECT is the member ADR-041 §5 names as mandatory and ADR-042 §6
+/// makes load-bearing for customer-supplied credentials. It MUST stay
+/// distinguishable from NOT_CONFIGURED and from DISABLED for the same reason
+/// `M365ConnectionState.NEEDS_RECONNECT` must stay distinguishable from
+/// DISCONNECTED: all three look identical to a "does a credential decrypt?"
+/// check and mean opposite things to the person reading the dashboard.
 enum IntegrationStatus {
+  /// No connection has ever been configured for this provider. The default.
   NOT_CONFIGURED
+  /// A credential is present and the connection is being established. A row
+  /// may NOT rest here after a completed probe — see `connect()`.
   PROVISIONING
+  /// Usable. The last probe against the vendor succeeded.
   CONNECTED
+  /// Transient sync failure (brief §15). A health signal, not a request for
+  /// human action — nobody needs to go and paste anything.
   DEGRADED
+  /// The schema fingerprint changed and writes are frozen (invariant 9).
   DRIFT_LOCKED
+  /// The stored credential no longer works: the customer revoked it in their
+  /// own vendor console, rotated it, or removed the admin who created it.
+  /// This is NOT an error — ADR-041 calls it routine — and reconnecting DOES
+  /// fix it, which is exactly what separates it from ERROR. Sync pauses;
+  /// already-synced data is untouched. The owner is asked to paste a new key.
+  NEEDS_RECONNECT
+  /// Something reconnecting will not fix — the configuration is wrong, the
+  /// vendor rejects the integration itself, the track is unbuildable.
   ERROR
+  /// The operator turned this connection off deliberately.
   DISABLED
 }
 

@@ -129,21 +129,46 @@ export function connectLanProvider(
   );
 }
 
-/** The write kill-switch / opt-in. */
-export function setEaglesoftWrites(
+/**
+ * The write kill-switch / opt-in, for ONE provider.
+ *
+ * WARP-2500 — `provider` is a required parameter and the URL is
+ * provider-scoped. This used to be `setEaglesoftWrites(enabled)` posting to a
+ * hardcoded `/api/integrations/eaglesoft/…`, which is the client half of the
+ * same defect: the orchestrator could only flip the Eaglesoft row, and the
+ * dashboard could only ask it to.
+ *
+ * `provider` is the row's own `connection.provider` — the orchestrator's
+ * free-form TEXT key, deliberately typed `string` and not `ConnectorId` (see
+ * the note on `IntegrationConnection.provider` in `erp-types.ts`), because a
+ * closed union here would make a wrong key a compile-time lie rather than a
+ * runtime 404.
+ */
+export function setProviderWrites(
+  provider: string,
   enabled: boolean,
 ): Promise<IntegrationConnection> {
   return apiFetch<IntegrationConnection>(
-    `/api/integrations/eaglesoft/${enabled ? "write-enable" : "write-disable"}`,
+    `/api/integrations/${encodeURIComponent(provider)}/${
+      enabled ? "write-enable" : "write-disable"
+    }`,
     { method: "POST" },
   );
 }
 
-/** Disconnect the integration — stops Droplet reading; Eaglesoft data untouched. */
-export function disconnectEaglesoft(): Promise<IntegrationConnection> {
-  return apiFetch<IntegrationConnection>("/api/integrations/eaglesoft/disconnect", {
-    method: "POST",
-  });
+/**
+ * Disconnect ONE provider — stops Droplet reading and purges the stored
+ * credential; the vendor's own data is untouched.
+ *
+ * WARP-2500 — provider-scoped; see {@link setProviderWrites}.
+ */
+export function disconnectProvider(
+  provider: string,
+): Promise<IntegrationConnection> {
+  return apiFetch<IntegrationConnection>(
+    `/api/integrations/${encodeURIComponent(provider)}/disconnect`,
+    { method: "POST" },
+  );
 }
 
 /** Stage a write (outbox) — never writes to Eaglesoft directly. */

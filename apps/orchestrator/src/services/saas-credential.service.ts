@@ -46,9 +46,13 @@
  *     a typo'd account id without retyping a key they may not still have.
  */
 import {
+  credentialFieldsFor,
+  credentialSecretFieldsFor,
   parseProviderConfigWith,
+  providerConfigVariantId,
   providerDescriptor,
   validateCredentialFieldValue,
+  CREDENTIAL_VARIANT_FIELD,
   type CredentialFieldDef,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
@@ -71,6 +75,9 @@ export type IntegrationStatusName =
   | "CONNECTED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
+  // WARP-2458 — the persisted enum finally carries what `SaasConnectionState`
+  // below could only derive, so the two unions in this file now agree.
+  | "NEEDS_RECONNECT"
   | "ERROR"
   | "DISABLED";
 
@@ -98,6 +105,11 @@ export type SaasConnectionState =
   | "PROVISIONING"
   | "CONNECTED"
   | "NEEDS_RECONNECT"
+  // WARP-2458 — present since NEEDS_RECONNECT stopped being inferred from it.
+  // Terminal in the sense the enum's docstring means: reconnecting will not
+  // fix it, so the view must be able to say so rather than folding it into an
+  // instruction to paste a new key.
+  | "ERROR"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   | "DISABLED";
@@ -272,9 +284,15 @@ export function openSaasCredentials(
  *  2. No credential ⇒ NOT_CONFIGURED, whatever the status column says. This is
  *     the honesty rule: a row left at CONNECTED after its credential was
  *     cleared must not keep claiming to work.
- *  3. ERROR **with** a credential present ⇒ NEEDS_RECONNECT — the vendor
- *     rejected what we hold, which is actionable ("paste a new key") in a way
- *     that a bare ERROR is not.
+ *  3. NEEDS_RECONNECT is now a PERSISTED status (WARP-2458) and passes
+ *     straight through. Before that member existed this function had to infer
+ *     it from `ERROR` + a credential being present, because the enum could not
+ *     express it. That inference is now WRONG and has been removed: with a
+ *     real member available, `ERROR` means what its docstring says — something
+ *     reconnecting will not fix, like a Stripe key whose IP access policy
+ *     refuses this box, or a Mailchimp plan that excludes the resource.
+ *     Collapsing those into "paste a new key" sends the owner to mint keys
+ *     until one of them works, which is the opposite of actionable.
  */
 export function saasConnectionState(
   status: string,
@@ -285,8 +303,10 @@ export function saasConnectionState(
   switch (status) {
     case "CONNECTED":
       return "CONNECTED";
-    case "ERROR":
+    case "NEEDS_RECONNECT":
       return "NEEDS_RECONNECT";
+    case "ERROR":
+      return "ERROR";
     case "DEGRADED":
       return "DEGRADED";
     case "DRIFT_LOCKED":
@@ -299,10 +319,6 @@ export function saasConnectionState(
 }
 
 // --- The read view --------------------------------------------------------
-
-function secretFieldsOf(d: ProviderDescriptor): readonly CredentialFieldDef[] {
-  return d.credentialFields.filter((f) => f.secret);
-}
 
 /**
  * Project a row into the API-safe view — FIELD BY FIELD.
@@ -336,7 +352,31 @@ export function buildCredentialView(
 
   const config = parseProviderConfigWith(descriptor, row?.providerConfig) ?? undefined;
 
-  const fields: SaasCredentialFieldView[] = descriptor.credentialFields.map((f) => ({
+  /**
+   * WARP-2491 — which authentication path this row is on, read from the key
+   * the config EXPLICITLY records. Never inferred from which fields happen to
+   * be present: two variants may share a field name, and "whichever path's
+   * fields I can see" is the guessed state the explicit-enum rule forbids.
+   *
+   * `undefined` for a provider declaring no variants, which is every shipped
+   * one — `credentialFieldsFor` then returns `credentialFields` unchanged and
+   * this whole block is a no-op.
+   */
+  const variantId = providerConfigVariantId(descriptor, row?.providerConfig);
+  /**
+   * The fields this connection's form is actually made of. A variants-declaring
+   * provider's view must carry the CHOSEN path's fields — rendering
+   * `credentialFields` alone is what made the wizard collect values the service
+   * then dropped.
+   *
+   * A row whose stored variant id no longer exists falls back to the first
+   * variant here (`credentialVariantFor`'s documented behaviour): a form that
+   * renders nothing looks like a provider needing no credentials, which is
+   * worse than reopening on a path the owner can correct.
+   */
+  const viewFields = credentialFieldsFor(descriptor, variantId);
+
+  const fields: SaasCredentialFieldView[] = viewFields.map((f) => ({
     name: f.name,
     label: f.label,
     type: f.type,
@@ -349,13 +389,17 @@ export function buildCredentialView(
   }));
 
   const values: Record<string, string | number> = {};
-  for (const f of descriptor.credentialFields) {
+  for (const f of viewFields) {
     if (f.secret) continue; // a secret's value never leaves the box
     const v = config?.[f.name];
     if (typeof v === "string" || typeof v === "number") values[f.name] = v;
   }
 
-  const declaredSecrets = secretFieldsOf(descriptor);
+  // Variant-aware: "is this connection usable" is a question about the path it
+  // is on. A PKCE row is not missing the Custom Connection secret — that field
+  // is not part of its credential at all, and counting it would report every
+  // variant connection as permanently incomplete.
+  const declaredSecrets = credentialSecretFieldsFor(descriptor, variantId);
   const hasCredentials =
     declaredSecrets.length > 0 &&
     declaredSecrets.every((f) => typeof storedSecrets[f.name] === "string");
@@ -427,6 +471,45 @@ export function resolveCredentialUpdate(
 ): ResolvedCredentialUpdate {
   const fieldErrors: Record<string, string[]> = {};
 
+  /**
+   * WARP-2491 — resolve the authentication path BEFORE anything else, and
+   * throw rather than accumulate.
+   *
+   * Which variant this write is for decides which fields are even legal, so
+   * there is nothing useful to say about the individual fields until it is
+   * known. Accumulating a per-field error list against the wrong path would
+   * hand the owner a list of complaints about fields their flow does not have.
+   *
+   * The three-way rule still holds for the discriminator itself: a body that
+   * omits it on a row that already records one KEEPS that path. What is refused
+   * is a variant this descriptor does not declare (always), and an absent one
+   * on a connection that has never recorded a path — the case that used to
+   * parse "successfully" with the variant's fields silently dropped.
+   */
+  const declaredVariants = descriptor.credentialVariants ?? [];
+  const storedVariantId = providerConfigVariantId(descriptor, row?.providerConfig);
+  let variantId: string | undefined;
+  if (declaredVariants.length > 0) {
+    const submittedVariant = submitted[CREDENTIAL_VARIANT_FIELD];
+    if (typeof submittedVariant === "string" && submittedVariant !== "") {
+      if (!declaredVariants.some((v) => v.id === submittedVariant)) {
+        throw new SaasCredentialValidationError({
+          // The rejected id is NOT echoed. It is caller-supplied text, and a
+          // 400 that quotes what was submitted is how submitted values reach
+          // every log between here and the browser (rule 19).
+          [CREDENTIAL_VARIANT_FIELD]: ["Unknown credential variant."],
+        });
+      }
+      variantId = submittedVariant;
+    } else if (storedVariantId !== undefined) {
+      variantId = storedVariantId;
+    } else {
+      throw new SaasCredentialValidationError({
+        [CREDENTIAL_VARIANT_FIELD]: ["Choose which credential type this is."],
+      });
+    }
+  }
+
   const stored: Record<string, string> = (() => {
     if (!row?.providerTokensEnc || !isEncryptedColumn(row.providerTokensEnc)) return {};
     try {
@@ -438,8 +521,27 @@ export function resolveCredentialUpdate(
 
   // --- secrets ---
   const nextSecrets: Record<string, string> = { ...stored };
+  /**
+   * A secret belonging to a path this connection is NOT on is dropped rather
+   * than resealed. After a switch from Custom Connection to PKCE, the old
+   * path's client secret is credential material for a flow nobody can use, and
+   * carrying it forward would keep it sealed on the row indefinitely with
+   * nothing in the UI admitting it is there.
+   *
+   * Scoped to fields OTHER variants declare, and only when the live path does
+   * not declare the same name — a provider with no variants is untouched.
+   */
+  const liveSecretNames = new Set(
+    credentialSecretFieldsFor(descriptor, variantId).map((f) => f.name),
+  );
+  for (const v of declaredVariants) {
+    if (v.id === variantId) continue;
+    for (const f of v.fields) {
+      if (f.secret && !liveSecretNames.has(f.name)) delete nextSecrets[f.name];
+    }
+  }
   let touchedSecret = false;
-  for (const f of secretFieldsOf(descriptor)) {
+  for (const f of credentialSecretFieldsFor(descriptor, variantId)) {
     if (!(f.name in submitted)) continue; // omitted → keep
     touchedSecret = true;
     const raw = submitted[f.name];
@@ -468,9 +570,12 @@ export function resolveCredentialUpdate(
   const storedConfig = parseProviderConfigWith(descriptor, row?.providerConfig);
   const nextConfig: Record<string, string | number> = {};
   let touchedConfig = false;
-  const configFields = descriptor.credentialFields.filter(
+  const configFields = credentialFieldsFor(descriptor, variantId).filter(
     (f) => !f.secret && f.storage === "providerConfig",
   );
+  // The chosen path is PERSISTED, first, as an explicit key — never re-derived
+  // later from which fields the row happens to carry.
+  if (variantId !== undefined) nextConfig[CREDENTIAL_VARIANT_FIELD] = variantId;
   for (const f of configFields) {
     if (f.name in submitted) {
       touchedConfig = true;
@@ -514,7 +619,12 @@ export function resolveCredentialUpdate(
       : hasSecret
         ? sealSaasCredentials(connectionId, nextSecrets)
         : null,
-    providerConfig: touchedConfig || configFields.length > 0 ? nextConfig : undefined,
+    // A variants-declaring provider always writes a config, even with zero
+    // config-stored fields: the chosen path itself has to be recorded.
+    providerConfig:
+      touchedConfig || configFields.length > 0 || variantId !== undefined
+        ? nextConfig
+        : undefined,
     hasSecret,
     // Cleared = the caller sent "" and nothing is left. `touchedSecret` alone
     // would call a partial update a clear.

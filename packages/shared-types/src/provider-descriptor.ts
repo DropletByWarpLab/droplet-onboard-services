@@ -45,7 +45,8 @@
  * dataset added on one side and not the other goes red rather than silently
  * splitting the vocabulary in two.
  *
- * Widened six → twenty alongside WARP-2280, with that drift test as the guard.
+ * Widened six → twenty alongside WARP-2280, then twenty → twenty-three by
+ * WARP-2466's reconciliation, with that drift test as the guard throughout.
  */
 export const DATASET_NAMES = [
   // practice-management (WARP-1964)
@@ -62,22 +63,25 @@ export const DATASET_NAMES = [
   "payout",
   "balance_transaction",
   "subscription",
-  // CRM — HubSpot (WARP-2280)
+  // CRM — HubSpot (WARP-2280; `engagement` added by WARP-2466)
   "contact",
   "company",
   "deal",
   "ticket",
+  "engagement",
   // commerce — Shopify (WARP-2280)
   "order",
   "product",
   "customer",
-  // marketing — Mailchimp (WARP-2280)
+  // marketing — Mailchimp (WARP-2280; the two below added by WARP-2466)
   "campaign",
   "audience",
+  "audience_member",
+  "ecommerce_order",
 ] as const;
 
 /**
- * The closed union of twenty. A descriptor's `datasets` is typed with THIS, never
+ * The closed union of twenty-three. A descriptor's `datasets` is typed with THIS, never
  * `string[]`: the exhaustive `Record`s keyed by it (`DATASET_CATEGORY`,
  * `CANONICAL_COLUMNS`) only buy exhaustiveness while the union stays closed,
  * and a widened `string[]` throws that away silently.
@@ -248,6 +252,50 @@ export type CloudProviderCatalogMeta =
     });
 
 /**
+ * The payload/`providerConfig` key the chosen credential variant travels under.
+ *
+ * Named ONCE, here, because three independent readers have to agree about it:
+ * the connect wizard writes it into the PATCH body, the credential service
+ * validates it and persists it, and the read view reopens the form on it. It
+ * was a private const in `ConnectWizard.tsx` while only the wizard used it
+ * (WARP-2451); the moment the orchestrator started reading it, a second literal
+ * would have been the drift.
+ *
+ * It is a RESERVED field name: no descriptor may declare a credential field
+ * called this, and `erp-provider.descriptor.test.ts` gates that over every
+ * shipped descriptor — a collision would let a vendor field overwrite the
+ * record of which authentication path the row is on.
+ */
+export const CREDENTIAL_VARIANT_FIELD = "credentialVariant";
+
+/**
+ * The storages a field INSIDE a variant may declare.
+ *
+ * `column` is excluded, and that exclusion is the point: the first-class
+ * columns (`host`, `port`, `databaseName`) are LAN connection facts owned by
+ * the ERP wizard's schema, and the flat parse path routes a `column` field to
+ * none of the places a variant's value can go. A variant field declaring one
+ * would be collected by the form and then written nowhere — the exact silent
+ * drop this whole story exists to close, reintroduced one level down.
+ *
+ * Making it a type rather than a runtime check means the refusal lands at the
+ * declaration site, in `tsc`, before any descriptor ships.
+ */
+export type VariantFieldStorage = Exclude<CredentialFieldStorage, "column">;
+
+/**
+ * A field belonging to one authentication path.
+ *
+ * Identical to {@link CredentialFieldDef} except that its `storage` is narrowed
+ * to what the variant-aware parse can actually persist. Assignable to
+ * `CredentialFieldDef`, so every reader that walks a merged field list stays
+ * unchanged.
+ */
+export interface VariantCredentialFieldDef extends Omit<CredentialFieldDef, "storage"> {
+  readonly storage: VariantFieldStorage;
+}
+
+/**
  * One mutually exclusive way of authenticating a provider.
  *
  * Some vendors offer genuinely different credential shapes for the same
@@ -268,7 +316,7 @@ export interface CredentialVariant {
   readonly label: string;
   /** One line telling the owner which path is theirs. */
   readonly description?: string;
-  readonly fields: readonly CredentialFieldDef[];
+  readonly fields: readonly VariantCredentialFieldDef[];
 }
 
 /** One read scope the owner may grant on a LAN-database track. */
@@ -344,6 +392,32 @@ interface ProviderDescriptorBase {
    * full strings precisely so the scanner can read them.
    */
   readonly egressHosts: readonly string[];
+  /**
+   * Present when this track's host is ASSEMBLED AT RUNTIME and therefore
+   * cannot appear in {@link egressHosts} at all.
+   *
+   * Mailchimp is the shipped case (WARP-2379): the customer's API key carries
+   * a `-us14` datacentre suffix that SELECTS the host, so there is no literal
+   * for the CI scanner to find and no fixed name to register. Its
+   * `allowed-egress.yaml` entry is `kind: dynamic` with a `config_key`, and
+   * this field is the descriptor's half of that registration.
+   *
+   * It exists so an empty `egressHosts` stays UNAMBIGUOUS. Without it, "this
+   * track never leaves the LAN" (Eaglesoft) and "this track's host is
+   * per-connection" (Mailchimp) are the same empty array — and reading the
+   * second as the first is how a cloud track quietly acquires a LAN-only
+   * guarantee it does not have. Absence is never a silent anything.
+   *
+   * The code-side exact-host guard is the enforcement, not this declaration:
+   * `assertSafeMailchimpBaseUrl` is what refuses a host the key did not name.
+   */
+  readonly dynamicEgress?: {
+    /** Mirrors the YAML entry's `config_key`: where the host comes from. */
+    readonly configKey: string;
+    /** The `allowed-egress.yaml` entry id this pairs with, so the two cannot
+     *  drift apart without a test noticing. */
+    readonly registryId: string;
+  };
   /** Datasets this track can serve. Reconciled against what the connector
    *  reports at runtime (`Connector.servesDatasets`) rather than trusted. */
   readonly datasets: readonly DatasetName[];
@@ -480,44 +554,192 @@ export function validateCredentialFieldValue(
 }
 
 /**
+ * Why a `providerConfig` could not be parsed.
+ *
+ * A REASON rather than a bare `undefined`, because the two audiences differ:
+ * the read path treats an unusable stored row as "absent" and moves on, while
+ * the write path owes the person a 400 that says what was wrong with what they
+ * just submitted. Collapsing both into `undefined` is what let a variant
+ * provider's fields vanish silently (WARP-2491) — the caller could not tell
+ * "this provider has no config concept" from "you did not say which
+ * authentication path this is".
+ */
+export type ProviderConfigParseFailure =
+  /** Not an object, or an array. A row written by hand or by an older build. */
+  | "not-an-object"
+  /** No descriptor — the provider key names nothing this appliance knows. */
+  | "unknown-provider"
+  /** The descriptor declares no `providerConfig`-stored fields and no
+   *  variants, i.e. it has no `providerConfig` concept at all (every LAN
+   *  track). This is what keeps a well-formed QuickBooks config on an
+   *  Eaglesoft row from half-configuring anything. */
+  | "no-provider-config-fields"
+  /** The descriptor declares variants and the value named none. NEVER treated
+   *  as "use the first one": which credential path a connection is on is
+   *  persisted state, and guessing it is the house rule this violates. */
+  | "missing-variant"
+  /** The value named a variant this descriptor does not declare. */
+  | "unknown-variant"
+  /** A REQUIRED field was absent, blank, or the wrong type. */
+  | "missing-required-field";
+
+/** The outcome of a variant-aware parse. */
+export type ProviderConfigParseResult =
+  | { readonly ok: true; readonly config: ProviderConfig }
+  | {
+      readonly ok: false;
+      readonly reason: ProviderConfigParseFailure;
+      /** The offending field, for `missing-required-field`. */
+      readonly field?: string;
+      /** The variant id that was named, for `unknown-variant`. */
+      readonly variant?: string;
+    };
+
+/** Options for the variant-aware parse. */
+export interface ParseProviderConfigOptions {
+  /**
+   * The authentication path this parse is for, from the submitted body.
+   *
+   * When absent, the variant is read from the value's own
+   * {@link CREDENTIAL_VARIANT_FIELD} key — which is how re-parsing a STORED row
+   * finds the path it was saved on. Absent from both, on a descriptor that
+   * declares variants, is `missing-variant` and never a default.
+   */
+  readonly variant?: string;
+}
+
+/**
+ * The variant id a stored `providerConfig` explicitly records, if it is one the
+ * descriptor still declares.
+ *
+ * Reads the persisted key — it does not infer the path from WHICH fields are
+ * present. Two variants can share a field name, and "whichever variant's fields
+ * I can see" is precisely the guessed state the explicit-enum rule forbids.
+ *
+ * Returns undefined for a descriptor with no variants, an unparseable value, or
+ * an id that no longer exists. The last is deliberate and is NOT the same call
+ * as {@link credentialVariantFor}'s first-variant fallback: a form must still
+ * render something, while a validator must not silently relabel a row.
+ */
+export function providerConfigVariantId(
+  descriptor: ProviderDescriptor | undefined,
+  value: unknown,
+): string | undefined {
+  const variants = descriptor?.credentialVariants;
+  if (!variants || variants.length === 0) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = (value as Record<string, unknown>)[CREDENTIAL_VARIANT_FIELD];
+  if (typeof raw !== "string") return undefined;
+  return variants.some((v) => v.id === raw) ? raw : undefined;
+}
+
+/**
+ * Every SECRET field one authentication path needs — the provider's own, then
+ * the chosen variant's.
+ *
+ * The companion to {@link credentialFieldsFor} for the questions the credential
+ * service asks: "is this connection usable" and "which secrets does a write
+ * touch". Reading `credentialFields.filter(f => f.secret)` directly is correct
+ * for a provider with no variants and silently wrong for one with them.
+ */
+export function credentialSecretFieldsFor(
+  descriptor: ProviderDescriptor | undefined,
+  variantId?: string,
+): readonly CredentialFieldDef[] {
+  return credentialFieldsFor(descriptor, variantId).filter((f) => f.secret);
+}
+
+/**
  * The generic, descriptor-driven replacement for the per-provider
- * `parseProviderConfig` switch.
+ * `parseProviderConfig` switch — the full form, reporting WHY it refused.
  *
  * Structural check, not a cast — a row written by an older build, by hand, or
  * for a different provider must not be handed to a connector as though it were
  * a contract.
  *
- * Returns undefined when:
- *  • the value is absent, not an object, or an array;
- *  • the descriptor declares no `providerConfig`-stored fields, i.e. this
- *    provider has no `providerConfig` concept at all (every LAN track: its
- *    connection facts live in real columns). This is what keeps a well-formed
- *    QuickBooks config on an Eaglesoft row from half-configuring anything;
- *  • any REQUIRED field is absent, blank, or the wrong type.
+ * WARP-2491 made it variant-aware. Before, it walked `credentialFields` only,
+ * so a provider declaring `credentialVariants` (Xero: Custom Connection vs a
+ * customer-owned PKCE app) had the chosen path's fields DROPPED here while the
+ * wizard collected them — the row then looked configured with half its
+ * credential missing. The variant's fields are now parsed IN ADDITION to the
+ * shared ones, and a value that names no variant is refused rather than
+ * half-parsed.
  *
  * Emits every declared field as a KEY, in declaration order, present even when
  * its value is undefined. Both are load-bearing: a persisted config is JSON, so
  * insertion order is what `JSON.stringify` writes, and `"baseUrl" in cfg` is a
- * question a caller can ask.
+ * question a caller can ask. The variant id is emitted right after `provider`,
+ * before any field, so the path a row is on is readable without knowing which
+ * fields belong to which variant.
+ */
+export function parseProviderConfigResult(
+  descriptor: ProviderDescriptor | undefined,
+  value: unknown,
+  options: ParseProviderConfigOptions = {},
+): ProviderConfigParseResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, reason: "not-an-object" };
+  }
+  if (!descriptor) return { ok: false, reason: "unknown-provider" };
+
+  const raw = value as Record<string, unknown>;
+  const variants = descriptor.credentialVariants;
+  const hasVariants = Boolean(variants && variants.length > 0);
+
+  let chosen: CredentialVariant | undefined;
+  if (hasVariants) {
+    // The submitted discriminator wins; a stored row falls back to the id it
+    // recorded for itself. Neither is a guess — both are values somebody wrote.
+    const stored = raw[CREDENTIAL_VARIANT_FIELD];
+    const named = options.variant ?? (typeof stored === "string" ? stored : undefined);
+    if (named === undefined) return { ok: false, reason: "missing-variant" };
+    chosen = variants?.find((v) => v.id === named);
+    if (!chosen) return { ok: false, reason: "unknown-variant", variant: named };
+  }
+
+  const fields = [...descriptor.credentialFields, ...(chosen?.fields ?? [])].filter(
+    (f) => f.storage === "providerConfig",
+  );
+
+  // A variants-declaring provider ALWAYS has a `providerConfig` concept, even
+  // with zero config-stored fields: the chosen path itself has to be recorded
+  // somewhere, and that somewhere is this object.
+  if (fields.length === 0 && !hasVariants) {
+    return { ok: false, reason: "no-provider-config-fields" };
+  }
+
+  const out: Record<string, string | number | undefined> = { provider: descriptor.id };
+  if (chosen) out[CREDENTIAL_VARIANT_FIELD] = chosen.id;
+
+  for (const field of fields) {
+    const parsed = validateCredentialFieldValue(field, raw[field.name]);
+    if (field.required && parsed === undefined) {
+      return { ok: false, reason: "missing-required-field", field: field.name };
+    }
+    out[field.name] = parsed;
+  }
+
+  return { ok: true, config: out as ProviderConfig };
+}
+
+/**
+ * The read-path form: a usable config, or `undefined`.
+ *
+ * Every refusal collapses to `undefined` here, which is the RIGHT contract for
+ * a reader projecting a stored row — an unusable config and an absent one lead
+ * to the same screen. A caller that owes the person an explanation (the PATCH
+ * route) must use {@link parseProviderConfigResult} instead; this wrapper
+ * cannot tell it what to say.
+ *
+ * What it never does, since WARP-2491, is return a SUCCESS that is missing the
+ * variant's fields. A variants-declaring descriptor either parses the named
+ * path in full or fails — the half-parsed config was the defect.
  */
 export function parseProviderConfigWith(
   descriptor: ProviderDescriptor | undefined,
   value: unknown,
+  options: ParseProviderConfigOptions = {},
 ): ProviderConfig | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  if (!descriptor) return undefined;
-
-  const fields = descriptor.credentialFields.filter((f) => f.storage === "providerConfig");
-  if (fields.length === 0) return undefined;
-
-  const raw = value as Record<string, unknown>;
-  const out: Record<string, string | number | undefined> = { provider: descriptor.id };
-
-  for (const field of fields) {
-    const parsed = validateCredentialFieldValue(field, raw[field.name]);
-    if (field.required && parsed === undefined) return undefined;
-    out[field.name] = parsed;
-  }
-
-  return out as ProviderConfig;
+  const result = parseProviderConfigResult(descriptor, value, options);
+  return result.ok ? result.config : undefined;
 }

@@ -345,6 +345,195 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 3,
     },
   },
+  // ── WARP-2214 SaaS business connectors (registered by WARP-2466) ─────────
+  //
+  // All three take a credential the CUSTOMER mints in their own vendor account
+  // and pastes into the box (ADR-042), so none needs OAuth, none needs a Warp
+  // Lab vendor registration, and the `pattern` on each secret field is the
+  // boundary rejection ADR-042 §4 requires — a full-privilege key is refused
+  // before it is ever stored, not after it has been used.
+
+  {
+    id: "stripe",
+    displayName: "Stripe",
+    category: "Payments",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Stripe restricted key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `rk_` ONLY. A secret key (`sk_`) can move money; a restricted key
+        // cannot, and refusing the wrong shape here is why a merchant cannot
+        // accidentally hand this box the ability to issue refunds. The
+        // connector re-checks with the same rule at dial time — the two
+        // together are the "allowlist at point of use" pattern, not a
+        // duplicate.
+        pattern: "^rk_(live|test)_",
+        help:
+          "Create it in the Stripe Workbench with the resources you want read set to Read. " +
+          "A live key's value is shown once, so a lost key is a re-create.",
+      },
+    ],
+    egressHosts: ["api.stripe.com", "files.stripe.com"],
+    datasets: ["invoice"],
+    rateLimit: {
+      // `STRIPE_DEFAULT_MONTHLY_READ_ALLOCATION`. Not a Stripe-imposed ceiling
+      // — Stripe rate-limits per second, not per month — but the connector's
+      // own read allocation, which is what `ReadAllocationMeter` enforces.
+      callCeiling: 10_000,
+      periodMs: THIRTY_DAYS_MS,
+    },
+    // `STRIPE_MIN_POLL_INTERVAL_SECONDS` (900s) in ms. The first shipped track
+    // to carry one: this floor is enforced in the connector by
+    // `assertStripePollIntervalSeconds`, so the descriptor is stating a real
+    // number rather than the guess the field's docstring warns about.
+    pollIntervalFloorMs: 900_000,
+    catalog: {
+      id: "stripe",
+      name: "Stripe",
+      category: "Payments",
+      description: "Payments, refunds and payouts read straight from Stripe — never money movement.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
+      // customer creates this credential in a vendor console we do not
+      // control, so shipping the card without the click-path is shipping an
+      // unusable connector. Served from `docs/integrations/stripe.md`,
+      // bundled at build so the link works with no internet.
+      setupGuideHref: "/help/integrations/stripe",
+      order: 4,
+    },
+  },
+  {
+    id: "hubspot",
+    displayName: "HubSpot",
+    category: "CRM",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "accessToken",
+        label: "HubSpot private app token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `HUBSPOT_PRIVATE_APP_TOKEN_PATTERN`. HubSpot has no PKCE, so a
+        // private app token is the only customer-creatable credential.
+        pattern: "^pat-[a-z]{2}[0-9]+-",
+        help:
+          "A super admin creates it under Settings → Integrations → Private Apps. " +
+          "Create it on an account that will outlive any one individual.",
+      },
+      {
+        name: "portalId",
+        label: "HubSpot portal id",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // Required because the Search governor is keyed on it. Two connections
+        // pointed at one portal MUST share a governor — the ceiling is per
+        // ACCOUNT, not per app — so a connection that cannot name its portal
+        // cannot be rate-limited correctly and must not be built.
+        help: "Shown in your HubSpot account settings, and in the portal URL.",
+      },
+    ],
+    egressHosts: ["api.hubapi.com"],
+    datasets: ["contact", "company", "deal", "ticket", "engagement"],
+    rateLimit: {
+      // `HUBSPOT_SEARCH_MAX_REQUESTS_PER_SECOND`. Expressed as 5 per 1000ms
+      // rather than folded into a monthly number because that is what HubSpot
+      // actually enforces, and because the ceiling is ACCOUNT-keyed: it is not
+      // a budget this connection spends, it is a rate two connections share.
+      callCeiling: 5,
+      periodMs: 1_000,
+    },
+    catalog: {
+      id: "hubspot",
+      name: "HubSpot",
+      category: "CRM",
+      description: "Contacts, companies, deals and tickets from your CRM — read on request.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
+      // customer creates this credential in a vendor console we do not
+      // control, so shipping the card without the click-path is shipping an
+      // unusable connector. Served from `docs/integrations/hubspot.md`,
+      // bundled at build so the link works with no internet.
+      setupGuideHref: "/help/integrations/hubspot",
+      order: 5,
+    },
+  },
+  {
+    id: "mailchimp",
+    displayName: "Mailchimp",
+    category: "Marketing",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Mailchimp API key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `MAILCHIMP_API_KEY_PATTERN`. The `-us14` suffix is not decoration —
+        // it SELECTS THE HOST, so a key that does not carry one cannot be
+        // dialed at all and is refused here rather than producing a request to
+        // a URL whose first label is the string "undefined".
+        pattern: "^([0-9A-Za-z]{20,64})-([a-z]{2}\\d{1,2})$",
+        help:
+          "Account → Extras → API keys. The key ends in a datacentre suffix like -us14, " +
+          "which tells the box which Mailchimp server your account lives on.",
+      },
+      {
+        name: "datacenter",
+        label: "Mailchimp datacentre",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // NOT secret, and stored separately from the key on purpose (ADR-042
+        // §5: "non-secret connection facts … go in `providerConfig`, never in
+        // the encrypted blob and never re-derived per request"). Keeping it
+        // here means answering "where does this connection dial?" never
+        // requires decrypting a credential — and it means a key swapped
+        // out-of-band cannot silently move the destination.
+        pattern: "^[a-z]{2}\\d{1,2}$",
+        help: "The suffix of your API key, without the dash — e.g. us14.",
+      },
+    ],
+    // EMPTY, and not because this track stays on the LAN — it emphatically
+    // does not. The host is `<dc>.api.mailchimp.com` where `<dc>` comes out of
+    // the customer's own key, so there is no name to register and no literal
+    // for the egress scanner to find. `dynamicEgress` below is what says so.
+    egressHosts: [],
+    dynamicEgress: {
+      configKey: "IntegrationConnection.providerConfig.datacenter",
+      registryId: "mailchimp-marketing-api",
+    },
+    datasets: ["audience_member", "campaign", "ecommerce_order"],
+    // No `rateLimit`: Mailchimp meters by CONCURRENT CONNECTIONS (10), not by
+    // a call ceiling over a period, and `ConnectionSemaphore` enforces that
+    // where it applies. A monthly number invented here would be a guess
+    // wearing a policy's clothes — the same reason Dentrix Ascend has none.
+    catalog: {
+      id: "mailchimp",
+      name: "Mailchimp",
+      category: "Marketing",
+      description: "Audiences, campaign performance and attributed orders — read from Mailchimp.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
+      // customer creates this credential in a vendor console we do not
+      // control, so shipping the card without the click-path is shipping an
+      // unusable connector. Served from `docs/integrations/mailchimp.md`,
+      // bundled at build so the link works with no internet.
+      setupGuideHref: "/help/integrations/mailchimp",
+      order: 6,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

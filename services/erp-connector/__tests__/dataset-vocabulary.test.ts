@@ -114,6 +114,14 @@ const ADDED_BY_WARP_2280: readonly DatasetName[] = [
   "audience",
 ];
 
+/** WARP-2466 — the three shapes the connector reconciliation found had no
+ *  interchangeable equivalent in WARP-2280's twenty. */
+const ADDED_BY_WARP_2466: readonly DatasetName[] = [
+  "engagement",
+  "audience_member",
+  "ecommerce_order",
+];
+
 describe("the widening is additive — the original six are untouched", () => {
   it("keeps every original name, its category and its pinned columns intact", () => {
     // Mutation: reorder CANONICAL_COLUMNS.invoice, rename one of its columns,
@@ -158,11 +166,19 @@ describe("the widening is additive — the original six are untouched", () => {
     ]);
   });
 
-  it("adds exactly fourteen names and nothing else", () => {
-    // Mutation: add a fifteenth dataset without deciding its category and
-    // columns → red here before it is red anywhere subtler.
-    expect(DATASETS).toHaveLength(20);
-    expect(DATASETS.slice(6)).toEqual(ADDED_BY_WARP_2280);
+  it("adds exactly fourteen names, then WARP-2466's three, and nothing else", () => {
+    // Mutation: add a dataset without deciding its category and columns → red
+    // here before it is red anywhere subtler.
+    //
+    // WARP-2466's reconciliation took the union to twenty-three. Its three are
+    // the HubSpot/Mailchimp shapes that turned out NOT to be interchangeable
+    // with an existing name — `engagement` sits with the CRM names it belongs
+    // to and the two marketing ones sit at the end. Per-name evidence: the
+    // table in `profiles.ts`'s docstring.
+    expect(DATASETS).toHaveLength(23);
+    const added = DATASETS.slice(6);
+    expect(added.filter((d) => !ADDED_BY_WARP_2466.includes(d))).toEqual(ADDED_BY_WARP_2280);
+    expect(added.filter((d) => ADDED_BY_WARP_2466.includes(d))).toEqual(ADDED_BY_WARP_2466);
   });
 });
 

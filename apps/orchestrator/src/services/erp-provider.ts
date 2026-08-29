@@ -31,6 +31,10 @@ import { Agent } from "undici";
 import { config } from "../config.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
 import { deriveErpCloudTokenKey, encryptColumn, decryptColumn } from "./column-crypto.service.js";
+// WARP-2466 — the customer-supplied credential store (WARP-2275). Imported
+// for `openSaasCredentials` only: this module builds connectors, and the
+// sealing/validation half stays where the route can reach it.
+import { openSaasCredentials } from "./saas-credential.service.js";
 import { readFileSync } from "node:fs";
 import {
   EaglesoftConnector,
@@ -47,6 +51,15 @@ import {
   DEFAULT_CALL_CEILING,
   QUICKBOOKS_ONLINE_PROVIDER,
   DENTRIX_ASCEND_PROVIDER,
+  // WARP-2466 — the three WARP-2214 SaaS tracks.
+  StripeConnector,
+  HubSpotConnector,
+  MailchimpConnector,
+  STRIPE_PROVIDER,
+  HUBSPOT_PROVIDER,
+  MAILCHIMP_PROVIDER,
+  HUBSPOT_TRACK_REMEDIATION,
+  MAILCHIMP_TRACK_REMEDIATION,
   exportProviders,
   parseProfileJson,
   vendorFromExportProvider,
@@ -183,6 +196,22 @@ export interface CloudTokenAccess {
   resolveQbo?: () => Promise<QboTokens>;
   persistQbo?: (tokens: QboTokens) => Promise<void>;
   resolveAscend?: () => Promise<AscendToken>;
+  /**
+   * WARP-2466 — resolve one named secret field out of the sealed
+   * customer-credential bundle.
+   *
+   * GENERIC BY FIELD NAME, never by vendor: which fields exist and which are
+   * secret is the descriptor's answer, so this seam has no idea whether it is
+   * handing back a Stripe restricted key or a HubSpot token. A `provider ===`
+   * comparison in here would mean the descriptor was under-specified, which is
+   * the bug to fix instead.
+   *
+   * REJECTS rather than returning `""` when the field is absent: an empty
+   * credential is indistinguishable from "not configured", and the connector
+   * would then reach the vendor with nothing and collect an opaque 401 in
+   * place of a diagnosable refusal.
+   */
+  resolveSaasSecret?: (field: string) => Promise<string>;
 }
 
 /** The credential triple the REST track authenticates with. */
@@ -360,7 +389,30 @@ export interface CloudConnectionRow {
   id: string;
   provider: string;
   providerConfig?: unknown;
+  /**
+   * The cloud-track credential column, and the ONE the SaaS resolver reads.
+   *
+   * ADR-042 §5 is the authority: a customer-supplied credential is sealed here
+   * under `deriveSaasCredentialKey()`, AAD-bound to the row id. WARP-2453
+   * (#1827) reconciled the configurator onto it after WARP-2275 had written
+   * `apiCredentialsEnc` — that column is the Eaglesoft REST track's static
+   * {integrationKey,userId,password} triple under the older `encryptSecret`,
+   * on a LAN transport this never touches.
+   *
+   * TWO WRITERS, disjoint by PROVIDER and each failing closed against the
+   * other. The ERP cloud track (QuickBooks Online, Dentrix Ascend) seals
+   * rotating OAuth material under `deriveErpCloudTokenKey()`; the SaaS tracks
+   * seal a pasted credential bundle under `deriveSaasCredentialKey()` with the
+   * `saas-credential:<rowId>` AAD. A row is one provider, so only one writer
+   * ever owns a given blob — and if the wrong opener is tried, GCM's tag check
+   * fails and the caller sees "no credential", never somebody else's. The
+   * branches below reflect that: QBO and Ascend return before the generic
+   * SaaS branch is reached.
+   */
   providerTokensEnc?: string | null;
+  /** The Eaglesoft REST triple. Read by the LAN path, never by the SaaS
+   *  resolver — a different transport with its own encryption vintage. */
+  apiCredentialsEnc?: string | null;
 }
 
 /**
@@ -489,7 +541,42 @@ export function cloudMaterialFromRow(
     };
   }
 
-  return { connectionId: row.id, providerConfig: undefined, cloudTokens: undefined };
+  // WARP-2466 — every other cloud track: the customer-supplied credential
+  // bundle. Descriptor-driven and vendor-free, so a fourth SaaS vendor needs
+  // no edit here at all.
+  //
+  // The provider must be a KNOWN cloud descriptor before we hand back a
+  // resolver: an unrecognised key reaching this line means a row written by a
+  // newer build, and `connectorForProvider` refuses it by name a moment later.
+  const descriptor = providerDescriptor(row.provider);
+  if (descriptor?.track === "cloud" && row.providerTokensEnc) {
+    const blob = row.providerTokensEnc;
+    return {
+      connectionId: row.id,
+      providerConfig,
+      cloudTokens: {
+        resolveSaasSecret: async (field: string) => {
+          // Opened per call and never cached: the cleartext lives for the
+          // length of one request. `openSaasCredentials` THROWS on a blob
+          // sealed for another row (the AAD tag check), which is the failure
+          // we want — a credential that silently belonged to someone else
+          // would authenticate as the wrong company.
+          const secrets = openSaasCredentials(row.id, blob);
+          const value = secrets[field];
+          if (!value) {
+            throw new ConnectorBlockedError(
+              `resolve the ${row.provider} credential`,
+              "the stored credential bundle carries no value for this field — " +
+                "re-enter it from the Integrations page",
+            );
+          }
+          return value;
+        },
+      },
+    };
+  }
+
+  return { connectionId: row.id, providerConfig, cloudTokens: undefined };
 }
 
 /**
@@ -677,6 +764,81 @@ registerConnectorFactory(DENTRIX_ASCEND_PROVIDER, ({ selector: sel, config: cfg 
     { resolveToken: sel.cloudTokens?.resolveAscend },
   ),
 );
+
+/**
+ * WARP-2466 — the three WARP-2214 SaaS tracks.
+ *
+ * Each takes an injected `fetch` (defaulted inside the connector) and a
+ * resolver over the sealed credential bundle. An absent bundle leaves the
+ * connector's OWN blocked resolver in place, so a half-configured row reports
+ * ERP_NOT_CONNECTED rather than dialing a vendor with nothing — the same
+ * honest-degradation rule every other track follows.
+ *
+ * Note what is NOT here: no key material, no vendor host, no `if (provider
+ * === …)` inside the resolver. The factories name their descriptor's field
+ * names and nothing else about the credential.
+ */
+registerConnectorFactory(STRIPE_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new StripeConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+      monthlyReadAllocation: providerConfigNumber(cfg, "monthlyReadAllocation"),
+    },
+    // `resolveApiKey` left undefined when nothing is sealed, so the connector
+    // keeps `blockedStripeKeyResolver` and says what is missing.
+    { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
+
+registerConnectorFactory(HUBSPOT_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const portalId = providerConfigString(cfg, "portalId");
+  // Refused here rather than inside the connector, for the QuickBooks reason:
+  // the Search governor is keyed on the portal id, and a connection that
+  // cannot name its portal cannot share the ACCOUNT-wide 5 req/s ceiling with
+  // its siblings. Building it anyway would produce a connector that looks
+  // correct and 429s under load.
+  if (!portalId) {
+    throw new ConnectorBlockedError(
+      "construct (no HubSpot portal id configured)",
+      HUBSPOT_TRACK_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new HubSpotConnector(
+    {
+      portalId,
+      credentialsSecretRef: sel.secretRef ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+    },
+    { resolveToken: resolve ? () => resolve("accessToken") : undefined },
+  );
+});
+
+registerConnectorFactory(MAILCHIMP_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const datacenter = providerConfigString(cfg, "datacenter");
+  // The datacentre SELECTS THE HOST. Without it there is no destination at
+  // all, and guessing one would mean assembling a URL whose first label is the
+  // string "undefined". Read from `providerConfig`, never re-derived from the
+  // key, so answering "where does this dial?" never decrypts a credential.
+  if (!datacenter) {
+    throw new ConnectorBlockedError(
+      "construct (no Mailchimp datacentre configured)",
+      MAILCHIMP_TRACK_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new MailchimpConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      datacenter,
+      connectionId: sel.connectionId ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+    },
+    { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
 
 /**
  * WARP-1964 — the export-drop track.

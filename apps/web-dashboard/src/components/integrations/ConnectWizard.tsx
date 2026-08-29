@@ -65,6 +65,7 @@ import { SafetyChip } from "./SafetyChip";
 import {
   credentialFieldsFor,
   credentialVariantFor,
+  CREDENTIAL_VARIANT_FIELD,
   descriptorForCatalogId,
   type CredentialFieldDef,
   type LanProvisioning,
@@ -86,15 +87,6 @@ type Status =
   | { kind: "idle" }
   | { kind: "busy" }
   | { kind: "error"; message: string };
-
-/**
- * The payload key the chosen credential variant is sent under.
- *
- * Named once rather than inlined, so the wizard and any future reader of the
- * saved row cannot disagree about it. A provider with a single credential shape
- * never sends it at all.
- */
-const VARIANT_FIELD = "credentialVariant";
 
 const monoStyle: CSSProperties = {
   fontFamily: "var(--font-mono, ui-monospace, monospace)",
@@ -250,7 +242,7 @@ function CredentialFlow({
       if (f.secret && (typed === undefined || typed === "")) continue;
       if (typed !== undefined) payload[f.name] = typed;
     }
-    if (variant) payload[VARIANT_FIELD] = variant.id;
+    if (variant) payload[CREDENTIAL_VARIANT_FIELD] = variant.id;
 
     try {
       await saveSaasCredential(descriptor.id, payload);

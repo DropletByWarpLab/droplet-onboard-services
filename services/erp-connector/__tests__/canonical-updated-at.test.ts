@@ -10,7 +10,7 @@
  * incremental path. That is why that story ships its sweep as mandatory rather
  * than as a safety net.
  *
- * The dangerous way to close that gap is to give all twenty datasets an
+ * The dangerous way to close that gap is to give all twenty-three datasets an
  * `updated_at` and let each connector fill it with the best thing it has. A
  * synthesised modification timestamp is worse than none, because a watermark
  * TRUSTS it: it advances, the sweep looks redundant, and edits stop being seen
@@ -70,9 +70,13 @@ const VENDOR_SOURCE: Readonly<Record<string, string>> = {
 };
 
 /**
- * The seven datasets that get NO `updated_at`, each with the reason. This is
+ * The ten datasets that get NO `updated_at`, each with the reason. This is
  * the acceptance criterion "no dataset gains a synthesised `updated_at`",
  * written as data so it can be asserted rather than reviewed.
+ *
+ * The last three arrived with WARP-2466's connector reconciliation, which
+ * landed alongside WARP-2494 rather than after it — neither branch could see
+ * the other's names, so their decisions are recorded here at the merge.
  */
 const NO_HONEST_SOURCE: Readonly<Record<string, string>> = {
   // Practice management: the export-drop track is operator-authored CSV and no
@@ -91,16 +95,32 @@ const NO_HONEST_SOURCE: Readonly<Record<string, string>> = {
   // the parent charge's or payout's event time onto the ledger row would be
   // another object's timestamp wearing this one's name.
   balance_transaction: "Stripe emits no balance_transaction.* event",
-  // Mailchimp's `last_changed` is on a LIST MEMBER, which is not one of the
-  // twenty datasets. Neither the campaign resource nor the list resource
-  // carries a modification timestamp of its own.
+  // Mailchimp's `last_changed` is on a LIST MEMBER. Neither the campaign
+  // resource nor the list resource carries a modification timestamp of its own.
   campaign: "Mailchimp exposes last_changed on members, not on campaigns",
   audience: "Mailchimp exposes last_changed on members, not on the list",
+  // ── WARP-2466's three (see the note above) ────────────────────────────────
+  // The list member IS a dataset now, and it DOES carry Mailchimp's
+  // `last_changed` — but WARP-2466 spelled that column `last_changed_at`
+  // rather than `updated_at`. So this dataset has an honest modification time
+  // under a different canonical name, which is why it is here rather than in
+  // VENDOR_SOURCE: the column named `updated_at` is genuinely absent.
+  audience_member: "its modification time is the canonical column last_changed_at",
+  // `/ecommerce/stores/{id}/orders` documents no modification field and no
+  // date filter of any kind — see MAILCHIMP_ECOMMERCE_ORDER_PARAMS, whose
+  // completeness is the finding that makes an incremental read impossible.
+  ecommerce_order: "the orders resource exposes no modification field at all",
+  // WARP-2466 added this dataset with `occurred_at` — when the activity
+  // HAPPENED — and decided no modification column. HubSpot's engagement object
+  // does carry hs_lastmodifieddate, so this is an absence by omission rather
+  // than for want of a source; changing it is a vocabulary decision, not a
+  // connector one.
+  engagement: "WARP-2466 added it with occurred_at only; no modification column decided",
 };
 
 describe("updated_at exists exactly where a vendor can populate it", () => {
-  it("covers every dataset, splitting the twenty into sourced and unsourced", () => {
-    // Mutation: add a twenty-first dataset without deciding whether it has a
+  it("covers every dataset, splitting the twenty-three into sourced and unsourced", () => {
+    // Mutation: add a twenty-fourth dataset without deciding whether it has a
     // modification source → red here, before that decision gets made by
     // default somewhere subtler.
     const decided = [...Object.keys(VENDOR_SOURCE), ...Object.keys(NO_HONEST_SOURCE)].sort();

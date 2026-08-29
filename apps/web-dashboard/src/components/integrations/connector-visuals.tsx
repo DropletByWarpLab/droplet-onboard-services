@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   Clock,
   Lock,
+  KeyRound,
   HelpCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -63,7 +64,8 @@ export interface StatusView {
 /**
  * Hub-tile / connected-row status pill.
  *
- * All seven `IntegrationStatus` values get their own treatment (WARP-2291).
+ * All eight `IntegrationStatus` values get their own treatment (WARP-2291,
+ * NEEDS_RECONNECT added by WARP-2458).
  * Fixing the status merge made five of them reachable in the hub for the first
  * time, and collapsing DRIFT_LOCKED into DEGRADED loses the one distinction
  * that tells an owner whether to fix something or whether a schema change
@@ -114,6 +116,12 @@ export function statusView(
       return { label: "Needs attention", kind: "warn", icon: AlertTriangle };
     case "DRIFT_LOCKED":
       return { label: "Locked — schema changed", kind: "danger", icon: Lock };
+    // WARP-2458 — a revoked customer credential. Deliberately NOT `danger`:
+    // ADR-041 calls this routine, and the copy names the ACTION rather than
+    // the symptom, because the one thing the owner can do about it is go and
+    // paste a new key. Rendering it as an error tells them to call support.
+    case "NEEDS_RECONNECT":
+      return { label: "Paste a new key", kind: "warn", icon: KeyRound };
     case "ERROR":
       return { label: "Can't connect", kind: "danger", icon: AlertTriangle };
     case "PROVISIONING":

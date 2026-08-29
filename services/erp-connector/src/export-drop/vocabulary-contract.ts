@@ -88,24 +88,34 @@ const _requiredIsTotal: (d: DatasetName) => readonly string[] = (d) => REQUIRED_
 // ── the union at the two capability boundaries ──────────────────────────────
 
 /**
- * WARP-2306 typed `Connector.servesDatasets` as the union so a track could not
- * declare a dataset nothing can serve. That refusal is NOT asserted here, and
- * deliberately: the shipped HubSpot and Mailchimp tracks declare vendor names
- * (`crm_contact`, `ecommerce_order`, …) the vocabulary spells flatly, and
- * reconciling the two is WARP-2466's step 4 — it re-narrows the field and owns
- * the acceptance criterion "tsc rejects a name outside the union on a
- * connector". Asserting it before then would be asserting a decision nobody
- * has made. The comment above the field in `connector.ts` carries the same
- * note, so the two cannot drift apart silently.
+ * Every name in the vocabulary is a legal capability declaration — the
+ * direction that survived #1816's temporary loosening, and the precondition
+ * the refusal below tightens onto.
  *
- * What still holds, and is worth pinning, is the direction that survives the
- * loosening: every name in the vocabulary is a legal capability declaration.
- * That is what makes the union usable at this boundary at all, and it is the
- * precondition WARP-2466 will tighten onto. Mutation: retype `servesDatasets`
- * to anything `DatasetName` is not assignable to (`readonly DatasetCategory[]`,
- * `readonly number[]`) → this assignment fails → tsc red.
+ * Mutation: retype `servesDatasets` to anything `DatasetName` is not
+ * assignable to (`readonly DatasetCategory[]`, `readonly number[]`) → this
+ * assignment fails → tsc red.
  */
 const _servesVocabulary: Connector["servesDatasets"] = DATASETS;
+
+/** WARP-2306: a track declares capability with dataset names, not strings. */
+const _servesKnown: Connector["servesDatasets"] = ["invoice", "charge"];
+
+// @ts-expect-error -- a connector may not declare a dataset outside the union.
+//
+// #1816 could not assert this: the shipped HubSpot and Mailchimp tracks
+// declared vendor spellings (`crm_contact`, Mailchimp's own `contact`) that
+// the vocabulary did not hold, so the field had to stay `readonly string[]`
+// and this fixture came out. WARP-2466's reconciliation settled every one of
+// those names by column shape, so the field is back on the union and the
+// refusal is assertable again — which is what the ticket's acceptance
+// criterion "tsc rejects a name outside the union" means.
+//
+// Mutation: revert `servesDatasets` to `readonly string[]` → this directive
+// becomes unused → tsc red. That mutation is exactly the defect WARP-2306
+// removed and #1816 had to reintroduce, so it is the one this file most needs
+// to catch.
+const _servesUnknown: Connector["servesDatasets"] = ["not_a_dataset"];
 
 /** WARP-2308: a read query declares its datasets with the same union. */
 const _dependsKnown: ReadQuery["dependsOnTables"] = ["charge", "refund"];
@@ -132,6 +142,8 @@ export const DATASET_VOCABULARY_CONTRACT: readonly unknown[] = [
   _columnsAreTotal,
   _requiredIsTotal,
   _servesVocabulary,
+  _servesKnown,
+  _servesUnknown,
   _dependsKnown,
   _dependsUnknown,
 ];

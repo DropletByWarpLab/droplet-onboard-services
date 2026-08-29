@@ -52,6 +52,7 @@ import {
   ReauthorizationRequiredError,
   DEFAULT_CALL_CEILING,
 } from "@droplet/erp-connector";
+import { providerDescriptor } from "@droplet/shared-types";
 
 import { createLogger } from "../../lib/logger.js";
 import type { ActivityRowRecorder } from "../activity.service.js";
@@ -423,10 +424,37 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
     }
   }
 
+  /**
+   * WARP-2533 — does this connection's track serve this sync entity?
+   *
+   * The entity names are canonical dataset names (`entities.ts`), so a cloud
+   * track's descriptor `datasets` answers directly. Before this filter,
+   * `registerCursors` gave EVERY connected connection an `invoice` and a
+   * `bill` cursor; a healthy HubSpot or Mailchimp connection's first tick
+   * then asked for a dataset the track will never have,
+   * `DatasetNotServedError` was classified FATAL, the cursor parked FAILED,
+   * and `foldSyncState` rendered the connection as a failed sync forever.
+   *
+   * Cloud tracks ONLY. A lan track's descriptor lists the practice datasets,
+   * but its served set is runtime-computed — the export-drop connector serves
+   * invoices and bills whenever the practice's export carries them
+   * (`Connector.servedDatasets` is "computed, not declared" for that track) —
+   * so filtering it by the static declaration would silently stop the
+   * accounting sync the track shipped with. An unknown provider likewise
+   * keeps today's behaviour: no descriptor is no evidence either way, and a
+   * wrongly-registered cursor fails visibly while a never-registered one
+   * fails silently.
+   */
+  function entityServedBy(provider: string, entity: string): boolean {
+    const descriptor = providerDescriptor(provider);
+    if (!descriptor || descriptor.track !== "cloud") return true;
+    return (descriptor.datasets as readonly string[]).includes(entity);
+  }
+
   return {
     /**
-     * Register a cursor per (live connection, entity). Idempotent, and never
-     * resets an existing cursor's watermark.
+     * Register a cursor per (live connection, entity the provider's track
+     * serves). Idempotent, and never resets an existing cursor's watermark.
      */
     async registerCursors() {
       const live = await prisma.integrationConnection.findMany({
@@ -435,6 +463,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       });
       for (const conn of live) {
         for (const spec of ERP_SYNC_ENTITIES) {
+          if (!entityServedBy(conn.provider, spec.entity)) continue;
           await upsertErpCursor(prisma, conn.id, spec.entity);
         }
       }

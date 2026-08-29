@@ -98,6 +98,30 @@
  * Mailchimp → `campaign`, `audience`. **Xero adds nothing** — it maps cleanly
  * onto the existing `invoice` / `bill` / `ap_summary`, which is the naming
  * rule's best evidence.
+ *
+ * ## The WARP-2466 reconciliation — three connectors met the vocabulary
+ *
+ * HubSpot (WARP-2317) and Mailchimp (WARP-2379) shipped before this union
+ * could express what they serve, so both declared their dataset names as bare
+ * `readonly string[]` and said in their own docstrings that the reconciliation
+ * was owed. WARP-2466 paid it, **by comparing canonical column lists rather
+ * than names** — the only comparison the rule above sanctions. Every decision,
+ * with the evidence:
+ *
+ * | Declared | Verdict | Why |
+ * |---|---|---|
+ * | HubSpot `crm_contact` | **is `contact`** | `[id, email, firstname, lastname, lifecyclestage]` are HubSpot's PROPERTY names for exactly `[contact_id, email, first_name, last_name, lifecycle_stage]`. Same shape, same meaning, no units to disagree about. The `crm_` prefix was a namespace segment, which §2/§3 above already reject. |
+ * | HubSpot `crm_company` | **is `company`** | `[id, name, domain]` ≡ `[company_id, name, domain]`. |
+ * | HubSpot `crm_deal` | **is `deal`** | `[id, dealname, dealstage, amount]` ≡ `[deal_id, name, stage, amount]`. `pipeline` is a HubSpot extra, not a shape difference — a connector may carry more than the canonical set. |
+ * | HubSpot `crm_ticket` | **is `ticket`** | `[id, subject, hs_pipeline_stage, hs_ticket_priority]` ≡ `[ticket_id, subject, status, priority]`. |
+ * | HubSpot `crm_engagement` | **new name `engagement`** | A timeline activity — a call, email, meeting, note or task. Nothing in the twenty is that shape: it is not a `ticket` (no status, no resolution), not a `deal`, and carries no money. It takes the bare name because nothing collides with it. |
+ * | Mailchimp `campaign` | **is `campaign`** | `[campaign_id, title, status, send_time, emails_sent]` ≡ `[campaign_id, subject, status, sent_at, emails_sent]`. Mailchimp is the vendor this name was designed for. |
+ * | Mailchimp `contact` | **new name `audience_member`** | **NOT** the CRM `contact`, and this is the reconciliation's most load-bearing call. A Mailchimp member is `[contact_id, email_address, status, last_changed, opt_in_time]`: a SUBSCRIPTION record. Its `status` is subscribed/unsubscribed/cleaned — not a `lifecycle_stage` — and it has no name, no company and no pipeline position. `find_contact` searches contacts by LAST-NAME PREFIX (`read-queries.ts`); against a Mailchimp connection that query would resolve `last_name` against a schema map that has no such column and fail at read time. Declaring `contact` here would be the "answers `get_open_invoices` with CRM rows" failure with the vendors swapped. Note the vendor mapping above already declined to give Mailchimp `contact`. |
+ * | Mailchimp `ecommerce_order` | **stays its own name** | **NOT** the commerce `order`. `order` requires `total_amount` AND `currency` and exists to answer `total_amount - tax_amount - refunded_amount`; a Mailchimp order is `[order_id, store_id, customer_id, order_total, processed_at]` with no tax, no refund and no currency, because it is a marketing-attribution shadow a storefront integration syncs INTO Mailchimp, not the store's order of record. Serving it as `order` would let a revenue calculation run on columns that are not there. It already carries its domain in its name, which is the `stripe_account` form §"naming rule" sanctions. |
+ *
+ * The twenty become twenty-three. Nothing was renamed to fit and nothing was
+ * cast: where a shape matched it took the canonical name, and where it did not
+ * it took a new one — which is the rule working in both directions.
  */
 export const DATASETS = [
   // practice-management (WARP-1964)
@@ -114,18 +138,22 @@ export const DATASETS = [
   "payout",
   "balance_transaction",
   "subscription",
-  // CRM — HubSpot (WARP-2280)
+  // CRM — HubSpot (WARP-2280; `engagement` added by WARP-2466)
   "contact",
   "company",
   "deal",
   "ticket",
+  "engagement",
   // commerce — Shopify (WARP-2280)
   "order",
   "product",
   "customer",
-  // marketing — Mailchimp (WARP-2280)
+  // marketing — Mailchimp (WARP-2280; the two below added by WARP-2466 after
+  // the reconciliation found neither interchangeable with an existing shape)
   "campaign",
   "audience",
+  "audience_member",
+  "ecommerce_order",
 ] as const;
 export type DatasetName = (typeof DATASETS)[number];
 
@@ -195,8 +223,11 @@ export const DATASET_CATEGORY: Readonly<Record<DatasetName, DatasetCategory>> = 
   order: "commerce",
   product: "commerce",
   customer: "commerce",
+  engagement: "crm",
   campaign: "marketing",
   audience: "marketing",
+  audience_member: "marketing",
+  ecommerce_order: "commerce",
 };
 
 /**
@@ -495,6 +526,13 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     // HubSpot `hs_lastmodifieddate`.
     "updated_at",
   ],
+  // WARP-2466 — a CRM timeline activity: a call, an email, a meeting, a note,
+  // a task. `type` is which of those it was, `occurred_at` is when it happened
+  // (NOT when the record was written — a meeting logged the next morning
+  // happened the day before, and sorting a timeline by write time reorders
+  // history). Deliberately not merged into `ticket`: an engagement has no
+  // status and nothing to resolve, it is a thing that HAPPENED.
+  engagement: ["engagement_id", "occurred_at", "type", "contact_id", "deal_id"],
 
   // ── commerce (WARP-2280) ──────────────────────────────────────────────────
 
@@ -586,6 +624,35 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
   // rather than netted off, so neither number has to be reconstructed from the
   // other.
   audience: ["audience_id", "created_at", "name", "member_count", "unsubscribe_count"],
+  // WARP-2466 — one person's MEMBERSHIP of one audience, which is why it is
+  // not `contact`. `subscription_status` is subscribed / unsubscribed /
+  // cleaned / pending and is the column the whole row exists for: mailing
+  // somebody who unsubscribed is the one unrecoverable mistake this dataset
+  // can cause. `opted_in_at` is consent evidence, kept separate from
+  // `last_changed_at` because "when did they agree" and "when did this row
+  // last move" answer different questions — one of them legal.
+  audience_member: [
+    "audience_member_id",
+    "audience_id",
+    "email",
+    "subscription_status",
+    "opted_in_at",
+    "last_changed_at",
+  ],
+  // WARP-2466 — a purchase as a MARKETING platform recorded it, synced in by
+  // a storefront integration. Deliberately NOT `order`: there is no tax split,
+  // no refund column and no fulfillment state, so the revenue arithmetic
+  // `order`'s docstring specifies cannot be performed on it and must not be
+  // attempted. `total_amount` is what the platform was told the buyer paid —
+  // an attribution figure, not the store's books.
+  ecommerce_order: [
+    "ecommerce_order_id",
+    "store_id",
+    "customer_id",
+    "total_amount",
+    "currency",
+    "processed_at",
+  ],
 };
 
 /**
@@ -626,6 +693,9 @@ export const REQUIRED_CANONICAL: Readonly<Record<DatasetName, readonly string[]>
   company: ["company_id"],
   deal: ["deal_id", "stage"],
   ticket: ["ticket_id", "status"],
+  // An activity with no time cannot be placed on the timeline that is the only
+  // reason to read it.
+  engagement: ["engagement_id", "occurred_at"],
   order: ["order_id", "total_amount", "currency"],
   product: ["product_id"],
   customer: ["customer_id"],
@@ -634,6 +704,12 @@ export const REQUIRED_CANONICAL: Readonly<Record<DatasetName, readonly string[]>
   // it as fact — the marketing-domain twin of a bill with no balance.
   campaign: ["campaign_id", "emails_sent"],
   audience: ["audience_id", "member_count"],
+  // Identity plus the subscription state. A member row whose status is unknown
+  // is worse than no row: it invites a send to somebody who opted out.
+  audience_member: ["audience_member_id", "subscription_status"],
+  // Same rule as `order` minus the columns this shape does not carry: an
+  // amount whose currency has to be guessed is not a number.
+  ecommerce_order: ["ecommerce_order_id", "total_amount", "currency"],
 };
 
 /**
@@ -738,6 +814,16 @@ export const COLUMN_KIND: Readonly<Record<string, "text" | "money" | "count" | "
   clicks_unique: "count",
   member_count: "count",
   unsubscribe_count: "count",
+  // WARP-2466
+  engagement_id: "text",
+  occurred_at: "timestamp",
+  audience_member_id: "text",
+  subscription_status: "text",
+  opted_in_at: "timestamp",
+  last_changed_at: "timestamp",
+  ecommerce_order_id: "text",
+  store_id: "text",
+  processed_at: "timestamp",
 };
 
 /**

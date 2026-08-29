@@ -65,11 +65,56 @@ const CATALOG_BEFORE = [
   },
 ];
 
+/**
+ * WARP-2466 — the three WARP-2214 SaaS vendors, appended after the historical
+ * four. Kept separate from `CATALOG_BEFORE` for the same reason the
+ * orchestrator's descriptor test keeps its `_BEFORE` anchors separate: that
+ * list is a record of what shipped before the refactor, and folding new cards
+ * into it turns a regression anchor into a running total.
+ */
+const CATALOG_WARP_2214 = [
+  {
+    id: "stripe",
+    name: "Stripe",
+    category: "Payments",
+    description:
+      "Payments, refunds and payouts read straight from Stripe — never money movement.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/stripe",
+  },
+  {
+    id: "hubspot",
+    name: "HubSpot",
+    category: "CRM",
+    description: "Contacts, companies, deals and tickets from your CRM — read on request.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/hubspot",
+  },
+  {
+    id: "mailchimp",
+    name: "Mailchimp",
+    category: "Marketing",
+    description:
+      "Audiences, campaign performance and attributed orders — read from Mailchimp.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/mailchimp",
+  },
+];
+
 describe("the derived catalog is byte-identical to the hand-written one", () => {
-  it("renders the same four cards, same copy, same order", () => {
+  it("still renders the original four cards first, same copy, same order", () => {
     // Order is part of it: the Claude Design handoff is Eaglesoft · Dentrix ·
     // QuickBooks · Open Dental, and the hub renders CONNECTORS in array order.
-    expect(CONNECTORS).toEqual(CATALOG_BEFORE);
+    // Asserted as a PREFIX so the pre-change surface stays pinned exactly while
+    // new cards can only ever be appended.
+    // Mutation: reorder the descriptors or edit a card's copy → red.
+    expect(CONNECTORS.slice(0, CATALOG_BEFORE.length)).toEqual(CATALOG_BEFORE);
+  });
+
+  it("appends the three WARP-2214 vendors, in hub order", () => {
+    // Mutation: change a `catalog.order` so a SaaS card lands among the
+    // practice cards → red.
+    expect(CONNECTORS.slice(CATALOG_BEFORE.length)).toEqual(CATALOG_WARP_2214);
   });
 
   it("keeps every id inside the ConnectorId union the rest of the hub uses", () => {
@@ -79,8 +124,11 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     expect(CONNECTORS.map((c) => c.id).sort()).toEqual([
       "dentrix",
       "eaglesoft",
+      "hubspot",
+      "mailchimp",
       "opendental",
       "quickbooks",
+      "stripe",
     ]);
   });
 
@@ -136,11 +184,161 @@ describe("credential fields come from the shared descriptor, not from this file"
 
   it("never exposes a secret VALUE — only the shape of the field", () => {
     // A descriptor describes what to ask for; it must never carry what was
-    // answered. Serialising the whole catalog is the cheapest way to assert it.
+    // answered.
+    //
+    // WARP-2466 fixed a real bug in this assertion. It was
+    // `/password|token|secret["']?\s*:\s*["'][^"']/i`, and JS alternation
+    // binds looser than concatenation — so it read as `password` OR `token` OR
+    // `secret:"…"`, and fired on the bare word "token" ANYWHERE. That is not
+    // what the comment above claims it checks: it made a field NAMED
+    // `accessToken`, or a help string containing the word "token",
+    // indistinguishable from a leaked value. The group is now explicit.
     const serialised = JSON.stringify(
       CONNECTORS.map((c) => connectorCredentialFields(c.id)),
     );
-    expect(serialised).not.toMatch(/password|token|secret["']?\s*:\s*["'][^"']/i);
+    // Mutation: add `value: "hunter2"` to any descriptor field → red.
+    expect(serialised).not.toMatch(/(password|token|secret)["']?\s*:\s*["'][^"']/i);
+
+    // Stronger than a regex, and the assertion the comment actually wants: a
+    // field object may carry ONLY the declared shape keys. A value smuggled
+    // under any name at all — not just one the regex thought to look for —
+    // fails here.
+    // Mutation: add any key to a descriptor's credential field → red.
+    const allowed = new Set([
+      "name",
+      "label",
+      "type",
+      "required",
+      "secret",
+      "storage",
+      "pattern",
+      "help",
+    ]);
+    for (const c of CONNECTORS) {
+      for (const field of connectorCredentialFields(c.id)) {
+        const extra = Object.keys(field).filter((k) => !allowed.has(k));
+        expect(extra, `${c.id}.${field.name} carries non-shape keys`).toEqual([]);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2342 — the setup guide is part of a cloud card's contract
+// ---------------------------------------------------------------------------
+
+describe("the setup guide travels with the card", () => {
+  /**
+   * The pass-through is real, and a card with no guide carries no key —
+   * `{ setupGuideHref: undefined }` would make "no guide declared" and
+   * "declared as nothing" indistinguishable, including to the pinned-catalog
+   * assertion at the top of this file.
+   *
+   * Mutation: always emit the key → red, because `"setupGuideHref" in meta`
+   * then holds for every card.
+   */
+  it("omits the key entirely for a card that declares no guide", () => {
+    for (const card of CONNECTORS) {
+      const declared = descriptorForCatalogId(card.id)?.catalog?.setupGuideHref;
+      expect(("setupGuideHref" in card), card.id).toBe(declared !== undefined);
+      expect(connectorSetupGuideHref(card.id)).toBe(declared);
+    }
+  });
+
+  it("has no guide for an id that is not a card", () => {
+    expect(connectorSetupGuideHref("not-a-card")).toBeUndefined();
+  });
+
+  /**
+   * The type-level half: a cloud provider offered on the hub CANNOT ship
+   * without a guide link. An SMB owner is being told to go and create a
+   * credential in a vendor console we do not control (ADR-042 §2), so an
+   * unreachable click-path is the connector being unusable.
+   *
+   * ⚠ Enforced by `tsc`, NOT by vitest — esbuild strips types, so under vitest
+   * the body below is an object literal like any other.
+   *
+   * Mutation: make `setupGuideHref` optional on the cloud arm and the
+   * `@ts-expect-error` becomes UNUSED, which is itself a tsc error ("Unused
+   * '@ts-expect-error' directive") — so the mutation goes red in both
+   * directions.
+   */
+  it("makes an available cloud card without a guide a TYPE error", () => {
+    // @ts-expect-error -- an `available` cloud card must declare setupGuideHref.
+    const bad: ProviderDescriptor = {
+      id: "fixture-no-guide",
+      displayName: "Fixture No Guide",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-no-guide",
+        name: "Fixture No Guide",
+        category: "Payments",
+        description: "Offered, with nowhere to read about it.",
+        availability: "available",
+        order: 99,
+      },
+    };
+    expect(bad.catalog?.setupGuideHref).toBeUndefined();
+  });
+
+  /**
+   * …and a `coming-soon` cloud card is deliberately exempt: it has no connect
+   * flow, so there is no moment of use to link from, and requiring a href
+   * would mean pointing at a guide nobody has written. Both shipped cloud
+   * cards are in exactly that state.
+   *
+   * Mutation: require the href on every cloud card → this stops compiling.
+   */
+  it("exempts a coming-soon cloud card", () => {
+    const ok: ProviderDescriptor = {
+      id: "fixture-later",
+      displayName: "Fixture Later",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-later",
+        name: "Fixture Later",
+        category: "Payments",
+        description: "Not offered yet.",
+        availability: "coming-soon",
+        order: 99,
+      },
+    };
+    expect(ok.catalog?.setupGuideHref).toBeUndefined();
+
+    // WARP-2466 corrected the loop that used to sit here. It read
+    //
+    //   if (d?.track === "cloud") expect(card.availability).toBe("coming-soon")
+    //
+    // which asserted that EVERY cloud card is coming-soon. That happened to be
+    // true when it was written (QuickBooks was the only cloud card), but it is
+    // not the property this test is named for, and it goes red the moment any
+    // cloud provider actually ships — which is what registering Stripe,
+    // HubSpot and Mailchimp does.
+    //
+    // The real property, both halves:
+    //   • an `available` cloud card MUST carry a guide (the union enforces it
+    //     at compile time; this is the runtime witness on shipped data);
+    //   • a `coming-soon` cloud card need not.
+    // Mutation: drop `setupGuideHref` from any of the three → tsc red AND red
+    // here.
+    for (const card of CONNECTORS) {
+      const d = descriptorForCatalogId(card.id);
+      if (d?.track !== "cloud") continue;
+      if (card.availability === "available") {
+        expect(
+          d.catalog?.setupGuideHref,
+          `${card.id} is an available cloud card with no setup guide`,
+        ).toBeTruthy();
+      }
+    }
   });
 });
 
