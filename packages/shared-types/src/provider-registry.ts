@@ -91,6 +91,51 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     // drift gate like any other — not an omission.
     egressHosts: [],
     datasets: PRACTICE_DATASETS,
+    // The owner-facing connect flow. Every string a practice owner reads in
+    // the wizard's four steps is HERE or on `displayName` — the wizard itself
+    // names no vendor, so a second LAN vendor is a descriptor, not a second
+    // wizard (WARP-2451). Transcribed verbatim from the shipped
+    // `ConnectWizard.tsx`; the flow is generalised, not re-worded.
+    lanProvisioning: {
+      accountName: "droplet_ro",
+      databaseName: "PattersonPM",
+      defaultPort: 2638,
+      hostPlaceholder: "10.0.1.5 or server-pc",
+      reachableLabel: "an Eaglesoft database",
+      // The droplet_ro password is generated (strong, unique per box) and
+      // stored via a secretRef by Droplet when it provisions — never
+      // fabricated in the browser (that would strand a live credential the
+      // connector cannot retrieve). The script carries the PLACEHOLDER Droplet
+      // fills in with the issued value; mirrors
+      // services/erp-connector/sql/provision.sql (WARP-1094, brief §8.1).
+      script: [
+        "-- Run once as a SQL Anywhere DBA on the PattersonPM database.",
+        "-- Replace <GENERATED_BY_DROPLET> with the password Droplet issues on the setup screen.",
+        "CREATE USER droplet_ro IDENTIFIED BY '<GENERATED_BY_DROPLET>';",
+        "GRANT SELECT ON dba.patient TO droplet_ro;",
+        "GRANT SELECT ON dba.appointment TO droplet_ro;",
+        "GRANT SELECT ON dba.provider TO droplet_ro;",
+        "GRANT SELECT ON dba.service TO droplet_ro;",
+        "GRANT SELECT ON dba.serv_trans TO droplet_ro;",
+        "GRANT SELECT ON dba.recall TO droplet_ro;",
+        "GRANT SELECT ON dba.account TO droplet_ro;   -- AR read only",
+      ],
+      // Ids are the `ErpScope` union the connect endpoint accepts; the
+      // dashboard pins that correspondence in `connectors.test.ts` rather than
+      // trusting it, because this file cannot import the dashboard's type.
+      scopes: [
+        { id: "schedule", label: "Schedule & appointments" },
+        { id: "patients", label: "Patients & contact info", tag: "PHI" },
+        { id: "providers", label: "Providers & chairs" },
+        { id: "financials", label: "Production & accounts receivable", tag: "financial" },
+        { id: "recall", label: "Recall / recare" },
+      ],
+      writeOptIn: {
+        label: "Let Droplet schedule appointments back into Eaglesoft",
+        caution:
+          "Off by default. When on, Droplet still asks you to confirm every change before it writes. You can turn this off any time.",
+      },
+    },
     catalog: {
       id: "eaglesoft",
       name: "Eaglesoft",

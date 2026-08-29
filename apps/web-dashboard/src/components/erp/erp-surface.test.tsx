@@ -126,7 +126,7 @@ describe("ConnectorCard", () => {
   const entry = (m: ConnectorMeta, connection: IntegrationConnection) => ({
     meta: m,
     state: { kind: "reported" as const, connection },
-    connect: { kind: "wizard" as const },
+    connect: { kind: "wizard" as const, catalogId: "eaglesoft" },
     open: { kind: "route" as const, href: "/integrations/eaglesoft" },
   });
 

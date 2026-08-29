@@ -13,11 +13,16 @@
  *    ordering change here would land in their surface.
  */
 import { describe, it, expect } from "vitest";
-import { descriptorForCatalogId, providerDescriptor } from "@droplet/shared-types";
+import {
+  descriptorForCatalogId,
+  providerDescriptor,
+  type ProviderDescriptor,
+} from "@droplet/shared-types";
 import {
   CONNECTORS,
   connectorMeta,
   connectorCredentialFields,
+  connectorSetupGuideHref,
   providerKeyForConnector,
 } from "./connectors";
 
@@ -136,5 +141,139 @@ describe("credential fields come from the shared descriptor, not from this file"
       CONNECTORS.map((c) => connectorCredentialFields(c.id)),
     );
     expect(serialised).not.toMatch(/password|token|secret["']?\s*:\s*["'][^"']/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2342 — the setup guide is part of a cloud card's contract
+// ---------------------------------------------------------------------------
+
+describe("the setup guide travels with the card", () => {
+  /**
+   * The pass-through is real, and a card with no guide carries no key —
+   * `{ setupGuideHref: undefined }` would make "no guide declared" and
+   * "declared as nothing" indistinguishable, including to the pinned-catalog
+   * assertion at the top of this file.
+   *
+   * Mutation: always emit the key → red, because `"setupGuideHref" in meta`
+   * then holds for every card.
+   */
+  it("omits the key entirely for a card that declares no guide", () => {
+    for (const card of CONNECTORS) {
+      const declared = descriptorForCatalogId(card.id)?.catalog?.setupGuideHref;
+      expect(("setupGuideHref" in card), card.id).toBe(declared !== undefined);
+      expect(connectorSetupGuideHref(card.id)).toBe(declared);
+    }
+  });
+
+  it("has no guide for an id that is not a card", () => {
+    expect(connectorSetupGuideHref("not-a-card")).toBeUndefined();
+  });
+
+  /**
+   * The type-level half: a cloud provider offered on the hub CANNOT ship
+   * without a guide link. An SMB owner is being told to go and create a
+   * credential in a vendor console we do not control (ADR-042 §2), so an
+   * unreachable click-path is the connector being unusable.
+   *
+   * ⚠ Enforced by `tsc`, NOT by vitest — esbuild strips types, so under vitest
+   * the body below is an object literal like any other.
+   *
+   * Mutation: make `setupGuideHref` optional on the cloud arm and the
+   * `@ts-expect-error` becomes UNUSED, which is itself a tsc error ("Unused
+   * '@ts-expect-error' directive") — so the mutation goes red in both
+   * directions.
+   */
+  it("makes an available cloud card without a guide a TYPE error", () => {
+    // @ts-expect-error -- an `available` cloud card must declare setupGuideHref.
+    const bad: ProviderDescriptor = {
+      id: "fixture-no-guide",
+      displayName: "Fixture No Guide",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-no-guide",
+        name: "Fixture No Guide",
+        category: "Payments",
+        description: "Offered, with nowhere to read about it.",
+        availability: "available",
+        order: 99,
+      },
+    };
+    expect(bad.catalog?.setupGuideHref).toBeUndefined();
+  });
+
+  /**
+   * …and a `coming-soon` cloud card is deliberately exempt: it has no connect
+   * flow, so there is no moment of use to link from, and requiring a href
+   * would mean pointing at a guide nobody has written.
+   *
+   * One fixture of each, because the rule has two sides and only stating both
+   * pins it. An earlier version of this test ended by asserting every cloud
+   * card in the catalog IS `coming-soon` — true while QuickBooks and Dentrix
+   * were the only two, but that is a fact about this week's catalog, not the
+   * property the test is named for, and it goes red the moment WARP-2466
+   * lands three `available` providers. Found while merging this branch into
+   * that one.
+   *
+   * Mutation: require the href on every cloud card → the `later` fixture
+   * stops compiling. Drop the requirement entirely → the `@ts-expect-error`
+   * above goes unused, which is itself a tsc error.
+   */
+  it("requires a guide of an available cloud card, and not of a coming-soon one", () => {
+    const later: ProviderDescriptor = {
+      id: "fixture-later",
+      displayName: "Fixture Later",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-later",
+        name: "Fixture Later",
+        category: "Payments",
+        description: "Not offered yet.",
+        availability: "coming-soon",
+        order: 99,
+      },
+    };
+    expect(later.catalog?.setupGuideHref).toBeUndefined();
+
+    // The positive half: an `available` cloud card compiles ONLY with the
+    // href. The `@ts-expect-error` fixture above is the same rule from the
+    // other side.
+    const offered: ProviderDescriptor = {
+      id: "fixture-offered",
+      displayName: "Fixture Offered",
+      category: "Payments",
+      track: "cloud",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-offered",
+        name: "Fixture Offered",
+        category: "Payments",
+        description: "Offered, with a guide.",
+        availability: "available",
+        setupGuideHref: "/help/integrations/fixture-offered",
+        order: 99,
+      },
+    };
+    expect(offered.catalog?.setupGuideHref).toBe("/help/integrations/fixture-offered");
+
+    // And the property over the SHIPPED catalog — every cloud card that is
+    // offered carries a guide. Vacuous today (both cloud cards are
+    // coming-soon) and load-bearing the moment WARP-2466 lands.
+    for (const card of CONNECTORS) {
+      const descriptor = descriptorForCatalogId(card.id);
+      if (descriptor?.track !== "cloud") continue;
+      if (card.availability !== "available") continue;
+      expect(card.setupGuideHref, `${card.id} is offered with no setup guide`).toBeTruthy();
+    }
   });
 });

@@ -13,7 +13,7 @@
  * to render.
  */
 
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, BookOpen } from "lucide-react";
 import { Badge } from "@/components/shell/primitives";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
 import type { HubEntry } from "@/lib/hooks/useIntegrations";
@@ -162,6 +162,25 @@ export function ConnectorCard({
       {state.kind === "error" && (
         <p className="type-caption-1 text-label-tertiary" style={{ margin: "0 0 12px" }} role="status">
           {state.message}
+        </p>
+      )}
+
+      {/* WARP-2342 — the setup guide, on the card as well as in the wizard.
+          A cloud provider's credential is made in a vendor console we do not
+          control, so the click-path has to be reachable from wherever the
+          owner is looking. Rendered only when the provider declares one. */}
+      {meta.setupGuideHref && (
+        <p style={{ margin: "0 0 12px" }}>
+          <a
+            href={meta.setupGuideHref}
+            target="_blank"
+            rel="noreferrer"
+            className="type-caption-1 text-accent"
+            style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+          >
+            <BookOpen size={12} strokeWidth={1.75} aria-hidden />
+            Setup guide
+          </a>
         </p>
       )}
 

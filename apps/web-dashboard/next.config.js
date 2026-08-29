@@ -23,6 +23,21 @@ const nextConfig = {
       ...(config.resolve.extensionAlias || {}),
       ".js": [".ts", ".tsx", ".js"],
     };
+    // WARP-2490 — `import guide from "…/stripe.md?raw"` returns the file's
+    // TEXT, inlined into the bundle at build time.
+    //
+    // `?raw` rather than a bare `.md` rule because vitest (vite) supports
+    // that query natively, so ONE import specifier works under both
+    // bundlers. A bare `.md` rule would need a matching vite plugin, i.e. a
+    // second place to keep in agreement.
+    //
+    // This is what keeps the customer setup guides readable on a box with no
+    // internet path to us: the markdown ships inside the JS, so the page
+    // prerenders static with no runtime filesystem read and nothing to fetch.
+    config.module.rules.push({
+      resourceQuery: /^\?raw$/,
+      type: "asset/source",
+    });
     return config;
   },
   async rewrites() {

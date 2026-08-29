@@ -37,7 +37,7 @@
  * than restating any of it.
  */
 
-import { CONNECTORS } from "@/lib/connectors";
+import { CONNECTORS, providerKeyForConnector } from "@/lib/connectors";
 import { providerName } from "@/app/reports/connectors";
 import type { ConnectorMeta } from "@/lib/erp-types";
 
@@ -50,7 +50,18 @@ import type { ConnectorMeta } from "@/lib/erp-types";
  * failure this type exists to make unrepresentable.
  */
 export type ConnectAction =
-  | { readonly kind: "wizard" }
+  | {
+      readonly kind: "wizard";
+      /**
+       * WHICH provider the wizard is being opened for (WARP-2451).
+       *
+       * The wizard used to need no argument because it could only ever mean
+       * one vendor. Carrying the catalog id makes the dispatch total: the
+       * wizard resolves its fields from that provider's descriptor, so a tile
+       * can no longer open a form belonging to somebody else.
+       */
+      readonly catalogId: string;
+    }
   | { readonly kind: "route"; readonly href: string }
   | { readonly kind: "unavailable"; readonly reason: string };
 
@@ -93,9 +104,6 @@ const DETAIL_ROUTES: Readonly<Record<string, string>> = {
   eaglesoft: "/integrations/eaglesoft",
 };
 
-/** Tiles whose Connect opens the in-dashboard wizard today. */
-const WIZARD_CONNECT: readonly string[] = ["eaglesoft"];
-
 const COMING_SOON_REASON = "Available in a future update.";
 const NO_CONNECT_FLOW_REASON =
   "This system can't be set up from the dashboard yet.";
@@ -114,11 +122,16 @@ export function providerKeysFor(catalogId: string): readonly string[] {
 
 function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
   const route = DETAIL_ROUTES[meta.id];
+  // WARP-2451: which tiles open the wizard is DERIVED — a card backed by a
+  // provider key the orchestrator can persist has a connect flow, because the
+  // wizard now renders that provider's own credential fields. It was a
+  // hand-kept list of one, which is the same shape of defect WARP-2291 removed
+  // from the dispatch: correct for exactly the vendor that was hardcoded.
   const connect: ConnectAction =
     meta.availability === "coming-soon"
       ? { kind: "unavailable", reason: COMING_SOON_REASON }
-      : WIZARD_CONNECT.includes(meta.id)
-        ? { kind: "wizard" }
+      : providerKeyForConnector(meta.id) !== undefined
+        ? { kind: "wizard", catalogId: meta.id }
         : { kind: "unavailable", reason: NO_CONNECT_FLOW_REASON };
 
   return {

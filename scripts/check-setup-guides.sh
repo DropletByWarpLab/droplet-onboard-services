@@ -37,6 +37,21 @@
 #         resolved path would pass a near-miss like `stripe-setup.md`, which
 #         is exactly the failure this is for.
 #
+#   3b. A link's PATH resolves but its #fragment does not.
+#      -> FRAGMENTS. Every `file.md#anchor` target is resolved against the
+#         target file's headings, using the same GitHub slug rule the
+#         dashboard route uses to mint heading ids (shared fixture:
+#         scripts/fixtures/heading-slug-cases.tsv). Path-only checking was
+#         green for months over `SETUP.md` §8 on a file with seven sections
+#         (WARP-2498).
+#
+#   4. A guide ships that the box cannot serve.
+#      -> ROUTE. `/help/integrations/<id>` renders the guide from a bundled
+#         `?raw` import (WARP-2490). The import list is hand-written — a
+#         static import is the only kind a bundler can inline — so a new
+#         guide can pass checks 1-3 and still be unreachable from the tile
+#         and the connect wizard that link to it.
+#
 # WHERE THE FACTS COME FROM
 # -------------------------
 # CLOUD_PROVIDERS and the pins below are pinned to the per-vendor table in
@@ -88,6 +103,32 @@ fail=0
 note() { printf '\033[31mFAIL\033[0m %s\n' "$*" >&2; fail=1; }
 ok()   { printf '\033[32m  OK\033[0m %s\n' "$*"; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# slugify <heading-text> — GitHub's heading-slug rule (WARP-2498).
+#
+# Byte-for-byte the same rule as `headingSlug()` in
+# apps/web-dashboard/src/lib/integration-guides.ts, which gives the rendered
+# guide pages their heading ids. If the two drift, this script starts passing
+# links a browser cannot follow — so they are not trusted to agree, they are
+# CHECKED against scripts/fixtures/heading-slug-cases.tsv below.
+#
+# ASCII classes (`a-z0-9_`), not `[:alnum:]`: JavaScript's `\w` is ASCII-only
+# and `[:alnum:]` is locale-dependent, so the two would part company on the
+# first accented heading. Each whitespace character becomes ONE hyphen — the
+# em dash in "Track B — a cloud service" leaves two spaces behind, and the
+# anchor really is `b--a`.
+slugify() {
+  # `printf '%s\n'`, not `%s`: BSD sed preserves the absence of a trailing
+  # newline, so a newline-less slugify makes `... | while read; do slugify;
+  # done` concatenate every heading into one line — which reads as "no heading
+  # matched" and fails every anchor. Command substitution strips the newline
+  # again for single-value callers, so this costs them nothing.
+  printf '%s\n' "$1" \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | tr 'A-Z' 'a-z' \
+    | sed 's/[^a-z0-9_[:space:]-]//g' \
+    | sed 's/[[:space:]]/-/g'
+}
 
 # fact_pins <provider> — emits one literal string per line that MUST appear
 # verbatim in that provider's guide.
@@ -268,9 +309,33 @@ done
 # Resolve every relative markdown link under docs/integrations/ against the
 # tree. Text-only checking would pass a near-miss filename and is not enough.
 
+hdr "slug rule — this script and the dashboard route agree"
+
+# The fragment check below is only as good as `slugify`, and the dashboard's
+# `headingSlug()` has to produce the SAME id or the anchors this script blesses
+# will not exist in the rendered page. One fixture, two readers: the
+# TypeScript side runs it in `integration-guides.test.ts`.
+SLUG_FIXTURE="scripts/fixtures/heading-slug-cases.tsv"
+if [ ! -f "$SLUG_FIXTURE" ]; then
+  note "$SLUG_FIXTURE is missing — the slug rule is then unchecked on both sides"
+else
+  slug_cases=0
+  while IFS="	" read -r heading expected; do
+    case "$heading" in ""|"#"*) continue ;; esac
+    [ -n "$expected" ] || continue
+    actual=$(slugify "$heading")
+    slug_cases=$((slug_cases + 1))
+    if [ "$actual" != "$expected" ]; then
+      note "slugify '$heading' -> '$actual', fixture expects '$expected'"
+    fi
+  done < "$SLUG_FIXTURE"
+  ok "$slug_cases slug case(s) match $SLUG_FIXTURE"
+fi
+
 hdr "links — every relative link under $DOCS_DIR resolves"
 
 link_count=0
+anchor_count=0
 for md in "$DOCS_DIR"/*.md; do
   [ -f "$md" ] || continue
   dir=$(dirname "$md")
@@ -287,10 +352,67 @@ for md in "$DOCS_DIR"/*.md; do
     link_count=$((link_count + 1))
     if [ ! -e "$dir/$path" ]; then
       note "$md links to '$target', which does not resolve (looked for $dir/$path)"
+      continue
+    fi
+
+    # …and then the FRAGMENT, which this script never used to look at
+    # (WARP-2498). `vendor-setup-template.md` cited `SETUP.md` §8 while
+    # SETUP.md had seven sections, and every run was green over it: the file
+    # existed, so the link "resolved". A dead fragment drops the reader at the
+    # top of a 20,000-word page with no sign anything went wrong — and on the
+    # box the same anchor is a real in-app link (WARP-2490), not just a
+    # GitHub convenience.
+    anchor=${target#*#}
+    [ "$anchor" != "$target" ] || continue
+    [ -n "$anchor" ] || continue
+    anchor_count=$((anchor_count + 1))
+    heading_slugs=$(grep -E '^#{1,6}[[:space:]]+' "$dir/$path" \
+      | sed -E 's/^#{1,6}[[:space:]]+//' \
+      | while IFS= read -r heading; do slugify "$heading"; done)
+    if ! printf '%s\n' "$heading_slugs" | grep -Fxq "$anchor"; then
+      note "$md links to '$target', but $path has no heading whose id is '#$anchor'"
     fi
   done
 done
-ok "checked $link_count relative link(s)"
+ok "checked $link_count relative link(s), $anchor_count of them with a #fragment"
+
+# --- 5. The guide is REACHABLE from the box --------------------------------
+#
+# WARP-2490. A guide that exists in git but is not bundled into the dashboard
+# is unreachable on the appliance: the tile and the connect wizard render a
+# `setupGuideHref` and the owner lands on a 404. That is the same class of
+# failure as a missing guide, and until this check existed nothing caught it —
+# checks 1-4 all pass on a file no route serves.
+#
+# Two things must hold, and the second is the one that rots: the route exists,
+# and every cloud guide is in the bundle's static import list. `?raw` imports
+# are the only kind a bundler can inline, so the list is hand-written and will
+# be forgotten. `integration-guides.test.ts` asserts the reverse direction
+# (bundle == directory) at vitest time; this is the cheap docs-PR-time half,
+# and `detect` is the one job that runs on every PR.
+
+hdr "route — every cloud guide is bundled into the dashboard"
+
+GUIDE_ROUTE="apps/web-dashboard/src/app/help/integrations/[provider]/page.tsx"
+GUIDE_BUNDLE="apps/web-dashboard/src/lib/integration-guides.ts"
+
+if [ ! -f "$GUIDE_ROUTE" ]; then
+  note "the guide route is missing ($GUIDE_ROUTE) — every setupGuideHref is a 404"
+else
+  ok "route present ($GUIDE_ROUTE)"
+fi
+
+if [ ! -f "$GUIDE_BUNDLE" ]; then
+  note "the guide bundle is missing ($GUIDE_BUNDLE)"
+else
+  for provider in $CLOUD_PROVIDERS; do
+    if grep -q "docs/integrations/$provider.md?raw" "$GUIDE_BUNDLE"; then
+      ok "$provider is bundled, reachable at /help/integrations/$provider"
+    else
+      note "$provider has a guide but is not imported in $GUIDE_BUNDLE — the link would 404 on the box"
+    fi
+  done
+fi
 
 # --- Verdict ---------------------------------------------------------------
 
@@ -303,5 +425,5 @@ provider_count=0
 for provider in $CLOUD_PROVIDERS; do
   provider_count=$((provider_count + 1))
 done
-printf '\033[32mcheck-setup-guides: OK\033[0m — %s provider guide(s), six sections each, pins intact, %s links resolve.\n' \
-  "$provider_count" "$link_count"
+printf '\033[32mcheck-setup-guides: OK\033[0m — %s provider guide(s), six sections each, pins intact, %s links resolve (%s with a #fragment).\n' \
+  "$provider_count" "$link_count" "$anchor_count"
