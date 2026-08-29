@@ -44,9 +44,15 @@ import {
   cloudProviderIds,
   catalogDescriptors,
   parseProviderConfigWith,
+  parseProviderConfigResult,
+  providerConfigVariantId,
+  credentialFieldsFor,
+  credentialSecretFieldsFor,
   validateCredentialFieldValue,
+  CREDENTIAL_VARIANT_FIELD,
   type DatasetName as SharedDatasetName,
   type ProviderDescriptor,
+  type CredentialVariant,
 } from "@droplet/shared-types";
 import {
   connectorForProvider,
@@ -533,6 +539,260 @@ describe("validateCredentialFieldValue", () => {
     expect(validateCredentialFieldValue(patterned, "42")).toBe("42");
     expect(validateCredentialFieldValue(patterned, "4a2")).toBeUndefined();
     expect(validateCredentialFieldValue(patterned, "")).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// WARP-2491 — the discriminated credential choice
+// ===========================================================================
+
+/**
+ * A provider with two mutually exclusive authentication paths.
+ *
+ * Modelled on Xero (WARP-2383), the first shipped descriptor that will declare
+ * variants: a Custom Connection and a customer-owned PKCE app are different
+ * flows with different fields, not one flow with optional extras.
+ *
+ * The shape is chosen so the defect is OBSERVABLE. `tenantId` is shared, and
+ * each path has a `providerConfig`-stored field the other does not — which is
+ * what lets "the path I did not choose is not parsed" be asserted as the
+ * absence of a specific key rather than as a vague rejection.
+ */
+const TWO_PATH_PROVIDER: ProviderDescriptor = {
+  id: "fixture-two-path",
+  displayName: "Fixture Two-Path",
+  category: "Accounting",
+  track: "cloud",
+  credentialFields: [
+    {
+      name: "tenantId",
+      label: "Tenant ID",
+      type: "string",
+      required: true,
+      secret: false,
+      // Belongs to the ACCOUNT, not to either path — it survives a switch.
+      storage: "providerConfig",
+    },
+  ],
+  credentialVariants: [
+    {
+      id: "custom-connection",
+      label: "Custom Connection",
+      fields: [
+        {
+          name: "connectionName",
+          label: "Connection name",
+          type: "string",
+          required: true,
+          secret: false,
+          storage: "providerConfig",
+        },
+        {
+          name: "customSecret",
+          label: "Custom Connection secret",
+          type: "string",
+          required: true,
+          secret: true,
+          storage: "encrypted",
+        },
+      ],
+    },
+    {
+      id: "pkce-app",
+      label: "Your own PKCE app",
+      fields: [
+        {
+          name: "pkceClientId",
+          label: "PKCE client ID",
+          type: "string",
+          required: true,
+          secret: false,
+          storage: "providerConfig",
+        },
+      ],
+    },
+  ],
+  egressHosts: ["two-path.example.test"],
+  datasets: ["invoice"],
+};
+
+/**
+ * `tsc` — not a runtime check — refuses a variant field stored in a
+ * first-class column.
+ *
+ * The flat parse path routes a variant's field either into `providerConfig` or
+ * into the sealed credential blob. `column` is neither: `host` / `port` /
+ * `databaseName` are LAN connection facts owned by the ERP wizard's schema, so
+ * a variant field declaring one would be collected by the form and then written
+ * NOWHERE — the same silent drop this story closes, one level down.
+ *
+ * If `VariantFieldStorage` is ever widened back to the full
+ * `CredentialFieldStorage`, this directive becomes unused and `tsc` fails with
+ * "Unused '@ts-expect-error' directive" — which is the gate, and it is why the
+ * fixture is compiled rather than merely described in a comment.
+ *
+ * `vitest` cannot see this: esbuild strips types. It is `npx tsc --noEmit` in
+ * `apps/orchestrator` that enforces it.
+ */
+const COLUMN_STORAGE_VARIANT: CredentialVariant = {
+  id: "not-shippable",
+  label: "Not shippable",
+  fields: [
+    {
+      name: "host",
+      label: "Host",
+      type: "string",
+      required: true,
+      secret: false,
+      // @ts-expect-error — `column` is not a VariantFieldStorage.
+      storage: "column",
+    },
+  ],
+};
+
+describe("a provider with two authentication paths parses the chosen one", () => {
+  const body = {
+    tenantId: "t-1",
+    connectionName: "Acme Books",
+    pkceClientId: "pkce-should-not-appear",
+  };
+
+  it("parses the shared fields AND the chosen variant's, and records the choice", () => {
+    const parsed = parseProviderConfigWith(TWO_PATH_PROVIDER, body, {
+      variant: "custom-connection",
+    });
+
+    // The variant's own field is the whole point: before WARP-2491 the parse
+    // walked `credentialFields` only, so this key was silently absent while the
+    // wizard had collected it and the row looked configured.
+    expect(parsed?.connectionName).toBe("Acme Books");
+    expect(parsed?.tenantId).toBe("t-1");
+    // Explicit, persisted, not inferred from which fields are present.
+    expect(parsed?.[CREDENTIAL_VARIANT_FIELD]).toBe("custom-connection");
+  });
+
+  /**
+   * THE mutation test.
+   *
+   * Mutation: ignore the discriminator — build `fields` from every variant,
+   *   `...(descriptor.credentialVariants ?? []).flatMap((v) => v.fields)`
+   * instead of the chosen one — and this goes red, because `pkceClientId`
+   * becomes a key on a Custom Connection row. That is the defect wearing a
+   * successful parse: a config carrying a field from a flow the owner is not
+   * on, which the connector would then try to authenticate with.
+   */
+  it("does not parse the OTHER path's fields, even when the body carries them", () => {
+    const parsed = parseProviderConfigWith(TWO_PATH_PROVIDER, body, {
+      variant: "custom-connection",
+    });
+
+    expect(parsed).toBeDefined();
+    // Absent as a KEY, not merely undefined as a value: every declared field is
+    // emitted as a key, so `in` is the question that distinguishes "declared
+    // and empty" from "not part of this path at all".
+    expect(parsed && "pkceClientId" in parsed).toBe(false);
+  });
+
+  it("rejects the whole config when the chosen path's required field is missing", () => {
+    // `connectionName` is required on this path and absent; `pkceClientId` is
+    // present but belongs to the other one, so it cannot stand in for it.
+    const result = parseProviderConfigResult(
+      TWO_PATH_PROVIDER,
+      { tenantId: "t-1", pkceClientId: "c-1" },
+      { variant: "custom-connection" },
+    );
+    expect(result).toEqual({
+      ok: false,
+      reason: "missing-required-field",
+      field: "connectionName",
+    });
+  });
+
+  it("rejects a missing discriminator rather than defaulting to the first path", () => {
+    // The first-variant fallback is a FORM behaviour (`credentialVariantFor`),
+    // deliberately not a validator one: defaulting here would persist a path
+    // the owner never chose and call it configured.
+    const result = parseProviderConfigResult(TWO_PATH_PROVIDER, body);
+    expect(result).toEqual({ ok: false, reason: "missing-variant" });
+    expect(parseProviderConfigWith(TWO_PATH_PROVIDER, body)).toBeUndefined();
+  });
+
+  it("rejects a discriminator naming a variant the descriptor does not declare", () => {
+    const result = parseProviderConfigResult(TWO_PATH_PROVIDER, body, {
+      variant: "oauth-implicit",
+    });
+    expect(result).toEqual({
+      ok: false,
+      reason: "unknown-variant",
+      variant: "oauth-implicit",
+    });
+  });
+
+  it("re-parses a STORED row from the variant id the row itself recorded", () => {
+    // No `options.variant` — this is the read path. The row says which path it
+    // is on, which is why the id is persisted rather than re-derived.
+    const stored = {
+      provider: "fixture-two-path",
+      [CREDENTIAL_VARIANT_FIELD]: "pkce-app",
+      tenantId: "t-1",
+      pkceClientId: "c-1",
+    };
+    const parsed = parseProviderConfigWith(TWO_PATH_PROVIDER, stored);
+    expect(parsed?.pkceClientId).toBe("c-1");
+    expect(parsed && "connectionName" in parsed).toBe(false);
+  });
+
+  it("reads back the recorded variant id, and only one it still declares", () => {
+    expect(
+      providerConfigVariantId(TWO_PATH_PROVIDER, {
+        [CREDENTIAL_VARIANT_FIELD]: "pkce-app",
+      }),
+    ).toBe("pkce-app");
+    // A path that has since been withdrawn is NOT silently relabelled to the
+    // first one — that is the form's fallback, not the validator's.
+    expect(
+      providerConfigVariantId(TWO_PATH_PROVIDER, {
+        [CREDENTIAL_VARIANT_FIELD]: "retired-path",
+      }),
+    ).toBeUndefined();
+    // Never inferred from which fields are present.
+    expect(providerConfigVariantId(TWO_PATH_PROVIDER, { pkceClientId: "c-1" })).toBeUndefined();
+  });
+
+  it("merges shared and variant fields for the form and for the secret question", () => {
+    expect(credentialFieldsFor(TWO_PATH_PROVIDER, "pkce-app").map((f) => f.name)).toEqual([
+      "tenantId",
+      "pkceClientId",
+    ]);
+    // The PKCE path has NO secret of its own — so "is this usable" must not be
+    // asked about the Custom Connection secret, which is not part of it.
+    expect(credentialSecretFieldsFor(TWO_PATH_PROVIDER, "pkce-app")).toEqual([]);
+    expect(
+      credentialSecretFieldsFor(TWO_PATH_PROVIDER, "custom-connection").map((f) => f.name),
+    ).toEqual(["customSecret"]);
+  });
+
+  it("keeps the type-level refusal fixture referenced", () => {
+    // The assertion that matters is `tsc`'s; this only stops the fixture being
+    // dead code a linter would strip.
+    expect(COLUMN_STORAGE_VARIANT.fields).toHaveLength(1);
+  });
+});
+
+describe("the variant discriminator is a reserved field name", () => {
+  it("is declared by no shipped descriptor, on any path", () => {
+    // A vendor field called `credentialVariant` would overwrite the record of
+    // which authentication path the row is on — the one key the config is not
+    // allowed to lose.
+    for (const d of providerDescriptors()) {
+      const every = [
+        ...d.credentialFields,
+        ...(d.credentialVariants ?? []).flatMap((v) => v.fields),
+      ];
+      for (const f of every) {
+        expect(f.name).not.toBe(CREDENTIAL_VARIANT_FIELD);
+      }
+    }
   });
 });
 

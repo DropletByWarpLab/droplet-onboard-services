@@ -8,6 +8,7 @@
  * the meeting — everything as the forwarded acting user.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import sendMeetingInvite from "../../../src/handlers/team-chat/send-meeting-invite.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -29,10 +30,10 @@ const CONTACTS = {
 };
 
 function ctxWith(overrides: {
-  get?: ReturnType<typeof vi.fn>;
-  post?: ReturnType<typeof vi.fn>;
+  get?: Mock;
+  post?: Mock;
   userId?: string | undefined;
-}): { ctx: ToolContext; get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> } {
+}): { ctx: ToolContext; get: Mock; post: Mock } {
   const get = overrides.get ?? vi.fn(async () => res(200, CONTACTS));
   const post = overrides.post ?? vi.fn();
   const ctx = {
@@ -61,6 +62,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("AUTH_REQUIRED");
     expect(get).not.toHaveBeenCalled();
   });
@@ -72,6 +74,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(garbage.ok).toBe(false);
+    if (garbage.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(garbage)}`);
     expect(garbage.error?.code).toBe("INVALID_ARGS");
 
     const past = await sendMeetingInvite.handler(
@@ -83,6 +86,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(past.ok).toBe(false);
+    if (past.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(past)}`);
     expect(past.error?.code).toBe("INVALID_ARGS");
     expect(past.status).not.toBe("confirmation_required");
     expect(get).not.toHaveBeenCalled();
@@ -101,6 +105,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(longTitle.ok).toBe(false);
+    if (longTitle.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(longTitle)}`);
     expect(longTitle.error?.code).toBe("INVALID_ARGS");
   });
 
@@ -118,6 +123,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("Budget review");
     // UX review: display name, not the login handle.
@@ -151,6 +157,7 @@ describe("team_chat_send_meeting_invite", () => {
       { recipients: ["bob"], title: "Sync", starts_at: futureIso() },
       ctx,
     );
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("bob");
     expect(post).not.toHaveBeenCalled();
@@ -165,6 +172,7 @@ describe("team_chat_send_meeting_invite", () => {
       { recipients: ["bob"], title: "Sync", starts_at: futureIso(), note },
       ctx,
     );
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("confirmation_required");
     expect(r.error?.message).toContain("Note on the invite:");
     expect(r.error?.message).not.toContain(note); // truncated, never verbatim-long
@@ -200,6 +208,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
     expect(r.data).toMatchObject({
       type: "team_chat_send_meeting_invite",
       meetingId: "meeting-1",
@@ -238,6 +247,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("UNKNOWN_RECIPIENT");
     expect(post).not.toHaveBeenCalled();
   });
@@ -253,6 +263,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("INVALID_ARGS");
     expect(r.error?.message).toContain("starts_at_must_be_future");
   });
@@ -268,6 +279,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("NOT_FOUND");
   });
 
@@ -288,6 +300,7 @@ describe("team_chat_send_meeting_invite", () => {
       ctx,
     );
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
   });
 });

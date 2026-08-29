@@ -23,13 +23,38 @@ export interface ChatToolCall {
    * "Approve & run" button that re-POSTs with the single-use token to finish
    * the action. Absent for tools confirmed on a dedicated dashboard surface.
    */
+  /**
+   * WARP-2469 — `kind: "tool_confirmation"` is a WARP-2305 interceptor
+   * challenge, rendered as an in-chat approval prompt. It carries a
+   * `challengeId` and, deliberately, NO token: the interceptor's secret
+   * never leaves the orchestrator, so holding the SSE stream is not the
+   * same as holding the approval. Every other `kind` is the pre-existing
+   * WARP-640 one-click handle and still carries `confirmationToken` —
+   * read that field only after checking `kind`.
+   */
   confirmation?: {
     kind: string;
     sceneId?: string;
-    confirmationToken: string;
+    confirmationToken?: string;
+    challengeId?: string;
+    tool?: string;
+    status?: string;
+    /** Epoch ms. Past this the prompt renders as expired. */
+    expiresAt?: number;
+    /** PHI-free argument summary; never an argument VALUE. */
+    summary?: {
+      tool: string;
+      fields: { key: string; kind: string; detail: string; value?: boolean }[];
+      truncatedFields: number;
+    };
   };
-  /** Local approve-button state: undefined = idle, then running → ran/failed. */
-  confirmState?: "running" | "ran" | "failed";
+  /**
+   * Local approve-button state: undefined = idle, then running →
+   * ran/failed. WARP-2469 adds `denied` and `expired`, which are decided
+   * states rather than in-flight ones: a denied prompt must not read as
+   * a failure the user should retry.
+   */
+  confirmState?: "running" | "ran" | "failed" | "denied" | "expired";
 }
 
 export interface ChatMessage {

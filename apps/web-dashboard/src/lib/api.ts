@@ -3697,6 +3697,58 @@ export async function runSceneConfirmed(
 }
 
 /**
+ * WARP-2469 — the outcome of an in-chat tool approval.
+ *
+ * Deliberately WITHOUT the interceptor's bound token. Approving flips the
+ * challenge to `approved` in the orchestrator's store, and the agent loop
+ * that redeems the token runs SERVER-SIDE on `/api/llm/chat` for every
+ * caller — this dashboard and a raw API client alike. The loop claims the
+ * grant from that store itself and attaches the token via `_meta` when the
+ * model re-issues the call, so no client ever needs the secret; returning
+ * it would hand a live single-use write capability to whatever holds the
+ * HTTP response, for nothing.
+ */
+export interface ToolConfirmationOutcome {
+  challengeId: string;
+  status: "approved" | "denied";
+  tool: string;
+  /** Epoch ms until which the loop can still claim the approved grant. */
+  expiresAt?: number;
+}
+
+/**
+ * WARP-2469 — approve or deny a WARP-2305 interceptor challenge raised
+ * during a chat turn.
+ *
+ * The client holds only the opaque `challengeId`; the token stays in the
+ * orchestrator. A 403 means this role may not approve this tool, a 410
+ * means the challenge outlived its TTL (the prompt should render as
+ * expired and offer a re-request), and a 409 means it was already
+ * resolved. Each throws with `status` attached so the chip can tell
+ * those apart instead of showing one generic failure.
+ */
+export async function resolveToolConfirmation(
+  challengeId: string,
+  decision: "approve" | "deny",
+): Promise<ToolConfirmationOutcome> {
+  const res = await authFetch(`${BASE}/api/llm/confirm/${challengeId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(
+      data.error || data.status || `Couldn't record your decision (${res.status})`,
+    ) as Error & { status?: number; reason?: string };
+    err.status = res.status;
+    err.reason = typeof data.status === "string" ? data.status : undefined;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
  * A smart-home routine (Scene, WARP-474) as listed by `GET /api/scenes` — a
  * named batch of device actions an owner can run in one tap. `actionCount` is
  * how many device commands the routine fires.
@@ -8124,12 +8176,21 @@ export interface SaasCredentialField {
  * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
  * credential is not an absent one, and telling a person to "connect" when they
  * already did is how a broken connection stays broken.
+ *
+ * `ERROR` is deliberately distinct from `NEEDS_RECONNECT` (WARP-2458, mirrored
+ * here by WARP-2517): the service folds a persisted `ERROR` status straight
+ * through, and it means something a new key will not fix — a vendor-side
+ * refusal like an IP access policy or a plan limit. This union mirrors the
+ * orchestrator's `SaasConnectionState` in `saas-credential.service.ts`;
+ * dropping a member the box can send is how `STATE_COPY[view.state]` came to
+ * crash the credentials page on the very rows it exists to repair.
  */
 export type SaasConnectionState =
   | "NOT_CONFIGURED"
   | "PROVISIONING"
   | "CONNECTED"
   | "NEEDS_RECONNECT"
+  | "ERROR"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   | "DISABLED";
@@ -8139,7 +8200,24 @@ export interface SaasCredentialView {
   displayName: string;
   category: string;
   state: SaasConnectionState;
+  /**
+   * Whether EVERY declared secret is stored — an `every()`, so a provider
+   * declaring two with one stored reports `false`. It answers "is this
+   * connection usable", NOT "was the credential removed" (WARP-2489).
+   */
   hasCredentials: boolean;
+  /**
+   * WARP-2489 — whether the credential material was actually removed from the
+   * row, straight from the box, derived there by the same `credentialsPurgedFor`
+   * that builds `IntegrationConnection.credentialsPurged` for the hub.
+   *
+   * OPTIONAL for the same reason it is optional on `IntegrationConnection`
+   * (`erp-types.ts`): this interface mirrors a JSON payload rather than being
+   * one, and a response that does not carry the key must not be read as either
+   * answer. `undefined` means "the box said nothing", which is a third fact and
+   * renders as neither sentence.
+   */
+  credentialsPurged?: boolean;
   configured: boolean;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */

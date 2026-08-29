@@ -506,3 +506,53 @@ describe("DELETE /api/devices/clients/:id — forged X-Forwarded-For cannot mint
     expect(bumped).not.toContain("ratelimit:revoke:ip:");
   });
 });
+
+// CodeQL js/polynomial-redos: the scheme matcher is `/^Basic\s+(\S.*)$/i`
+// (the credential must start with a non-space so `\s+` and the capture
+// can't overlap). The accept set the client relies on must not move.
+describe("DELETE /api/devices/clients/:id — Basic header matching", () => {
+  it("accepts extra whitespace between the scheme and the credential", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", "Basic \t   " + basicAuth("owner-1", "app-pw-123").slice(6));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ revoked: "dc-1" });
+  });
+
+  it("matches the scheme case-insensitively (RFC 7235)", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", "bAsIc " + basicAuth("owner-1", "app-pw-123").slice(6));
+
+    expect(res.status).toBe(200);
+  });
+
+  it("does not engage for a non-Basic scheme — falls through to the session path", async () => {
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", "Bearer " + basicAuth("owner-1", "app-pw-123").slice(6));
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "Missing or invalid authentication" });
+    expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("decides a 5,000-space credential run in well under 100 ms", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+    const started = performance.now();
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", "Basic" + " ".repeat(5000) + basicAuth("owner-1", "wrong").slice(6));
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual(BASIC_REVOKE_401_BODY);
+  });
+});
+
+/** The uniform Basic-path rejection body (device-clients.ts BASIC_REVOKE_401). */
+const BASIC_REVOKE_401_BODY = { error: "Invalid device credentials" };

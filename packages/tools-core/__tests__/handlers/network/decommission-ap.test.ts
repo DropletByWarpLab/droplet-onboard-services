@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import decommissionAp from "../../../src/handlers/network/decommission-ap.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(post: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(post: Mock): ToolContext {
   return {
     http: {
       orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },

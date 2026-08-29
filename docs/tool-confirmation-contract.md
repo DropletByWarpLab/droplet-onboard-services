@@ -302,28 +302,109 @@ command, a fact whose text must be echoed for the user to approve it).
 Do not write one merely to satisfy `requiresConfirmation`; that is what
 produced 37 copies of the same four lines.
 
+The one case that needs a second declaration: if your handler relays a
+`202` from an orchestrator route that gates the operation itself, set
+`confirmationOwner: "route"` so the user is asked once, by that route.
+§13 has the rule and the gate that enforces it.
+
 See `packages/tools-core/src/confirmation.ts` and
 `packages/tools-core/src/interceptor.ts`.
 
-## 13. Known gap — no human approval round-trip in chat
+## 13. Who asks — `confirmationOwner` (WARP-2472)
 
-The strong token is minted and returned on every challenge, and the
-dispatch path verifies it. What does **not** exist yet is a way for a
-human's approval in the chat surface to put that token back on the wire.
+`requiresConfirmation: true` says a human must approve the write. It
+does **not** say which layer asks, and for ten tools the answer is not
+this interceptor.
 
-The WARP-640 `confirmationToken` plumbing that exists today is for the
-**direct REST routes** (`network-firewall.routes.ts`, `matter.ts`,
-`scenes.ts`, `cameras.ts`) and their dashboard cards — not for the agent
-tool loop. `McpCallContext.confirmationToken` is the seam on the
-orchestrator side, and it is deliberately **not** set by the agent loop:
-a loop that re-attached a token it had just been handed would let the
-model approve its own writes, which is the hole this work closes.
+Those tools relay a `202` from an orchestrator route that runs its own
+Tier-2 gate (`apps/orchestrator/src/config/network-safety-rules.ts`).
+When the interceptor also challenged them, the user was asked twice for
+one action — and the route's challenge is the one the model cannot
+answer: it carries the **route's** token, redeemable only at
+`/api/network/command/confirm` / `/api/switch/command/confirm`, which
+`tool-routes.ts` marks `dashboardOnly`. `share_clip` goes further and
+`403`s the `_service:mcp` principal on its inline confirm path on purpose
+(`cameras.ts:574-578`) — an agent re-presenting the token it was just
+handed is the agent approving its own write. Net effect in chat: *"Block
+AA:BB:CC:DD:EE:FF?"* → **yes** → *"This action requires user confirmation
+in the Droplet dashboard."* → device not blocked.
 
-Until that round-trip exists:
+So the tool descriptor declares the owner:
 
-- the 16 legacy tools complete via §3's `confirmed: true` path;
-- the 8 gate-less registry tools and any remote tool are **refused** in
-  chat rather than writing unconfirmed.
+| value | meaning |
+|---|---|
+| `"interceptor"` (default) | this interceptor challenges, mints the token, and runs the handler only once it comes back |
+| `"route"` | the orchestrator route already answers `202` for this operation, with its own token and its own redemption path; the interceptor **stands down** so that route is the single gate |
 
-Wiring an approval affordance that returns the token — and then removing
-the legacy path — is follow-up work and needs its own ticket.
+Rules that make this safe:
+
+- It is a **skip, never a forward.** Nothing of ours is handed to the
+  route, because `evaluateNetworkCommand`
+  (`services/network-safety.service.ts:49-60`) accepts no confirmation
+  input at all — no token, no `confirmed` flag. There is no "forward the
+  interceptor's token" option; that fix has no target.
+- The skip sits **below** the runtime deny tier. No approval, from any
+  layer, makes a blocked action allowed.
+- `confirmationConsumed` stays `false`, so no audit row claims the
+  interceptor approved anything (§11).
+- `requiresConfirmation` stays `true` on route-owned tools. The flag
+  describes the tool, not the mechanism, so `WRITE_TOOLS`, the catalog
+  and the chat scope keep their meaning.
+- Omitting the field means `"interceptor"`. Read it through
+  `confirmationOwnerOf()` — the one place the default is applied. A tool
+  that forgets to declare therefore keeps its gate; forgetting can never
+  silently remove one.
+
+`detect_wan_port` was the reverse defect and is fixed here too: it
+declared `requiresConfirmation: false` while its route classified
+`switch_wan_detect` as Tier 2 and answered `202`. It is now `true` +
+`"route"`, so the flag stops lying and the tool appears in every
+enumeration that derives from it.
+
+**The drift gate.** A `"route"` declaration is a claim about a file in
+another package, so it is checked at runtime rather than trusted:
+`apps/orchestrator/src/__tests__/confirmation-owner-drift.guard.test.ts`
+enumerates `requiresConfirmation` off the live registry, `passThroughConfirmation`
+off each shipped `handler.toString()`, and the tier through
+`classifyNetworkCommand` — then asserts every pass-through tool declares
+the owner its route's tier implies. Adding a Tier-2 route to a tool that
+has not declared `"route"` fails it.
+
+## 14. The human approval round-trip in chat (WARP-2469, PR #1830)
+
+Earlier revisions of this document recorded "no human approval
+round-trip exists in chat" as a known gap. **That is no longer true.**
+
+The round-trip is four arrows, three of them added by #1830:
+
+1. the interceptor challenges (§3, unchanged);
+2. the agent loop registers the challenge and renders an approval prompt;
+3. the user approves via `POST /api/llm/confirm/:challengeId`;
+4. the loop claims the grant and attaches the token on `_meta` for the
+   model's re-issued call of the **same tool with the same arguments**.
+
+**The token never reaches the browser.** The wire carries an opaque
+`challengeId` that authorises nothing; the store keeps the token and
+hands it out only after a human has moved the challenge to `approved`
+through the role-gated route. Forwarding the raw token in the SSE
+`tool_result` — which is what `interceptOutcomeToToolResult` puts at
+`details.confirmationToken` — would make the approval authenticated by
+whoever holds the stream, including a `guest`, who may approve nothing.
+Where no approval store is wired (voice, ToolSpec runs) the chip
+degrades to display-only rather than leaking.
+
+Approval is role-gated twice: `requireRole("owner","admin","family")` at
+registration, then `toolAllowedForTier` in the handler against the
+challenge's actual tool — the same predicate the chat dispatch path uses,
+so approval and execution cannot disagree.
+
+`McpCallContext.confirmationToken` is still never set by the loop on its
+own. A token becomes claimable **only** after a human acted; nothing the
+model or the interceptor produces reaches the store by itself. That is
+the same reasoning §3 gives, now with a human in the middle instead of a
+missing arrow.
+
+What remains open: the legacy `confirmed: true` acceptance (§3) is not
+yet retired, so the hand-rolled two-phase tools still complete that way.
+Route-owned tools (§13) never enter this flow at all — their approval
+happens in the dashboard, on the route's own token.

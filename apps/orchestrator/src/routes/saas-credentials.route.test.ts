@@ -17,6 +17,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import express, { type Request, type Response, type NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
@@ -46,6 +48,7 @@ import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.j
 import {
   openSaasCredentials,
   sealSaasCredentials,
+  type SaasConnectionRow,
 } from "../services/saas-credential.service.js";
 
 const TEST_KEY = Buffer.alloc(32, 3).toString("base64");
@@ -90,6 +93,37 @@ interface StubRow {
   providerConfig: unknown;
   updatedAt: Date;
 }
+
+/**
+ * The narrowed cast is what makes a dropped credential column a compile error.
+ *
+ * WARP-2489 made BOTH credential columns REQUIRED on `SaasConnectionRow`,
+ * because "was this connection's credential removed" is a question about the
+ * ROW and the row has two of them — answering it from `providerTokensEnc`
+ * alone lets the credentials page report a purge the hub denies. Its docstring
+ * says so outright: "a caller that narrows its `select` and drops the column
+ * must fail to compile rather than silently claim a purge."
+ *
+ * `saas-credentials.ts` was erasing exactly that check at two of its three
+ * Prisma reads. `as unknown as SaasConnectionRow` is a DOUBLE cast, and a
+ * double cast asserts through any shape at all — so a `select` narrowed to the
+ * columns a handler happens to read would have compiled, and
+ * `credentialsPurgedFor` would then have judged a purge from a column that was
+ * never fetched. `findRow` had it right with a plain `as`; the create and
+ * update paths now match it.
+ *
+ * `StubRow` above IS a narrowed select — it declares five columns and not
+ * `apiCredentialsEnc`. That makes it the honest fixture: the assignment below
+ * is the error the plain cast reinstates and the double cast swallowed.
+ *
+ * Restore either double cast and this directive goes UNUSED, failing tsc with
+ * "Unused '@ts-expect-error' directive" — which is what makes this a gate and
+ * not a comment. `vitest` cannot see any of it: esbuild strips types, so
+ * `npx tsc --noEmit` in `apps/orchestrator` is what enforces it.
+ */
+// @ts-expect-error — a select without `apiCredentialsEnc` is not a SaasConnectionRow.
+const NARROWED_SELECT_IS_NOT_A_ROW: SaasConnectionRow = {} as StubRow;
+void NARROWED_SELECT_IS_NOT_A_ROW;
 
 function createPrismaStub(initial: StubRow | null) {
   let row = initial;
@@ -438,5 +472,34 @@ describe("audit — one row per mutation, carrying hasSecret and never the value
       .patch(`/api/integrations/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "sk_live_wrong" } });
     expect(credentialRows()).toHaveLength(0);
+  });
+});
+
+describe("the row casts stay narrow enough to keep the structural check", () => {
+  /**
+   * The companion to the `@ts-expect-error` fixture above, and the half that
+   * actually gates the ROUTE.
+   *
+   * `tsc` alone cannot catch this. `as unknown as SaasConnectionRow` asserts
+   * through any shape whatsoever, so restoring the double cast leaves the
+   * typecheck perfectly green — verified, not assumed. That is exactly what
+   * makes the double cast dangerous and why it needs a different kind of gate:
+   * the type fixture proves a narrowed select is rejected, and this proves the
+   * route never opts out of that rejection.
+   *
+   * Mutation: put either `as unknown as SaasConnectionRow` back in
+   * `saas-credentials.ts` → red here, green under `tsc`.
+   */
+  it("never launders a Prisma result through `unknown` on the way to a row", () => {
+    const source = readFileSync(
+      path.resolve(process.cwd(), "src/routes/saas-credentials.ts"),
+      "utf-8",
+    );
+
+    expect(source).toContain("as SaasConnectionRow");
+    // The whole point: a double cast would let a `select` that drops
+    // `apiCredentialsEnc` compile, and `credentialsPurgedFor` would then judge
+    // a purge from a column that was never fetched.
+    expect(source).not.toContain("as unknown as SaasConnectionRow");
   });
 });

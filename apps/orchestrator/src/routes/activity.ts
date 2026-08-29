@@ -26,6 +26,7 @@ import {
   type ActivityRowContent,
   type ActivitySeverityName,
 } from "../services/audit-signing.service.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 
 /**
  * WARP-456: owner/admin gate for the activity surface. Same shape as
@@ -231,6 +232,10 @@ export function createActivityRouter(prisma: PrismaClient): Router {
   // repeated re-verify clicks against a damaged table.
   router.get(
     "/activity/verify",
+    // CodeQL js/missing-rate-limiting — the walk is O(rows) even when
+    // coalesced (WARP-1027 only dedupes *concurrent* callers); a per-IP
+    // ceiling stops one admin session from re-running it back to back.
+    sensitiveRateLimit,
     requireOwnerOrAdmin,
     async (_req, res, next) => {
       try {

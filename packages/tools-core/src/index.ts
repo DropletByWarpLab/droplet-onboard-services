@@ -1,7 +1,9 @@
 // WARP-1611: `ScoreKind` is exported so producers and consumers of a
 // retrieval score can share one declaration of the scale union instead
 // of each restating it.
-export type { Tool, ToolContext, ToolHandler, ToolResult, ToolError, Role, ScoreKind, HttpClient, MatterController } from "./types.js";
+// WARP-2472: `ConfirmationOwner` is exported so the orchestrator's drift
+// gate can name the enum rather than restate its two members.
+export type { Tool, ToolContext, ToolHandler, ToolResult, ToolError, Role, ScoreKind, HttpClient, MatterController, ConfirmationOwner } from "./types.js";
 export type { PrivateEnhancement } from "./private-enhancement.js";
 export { TOOLS, getTool } from "./registry.js";
 // WARP-2497 — the cloud_query_dataset vocabulary. Re-exported so the
@@ -35,6 +37,8 @@ export {
   createRuntimeDenyTier,
   defaultToolCallInterceptor,
   declaresConfirmedFlag,
+  // WARP-2472 — the single place the `"interceptor"` default is applied.
+  confirmationOwnerOf,
   interceptOutcomeToToolResult,
   interceptorAuditEvent,
   type InterceptableTool,

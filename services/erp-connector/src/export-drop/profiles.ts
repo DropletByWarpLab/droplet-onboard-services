@@ -268,6 +268,47 @@ export const DATASET_CATEGORY: Readonly<Record<DatasetName, DatasetCategory>> = 
  *    declared `count` in {@link COLUMN_KIND} so they parse as numbers rather
  *    than serializing as the string `"1,234"`, while staying outside the
  *    currency rule, which they have no business satisfying.
+ *
+ * ## `updated_at` — present only where a vendor can honestly fill it (WARP-2464)
+ *
+ * `issued_at` and `due_at` are facts ABOUT a document. `updated_at` is a fact
+ * about our copy of it: when the vendor last changed the record. It is the
+ * ordering key an incremental sync should advance on, because every other
+ * candidate — a created-at, an id sequence — is approximate by construction:
+ * a record edited after creation, with an unchanged ordering key, is invisible
+ * to an incremental pass. WARP-2218 ships its sweep as mandatory for exactly
+ * that reason.
+ *
+ * Thirteen of the twenty datasets carry it. **Seven deliberately do not**, and
+ * that absence is the load-bearing half of this design:
+ *
+ *  * `appointment`, `patient` — no practice-management track exposes a
+ *    modification timestamp at all.
+ *  * `account`, `ap_summary` — computed aggregates. There is no vendor OBJECT
+ *    to carry a timestamp; the row is derived from other rows. Xero's
+ *    `UpdatedDateUTC` notably does NOT move on a contact-balance change
+ *    (WARP-2383), so borrowing it here would be the exact lie this column
+ *    exists to prevent.
+ *  * `balance_transaction` — Stripe emits no `balance_transaction.*` event, so
+ *    `/v1/events`, the source for every other Stripe dataset, does not reach
+ *    it. Stamping the parent charge's event time on the ledger row would be
+ *    another object's timestamp wearing this one's name.
+ *  * `campaign`, `audience` — Mailchimp's `last_changed` is on a list MEMBER,
+ *    which is not one of these twenty. Neither the campaign resource nor the
+ *    list resource carries a modification time of its own.
+ *
+ * A synthesised `updated_at` is worse than none, because a watermark TRUSTS
+ * it: it advances, the sweep starts to look redundant, and edits quietly stop
+ * being seen with nothing anywhere reporting a fault. So each entry below
+ * states the vendor field it comes from AND its known limits — the same
+ * convention the `invoice` money comment set, for the same reason. The five
+ * vendors' fields are not equivalent, and "there is an `updated_at`" is not
+ * enough to use one safely. `__tests__/canonical-updated-at.test.ts` asserts
+ * the comment is really there, and that the seven above stay without it.
+ *
+ * The column is declared but never {@link REQUIRED_CANONICAL}: a track that
+ * has no source for it leaves it present-and-undefined, like any other
+ * unmapped canonical column, and a watermark falls back to its ordering key.
  */
 export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>> = {
   appointment: ["appt_id", "appt_time", "provider_id", "operatory_id", "status", "patient_id"],
@@ -276,10 +317,50 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
   // Money OWED TO the business. `balance` is what remains unpaid, which is not
   // the same as `amount` — an invoice part-paid still has its original amount,
   // and summing amounts instead of balances overstates receivables.
-  invoice: ["invoice_id", "issued_at", "due_at", "customer_id", "amount", "balance", "status"],
+  invoice: [
+    "invoice_id",
+    "issued_at",
+    "due_at",
+    "customer_id",
+    "amount",
+    "balance",
+    "status",
+    // THREE vendors serve this dataset, and their timestamps are not
+    // interchangeable — read the one that applies to the track in hand.
+    //
+    // Xero `UpdatedDateUTC`. DOCUMENTED-INCOMPLETE, and this is the one entry
+    // whose limits change how the sync must be operated: it does not fire on a
+    // DueDate edit, on SentToContact, or on a contact-balance change
+    // (WARP-2383). An incremental pass keyed on it therefore misses real edits
+    // in silence, which is why WARP-2218's sweep stays MANDATORY for Xero
+    // rather than becoming a safety net.
+    //
+    // QuickBooks Online `MetaData.LastUpdatedTime` and QuickBooks Desktop
+    // qbXML `TimeModified` (WARP-2475). Both are complete — they move on any
+    // edit — but both are LOCAL WALL-CLOCK PLUS AN OFFSET, normalised to UTC
+    // on the way in. QBD sometimes prints no offset at all, and a naive value
+    // is refused rather than guessed, so this column is undefined on those
+    // rows and the sweep is what catches those edits.
+    "updated_at",
+  ],
   // Money OWED BY the business — the half WARP-1991 records as having no data
   // source anywhere in the product.
-  bill: ["bill_id", "issued_at", "due_at", "vendor_id", "amount", "balance", "status"],
+  bill: [
+    "bill_id",
+    "issued_at",
+    "due_at",
+    "vendor_id",
+    "amount",
+    "balance",
+    "status",
+    // Xero `UpdatedDateUTC`, with the same documented gaps as `invoice`: no
+    // fire on DueDate, SentToContact, or a contact-balance change (WARP-2383).
+    // The sweep stays mandatory here for the same reason. QuickBooks Online
+    // `MetaData.LastUpdatedTime` and QuickBooks Desktop qbXML `TimeModified`
+    // fill it on their own tracks (WARP-2475), on the same terms as
+    // `invoice`: converted from an offset, refused when naive.
+    "updated_at",
+  ],
   ap_summary: ["vendor_id", "balance"],
 
   // ── payments (WARP-2280) ──────────────────────────────────────────────────
@@ -299,22 +380,62 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "amount_refunded",
     "currency",
     "status",
+    // Stripe puts NO modification time on the object — a charge carries only
+    // `created`. This comes from the `/v1/events` stream (`charge.updated`,
+    // `charge.refunded`), whose own `created` is when the change happened. The
+    // practical consequence: a sync must read the event stream, because
+    // re-listing charges can never reveal that one of them moved.
+    "updated_at",
   ],
   // Money going BACK to a customer. `amount` is a positive magnitude — the
   // direction is the dataset's name, not the number's sign — so summing
   // refunds gives what was returned, and a caller that wants a net figure
   // subtracts deliberately rather than by accident.
-  refund: ["refund_id", "created_at", "charge_id", "amount", "currency", "status", "reason"],
+  refund: [
+    "refund_id",
+    "created_at",
+    "charge_id",
+    "amount",
+    "currency",
+    "status",
+    "reason",
+    // From `/v1/events` (`refund.updated`), not from the object. A refund's
+    // `status` moves after creation — pending to succeeded, or to failed — and
+    // that transition is the whole reason this dataset needs a modification
+    // time: the row a sync already holds is the row that changed.
+    "updated_at",
+  ],
   // Money leaving the processor's balance for the business's bank. Positive
   // magnitude, same reasoning as `refund`. A payout is NOT revenue: it is a
   // transfer of money already earned, so adding payouts to charges
   // double-counts every dollar.
-  payout: ["payout_id", "created_at", "arrival_at", "amount", "currency", "status"],
+  payout: [
+    "payout_id",
+    "created_at",
+    "arrival_at",
+    "amount",
+    "currency",
+    "status",
+    // From `/v1/events` (`payout.paid`, `payout.failed`, `payout.updated`),
+    // not from the object. A payout is created `pending` and settles days
+    // later, so its ordering key `created_at` is guaranteed stale by the time
+    // the row matters — the clearest case in this table for why an incremental
+    // pass cannot key on creation.
+    "updated_at",
+  ],
   // The fee reconciliation row, and the only place the processor's cut is
   // visible. `net_amount` = `gross_amount` - `fee_amount` and is the ONLY
   // canonical money column that may legitimately be NEGATIVE: a refund's
   // balance transaction takes money off the balance. `fee_amount` is a
   // positive magnitude deducted from gross.
+  //
+  // NO `updated_at` (WARP-2464) — the one Stripe dataset without it. Stripe
+  // emits no `balance_transaction.*` event type, so `/v1/events`, the source
+  // the other four Stripe datasets use, does not reach this row. Its
+  // pending-to-available `status` move is consequently invisible to an
+  // incremental pass, and only WARP-2218's sweep catches it. Taking the parent
+  // charge's or payout's event time would put another object's timestamp here
+  // under this one's name, which is the failure the column exists to avoid.
   balance_transaction: [
     "balance_transaction_id",
     "created_at",
@@ -337,6 +458,11 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "amount",
     "currency",
     "interval",
+    // From `/v1/events` (`customer.subscription.updated`), not from the
+    // object. A subscription is the longest-lived row in this table and almost
+    // every fact about it — status, price, period — changes long after
+    // creation, so its `created` is close to useless as an ordering key.
+    "updated_at",
   ],
 
   // ── CRM (WARP-2280) ───────────────────────────────────────────────────────
@@ -352,16 +478,54 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "email",
     "company_id",
     "lifecycle_stage",
+    // HubSpot `hs_lastmodifieddate`, a real property on the object (unlike
+    // Stripe's), and the field its `search` endpoint filters and sorts on. It
+    // moves on ANY property write, including ones HubSpot's own automation
+    // makes — so it is complete, but it is noisy: a workflow touching a
+    // property re-surfaces the contact with nothing a reader would call a
+    // change.
+    "updated_at",
   ],
-  company: ["company_id", "created_at", "name", "domain"],
+  // `hs_lastmodifieddate`, as for `contact`.
+  company: [
+    "company_id",
+    "created_at",
+    "name",
+    "domain",
+    // HubSpot `hs_lastmodifieddate`.
+    "updated_at",
+  ],
   // A pipeline opportunity. `amount` is EXPECTED value, not money that exists:
   // a deal amount is a salesperson's estimate on an open deal and a contract
   // value on a won one. It is in the same major-unit decimal form as every
   // other money column, but summing it with invoice balances mixes forecast
   // with fact — which is the single most common way a revenue number gets
   // reported wrong.
-  deal: ["deal_id", "created_at", "closed_at", "company_id", "name", "stage", "amount", "currency"],
-  ticket: ["ticket_id", "created_at", "closed_at", "contact_id", "subject", "status", "priority"],
+  deal: [
+    "deal_id",
+    "created_at",
+    "closed_at",
+    "company_id",
+    "name",
+    "stage",
+    "amount",
+    "currency",
+    // HubSpot `hs_lastmodifieddate`. A deal's `stage` and `amount` are edited
+    // repeatedly over its life, so this is the only ordering key that can see
+    // a pipeline move at all.
+    "updated_at",
+  ],
+  ticket: [
+    "ticket_id",
+    "created_at",
+    "closed_at",
+    "contact_id",
+    "subject",
+    "status",
+    "priority",
+    // HubSpot `hs_lastmodifieddate`.
+    "updated_at",
+  ],
   // WARP-2466 — a CRM timeline activity: a call, an email, a meeting, a note,
   // a task. `type` is which of those it was, `occurred_at` is when it happened
   // (NOT when the record was written — a meeting logged the next morning
@@ -390,6 +554,12 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "currency",
     "financial_status",
     "fulfillment_status",
+    // Shopify's own `updated_at`, filterable as `updated_at_min` — the only
+    // vendor here whose field already carries this name and this meaning. It
+    // moves on fulfillment and refund writes, which is exactly what makes an
+    // order's `created_at` unusable as an ordering key: an order placed on
+    // Monday and shipped on Friday changes without moving.
+    "updated_at",
   ],
   // A sellable catalog item. `price_amount` is the LIST price for one unit,
   // before any discount and excluding tax — what an order line actually
@@ -404,6 +574,10 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "currency",
     "inventory_quantity",
     "status",
+    // Shopify `updated_at` (`updated_at_min`). Price and inventory are edited
+    // constantly, so a catalog sync keyed on creation would freeze at the
+    // first import.
+    "updated_at",
   ],
   // A storefront buyer. Distinct from `contact` (a CRM person, who may have
   // bought nothing) and from `patient` (clinical, PHI). `total_spent_amount`
@@ -418,6 +592,10 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "orders_count",
     "total_spent_amount",
     "currency",
+    // Shopify `updated_at` (`updated_at_min`). `orders_count` and
+    // `total_spent_amount` are running totals the storefront rewrites on every
+    // purchase, so this row changes far more often than the customer does.
+    "updated_at",
   ],
 
   // ── marketing (WARP-2280) ─────────────────────────────────────────────────
@@ -436,6 +614,11 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "opens_unique",
     "clicks_unique",
   ],
+  // NO `updated_at` on either marketing dataset (WARP-2464). Mailchimp's
+  // `last_changed` is a field on a list MEMBER, which is not one of these
+  // twenty datasets; the campaign resource and the list resource each carry
+  // only a creation time. Mailchimp's e-commerce orders have none either.
+  //
   // A mailing list. `member_count` is CURRENT subscribed members, not everyone
   // who was ever on the list — `unsubscribe_count` is tracked separately
   // rather than netted off, so neither number has to be reconstructed from the
@@ -572,6 +755,10 @@ export const COLUMN_KIND: Readonly<Record<string, "text" | "money" | "count" | "
   customer_id: "text",
   vendor_id: "text",
   amount: "money",
+  // The vendor modification time (WARP-2464). A timestamp, never text: a
+  // watermark compares these, and a string comparison orders "2026-9-1" after
+  // "2026-10-1" — a sync that silently stops advancing for a month.
+  updated_at: "timestamp",
   // payments (WARP-2280)
   charge_id: "text",
   refund_id: "text",

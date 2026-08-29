@@ -229,6 +229,16 @@ export const STRIPE_MIN_POLL_INTERVAL_SECONDS = 900;
  */
 export const STRIPE_EVENT_CURSOR_LAG_MS = 5_000;
 
+/**
+ * The `/v1/events` type filter used to recover an invoice's modification time
+ * (WARP-2494). Stripe documents `type` as "a specific event name, or group of
+ * events using * as a wildcard", so this is one server-side filter rather than
+ * an enumeration this file would have to keep in step with Stripe's event
+ * catalogue - a missed member of such a list reads as "that invoice never
+ * changed", which is the failure `updated_at` exists to prevent.
+ */
+export const STRIPE_INVOICE_EVENT_TYPE = "invoice.*";
+
 /** `/v1/events` retention. A gap wider than this cannot be closed by any cursor. */
 export const STRIPE_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -1459,6 +1469,9 @@ export class StripeConnector implements Connector {
         // — the one place in this package where the vendor already models the
         // state we would otherwise have to derive.
         const raw = await this.list(op, "/v1/invoices", { status: "open" });
+        // WARP-2494 — the modification time is a SECOND read, because Stripe
+        // does not put one on the object. See {@link invoiceModifiedAt}.
+        const modifiedAt = await this.invoiceModifiedAt(op, raw);
         const rows = raw.map((r) => ({
           invoice_id: typeof r.number === "string" ? r.number : String(r.id ?? ""),
           issued_at: StripeConnector.instant(r.created),
@@ -1467,6 +1480,9 @@ export class StripeConnector implements Connector {
           amount: majorUnits(r.total, r.currency),
           balance: majorUnits(r.amount_remaining, r.currency),
           status: typeof r.status === "string" ? r.status : undefined,
+          // Keyed on the OBJECT id, never on `invoice_id` - that column is the
+          // merchant-facing `number`, which the event feed never mentions.
+          updated_at: StripeConnector.instant(modifiedAt.get(String(r.id ?? ""))),
         }));
         return sortByKey(sortByKey(rows, "invoice_id"), "due_at");
       }
@@ -1554,6 +1570,71 @@ export class StripeConnector implements Connector {
       net: majorUnits(r.net, r.currency),
       status: typeof r.status === "string" ? r.status : undefined,
     }));
+  }
+
+  /**
+   * The last time each of `invoices` CHANGED, keyed on the Stripe object id.
+   *
+   * Stripe puts no modification timestamp on an invoice - the object carries
+   * `created` and nothing else - so re-listing invoices can never reveal that
+   * one of them moved. The only source is the `/v1/events` feed, whose own
+   * `created` is when the change happened; this is the same feed
+   * {@link pollEvents} already consumes, read here for its timestamps rather
+   * than for its objects, so nothing is re-fetched.
+   *
+   * Emitting the object's `created` as `updated_at` instead would be strictly
+   * worse than emitting nothing: a watermark TRUSTS this column, so a row that
+   * has never changed would advance it and the edits that follow would stop
+   * being seen with nothing reporting a fault. An invoice whose last change
+   * predates {@link STRIPE_EVENT_RETENTION_MS} therefore gets `undefined`, and
+   * WARP-2218's sweep is what catches it.
+   *
+   * Two bounds keep this from spending the merchant's read allocation:
+   *
+   *  1. `type=invoice.*` - the documented single-type wildcard, so the feed is
+   *     filtered server-side rather than paged through and discarded here.
+   *  2. `created[gte]` never reaches further back than the OLDEST invoice in
+   *     hand, because no `invoice.*` event can predate the invoice it is
+   *     about (`invoice.created` is the first one). Retention is the other
+   *     bound; the later of the two wins.
+   *
+   * An empty invoice list short-circuits to zero requests: there is nothing to
+   * stamp, and the call is metered.
+   */
+  private async invoiceModifiedAt(
+    op: string,
+    invoices: readonly Record<string, unknown>[],
+  ): Promise<Map<string, number>> {
+    const byObject = new Map<string, number>();
+    if (invoices.length === 0) return byObject;
+
+    const retentionFloor = Math.floor((this.now() - STRIPE_EVENT_RETENTION_MS) / 1000);
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const inv of invoices) {
+      if (typeof inv.created === "number" && Number.isFinite(inv.created)) {
+        oldest = Math.min(oldest, inv.created);
+      }
+    }
+    const floor = Number.isFinite(oldest) ? Math.max(retentionFloor, oldest) : retentionFloor;
+
+    const events = await this.list(op, "/v1/events", {
+      type: STRIPE_INVOICE_EVENT_TYPE,
+      "created[gte]": floor,
+    });
+
+    for (const ev of events) {
+      const created =
+        typeof ev.created === "number" && Number.isFinite(ev.created) ? ev.created : undefined;
+      const objectId = StripeConnector.idOf(
+        (ev.data as { object?: unknown } | undefined)?.object,
+      );
+      if (created === undefined || !objectId) continue;
+      // MAXIMUM, not last-seen: ordering on /v1/events is explicitly not
+      // guaranteed, so "the last one on the page" is a stale change time.
+      const prev = byObject.get(objectId);
+      if (prev === undefined || created > prev) byObject.set(objectId, created);
+    }
+    return byObject;
   }
 
   /**

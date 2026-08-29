@@ -151,6 +151,14 @@ describe("connect() probes a cloud credential with health()", () => {
       ["capability", async () => { throw new MailchimpCapabilityMissingError("lists", "plan"); }],
       ["blocked", async () => { throw new ConnectorBlockedError("health", "nothing wired"); }],
       ["unknown", async () => { throw new Error("boom"); }],
+      // A rejection whose VALUE is `undefined`. The catch still runs, but a
+      // classifier reached through `statusAfterHealthProbe(err)` reads the
+      // undefined as its no-argument success calling convention and answers
+      // CONNECTED — a failed probe recorded as a healthy row. The catch must
+      // call `integrationStatusForHealthFailure` directly, where undefined is
+      // just another unclassifiable failure: ERROR.
+      // eslint-disable-next-line no-throw-literal
+      ["rejected-undefined", async () => { throw undefined; }],
     ];
     for (const [name, health] of outcomes) {
       const row = await connectAndReadRow("stripe", connectorWith(health));
