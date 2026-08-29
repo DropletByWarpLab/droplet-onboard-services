@@ -316,6 +316,17 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   //     that does not work. The cost is "that's a good deal".
   // Both cost ONE 842-char schema on a turn that did not want it, which is the
   // cheap direction to be wrong in. Neither steals a word another rule needs.
+  //
+  // `refunds?` and `payouts?` are claimed although the Stripe track REFUSES
+  // their dedicated datasets by design (no entry in
+  // STRIPE_READABLE_COLLECTIONS; `stripe.test.ts` pins the refusal at zero
+  // calls). Claimed anyway, for two reasons: a refund question is often
+  // answerable from the `charge` dataset the track DOES serve — a charge row
+  // carries `amount_refunded` — and for the rest, advertising the reader is
+  // what lets the model receive `DatasetNotServedError`'s "this connection
+  // will never have that data" and say so, instead of finding no tool and
+  // inventing an outage. Dropping the words would trade an honest refusal
+  // for a hallucinated one.
   { pattern: /\b(stripe|hubspot|mailchimp|crm|invoices?|invoicing|bill|billed|billing|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
