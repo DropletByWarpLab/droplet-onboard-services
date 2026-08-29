@@ -156,12 +156,18 @@ else
   fail "scripts/lib/compose.sh build_services is missing gateway"
 fi
 
-# 9) This suite runs in CI: test-fips.yml must invoke it.
-tfy="$REPO_ROOT/.github/workflows/test-fips.yml"
-if grep -q 'tests/nginx-fips.test.sh' "$tfy"; then
-  pass "test-fips.yml runs tests/nginx-fips.test.sh"
+# 9) This suite runs in CI: ci.yml's `fips` leg must invoke it.
+#    WARP-2481 moved the FIPS static-lint job out of test-fips.yml (a
+#    path-filtered workflow, whose jobs can never be required status checks)
+#    and into ci.yml, where `ci-summary` aggregates it. Follow the file.
+#    Match the `run:` INVOCATION, not the bare filename: the filename also
+#    appears in detect's `fips:` path filter, so a substring grep stays green
+#    even if the step that actually executes this suite is deleted.
+ciy="$REPO_ROOT/.github/workflows/ci.yml"
+if grep -qE '^[[:space:]]*run:[[:space:]]*bash tests/nginx-fips\.test\.sh[[:space:]]*$' "$ciy"; then
+  pass "ci.yml's fips leg runs tests/nginx-fips.test.sh"
 else
-  fail "test-fips.yml does not run tests/nginx-fips.test.sh"
+  fail "ci.yml has no step running tests/nginx-fips.test.sh"
 fi
 
 echo ""
