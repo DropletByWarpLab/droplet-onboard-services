@@ -21,10 +21,15 @@ import {
   narrowToolNamesForPrincipal,
   resolveToolAccessScope,
   toolAllowedForTier,
+  toolAllowedInScope,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
 } from "../services/tool-access.service.js";
+// WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
+// domain selection, so it sizes the tools[] the model actually receives.
+import { selectAdvertisedTools } from "../services/tool-selection.service.js";
+import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
@@ -1745,8 +1750,53 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
+        // WARP-2497 — in domains mode the agent sends only the SELECTED set,
+        // so the estimate must size that set, not the whole chat scope.
+        // Estimating over the full scope (~77 tools / ~14K tokens at the
+        // shipping window) left under 211 tokens of apparent headroom, so any
+        // registry growth "overflowed" the estimate and degradeToFit dropped
+        // the business block from real requests whose actual advertisement
+        // was a twentieth of that size.
+        //
+        // Same inputs the agent loop derives at its first iteration
+        // (llm-agent.service.ts): the RBAC-scoped pool, the last user turn's
+        // text (multimodal content yields "" there too), the persisted
+        // prior-turn tool names — this-turn iteration calls cannot exist yet,
+        // and replayed assistant turns have tool_calls zod-stripped — and the
+        // runtime half of the universe. Later iterations may re-admit tools
+        // (self-heal/continuity), but the system prompt this estimate gates
+        // is already fixed by then; the advertisement side has its own gate
+        // (assertToolAdvertisementFitsBudget). Full-scope mode keeps the
+        // existing whole-scope estimate byte-for-byte.
+        const scopedTools = effectiveTools.filter(
+          (t) => !toolAccessScope || toolAllowedInScope(t.name, toolAccessScope),
+        );
+        let estimatedTools = effectiveTools;
+        // `!== "off"`, the same reading of this flag as the continuity lookup
+        // above: the zod default is "domains", so anything but an explicit
+        // "off" means the agent will select. The agent's other gate —
+        // `toolChoice !== "none"` — has no counterpart here because
+        // chatRequestSchema's `tool_choice` cannot express "none" at all
+        // (`"auto" | undefined`), so on this route the agent always selects.
+        if (config.TOOL_SELECTION_MODE !== "off") {
+          const lastUserTurn = [...agentMessages]
+            .reverse()
+            .find((m) => m.role === "user");
+          const sel = selectAdvertisedTools({
+            mode: "domains",
+            userMessage:
+              typeof lastUserTurn?.content === "string"
+                ? lastUserTurn.content
+                : "",
+            pool: scopedTools.map((t) => t.name),
+            conversationToolNames: priorToolNames,
+            runtimeTools: runtimeToolRegistry.list(),
+          });
+          const selected = new Set(sel.advertised);
+          estimatedTools = scopedTools.filter((t) => selected.has(t.name));
+        }
         const toolSchemasJson = JSON.stringify(
-          effectiveTools.map((t) => ({
+          estimatedTools.map((t) => ({
             type: "function" as const,
             function: {
               name: t.name,
