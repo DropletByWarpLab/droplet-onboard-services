@@ -19,6 +19,7 @@ import {
   detectCompletionClaims,
   validateAnswerAgainstTrace,
   describeToolUseVerdict,
+  isRealDispatch,
 } from "./tool-use-validation.js";
 
 const entry = (tool: string, result: unknown): AgentTraceEntry => ({
@@ -82,7 +83,7 @@ describe("detectCompletionClaims — positives", () => {
     "The camera was successfully disabled.",
     "Successfully updated the schedule.",
     "I've already restarted the service.",
-    "I checked the logs and everything looks fine.",
+    "I've saved the new schedule.",
   ])("flags %j", (text) => {
     expect(detectCompletionClaims(text).length).toBeGreaterThan(0);
   });
@@ -110,6 +111,23 @@ describe("detectCompletionClaims — negatives (false positives are the real ris
     "None of the rules were removed.",
     "No changes were applied.",
     "The configuration is unchanged.",
+    // 🔴 RETRIEVAL verbs are deliberately NOT claims. They are ordinary English
+    // and fired on healthy conversational turns — and the exemption meant to
+    // protect those does not exist in practice, because the dashboard never
+    // sends tool_choice so tools are advertised on EVERY chat turn. Narrowed
+    // to state-changing verbs, which is also where a false "done" is actually
+    // harmful: these tools are physical.
+    "I checked the logs and everything looks fine.",
+    "I've listed the main options below.",
+    "I read your question as asking about the porch camera.",
+    "I looked at it from a couple of angles.",
+    // Verbs left OUT of the list on purpose — common in ordinary prose, where
+    // firing would punish a healthy turn.
+    "I've added a note below for context.",
+    "I set that aside for now.",
+    "I changed my mind about the earlier suggestion.",
+    "I searched for that and here is what I saw.",
+    "I found three cameras.",
     // pure conversation
     "Hello! How can I help you today?",
     "That depends on which camera you mean.",
@@ -143,6 +161,52 @@ describe("detectCompletionClaims — negatives (false positives are the real ris
     const [claim] = detectCompletionClaims(long);
     expect(claim.length).toBeLessThanOrEqual(160);
     expect(claim.endsWith("…")).toBe(true);
+  });
+});
+
+describe("isRealDispatch — loop guards are not dispatches", () => {
+  // The loop pushes trace entries for calls that NEVER reached a tool, all
+  // shaped {status:"error", …} exactly like a real failure. Counting them as
+  // dispatches reported "EVERY dispatch failed" (contradicted) on turns where
+  // nothing was dispatched at all (unsupported) — collapsing the two
+  // categories this module says need different fixes.
+  const guard = (code: string) => ({
+    result: { status: "error", error: { code, message: "x" } },
+  });
+
+  it.each(["TOOL_NOW_AVAILABLE", "UNKNOWN_TOOL", "REPEATED_CALL", "FORBIDDEN_TOOL"])(
+    "%s is not a dispatch",
+    (code) => expect(isRealDispatch(guard(code))).toBe(false),
+  );
+
+  it("a genuine tool error IS a dispatch", () => {
+    expect(isRealDispatch({ result: ERR_RESULT })).toBe(true);
+  });
+
+  it("a success payload is a dispatch", () => {
+    expect(isRealDispatch({ result: OK_RESULT })).toBe(true);
+  });
+
+  it("reports unsupported, not contradicted, when only guards fired", () => {
+    // The WARP-642 self-heal pushes TOOL_NOW_AVAILABLE and asks the model to
+    // retry; a model that then gives up and claims an action was being
+    // reported as contradicting a failed dispatch that never happened.
+    const v = validate("I've turned off the camera.", [
+      { ...entry("search_content", null), result: { status: "error", error: { code: "TOOL_NOW_AVAILABLE" } } },
+    ]);
+    expect(v.status).toBe("unsupported");
+    expect(v.counts.total).toBe(0);
+    expect(v.tools).toEqual([]);
+  });
+
+  it("still reports contradicted when a REAL dispatch failed alongside a guard", () => {
+    const v = validate("I've turned off the camera.", [
+      { ...entry("x", null), result: { status: "error", error: { code: "UNKNOWN_TOOL" } } },
+      entry("camera_set_state", ERR_RESULT),
+    ]);
+    expect(v.status).toBe("contradicted");
+    expect(v.counts.total).toBe(1);
+    expect(v.tools).toEqual(["camera_set_state"]);
   });
 });
 
@@ -259,7 +323,11 @@ describe("describeToolUseVerdict", () => {
     const line = describeToolUseVerdict(v);
     expect(line).toContain("NO tool was dispatched");
     expect(line).toContain("dispatches=0");
-    expect(line).toContain("I've turned off the camera.");
+    // 🔴 The log line must carry the SHAPE, never the model's prose — the
+    // excerpts can contain user file/message content and the logger has no
+    // redaction. The sentences go on the SSE frame instead.
+    expect(line).not.toContain("I've turned off the camera.");
+    expect(line).toContain("claimCount=1");
   });
 
   it("distinguishes the contradicted wording", () => {

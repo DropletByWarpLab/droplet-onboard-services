@@ -83,8 +83,18 @@ export type ToolUseStatus =
 
 export interface ToolUseVerdict {
   status: ToolUseStatus;
-  /** The claim excerpts that triggered a non-ok verdict. Short, and drawn
-   *  from the model's own text — safe to log (it is not corpus content). */
+  /**
+   * The claim excerpts that triggered a non-ok verdict, capped at 160 chars.
+   *
+   * ⚠ NOT LOG-SAFE. An earlier comment here claimed these were "safe to log
+   * (it is not corpus content)" and nothing established that: a claim is a raw
+   * slice of the model's answer, which is generated over whatever the user
+   * asked and whatever the tools returned — file contents, message bodies,
+   * device and person names. They belong on the SSE frame, which goes to the
+   * client already entitled to the answer. They must not reach the process log
+   * (bare pino to stdout, no redact paths, collected into the diagnostics
+   * bundle). `describeToolUseVerdict` emits `claimCount` for that reason.
+   */
   claims: string[];
   /** Dispatch tallies, so a log line explains itself without the trace. */
   counts: { total: number; success: number; error: number; pending: number };
@@ -115,6 +125,36 @@ export function classifyToolOutcome(result: unknown): ToolOutcome {
 }
 
 /**
+ * Error codes the agent loop pushes into `trace` for calls that NEVER REACHED
+ * a tool. They are shaped `{status:"error", …}` exactly like a real failure, so
+ * counting them as dispatches is wrong twice over:
+ *
+ *   - a turn whose only entries are guard hits reports "EVERY dispatch failed"
+ *     (contradicted) when in truth NOTHING was dispatched (unsupported) —
+ *     collapsing the two categories this module says need different fixes;
+ *   - the WARP-642 self-heal pushes TOOL_NOW_AVAILABLE and asks the model to
+ *     retry, so a model that then gives up and answers gets reported as
+ *     contradicting a failed dispatch that never happened.
+ *
+ * These are the loop's own control messages, not tool results.
+ */
+const NON_DISPATCH_ERROR_CODES = new Set([
+  "TOOL_NOW_AVAILABLE", // WARP-642 §3 self-heal — "call it again"
+  "UNKNOWN_TOOL",       // WARP-642 hallucinated-name guard
+  "REPEATED_CALL",      // loop repetition breaker
+  "FORBIDDEN_TOOL",     // WARP-1529 RBAC denial
+]);
+
+/** True when this trace entry is a loop guard rather than a real dispatch. */
+export function isRealDispatch(entry: { result: unknown }): boolean {
+  const r = entry.result;
+  if (r === null || typeof r !== "object") return true;
+  const err = (r as { error?: { code?: unknown } }).error;
+  const code = err && typeof err === "object" ? err.code : undefined;
+  return typeof code !== "string" || !NON_DISPATCH_ERROR_CODES.has(code);
+}
+
+/**
  * First-person COMPLETED-action claims.
  *
  * Tuned to be conservative. A false positive fires on a turn that did nothing
@@ -129,19 +169,49 @@ export function classifyToolOutcome(result: unknown): ToolOutcome {
  *   - an action verb, not a speech verb. "I explained", "I think", "I would
  *     suggest" are not claims about the world.
  */
+// 🔴 STATE-CHANGING VERBS ONLY. An earlier revision also listed retrieval
+// verbs — checked, searched, found, retrieved, fetched, looked, scanned,
+// queried, read, pulled, listed — and that made the guard fire on ordinary
+// conversation. Running the shipped regexes over plain answers flagged all of:
+//
+//     "I've listed the main options below."
+//     "I read your question as asking about the porch camera."
+//     "I looked at it from a couple of angles."
+//
+// Those are the model writing English, not claiming a dispatch. And the
+// exemption meant to protect them does not exist in practice: the comment at
+// the call site asserted that a conversational turn runs with
+// `tool_choice:"none"`, but the dashboard never sends `tool_choice` at all —
+// it defaults to `"auto"` (llm-agent.service.ts), so tools ARE advertised on
+// every chat turn. `"none"` is produced only by voice-io's greeting path and
+// email-analysis. So on the surface that matters, every turn was claim-checked
+// and ordinary sentences tripped it.
+//
+// Narrowing to state changes is the principled fix rather than a patch,
+// because it matches why this guard exists at all: these tools are PHYSICAL.
+// A false "I turned the camera off" or "I disabled that firewall rule" is a
+// safety and trust failure. A false "I looked at your files" is a turn of
+// phrase. Retrieval claims are also the ones a reader can verify for
+// themselves from the answer's own content, which action claims are not.
+//
+// Precision over recall, deliberately: a warning that fires on healthy turns
+// gets muted, and a muted guard protects nothing.
 const ACTION_VERBS = [
-  // state changes
-  "turned", "switched", "set", "enabled", "disabled", "activated", "deactivated",
+  // physical / device state
+  "turned", "switched", "enabled", "disabled", "activated", "deactivated",
   "started", "stopped", "restarted", "rebooted", "paused", "resumed",
-  "locked", "unlocked", "opened", "closed", "armed", "disarmed",
-  // CRUD
-  "created", "added", "removed", "deleted", "updated", "changed", "renamed",
-  "moved", "copied", "saved", "written", "wrote", "configured", "installed",
-  "uninstalled", "applied", "reset", "cleared", "scheduled", "cancelled",
-  "canceled", "sent", "assigned", "connected", "disconnected",
-  // retrieval that implies a tool ran
-  "checked", "searched", "found", "retrieved", "fetched", "looked",
-  "scanned", "queried", "read", "pulled", "listed",
+  "locked", "unlocked", "armed", "disarmed",
+  // persistent mutations
+  "created", "deleted", "removed", "renamed", "installed", "uninstalled",
+  "configured", "applied", "scheduled", "cancelled", "canceled",
+  "sent", "connected", "disconnected", "reset",
+  // Kept despite the narrowing: these read as mutations far more often than as
+  // turns of phrase ("I updated the schedule" / "I saved the file"), and both
+  // name changes a user cannot verify from the answer's own text. `added`,
+  // `changed`, `moved`, `set` and `wrote` were NOT kept — each is common in
+  // ordinary prose ("I've added a note below", "I set that aside") where the
+  // guard would fire on a healthy turn.
+  "updated", "saved",
 ].join("|");
 
 /**
@@ -233,14 +303,16 @@ export interface ValidateInput {
 export function validateAnswerAgainstTrace(input: ValidateInput): ToolUseVerdict {
   const { answer, trace, toolsAdvertised } = input;
 
-  const outcomes = trace.map((t) => classifyToolOutcome(t.result));
+  // Guard entries are not dispatches — see NON_DISPATCH_ERROR_CODES.
+  const dispatched = trace.filter(isRealDispatch);
+  const outcomes = dispatched.map((t) => classifyToolOutcome(t.result));
   const counts = {
-    total: trace.length,
+    total: dispatched.length,
     success: outcomes.filter((o) => o === "success").length,
     error: outcomes.filter((o) => o === "error").length,
     pending: outcomes.filter((o) => o === "pending").length,
   };
-  const tools = [...new Set(trace.map((t) => t.tool))];
+  const tools = [...new Set(dispatched.map((t) => t.tool))];
   const ok = (): ToolUseVerdict => ({ status: "ok", claims: [], counts, tools });
 
   // A turn that could not act cannot have fabricated a dispatch.
@@ -273,9 +345,18 @@ export function describeToolUseVerdict(v: ToolUseVerdict): string {
     v.status === "unsupported"
       ? "answer claims a completed action but NO tool was dispatched"
       : "answer claims a completed action but EVERY dispatch failed";
+  // 🔴 SHAPE, NOT TEXT. `claims` are verbatim excerpts of the model's answer,
+  // which is generated over whatever the user asked about and whatever the
+  // tools returned — file contents, message bodies, camera/device names. The
+  // process log is plain pino to stdout with no redact paths and is collected
+  // into the diagnostics bundle, so putting answer prose there ships user
+  // content off the box. An operator triaging "the model is fabricating
+  // completions" needs the COUNT and the tools, not the sentences; the
+  // sentences are already on the SSE stream for the client that is entitled to
+  // them. Same posture as the confirmation-summary redaction.
   return (
     `${what} — tools=[${v.tools.join(",")}] ` +
     `dispatches=${v.counts.total} ok=${v.counts.success} err=${v.counts.error} ` +
-    `pending=${v.counts.pending} claims=${JSON.stringify(v.claims)}`
+    `pending=${v.counts.pending} claimCount=${v.claims.length}`
   );
 }

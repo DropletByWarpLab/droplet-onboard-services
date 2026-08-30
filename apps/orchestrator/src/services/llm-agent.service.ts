@@ -1743,9 +1743,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const toolUse = validateAnswerAgainstTrace({
         answer: visible,
         trace,
-        // A turn advertising zero tools ran with tool_choice:"none" and could
-        // not have dispatched anything — "I checked" in a greeting is chat,
-        // not a fabricated call.
+        // ⚠ A WEAK gate, and deliberately no longer load-bearing. The comment
+        // that used to sit here claimed a conversational turn runs with
+        // `tool_choice:"none"` and therefore advertises nothing. That is false
+        // for the surface that matters: the dashboard never sends
+        // `tool_choice`, so it defaults to "auto" and tools ARE advertised on
+        // every chat turn. `"none"` is produced only by voice-io's greeting
+        // path and email-analysis. Relying on this to suppress false positives
+        // meant ordinary sentences ("I've listed the options below") were
+        // claim-checked. The real protection is the narrowed, state-change-only
+        // verb list in tool-use-validation.ts; this only skips the genuinely
+        // tool-less turns.
         toolsAdvertised: advertisedNames.size > 0,
       });
       if (toolUse.status !== "ok") {
@@ -1756,7 +1764,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             status: toolUse.status,
             tools: toolUse.tools,
             counts: toolUse.counts,
-            claims: toolUse.claims,
+            // 🔴 claimCount, not the claim TEXT. The excerpts are the model's
+            // own prose about whatever the user asked and whatever the tools
+            // returned — file contents, message bodies, device names. The
+            // logger is bare pino to stdout with no redact paths and its
+            // output is collected into the diagnostics bundle, so logging the
+            // sentences ships user content off the box. The client that is
+            // entitled to them still gets them on the SSE frame below.
+            claimCount: toolUse.claims.length,
             threadId: req.citationContext?.threadId,
           },
           `agent_tool_use_unverified: ${describeToolUseVerdict(toolUse)}`,
