@@ -1078,14 +1078,12 @@ configure_single_box_env() {
   fi
 
   # Strip ALL known runtime tokens unconditionally, then add the one we want.
-  # `grep -vx` on a newline-split list, matching the idiom already used above.
-  merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' \
-    | grep -vx -e 'dmr' -e 'dmr-cuda' -e 'ollama' | paste -sd, -)"
-  if [ -z "$merged_profiles" ]; then
-    merged_profiles="$_wanted_profile"
-  else
-    merged_profiles="${merged_profiles},${_wanted_profile}"
-  fi
+  # The token list lives in gpu.sh (set_runtime_profile_token) because THREE
+  # scripts rewrite this list — this one, scripts/dmr/flip-single-box.sh and
+  # scripts/dmr/rollback-single-box.sh — and a token known to only one of them
+  # is a WARP-1826 single-GPU-owner violation waiting to happen. rollback's
+  # `grep -vx 'dmr'` is an exact-line match, so `dmr-cuda` survived it.
+  merged_profiles="$(set_runtime_profile_token "$merged_profiles" "$_wanted_profile")"
   log_info "single-box env: INFERENCE_RUNTIME=${_profiles_runtime:-unset}, GPU_VENDOR=${_gpu_vendor:-n/a} — single runtime profile '${_wanted_profile}' (single GPU owner, WARP-1826/2543)"
   # END RUNTIME PROFILE SELECTION — load-bearing sentinel, do not delete.
   # tests/dmr-profile-survives-setup.test.sh awk-extracts the block above and

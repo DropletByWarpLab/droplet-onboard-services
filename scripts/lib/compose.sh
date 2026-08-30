@@ -269,8 +269,12 @@ prepare_and_build() {
   # failure at `up` applies. Same build-only-when-active idiom: a box still on
   # the ollama runtime never starts it, and building a python image there is
   # pure waste.
+  # WARP-2543: `dmr-cuda` is the NVIDIA sibling of `dmr`. Matching only `,dmr,`
+  # here meant an NVIDIA box never BUILT the sidecar either — so even with the
+  # profile fixed it would have failed at `up` with "No such image", which is
+  # the exact failure this build-only-when-active idiom exists to prevent.
   case ",${active_profiles}," in
-    *,dmr,*) build_services+=(inference-manager) ;;
+    *,dmr,*|*,dmr-cuda,*) build_services+=(inference-manager) ;;
   esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
@@ -280,8 +284,8 @@ prepare_and_build() {
   #                 (WARP-1436 screened ambient-data fetcher)
   #   erp-sql-bridge — appended above only when the erp profile is active
   #                 (WARP-1106 direct-SQL ERP bridge)
-  #   inference-manager — appended above only when the dmr profile is active
-  #                 (WARP-2131 model-catalog sidecar)
+  #   inference-manager — appended above only when a dmr profile is active
+  #                 (`dmr` or `dmr-cuda`; WARP-2131 model-catalog sidecar)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned

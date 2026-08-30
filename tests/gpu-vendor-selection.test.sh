@@ -121,15 +121,15 @@ fi
 #
 # A typo'd override must FAIL rather than silently degrade to 'none' (which
 # would take inference down on a box that has a perfectly good GPU).
-out="$( GPU_VENDOR=nvidia detect_gpu_vendor )"
-[ "$out" = "nvidia" ] && ok "override GPU_VENDOR=nvidia honoured" || bad "override not honoured (got '$out')"
+out="$( GPU_VENDOR_OVERRIDE=nvidia detect_gpu_vendor )"
+[ "$out" = "nvidia" ] && ok "override GPU_VENDOR_OVERRIDE=nvidia honoured" || bad "override not honoured (got '$out')"
 
-out="$( GPU_VENDOR=NVIDIA detect_gpu_vendor )"
+out="$( GPU_VENDOR_OVERRIDE=NVIDIA detect_gpu_vendor )"
 [ "$out" = "nvidia" ] && ok "override is case-insensitive" || bad "override case handling (got '$out')"
 
-( GPU_VENDOR=nvidai detect_gpu_vendor >/dev/null 2>&1 )
-[ $? -ne 0 ] && ok "a typo'd GPU_VENDOR is REFUSED, not silently treated as 'none'" \
-             || bad "typo'd GPU_VENDOR accepted — would silently disable the GPU"
+( GPU_VENDOR_OVERRIDE=nvidai detect_gpu_vendor >/dev/null 2>&1 )
+[ $? -ne 0 ] && ok "a typo'd GPU_VENDOR_OVERRIDE is REFUSED, not silently treated as 'none'" \
+             || bad "typo'd GPU_VENDOR_OVERRIDE accepted — would silently disable the GPU"
 
 # Detection must not depend on a driver being loaded. On the box that prompted
 # this ticket the NVIDIA card was present with NO kernel driver bound, so a
@@ -148,12 +148,81 @@ else
   ok "detection does not depend on a loaded driver (reads the PCI bus)"
 fi
 
-# It must key on stable numeric vendor IDs, not marketing names: a card newer
-# than the host's pci.ids prints as "Device 2d04" with no name at all.
-if grep -q '10de' "$LIB" && grep -q '1002' "$LIB"; then
-  ok "detection keys on numeric PCI vendor IDs (10de/1002), not marketing names"
+# --- 3b. DRIVE THE REAL DETECTION PATH THROUGH A STUBBED lspci --------------
+#
+# 🔴 This section replaces a `grep -q '10de' "$LIB"` assertion that was
+# satisfied by a COMMENT in gpu.sh ("Vendor IDs are the stable identifier:
+# 10de = NVIDIA, 1002 = AMD/ATI"). It therefore held even if the entire
+# detection body were deleted, and it was the ONLY coverage the hardware path
+# had — every other call in this file sets GPU_VENDOR_OVERRIDE, which
+# short-circuits before lspci is ever reached. The function whose whole job is
+# to read the silicon — the fault that started this ticket — had no test.
+#
+# PATH-stubbed lspci, the idiom this repo already uses for docker/cryptsetup.
+
+_stub_lspci() {
+  # $1 = fixture name; writes a stub lspci onto PATH and echoes the bin dir
+  _sd="$(mktemp -d)"
+  case "$1" in
+    nvidia-discrete-plus-amd-igpu)
+      # The ACTUAL bench box: an NVIDIA discrete card AND the Ryzen iGPU.
+      # DISCRETE-FIRST must pick nvidia; picking amd here is WARP-2543.
+      cat > "$_sd/out" <<'FIX'
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation Device [10de:2d04] (rev a1)
+0d:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Raphael [1002:164e] (rev c3)
+FIX
+      ;;
+    amd-only)
+      cat > "$_sd/out" <<'FIX'
+0d:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Raphael [1002:164e] (rev c3)
+FIX
+      ;;
+    nvidia-3d-controller)
+      # A headless compute card presents as "3D controller", not VGA.
+      cat > "$_sd/out" <<'FIX'
+01:00.0 3D controller [0302]: NVIDIA Corporation Device [10de:20b5]
+FIX
+      ;;
+    no-gpu)
+      : > "$_sd/out"
+      ;;
+  esac
+  printf '#!/bin/sh
+cat %s
+' "$_sd/out" > "$_sd/lspci"
+  chmod +x "$_sd/lspci"
+  printf '%s' "$_sd"
+}
+
+_detect_with() {
+  _d="$(_stub_lspci "$1")"
+  ( PATH="$_d:$PATH"; unset GPU_VENDOR_OVERRIDE; gpu_vendor_from_bus )
+  rm -rf "$_d"
+}
+
+got="$(_detect_with nvidia-discrete-plus-amd-igpu)"
+[ "$got" = "nvidia" ]   && ok "DISCRETE-FIRST: NVIDIA card + AMD iGPU on the bus -> nvidia (the real bench box)"   || bad "NVIDIA discrete alongside an AMD iGPU detected as '$got' — this IS the WARP-2543 misdetection"
+
+got="$(_detect_with amd-only)"
+[ "$got" = "amd" ] && ok "AMD-only bus -> amd (the installed fleet)"                    || bad "AMD-only bus detected as '$got'"
+
+got="$(_detect_with nvidia-3d-controller)"
+[ "$got" = "nvidia" ] && ok "headless compute card ('3D controller', no marketing name) -> nvidia"                       || bad "3D-controller NVIDIA card detected as '$got'"
+
+got="$(_detect_with no-gpu)"
+[ "$got" = "none" ] && ok "no GPU on the bus -> none" || bad "empty bus detected as '$got'"
+
+# lspci absent entirely (container / CI runner / macOS dev shape).
+got="$( PATH="/nonexistent-$$"; unset GPU_VENDOR_OVERRIDE; gpu_vendor_from_bus 2>/dev/null || true )"
+[ "$got" = "none" ] && ok "lspci absent -> none (dev/CI shapes still provision)"                     || bad "lspci absent produced '$got'"
+
+# 🔴 The SIGPIPE regression guard. `printf … | grep -q` under pipefail can
+# report a SUCCESSFUL match as a failure, and here that misclassifies an NVIDIA
+# box as AMD — silently reproducing WARP-2543. Detection must not pipe.
+if grep -nE "grep -q" "$LIB" | grep -v "^[0-9]*: *#" | grep -q .; then
+  bad "gpu.sh pipes into grep -q — under pipefail a matched NVIDIA test can fall through to the AMD branch"
 else
-  bad "detection does not use numeric vendor IDs — a new card with no pci.ids entry would be missed"
+  ok "gpu.sh contains no pipe-into-grep -q (SIGPIPE cannot misclassify the vendor)"
 fi
 
 # --- 4. configure_gpu_env: what is fatal, and what is only loud --------------
@@ -167,7 +236,7 @@ upsert_env() { printf '%s=%s\n' "$1" "$2" >> "$tmp/.env"; }
 # previously-green unit tests went red because every knob written after that
 # point stopped being written. A guard everyone has to work around gets
 # deleted, so this one warns instead.
-( GPU_VENDOR=none configure_gpu_env "$tmp/.env" >/dev/null 2>&1 )
+( GPU_VENDOR_OVERRIDE=none configure_gpu_env "$tmp/.env" >/dev/null 2>&1 )
 [ $? -eq 0 ] && ok "no GPU: warns and continues (CI, containers and dev machines still provision)" \
              || bad "no GPU: aborted — this breaks CI, containers and every dev machine"
 
@@ -180,14 +249,72 @@ else
 fi
 
 # Appliance provisioning that genuinely cannot proceed without a GPU opts in.
-( GPU_VENDOR=none DROPLET_REQUIRE_GPU=1 configure_gpu_env "$tmp/.env" >/dev/null 2>&1 )
+( GPU_VENDOR_OVERRIDE=none DROPLET_REQUIRE_GPU=1 configure_gpu_env "$tmp/.env" >/dev/null 2>&1 )
 [ $? -ne 0 ] && ok "no GPU + DROPLET_REQUIRE_GPU=1: REFUSES (opt-in strict mode)" \
              || bad "DROPLET_REQUIRE_GPU=1 did not refuse a GPU-less DMR box"
 
-( GPU_VENDOR=nvidia DMR_IMAGE=docker/model-runner:v1.2.6 configure_gpu_env "$tmp/.env" >/dev/null 2>&1 )
-[ $? -ne 0 ] && ok "configure_gpu_env REFUSES an operator-pinned CPU-only DMR_IMAGE" \
-             || bad "a hand-pinned CPU image was accepted — this is exactly how WARP-2543 shipped"
 rm -rf "$tmp"
+
+# --- 4b. the WARP-2543 pin, tested the way it actually occurred --------------
+#
+# 🔴 As a LINE IN THE .env FILE, not an exported shell variable. The original
+# assertion here passed DMR_IMAGE in the environment and was labelled "exactly
+# how WARP-2543 shipped" — it wasn't. The incident value was a file line, and
+# configure_gpu_env must read the FILE: `materialize_artifacts` does
+# `set -a; . .env; set +a` at setup.sh:437, fourteen lines before
+# configure_single_box_env at :451, so by then the box's own stored value is
+# already an exported variable and "is it an operator override?" is
+# unanswerable from the environment.
+#
+# It must also CORRECT the pin, not refuse. The earlier `assert … || return 1`
+# aborted configure_single_box_env — i.e. setup.sh failed outright on the very
+# box this change exists to repair. The guard turned its own target into a
+# hard-down.
+tmp2="$(mktemp -d)"
+upsert_env() { printf '%s=%s\n' "$1" "$2" >> "$tmp2/.env"; }
+
+printf 'INFERENCE_RUNTIME=dmr\nDMR_IMAGE=docker/model-runner:v1.2.6\n' > "$tmp2/.env"
+( GPU_VENDOR_OVERRIDE=nvidia configure_gpu_env "$tmp2/.env" >/dev/null 2>&1 )
+if grep -q '^DMR_IMAGE=.*-cuda$' "$tmp2/.env"; then
+  ok ".env-pinned CPU-only DMR_IMAGE is REWRITTEN to the vendor image, not refused"
+else
+  bad "file-pinned CPU image not corrected (got: $(grep '^DMR_IMAGE=' "$tmp2/.env" | tail -1))"
+fi
+
+# A vendor MISMATCH must also be corrected: a ROCm pin left behind after a card
+# swap would otherwise pair the CUDA profile with the ROCm image — the exact
+# profile/image disagreement gpu.sh says it exists to prevent.
+printf 'INFERENCE_RUNTIME=dmr\nDMR_IMAGE=docker/model-runner:v1.2.6-rocm\n' > "$tmp2/.env"
+( GPU_VENDOR_OVERRIDE=nvidia configure_gpu_env "$tmp2/.env" >/dev/null 2>&1 )
+grep -q '^DMR_IMAGE=.*-cuda$' "$tmp2/.env" \
+  && ok "a ROCm pin on an NVIDIA box is rewritten to the CUDA image" \
+  || bad "vendor-mismatched pin survived (got: $(grep '^DMR_IMAGE=' "$tmp2/.env" | tail -1))"
+
+# 🔴 An AMD box with NO pin must NOT gain one. migrate_env only backfills
+# ABSENT keys, so a value written once shadows the compose default for ever and
+# freezes the runtime version — on every AMD box in the fleet.
+printf 'INFERENCE_RUNTIME=dmr\n' > "$tmp2/.env"
+( GPU_VENDOR_OVERRIDE=amd configure_gpu_env "$tmp2/.env" >/dev/null 2>&1 )
+grep -q '^DMR_IMAGE=' "$tmp2/.env" \
+  && bad "an AMD box with no DMR_IMAGE gained a permanent pin — freezes the version fleet-wide" \
+  || ok "no DMR_IMAGE written when absent (compose default stays the source of truth)"
+
+# An operator's newer, correct pin must survive setup untouched.
+printf 'INFERENCE_RUNTIME=dmr\nDMR_IMAGE=docker/model-runner:v9.9.9-rocm\n' > "$tmp2/.env"
+( GPU_VENDOR_OVERRIDE=amd configure_gpu_env "$tmp2/.env" >/dev/null 2>&1 )
+grep -q '^DMR_IMAGE=docker/model-runner:v9.9.9-rocm$' "$tmp2/.env" \
+  && ok "a correct, newer operator pin is left alone" \
+  || bad "an operator's valid pin was overwritten (got: $(grep '^DMR_IMAGE=' "$tmp2/.env" | tail -1))"
+
+# GPU_VENDOR must never be readable back as an override, or detection latches
+# to its own past output and a card swap can never move the box again.
+printf 'INFERENCE_RUNTIME=dmr\n' > "$tmp2/.env"
+( GPU_VENDOR=amd GPU_VENDOR_OVERRIDE= ; export GPU_VENDOR; unset GPU_VENDOR_OVERRIDE
+  _d="$(_stub_lspci nvidia-discrete-plus-amd-igpu)"; PATH="$_d:$PATH"; detect_gpu_vendor ) > "$tmp2/vendor" 2>/dev/null
+grep -q '^nvidia$' "$tmp2/vendor" \
+  && ok "a persisted GPU_VENDOR does NOT shadow detection (no self-latching after a card swap)" \
+  || bad "detection returned '$(cat "$tmp2/vendor")' — a stored GPU_VENDOR is being read back as an override"
+rm -rf "$tmp2"
 
 # --- 5. compose wiring matches the vendor model ------------------------------
 #
@@ -252,6 +379,47 @@ if grep -q 'nvidia-smi' <<<"$_b"; then
   ok "dmr-cuda healthcheck asserts GPU visibility (silent CPU fallback becomes unhealthy)"
 else
   bad "dmr-cuda has no GPU-residency healthcheck — a CPU fallback would still report healthy"
+fi
+
+# 🔴 ...AND it must still assert API liveness. A service-level `healthcheck:`
+# REPLACES the image's HEALTHCHECK rather than merging with it, and the CUDA
+# image ships `curl -f .../engines/status`. A GPU-only probe would discard that,
+# so a model-runner that had died would report healthy — trading one blind spot
+# for another, and the same "the API answers" vs "the GPU is used" confusion
+# that let WARP-2543 run for days.
+_b="$(_block '/^  dmr-cuda:/,/^  inference-manager:/')"
+if grep -q 'engines/status' <<<"$_b"; then
+  ok "dmr-cuda healthcheck ALSO probes /engines/status (image healthcheck not silently dropped)"
+else
+  bad "dmr-cuda healthcheck replaced the image's /engines/status probe — a dead runner would report healthy"
+fi
+
+# The model-catalog sidecar must be selected on BOTH DMR shapes. Gated on `dmr`
+# alone it silently vanished from the NVIDIA project, and the Models page
+# renders nothing rather than erroring.
+# NOTE the end anchor: `/^  [a-z...]:$/` would match the START line too, and an
+# awk range whose start also matches its end spans exactly one line — the same
+# silent-truncation trap this suite already hit once. Anchor on the next real
+# service instead.
+_im="$(awk '/^  inference-manager:/,/^  openwrt:/' "$COMPOSE")"
+if grep -qF 'profiles: ["dmr", "dmr-cuda"]' <<<"$_im"; then
+  ok "inference-manager is selected on both dmr and dmr-cuda"
+else
+  bad "inference-manager is not profiled for dmr-cuda — the model catalog dies on the NVIDIA shape"
+fi
+
+# ...and it must not depend_on a profile-excluded service: compose rejects the
+# WHOLE project ("depends on undefined service"), and systemd runs
+# `docker compose config -q` as ExecStartPre — so that is a full-appliance
+# outage, not a degraded service.
+# Comment lines stripped first: the compose block explains at length WHY the
+# depends_on was removed, and matching that prose would fail the assertion for
+# the very reason it passes.
+_im_code="$(grep -vE '^[[:space:]]*#' <<<"$_im")"
+if grep -qE '^[[:space:]]*depends_on:' <<<"$_im_code"; then
+  bad "inference-manager still declares depends_on — on the other profile that makes the whole compose project invalid"
+else
+  ok "inference-manager declares no depends_on (cannot invalidate the project on either shape)"
 fi
 
 printf '\n  %d passed, %d failed\n\n' "$pass" "$fail"

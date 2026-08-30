@@ -2906,12 +2906,23 @@ services:
   # exists to eliminate, so the design that fails LOUD wins: a missing or
   # wrong profile token starts no inference service at all.
   #
-  # 🔴 CONTAINER NAME IS SHARED WITH `dmr` ON PURPOSE. Both declare
-  # container_name: droplet-dmr. `docker compose config` accepts this (checked
-  # on the box, not assumed); profiles guarantee only one is ever selected,
-  # and if both tokens were somehow set, `up` fails on the name collision
-  # instead of quietly starting two runtimes that would fight over the GPU.
-  # The collision IS the backstop.
+  # 🔴 CONTAINER NAME IS SHARED WITH `dmr`. Both declare
+  # container_name: droplet-dmr, so everything that addresses the runtime by
+  # container name keeps working across a vendor swap.
+  #
+  # ⚠ CORRECTED: an earlier version of this comment claimed `docker compose
+  # config` accepts the duplicate and that a both-tokens box would merely fail
+  # at `up`. Both halves are wrong, in the dangerous direction. With BOTH
+  # profiles selected, `config` REJECTS the file outright
+  # ("container name ... is already in use"), and scripts/lib/systemd.sh runs
+  # `docker compose config -q` as ExecStartPre — so the unit never reaches
+  # ExecStart and NOT ONE container on the appliance starts. The blast radius
+  # is the whole stack, not this service.
+  # That makes it a real backstop, but a loud and total one: the thing that
+  # must never happen is a box carrying two runtime tokens, and
+  # set_runtime_profile_token (scripts/lib/gpu.sh) is what prevents it — used
+  # by single-box.sh, flip-single-box.sh and rollback-single-box.sh alike, so
+  # the token list lives in exactly one place.
   dmr-cuda:
     # The CUDA build. Same upstream version as `dmr`'s ROCm tag — keep the two
     # pinned in lockstep, they are one decision. Bare `v1.2.6` is the CPU-only
@@ -2980,8 +2991,17 @@ services:
     # nvidia-smi inside the container exits non-zero when the driver, the
     # toolkit, or the device is missing — so this turns a silent 10x
     # regression into an unhealthy container that monitoring can see.
+    # 🔴 A service-level `healthcheck:` REPLACES the image's HEALTHCHECK, it does
+    # not merge with it. docker/model-runner:*-cuda ships
+    #   CMD-SHELL curl -f "http://localhost:${MODEL_RUNNER_PORT}/engines/status"
+    # so declaring a GPU-only probe here would DISCARD the API-liveness check
+    # and a model-runner that had died would report healthy — trading one blind
+    # spot for another, and the exact blind spot ("the API answers" vs "the GPU
+    # is used") that let WARP-2543 run for days. Assert BOTH in one probe.
     healthcheck:
-      test: ["CMD-SHELL", "nvidia-smi -L | grep -q '^GPU 0' || exit 1"]
+      test:
+        - "CMD-SHELL"
+        - "nvidia-smi -L | grep -q '^GPU 0' && curl -f http://localhost:${DMR_PORT:-12434}/engines/status || exit 1"
       interval: 60s
       timeout: 10s
       retries: 3
@@ -3020,7 +3040,13 @@ services:
       context: ..
       dockerfile: services/inference-manager/Dockerfile
     container_name: droplet-inference-manager
-    profiles: ["dmr"]
+    # WARP-2543: BOTH DMR shapes. Gated on `dmr` alone, the model-catalog
+    # sidecar silently dropped out of the project on an NVIDIA box — the
+    # orchestrator proxies GET /api/models/catalog to http://inference-manager:8002,
+    # and models/page.tsx guards its "Available to install" section on a
+    # non-empty list, so the feature just vanishes with no error. That is the
+    # dead-catalog state this repo has already shipped once.
+    profiles: ["dmr", "dmr-cuda"]
     restart: always
     <<: *default-logging
     # NO `ports:` — DELIBERATE, and the one place this diverges hardest from
@@ -3030,11 +3056,21 @@ services:
     # the `dmr` service above is loopback-bound for precisely that reason
     # (ADR-036 §6). The orchestrator reaches this over the compose network as
     # http://inference-manager:8002; nothing off-box has any business here.
-    depends_on:
-      # Upstream waits on `ollama`, which is profile-gated OFF on a DMR box —
-      # copying that verbatim means this service never starts.
-      dmr:
-        condition: service_started
+    # 🔴 NO `depends_on:` — REMOVED, not forgotten. It previously named `dmr`,
+    # which is profile-excluded on the NVIDIA shape, and compose does not treat
+    # that as "skip the dependency": it rejects the whole file with
+    #   service "inference-manager" depends on undefined service "dmr":
+    #   invalid compose project
+    # Measured, not assumed. That matters far beyond this service, because
+    # scripts/lib/systemd.sh runs `docker compose config -q` as ExecStartPre —
+    # so an invalid project means the unit never reaches ExecStart and NOT ONE
+    # container starts. A whole-appliance outage from a dependency edge.
+    # Naming `dmr-cuda` instead would just mirror the fault onto AMD boxes, and
+    # a dependency cannot be profile-conditional.
+    # Losing it costs nothing real: the condition was `service_started`, which
+    # waits for the process to exist and not for it to serve, and this service
+    # already retries behind a circuit breaker (it reports
+    # {"ollama_reachable":…,"circuit_breaker":…} on /health for exactly this).
     environment:
       # The lifecycle client's base URL. Named OLLAMA_URL for historical
       # reasons; on this shape it is a DMR pointer (see runtime/factory.py).

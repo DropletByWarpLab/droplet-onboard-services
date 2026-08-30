@@ -63,7 +63,11 @@ if [ "$vendor" != "nvidia" ]; then
   exit 0
 fi
 
-log_step "NVIDIA runtime provisioning (WARP-2543)"
+# log_step takes (current, total, msg) — calling it with one argument expands
+# an unset $2 and, under `set -u`, kills the script at its first real statement
+# on the only hardware it targets. Verified: `log_step "x"` -> "$2: unbound
+# variable", exit 1.
+log_info "NVIDIA runtime provisioning (WARP-2543)"
 lspci -nn | grep -iE 'VGA compatible controller|3D controller' | grep -i '10de' | sed 's/^/  card: /' || true
 
 # ---------------------------------------------------------------------------
@@ -74,7 +78,12 @@ lspci -nn | grep -iE 'VGA compatible controller|3D controller' | grep -i '10de' 
 # Hard-coding a version is how a box ends up with a driver that predates its
 # GPU — Blackwell (GB20x) needs >= 570 and the OPEN kernel modules; the
 # proprietary flavour does not support it at all.
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU 0'; then
+# Materialised, never piped into `grep -q`. Under `set -o pipefail` grep -q
+# exits on first match, the producer takes SIGPIPE and dies 141, and pipefail
+# promotes that to the pipeline status — so a SUCCESSFUL match takes the else
+# branch. Same trap this PR removed from its own test files.
+_smi_l="$(nvidia-smi -L 2>/dev/null || true)"
+if command -v nvidia-smi >/dev/null 2>&1 && case "$_smi_l" in *'GPU 0'*) true ;; *) false ;; esac; then
   log_success "NVIDIA driver already loaded: $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1)"
 else
   log_info "No working NVIDIA driver — installing the recommended one."
@@ -83,7 +92,14 @@ else
   # ubuntu-drivers-common provides the recommendation engine itself.
   command -v ubuntu-drivers >/dev/null 2>&1 || run apt-get install -y -qq ubuntu-drivers-common
 
-  recommended="$(ubuntu-drivers devices 2>/dev/null | awk '/recommended/ {print $3}' | head -1 || true)"
+  # `ubuntu-drivers devices` enumerates EVERY device with a third-party driver
+  # — wifi (bcmwl-kernel-source), oem-*-meta kernel metapackages, guest modules
+  # — each in its own section, each able to carry its own "recommended" line.
+  # Taking the first one unconstrained can install a wifi driver and then
+  # report NVIDIA provisioning as done. Constrain to nvidia-driver-* packages.
+  _ud="$(ubuntu-drivers devices 2>/dev/null || true)"
+  recommended="$(printf '%s
+' "$_ud" | awk '/recommended/ && $3 ~ /^nvidia-driver-/ {print $3}' | sort -u | head -1)"
   if [ -z "$recommended" ]; then
     log_error "ubuntu-drivers has no recommendation for this card."
     log_error "  Refusing to guess a driver version — an unsupported one loads and then fails at CUDA init,"
@@ -106,7 +122,8 @@ else
   # enrollment at the next boot — impossible on a headless appliance and a
   # confusing way to fail (driver "installed", module refuses to load).
   # Report it rather than pretend the install succeeded.
-  if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+  _sb="$(mokutil --sb-state 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+  if command -v mokutil >/dev/null 2>&1 && case "$_sb" in *enabled*) true ;; *) false ;; esac; then
     log_warn "Secure Boot is ENABLED — the DKMS module needs MOK enrollment at the console before it will load."
   fi
 
@@ -121,7 +138,11 @@ fi
 # Without this, `runtime: nvidia` in compose fails with "unknown runtime" —
 # which is loud and therefore acceptable, but the box has no inference until
 # it is fixed.
-if command -v nvidia-ctk >/dev/null 2>&1 && docker info 2>/dev/null | grep -qi 'nvidia'; then
+# Materialised: the piped form reinstalled the toolkit and RESTARTED DOCKER on
+# every run of an already-correct box, because docker info keeps writing after
+# grep -q exits and pipefail turned the resulting SIGPIPE into "not found".
+_dockerinfo="$(docker info 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+if command -v nvidia-ctk >/dev/null 2>&1 && case "$_dockerinfo" in *nvidia*) true ;; *) false ;; esac; then
   log_success "nvidia-container-toolkit already installed and registered with Docker."
 else
   log_info "Installing nvidia-container-toolkit."
@@ -165,14 +186,22 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 log_info "Verifying GPU visibility from inside a container…"
-if docker run --rm --runtime=nvidia --gpus all \
-     --entrypoint nvidia-smi "${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda}" -L 2>/dev/null \
-     | grep -q '^GPU 0'; then
+# 🔴 Materialised, not piped into `grep -q`. This is the check that decides
+# pass/fail for the entire NVIDIA provisioning run, and in the piped form it
+# failed in the WORST direction: grep -q exits on the first match, docker run
+# takes SIGPIPE and dies 141, pipefail promotes it, and a box whose GPU is
+# working perfectly reports "GPU is NOT visible inside containers" and exits 1.
+_ctr_gpus="$(docker run --rm --runtime=nvidia --gpus all \
+     --entrypoint nvidia-smi "${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda}" -L 2>/dev/null || true)"
+case "$_ctr_gpus" in
+  *'GPU 0'*)
   log_success "GPU is visible inside containers — DMR can offload."
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | sed 's/^/  /'
-else
+    ;;
+  *)
   log_error "GPU is NOT visible inside containers."
   log_error "  DMR would start and silently serve from CPU (~8 tok/s on the 20B, healthchecks green)."
   log_error "  Check: nvidia-smi on the host, 'docker info | grep -i runtime', /etc/docker/daemon.json"
   exit 1
-fi
+    ;;
+esac
