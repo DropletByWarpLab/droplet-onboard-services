@@ -109,6 +109,23 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-2117. Same ladder as `projects`, which it lives inside: `act` is
+  // logging a call and moving a deal, `manage` is editing the pipeline itself.
+  // Both floored at `family` — a pipeline is business-sensitive, so the guest
+  // tier gets read-only or nothing.
+  crm: [
+    { level: "view" },
+    { level: "act", minTier: "family" },
+    { level: "manage", minTier: "family" },
+  ],
+  // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
+  // live (carddav-4), which is a credential-handling action; editing one's own
+  // contacts is `act`.
+  contacts: [
+    { level: "view" },
+    { level: "act", minTier: "family" },
+    { level: "manage", minTier: "family" },
+  ],
   voice: [
     { level: "view" },
     { level: "act" }, // un-floored — guests may talk to the assistant

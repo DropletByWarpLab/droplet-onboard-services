@@ -1304,7 +1304,9 @@ export type AccessModuleId =
   | "smart_home"
   | "network"
   | "managed_switch"
-  | "team_chat";
+  | "team_chat"
+  | "contacts"
+  | "crm";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
