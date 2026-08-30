@@ -51,7 +51,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "crm_pipeline_summary",
   description:
-    "Deal count and value per pipeline stage — 'how is the quarter looking'. `amount_minor` is a string of minor units; a mixed-currency stage reports `total: null` and is not summed. Read-only.",
+    "Deal count and value per pipeline stage. `amount_minor` is a minor-units string; a mixed-currency stage reports `total: null`.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

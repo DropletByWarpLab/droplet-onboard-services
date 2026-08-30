@@ -5,7 +5,7 @@ const inputSchema = {
   type: "object",
   properties: {
     deal_id: { type: "string" },
-    stage_id: { type: "string", description: "From crm_pipeline_summary; same pipeline only." },
+    stage_id: { type: "string", description: "From crm_pipeline_summary; same pipeline." },
   },
   required: ["deal_id", "stage_id"],
   additionalProperties: false,
@@ -38,7 +38,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "crm_move_deal_stage",
   description:
-    "Move a deal to another stage in its own pipeline. Requires confirmation — this is what the forecast reads, and it is recorded on the timeline.",
+    "Move a deal to another stage in its own pipeline; the forecast reads this and it lands on the timeline.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

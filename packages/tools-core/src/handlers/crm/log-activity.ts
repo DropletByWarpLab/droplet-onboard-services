@@ -22,7 +22,7 @@ const inputSchema = {
       type: "string",
       minLength: 1,
       maxLength: 1000,
-      description: "One line, shown on the timeline",
+      description: "One line for the timeline",
     },
   },
   required: ["subject_type", "subject_id", "kind", "summary"],
@@ -60,7 +60,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "crm_log_activity",
   description:
-    "Append an interaction to a customer's or deal's timeline. Requires confirmation. Summarise what happened, not what was said.",
+    "Append an interaction to a customer's or deal's timeline. Summarise what happened, not what was said.",
   inputSchema,
   requiresWrite: true,
   // Enforced generically by the dispatch interceptor (WARP-2305): the first

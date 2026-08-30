@@ -60,7 +60,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "crm_get_customer",
   description:
-    "One CRM customer with their open deals and recent timeline. Read-only.",
+    "One customer: open deals and recent timeline.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

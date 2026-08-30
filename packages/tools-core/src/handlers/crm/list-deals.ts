@@ -7,14 +7,14 @@ const inputSchema = {
     outcome: {
       type: "string",
       enum: ["OPEN", "WON", "LOST"],
-      description: "Outcome class. The stage's meaning, not its name.",
+      description: "Stage meaning, not its name.",
     },
     customer_id: { type: "string" },
     idle_days: {
       type: "number",
       minimum: 0,
       maximum: 3650,
-      description: "Days with no timeline activity; counts from creation if never active.",
+      description: "Days idle; from creation if never active.",
     },
     limit: { type: "number", minimum: 1, maximum: 50 },
   },
@@ -51,7 +51,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "crm_list_deals",
   description:
-    "List CRM deals, optionally by outcome, customer, or idle_days (how you find deals needing a chase). `amount_minor` is a STRING of minor units — pair with `currency`, never parse as a number. Read-only.",
+    "List deals by outcome, customer or idle_days (finds deals needing a chase). `amount_minor` is a minor-units string, never a number.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

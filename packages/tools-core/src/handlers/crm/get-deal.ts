@@ -40,7 +40,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "crm_get_deal",
   description:
-    "One deal with its recent timeline. Read before drafting a follow-up. Read-only.",
+    "One deal with its timeline.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

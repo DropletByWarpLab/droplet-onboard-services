@@ -6,7 +6,7 @@ const inputSchema = {
   properties: {
     query: {
       type: "string",
-      description: "Name or web domain. Omit to list all customers.",
+      description: "Name or domain; omit for all.",
     },
     limit: { type: "number", minimum: 1, maximum: 50 },
   },
@@ -49,7 +49,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "crm_search_customers",
   description:
-    "Search CRM customers (companies) by name or web domain. Returns ids for crm_get_customer and crm_list_deals. Read-only.",
+    "Find customers by name or web domain; returns ids for the other crm tools.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
