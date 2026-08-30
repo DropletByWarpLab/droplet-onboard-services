@@ -472,8 +472,13 @@ export interface CompanyInput {
   archived?: boolean;
 }
 
-/** Lowercased and stripped of scheme/path, so `https://Acme.com/pricing` and
- *  `acme.com` are the same dedupe key rather than two customers. */
+/** Lowercased and stripped of scheme/path, so `https://Example.com/pricing`
+ *  and `example.com` are the same dedupe key rather than two customers.
+ *
+ *  The illustration uses an RFC-2606 reserved name deliberately: any other
+ *  domain written here, even inside a comment, is a hostname literal that
+ *  `check-egress-allowlist.py` reads as an unregistered outbound destination
+ *  and blocks the PR on. */
 export function normalizeDomain(input: string | null | undefined): string | null {
   if (!input) return null;
   const trimmed = input.trim().toLowerCase();

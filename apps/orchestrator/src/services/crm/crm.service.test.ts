@@ -30,11 +30,11 @@ const stage = (over: Partial<Record<string, unknown>> = {}) => ({
 
 describe("normalizeDomain", () => {
   it("reduces a pasted URL to the dedupe key", () => {
-    // A human pastes what is in their address bar. If `https://Acme.com/pricing`
-    // and `acme.com` are two keys, the same customer arrives twice.
-    expect(normalizeDomain("https://Acme.com/pricing?utm=x")).toBe("acme.com");
-    expect(normalizeDomain("www.acme.com")).toBe("acme.com");
-    expect(normalizeDomain("  ACME.com.  ")).toBe("acme.com");
+    // A human pastes what is in their address bar. If `https://Example.com/pricing`
+    // and `example.com` are two keys, the same customer arrives twice.
+    expect(normalizeDomain("https://Example.com/pricing?utm=x")).toBe("example.com");
+    expect(normalizeDomain("www.example.com")).toBe("example.com");
+    expect(normalizeDomain("  EXAMPLE.com.  ")).toBe("example.com");
   });
 
   it("maps empty and absent to null rather than to an empty string", () => {
