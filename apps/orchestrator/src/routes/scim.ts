@@ -36,8 +36,10 @@ import {
   findUserByUserName,
   setUserActive,
   deactivateUser,
+  replaceUser,
   provisionGroup,
 } from "../services/scim.service.js";
+import { RoleMutationRefusedError } from "../services/role-mutation-guard.service.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 
@@ -112,6 +114,26 @@ export function createScimRouter(prisma?: PrismaClient): Router {
           res.status(err.status).type(SCIM_CONTENT_TYPE).json(err.toScim());
           return;
         }
+        // WARP-2016: a rail refusal from the role-mutation guard renders as
+        // a SCIM Error envelope carrying the rail's stable machine-readable
+        // code in `scimType` — 403 OWNER_IMMUTABLE, 409
+        // LAST_OPERATOR_INVARIANT (two different rails, two different
+        // codes), 409 CONCURRENT_MUTATION for a lost race. Both refusal
+        // statuses are terminal for Okta, so the refusal cannot 4xx-loop its
+        // retry into a wedge; logged at warn with the code, the same posture
+        // as the per-member group-mapping refusals (scim.service.ts) —
+        // never swallowed silently, never a 500.
+        if (err instanceof RoleMutationRefusedError) {
+          logger.warn(
+            { code: err.code, method: req.method, path: req.path },
+            "SCIM mutation refused by the role-mutation guard; nothing was applied",
+          );
+          res
+            .status(err.status)
+            .type(SCIM_CONTENT_TYPE)
+            .json(new ScimError(err.status, err.message, err.code).toScim());
+          return;
+        }
         logger.error({ err: (err as Error).message }, "SCIM request failed");
         res.status(500).type(SCIM_CONTENT_TYPE).json(new ScimError(500, "Internal error").toScim());
       }
@@ -171,21 +193,19 @@ export function createScimRouter(prisma?: PrismaClient): Router {
   );
 
   // PUT = full replace. Okta sends the whole resource; we key by the path id
-  // and apply displayName + active in a SINGLE update. (userName/email is the
-  // immutable login key — we do not re-key an existing row here.)
+  // and apply displayName + active. (userName/email is the immutable login
+  // key — we do not re-key an existing row here.) WARP-2016: the active flip
+  // routes through the SAME guarded funnel as PATCH/DELETE — this verb used
+  // to perform its own bare `prisma.user.update` on `directoryStatus`,
+  // bypassing scim.service.ts and every disable rail.
   router.put(
     "/scim/v2/Users/:id",
     handle(async (req, res) => {
       const existing = await findUserById(prisma!, req.params.id);
       if (!existing) throw ScimError.notFound("User not found");
       const parsed = parseScimUser(req.body);
-      const updated = await prisma!.user.update({
-        where: { id: existing.id },
-        data: {
-          displayName: parsed.displayName,
-          directoryStatus: parsed.active ? "ACTIVE" : "DEACTIVATED",
-        },
-      });
+      const updated = await replaceUser(prisma!, existing.id, parsed);
+      if (!updated) throw ScimError.notFound("User not found");
       // WARP-237: SCIM full-replace is an admin-directory mutation.
       await recordActivity({
         kind: "auth",
