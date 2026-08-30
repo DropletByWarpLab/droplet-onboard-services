@@ -160,6 +160,17 @@ grep -qE 'systemd-cryptenroll .*--recovery-key' "$CMD_LOG" && pass "recovery key
 grep -q 'cryptsetup luksRemoveKey' "$CMD_LOG" && pass "temp keyslot removed" || fail "temp keyslot kept"
 grep -q 'droplet-data-crypt' "$ETC/crypttab" 2>/dev/null && grep -q 'tpm2-device=auto' "$ETC/crypttab" 2>/dev/null \
   && pass "crypttab entry written" || fail "crypttab wrong"
+# WARP-2100: the attach must run headless (never queue an ask-password agent
+# prompt — the agent protocol is socket-based, so closing stdin alone cannot
+# stop it) and with a single try; the boot-time crypttab unlock likewise.
+grep -qE 'systemd-cryptsetup attach .*headless=true' "$CMD_LOG" \
+  && pass "attach passes headless=true (no ask-password prompt queued) [WARP-2100]" \
+  || fail "attach not headless (WARP-2100) — a failed TPM unseal queues a prompt that blocks first boot"
+grep -qE 'systemd-cryptsetup attach .*tries=1' "$CMD_LOG" \
+  && pass "attach passes tries=1 [WARP-2100]" || fail "attach missing tries=1 (WARP-2100)"
+grep -qE 'droplet-data-crypt .*headless=true' "$ETC/crypttab" 2>/dev/null \
+  && pass "written crypttab entry carries headless=true [WARP-2100]" \
+  || fail "crypttab entry missing headless=true (WARP-2100): $(grep droplet-data-crypt "$ETC/crypttab" 2>/dev/null)"
 grep -q '/dev/mapper/droplet-data-crypt /data ext4' "$ETC/fstab" 2>/dev/null && pass "fstab entry written" || fail "fstab wrong"
 grep -q 'RequiresMountsFor=/data' "$ETC/systemd/system/docker.service.d/droplet-data.conf" 2>/dev/null \
   && pass "docker drop-in written" || fail "docker drop-in missing"
@@ -211,6 +222,13 @@ grep -qE 'systemd-cryptenroll .*--recovery-key' "$CMD_LOG" \
 grep -qE 'DROPLET_LUKS_ALLOW_NO_TPM="\$\{DROPLET_LUKS_ALLOW_NO_TPM' "$INSTALL_LIB" \
   && pass "install lib forwards DROPLET_LUKS_ALLOW_NO_TPM through sudo [finding 6]" \
   || fail "install lib does not forward DROPLET_LUKS_ALLOW_NO_TPM (finding 6) — flag inert"
+
+# WARP-2100: the unlock-timeout seam must also cross the sudo boundary, or an
+# operator-tuned DROPLET_LUKS_UNLOCK_TIMEOUT is silently dropped by sudo's
+# env scrub (same failure shape as finding 6).
+grep -qE 'DROPLET_LUKS_UNLOCK_TIMEOUT="\$\{DROPLET_LUKS_UNLOCK_TIMEOUT' "$INSTALL_LIB" \
+  && pass "install lib forwards DROPLET_LUKS_UNLOCK_TIMEOUT through sudo [WARP-2100]" \
+  || fail "install lib does not forward DROPLET_LUKS_UNLOCK_TIMEOUT (WARP-2100) — seam inert under sudo"
 
 # status surface is stable JSON.
 st="$(env "${luks_env[@]}" STUB_MAPPER_ACTIVE=1 "$LUKS_SCRIPT" status 2>/dev/null || true)"
@@ -287,7 +305,7 @@ fi
 echo ""
 echo "--- EXECUTING drill: secrets relocation onto the encrypted /data ---"
 RWORK="$(mktemp -d -t relocdrill-XXXXXXXX)"
-trap 'rm -rf "${WORK:-}" "${RWORK:-}" "${PWORK:-}" "${SWORK:-}"' EXIT
+trap 'rm -rf "${WORK:-}" "${RWORK:-}" "${PWORK:-}" "${SWORK:-}" "${HWORK:-}" "${UWORK:-}"' EXIT
 RSTUB="$RWORK/bin"; RREPO="$RWORK/repo"; RDATA="$RWORK/data"
 mkdir -p "$RSTUB" "$RREPO/data/secrets" "$RDATA"
 # sudo stub: strip leading VAR=val assignments, exec the rest as the test user.
@@ -481,6 +499,274 @@ STUB
     pass "no crypttab/fstab wired for the unopenable container [finding 5]"
   else
     fail "provision wrote boot config for a container it could not open (finding 5)"
+  fi
+fi
+
+# =============================================================================
+# EXECUTING drill: a BLOCKING unlock is TIMED OUT, never hung (WARP-2100)
+#
+# droplet-firstboot ran provision with inherited stdin, no timeout, and no
+# headless= option. A systemd-cryptsetup attach whose TPM unseal fails queues
+# a socket-based ask-password prompt and BLOCKS; the bare `cryptsetup open`
+# fallback then reads a passphrase from stdin and blocks again. With the
+# firstboot unit's TimeoutStartSec=0 the box wedged on first boot FOREVER —
+# and the WARP-232 _unlock_verified refusal sits AFTER the attach, so it never
+# ran. The stubs model the queued prompt as a bounded sleep (bounded so a
+# regression cannot wedge CI); provision must kill them via its shrunk
+# DROPLET_LUKS_UNLOCK_TIMEOUT and land on the loud finding-5 refusal (exit 2)
+# well inside the outer `timeout` — pre-WARP-2100 code hangs until the outer
+# timeout fires (exit 124) and this drill fails fast instead of hanging.
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: blocking unlock is TIMED OUT, not hung [WARP-2100] ---"
+if [ -x "$LUKS_SCRIPT" ]; then
+  HWORK="$(mktemp -d -t provhang-XXXXXXXX)"
+  HSTUB="$HWORK/bin"; HETC="$HWORK/etc"; HDEV="$HWORK/dev"; HASK="$HWORK/ask-password"
+  mkdir -p "$HSTUB" "$HETC" "$HDEV" "$HASK"
+  HCMD="$HWORK/cmd.log"; : > "$HCMD"
+  HLV="$HDEV/luks-lv"; : > "$HLV"          # existing LUKS "container" node
+  : > "$HASK/ask.warp2100drill"            # a queued prompt the diagnostic must surface
+  for t in lvcreate mkfs.ext4 mount blkid vgs systemd-cryptenroll; do
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\n' "$t" "$HCMD" > "$HSTUB/$t"
+    chmod +x "$HSTUB/$t"
+  done
+  printf '#!/usr/bin/env bash\nprintf "findmnt %%s\\n" "$*" >> "%s"\nexit 1\n' "$HCMD" > "$HSTUB/findmnt"
+  chmod +x "$HSTUB/findmnt"
+  # cryptsetup: isLuks TRUE; status FAILS (never opened); `open` models the
+  # interactive passphrase read — it SLEEPS (bounded).
+  cat > "$HSTUB/cryptsetup" <<STUB
+#!/usr/bin/env bash
+printf 'cryptsetup %s\n' "\$*" >> "$HCMD"
+case " \$* " in
+  *" isLuks "*) exit 0 ;;
+  *" status "*) exit 1 ;;
+  *" open "*)   sleep 20; exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$HSTUB/cryptsetup"
+  # systemd-cryptsetup attach: models the queued ask-password prompt — SLEEPS.
+  cat > "$HSTUB/systemd-cryptsetup" <<STUB
+#!/usr/bin/env bash
+printf 'systemd-cryptsetup %s\n' "\$*" >> "$HCMD"
+sleep 20
+exit 1
+STUB
+  chmod +x "$HSTUB/systemd-cryptsetup"
+
+  hang_env=(
+    "PATH=$HSTUB:$PATH"
+    DROPLET_LUKS_SKIP_OS_GATE=1
+    DROPLET_LUKS_VG=ubuntu-vg DROPLET_LUKS_LV=droplet-data
+    DROPLET_LUKS_MAPPER=droplet-data-crypt DROPLET_DATA_MOUNT="$HWORK/data"
+    DROPLET_LUKS_LV_DEV="$HLV"
+    DROPLET_LUKS_MAPPER_DEV="$HDEV/mapper-absent"
+    DROPLET_ETC_DIR="$HETC" DROPLET_LUKS_RUNTIME_DIR="$HWORK/run"
+    DROPLET_TPM_DEVICE="$HSTUB/cryptsetup"
+    DROPLET_LVCREATE_BIN="$HSTUB/lvcreate" DROPLET_VGS_BIN="$HSTUB/vgs"
+    DROPLET_MKFS_BIN="$HSTUB/mkfs.ext4" DROPLET_MOUNT_BIN="$HSTUB/mount"
+    DROPLET_CRYPTSETUP_BIN="$HSTUB/cryptsetup"
+    DROPLET_CRYPTENROLL_BIN="$HSTUB/systemd-cryptenroll"
+    DROPLET_SYSTEMD_CRYPTSETUP_BIN="$HSTUB/systemd-cryptsetup"
+    DROPLET_LUKS_UNLOCK_TIMEOUT=2
+    DROPLET_ASK_PASSWORD_DIR="$HASK"
+    CMD_LOG="$HCMD"
+  )
+  HOUT="$HWORK/provision.out"
+  hrc=0
+  timeout 15 env "${hang_env[@]}" "$LUKS_SCRIPT" provision > "$HOUT" 2>&1 || hrc=$?
+  if [ "$hrc" -eq 124 ]; then
+    fail "provision HUNG on the blocking unlock (killed by the outer 15s timeout) [WARP-2100]"
+  elif [ "$hrc" -eq 2 ]; then
+    pass "blocking unlock bounded: provision refused loudly (exit 2) inside the timeout [WARP-2100]"
+  else
+    fail "provision exited $hrc on a blocking unlock (want the loud exit-2 refusal, got neither hang nor refusal)"
+  fi
+  # The bounded failure must land on the finding-5 discipline: NO boot config.
+  if ! grep -q 'droplet-data-crypt' "$HETC/crypttab" 2>/dev/null \
+     && ! grep -q 'ext4' "$HETC/fstab" 2>/dev/null; then
+    pass "no crypttab/fstab wired after the timed-out unlock [WARP-2100]"
+  else
+    fail "timed-out unlock still wired boot config (WARP-2100)"
+  fi
+  # The refusal diagnostic must surface the queued ask-password prompt.
+  if grep -q 'ask-password' "$HOUT" 2>/dev/null && grep -q 'ask.warp2100drill' "$HOUT" 2>/dev/null; then
+    pass "refusal diagnostic surfaces the pending ask-password prompt [WARP-2100]"
+  else
+    fail "no pending-prompt diagnostic in the refusal output (WARP-2100)"
+  fi
+fi
+
+# =============================================================================
+# EXECUTING drill: FRESH provision refuses a missing TPM2 USERSPACE — and
+# self-heals via apt when it can (WARP-2101)
+#
+# /dev/tpm0 proves the CHIP; systemd-cryptenroll additionally dlopens the tss2
+# userspace (libtss2-esys/-mu/-rc) at runtime. The install seed never shipped
+# those, so on a box with healthy TPM hardware cryptenroll died "TPM2 support
+# is not installed" AFTER luksFormat and BEFORE any keyslot enroll (set -e) —
+# stranding the exact zero-keyslot container the finding-5 re-run branch
+# refuses. The fix preflights the userspace (cryptenroll --tpm2-device=list)
+# BEFORE creating anything, attempts the repo's apt self-install pattern
+# (backup.sh restic precedent), and aborts pre-format when still unusable.
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: missing TPM2 userspace fails BEFORE luksFormat [WARP-2101] ---"
+if [ -x "$LUKS_SCRIPT" ]; then
+  UWORK="$(mktemp -d -t tpm2usr-XXXXXXXX)"
+  USTUB="$UWORK/bin"; UETC="$UWORK/etc"
+  mkdir -p "$USTUB" "$UETC"
+  UCMD="$UWORK/cmd.log"; : > "$UCMD"
+  for t in lvcreate mkfs.ext4 mount cryptsetup systemd-cryptsetup; do
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\n' "$t" "$UCMD" > "$USTUB/$t"; chmod +x "$USTUB/$t"
+  done
+  printf '#!/usr/bin/env bash\nprintf "vgs %%s\\n" "$*" >> "%s"\nprintf "512\\n"\n' "$UCMD" > "$USTUB/vgs"; chmod +x "$USTUB/vgs"
+  printf '#!/usr/bin/env bash\nprintf "findmnt %%s\\n" "$*" >> "%s"\nexit 1\n' "$UCMD" > "$USTUB/findmnt"; chmod +x "$USTUB/findmnt"
+  printf '#!/usr/bin/env bash\nprintf "blkid %%s\\n" "$*" >> "%s"\nexit 2\n' "$UCMD" > "$USTUB/blkid"; chmod +x "$USTUB/blkid"
+  # cryptenroll: EVERY --tpm2-device call (list AND auto) fails with the real
+  # "TPM2 support is not installed" until the apt stub drops the
+  # tss2-installed flag — exactly how a missing userspace behaves on the box.
+  cat > "$USTUB/systemd-cryptenroll" <<STUB
+#!/usr/bin/env bash
+printf 'systemd-cryptenroll %s\n' "\$*" >> "$UCMD"
+for a in "\$@"; do
+  case "\$a" in
+    --tpm2-device=*)
+      if [ ! -e "$UWORK/tss2-installed" ]; then
+        echo "TPM2 support is not installed." >&2
+        exit 1
+      fi ;;
+    --recovery-key)
+      printf 'aaaaa-bbbbb-ccccc-ddddd\n'; exit 0 ;;
+  esac
+done
+exit 0
+STUB
+  chmod +x "$USTUB/systemd-cryptenroll"
+  # apt-get: logs every call; "installs" the userspace only when
+  # STUB_APT_HEALS=1. Always exits 0 — proving the script re-checks
+  # cryptenroll instead of trusting apt's exit code. STUB_APT_LOCKED=1
+  # instead models apt-daily/unattended-upgrades holding the dpkg frontend
+  # lock across first boot: every install fails exactly as a lock timeout
+  # does, so BOTH hardened attempts (and their index refreshes) are driven.
+  cat > "$USTUB/apt-get" <<STUB
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >> "$UCMD"
+if [ "\${STUB_APT_LOCKED:-0}" = "1" ]; then
+  case " \$* " in
+    *" install "*)
+      echo "E: Could not get lock /var/lib/dpkg/lock-frontend." >&2
+      exit 100 ;;
+  esac
+fi
+if [ "\${STUB_APT_HEALS:-0}" = "1" ]; then
+  case " \$* " in *" install "*) : > "$UWORK/tss2-installed" ;; esac
+fi
+exit 0
+STUB
+  chmod +x "$USTUB/apt-get"
+
+  uenv=(
+    "PATH=$USTUB:$PATH"
+    DROPLET_LUKS_SKIP_OS_GATE=1
+    DROPLET_LUKS_VG=ubuntu-vg DROPLET_LUKS_LV=droplet-data
+    DROPLET_LUKS_MAPPER=droplet-data-crypt DROPLET_DATA_MOUNT=/data
+    DROPLET_ETC_DIR="$UETC" DROPLET_LUKS_RUNTIME_DIR="$UWORK/run"
+    DROPLET_TPM_DEVICE="$USTUB/cryptsetup"  # TPM CHIP "present"; the USERSPACE is what's missing
+    DROPLET_LVCREATE_BIN="$USTUB/lvcreate" DROPLET_VGS_BIN="$USTUB/vgs"
+    DROPLET_MKFS_BIN="$USTUB/mkfs.ext4" DROPLET_MOUNT_BIN="$USTUB/mount"
+    DROPLET_CRYPTSETUP_BIN="$USTUB/cryptsetup"
+    DROPLET_CRYPTENROLL_BIN="$USTUB/systemd-cryptenroll"
+    DROPLET_SYSTEMD_CRYPTSETUP_BIN="$USTUB/systemd-cryptsetup"
+    DROPLET_APT_GET_BIN="$USTUB/apt-get"
+    CMD_LOG="$UCMD"
+  )
+
+  # (1) userspace missing + apt cannot supply it → refuse BEFORE luksFormat.
+  : > "$UCMD"
+  urc=0
+  uout="$(env "${uenv[@]}" "$LUKS_SCRIPT" provision 2>&1)" || urc=$?
+  if [ "$urc" -eq 2 ]; then
+    pass "missing TPM2 userspace refuses with exit 2 (precondition) [WARP-2101]"
+  else
+    fail "missing TPM2 userspace: wrong exit code ($urc) — cryptenroll died AFTER luksFormat, not in a preflight"
+  fi
+  if grep -q 'luksFormat' "$UCMD" || grep -q 'lvcreate' "$UCMD"; then
+    fail "provision touched LVM/LUKS despite an unusable TPM2 userspace — the zero-keyslot stranded container [WARP-2101]"
+  else
+    pass "no LV created, no luksFormat run — abort lands BEFORE any container exists"
+  fi
+  if ! grep -q 'droplet-data-crypt' "$UETC/crypttab" 2>/dev/null && [ ! -s "$UETC/fstab" ]; then
+    pass "no crypttab/fstab wired on the userspace refusal"
+  else
+    fail "boot config written despite the userspace refusal"
+  fi
+  grep -qE 'apt-get .*install .*libtss2-rc0t64' "$UCMD" \
+    && pass "self-heal attempted (apt-get install libtss2-*) before refusing" \
+    || fail "no apt self-install attempt (backup.sh restic pattern) before the refusal"
+  printf '%s' "$uout" | grep -qi 'TPM2 userspace' \
+    && pass "refusal message names the TPM2 userspace (distinct from the no-chip error)" \
+    || fail "refusal message does not name the TPM2 userspace: $(printf '%s' "$uout" | tail -2 | tr '\n' ' ')"
+
+  # (1b) dpkg lock held (apt-daily / unattended-upgrades racing first boot):
+  # the self-heal must (a) refresh the possibly-stale seed apt indexes BEFORE
+  # the first install attempt, (b) carry a dpkg lock timeout on EVERY apt-get
+  # call — apt's default Lock::Timeout is 0 = fail immediately, so a transient
+  # lock fluke here hard-exits 2, which scripts/lib/luks.sh downgrades to a
+  # buried warning = a box shipped with NO encryption-at-rest — and (c) STILL
+  # hard-fail once both hardened attempts genuinely cannot supply the tss2
+  # stack (a truly missing userspace keeps failing the provision: WARP-2101).
+  : > "$UCMD"; rm -f "$UWORK/tss2-installed"
+  lrc=0
+  env "${uenv[@]}" STUB_APT_LOCKED=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1 || lrc=$?
+  if [ "$lrc" -eq 2 ]; then
+    pass "genuinely-unhealable userspace still refuses (exit 2) under a held dpkg lock [WARP-2101]"
+  else
+    fail "held-dpkg-lock run: wrong exit code ($lrc) — the hardened self-heal must still hard-fail"
+  fi
+  if grep -q 'luksFormat' "$UCMD" || grep -q 'lvcreate' "$UCMD"; then
+    fail "held-dpkg-lock run touched LVM/LUKS — must abort before creating anything"
+  else
+    pass "held-dpkg-lock run created nothing (abort still lands pre-format)"
+  fi
+  upd_line="$(grep -nE '^apt-get .*update' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  inst_line="$(grep -nE '^apt-get .*install' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  if [ -n "$upd_line" ] && [ -n "$inst_line" ] && [ "$upd_line" -lt "$inst_line" ]; then
+    pass "apt indexes refreshed (update) BEFORE the first install attempt [WARP-2101 review]"
+  else
+    fail "no apt-get update before the first install attempt (upd=${upd_line:-none} inst=${inst_line:-none}) — a stale seed index fails the install outright"
+  fi
+  inst_count="$(grep -cE '^apt-get .*install' "$UCMD" || true)"
+  if [ "${inst_count:-0}" -ge 2 ]; then
+    pass "both install attempts still made under the lock (retry preserved)"
+  else
+    fail "only ${inst_count:-0} install attempt(s) under the lock — the retry was lost"
+  fi
+  if grep -E '^apt-get ' "$UCMD" | grep -qv 'DPkg::Lock::Timeout=60'; then
+    fail "apt-get call(s) missing -o DPkg::Lock::Timeout=60: $(grep -E '^apt-get ' "$UCMD" | grep -v 'DPkg::Lock::Timeout=60' | head -2 | tr '\n' ' ')"
+  else
+    pass "every apt-get call waits on the dpkg lock (-o DPkg::Lock::Timeout=60) [WARP-2101 review]"
+  fi
+
+  # (2) apt CAN supply it → provision self-heals and completes the full flow.
+  : > "$UCMD"; rm -f "$UWORK/tss2-installed"
+  if env "${uenv[@]}" STUB_APT_HEALS=1 "$LUKS_SCRIPT" provision >/dev/null 2>&1; then
+    pass "provision self-heals via apt and completes [WARP-2101]"
+  else
+    fail "provision did not complete after the apt self-install healed the userspace"
+  fi
+  grep -qE 'cryptsetup luksFormat --type luks2' "$UCMD" && pass "healed run formats the container" || fail "healed run never formatted"
+  grep -qE 'systemd-cryptenroll .*--tpm2-device=auto' "$UCMD" && pass "healed run enrolls the TPM keyslot" || fail "healed run never TPM-enrolled"
+
+  # (3) enroll ORDER: the recovery keyslot must land BEFORE the TPM keyslot,
+  # so an abort inside the TPM enroll can never strand a container whose only
+  # keyslot is the tmpfs install keyfile that vanishes on reboot (WARP-2101).
+  rec_line="$(grep -nE 'systemd-cryptenroll .*--recovery-key' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  tpm_line="$(grep -nE 'systemd-cryptenroll .*--tpm2-device=auto' "$UCMD" | head -1 | cut -d: -f1 || true)"
+  if [ -n "$rec_line" ] && [ -n "$tpm_line" ] && [ "$rec_line" -lt "$tpm_line" ]; then
+    pass "recovery keyslot enrolled BEFORE the TPM keyslot (abort-safe order) [WARP-2101]"
+  else
+    fail "TPM keyslot enrolled before the recovery keyslot (rec=${rec_line:-none} tpm=${tpm_line:-none}) — a TPM-enroll abort strands the container"
   fi
 fi
 
