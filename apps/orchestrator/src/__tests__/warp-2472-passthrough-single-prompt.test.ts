@@ -243,7 +243,12 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // 38, not the 37 the probe measured: WARP-2472 flips
     // `detect_wan_port.requiresConfirmation` to true so the flag stops
     // disagreeing with its route's Tier-2 classification.
-    expect(confirming).toHaveLength(38);
+    //
+    // 40 as of WARP-2546: `crm_log_activity` and `crm_move_deal_stage`. Both
+    // are gated by the flag alone (the interceptor enforces it generically),
+    // and neither is a pass-through — the roster below is unchanged, which is
+    // the distinction this count exists to keep visible.
+    expect(confirming).toHaveLength(40);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

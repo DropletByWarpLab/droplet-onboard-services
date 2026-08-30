@@ -61,7 +61,7 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import {
-  selectAdvertisedTools,
+  effectiveAdvertisedToolNames,
   domainOfTool,
   toolNamesForDomain,
 } from "./tool-selection.service.js";
@@ -1254,41 +1254,32 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const fullPoolNames = new Set(filtered.map((t) => t.name));
   let activeTools = filtered;
   if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
-    const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
-    // WARP-1921 — continuity spans BOTH sources, and needs both:
-    //   • `prior_tool_names` — earlier TURNS, read from the persisted trace
-    //     by the route. `req.messages` cannot supply these: chatRequestSchema
-    //     declares no `tool_calls` field, so zod strips it from every
-    //     replayed assistant message.
-    //   • `req.messages` — earlier ITERATIONS of THIS turn, where the loop
-    //     pushes the model's raw message object with tool_calls intact. Still
-    //     required: those calls are not persisted until the turn finalizes.
-    const conversationToolNames = [
-      ...(req.prior_tool_names ?? []),
-      ...req.messages.flatMap((m) =>
-        m.role === "assistant" && m.tool_calls
-          ? m.tool_calls.map((tc) => tc.function.name)
-          : [],
-      ),
-    ];
-    // `content` is an array (multimodal — e.g. an image attachment) on some
-    // user turns; rule matching only understands plain text, so those turns
-    // yield "" here and fall back to core-only advertisement. That's an
-    // accepted gap, not a silent failure: the WARP-642 self-heal branch
-    // below re-admits any real tool the model still names, at the cost of
-    // one lost iteration.
-    const sel = selectAdvertisedTools({
+    // WARP-2552 — the derivation of `userMessage` and `conversationToolNames`
+    // moved into `effectiveAdvertisedToolNames` so that routes/llm.ts's budget
+    // estimate can ask the identical question through the identical code. It
+    // could not before: the route sized the whole pool while this loop
+    // advertised a subset, and the estimate charged ~14,986 tokens of schemas
+    // on a turn that ships ~3,426. `tool-selection.parity.test.ts` asserts the
+    // two sites agree, which is what makes the shared helper load-bearing
+    // rather than merely tidy.
+    //
+    // The behaviour is unchanged: continuity still spans BOTH `prior_tool_names`
+    // (earlier TURNS, from the persisted trace — zod strips `tool_calls` from
+    // replayed messages, so they cannot come from `req.messages`) and
+    // `req.messages` (earlier ITERATIONS of this turn, not yet persisted); and
+    // a multimodal turn whose `content` is an array still yields "" and falls
+    // back to core-only advertisement, with the WARP-642 self-heal branch below
+    // re-admitting any real tool the model names.
+    const selected = effectiveAdvertisedToolNames({
       mode: "domains",
-      userMessage:
-        typeof lastUser?.content === "string" ? lastUser.content : "",
+      messages: req.messages,
+      priorToolNames: req.prior_tool_names,
       pool: filtered.map((t) => t.name),
-      conversationToolNames,
       // WARP-2443 — the dynamic half of the universe. Empty until WARP-2300
       // registers a remote server, and selection is byte-identical to its
       // pre-WARP-2443 behaviour while it is.
       runtimeTools: runtimeToolRegistry.list(),
     });
-    const selected = new Set(sel.advertised);
     activeTools = filtered.filter((t) => selected.has(t.name));
   }
   let tools = activeTools.map(toSpec);

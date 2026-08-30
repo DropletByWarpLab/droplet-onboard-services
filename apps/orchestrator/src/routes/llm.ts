@@ -16,6 +16,9 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+// WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
+// and the wire payload cannot disagree.
+import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
@@ -28,7 +31,6 @@ import {
 } from "../services/tool-access.service.js";
 // WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
 // domain selection, so it sizes the tools[] the model actually receives.
-import { selectAdvertisedTools } from "../services/tool-selection.service.js";
 import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
@@ -1739,10 +1741,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const interviewBlock = interviewActive
           ? INTERVIEW_CONDUCTOR_BLOCK
           : "";
-        // Serialize the effective tools[] the same way llm-agent.service.ts
-        // does, so the estimate reflects what the model actually receives:
-        // an explicit allowed set verbatim, otherwise the WARP-1424 default
-        // chat scope (registry minus chat-tool-scope.ts exclusions).
+        // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
+        // default chat scope (registry minus chat-tool-scope.ts exclusions).
         const effectiveTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
@@ -1750,60 +1750,51 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
-        // WARP-2497 — in domains mode the agent sends only the SELECTED set,
-        // so the estimate must size that set, not the whole chat scope.
-        // Estimating over the full scope (~77 tools / ~14K tokens at the
-        // shipping window) left under 211 tokens of apparent headroom, so any
-        // registry growth "overflowed" the estimate and degradeToFit dropped
-        // the business block from real requests whose actual advertisement
-        // was a twentieth of that size.
+        // WARP-2552 — but the pool is NOT what the model receives, and sizing
+        // it as though it were is the defect this fixes.
         //
-        // Same inputs the agent loop derives at its first iteration
-        // (llm-agent.service.ts): the RBAC-scoped pool, the last user turn's
-        // text (multimodal content yields "" there too), the persisted
-        // prior-turn tool names — this-turn iteration calls cannot exist yet,
-        // and replayed assistant turns have tool_calls zod-stripped — and the
-        // runtime half of the universe. Later iterations may re-admit tools
-        // (self-heal/continuity), but the system prompt this estimate gates
-        // is already fixed by then; the advertisement side has its own gate
-        // (assertToolAdvertisementFitsBudget). Full-scope mode keeps the
-        // existing whole-scope estimate byte-for-byte.
-        const scopedTools = effectiveTools.filter(
-          (t) => !toolAccessScope || toolAllowedInScope(t.name, toolAccessScope),
-        );
-        let estimatedTools = effectiveTools;
-        // `!== "off"`, the same reading of this flag as the continuity lookup
-        // above: the zod default is "domains", so anything but an explicit
-        // "off" means the agent will select. The agent's other gate —
-        // `toolChoice !== "none"` — has no counterpart here because
-        // chatRequestSchema's `tool_choice` cannot express "none" at all
-        // (`"auto" | undefined`), so on this route the agent always selects.
-        if (config.TOOL_SELECTION_MODE !== "off") {
-          const lastUserTurn = [...agentMessages]
-            .reverse()
-            .find((m) => m.role === "user");
-          const sel = selectAdvertisedTools({
-            mode: "domains",
-            userMessage:
-              typeof lastUserTurn?.content === "string"
-                ? lastUserTurn.content
-                : "",
-            pool: scopedTools.map((t) => t.name),
-            conversationToolNames: priorToolNames,
-            runtimeTools: runtimeToolRegistry.list(),
-          });
-          const selected = new Set(sel.advertised);
-          estimatedTools = scopedTools.filter((t) => selected.has(t.name));
-        }
+        // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
+        // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
+        // which the route passes UNCONDITIONALLY — there is no path that ships
+        // the whole pool except an operator setting TOOL_SELECTION_MODE=off).
+        // The comment that used to sit here still claimed the estimate
+        // "reflects what the model actually receives"; it had been false since
+        // selection landed. Measured on a 16384 window: the estimator charged
+        // ~14,986 tokens of tool schemas on a turn that ships ~3,426 — an
+        // ~11.5K-token phantom on EVERY turn.
+        //
+        // The consequence was not theoretical. `degradeToFit` below drops the
+        // business block, then the persona block, once the estimate exceeds
+        // the window; with the phantom included, identity + tool guidance +
+        // the pool alone came to ~15,853 tokens against a 15,360 ceiling. So
+        // on any box carrying durable memory facts, persona and business were
+        // being dropped from the system prompt on every turn — to make room
+        // for schemas that were never sent.
+        //
+        // Under `off` the pool genuinely IS the wire payload, so it is sized
+        // whole. `effectiveAdvertisedToolNames` is the SAME function the loop
+        // uses, so the two cannot drift; `tool-selection.parity.test.ts` pins
+        // that. Runtime-registered remote tools are not in this estimate — the
+        // route has no registry access — which is unchanged from before; the
+        // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
+        // the fully assembled advertisement.
+        const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
+          mode: config.TOOL_SELECTION_MODE,
+          messages: agentMessages,
+          priorToolNames,
+          pool: effectiveTools.map((t) => t.name),
+        });
         const toolSchemasJson = JSON.stringify(
-          estimatedTools.map((t) => ({
-            type: "function" as const,
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.inputSchema,
-            },
-          })),
+          effectiveTools
+            .filter((t) => advertisedNamesForEstimate.has(t.name))
+            .map((t) => ({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.inputSchema,
+              },
+            })),
         );
         // Everything already spliced onto agentMessages (pins, attachments,
         // history) counts toward the window; serialize it as one blob.

@@ -105,6 +105,32 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     expect(deadRules).toEqual(["notifications"]);
   });
 
+  it("records exactly which domains have in-scope tools but NO rule to advertise them", () => {
+    // WARP-2552 — the INVERSE of the assertion above, and the half that was
+    // missing. The test before this one catches "a rule that reaches no tool";
+    // nothing caught "a tool no rule can reach", which is the strictly worse
+    // failure: the schemas are serialized into the pool, charged against the
+    // context budget on every turn, and advertised to the model on NONE.
+    //
+    // This has now happened three times — WARP-2058 for `pm`, WARP-2454 for
+    // `team_chat`, and WARP-2546 shipped seven `crm_*` tools with no `crm`
+    // rule. Each was found by hand, after the fact. This finds the fourth at
+    // commit time.
+    //
+    // Mutation: delete the `crm` entry from DOMAIN_RULES → `crm` appears in
+    // this set → red.
+    const inScope = inScopeByDomain();
+    const unreachable = [...inScope.entries()]
+      .filter(([domain, tools]) => tools.length > 0 && !RULED_DOMAINS.has(domain))
+      .map(([domain]) => domain)
+      .sort();
+
+    // Empty is the only correct answer. A domain whose tools are in the chat
+    // pool must have SOME rule that can advertise them — otherwise exclude the
+    // tools from the pool instead, so they stop costing budget for nothing.
+    expect(unreachable).toEqual([]);
+  });
+
   it("the pm rule is NOT dead — WARP-2058's comment is stale", () => {
     // Recorded because the obvious reading of the exclusion list is that
     // every pm_* tool is gone. Nine of ten are; pm_create_project is not.

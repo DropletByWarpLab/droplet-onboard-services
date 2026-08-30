@@ -95,6 +95,14 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "set_port_poe",
   "detect_wan_port",
   "setup_camera_ports",
+  // crm: the pipeline WRITE only. WARP-2546 puts the six CRM reads and
+  // crm_log_activity in chat on purpose — "who have we not chased?",
+  // "log that I called them" are the point of the suite. Moving a deal
+  // between stages is a drag on the pipeline board WARP-2545 shipped, and
+  // it is what the forecast reads; it does not need to cost every chat
+  // turn the schema budget. Excluded to keep the full-pool tripwire in
+  // base-prompt-budget.test.ts green as the registry grew past it.
+  "crm_move_deal_stage",
   // erp vertical suite (external MCP / dedicated UI)
   "erp_get_schedule_today",
   "erp_find_patient",

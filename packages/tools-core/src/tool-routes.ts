@@ -308,6 +308,30 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "pm_get_work_item", client: "orchestrator", hops: [admit("get", "/api/pm/work-items/:id")] },
   { tool: "pm_search_work_items", client: "orchestrator", hops: [admit("get", "/api/pm/work-items")] },
 
+  // WARP-2546 — CRM. `crm_get_customer` and `crm_get_deal` each make more than
+  // one call, so every hop is declared: the completeness gate checks the LIST,
+  // not just the first request, and an undeclared hop is how a tool ships with
+  // a route the mcp principal cannot reach.
+  { tool: "crm_search_customers", client: "orchestrator", hops: [admit("get", "/api/crm/companies")] },
+  {
+    tool: "crm_get_customer",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/crm/companies/:id"),
+      admit("get", "/api/crm/deals"),
+      admit("get", "/api/crm/activities"),
+    ],
+  },
+  { tool: "crm_list_deals", client: "orchestrator", hops: [admit("get", "/api/crm/deals")] },
+  {
+    tool: "crm_get_deal",
+    client: "orchestrator",
+    hops: [admit("get", "/api/crm/deals/:id"), admit("get", "/api/crm/activities")],
+  },
+  { tool: "crm_pipeline_summary", client: "orchestrator", hops: [admit("get", "/api/crm/summary")] },
+  { tool: "crm_log_activity", client: "orchestrator", hops: [admit("post", "/api/crm/activities")] },
+  { tool: "crm_move_deal_stage", client: "orchestrator", hops: [admit("post", "/api/crm/deals/:id/stage")] },
+
   // ── erp (ERP_NOT_CONNECTED stubs — no ctx.http hop yet) ─────────────────
   none("erp_get_schedule_today"),
   none("erp_find_patient"),

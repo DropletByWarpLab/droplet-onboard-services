@@ -102,6 +102,14 @@ const EXPECTED_TOOL_NAMES = [
   "pm_list_work_items",
   "pm_list_workspaces",
   "pm_search_work_items",
+  // crm (WARP-2546)
+  "crm_search_customers",
+  "crm_get_customer",
+  "crm_list_deals",
+  "crm_get_deal",
+  "crm_pipeline_summary",
+  "crm_log_activity",
+  "crm_move_deal_stage",
   // WARP-1094 — ERP-connector (Eaglesoft) tools
   "erp_get_schedule_today",
   "erp_find_patient",
