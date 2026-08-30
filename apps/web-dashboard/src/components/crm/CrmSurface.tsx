@@ -17,7 +17,7 @@ import { translateError } from "@/lib/friendly-errors";
 import { PmIcon } from "@/components/projects/icons";
 import { EmptyBlock } from "@/components/projects/bits";
 
-import { CustomersView, DealBoard, Timeline, type CrmDomain } from "./views";
+import { CustomersView, DealBoard, type CrmDomain } from "./views";
 import { NewCompanyModal, NewDealModal, RecordDrawer } from "./modals";
 import { useCompanies, useCrmActions, useCrmSummary, useDeals, usePipelines } from "./useCrm";
 import type { CrmCompany, CrmDeal } from "./types";
@@ -197,5 +197,3 @@ export function CrmSurface({
     </>
   );
 }
-
-export { Timeline };
