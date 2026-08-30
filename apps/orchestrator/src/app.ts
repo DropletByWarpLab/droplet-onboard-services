@@ -50,6 +50,8 @@ import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
+import { createCrmRouter } from "./routes/crm.js";
+import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -394,6 +396,12 @@ export function createApp(
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
   app.use("/api", createPmNativeRouter(prisma));
+  // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
+  // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
+  // shadows the other; the `crm` module gate comes from the registry.
+  app.use("/api", createCrmRouter(prisma));
+  // WARP-2018/WARP-2032 — the one address book. Owner-scoped, unlike PM/CRM.
+  app.use("/api", createContactsRouter(prisma));
   // ADR-026 — read-only mobile wrappers over the native PM service
   // (workspaces, projects, work-items). iOS/Android/Windows consume.
   app.use(createPmMobileRouter(prisma));

@@ -7136,6 +7136,13 @@ export async function fetchCapabilities(): Promise<AdminCapabilities> {
 export interface AppCapabilities {
   /** The Projects (native PM, ADR-026) surface is enabled on this Droplet. */
   projects: boolean;
+  /** WARP-2545 — the CRM sub-tabs on the Projects page. Already resolved
+   *  against the `requires: "projects"` edge server-side, so this is safe to
+   *  read on its own; re-checking `projects` here would be a second copy of a
+   *  rule the box already applied. */
+  crm: boolean;
+  /** WARP-2038 — the /contacts surface. Ships false until that page exists. */
+  contacts: boolean;
 }
 
 /**

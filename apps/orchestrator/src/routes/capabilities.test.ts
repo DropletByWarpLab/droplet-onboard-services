@@ -74,12 +74,15 @@ describe("GET /api/capabilities", () => {
     expect(res.status).toBe(401);
   });
 
-  it("answers projects:false when the module has no enablement row (registry default)", async () => {
+  it("answers false for every module with no enablement row (registry default)", async () => {
     const res = await request(appWithUser({ role: "owner" }, [])).get(
       "/api/capabilities",
     );
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ projects: false });
+    // WARP-2545 — `crm` and `contacts` join the contract here. They are
+    // `defaultEnabled: false` in the registry, so a fresh box answers false
+    // for both, and the dashboard renders the Projects surface it always had.
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
   });
 
   it.each(["owner", "admin", "family", "guest", "service"])(
@@ -89,7 +92,7 @@ describe("GET /api/capabilities", () => {
         appWithUser({ role }, [{ moduleId: "projects", enabled: true }]),
       ).get("/api/capabilities");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ projects: true });
+      expect(res.body).toEqual({ projects: true, crm: false, contacts: false });
     },
   );
 
@@ -98,15 +101,51 @@ describe("GET /api/capabilities", () => {
       appWithUser({ role: "owner" }, [{ moduleId: "projects", enabled: false }]),
     ).get("/api/capabilities");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ projects: false });
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
   });
 
-  it("fails CLOSED (projects:false) when the enablement read errors — module-gate parity", async () => {
+  it("answers crm:true only when its parent module is on too", async () => {
+    // WARP-2545 — the CRM renders as sub-tabs on the Projects page, so the
+    // registry declares `requires: "projects"`. That edge is applied by
+    // `satisfiedModuleIds` inside getEffectiveModuleIds; this route must NOT
+    // re-derive it, because a second copy of the rule is free to drift from
+    // the one the module gate enforces.
+    //
+    // Mutation: drop `requires: "projects"` from the crm module def, or write
+    // `crm = effective.has("crm") && projects` here → the first assertion
+    // below stops meaning anything.
+    const crmOnProjectsOff = await request(
+      appWithUser({ role: "owner" }, [
+        { moduleId: "crm", enabled: true },
+        { moduleId: "projects", enabled: false },
+      ]),
+    ).get("/api/capabilities");
+    expect(crmOnProjectsOff.body).toEqual({ projects: false, crm: false, contacts: false });
+
+    const bothOn = await request(
+      appWithUser({ role: "owner" }, [
+        { moduleId: "crm", enabled: true },
+        { moduleId: "projects", enabled: true },
+      ]),
+    ).get("/api/capabilities");
+    expect(bothOn.body).toEqual({ projects: true, crm: true, contacts: false });
+  });
+
+  it("answers contacts independently of the CRM", async () => {
+    // Contacts is its own surface (WARP-2038) and works with the CRM off —
+    // declaring a dependency it does not have would hide it for no reason.
+    const res = await request(
+      appWithUser({ role: "owner" }, [{ moduleId: "contacts", enabled: true }]),
+    ).get("/api/capabilities");
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: true });
+  });
+
+  it("fails CLOSED for every flag when the enablement read errors — module-gate parity", async () => {
     const res = await request(
       appWithUser({ role: "owner" }, new Error("db down")),
     ).get("/api/capabilities");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ projects: false });
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
   });
 
   it("allows brief private caching so the nav doesn't re-probe every mount", async () => {

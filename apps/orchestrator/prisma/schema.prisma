@@ -1425,6 +1425,11 @@ model Note {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// WARP-2117 — CRM timeline entries that POINT AT this note. The CRM never
+  /// copies the body; deleting the note nulls the reference and leaves the
+  /// fact that the interaction happened intact.
+  crmActivities CrmActivity[]
+
   // Home reads "this user's pinned notes, newest first"; the notes surface
   // reads "this user's notes, pinned first, newest first". One index serves
   // both.
@@ -1474,6 +1479,10 @@ model CalendarEvent {
   externalEtag String? // CalDAV ETag for change detection
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  /// WARP-2117 — CRM timeline entries that POINT AT this event (a meeting on
+  /// a deal). The CRM stores a caption, never a copy.
+  crmActivities CrmActivity[]
 
   @@unique([sourceId, externalUid]) // a given upstream event appears at most once locally
   @@index([userId, startsAt])
@@ -2987,6 +2996,11 @@ model EmailMessage {
   receivedAt DateTime
   createdAt  DateTime     @default(now())
 
+  /// WARP-2117 — CRM timeline entries that POINT AT this message. The CRM
+  /// stores the subject line as a caption and never a copy of the body, so
+  /// mail retention stays governed by the mail surface alone.
+  crmActivities CrmActivity[]
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
 }
@@ -3548,6 +3562,11 @@ enum ModuleId {
   managed_switch
   /// WARP-1683 — Team chat (member-to-member Messages surface).
   team_chat
+  /// WARP-2018 — Contacts (the one address book, CardDAV/Graph-fed or local).
+  contacts
+  /// WARP-2117 — CRM (companies, deals, pipeline, timeline), nested inside
+  /// the Projects surface.
+  crm
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -3881,6 +3900,11 @@ model PmProject {
   modules    PmModule[]
   properties PmCustomProperty[]
 
+  /// WARP-2117 — the deals this project delivers. A won deal becomes a job;
+  /// the link is on the deal so deleting the project leaves the commercial
+  /// record intact (SetNull, not Cascade).
+  crmDeals CrmDeal[]
+
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
 }
@@ -4004,6 +4028,10 @@ model PmWorkItem {
   activity       PmActivity[]
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
+
+  /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
+  /// raised off a customer conversation).
+  crmActivities CrmActivity[]
 
   @@unique([projectId, sequenceId])
   @@index([projectId, stateId, sortOrder])
@@ -5386,4 +5414,539 @@ model M365DeltaCursor {
   /// The scheduler's claim query: "what is due now".
   @@index([state, nextAttemptAt])
   @@index([userId])
+}
+
+// ============================================================================
+// Contacts — WARP-2018 (carddav-3)
+//
+// The ONE contact entity on the box. WARP-2117 makes this the CRM's person
+// record rather than inventing a second one: the box must not end up with a
+// CardDAV contact, a Graph contact and a CRM contact that are three rows for
+// one human. A CardDAV address book is a SOURCE that fills this table
+// (`AddressBookSource`); so is Microsoft Graph; so is a person typed in by
+// hand. `origin` says which, explicitly.
+//
+// Modelled on `IntegrationConnection`/`IntegrationStatus`, NOT on
+// `CalendarSource` — that one derives health from `lastSyncError IS NULL`,
+// which is the WARP-218 pattern this repo forbids.
+// ============================================================================
+
+/// Lifecycle of one address-book source. Explicit column; never derived from
+/// the nullability of `lastSyncError` or `collectionUrl`.
+enum AddressBookStatus {
+  /// No source has been configured. The default.
+  NOT_CONFIGURED
+  /// Credentials accepted, discovery in flight. A row may not rest here after
+  /// a completed verify.
+  VERIFYING
+  /// Usable — the last sync against the server succeeded.
+  CONNECTED
+  /// Transient sync failure. A health signal, not a request for human action.
+  DEGRADED
+  /// The stored credential no longer works. Split from DEGRADED deliberately:
+  /// it needs operator action and must BACK OFF rather than retry into an
+  /// account lockout.
+  AUTH_FAILED
+  /// The server answered, but not with something we can read (no addressbook
+  /// collection, or a vCard version we do not support). Retrying will not fix
+  /// it and neither will new credentials.
+  UNSUPPORTED_SERVER
+  /// The operator turned this source off deliberately.
+  DISABLED
+}
+
+/// What the server actually negotiated — persisted so the dashboard reports
+/// the real mechanism rather than the one we intended.
+enum AddressBookSyncMode {
+  SYNC_COLLECTION
+  ETAG_DIFF
+  FULL_PULL
+}
+
+/// Where a contact row came from. Explicit, because "has an externalUid" is
+/// exactly the derive-state-from-NULL shape the repo forbids — and because a
+/// locally-authored contact that later gets matched to a synced one must not
+/// silently change class.
+enum ContactOrigin {
+  /// Typed into Droplet. Droplet owns it; no sync will overwrite it.
+  LOCAL
+  /// Pulled from a source (CardDAV, Graph, a CRM connector). The source owns
+  /// the synced fields.
+  EXTERNAL
+}
+
+model AddressBookSource {
+  id String @id @default(uuid())
+
+  /// Owner of this address book. Delegated auth: a source can never expose
+  /// data its owner could not read at the server.
+  userId String
+  name   String
+
+  /// What the operator pasted. Kept verbatim so a failed discovery can be
+  /// diagnosed against the input rather than against our rewrite of it.
+  serverUrl String
+
+  /// Resolved by discovery. NULL until a verify succeeds — which is a FACT
+  /// about discovery, not the source's lifecycle state (see `status`).
+  collectionUrl String?
+
+  authMode String  @default("basic")
+  username String?
+
+  /// aes-256-gcm blob (encryption.service `encryptSecret`), same key and
+  /// format as `CalendarSource.passwordEnc` and `DeviceClient.ncAppPassword`.
+  /// Never returned by any route, never logged.
+  passwordEnc String?
+
+  status AddressBookStatus @default(NOT_CONFIGURED)
+
+  /// Named vocabulary explaining a non-CONNECTED `status` to a human:
+  /// `vcard_version_unsupported`, `no_addressbook_collection`,
+  /// `off_lan_denied`, `credentials_rejected`. A closed set, unlike
+  /// `lastSyncError`.
+  statusReason String?
+
+  syncMode        AddressBookSyncMode @default(FULL_PULL)
+  syncToken       String?
+  ctag            String?
+  syncIntervalSec Int                 @default(900)
+  lastSyncAt      DateTime?
+
+  /// DIAGNOSTIC DETAIL ONLY — never the state. Read `status` for that.
+  lastSyncError String?
+
+  /// A CardDAV server off the LAN is an egress decision the owner has to make
+  /// deliberately; the default is no.
+  offLanAllowed Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contacts Contact[]
+
+  @@index([userId, status])
+}
+
+model Contact {
+  id String @id @default(uuid())
+
+  userId String
+
+  /// The source that owns this row, when it has one. Schema-level cascade
+  /// (NOT a hand-rolled `$transaction` sweep like `calendar.service.ts` does)
+  /// so deleting a source in a live DB cannot leave orphans behind.
+  sourceId String?
+  source   AddressBookSource? @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  origin ContactOrigin @default(LOCAL)
+
+  // --- Provenance (WARP-2117) ---------------------------------------------
+  // Free TEXT, mirroring `IntegrationConnection.provider`: a new upstream
+  // needs no migration. `externalSystem` names the vendor ("m365",
+  // "salesforce", "hubspot", "carddav"); `externalId` is that vendor's id.
+
+  /// Vendor key of the upstream that owns this row. NULL for LOCAL rows.
+  externalSystem String?
+
+  /// Stable id in the upstream system — the reconcile key that stops two
+  /// connectors from each creating their own copy of one person.
+  externalId String?
+
+  /// CardDAV's own identity/versioning triple.
+  externalUid  String?
+  href         String?
+  etag         String?
+  vcardVersion String?
+
+  displayName  String
+  givenName    String?
+  familyName   String?
+  organization String?
+  jobTitle     String?
+  note         String?
+
+  /// String, NOT DateTime. RFC 6350 §4.3.1 permits partial dates — a birthday
+  /// of `--0423` (April 23rd, year unknown) has no Date representation, and
+  /// coercing it invents a year.
+  birthday String?
+
+  photoStorageKey String? @unique
+  photoMimeType   String?
+  photoSizeBytes  Int?
+
+  /// Bounded at 64 KB by the write path.
+  rawVcard String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  emails          ContactEmail[]
+  phones          ContactPhone[]
+  companyLinks    CrmCompanyContact[]
+  dealLinks       CrmDealContact[]
+  crmActivities   CrmActivity[]
+
+  /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
+  /// upstream id), so a re-sync updates rather than duplicates.
+  @@unique([sourceId, externalUid])
+  /// The cross-connector reconcile key.
+  @@unique([externalSystem, externalId])
+  @@index([userId, displayName])
+  @@index([userId, origin])
+}
+
+model ContactEmail {
+  id        String  @id @default(uuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  address String
+
+  /// Indexed lowercase form — the join key to `EmailMessage.fromAddr` and the
+  /// cross-book dedupe key. Derived on write, never read from user input.
+  addressLower String
+
+  label     String?
+  isPrimary Boolean @default(false)
+
+  @@index([contactId])
+  @@index([addressLower])
+}
+
+model ContactPhone {
+  id        String  @id @default(uuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  /// `tel:` scheme stripped on write.
+  number    String
+  label     String?
+  isPrimary Boolean @default(false)
+
+  @@index([contactId])
+}
+
+// ============================================================================
+// CRM — WARP-2117
+//
+// Built, not adopted: every mature open-source CRM is AGPL-3 on purpose and
+// shipping the appliance is conveyance, so copyleft attaches (see WARP-2113 /
+// ADR-041 for the licence argument). Structure informed by Atomic CRM
+// (Marmelab, MIT) as a reference model; zero AGPL-derived code.
+//
+// This is deliberately THIN. It owns companies, deals, a configurable
+// pipeline and a timeline — and it reuses the box's existing primitives for
+// everything else: `Contact` above for people, `Note` / `EmailMessage` /
+// `CalendarEvent` / `PmWorkItem` for timeline content, the files+RAG path for
+// attachments, and `PmProject` for the work that delivers a won deal.
+// ============================================================================
+
+/// Where a CRM row came from. Explicit for the same reason `ContactOrigin` is.
+enum CrmRecordOrigin {
+  LOCAL
+  EXTERNAL
+}
+
+/// What reaching a stage MEANS. An explicit outcome class, never inferred from
+/// a stage's position, its name, or the absence of a `closedAt` — a pipeline's
+/// stages are owner-configurable, so position and name carry no guarantees.
+enum CrmStageKind {
+  OPEN
+  WON
+  LOST
+}
+
+/// Which record a timeline entry hangs off. Exactly one of the three id
+/// columns on `CrmActivity` is non-NULL, enforced by a CHECK constraint in the
+/// migration (Prisma cannot express it).
+enum CrmActivitySubject {
+  COMPANY
+  CONTACT
+  DEAL
+}
+
+/// The timeline vocabulary. `NOTE` / `EMAIL` / `MEETING` / `TASK` carry a
+/// reference to the record that already holds the content; `STAGE_CHANGE`,
+/// `CREATED` and `SYNCED` are audit events the CRM itself writes.
+enum CrmActivityKind {
+  NOTE
+  EMAIL
+  CALL
+  MEETING
+  TASK
+  STAGE_CHANGE
+  CREATED
+  SYNCED
+}
+
+model CrmCompany {
+  id String @id @default(uuid())
+
+  name String
+
+  /// Primary web domain, lowercased on write. The natural dedupe key when a
+  /// connector and a human both create the same account.
+  domain String?
+
+  industry String?
+  phone    String?
+  website  String?
+
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  region       String?
+  postalCode   String?
+  country      String?
+
+  note String?
+
+  /// The person accountable for this account. A `User.id`, kept as a plain
+  /// column (the house style for cross-surface owner references — cf.
+  /// `PmProject.leadId`).
+  ownerId String?
+
+  origin         CrmRecordOrigin @default(LOCAL)
+  externalSystem String?
+  externalId     String?
+
+  /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
+  /// (WARP-884). `archivedAt` is the audit timestamp only.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contactLinks CrmCompanyContact[]
+  deals        CrmDeal[]
+  activities   CrmActivity[]
+
+  @@unique([externalSystem, externalId])
+  @@index([name])
+  @@index([domain])
+  @@index([ownerId, isArchived])
+}
+
+/// Company↔Contact as a link table rather than a foreign key on `Contact`:
+/// people change jobs, and a person can legitimately be reachable at two
+/// organizations at once. Deleting either side deletes only the link.
+model CrmCompanyContact {
+  id String @id @default(uuid())
+
+  companyId String
+  company   CrmCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  /// Role at THIS company, which may differ from the contact's own jobTitle.
+  title     String?
+  isPrimary Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, contactId])
+  @@index([contactId])
+}
+
+/// A named pipeline. Owner-configurable and plural from day one, because a
+/// business that sells two things sells them through two processes.
+model CrmPipeline {
+  id String @id @default(uuid())
+
+  name String
+
+  /// Exactly one pipeline is the default new deals land in. Enforced by a
+  /// partial unique index in the migration.
+  isDefault Boolean @default(false)
+
+  sortOrder Int @default(0)
+
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stages CrmPipelineStage[]
+  deals  CrmDeal[]
+
+  @@index([isArchived, sortOrder])
+}
+
+model CrmPipelineStage {
+  id String @id @default(uuid())
+
+  pipelineId String
+  pipeline   CrmPipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  name String
+
+  /// Explicit ordering column. The board renders by this, never by insertion
+  /// order or by name.
+  sortOrder Int
+
+  /// What landing here means for the deal. Owner-configurable stage NAMES,
+  /// fixed outcome SEMANTICS.
+  kind CrmStageKind @default(OPEN)
+
+  /// Optional forecast weighting, 0-100. Advisory only — nothing derives an
+  /// outcome from it.
+  probability Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deals CrmDeal[]
+
+  @@unique([pipelineId, sortOrder])
+  @@index([pipelineId, kind])
+}
+
+model CrmDeal {
+  id String @id @default(uuid())
+
+  title String
+
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  pipelineId String
+  pipeline   CrmPipeline @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
+
+  stageId String
+  stage   CrmPipelineStage @relation(fields: [stageId], references: [id], onDelete: Restrict)
+
+  /// Minor units (cents), never a float — money in a binary fraction is how
+  /// pipelines stop adding up.
+  amountMinor BigInt?
+
+  /// ISO-4217. NULL only when `amountMinor` is NULL.
+  currency String?
+
+  expectedCloseOn DateTime?
+
+  /// Audit timestamp of when the deal reached a WON/LOST stage. The OUTCOME
+  /// lives in `stage.kind`; this is only when it happened.
+  closedAt DateTime?
+
+  /// Free-text reason, typically for a LOST deal.
+  closeReason String?
+
+  ownerId String?
+
+  /// WARP-2117: a won deal becomes the job that delivers it. SetNull because
+  /// deleting the project must not delete the commercial record of the sale.
+  projectId String?
+  project   PmProject? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  origin         CrmRecordOrigin @default(LOCAL)
+  externalSystem String?
+  externalId     String?
+
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contactLinks CrmDealContact[]
+  activities   CrmActivity[]
+
+  @@unique([externalSystem, externalId])
+  @@index([pipelineId, stageId])
+  @@index([stageId])
+  @@index([companyId])
+  @@index([ownerId, isArchived])
+  @@index([expectedCloseOn])
+}
+
+model CrmDealContact {
+  id String @id @default(uuid())
+
+  dealId String
+  deal   CrmDeal @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  /// Their part in THIS deal — "economic buyer", "champion", "blocker".
+  role String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([dealId, contactId])
+  @@index([contactId])
+}
+
+/// The timeline unit, and the thing the local model reads when asked about a
+/// customer. It REFERENCES the record that holds the content rather than
+/// copying it — a note stays one note, an email stays one email.
+model CrmActivity {
+  id String @id @default(uuid())
+
+  /// Which of the three subject columns below is populated. Explicit, so a
+  /// query can filter without three IS-NULL tests, and so the CHECK constraint
+  /// has something to check against.
+  subjectType CrmActivitySubject
+
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  dealId String?
+  deal   CrmDeal? @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  kind CrmActivityKind
+
+  /// One line for the timeline. For a referenced record this is a caption
+  /// (subject line, meeting title) — never a copy of the body.
+  summary String
+
+  /// Who did it. A `User.id`, or NULL when the box itself wrote the row.
+  actorId String?
+
+  /// When it HAPPENED (an email's sent time), which is not when the row was
+  /// written (`createdAt`).
+  occurredAt DateTime @default(now())
+
+  // --- References to the primitives that already hold the content ----------
+  // All nullable, all SetNull: deleting the underlying note or email must not
+  // erase the fact that the interaction happened, and must not leave a
+  // dangling id behind either.
+
+  noteId String?
+  note   Note?   @relation(fields: [noteId], references: [id], onDelete: SetNull)
+
+  emailMessageId String?
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+
+  calendarEventId String?
+  calendarEvent   CalendarEvent? @relation(fields: [calendarEventId], references: [id], onDelete: SetNull)
+
+  workItemId String?
+  workItem   PmWorkItem? @relation(fields: [workItemId], references: [id], onDelete: SetNull)
+
+  // --- STAGE_CHANGE detail -------------------------------------------------
+
+  fromStageId String?
+  toStageId   String?
+
+  origin         CrmRecordOrigin @default(LOCAL)
+  externalSystem String?
+  externalId     String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([externalSystem, externalId])
+  @@index([dealId, occurredAt])
+  @@index([companyId, occurredAt])
+  @@index([contactId, occurredAt])
+  @@index([kind, occurredAt])
 }
