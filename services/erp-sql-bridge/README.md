@@ -55,8 +55,28 @@ granted only the one enabled write capability — a column-scoped UPDATE on
 `appointment`'s four mutable scheduling columns.
 `services/erp-connector/sql/provision.sql` is the script that establishes this.
 
-The route guards sit on top of that so a caller bug fails immediately and by
-name. Two independent properties, checked in this order on **every** route:
+On top of that, outermost first:
+
+**The statement allowlist** (WARP-2540, `allowlist.py` +
+`statement_manifest.json`). `/read/{name}` and `/write/{name}` refuse any
+statement that is not, shape-for-shape, what the registries emit for that
+`{name}`: the incoming SQL is normalized (double-quoted identifiers masked to
+`<id>`, whitespace collapsed) and must equal a shipped skeleton exactly. An
+unknown name is `UNKNOWN_STATEMENT`, a reshaped statement is
+`STATEMENT_MISMATCH` — both HTTP 400, refused before a connection is acquired.
+Identifier *names* stay free (the schema map resolves them per practice, the
+server checks they exist); the statement's *shape* may not vary by one
+character, which is what makes an injected predicate, UNION, comment, second
+statement, or changed verb structurally impossible. The manifest is pinned to
+the registries by
+`services/erp-connector/__tests__/statement-manifest-sync.test.ts`; a
+missing/malformed manifest stops the service at import rather than starting it
+half-guarded. `/introspect` is not allowlisted — its catalog SQL is a
+dialect-injection seam (the live lane introspects Postgres) and the route is
+confined to SELECTs on the read identity by the guards below.
+
+The route guards then make a caller bug fail immediately and by name. Two
+independent properties, checked in this order on **every** route:
 
 1. **Exactly one statement** (`NOT_A_SINGLE_STATEMENT`). Unconditional, and
    deliberately independent of statement kind — an earlier revision folded this
@@ -76,8 +96,8 @@ against a live server, bypassing the routes entirely.
 | Route | Identity | Notes |
 |---|---|---|
 | `GET /health` | read | `SELECT 1` + pool state. Returns `ok:false` with a reason when the practice's DB is unreachable — a running bridge is not a working one |
-| `POST /read/{name}` | `droplet_ro` | One already-built SELECT. `{name}` is the registry query name, used for logs/errors only |
-| `POST /write/{name}` | `droplet_rw` | One already-built write, in one transaction. `rowCount: 0` is the optimistic guard missing, **not** an error |
+| `POST /read/{name}` | `droplet_ro` | One registry-built SELECT. `{name}` is the registry query name — it selects which registered shape the SQL must match, and names the read in logs/errors |
+| `POST /write/{name}` | `droplet_rw` | One registry-built write, in one transaction. `{name}` selects the registered shape. `rowCount: 0` is the optimistic guard missing, **not** an error |
 | `POST /introspect` | read | Runs caller-supplied catalog queries and returns raw rows. Fingerprinting happens in TypeScript, against the same `computeSchemaFingerprint` the drift check uses |
 
 ## Enabling the track

@@ -67,12 +67,19 @@ const makeConnector = (over: ConnectorDeps = {}) =>
   new EaglesoftConnector(CONFIG, { bridgeUrl: BRIDGE_URL, catalog: PG_CATALOG, ...over });
 
 /** Raw bridge access for test setup only (reading a guard watermark). The
- *  connector has no read query that exposes `last_modified`, by design. */
+ *  connector has no read query that exposes `last_modified`, by design — and
+ *  since WARP-2540 the bridge itself accepts only registered statement
+ *  shapes, so this scaffolding borrows the registered `get_patient` shape
+ *  (three columns, one equality predicate) against the appointment table.
+ *  Identifier names are free under the allowlist; the shape is not. */
 const raw = () => new SqlBridgeClient({ baseUrl: BRIDGE_URL });
 
+const VERIFY_APPT_SQL =
+  'SELECT "status", "operatory_id", "last_modified" FROM "dba"."appointment" WHERE "appt_id" = ?';
+
 async function lastModified(apptId: number): Promise<string> {
-  const rows = await raw().runRead("__test_watermark", {
-    sql: 'SELECT "last_modified" FROM "dba"."appointment" WHERE "appt_id" = ?',
+  const rows = await raw().runRead("get_patient", {
+    sql: VERIFY_APPT_SQL,
     params: [apptId],
   });
   return String(rows[0].last_modified);
@@ -218,11 +225,11 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
       });
       expect(result).toEqual({ applied: true, rowCount: 1 });
 
-      const rows = await raw().runRead("__test_verify", {
-        sql: 'SELECT "status", "operatory_id" FROM "dba"."appointment" WHERE "appt_id" = ?',
+      const rows = await raw().runRead("get_patient", {
+        sql: VERIFY_APPT_SQL,
         params: [5002],
       });
-      expect(rows).toEqual([{ status: "confirmed", operatory_id: 2 }]);
+      expect(rows).toMatchObject([{ status: "confirmed", operatory_id: 2 }]);
     });
 
     it("reports a stale optimistic guard as applied:false, not as an error", async () => {
@@ -235,8 +242,8 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
       });
       expect(result).toEqual({ applied: false, rowCount: 0 });
 
-      const rows = (await raw().runRead("__test_verify", {
-        sql: 'SELECT "status" FROM "dba"."appointment" WHERE "appt_id" = ?',
+      const rows = (await raw().runRead("get_patient", {
+        sql: VERIFY_APPT_SQL,
         params: [5001],
       })) as Record<string, unknown>[];
       expect(rows[0].status).not.toBe("cancelled");
@@ -256,6 +263,20 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
       await expect(
         connector.applyWrite("reschedule_appointment", { appt_id: 5001, status: "confirmed" }),
       ).rejects.toBeInstanceOf(MissingParamError);
+    });
+  });
+
+  describe("the bridge refuses unregistered statements (WARP-2540)", () => {
+    it("refuses an unknown statement name at the bridge, not the database", async () => {
+      await expect(
+        raw().runRead("__not_registered", { sql: VERIFY_APPT_SQL, params: [5001] }),
+      ).rejects.toMatchObject({ code: "UNKNOWN_STATEMENT", status: 400 });
+    });
+
+    it("refuses a reshaped statement under a registered name", async () => {
+      await expect(
+        raw().runRead("get_patient", { sql: `${VERIFY_APPT_SQL} OR 1=1`, params: [5001] }),
+      ).rejects.toMatchObject({ code: "STATEMENT_MISMATCH", status: 400 });
     });
   });
 
