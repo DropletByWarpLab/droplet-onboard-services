@@ -948,6 +948,26 @@ entries:
     review_by: 2027-07-04
     code_refs: [scripts/lib/docker.sh]
 
+  - id: setup-nvidia-container-toolkit
+    kind: egress
+    service: repo
+    destination:
+      hosts: [nvidia.github.io]
+      ports: [443]
+      protocol: https
+    phase: setup
+    data_class: none
+    purpose: >-
+      NVIDIA container-toolkit apt repo (signing key + sources list) during
+      appliance setup on a box with an NVIDIA accelerator. Without the toolkit
+      the `nvidia` container runtime does not exist and DMR cannot reach the
+      GPU at all — which is how WARP-2543 shipped a box serving its 20B model
+      from CPU at 8 tok/s with every healthcheck green.
+    ticket: WARP-2543
+    added: 2026-08-30
+    review_by: 2027-08-30
+    code_refs: [scripts/host/install-nvidia-runtime.sh]
+
   - id: build-openwrt-artifacts
     kind: egress
     service: openwrt-router

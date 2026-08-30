@@ -75,21 +75,38 @@ fi
 # reimplements the logic keeps passing when the fix is reverted.
 
 merged_for() {
-  # $1 = existing COMPOSE_PROFILES value, $2 = INFERENCE_RUNTIME value
-  local existing="$1" runtime="$2"
+  # $1 = existing COMPOSE_PROFILES value, $2 = INFERENCE_RUNTIME value,
+  # $3 = GPU_VENDOR (optional; omitted means "not yet detected", which the
+  #      shipped block treats as `amd` — the whole installed fleet).
+  local existing="$1" runtime="$2" vendor="${3:-}"
   local tmp; tmp="$(mktemp -d)"
   local env_file="$tmp/.env" env_target="$tmp/.env"
   printf 'COMPOSE_PROFILES=%s\n' "$existing" > "$env_file"
   [ -n "$runtime" ] && printf 'INFERENCE_RUNTIME=%s\n' "$runtime" >> "$env_file"
+  [ -n "$vendor" ]  && printf 'GPU_VENDOR=%s\n' "$vendor" >> "$env_file"
 
   # Pull the merge + guard block straight out of the shipped script.
+  #
+  # WARP-2543 — the end marker is now an explicit sentinel rather than
+  # `^  fi$`. The old range broke the moment the block grew an inner `if`:
+  # awk stopped at the INNER `fi`, so the extracted text omitted the
+  # strip-and-add that actually selects the runtime — and it would still
+  # eval cleanly, still emit a plausible string, and still pass. A truncated
+  # extraction is worse than a broken one because it is invisible.
   local block
-  block="$(awk '/^  existing_profiles=\$\(grep -E/,/^  fi$/' "$LIB")"
+  block="$(awk '/^  existing_profiles=\$\(grep -E/,/END RUNTIME PROFILE SELECTION/' "$LIB")"
 
   local out
   out="$(
     log_info() { :; }
+    log_error() { :; }
+    # The shipped block resolves the DMR shape through gpu.sh. Source the real
+    # one: stubbing it here would let a wrong vendor->profile mapping ship
+    # green, which is the exact class of bug WARP-2543 was.
+    # shellcheck source=../scripts/lib/gpu.sh
+    source "$REPO_ROOT/scripts/lib/gpu.sh"
     local merged_profiles existing_profiles _profiles_runtime
+    local _wanted_profile _gpu_vendor
     eval "$block"
     printf '%s' "$merged_profiles"
   )"
@@ -202,6 +219,69 @@ if [ "$count" = "1" ]; then
 else
   bad "dmr appears $count times — re-running setup duplicates it (got '$got')"
 fi
+
+# ── WARP-2543: the vendor axis ─────────────────────────────────────────────
+#
+# GPU_VENDOR picks WHICH DMR shape, independently of INFERENCE_RUNTIME picking
+# WHICH DAEMON. The failure being designed out is the two disagreeing: a box
+# that starts the ROCm service against an NVIDIA card (or the reverse) finds no
+# usable device, falls back to CPU, and serves the 20B at ~8 tok/s with every
+# healthcheck green. That ran for days on the bench box.
+
+# The installed fleet: AMD silicon keeps the EXACT token it already carries.
+# If this ever flips to `dmr-cuda`, every AMD box in the field rewrites its
+# COMPOSE_PROFILES on the next setup.sh run and loses inference.
+got="$(merged_for 'linux,single-box' 'dmr' 'amd')"
+case ",$got," in
+  *,dmr,*) ok "GPU_VENDOR=amd: keeps the existing 'dmr' token — installed fleet unaffected (got '$got')" ;;
+  *)       bad "GPU_VENDOR=amd: 'dmr' token missing — this would break every AMD box in the field (got '$got')" ;;
+esac
+case ",$got," in
+  *,dmr-cuda,*) bad "GPU_VENDOR=amd: got the NVIDIA profile — ROCm box would start the CUDA service (got '$got')" ;;
+  *)            ok  "GPU_VENDOR=amd: dmr-cuda correctly absent (got '$got')" ;;
+esac
+
+got="$(merged_for 'linux,single-box' 'dmr' 'nvidia')"
+case ",$got," in
+  *,dmr-cuda,*) ok "GPU_VENDOR=nvidia: selects 'dmr-cuda' (got '$got')" ;;
+  *)            bad "GPU_VENDOR=nvidia: 'dmr-cuda' missing — no inference service would start (got '$got')" ;;
+esac
+# The one that actually bit: the AMD service wired to an NVIDIA card. Its
+# /dev/kfd + render node still RESOLVE (to a 512 MiB integrated GPU), so it
+# starts, reports healthy, and serves from CPU.
+case ",$got," in
+  *,dmr,*) bad "GPU_VENDOR=nvidia: bare 'dmr' present — ROCm service on an NVIDIA card = silent CPU fallback (got '$got')" ;;
+  *)       ok  "GPU_VENDOR=nvidia: bare 'dmr' correctly absent (got '$got')" ;;
+esac
+
+# Exactly one runtime token, whatever the starting state. This is the property
+# the rewrite makes true BY CONSTRUCTION rather than by remembering to strip
+# each sibling — with three tokens the pairwise version needs six strips and
+# stays one forgotten line from putting two runtimes on one card.
+for start in 'linux,dmr' 'linux,dmr-cuda' 'linux,ollama' 'linux,dmr,dmr-cuda,ollama'; do
+  for v in amd nvidia; do
+    got="$(merged_for "$start" 'dmr' "$v")"
+    n="$(printf '%s' "$got" | tr ',' '\n' | grep -cE '^(dmr|dmr-cuda|ollama)$')"
+    if [ "$n" = "1" ]; then
+      ok "exactly one runtime token from '$start' at vendor=$v (got '$got')"
+    else
+      bad "$n runtime tokens from '$start' at vendor=$v — single-GPU-owner violation (got '$got')"
+    fi
+  done
+done
+
+# A vendor with no accelerator must NOT silently fall through to a token that
+# would serve inference from CPU. Refusing is the correct outcome: 8 tok/s
+# reporting healthy is worse than not starting.
+# An unclassifiable GPU falls back to the PRE-WARP-2543 token rather than
+# aborting: CI, containers and dev laptops all land here, and refusing broke
+# every one of them. The warning is the signal; the behaviour is unchanged.
+got="$(merged_for 'linux,single-box' 'dmr' 'none')"
+case ",$got," in
+  *,dmr-cuda,*) bad "GPU_VENDOR=none: selected the NVIDIA profile on unclassified hardware (got '$got')" ;;
+  *,dmr,*)      ok  "GPU_VENDOR=none: falls back to the pre-existing 'dmr' token, no abort (got '$got')" ;;
+  *)            bad "GPU_VENDOR=none: no runtime profile at all — box would have no inference (got '$got')" ;;
+esac
 
 # The pre-existing merge contract must survive.
 got="$(merged_for 'linux,display,eval,docs' 'dmr')"

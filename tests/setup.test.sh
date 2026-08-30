@@ -233,6 +233,14 @@ echo "--- Phase 3: configure_single_box_env (single-box knobs) ---"
 # lib/single-box.sh is a sourceable lib (functions only; no top-level run).
 # logging.sh is already sourced above, and REPO_ROOT + a generated .env exist
 # from Phase 2 — so configure_single_box_env has everything it needs.
+# WARP-2543 — single-box.sh now calls configure_gpu_env (accelerator detection
+# decides the DMR profile and image), so gpu.sh is a hard dependency of it and
+# must be sourced FIRST, exactly as scripts/setup.sh does. Without this,
+# configure_single_box_env dies on an undefined function and every knob it
+# writes afterwards silently stops being written — which failed 33 assertions
+# in this file the first time round, none of them mentioning the GPU.
+# shellcheck source=../scripts/lib/gpu.sh
+source "$REPO_ROOT_REAL/scripts/lib/gpu.sh"
 # shellcheck source=../scripts/lib/single-box.sh
 source "$REPO_ROOT_REAL/scripts/lib/single-box.sh"
 

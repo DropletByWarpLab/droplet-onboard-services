@@ -2884,6 +2884,122 @@ services:
     cpus: ${DMR_CPUS:-4.0}
     pids_limit: ${DMR_PIDS_LIMIT:-2048}
 
+  # --- dmr-cuda (NVIDIA sibling of `dmr` above) ----------------------------
+  # WARP-2543. The `dmr` service above is the AMD/ROCm shape and stays exactly
+  # as it was — every box in the field runs it and must keep running it. This
+  # is the NVIDIA shape, and the two are mutually exclusive by profile:
+  #
+  #   GPU_VENDOR=amd     -> COMPOSE_PROFILES carries `dmr`       -> service above
+  #   GPU_VENDOR=nvidia  -> COMPOSE_PROFILES carries `dmr-cuda`  -> this service
+  #
+  # scripts/lib/gpu.sh detects the vendor off the PCI bus and writes both
+  # GPU_VENDOR and the matching DMR_IMAGE; scripts/lib/single-box.sh enforces
+  # that exactly ONE of `ollama` / `dmr` / `dmr-cuda` is ever in the profile
+  # list (the WARP-1826 single-GPU-owner rule, extended to three tokens).
+  #
+  # WHY A SECOND SERVICE AND NOT ENV-VAR SWITCHES ON THE FIRST:
+  # The alternative was to parameterise `dmr` with ${DMR_DEVICE_A:-/dev/null}
+  # style indirection. Both shapes validate — that was measured, not assumed —
+  # but the parameterised one fails SOFT: a half-written .env yields a service
+  # that starts, finds no accelerator, and serves from CPU at a tenth of the
+  # speed while reporting healthy. That is the precise failure this ticket
+  # exists to eliminate, so the design that fails LOUD wins: a missing or
+  # wrong profile token starts no inference service at all.
+  #
+  # 🔴 CONTAINER NAME IS SHARED WITH `dmr` ON PURPOSE. Both declare
+  # container_name: droplet-dmr. `docker compose config` accepts this (checked
+  # on the box, not assumed); profiles guarantee only one is ever selected,
+  # and if both tokens were somehow set, `up` fails on the name collision
+  # instead of quietly starting two runtimes that would fight over the GPU.
+  # The collision IS the backstop.
+  dmr-cuda:
+    # The CUDA build. Same upstream version as `dmr`'s ROCm tag — keep the two
+    # pinned in lockstep, they are one decision. Bare `v1.2.6` is the CPU-only
+    # build and is refused by assert_dmr_image_is_accelerated in gpu.sh; a
+    # hand-pinned bare tag in docker/.env is exactly how WARP-2543 happened.
+    image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda}
+    container_name: droplet-dmr
+    profiles: ["dmr-cuda"]
+    restart: unless-stopped
+    <<: *default-logging
+    ports:
+      # LOOPBACK ONLY — identical reasoning to `dmr` above (ADR-036 §6): DMR's
+      # API is unauthenticated and POST /models/create is an arbitrary-registry
+      # pull primitive. Never the LAN bridge, never 0.0.0.0.
+      - "127.0.0.1:${DMR_PORT:-12434}:12434"
+    networks:
+      default:
+        aliases:
+          # LOAD-BEARING. Everything upstream dials the chat endpoint as
+          # `http://dmr:12434` (OLLAMA_URL / RAGAS_OLLAMA_URL, written by
+          # single-box.sh, plus INFERENCE_MANAGER_URL's peer). On the implicit
+          # default network a service answers to its own name, so without this
+          # alias the NVIDIA shape would be reachable only as `dmr-cuda` and
+          # every consumer would fail to resolve — turning a GPU fix into an
+          # inference outage. The alias keeps the vendor swap invisible above
+          # this file.
+          - dmr
+    # NVIDIA device access. This is the counterpart of `dmr`'s /dev/kfd +
+    # render-node pair, and the reason a second service is cheaper than
+    # switching the first: the two vendors do not share a mechanism.
+    #
+    # `runtime: nvidia` comes from nvidia-container-toolkit, which
+    # scripts/host/install-nvidia-runtime.sh installs and registers with the
+    # daemon. If the toolkit is absent this service fails to start with an
+    # explicit "unknown runtime" — loud, which is correct. It must never
+    # degrade to a CPU start.
+    runtime: nvidia
+    environment:
+      MODELS_PATH: /models
+      # The NVIDIA analogue of `dmr`'s ROCR_VISIBLE_DEVICES: "0". `all` is
+      # right here because the appliance ships exactly one discrete card and
+      # the toolkit already scopes visibility to what it was given.
+      NVIDIA_VISIBLE_DEVICES: ${DMR_NVIDIA_VISIBLE_DEVICES:-all}
+      # `compute` = CUDA, `utility` = nvidia-smi inside the container, which
+      # the GPU-residency healthcheck below depends on. Dropping `utility`
+      # makes the check unable to distinguish "no GPU" from "no tooling".
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # Same 16k window as `dmr` above, same mechanism and the same reason:
+      # llama.cpp's env form provably applies and survives a restart, whereas
+      # the HTTP _configure route returns 202 and silently no-ops unless the
+      # model id is registry-qualified (measured 2026-08-08).
+      LLAMA_ARG_CTX_SIZE: "${DMR_CONTEXT_LENGTH:-16384}"
+    volumes:
+      # The SAME named volume as `dmr`. The two never run together, the
+      # on-disk OCI artifact layout is identical across both builds, and
+      # sharing it means a vendor swap does not re-pull ~14 GB of weights.
+      - dmr-models:/models
+    # GPU-RESIDENCY HEALTHCHECK — the fail-loud half of WARP-2543.
+    #
+    # `dmr` above deliberately inherits the image's own /engines/status probe.
+    # That probe is necessary but NOT sufficient, and its insufficiency is the
+    # entire incident: on the degraded box every container was healthy while
+    # inference ran on CPU. "The API answers" and "the GPU is being used" are
+    # different claims, and only the first was ever checked.
+    #
+    # nvidia-smi inside the container exits non-zero when the driver, the
+    # toolkit, or the device is missing — so this turns a silent 10x
+    # regression into an unhealthy container that monitoring can see.
+    healthcheck:
+      test: ["CMD-SHELL", "nvidia-smi -L | grep -q '^GPU 0' || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - "no-new-privileges:true"
+    stop_grace_period: 60s
+    # 🔴 NOT `dmr`'s 4g. That limit was inherited from the ollama service's
+    # reasoning and never re-measured (its own comment says so). A 20.91B F16
+    # model is ~14 GB on disk, and while the weights live in VRAM once
+    # offloaded, the loader still maps them through host memory — a 4 GiB cap
+    # turns the load into a paging storm. Raised here for the shape that is
+    # actually being introduced rather than left as an inherited guess;
+    # DMR_MEM_LIMIT still overrides.
+    mem_limit: ${DMR_MEM_LIMIT:-16g}
+    cpus: ${DMR_CPUS:-8.0}
+    pids_limit: ${DMR_PIDS_LIMIT:-2048}
+
   # --- inference-manager (model catalog / lifecycle sidecar) ----------------
   # WARP-2131. Vendored from droplet-local-LLM; see
   # services/inference-manager/VENDORED.md for provenance and what was removed.
