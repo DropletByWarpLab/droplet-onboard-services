@@ -467,6 +467,12 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "email", label: "Email", domains: ["email"], feature: "email" },
   { id: "projects", label: "Projects", domains: ["pm"], feature: "projects" },
   { id: "memory", label: "Memory", domains: ["memory"], feature: "knowledge" },
+  // WARP-2497 — its own row rather than folded into System: the cloud
+  // connectors read customer, payment and mailing-list records, a different
+  // sensitivity class from System's box telemetry and pure-compute utilities,
+  // and an operator has to be able to withhold it on its own. No module gates
+  // it (there is no connectors AccessModuleId), so `feature` stays null.
+  { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
   { id: "system", label: "System", domains: ["system", "business", "data"], feature: null },
 ];
 

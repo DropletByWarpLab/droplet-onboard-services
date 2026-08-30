@@ -211,6 +211,16 @@ const TURNS: Turn[] = [
     requires: "slack_send_message",
     remote: true,
   },
+  {
+    // WARP-2497. The literal acceptance sentence from the ticket, run through
+    // the REAL shipping chat pool — which is what makes it worth more than the
+    // unit test in tool-selection.service.test.ts: this one would also catch
+    // the tool being registered and then excluded from chat, or dropped by
+    // the budget gate, neither of which a hand-built pool can see.
+    label: "cloud dataset / the billing question this story exists to answer",
+    message: "what did we bill last week",
+    requires: "cloud_query_dataset",
+  },
 ];
 
 const select = (t: Turn) =>

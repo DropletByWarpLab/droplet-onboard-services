@@ -601,3 +601,97 @@ describe("WARP-2454 — keyword rules vs. natural phrasing", () => {
     });
   });
 });
+
+describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn", () => {
+  // The shipped tool name. One generic reader, not one per vendor: the
+  // full-registry canary had ~2.6K chars of headroom when this landed.
+  const CLOUD_POOL = [...POOL, "cloud_query_dataset"];
+
+  const advertisedFor = (userMessage: string, pool: string[] = CLOUD_POOL) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    }).advertised;
+
+  // ── positives ────────────────────────────────────────────────────────────
+  //
+  // Whole sentences, never a word lifted out of the pattern — asserting with
+  // the vocabulary already inside the regex is the tautology that let the
+  // `people` gap ship green (see the WARP-2454 header above).
+  //
+  // MUTATION for this whole group: delete the `domains: ["cloud"]` rule from
+  // tool-selection.service.ts and every positive below goes red. Note each
+  // one runs with an EMPTY `conversationToolNames`, so continuity cannot be
+  // what carries it — the fresh turn is the whole point of the ticket.
+  describe("positives", () => {
+    it.each([
+      // The sentence the ticket exists to answer.
+      "what did we bill last week",
+      "how much revenue did we take in August?",
+      "pull up the open invoices from Stripe",
+      "did that customer's refund go through?",
+      "what is in the sales pipeline this quarter?",
+      "how did the July campaign perform?",
+      "are we billing them monthly or annually?",
+      "what is our MRR right now?",
+      "show me the payouts that landed this month",
+      "which deals did we win in Q2?",
+      "how many subscribers do we have?",
+    ])("%s advertises the cloud dataset reader", (message) => {
+      expect(advertisedFor(message)).toContain("cloud_query_dataset");
+    });
+  });
+
+  // ── negatives ────────────────────────────────────────────────────────────
+  //
+  // These are the DELIBERATELY unclaimed words, and they are the half of the
+  // trade-off that is easy to let rot. Each one belongs to another domain
+  // that answers it better; a future widening that takes the bare word will
+  // turn these red, which is the intended alarm rather than an inconvenience.
+  //
+  // MUTATION: add bare `tickets?`, `company`, `customers?`, `newsletters?` or
+  // `contacts?` to the cloud pattern and the matching case below goes red.
+  describe("negatives — the words other domains own", () => {
+    it.each([
+      // `pm` owns `ticket` (WARP-2058).
+      "is there an open support ticket for the printer?",
+      // `business` owns `company` and `customers`.
+      "what are our opening hours?",
+      "which company do we buy the milk from?",
+      // `email` owns `newsletter`.
+      "did the newsletter go out this morning?",
+      // `search_contacts` is the on-box answer to this one.
+      "find Dana's contact details",
+      // Nothing to do with a SaaS account at all.
+      "turn the living room lights off",
+    ])("%s does NOT advertise the cloud dataset reader", (message) => {
+      expect(advertisedFor(message)).not.toContain("cloud_query_dataset");
+    });
+  });
+
+  it("does not let `open` alone reach the payments reader", () => {
+    // `(open|click|bounce) rates?` and `(sales|open|closed|won|lost) deals?`
+    // both REQUIRE their noun. Without that, "open" — one of the commonest
+    // words in a support sentence — would claim the domain outright.
+    // Mutation: drop the ` rates?` / ` deals?` tails so the qualifiers stand
+    // alone → red.
+    expect(advertisedFor("can you open the front door")).not.toContain("cloud_query_dataset");
+  });
+
+  it("still reaches the domain by continuity once the tool has been used", () => {
+    // The rule and continuity are independent paths; this pins that a
+    // follow-up with no keyword at all ("and the one before that?") keeps the
+    // tool in reach, which is what makes a multi-turn drill-down work.
+    // Mutation: drop the `conversationToolNames` loop in selectAdvertisedTools
+    // → red.
+    const advertised = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one before that?",
+      pool: CLOUD_POOL,
+      conversationToolNames: ["cloud_query_dataset"],
+    }).advertised;
+    expect(advertised).toContain("cloud_query_dataset");
+  });
+});

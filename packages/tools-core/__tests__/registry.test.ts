@@ -171,6 +171,9 @@ const EXPECTED_TOOL_NAMES = [
   "create_spreadsheet",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
+  // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
+  // three vendors and all ten datasets; the dataset arg picks the provider.
+  "cloud_query_dataset",
 ];
 
 describe("TOOLS registry", () => {

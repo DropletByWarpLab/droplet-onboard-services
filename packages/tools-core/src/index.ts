@@ -6,6 +6,11 @@
 export type { Tool, ToolContext, ToolHandler, ToolResult, ToolError, Role, ScoreKind, HttpClient, MatterController, ConfirmationOwner } from "./types.js";
 export type { PrivateEnhancement } from "./private-enhancement.js";
 export { TOOLS, getTool } from "./registry.js";
+// WARP-2497 — the cloud_query_dataset vocabulary. Re-exported so the
+// orchestrator's route can be drift-tested against the tool's enum from a
+// package boundary away; two hand-kept lists is exactly how the two sides
+// would silently diverge.
+export { CLOUD_QUERY_DATASETS } from "./handlers/cloud/query-dataset.js";
 export {
   TOOL_CATALOG,
   TOOL_DOMAINS,
