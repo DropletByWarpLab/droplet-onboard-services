@@ -255,6 +255,27 @@ describe("worst-case fixed system-block budget", () => {
     // tripwire for the MCP-facing surface, which advertises everything).
     // Re-baselined 2026-07 for the WARP-1423 rollout (94 → ~127 tools,
     // ~85K chars serialized).
+    //
+    // Re-baselined again 2026-08-30 for WARP-2546 — the seven-tool `crm`
+    // domain took this from ~99.4K to 100,561 and tripped the 100,000 line.
+    // Raised deliberately rather than trimmed under, for two reasons:
+    //
+    //   1. This ceiling watches the MCP-facing surface, which has no context
+    //      window to blow — an external client asks for the catalog once. The
+    //      number that bounds a real chat turn is the per-domain assertion
+    //      above, and it is comfortably green.
+    //   2. Shaving prose to squeeze under a growth tripwire is how a canary
+    //      stops meaning anything. The point of the line is that crossing it
+    //      is a decision somebody writes down, which is what this is.
+    //
+    // 110K leaves room for roughly one more domain of this size before the
+    // next author has to make the same call consciously.
+    //
+    // ⚠ The CHAT-pool assertion above is a different matter: it now sits at
+    // 59,941 of 60,000 — 59 chars of headroom. The next tool added to the chat
+    // scope WILL trip it, and that one has a real consequence (it is the wire
+    // payload of the TOOL_SELECTION_MODE=off rollback path). WARP-2547 tracks
+    // deciding between re-baselining it and excluding a vertical suite.
     const fullRegistryJson = JSON.stringify(
       Array.from(TOOLS.values()).map((t) => ({
         type: "function" as const,
@@ -265,7 +286,7 @@ describe("worst-case fixed system-block budget", () => {
         },
       })),
     );
-    expect(fullRegistryJson.length).toBeLessThan(100000);
+    expect(fullRegistryJson.length).toBeLessThan(110000);
   });
 
   /**

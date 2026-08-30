@@ -171,6 +171,17 @@ import pmListWorkItems from "./handlers/pm/list-work-items.js";
 import pmGetWorkItem from "./handlers/pm/get-work-item.js";
 import pmSearchWorkItems from "./handlers/pm/search-work-items.js";
 
+// WARP-2546 — CRM tools. The differentiator a cloud CRM cannot ship: the model
+// that reads the pipeline runs on the box, so "draft a follow-up to every deal
+// idle 14+ days" never sends a customer list to a vendor.
+import crmSearchCustomers from "./handlers/crm/search-customers.js";
+import crmGetCustomer from "./handlers/crm/get-customer.js";
+import crmListDeals from "./handlers/crm/list-deals.js";
+import crmGetDeal from "./handlers/crm/get-deal.js";
+import crmPipelineSummary from "./handlers/crm/pipeline-summary.js";
+import crmLogActivity from "./handlers/crm/log-activity.js";
+import crmMoveDealStage from "./handlers/crm/move-deal-stage.js";
+
 // ERP-connector framework (WARP-1094) — Eaglesoft as provider #1. DB-
 // independent slice: handlers return ERP_NOT_CONNECTED; the live read/write
 // paths ship in WARP-1095+. Read tools are Read-tier; the appointment
@@ -360,6 +371,14 @@ const allTools: Tool[] = [
   pmListWorkItems,
   pmGetWorkItem,
   pmSearchWorkItems,
+
+  crmSearchCustomers,
+  crmGetCustomer,
+  crmListDeals,
+  crmGetDeal,
+  crmPipelineSummary,
+  crmLogActivity,
+  crmMoveDealStage,
   // WARP-1094: ERP-connector (Eaglesoft) — 3 Read-tier + 1 Write-tier
   erpGetScheduleToday,
   erpFindPatient,

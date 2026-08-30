@@ -109,6 +109,13 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | pm_list_work_items | pm | List work items in a project (optional state/assignee filters). WARP-508. | false | false | orchestrator |
 | pm_get_work_item | pm | Fetch a single work item by id. WARP-508. | false | false | orchestrator |
 | pm_search_work_items | pm | Search work items in a workspace by query. WARP-508. | false | false | orchestrator |
+| crm_search_customers | crm | Search CRM customers (companies) by name or web domain. WARP-2546. | false | false | orchestrator |
+| crm_get_customer | crm | One customer with their open deals and recent timeline. WARP-2546. | false | false | orchestrator |
+| crm_list_deals | crm | List deals, filtered by outcome / customer / idle days. WARP-2546. | false | false | orchestrator |
+| crm_get_deal | crm | One deal with its recent timeline. WARP-2546. | false | false | orchestrator |
+| crm_pipeline_summary | crm | Deal count and value per pipeline stage. WARP-2546. | false | false | orchestrator |
+| crm_log_activity | crm | Append a note/call/meeting/task/email to a customer's or deal's timeline. WARP-2546. | true | true | orchestrator |
+| crm_move_deal_stage | crm | Move a deal to another stage in its own pipeline. WARP-2546. | true | true | orchestrator |
 | erp_get_schedule_today | erp | Get the practice's appointment schedule for a day (Eaglesoft). Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
 | erp_find_patient | erp | Search patients in the ERP (Eaglesoft) by name, minimum-necessary fields. Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |
 | erp_get_ar_summary | erp | Accounts-receivable summary (aggregated in SQL) from the ERP (Eaglesoft). Read-only. Returns ERP_NOT_CONNECTED until WARP-1095+. | false | false | orchestrator → erp-connector |

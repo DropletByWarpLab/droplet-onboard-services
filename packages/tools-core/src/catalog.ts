@@ -41,6 +41,9 @@ export type ToolDomain =
   | "email"
   | "memory"
   | "pm"
+  // WARP-2546 — the CRM. Slug matches the `crm` ModuleId so the module
+  // toggle gates the domain.
+  | "crm"
   | "erp"
   | "business"
   | "system"
@@ -190,6 +193,15 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "pm_list_work_items",
     "pm_get_work_item",
     "pm_search_work_items",
+  ],
+  crm: [
+    "crm_search_customers",
+    "crm_get_customer",
+    "crm_list_deals",
+    "crm_get_deal",
+    "crm_pipeline_summary",
+    "crm_log_activity",
+    "crm_move_deal_stage",
   ],
   erp: [
     "erp_get_schedule_today",
@@ -377,6 +389,14 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   pm_list_work_items: "See the tasks in a project",
   pm_get_work_item: "See the full details of one task",
   pm_search_work_items: "Search your tasks",
+  // CRM (customers, deals, pipeline)
+  crm_search_customers: "Find a customer by name or website",
+  crm_get_customer: "See one customer, their open deals and recent history",
+  crm_list_deals: "See your deals — including the ones going quiet",
+  crm_get_deal: "See one deal and what has happened on it",
+  crm_pipeline_summary: "See how much is in each stage of your pipeline",
+  crm_log_activity: "Add a call or note to a customer's history (you approve it first)",
+  crm_move_deal_stage: "Move a deal to a different stage (you approve it first)",
   // ERP (Eaglesoft practice-management integration)
   erp_get_schedule_today: "See the day's appointment schedule from your practice software",
   erp_find_patient: "Look up a patient in your practice software",

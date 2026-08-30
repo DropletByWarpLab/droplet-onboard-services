@@ -204,13 +204,10 @@ export const MODULES: readonly ModuleDef[] = [
     // /projects. Listing that href here would hide the PM surface whenever CRM
     // is off, which is backwards — the dependency runs the other way.
     navHrefs: [],
-    // Empty until WARP-2546 builds the `crm` tool domain. The registry's
-    // `unknown domain` invariant is right to refuse a forward declaration: a
-    // domain named here that the tools-core catalog cannot resolve is a gate
-    // pointing at nothing, and it would read as "these tools are gated" in
-    // every review between now and then. WARP-2546 adds `"crm"` here in the
-    // same change that adds the handlers.
-    toolDomains: [], core: false, defaultEnabled: false,
+    // WARP-2546 — claimed in the same change that adds the handlers, which is
+    // what the registry's `unknown domain` invariant enforces: a domain the
+    // tools-core catalog cannot resolve is a gate pointing at nothing.
+    toolDomains: ["crm"], core: false, defaultEnabled: false,
     // WARP-2117 puts the CRM INSIDE /projects — it has no reachable surface of
     // its own without it, which is exactly the bar this field documents. So
     // Projects-off renders CRM blocked with a reason rather than offering a
