@@ -90,12 +90,21 @@ export const MODEL_TOOL_RESULT_CAP_CHARS = 8000;
 /**
  * Cap for the loop's OWN control envelopes (forbidden tool, unknown tool,
  * self-heal, repeated call). These are authored by the agent loop, not by a
- * tool, so they are never measured against a dynamic budget and never walked
- * by the reducer: they are small, fixed-shape, and their only variable part is
- * the advertised-tool name list. A canary test pins the real registry's
- * worst-case envelope well under this value.
+ * tool, so they are never measured against a dynamic budget: they are small,
+ * fixed-shape, and their only variable part is the advertised-tool name list.
+ * A canary test pins the real registry's worst-case envelope well under this
+ * value, so the reducer never actually engages today — but when it does
+ * (registry growth), the cut is the same JSON-safe bounding tool results get
+ * (WARP-2525), never a raw character slice.
  */
 export const CONTROL_ENVELOPE_CAP_CHARS = 4000;
+
+/**
+ * The `tool` the marker names when the bounded text is a loop-authored
+ * control envelope rather than a tool result (WARP-2525). Fixed vocabulary:
+ * the loop is the producer, so there is no tool name to report.
+ */
+const CONTROL_ENVELOPE_TOOL_LABEL = "control_envelope";
 
 /**
  * The one key this module adds. Verified collision-free across tools-core
@@ -703,10 +712,19 @@ function applyCursorPass(tree: unknown, reductions: readonly Reduction[]): Curso
     //     without this gate, a `{ pagination: { nextCursor, total, limit,
     //     page } }` sub-object that nothing touched lost three STILL-TRUE
     //     numbers because a cursor beside them was swept.
+    //
+    //     Per-key, not per-level (WARP-2525): a cursor whose recompute
+    //     VERIFIED against the producer's own numbers is not a casualty of
+    //     its neighbours. The sweep used to delete EVERY cursor-shaped key at
+    //     the level the moment ONE failed — throwing away the one still-true
+    //     resume point this pass had just checked. Only the keys that
+    //     actually failed go, plus the accounting group: those numbers are
+    //     what would let the model reconstruct a DELETED cursor, and that
+    //     reconstruction is wrong (chunk indices are not promised dense).
     if (reducedAtOrUnder && cursorKeysHere.some((k) => toDelete.has(k))) {
       for (const k of keys) {
+        if (toSet.has(k)) continue; // a verified recompute survives
         if (PAGING_ACCOUNTING_KEYS.has(k) || CURSOR_KEYS.has(k)) {
-          toSet.delete(k);
           toDelete.add(k);
         }
       }
@@ -755,6 +773,7 @@ function buildMarker(
   reductions: readonly Reduction[],
   removed: readonly string[],
   recomputed: readonly string[],
+  cap: number,
 ): Record<string, unknown> {
   const reduced = reductions.slice(0, MAX_MARKER_REDUCTIONS).map((r) => ({
     at: (pathKey(r.path) || "(root)").slice(0, MAX_MARKER_PATH_CHARS),
@@ -765,7 +784,7 @@ function buildMarker(
   const clip = (keys: readonly string[]): string[] =>
     keys.slice(0, MAX_MARKER_KEYS).map((k) => k.slice(0, MAX_MARKER_KEY_CHARS));
   return {
-    cap_chars: MODEL_TOOL_RESULT_CAP_CHARS,
+    cap_chars: cap,
     original_chars: originalChars,
     tool: safeToolName(toolName),
     ...(reduced.length > 0 ? { reduced } : {}),
@@ -785,10 +804,18 @@ function emit(
   reductions: readonly Reduction[],
   toolName: string,
   originalChars: number,
+  cap: number,
 ): string {
   const reducedTree = applyReductions(root, reductions);
   const pass = applyCursorPass(reducedTree, reductions);
-  const marker = buildMarker(toolName, originalChars, reductions, pass.removed, pass.recomputed);
+  const marker = buildMarker(
+    toolName,
+    originalChars,
+    reductions,
+    pass.removed,
+    pass.recomputed,
+    cap,
+  );
   if (isPlainObject(pass.tree)) {
     return JSON.stringify({ ...pass.tree, [TRUNCATION_MARKER_KEY]: marker });
   }
@@ -807,10 +834,11 @@ function refusalEnvelope(
   toolName: string,
   originalChars: number,
   reason: BoundingRefusalReason,
+  cap: number,
 ): string {
   return JSON.stringify({
     [TRUNCATION_MARKER_KEY]: {
-      cap_chars: MODEL_TOOL_RESULT_CAP_CHARS,
+      cap_chars: cap,
       original_chars: originalChars,
       tool: safeToolName(toolName),
       refused: true,
@@ -849,6 +877,7 @@ function reduceToFit(
   text: string,
   toolName: string,
   onRefusal: ((r: BoundingRefusal) => void) | undefined,
+  cap: number,
 ): string {
   let root: unknown;
   try {
@@ -866,8 +895,8 @@ function reduceToFit(
   let probes = 0;
 
   for (let iteration = 0; iteration < MAX_REDUCTION_ITERATIONS; iteration++) {
-    const current = emit(root, reductions, toolName, originalChars);
-    if (current.length <= MODEL_TOOL_RESULT_CAP_CHARS) return current;
+    const current = emit(root, reductions, toolName, originalChars, cap);
+    if (current.length <= cap) return current;
 
     const reducedTree = applyReductions(root, reductions);
     const sites = findSites(reducedTree)
@@ -882,8 +911,8 @@ function reduceToFit(
       // of it still leaves us over the cap it cannot beat a candidate that
       // already fits. Pruned WITHOUT a probe: on a 20,000-row payload this is
       // the difference between one binary search and twenty thousand.
-      const couldFit = current.length - site.weight <= MODEL_TOOL_RESULT_CAP_CHARS;
-      if (best !== null && best.length <= MODEL_TOOL_RESULT_CAP_CHARS && !couldFit) continue;
+      const couldFit = current.length - site.weight <= cap;
+      if (best !== null && best.length <= cap && !couldFit) continue;
       if (probedHere >= MAX_PROBES_PER_ITERATION || probes >= MAX_PROBES_TOTAL) break;
 
       probedHere++;
@@ -899,12 +928,9 @@ function reduceToFit(
         return { path: site.path, kind: site.kind, from: site.len, to };
       };
       const lengthWith = (n: number): number =>
-        emit(root, [...reductions, build(n)], toolName, originalChars).length;
+        emit(root, [...reductions, build(n)], toolName, originalChars, cap).length;
 
-      const fitting = largestFitting(
-        (n) => lengthWith(n) <= MODEL_TOOL_RESULT_CAP_CHARS,
-        site.len - 1,
-      );
+      const fitting = largestFitting((n) => lengthWith(n) <= cap, site.len - 1);
       const proposal = build(fitting ?? 0);
       if (proposal.to >= site.len) {
         settled.add(pathKey(site.path));
@@ -939,8 +965,8 @@ function reduceToFit(
         best = { proposal, length };
         continue;
       }
-      const bestFits = best.length <= MODEL_TOOL_RESULT_CAP_CHARS;
-      const thisFits = length <= MODEL_TOOL_RESULT_CAP_CHARS;
+      const bestFits = best.length <= cap;
+      const thisFits = length <= cap;
       if (thisFits !== bestFits) {
         if (thisFits) best = { proposal, length };
       } else if (thisFits) {
@@ -972,11 +998,11 @@ function reduceToFit(
     reductions.push(best.proposal);
   }
 
-  const final = emit(root, reductions, toolName, originalChars);
-  if (final.length <= MODEL_TOOL_RESULT_CAP_CHARS) return final;
+  const final = emit(root, reductions, toolName, originalChars, cap);
+  if (final.length <= cap) return final;
 
   onRefusal?.({ reason: "irreducible", inputChars: originalChars });
-  return refusalEnvelope(toolName, originalChars, "irreducible");
+  return refusalEnvelope(toolName, originalChars, "irreducible", cap);
 }
 
 /**
@@ -999,7 +1025,7 @@ export function boundToolResultForModel(
 ): string {
   if (text.length <= MODEL_TOOL_RESULT_CAP_CHARS) return text;
   try {
-    return reduceToFit(text, toolName, onRefusal);
+    return reduceToFit(text, toolName, onRefusal, MODEL_TOOL_RESULT_CAP_CHARS);
   } catch (err) {
     // No outer try/catch was the majors' finding, and it is what actually
     // makes "every payload the model receives is valid JSON" TRUE. The old
@@ -1011,18 +1037,43 @@ export function boundToolResultForModel(
       inputChars: text.length,
       detail: err instanceof Error ? err.message : String(err),
     });
-    return refusalEnvelope(toolName, text.length, "exception");
+    return refusalEnvelope(toolName, text.length, "exception", MODEL_TOOL_RESULT_CAP_CHARS);
   }
 }
 
 /**
  * Bound one of the agent loop's OWN control envelopes (forbidden tool, unknown
- * tool, self-heal, repeated call). Deliberately a plain slice at a static cap:
- * these are loop-authored, fixed-shape, and must never be measured against a
- * dynamic budget or walked by the reducer. A canary test pins the real
- * registry's worst-case envelope well under the cap, so this never actually
- * cuts today — it is a rail, not a transform.
+ * tool, self-heal, repeated call) at the static envelope cap.
+ *
+ * WARP-2525 — this was a plain `text.slice(0, 4000)`: the exact defect this
+ * module exists to remove for tool results, reintroduced for the loop's own
+ * envelopes. An envelope over the cap was cut mid-string into invalid JSON
+ * with its tail fields deleted. Now over-cap envelopes go through the SAME
+ * JSON-safe bounding as tool results, just measured against the envelope cap
+ * (and the exception rail lands on a refusal envelope, never a raw cut).
+ *
+ * The rail-not-transform property is unchanged in practice: envelopes are
+ * loop-authored and fixed-shape, and the canary test pins the real registry's
+ * worst-case envelope well under the cap, so the reducer never actually
+ * engages today. What changed is what happens when it someday does.
  */
 export function boundControlEnvelopeForModel(text: string): string {
-  return text.slice(0, CONTROL_ENVELOPE_CAP_CHARS);
+  if (text.length <= CONTROL_ENVELOPE_CAP_CHARS) return text;
+  try {
+    return reduceToFit(
+      text,
+      CONTROL_ENVELOPE_TOOL_LABEL,
+      undefined,
+      CONTROL_ENVELOPE_CAP_CHARS,
+    );
+  } catch {
+    // Same argument as boundToolResultForModel's outer catch: a reducer bug
+    // must degrade to a valid-JSON refusal, never to a dead or torn turn.
+    return refusalEnvelope(
+      CONTROL_ENVELOPE_TOOL_LABEL,
+      text.length,
+      "exception",
+      CONTROL_ENVELOPE_CAP_CHARS,
+    );
+  }
 }

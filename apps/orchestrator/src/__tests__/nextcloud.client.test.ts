@@ -20,6 +20,7 @@ vi.mock("../config.js", () => ({
 import {
   ncListFiles,
   ncUploadFile,
+  NcPreconditionFailedError,
   ncDownloadFile,
   ncCreateDirectory,
   ncMoveFile,
@@ -64,6 +65,50 @@ function mockResponse(init: {
     headers: new Headers(),
   } as unknown as Response;
 }
+
+describe("nextcloud.client — atomic create PUT (WARP-2523)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("sends If-None-Match: * only when the create-new option is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 201 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ncUploadFile("t", "alice", "/Documents", "q3.pdf", Buffer.from("x"), {
+      ifNoneMatch: true,
+    });
+    expect(fetchMock.mock.calls[0][1].headers["If-None-Match"]).toBe("*");
+
+    // The plain upload path (WARP-2096's documented clobber semantics) must
+    // stay byte-identical: no conditional header unless asked for.
+    await ncUploadFile("t", "alice", "/Documents", "q3.pdf", Buffer.from("x"));
+    expect(fetchMock.mock.calls[1][1].headers["If-None-Match"]).toBeUndefined();
+  });
+
+  it("maps a 412 under the create-new option to NcPreconditionFailedError", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 412 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      ncUploadFile("t", "alice", "/d", "f.pdf", Buffer.from("x"), { ifNoneMatch: true }),
+    ).rejects.toBeInstanceOf(NcPreconditionFailedError);
+  });
+
+  it("keeps the generic PUT error for a 412 without the option", async () => {
+    // A 412 with no If-None-Match sent is some other precondition failing —
+    // pretending it means "already exists" would be a lie.
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 412 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const err = await ncUploadFile("t", "alice", "/d", "f.pdf", Buffer.from("x")).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(NcPreconditionFailedError);
+  });
+});
 
 describe("nextcloud.client — move/copy/rename", () => {
   const realFetch = global.fetch;

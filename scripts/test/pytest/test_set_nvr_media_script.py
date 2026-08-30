@@ -225,6 +225,56 @@ def test_missing_trailing_newline_does_not_glue_keys(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# WARP-2522 — the write must go THROUGH a symlinked .env, literally
+# --------------------------------------------------------------------------
+
+# Symlink creation and `&`/`|` in directory names are POSIX-shaped; on a
+# Windows checkout these would error in the fixture, not exercise the script.
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX-only fixture")
+
+
+@posix_only
+def test_env_symlink_survives_the_rewrite(tmp_path):
+    """After relocate_secrets_to_data has run, the repo .env is a SYMLINK into
+    the encrypted /data. The old tmp+mv rewrite unlinked it and dropped a
+    plaintext secrets file on the unencrypted boot disk (the WARP-232
+    regression class). The write must land THROUGH the link — the link
+    survives and the bytes change at the link's REAL target."""
+    real = tmp_path / "data" / "secrets.env"
+    real.parent.mkdir()
+    real.write_text(
+        "JWT_SECRET=keepme\nNVR_MEDIA_SOURCE=/old/target\n", encoding="utf-8"
+    )
+    link = tmp_path / ".env"
+    link.symlink_to(real)
+
+    proc = _run("nvrdata", link)
+    assert proc.returncode == 0, proc.stderr
+    assert link.is_symlink(), "the .env symlink was replaced by a plain file"
+    body = real.read_text(encoding="utf-8")
+    assert "NVR_MEDIA_SOURCE=nvrdata\n" in body
+    assert "JWT_SECRET=keepme\n" in body
+    assert "/old/target" not in body
+
+
+@posix_only
+def test_sed_hostile_target_value_lands_byte_exact(tmp_path):
+    """`&` in a sed replacement splices in the matched text and `|` was the
+    old expression's delimiter — an operator-supplied path containing either
+    must land in .env byte-exact, neither corrupted nor a sed error."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("NVR_MEDIA_SOURCE=/old/target\n", encoding="utf-8")
+    target = tmp_path / "pool" / "a&b|c" / "nvr"
+    target.mkdir(parents=True)
+
+    proc = _run(str(target), env_file, root_dev=_off_root(target))
+    assert proc.returncode == 0, proc.stderr
+    body = env_file.read_text(encoding="utf-8")
+    assert f"NVR_MEDIA_SOURCE={target}\n" in body
+    assert body.count("NVR_MEDIA_SOURCE=") == 1
+
+
+# --------------------------------------------------------------------------
 # Provisioning always STATES the target (the ".env is never silent" AC)
 # --------------------------------------------------------------------------
 
@@ -284,6 +334,11 @@ def test_mutation_removing_the_root_device_guard_breaks_a_test(tmp_path):
         "DROPLET_NVR_MEDIA_SKIP_RECREATE": "1",
         "DROPLET_NVR_MEDIA_COMPOSE_FILE": str(COMPOSE),
         "DROPLET_NVR_MEDIA_ROOT_DEV": _on_root(target),
+        # The mutant runs from tmp_path, so it cannot find scripts/lib/ from
+        # its own location the way the in-tree script does — anchor it back
+        # to the real repo (the script honors a REPO_ROOT override) so the
+        # canonical _upsert_env_kv writer resolves (WARP-2522).
+        "REPO_ROOT": str(REPO_ROOT),
     })
     proc = subprocess.run([BASH, str(mutated), str(target)],
                           env=env, capture_output=True, text=True, timeout=60)
@@ -315,6 +370,8 @@ def test_mutation_removing_the_existence_check_changes_the_diagnostic(tmp_path):
         "DROPLET_NVR_MEDIA_SKIP_RECREATE": "1",
         "DROPLET_NVR_MEDIA_COMPOSE_FILE": str(COMPOSE),
         "DROPLET_NVR_MEDIA_ROOT_DEV": "999999",
+        # Same repo re-anchoring as the mutation test above (WARP-2522).
+        "REPO_ROOT": str(REPO_ROOT),
     })
     missing = str(tmp_path / "does-not-exist")
     real = subprocess.run([BASH, str(SCRIPT), missing], env=env,

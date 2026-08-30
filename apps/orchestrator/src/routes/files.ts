@@ -39,6 +39,7 @@ import {
   ncGetShare,
   ncDirExists,
   NextcloudOcsError,
+  NcPreconditionFailedError,
   type ShareDetail,
 } from "../services/nextcloud.client.js";
 import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
@@ -2387,6 +2388,13 @@ export function createFilesRouter(
         // same-name file (WARP-2096); a tool that generates "Q3-summary.pdf"
         // twice must not destroy the first one, and the model has no way to
         // know it already exists.
+        //
+        // WARP-2523 — this exists? check is a FAST PATH only (it saves a
+        // render when the answer is already knowable), NOT the guard:
+        // check-then-write races a concurrent render or user upload, and the
+        // loser would clobber the winner — WARP-2096 reopened. The
+        // authoritative guard is `If-None-Match: *` on the PUT below, which
+        // the server enforces atomically.
         const existing = await ncGetFileId(token, user, uploadedPath);
         if (existing !== null) {
           res.status(409).json({ error: "file already exists", path: uploadedPath });
@@ -2447,7 +2455,21 @@ export function createFilesRouter(
           return;
         }
 
-        await ncUploadFile(token, user, targetPath, filename, buffer);
+        try {
+          // WARP-2523 — create-new-only PUT: the server refuses atomically
+          // (412) when the target exists, closing the pre-check's race.
+          await ncUploadFile(token, user, targetPath, filename, buffer, {
+            ifNoneMatch: true,
+          });
+        } catch (uploadErr) {
+          if (uploadErr instanceof NcPreconditionFailedError) {
+            // A concurrent writer won between the pre-check and the PUT —
+            // same outcome, same response as the fast path above.
+            res.status(409).json({ error: "file already exists", path: uploadedPath });
+            return;
+          }
+          throw uploadErr;
+        }
 
         const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
         if (ownerUserId) {

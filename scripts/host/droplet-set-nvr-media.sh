@@ -21,7 +21,9 @@
 # guessing:
 #
 #   1. Validates the requested target, then idempotently writes
-#      NVR_MEDIA_SOURCE=<value> into the repo .env (tmp+mv).
+#      NVR_MEDIA_SOURCE=<value> into the repo .env via the canonical
+#      _upsert_env_kv (scripts/lib/secrets.sh) — symlink-preserving and
+#      literal-safe (WARP-2522).
 #   2. Recreates the frigate container, because an .env edit does NOT affect a
 #      running container. Skipping this leg would be its own silent failure:
 #      a successful save with no behaviour change.
@@ -156,7 +158,32 @@ case "$TARGET" in
     ;;
 esac
 
-# --- Idempotent .env write-back (replace-or-append, tmp+mv) -----------------
+# --- Idempotent .env write-back (canonical upsert — WARP-2522) --------------
+# The previous rewrite here staged a temp file and `mv`-ed it over $ENV_FILE.
+# On a box where relocate_secrets_to_data has run, $ENV_FILE is a SYMLINK into
+# the encrypted /data — mv REPLACED the link with a plain file on the
+# unencrypted boot disk (the WARP-232 regression class). Its sed splice also
+# interpolated the operator-supplied path unescaped, so a target containing
+# `&` (splices the matched text) or `|` (the expression's own delimiter)
+# corrupted the value or killed the write outright.
+#
+# _upsert_env_kv (scripts/lib/secrets.sh) is the repo's one .env writer with
+# the right discipline: it resolves a symlinked $ENV_FILE and renames onto the
+# REAL target so the link survives, strips-and-appends with printf (no sed, so
+# every byte of the value lands literally), normalizes a missing trailing
+# newline first, and stages under umask 077 + chmod 600. Hard-fail when the
+# lib cannot be found rather than fall back to a clobbering writer — same
+# "refuse loudly" posture as the validation above. The LIB_DIR fallback chain
+# mirrors droplet-set-public-fqdn.sh: the repo-checkout location first, then
+# $REPO_ROOT/scripts/lib for the /usr/local/sbin installed copy.
+LIB_DIR="$SCRIPT_DIR/../lib"
+if [ ! -f "$LIB_DIR/secrets.sh" ]; then
+  LIB_DIR="$REPO_ROOT/scripts/lib"
+fi
+[ -f "$LIB_DIR/secrets.sh" ] || die "secrets.sh not found under $LIB_DIR — refusing to rewrite ${ENV_FILE} without the canonical symlink-preserving writer"
+# shellcheck source=../lib/secrets.sh
+. "$LIB_DIR/secrets.sh"
+
 # Create the file if missing so a brand-new box can still record the choice.
 [ -f "$ENV_FILE" ] || { : > "$ENV_FILE"; chmod 0600 "$ENV_FILE"; }
 
@@ -164,21 +191,10 @@ _desired="NVR_MEDIA_SOURCE=${TARGET}"
 _changed=true
 if grep -qxF "$_desired" "$ENV_FILE"; then
   _changed=false  # already current — no rewrite (keeps re-runs byte-identical)
-elif grep -qE '^[[:space:]]*#?[[:space:]]*NVR_MEDIA_SOURCE=' "$ENV_FILE"; then
-  _tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
-  sed -E "s|^[[:space:]]*#?[[:space:]]*NVR_MEDIA_SOURCE=.*|${_desired}|" \
-    "$ENV_FILE" > "$_tmp"
-  # mktemp creates 0600; preserve whatever the live .env already had so we
-  # never widen (or narrow) its mode as a side effect of this write.
-  chmod --reference="$ENV_FILE" "$_tmp" 2>/dev/null || chmod 0600 "$_tmp"
-  mv "$_tmp" "$ENV_FILE"
 else
-  # A file whose last line was cut mid-write would otherwise glue our key onto
-  # it, corrupting BOTH — same guard as secrets.sh's writers.
-  if [ -s "$ENV_FILE" ] && [ -n "$(tail -c 1 "$ENV_FILE")" ]; then
-    printf '\n' >> "$ENV_FILE"
-  fi
-  printf '%s\n' "$_desired" >> "$ENV_FILE"
+  # _upsert_env_kv targets $ENV_FILE when set — which this script always sets
+  # (the DROPLET_NVR_MEDIA_ENV_FILE test hook included).
+  _upsert_env_kv NVR_MEDIA_SOURCE "$TARGET"
 fi
 printf 'NVR_MEDIA_SOURCE=%s persisted to %s\n' "$TARGET" "$ENV_FILE"
 
