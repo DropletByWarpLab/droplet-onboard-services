@@ -57,7 +57,10 @@ RUN if [ -d /opt/vendor/sqlanywhere/lib64 ]; then \
       echo "NOTE: no SAP SQL Anywhere client vendored — the direct-SQL ERP track will stay blocked."; \
     fi
 
-COPY services/erp-sql-bridge/main.py services/erp-sql-bridge/db.py services/erp-sql-bridge/schemas.py ./
+# allowlist.py + statement_manifest.json are load-bearing (WARP-2540): the
+# app refuses to import without the manifest, so a bridge missing it cannot
+# start half-guarded.
+COPY services/erp-sql-bridge/main.py services/erp-sql-bridge/db.py services/erp-sql-bridge/schemas.py services/erp-sql-bridge/allowlist.py services/erp-sql-bridge/statement_manifest.json ./
 
 # WARP-229: FIPS-provider OpenSSL config + shared self-test helper.
 # `OPENSSL_CONF` is intentionally NOT set at image-baseline (see
