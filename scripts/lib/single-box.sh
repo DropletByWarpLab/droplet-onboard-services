@@ -978,6 +978,13 @@ configure_single_box_env() {
     mv "$stage" "$env_target"
   }
 
+  # WARP-2543 — detect the accelerator and write GPU_VENDOR + DMR_IMAGE BEFORE
+  # the profile block below reads GPU_VENDOR to pick the DMR shape. Ordering is
+  # load-bearing: the profile and the image are one decision, and the failure
+  # this ticket closes is precisely the two disagreeing (a ROCm image wired to
+  # devices that resolved to a 512 MiB iGPU, serving from CPU while healthy).
+  configure_gpu_env "$env_target" || return 1
+
   # COMPOSE_PROFILES is MERGED, not overwritten: keep whatever lib/compose.sh
   # already set (`linux` for Frigate, `display` for the OLED sim) and add
   # `single-box` (bundled ollama + openwrt). The old overwrite silently
@@ -1020,40 +1027,72 @@ configure_single_box_env() {
   # Now exactly one runtime token is appended, so a box can never start both
   # runtimes (the SINGLE GPU OWNER violation, WARP-1826) nor neither (no
   # inference at all). Un-flipped boxes keep today's behaviour verbatim.
-  local _profiles_runtime
+  # WARP-2543 — REWRITTEN from a pair of mutually-aware strip/add arms to
+  # "strip every runtime token, then add exactly the wanted one".
+  #
+  # The old shape was correct but its correctness was EMERGENT: each arm had
+  # to remember to strip the other's token, and the mirror strip was added
+  # only after WARP-1870's self-review found the exclusion was one-directional
+  # in exactly that way. With a THIRD token (`dmr-cuda`, the NVIDIA shape) the
+  # pairwise approach needs six strips and stays one forgotten line away from
+  # shipping two runtimes on one card again. Strip-all-then-add-one makes
+  # "exactly one runtime token" true BY CONSTRUCTION, so a fourth token later
+  # costs one list entry and no new reasoning.
+  #
+  # 🔴 The token for AMD is still `dmr`, unchanged. Every box in the field runs
+  # an AMD card and carries that token; re-labelling it would have rewritten
+  # COMPOSE_PROFILES on the whole fleet at the next setup.sh run. `dmr-cuda`
+  # is the new case only.
+  local _profiles_runtime _wanted_profile _gpu_vendor
   _profiles_runtime="$(grep -E '^INFERENCE_RUNTIME=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
+
   if [ "$_profiles_runtime" = "dmr" ]; then
-    case ",${merged_profiles}," in
-      *,dmr,*) : ;;
-      *)       merged_profiles="${merged_profiles},dmr"
-               log_info "single-box env: INFERENCE_RUNTIME=dmr — kept the dmr profile in COMPOSE_PROFILES (WARP-1865)" ;;
-    esac
-    # Belt and braces: if a half-finished flip left `ollama` in the list, drop
-    # it. Leaving both is the one outcome worse than either alone.
-    case ",${merged_profiles}," in
-      *,ollama,*)
-        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'ollama' | paste -sd, -)"
-        log_info "single-box env: INFERENCE_RUNTIME=dmr — dropped the stale ollama profile (single GPU owner, WARP-1826)" ;;
-    esac
+    # Which DMR shape depends on the silicon, not on the runtime. gpu.sh has
+    # already written GPU_VENDOR by this point (configure_gpu_env runs first);
+    # read it rather than re-detecting so the profile and the DMR_IMAGE it
+    # wrote can never disagree — a CUDA profile running the ROCm image is the
+    # same class of silent misconfiguration this ticket is closing.
+    _gpu_vendor="$(grep -E '^GPU_VENDOR=' "$env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
+    _wanted_profile="$(dmr_profile_for_vendor "${_gpu_vendor:-amd}")"
+    if [ -z "$_wanted_profile" ]; then
+      # No classifiable accelerator — a CI runner, a container, a dev laptop,
+      # or an appliance whose card is gone. lspci cannot distinguish them, and
+      # an earlier revision returned 1 here, which aborted setup on every
+      # GPU-less shape (33 unit tests red, CI unable to provision at all).
+      #
+      # Fall back to the token this box would have carried before WARP-2543 —
+      # `dmr`, the AMD shape — so behaviour is unchanged rather than broken,
+      # and say so loudly. DROPLET_REQUIRE_GPU=1 makes it fatal for appliance
+      # provisioning that genuinely cannot proceed without a GPU.
+      if [ "${DROPLET_REQUIRE_GPU:-0}" = "1" ]; then
+        log_error "single-box env: INFERENCE_RUNTIME=dmr, GPU_VENDOR='${_gpu_vendor}' selects no DMR profile, DROPLET_REQUIRE_GPU=1."
+        log_error "  Refusing to write a COMPOSE_PROFILES that would serve inference from CPU (WARP-2543)."
+        return 1
+      fi
+      log_warn "single-box env: no GPU classified (GPU_VENDOR='${_gpu_vendor}') — falling back to the 'dmr' profile."
+      log_warn "  On real hardware with no usable GPU this serves from CPU. Set DROPLET_REQUIRE_GPU=1 to refuse instead."
+      _wanted_profile="dmr"
+    fi
   else
-    # The mirror strip. Without it the exclusion is one-directional: the dmr
-    # arm above drops a stale `ollama`, but a box carrying `dmr` whose runtime
-    # is ollama (or unset) would keep `dmr` AND gain `ollama` — both runtimes
-    # on one card, the very WARP-1826 violation this block exists to prevent,
-    # arriving from the rollback direction instead of the flip direction.
-    # Strip BEFORE the add so the add sees an already-cleaned list.
-    case ",${merged_profiles}," in
-      *,dmr,*)
-        merged_profiles="$(printf '%s' "$merged_profiles" | tr ',' '\n' | grep -vx 'dmr' | paste -sd, -)"
-        log_info "single-box env: INFERENCE_RUNTIME is not dmr — dropped the stale dmr profile (single GPU owner, WARP-1826)" ;;
-    esac
-    case ",${merged_profiles}," in
-      *,ollama,*) : ;;
-      ,,)         merged_profiles="ollama" ;;
-      *)          merged_profiles="${merged_profiles},ollama"
-                  log_info "single-box env: INFERENCE_RUNTIME is not dmr — added the ollama profile so the box has an inference runtime" ;;
-    esac
+    _wanted_profile="ollama"
   fi
+
+  # Strip ALL known runtime tokens unconditionally, then add the one we want.
+  # The token list lives in gpu.sh (set_runtime_profile_token) because THREE
+  # scripts rewrite this list — this one, scripts/dmr/flip-single-box.sh and
+  # scripts/dmr/rollback-single-box.sh — and a token known to only one of them
+  # is a WARP-1826 single-GPU-owner violation waiting to happen. rollback's
+  # `grep -vx 'dmr'` is an exact-line match, so `dmr-cuda` survived it.
+  merged_profiles="$(set_runtime_profile_token "$merged_profiles" "$_wanted_profile")"
+  log_info "single-box env: INFERENCE_RUNTIME=${_profiles_runtime:-unset}, GPU_VENDOR=${_gpu_vendor:-n/a} — single runtime profile '${_wanted_profile}' (single GPU owner, WARP-1826/2543)"
+  # END RUNTIME PROFILE SELECTION — load-bearing sentinel, do not delete.
+  # tests/dmr-profile-survives-setup.test.sh awk-extracts the block above and
+  # eval's it, so the suite exercises the SHIPPED code rather than a copy of
+  # it. The extractor previously ended on `^  fi$`, which silently stopped
+  # matching the moment this block grew an inner `if` — the extracted text
+  # would still eval, still produce a plausible COMPOSE_PROFILES, and still go
+  # green while testing only half the logic. An explicit sentinel cannot drift
+  # that way.
 
   # RAG eval (RAGAS retrieval-quality scoring) — enabled by DEFAULT on the
   # single-box shape (bug #15). The `rag-eval` service is `["eval"]`-profiled,

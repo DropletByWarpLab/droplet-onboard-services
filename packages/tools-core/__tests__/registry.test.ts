@@ -179,6 +179,9 @@ const EXPECTED_TOOL_NAMES = [
   "create_spreadsheet",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
+  // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
+  // three vendors and all ten datasets; the dataset arg picks the provider.
+  "cloud_query_dataset",
 ];
 
 describe("TOOLS registry", () => {
@@ -334,8 +337,10 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("create_document")?.requiresConfirmation).toBe(false);
     // WARP-2212 — the generators are plain writes too. They create a NEW file
     // at a path the caller named, and POST /api/files/render refuses an
-    // existing one (409), so there is no overwrite for a confirmation to
-    // guard against.
+    // existing one (409) — enforced atomically by the `If-None-Match: *`
+    // create-new guard on the WebDAV PUT itself (WARP-2523), with the exists?
+    // pre-check as a fast path — so there is no overwrite for a confirmation
+    // to guard against.
     for (const name of ["create_pdf_report", "create_word_document", "create_spreadsheet"]) {
       expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
       expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);

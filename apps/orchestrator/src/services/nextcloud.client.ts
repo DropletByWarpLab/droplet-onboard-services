@@ -123,20 +123,49 @@ export async function ncListFiles(
   return parseMultiStatus(xml, path);
 }
 
+/**
+ * WARP-2523 — the WebDAV server refused a create-new PUT because the target
+ * already exists (`If-None-Match: *` answered 412). Thrown ONLY when the
+ * caller asked for the create-new guard, so a caller catching it can map it
+ * to its own "already exists" error with no status-code sniffing.
+ */
+export class NcPreconditionFailedError extends Error {
+  constructor(message = "WebDAV PUT failed: 412 (target already exists)") {
+    super(message);
+    this.name = "NcPreconditionFailedError";
+  }
+}
+
 export async function ncUploadFile(
   token: string,
   user: string,
   path: string,
   filename: string,
-  buffer: Buffer
+  buffer: Buffer,
+  options?: { ifNoneMatch?: boolean }
 ): Promise<void> {
   const url = webdavUrl(user, `${path}/${filename}`);
+  const headers: Record<string, string> = {
+    ...davHeaders(token),
+    "Content-Type": "application/octet-stream",
+  };
+  // WARP-2523 — create-new-only PUT. An exists? pre-check followed by an
+  // unconditional PUT is check-then-write: two concurrent creators both read
+  // "absent" and the loser silently overwrites the winner (the WARP-2096
+  // clobber, reopened as a race). `If-None-Match: *` (RFC 9110 §13.1.2) makes
+  // the SERVER refuse atomically when the resource exists, answering 412.
+  // Opt-in so the plain upload path's documented overwrite semantics stay
+  // byte-identical.
+  if (options?.ifNoneMatch) headers["If-None-Match"] = "*";
   const resp = await fetch(url, {
     method: "PUT",
-    headers: { ...davHeaders(token), "Content-Type": "application/octet-stream" },
+    headers,
     body: new Uint8Array(buffer),
   });
 
+  if (options?.ifNoneMatch && resp.status === 412) {
+    throw new NcPreconditionFailedError();
+  }
   if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
     throw new Error(`WebDAV PUT failed: ${resp.status}`);
   }

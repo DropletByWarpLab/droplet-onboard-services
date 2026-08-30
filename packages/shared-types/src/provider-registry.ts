@@ -379,7 +379,11 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       },
     ],
     egressHosts: ["api.stripe.com", "files.stripe.com"],
-    datasets: ["invoice"],
+    // Mirrors `STRIPE_DATASETS`, and WARP-2497 widened both together: a
+    // descriptor that claimed less than the track serves would hide `charge`
+    // from every caller that resolves a dataset through the registry, which is
+    // how the cloud read tool finds its connection.
+    datasets: ["invoice", "charge"],
     rateLimit: {
       // `STRIPE_DEFAULT_MONTHLY_READ_ALLOCATION`. Not a Stripe-imposed ceiling
       // — Stripe rate-limits per second, not per month — but the connector's

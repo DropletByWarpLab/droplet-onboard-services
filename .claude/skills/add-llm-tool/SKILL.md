@@ -118,6 +118,7 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/__tests__/confirmation-owner-drift.guard.test.ts` | `apps/orchestrator` | that your tool's `confirmationOwner` still matches reality. `"route"` is a claim about a file in a DIFFERENT package, so it rots from either end — a safety tier moves and the descriptor keeps yesterday's answer, or a new pass-through tool ships undeclared and silently inherits `"interceptor"` against a route that already confirms. All three inputs are read at runtime (live registry, compiled call site, `classifyNetworkCommand`), so a name list cannot satisfy it. |
 | `apps/orchestrator/src/__tests__/warp-2472-passthrough-single-prompt.test.ts` | `apps/orchestrator` | that one approved action costs the user **one** prompt. Nothing is stubbed between MCP dispatch and the route's confirmation decision, so the double prompt this pins (WARP-2472 — it shipped, and reached chat) cannot come back. It also pins the **count** of `requiresConfirmation` tools, so a new confirming tool is a number someone updates on purpose. |
 | `apps/orchestrator/src/services/tool-selection.parity.test.ts` | `apps/orchestrator` | that the budget estimate and the wire payload are the **same set** (WARP-2552), and that every domain with in-scope tools is reachable by some rule. If you add a tool in a NEW domain, this is the gate that tells you the domain has no rule — see site 10. |
+| `apps/orchestrator/src/services/cloud-dataset-tool.e2e.test.ts` | `apps/orchestrator` | that the cloud read tool's whole chain still holds — registry entry, RBAC scope, the route's role gate, and the closed dataset set — driven against the live registry and `erp.service`, so a name list cannot satisfy it (WARP-2497). If your tool serves a cloud dataset, this gate exercises it end to end. |
 
 ### Read-only — these gates read them; do not edit them to go green
 
@@ -133,6 +134,7 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/config/network-safety-rules.ts` | The safety tiers the ownership gate classifies against, reached through `classifyNetworkCommand` — the same function the routes call. Restating a tier in your tool instead of consulting it is exactly what that gate rejects. |
 | `apps/orchestrator/src/routes/network-firewall.routes.ts` | This route confirms Tier 2/3 operations itself. If your tool calls it, the ROUTE owns the prompt: declare `confirmationOwner: "route"` rather than letting the interceptor add a second one. |
 | `apps/orchestrator/src/routes/network-phone-home.routes.ts` | Same ownership as the firewall routes — the confirmation lives here, so a pass-through tool must not re-ask. |
+| `apps/orchestrator/src/services/erp.service.ts` | `CLOUD_DATASET_READ_ROLES` and the dataset dispatch the cloud e2e gate drives. The service re-checks the role after MCP admission by design — do not "simplify" the double check away to make a tool test pass. |
 
 <!-- add-llm-tool:sites:end -->
 

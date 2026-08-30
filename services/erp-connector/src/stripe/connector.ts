@@ -274,7 +274,27 @@ export const STRIPE_MAX_RATE_LIMIT_RETRIES = 3;
  * outside the vocabulary. Note this does NOT widen what Stripe serves: the
  * balance-transaction case above is unchanged and still waits on WARP-2293.
  */
-export const STRIPE_DATASETS: readonly DatasetName[] = ["invoice"];
+/**
+ * WARP-2497 — `charge` joins `invoice`.
+ *
+ * The docstring above was written when the vocabulary held six names and the
+ * payments datasets did not exist; WARP-2280 has since added them, and
+ * `get_recent_charges` has been a registered read query with canonical columns
+ * ever since. What was still missing was this declaration, and its absence was
+ * load-bearing in the worst way: `assertDatasetsServed` refused the read before
+ * a request was built, so a merchant with a CONNECTED account and a full charge
+ * history got "the stripe track does not serve charge" for "what did we bill
+ * last week". The dataset was reachable everywhere except here.
+ *
+ * ONLY `charge` is added. `refund` and `payout` also have read queries and
+ * vocabulary entries, but neither `refunds` nor `payouts` is an ordinary
+ * readable collection on this track (`STRIPE_READABLE_COLLECTIONS` —
+ * `payouts` appears solely as a REPORT family), and `balance_transaction` and
+ * `subscription` need projection decisions of their own. Widening those is a
+ * capability change with its own tests, not a side effect of registering a
+ * tool, so they still refuse — asserted in stripe.test.ts.
+ */
+export const STRIPE_DATASETS: readonly DatasetName[] = ["invoice", "charge"];
 
 /**
  * What this track is waiting on. Deliberately unlike the other tracks', so an
@@ -739,6 +759,23 @@ interface StripeRequestOptions {
   /** Defaults to JSON. A report file is CSV, and asking for JSON there would
    *  be a request we do not mean. */
   accept?: string;
+}
+
+/**
+ * An ISO-8601 instant as Stripe's Unix seconds, or `undefined` when the caller
+ * did not supply one (WARP-2497).
+ *
+ * `undefined` rather than a default window on purpose: `send()` drops
+ * undefined search entries, so an absent bound becomes an absent filter —
+ * Stripe's own "no lower bound" — instead of a boundary this module invented.
+ * A NON-date string is also `undefined` rather than `NaN`: `String(NaN)` would
+ * put the literal text "NaN" on the wire as a filter value, which Stripe
+ * rejects with a 400 that reads like an auth problem.
+ */
+export function epochSeconds(value: unknown): number | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
 }
 
 /**
@@ -1421,7 +1458,7 @@ export class StripeConnector implements Connector {
     return { tables, fingerprint };
   }
 
-  async runRead(name: string, _params: Record<string, unknown>): Promise<unknown[]> {
+  async runRead(name: string, params: Record<string, unknown>): Promise<unknown[]> {
     const query = getReadQuery(name);
     assertDatasetsServed(this.provider, this.servesDatasets, name, query.dependsOnTables);
     const op = `runRead:${name}`;
@@ -1448,6 +1485,40 @@ export class StripeConnector implements Connector {
           updated_at: StripeConnector.instant(modifiedAt.get(String(r.id ?? ""))),
         }));
         return sortByKey(sortByKey(rows, "invoice_id"), "due_at");
+      }
+      case "get_recent_charges": {
+        // WARP-2497. The [from, to) window is pushed to Stripe as its own
+        // half-open `created` filter rather than applied after paging: this
+        // endpoint is metered, and a read that pulls the whole history to
+        // filter locally spends a merchant's monthly allocation on one
+        // question. `gte`/`lt` — inclusive start, exclusive end — so adjacent
+        // windows neither double-count a charge nor drop one.
+        const raw = await this.list(op, "/v1/charges", {
+          "created[gte]": epochSeconds(params.from),
+          "created[lt]": epochSeconds(params.to),
+        });
+        const rows = raw.map((r) => ({
+          charge_id: String(r.id ?? ""),
+          created_at: StripeConnector.instant(r.created),
+          customer_id: StripeConnector.idOf(r.customer),
+          // `amount_refunded` travels WITH the charge and is never netted off
+          // — gross takings and what was kept are different numbers, and only
+          // one of them can be the `amount` column (profiles.ts states this
+          // convention once for every payments dataset).
+          amount: majorUnits(r.amount, r.currency),
+          amount_refunded: majorUnits(r.amount_refunded ?? 0, r.currency),
+          currency: typeof r.currency === "string" ? r.currency : undefined,
+          status: typeof r.status === "string" ? r.status : undefined,
+        }));
+        // `created_at DESC, charge_id` — the ORDER BY `get_recent_charges`
+        // declares. Stripe's own list order is not contractual, so the sort is
+        // ours. sortByKey is ascending and Array.sort is stable, so sorting by
+        // id first and then DESCENDING by timestamp leaves charge_id ascending
+        // within a shared timestamp, which a bare `.reverse()` would not.
+        const byId = sortByKey(rows, "charge_id");
+        return [...byId].sort((a, b) =>
+          String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+        );
       }
       default:
         // Unreachable while every served read is handled above; a new registry

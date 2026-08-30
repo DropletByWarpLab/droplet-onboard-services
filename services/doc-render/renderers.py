@@ -20,6 +20,7 @@ permissive-only rule applies):
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 from docx import Document
@@ -62,6 +63,15 @@ MAX_COLUMNS = 256
 MAX_CELL_CHARS = 32_767
 # Sheet names: Excel forbids these characters and caps the name at 31 chars.
 INVALID_SHEET_CHARS = set(r"[]:*?/\\")
+# WARP-2521 — formula-injection guard for string cells (CWE-1236). A cell
+# whose first non-whitespace character is = + - @ executes as a live formula
+# the moment Excel/Sheets/Numbers opens the workbook, and cell values here are
+# LLM/user-supplied. Mirrors the dashboard CSV export's FORMULA_LEADER
+# (apps/web-dashboard/src/lib/audit-csv.ts, WARP-1031): leading whitespace is
+# included because spreadsheet apps trim space/tab/CR before deciding a cell
+# is a formula, so "\t=cmd" executes like "=cmd". A leading apostrophe makes
+# every one of them render as text.
+FORMULA_LEADER = re.compile(r"^\s*[=+\-@]")
 
 
 class RenderError(ValueError):
@@ -290,12 +300,20 @@ def _cell(value: Any) -> Any:
     string stays a string, because guessing turns a zip code or a phone
     number into a number and silently loses the leading zero. Same reasoning
     as `convert_data_format`'s refusal to infer CSV cell types.
+
+    Strings are additionally screened for formula leaders (WARP-2521, see
+    FORMULA_LEADER): openpyxl writes a string starting with `=` as a live
+    formula, so an LLM/user-supplied `=HYPERLINK(...)` would execute on open.
+    The apostrophe goes on BEFORE the MAX_CELL_CHARS truncate so the guard
+    can never push a cell past Excel's own hard ceiling.
     """
     if value is None:
         return ""
     if isinstance(value, bool) or isinstance(value, (int, float)):
         return value
     text = str(value)
+    if FORMULA_LEADER.match(text):
+        text = "'" + text
     return text[:MAX_CELL_CHARS]
 
 

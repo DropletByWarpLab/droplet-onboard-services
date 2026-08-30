@@ -1226,6 +1226,136 @@ describe("read surface", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Payments read surface (WARP-2497)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("payments read surface (WARP-2497)", () => {
+  it("declares that it serves the charge dataset", () => {
+    // Until WARP-2497 this track served `invoice` only, so `get_recent_charges`
+    // was refused by `assertDatasetsServed` before a request was ever built —
+    // which made "what did we bill last week" unanswerable even with a
+    // CONNECTED account and a charge history sitting right there.
+    // Mutation: drop "charge" from STRIPE_DATASETS → red.
+    expect(STRIPE_DATASETS).toContain("charge");
+  });
+
+  it("maps Stripe charges onto the canonical charge columns", async () => {
+    // Mutation: drop the majorUnits() conversion on `amount` → red
+    // (2500 minor units would read as $2500 instead of $25).
+    const { c } = connector({
+      routes: [
+        {
+          match: /\/v1\/charges/,
+          responses: [
+            {
+              body: {
+                has_more: false,
+                data: [
+                  {
+                    id: "ch_1",
+                    created: Math.floor(Date.UTC(2026, 7, 20) / 1000),
+                    customer: "cus_1",
+                    amount: 2500,
+                    amount_refunded: 500,
+                    currency: "usd",
+                    status: "succeeded",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const rows = (await c.runRead("get_recent_charges", {
+      from: "2026-08-01T00:00:00Z",
+      to: "2026-09-01T00:00:00Z",
+    })) as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      charge_id: "ch_1",
+      customer_id: "cus_1",
+      amount: 25,
+      amount_refunded: 5,
+      currency: "usd",
+      status: "succeeded",
+    });
+    expect(rows[0].created_at).toBe("2026-08-20T00:00:00.000Z");
+  });
+
+  it("pushes the [from, to) window to Stripe instead of paging all history", async () => {
+    // The window is the whole point of the allocation guard: a read that pulls
+    // every charge ever and filters locally spends the merchant's monthly
+    // allocation on one question. `created[gte]`/`created[lt]` are Stripe's own
+    // half-open filter and must appear on the wire.
+    // Mutation: delete the `created[gte]`/`created[lt]` search entries → red.
+    const { c, f } = connector({
+      routes: [{ match: /\/v1\/charges/, responses: [{ body: { has_more: false, data: [] } }] }],
+    });
+    await c.runRead("get_recent_charges", {
+      from: "2026-08-01T00:00:00Z",
+      to: "2026-09-01T00:00:00Z",
+    });
+    expect(f.calls).toHaveLength(1);
+    const url = new URL(f.calls[0].url);
+    expect(url.pathname).toBe("/v1/charges");
+    expect(url.searchParams.get("created[gte]")).toBe(
+      String(Math.floor(Date.UTC(2026, 7, 1) / 1000)),
+    );
+    expect(url.searchParams.get("created[lt]")).toBe(
+      String(Math.floor(Date.UTC(2026, 8, 1) / 1000)),
+    );
+  });
+
+  it("returns charges newest first", async () => {
+    // The canonical ordering for this dataset (read-queries.ts orders by
+    // created_at DESC, charge_id). Stripe's own list order is not contractual,
+    // so the sort has to be ours.
+    // Mutation: remove the descending sort → red.
+    const day = (d: number) => Math.floor(Date.UTC(2026, 7, d) / 1000);
+    const row = (id: string, created: number) => ({
+      id,
+      created,
+      customer: "cus_1",
+      amount: 100,
+      currency: "usd",
+      status: "succeeded",
+    });
+    const { c } = connector({
+      routes: [
+        {
+          match: /\/v1\/charges/,
+          responses: [
+            {
+              body: {
+                has_more: false,
+                data: [row("ch_old", day(1)), row("ch_new", day(9)), row("ch_mid", day(5))],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const rows = (await c.runRead("get_recent_charges", {
+      from: "2026-08-01T00:00:00Z",
+      to: "2026-09-01T00:00:00Z",
+    })) as Record<string, unknown>[];
+    expect(rows.map((r) => r.charge_id)).toEqual(["ch_new", "ch_mid", "ch_old"]);
+  });
+
+  it("still refuses a payments dataset this track does not serve", async () => {
+    // WARP-2497 widened `charge` ONLY. `refund` and `payout` have read queries
+    // and vocabulary entries but no Stripe implementation and no entry in
+    // STRIPE_READABLE_COLLECTIONS, so they must still refuse on ZERO calls
+    // rather than silently returning nothing.
+    // Mutation: add "refund" to STRIPE_DATASETS → red.
+    const { c, f } = connector();
+    await expect(c.runRead("get_refunds", {})).rejects.toBeInstanceOf(DatasetNotServedError);
+    expect(f.calls).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // `updated_at` — WARP-2494
 // ─────────────────────────────────────────────────────────────────────────────
 

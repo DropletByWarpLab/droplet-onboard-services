@@ -24,10 +24,15 @@ import {
   narrowToolNamesForPrincipal,
   resolveToolAccessScope,
   toolAllowedForTier,
+  toolAllowedInScope,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
 } from "../services/tool-access.service.js";
+// WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
+// domain selection, so it sizes the tools[] the model actually receives.
+import { selectAdvertisedTools } from "../services/tool-selection.service.js";
+import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";

@@ -66,6 +66,12 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+// WARP-2544 — output-side guard on tool use: does the finished answer match
+// what the tools actually did? Deterministic, no inference call.
+import {
+  validateAnswerAgainstTrace,
+  describeToolUseVerdict,
+} from "./tool-use-validation.js";
 import { assertToolAdvertisementFitsBudget } from "./tool-budget.service.js";
 import {
   ITERATION_MIN_HEADROOM,
@@ -1704,6 +1710,69 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // answer would silently vanish if the flag were merely "was streamed".
       if (visible && !(streamedTurn && streamContentReleased)) {
         emit({ type: "content_delta", text: visible });
+      }
+      // WARP-2544 — the ONE point where the finished answer and the tool trace
+      // are both in hand, on BOTH transports. Everything above this line
+      // guards the INPUT side of tool use (WARP-1529 RBAC, WARP-642
+      // hallucinated names, WARP-1480 error logging); nothing had ever
+      // compared the ANSWER against what the tools actually did, so a model
+      // could say "I've turned the camera off" on a turn that dispatched
+      // nothing, or over a dispatch that returned status:"error", and the
+      // sentence reached the user unchallenged. These tools are physical, so
+      // that is a safety failure rather than a cosmetic one.
+      //
+      // Deterministic and local: no inference call, no network, no tokens —
+      // it adds no latency to the happy path, which matters on a box whose
+      // whole problem was latency (WARP-2543).
+      //
+      // ⚠ ADVISORY BY CONSTRUCTION. On the streaming path `visible` already
+      // left as content_delta frames — above, or incrementally during the
+      // stream — so there is nothing here to retract. A corrective re-prompt
+      // needs a hold-back buffer that would defeat streaming; that trade is a
+      // separate decision, and pretending otherwise would mean emitting a
+      // second answer contradicting one the user has already read.
+      const toolUse = validateAnswerAgainstTrace({
+        answer: visible,
+        trace,
+        // ⚠ A WEAK gate, and deliberately no longer load-bearing. The comment
+        // that used to sit here claimed a conversational turn runs with
+        // `tool_choice:"none"` and therefore advertises nothing. That is false
+        // for the surface that matters: the dashboard never sends
+        // `tool_choice`, so it defaults to "auto" and tools ARE advertised on
+        // every chat turn. `"none"` is produced only by voice-io's greeting
+        // path and email-analysis. Relying on this to suppress false positives
+        // meant ordinary sentences ("I've listed the options below") were
+        // claim-checked. The real protection is the narrowed, state-change-only
+        // verb list in tool-use-validation.ts; this only skips the genuinely
+        // tool-less turns.
+        toolsAdvertised: advertisedNames.size > 0,
+      });
+      if (toolUse.status !== "ok") {
+        logger.warn(
+          {
+            turnId,
+            iterations: iter + 1,
+            status: toolUse.status,
+            tools: toolUse.tools,
+            counts: toolUse.counts,
+            // 🔴 claimCount, not the claim TEXT. The excerpts are the model's
+            // own prose about whatever the user asked and whatever the tools
+            // returned — file contents, message bodies, device names. The
+            // logger is bare pino to stdout with no redact paths and its
+            // output is collected into the diagnostics bundle, so logging the
+            // sentences ships user content off the box. The client that is
+            // entitled to them still gets them on the SSE frame below.
+            claimCount: toolUse.claims.length,
+            threadId: req.citationContext?.threadId,
+          },
+          `agent_tool_use_unverified: ${describeToolUseVerdict(toolUse)}`,
+        );
+        emit({
+          type: "tool_use_validation",
+          status: toolUse.status,
+          claims: toolUse.claims,
+          tools: toolUse.tools,
+        });
       }
       emit({
         type: "done",

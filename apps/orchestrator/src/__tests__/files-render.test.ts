@@ -53,6 +53,7 @@ vi.mock("../services/nextcloud.client.js", async () => {
   );
   return {
     NextcloudOcsError: actual.NextcloudOcsError,
+    NcPreconditionFailedError: actual.NcPreconditionFailedError,
     ncListFiles: vi.fn(),
     ncUploadFile: vi.fn(),
     ncDownloadFile: vi.fn(),
@@ -156,6 +157,7 @@ describe("POST /api/files/render (WARP-2211)", () => {
       "/Documents",
       "q3.pdf",
       expect.any(Buffer),
+      expect.objectContaining({ ifNoneMatch: true }),
     );
   });
 
@@ -191,6 +193,47 @@ describe("POST /api/files/render (WARP-2211)", () => {
     // And it never rendered — the refusal is before the work.
     expect(renderCalls()).toHaveLength(0);
     expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+  });
+
+  // WARP-2523 — the exists? pre-check is a FAST PATH, not the guard. Two
+  // concurrent renders (or a render racing a user upload) both read "absent"
+  // and the loser clobbered the winner — the WARP-2096 defect reopened as a
+  // race. The authoritative guard is `If-None-Match: *` on the PUT itself.
+  it("maps a PUT-level 412 to the same already-exists 409 despite a passing pre-check", async () => {
+    ncMock.ncGetFileId.mockResolvedValue(null); // pre-check: nothing there…
+    // …but by PUT time a concurrent writer won, and the WebDAV
+    // If-None-Match: * create answered 412.
+    ncMock.ncUploadFile.mockRejectedValue(new nc.NcPreconditionFailedError());
+
+    const res = await request(app)
+      .post("/api/files/render")
+      .send({ path: "/Documents/q3.pdf", format: "pdf", title: "Q3" });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      error: "file already exists",
+      path: "/Documents/q3.pdf",
+    });
+    // Nothing was written, so none of the post-write bookkeeping may run —
+    // the only ncGetFileId call is the pre-check, never the registry lookup.
+    expect(ncMock.ncGetFileId).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends the create-new option on the render upload", async () => {
+    ncMock.ncGetFileId.mockResolvedValueOnce(null).mockResolvedValueOnce(4242);
+
+    await request(app)
+      .post("/api/files/render")
+      .send({ path: "/Documents/q3.pdf", format: "pdf", title: "Q3" });
+
+    expect(ncMock.ncUploadFile).toHaveBeenCalledWith(
+      expect.any(String),
+      "dev",
+      "/Documents",
+      "q3.pdf",
+      expect.any(Buffer),
+      expect.objectContaining({ ifNoneMatch: true }),
+    );
   });
 
   it("rejects an unknown format", async () => {

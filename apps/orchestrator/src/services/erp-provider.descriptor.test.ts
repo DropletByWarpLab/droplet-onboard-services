@@ -22,9 +22,15 @@ import {
   DATASETS,
   PRACTICE_DATASETS,
   QBO_DATASETS,
+  STRIPE_DATASETS,
+  HUBSPOT_DATASETS,
+  MAILCHIMP_DATASETS,
   DEFAULT_CALL_CEILING,
   QUICKBOOKS_ONLINE_PROVIDER,
   DENTRIX_ASCEND_PROVIDER,
+  STRIPE_PROVIDER,
+  HUBSPOT_PROVIDER,
+  MAILCHIMP_PROVIDER,
   ConnectorBlockedError,
   type DatasetName as ConnectorDatasetName,
 } from "@droplet/erp-connector";
@@ -215,6 +221,22 @@ describe("datasets are typed by the closed union, not widened to string[]", () =
     expect(providerDescriptor("eaglesoft-api")?.datasets).toEqual([...PRACTICE_DATASETS]);
     expect(providerDescriptor(DENTRIX_ASCEND_PROVIDER)?.datasets).toEqual([...PRACTICE_DATASETS]);
     expect(providerDescriptor(QUICKBOOKS_ONLINE_PROVIDER)?.datasets).toEqual([...QBO_DATASETS]);
+  });
+
+  it("reconciles the three cloud SaaS tracks the same way (WARP-2497)", () => {
+    // The four assertions above shipped without covering Stripe, HubSpot or
+    // Mailchimp, and the gap was not cosmetic: `STRIPE_DATASETS` gained
+    // `charge` in WARP-2497 and nothing would have noticed if the descriptor
+    // had been left claiming `invoice` alone. The cloud read tool resolves a
+    // dataset to a connection THROUGH the descriptor, so a descriptor that
+    // under-claims makes a dataset the track genuinely serves unreachable —
+    // silently, and only from chat.
+    //
+    // Mutation: drop "charge" from either STRIPE_DATASETS or the descriptor's
+    // `datasets` (but not both) → red.
+    expect(providerDescriptor(STRIPE_PROVIDER)?.datasets).toEqual([...STRIPE_DATASETS]);
+    expect(providerDescriptor(HUBSPOT_PROVIDER)?.datasets).toEqual([...HUBSPOT_DATASETS]);
+    expect(providerDescriptor(MAILCHIMP_PROVIDER)?.datasets).toEqual([...MAILCHIMP_DATASETS]);
   });
 
   it("a dataset outside the closed union is a TYPE error, not a runtime one", () => {

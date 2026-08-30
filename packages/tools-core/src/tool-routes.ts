@@ -338,6 +338,11 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("erp_get_ar_summary"),
   none("erp_schedule_appointment"),
 
+  // ── cloud (WARP-2497) ───────────────────────────────────────────────────
+  // Lives under /api/erp/* because the cloud connectors reuse the ERP
+  // route surface and its connector-grant gate; the tool domain is `cloud`.
+  { tool: "cloud_query_dataset", client: "orchestrator", hops: [admit("get", "/api/erp/dataset/:dataset")] },
+
   // ── business ────────────────────────────────────────────────────────────
   none("business_profile_get"), // ctx.prisma
 

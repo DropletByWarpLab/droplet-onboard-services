@@ -33,6 +33,9 @@ on:
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
+      # WARP-2543: the accelerator vendor selects the DMR profile AND image,
+      # and a CPU-only image tag is refused outright.
+      - "tests/gpu-vendor-selection.test.sh"
       # WARP-1947: single-box derives the overlay home endpoint IP
       - "tests/wireguard-home-endpoint.test.sh"
       - "docker/nextcloud-init.sh"
@@ -72,6 +75,9 @@ on:
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
+      # WARP-2543: the accelerator vendor selects the DMR profile AND image,
+      # and a CPU-only image tag is refused outright.
+      - "tests/gpu-vendor-selection.test.sh"
       # WARP-1947: single-box derives the overlay home endpoint IP
       - "tests/wireguard-home-endpoint.test.sh"
       - "docker/nextcloud-init.sh"
@@ -155,6 +161,16 @@ jobs:
         # on every orchestrator boot. Also pins that a setup re-run can never
         # flip or un-flip an existing box. Pure bash.
         run: bash tests/dmr-default-provisioning.test.sh
+      - name: Run GPU vendor-selection unit tests
+        # WARP-2543: the box must pick its DMR shape from the SILICON it has.
+        # A bench box shipped with an NVIDIA RTX 5060 Ti while compose still
+        # wired AMD ROCm devices — which resolved to a 512 MiB integrated GPU —
+        # and docker/.env had been hand-pinned to the CPU-only image tag. The
+        # 20B then served at 8 tok/s with every healthcheck green for days.
+        # Pins: profile<->image agreement, the AMD token stays `dmr` so the
+        # installed fleet is untouched, and a suffix-less DMR_IMAGE is refused.
+        # Pure bash, no GPU required.
+        run: bash tests/gpu-vendor-selection.test.sh
       - name: Run single-box overlay home-endpoint derivation tests
         # WARP-1947: single-box must DERIVE WIREGUARD_HOME_ENDPOINT_HOST from the
         # box's default route so an approved overlay device's profile carries a

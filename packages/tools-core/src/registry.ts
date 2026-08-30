@@ -191,6 +191,12 @@ import erpFindPatient from "./handlers/erp/find-patient.js";
 import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
 import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 
+// cloud (WARP-2497) — the connected SaaS accounts (Stripe / HubSpot /
+// Mailchimp). Deliberately ONE tool for all three vendors and all ten record
+// shapes: the dataset name selects the provider inside the orchestrator, so
+// the registry's serialized size grows by one small block instead of ten.
+import cloudQueryDataset from "./handlers/cloud/query-dataset.js";
+
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
 
@@ -384,6 +390,9 @@ const allTools: Tool[] = [
   erpFindPatient,
   erpGetArSummary,
   erpScheduleAppointment,
+  // WARP-2497: cloud connectors (Stripe/HubSpot/Mailchimp) — one Read-tier
+  // tool covering all ten datasets; the dataset arg picks the provider.
+  cloudQueryDataset,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
   // WARP-1685: Messages sends (Tier-2: write + two-phase confirmation)

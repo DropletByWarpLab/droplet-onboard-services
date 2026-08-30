@@ -20,9 +20,20 @@ import {
 
 const UUID = "6f0f5a3e-2f4b-4a4e-9d7e-0a1b2c3d4e5f";
 
+// WARP-2524: searchByVector's SELECT now runs inside $transaction (SET LOCAL
+// hnsw.ef_search needs a transaction scope), so the stub hands the callback a
+// tx client whose $queryRawUnsafe is the SAME spy — `raw` sees every SELECT
+// from both arms, and the predicate/bind assertions below stay verbatim.
 function prismaStub(): { client: PrismaClient; raw: ReturnType<typeof vi.fn> } {
   const raw = vi.fn(async () => [] as unknown[]);
-  return { client: { $queryRawUnsafe: raw } as unknown as PrismaClient, raw };
+  const client = {
+    $queryRawUnsafe: raw,
+    $transaction: vi.fn(
+      async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ $queryRawUnsafe: raw, $executeRawUnsafe: vi.fn(async () => 0) }),
+    ),
+  } as unknown as PrismaClient;
+  return { client, raw };
 }
 
 describe("searchByVector multi-owner predicate", () => {
