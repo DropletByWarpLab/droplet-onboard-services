@@ -272,7 +272,18 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // taken bare. The negatives in tool-selection.service.test.ts pin this.
   { pattern: /\b(slack|stand-?ups?|huddles?|dms?|direct messages?|group chats?|team chats?|(slack|team|work|group|company) channels?|(slack|stand-?up|chat|message|comment) threads?)\b/i, domains: ["team_chat"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
-  { pattern: /\b(business|company|opening hours|customers?)\b/i, domains: ["business"] },
+  // WARP-2552 — `customers` claims BOTH domains on purpose. The word is the
+  // natural way to ask either "what does Droplet know about my business"
+  // (business profile) or "show me my customers" (the CRM). A false-positive
+  // domain is cheap here, and picking one owner would make the other
+  // unreachable by the only word a human uses for it.
+  { pattern: /\b(business|company|opening hours|customers?)\b/i, domains: ["business", "crm"] },
+  // WARP-2552 — the CRM's own vocabulary. Without a rule the seven crm_* tools
+  // sit in the chat pool, are charged to the budget, and are advertised on
+  // ZERO turns — the same defect WARP-2058 fixed for `pm` and WARP-2454 fixed
+  // for `team_chat`. `chat-tool-scope.test.ts` now fails if a domain with
+  // in-scope tools has no rule, so a fourth instance cannot ship quietly.
+  { pattern: /\b(crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|won|win|lost|follow-?ups?)\b/i, domains: ["crm"] },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
@@ -361,4 +372,95 @@ export function selectAdvertisedTools(opts: {
     return d !== undefined && domains.has(d);
   });
   return { advertised, matchedDomains: [...domains] };
+}
+
+// ── The ONE derivation of "what will this turn advertise" (WARP-2552) ───────
+//
+// `selectAdvertisedTools` is pure and takes already-derived inputs, which
+// means every caller has to derive `userMessage` and `conversationToolNames`
+// itself — and two callers deriving them differently is how the estimate and
+// the wire stopped agreeing.
+//
+// They HAD stopped agreeing. `routes/llm.ts` sized the whole chat pool while
+// `llm-agent.service.ts` advertised a per-turn subset, so the budget gate
+// charged ~14,986 tokens of tool schemas on a turn that ships ~3,426. The
+// helpers below exist so both sites ask the same question through the same
+// code path; `tool-selection.parity.test.ts` asserts they return the same set
+// for the same turn, and that test is the reason this is one function rather
+// than a convention.
+
+/**
+ * The structural slice of a chat message this module reads.
+ *
+ * Deliberately structural rather than importing `ChatMessage`: the route holds
+ * `ChatMessage[]` and the agent loop holds its own request type, and coupling
+ * this module to either would make the shared helper unusable from the other.
+ */
+export interface SelectionMessage {
+  role: string;
+  content?: unknown;
+  tool_calls?: ReadonlyArray<{ function: { name: string } }>;
+}
+
+/**
+ * The latest user message as plain text, or `""`.
+ *
+ * `content` is an array on multimodal turns (an image attachment), and rule
+ * matching only understands text — those turns yield `""` and fall back to
+ * core-only advertisement. That is an accepted gap rather than a silent
+ * failure: the WARP-642 self-heal branch re-admits any real tool the model
+ * still names, at the cost of one iteration.
+ */
+export function lastUserMessageText(messages: readonly SelectionMessage[]): string {
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  return typeof lastUser?.content === "string" ? lastUser.content : "";
+}
+
+/**
+ * Continuity: every tool name this conversation has already called.
+ *
+ * Spans BOTH sources, and needs both (WARP-1921):
+ *   • `priorToolNames` — earlier TURNS, read from the persisted trace by the
+ *     route. `messages` cannot supply these, because `chatRequestSchema`
+ *     declares no `tool_calls` field and zod strips it from every replayed
+ *     assistant message.
+ *   • `messages` — earlier ITERATIONS of THIS turn, where the loop pushes the
+ *     model's raw message object with `tool_calls` intact. Not yet persisted.
+ */
+export function conversationToolNamesFor(
+  priorToolNames: readonly string[] | undefined,
+  messages: readonly SelectionMessage[],
+): string[] {
+  return [
+    ...(priorToolNames ?? []),
+    ...messages.flatMap((m) =>
+      m.role === "assistant" && m.tool_calls
+        ? m.tool_calls.map((tc) => tc.function.name)
+        : [],
+    ),
+  ];
+}
+
+/**
+ * The names this turn will actually advertise, derived once.
+ *
+ * Under `off` the whole pool genuinely IS the wire payload, so it is returned
+ * unnarrowed — a budget estimate for that mode must charge for all of it.
+ */
+export function effectiveAdvertisedToolNames(opts: {
+  mode: ToolSelectionMode;
+  messages: readonly SelectionMessage[];
+  priorToolNames?: readonly string[];
+  pool: readonly string[];
+  runtimeTools?: readonly RuntimeToolDescriptor[];
+}): Set<string> {
+  if (opts.mode === "off") return new Set(opts.pool);
+  const { advertised } = selectAdvertisedTools({
+    mode: opts.mode,
+    userMessage: lastUserMessageText(opts.messages),
+    pool: [...opts.pool],
+    conversationToolNames: conversationToolNamesFor(opts.priorToolNames, opts.messages),
+    runtimeTools: opts.runtimeTools,
+  });
+  return new Set(advertised);
 }

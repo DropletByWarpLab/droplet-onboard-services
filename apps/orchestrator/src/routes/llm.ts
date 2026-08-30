@@ -16,6 +16,9 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+// WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
+// and the wire payload cannot disagree.
+import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
@@ -1734,10 +1737,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const interviewBlock = interviewActive
           ? INTERVIEW_CONDUCTOR_BLOCK
           : "";
-        // Serialize the effective tools[] the same way llm-agent.service.ts
-        // does, so the estimate reflects what the model actually receives:
-        // an explicit allowed set verbatim, otherwise the WARP-1424 default
-        // chat scope (registry minus chat-tool-scope.ts exclusions).
+        // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
+        // default chat scope (registry minus chat-tool-scope.ts exclusions).
         const effectiveTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
@@ -1745,15 +1746,51 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
+        // WARP-2552 — but the pool is NOT what the model receives, and sizing
+        // it as though it were is the defect this fixes.
+        //
+        // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
+        // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
+        // which the route passes UNCONDITIONALLY — there is no path that ships
+        // the whole pool except an operator setting TOOL_SELECTION_MODE=off).
+        // The comment that used to sit here still claimed the estimate
+        // "reflects what the model actually receives"; it had been false since
+        // selection landed. Measured on a 16384 window: the estimator charged
+        // ~14,986 tokens of tool schemas on a turn that ships ~3,426 — an
+        // ~11.5K-token phantom on EVERY turn.
+        //
+        // The consequence was not theoretical. `degradeToFit` below drops the
+        // business block, then the persona block, once the estimate exceeds
+        // the window; with the phantom included, identity + tool guidance +
+        // the pool alone came to ~15,853 tokens against a 15,360 ceiling. So
+        // on any box carrying durable memory facts, persona and business were
+        // being dropped from the system prompt on every turn — to make room
+        // for schemas that were never sent.
+        //
+        // Under `off` the pool genuinely IS the wire payload, so it is sized
+        // whole. `effectiveAdvertisedToolNames` is the SAME function the loop
+        // uses, so the two cannot drift; `tool-selection.parity.test.ts` pins
+        // that. Runtime-registered remote tools are not in this estimate — the
+        // route has no registry access — which is unchanged from before; the
+        // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
+        // the fully assembled advertisement.
+        const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
+          mode: config.TOOL_SELECTION_MODE,
+          messages: agentMessages,
+          priorToolNames,
+          pool: effectiveTools.map((t) => t.name),
+        });
         const toolSchemasJson = JSON.stringify(
-          effectiveTools.map((t) => ({
-            type: "function" as const,
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.inputSchema,
-            },
-          })),
+          effectiveTools
+            .filter((t) => advertisedNamesForEstimate.has(t.name))
+            .map((t) => ({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.inputSchema,
+              },
+            })),
         );
         // Everything already spliced onto agentMessages (pins, attachments,
         // history) counts toward the window; serialize it as one blob.
