@@ -38,6 +38,9 @@ import {
   List,
   Target,
   Layers,
+  Building2,
+  Briefcase,
+  Handshake,
   type LucideIcon,
 } from "lucide-react";
 
@@ -79,6 +82,11 @@ export const ICONS: Record<string, LucideIcon> = {
   list: List,
   target: Target,
   layers: Layers,
+  // WARP-2545 — the CRM sub-tabs and cards reuse this map so the two
+  // surfaces on the Projects page draw from one icon vocabulary.
+  building: Building2,
+  briefcase: Briefcase,
+  handshake: Handshake,
 };
 
 export function PmIcon({
