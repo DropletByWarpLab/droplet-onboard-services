@@ -10,7 +10,7 @@ description: |
 
 # Adding a new LLM tool
 
-Registering a tool is not one edit. It is **nine sites across two workspaces**,
+Registering a tool is not one edit. It is **ten sites across two workspaces**,
 each guarded by a drift gate that goes red if you skip it. This file used to
 list four; the missing two (`catalog.ts` and `INVENTORY.md`) cost WARP-2466 a
 red suite it had no explanation for.
@@ -94,6 +94,7 @@ site 7.
 | 7 | `apps/orchestrator/src/services/chat-tool-scope.ts` | A decision, not necessarily a line: leave the tool out of `EXCLUDED_FROM_CHAT_TOOLS` and it is advertised in default chat and costs budget on every matching turn; add it and only the dashboard and external MCP clients see it. | `chat-tool-scope.test.ts` recomputes the policy/relevance overlap every run: an excluded tool must be unreachable on **any** turn, no domain may be left with a selection rule that advertises nothing (the set is pinned to `["notifications"]`), no fully-excluded domain may keep a rule, and no `CORE_TOOL_NAMES` floor tool may be excluded. |
 | 8 | `apps/orchestrator/src/services/tool-result-bounding.ts` | Only if your handler pages: your cursor key in `CURSOR_KEYS`. | `tool-result-bounding.canary.test.ts` greps the whole producer surface for cursor-SHAPED keys and fails on any that is neither in `CURSOR_KEYS` nor on the reviewed not-a-cursor list. A cursor it does not know about is left beside a truncated body — the exact WARP-2203 defect. It also packs every registered name into the WARP-642 recovery envelope, so the registry growing is itself tripwired. |
 | 9 | `packages/tools-core/src/index.ts` | Only if you export a new symbol; the handler itself needs nothing here. | Every orchestrator-side gate imports `TOOLS` through this barrel, so an unexported addition is invisible to all of them. |
+| 10 | `apps/orchestrator/src/services/tool-selection.service.ts` | **Only if your tool opens a NEW domain**: a `DOMAIN_RULES` entry whose pattern matches how a human would ask for it. Word boundaries (`\b`) are not optional — without them `won` fires inside `wondering`. | `chat-tool-scope.test.ts` fails when a domain has in-scope tools and no rule. **This step used to be documented here as "a ticket, not a quiet edit", and that was too weak: WARP-2546 shipped seven `crm_*` tools with no rule, so they were serialized into the pool, charged against the budget on every turn, and advertised on ZERO turns.** Third instance of the class after WARP-2058 (`pm`) and WARP-2454 (`team_chat`). The rule belongs in the same change as the tools. |
 
 And, always, a **unit test for the handler** beside its peers in
 `packages/tools-core/__tests__/handlers` — injected `fetch`, asserting on the
@@ -115,7 +116,8 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/services/tool-result-bounding.canary.test.ts` | `apps/orchestrator` | site 8 |
 | `apps/orchestrator/src/__tests__/write-tools-derivation.guard.test.ts` | `apps/orchestrator` | that nobody "helpfully" hand-listed your tool somewhere instead of letting `requiresWrite` derive it |
 | `apps/orchestrator/src/__tests__/confirmation-owner-drift.guard.test.ts` | `apps/orchestrator` | that your tool's `confirmationOwner` still matches reality. `"route"` is a claim about a file in a DIFFERENT package, so it rots from either end — a safety tier moves and the descriptor keeps yesterday's answer, or a new pass-through tool ships undeclared and silently inherits `"interceptor"` against a route that already confirms. All three inputs are read at runtime (live registry, compiled call site, `classifyNetworkCommand`), so a name list cannot satisfy it. |
-| `apps/orchestrator/src/__tests__/warp-2472-passthrough-single-prompt.test.ts` | `apps/orchestrator` | that one approved action costs the user **one** prompt. Nothing is stubbed between MCP dispatch and the route's confirmation decision, so the double prompt this pins (WARP-2472 — it shipped, and reached chat) cannot come back. |
+| `apps/orchestrator/src/__tests__/warp-2472-passthrough-single-prompt.test.ts` | `apps/orchestrator` | that one approved action costs the user **one** prompt. Nothing is stubbed between MCP dispatch and the route's confirmation decision, so the double prompt this pins (WARP-2472 — it shipped, and reached chat) cannot come back. It also pins the **count** of `requiresConfirmation` tools, so a new confirming tool is a number someone updates on purpose. |
+| `apps/orchestrator/src/services/tool-selection.parity.test.ts` | `apps/orchestrator` | that the budget estimate and the wire payload are the **same set** (WARP-2552), and that every domain with in-scope tools is reachable by some rule. If you add a tool in a NEW domain, this is the gate that tells you the domain has no rule — see site 10. |
 
 ### Read-only — these gates read them; do not edit them to go green
 
@@ -123,7 +125,7 @@ your handler is wrong; they only tell you it is wired.
 |---|---|
 | `apps/orchestrator/src/services/tool-access.service.ts` | `WRITE_TOOLS` is **derived** from `requiresWrite` here (it is no longer in `apps/orchestrator/src/routes/llm.ts`). RBAC picks your tool up with no manual sync — adding a literal list is the thing the guard test exists to reject. |
 | `packages/tools-core/src/interceptor.ts` | Enforces `requiresConfirmation` generically at dispatch. Setting the flag is the whole integration; do not hand-roll a prompt. |
-| `apps/orchestrator/src/services/tool-selection.service.ts` | `CORE_TOOL_NAMES` (the always-advertised floor) and `RULED_DOMAINS`. A tool in a domain with no selection rule is in scope but never advertised on a turn — that is a real ship-dead path, and the fix is a ticket, not a quiet edit here. |
+| `apps/orchestrator/src/services/tool-selection.service.ts` | `CORE_TOOL_NAMES` (the always-advertised floor). Read-only for a tool in an EXISTING domain — but see **site 10** if your tool opens a new one. |
 | `apps/orchestrator/src/services/tool-budget.service.ts` | The measurement machinery from step 0. Over-budget throws by design; there is no truncate path and adding one re-creates the silent capability loss WARP-2348 removed. |
 | `apps/orchestrator/src/services/prompt-budget.consts.ts` | The fixed-block char caps the ceiling is derived from. |
 | `apps/orchestrator/src/services/context-budget.service.ts` | `DEFAULT_CONTEXT_WINDOW` and the chars→tokens estimator. |
