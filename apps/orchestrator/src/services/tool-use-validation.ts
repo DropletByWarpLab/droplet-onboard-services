@@ -322,20 +322,51 @@ export function validateAnswerAgainstTrace(input: ValidateInput): ToolUseVerdict
   // surfaces as an approval chip. Do not second-guess it.
   if (counts.pending > 0) return ok();
 
-  // Something really succeeded — the coarse question is answered. We do not
-  // try to prove the claim matches THAT tool; see the header note on why
-  // verb->tool tables are a false-positive machine.
-  if (counts.success > 0) return ok();
+  // PER-TOOL, not per-turn.
+  //
+  // 🔴 This was `if (counts.success > 0) return ok()` over the WHOLE trace,
+  // and that silenced the module's own headline failure mode on any
+  // multi-tool turn: dispatch two different tools, one succeeds and one
+  // returns status:"error", claim both completed, and the single success
+  // anywhere in `trace` cleared the check for the entire answer. That is
+  // exactly shipped-failure-mode #2, just not caught when it is one of
+  // several calls instead of the only one — and on this product the calls
+  // are physical, so "the camera turned off but the lock did not" is the
+  // case that matters most.
+  //
+  // Grouping by tool name fixes it without a verb->tool affinity table (see
+  // the header on why those are a false-positive machine). A tool is
+  // SATISFIED if at least one call to THAT tool succeeded, so a retry that
+  // eventually worked still passes — the healthy recovery behaviour the loop
+  // is designed to do. If every call to some tool failed, the model attempted
+  // something that never succeeded, and a completion claim over that is worth
+  // surfacing.
+  const failedTools = [
+    ...new Set(
+      dispatched
+        .filter((t) => classifyToolOutcome(t.result) === "error")
+        .map((t) => t.tool),
+    ),
+  ].filter(
+    (name) =>
+      !dispatched.some(
+        (t) => t.tool === name && classifyToolOutcome(t.result) === "success",
+      ),
+  );
+  if (failedTools.length === 0 && counts.success > 0) return ok();
 
   const claims = detectCompletionClaims(answer);
   if (claims.length === 0) return ok();
 
-  // A completion claim with no successful dispatch behind it.
+  // A completion claim that no successful dispatch backs.
   return {
     status: counts.total === 0 ? "unsupported" : "contradicted",
     claims,
     counts,
-    tools,
+    // Report the tools that actually failed when there are any — that is what
+    // an operator needs to act on. Falls back to every tool touched when the
+    // turn dispatched nothing at all.
+    tools: failedTools.length > 0 ? failedTools : tools,
   };
 }
 

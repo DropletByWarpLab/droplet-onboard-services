@@ -258,6 +258,39 @@ describe("validateAnswerAgainstTrace", () => {
     expect(v.status).toBe("ok");
   });
 
+  it("FLAGS a multi-tool turn where one tool wholly failed (review finding)", () => {
+    // Romain on PR #1867: `counts.success > 0` over the whole trace let a turn
+    // that dispatched two tools — one ok, one errored — claim both completed
+    // and pass silently. That is shipped-failure-mode #2 in multi-tool form,
+    // and on this product the calls are physical: "the camera turned off but
+    // the lock did not" is the case that matters most.
+    const v = validate("I've turned off the camera and locked the door.", [
+      entry("camera_set_state", OK_RESULT),
+      entry("lock_set_state", ERR_RESULT),
+    ]);
+    expect(v.status).toBe("contradicted");
+    // and it names the tool that actually failed, not both
+    expect(v.tools).toEqual(["lock_set_state"]);
+  });
+
+  it("still passes a same-tool retry that eventually succeeded", () => {
+    // The per-tool rule must not punish recovery — the loop is designed to
+    // retry, and a tool is satisfied if ANY call to it succeeded.
+    const v = validate("I've turned off the camera.", [
+      entry("camera_set_state", ERR_RESULT),
+      entry("camera_set_state", OK_RESULT),
+    ]);
+    expect(v.status).toBe("ok");
+  });
+
+  it("passes a multi-tool turn where every tool succeeded", () => {
+    const v = validate("I've turned off the camera and locked the door.", [
+      entry("camera_set_state", OK_RESULT),
+      entry("lock_set_state", OK_RESULT),
+    ]);
+    expect(v.status).toBe("ok");
+  });
+
   it("does not flag a turn awaiting confirmation", () => {
     // Legitimately "not done yet"; the dashboard already renders an approval
     // chip for it.
