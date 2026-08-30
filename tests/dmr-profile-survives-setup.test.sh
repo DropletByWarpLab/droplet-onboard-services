@@ -63,7 +63,12 @@ fi
 # The guard must key off INFERENCE_RUNTIME, not off whatever profiles happen to
 # be present: reading the profile list to decide the profile list cannot
 # recover a box whose root .env already lost `dmr`, which is the broken state.
-if awk '/WARP-1865/,/^  fi$/' "$LIB" | grep -q 'INFERENCE_RUNTIME'; then
+# WARP-2543 — materialised rather than piped into `grep -q`. With
+# `set -o pipefail`, grep -q exits on first match, awk takes SIGPIPE, and the
+# pipeline reports 141 — a successful match failing as if it had not matched.
+# It is scheduling-dependent, so it passed three local runs and failed CI.
+_guard_block="$(awk '/WARP-1865/,/^  fi$/' "$LIB")"
+if grep -q 'INFERENCE_RUNTIME' <<<"$_guard_block"; then
   ok "the guard is decided by INFERENCE_RUNTIME (the durable operator property)"
 else
   bad "the guard does not read INFERENCE_RUNTIME"
@@ -99,6 +104,7 @@ merged_for() {
   local out
   out="$(
     log_info() { :; }
+    log_warn() { :; }
     log_error() { :; }
     # The shipped block resolves the DMR shape through gpu.sh. Source the real
     # one: stubbing it here would let a wrong vendor->profile mapping ship

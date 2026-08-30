@@ -135,7 +135,14 @@ out="$( GPU_VENDOR=NVIDIA detect_gpu_vendor )"
 # this ticket the NVIDIA card was present with NO kernel driver bound, so a
 # detector keyed on nvidia-smi or /dev/nvidia* would have reported "no NVIDIA
 # GPU" on a machine that had one — and confirmed the wrong wiring as correct.
-if grep -vE '^\s*#' "$LIB" | grep -qE 'nvidia-smi|/dev/nvidia'; then
+# Materialised, not piped: `grep … | grep -q` under `set -o pipefail` is the
+# same SIGPIPE trap as above, and here it would fail in the DANGEROUS
+# direction — the pipeline reporting non-zero sends this to the `ok` branch,
+# so the test would claim detection is driver-independent precisely when it
+# had found evidence that it is not. `[[:space:]]` rather than `\s`, which is
+# a GNU extension.
+_lib_code="$(grep -vE '^[[:space:]]*#' "$LIB")"
+if grep -qE 'nvidia-smi|/dev/nvidia' <<<"$_lib_code"; then
   bad "detect_gpu_vendor keys off a loaded driver — it must read the PCI bus"
 else
   ok "detection does not depend on a loaded driver (reads the PCI bus)"
@@ -189,33 +196,50 @@ rm -rf "$tmp"
 # lesson (a fix whose only behaviour change has no test).
 COMPOSE="$REPO_ROOT/docker/docker-compose.yml"
 
+# WARP-2543 — materialise each awk range into a variable instead of piping it
+# into `grep -q`.
+#
+# `set -o pipefail` (line 1) plus `grep -q` is a SIGPIPE trap: grep exits the
+# instant it matches, awk gets SIGPIPE, and the PIPELINE status becomes 141 —
+# so a SUCCESSFUL match reports as a failure. Whether it fires depends on
+# whether awk finished writing before grep left, i.e. on output size and
+# scheduling, so it passes locally and fails on CI. That is exactly how the
+# first push of this branch failed `setup-unit` on an assertion that was green
+# on three local runs, and it is the same shape as the fips-lint SIGPIPE bug.
+# No pipe, no race.
+_block() { awk "$1" "$COMPOSE"; }
+
 if grep -qE '^  dmr-cuda:' "$COMPOSE"; then
   ok "compose declares the dmr-cuda service"
 else
   bad "compose has no dmr-cuda service — GPU_VENDOR=nvidia would select a profile that starts nothing"
 fi
 
-if awk '/^  dmr-cuda:/,/^  inference-manager:/' "$COMPOSE" | grep -q 'profiles: \["dmr-cuda"\]'; then
+_b="$(_block '/^  dmr-cuda:/,/^  inference-manager:/')"
+if grep -q 'profiles: \["dmr-cuda"\]' <<<"$_b"; then
   ok "dmr-cuda is gated on its own profile"
 else
   bad "dmr-cuda is not gated on the dmr-cuda profile"
 fi
 
 # The alias is load-bearing: every consumer dials http://dmr:12434.
-if awk '/^  dmr-cuda:/,/^  inference-manager:/' "$COMPOSE" | grep -qE '^ +- dmr$'; then
+_b="$(_block '/^  dmr-cuda:/,/^  inference-manager:/')"
+if grep -qE '^ +- dmr$' <<<"$_b"; then
   ok "dmr-cuda carries the 'dmr' network alias (consumers dial http://dmr:12434)"
 else
   bad "dmr-cuda has no 'dmr' network alias — every consumer would fail to resolve it"
 fi
 
 # The AMD service must NOT have gained NVIDIA wiring, and must keep its own.
-if awk '/^  dmr:/,/^  dmr-cuda:/' "$COMPOSE" | grep -q '/dev/kfd'; then
+_b="$(_block '/^  dmr:/,/^  dmr-cuda:/')"
+if grep -q '/dev/kfd' <<<"$_b"; then
   ok "the AMD 'dmr' service still wires /dev/kfd (unchanged for the installed fleet)"
 else
   bad "the AMD 'dmr' service lost its ROCm device wiring"
 fi
 
-if awk '/^  dmr:/,/^  dmr-cuda:/' "$COMPOSE" | grep -q 'runtime: nvidia'; then
+_b="$(_block '/^  dmr:/,/^  dmr-cuda:/')"
+if grep -q 'runtime: nvidia' <<<"$_b"; then
   bad "the AMD 'dmr' service gained 'runtime: nvidia' — it would fail to start on every AMD box"
 else
   ok "the AMD 'dmr' service has no nvidia runtime (correctly untouched)"
@@ -223,7 +247,8 @@ fi
 
 # The GPU-residency healthcheck is the fail-loud half of this ticket. Without
 # it, an NVIDIA box that loses its driver goes back to silent CPU inference.
-if awk '/^  dmr-cuda:/,/^  inference-manager:/' "$COMPOSE" | grep -q 'nvidia-smi'; then
+_b="$(_block '/^  dmr-cuda:/,/^  inference-manager:/')"
+if grep -q 'nvidia-smi' <<<"$_b"; then
   ok "dmr-cuda healthcheck asserts GPU visibility (silent CPU fallback becomes unhealthy)"
 else
   bad "dmr-cuda has no GPU-residency healthcheck — a CPU fallback would still report healthy"
