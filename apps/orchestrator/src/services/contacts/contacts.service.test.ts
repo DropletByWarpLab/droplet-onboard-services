@@ -7,10 +7,12 @@ import { describe, it, expect, vi } from "vitest";
 import {
   CONTACT_ERRORS,
   createContact,
+  deleteContact,
   deriveDisplayName,
   listContacts,
   normalizeEmail,
   normalizePhone,
+  setContactArchived,
   updateContact,
 } from "./contacts.service.js";
 
@@ -237,5 +239,104 @@ describe("listContacts", () => {
     expect(findMany.mock.calls[0][0].take).toBe(200);
     await listContacts(prisma, "u1", { perPage: 0 });
     expect(findMany.mock.calls[1][0].take).toBe(1);
+  });
+});
+
+describe("archiving — the one action a synced contact allows (WARP-2554)", () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: "c1",
+    origin: "LOCAL",
+    sourceId: null,
+    externalSystem: null,
+    externalId: null,
+    displayName: "Ada Lovelace",
+    givenName: "Ada",
+    familyName: "Lovelace",
+    organization: null,
+    jobTitle: null,
+    note: null,
+    birthday: null,
+    emails: [],
+    phones: [],
+    isArchived: false,
+    archivedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...over,
+  });
+
+  it("archives a SYNCED contact — the case the whole change exists for", async () => {
+    // Before this, an EXTERNAL row could not be edited, could not be deleted,
+    // and had no archive column: there was NO action a human could take to get
+    // a synced person off their screen. Mutation: add an origin guard to
+    // setContactArchived → red, and the dead end is back.
+    const update = vi.fn().mockResolvedValue(row({ isArchived: true, origin: "EXTERNAL" }));
+    const prisma = {
+      contact: { findFirst: async () => row({ origin: "EXTERNAL" }), update },
+    } as never;
+
+    const out = await setContactArchived(prisma, "u1", "c1", true);
+    expect(out.archived).toBe(true);
+    expect(update.mock.calls[0][0].data.isArchived).toBe(true);
+  });
+
+  it("moves archivedAt WITH the state, in both directions", async () => {
+    // The pair can never disagree, and the STATE is always read from
+    // `isArchived` — never derived from `archivedAt IS NOT NULL` (WARP-884).
+    // Mutation: leave archivedAt set on un-archive → red.
+    const update = vi.fn().mockResolvedValue(row());
+    const prisma = { contact: { findFirst: async () => row(), update } } as never;
+
+    await setContactArchived(prisma, "u1", "c1", true);
+    expect(update.mock.calls[0][0].data.archivedAt).toBeInstanceOf(Date);
+
+    await setContactArchived(prisma, "u1", "c1", false);
+    expect(update.mock.calls[1][0].data.isArchived).toBe(false);
+    expect(update.mock.calls[1][0].data.archivedAt).toBeNull();
+  });
+
+  it("is owner-scoped like every other contact read", async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const prisma = { contact: { findFirst, update: vi.fn() } } as never;
+
+    await expect(setContactArchived(prisma, "u1", "c-other", true)).rejects.toThrow(
+      CONTACT_ERRORS.CONTACT_NOT_FOUND,
+    );
+    expect(findFirst.mock.calls[0][0].where).toEqual({ id: "c-other", userId: "u1" });
+  });
+
+  it("hides archived rows from the default listing, and returns them on request", async () => {
+    // An archive that still listed the row would be pointless for the case it
+    // exists to serve. Mutation: drop the default filter → red.
+    const findMany = vi.fn().mockResolvedValue([]);
+    const prisma = { contact: { findMany, count: async () => 0 } } as never;
+
+    await listContacts(prisma, "u1", {});
+    expect(findMany.mock.calls[0][0].where.isArchived).toBe(false);
+
+    await listContacts(prisma, "u1", { includeArchived: true });
+    expect(findMany.mock.calls[1][0].where.isArchived).toBeUndefined();
+  });
+
+  it("refuses to DELETE a synced contact, but names archiving as the way out", async () => {
+    // Still refused — the next sync would put it straight back, and a delete
+    // that silently un-deletes is worse than one that declines. What changed
+    // is that the code is actionable. Mutation: return the old bare
+    // CONTACT_IS_EXTERNAL → red, and the caller is back to rendering "no".
+    const prisma = {
+      contact: { findFirst: async () => row({ origin: "EXTERNAL" }), delete: vi.fn() },
+    } as never;
+
+    await expect(deleteContact(prisma, "u1", "c1")).rejects.toThrow(
+      CONTACT_ERRORS.CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD,
+    );
+  });
+
+  it("still deletes a LOCAL contact outright", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const prisma = { contact: { findFirst: async () => row(), delete: del } } as never;
+
+    await deleteContact(prisma, "u1", "c1");
+    expect(del).toHaveBeenCalledWith({ where: { id: "c1" } });
   });
 });

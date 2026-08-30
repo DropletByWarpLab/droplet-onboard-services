@@ -309,15 +309,22 @@ describe("migrations", () => {
     }
   });
 
-  it("stamps both directories after every migration already on the branch", () => {
+  it("stamps both directories after the migration that preceded them", () => {
     // Mutation: re-stamp either to 20260101… → red. A stamp that predates a
     // migration already on main deploys out of order and breaks; this team
     // has hit that.
-    const others = MIGRATION_DIRS.filter(
-      (d) => d !== MODULE_ID_MIGRATION && d !== TABLES_MIGRATION,
-    ).sort();
-    const latestOther = others[others.length - 1];
-    expect(latestOther < MODULE_ID_MIGRATION).toBe(true);
-    expect(latestOther < TABLES_MIGRATION).toBe(true);
+    //
+    // WARP-2554 — this used to assert these two sorted after EVERY other
+    // directory, i.e. that they were last. That is not an invariant, it is a
+    // description of the day they landed: the very next migration anyone adds
+    // makes it false, and it did — `20260830220000_warp_2554_contact_archive`
+    // turned it red while being perfectly correct. Pinning the PREDECESSOR is
+    // the durable form, and it is what the ordering hazard is actually about:
+    // deploying before something that already exists, not failing to be last
+    // forever.
+    const PREDECESSOR = "20260828020000_warp_2458_integration_status_needs_reconnect";
+    expect(MIGRATION_DIRS).toContain(PREDECESSOR);
+    expect(PREDECESSOR < MODULE_ID_MIGRATION).toBe(true);
+    expect(PREDECESSOR < TABLES_MIGRATION).toBe(true);
   });
 });

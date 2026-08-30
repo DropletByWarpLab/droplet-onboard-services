@@ -5578,6 +5578,19 @@ model Contact {
   /// Bounded at 64 KB by the write path.
   rawVcard String?
 
+  /// WARP-2554 — the same explicit archive pair `CrmCompany` and `CrmDeal`
+  /// carry, and for a reason `Contact` needs more than either of them:
+  /// a row whose `origin` is EXTERNAL cannot be edited or deleted (the source
+  /// owns its fields, and a delete would simply be undone by the next sync),
+  /// so without this there is NO action a human can take to get a synced
+  /// person off their screen. Archiving is that action — it is the owner's
+  /// decision, it survives a re-sync, and it does not fight the source.
+  ///
+  /// Explicit boolean, never derived from `archivedAt IS NOT NULL` (WARP-884).
+  /// `archivedAt` is the audit timestamp only.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -5594,6 +5607,8 @@ model Contact {
   @@unique([externalSystem, externalId])
   @@index([userId, displayName])
   @@index([userId, origin])
+  /// The default listing is "this person's contacts, unarchived, by name".
+  @@index([userId, isArchived])
 }
 
 model ContactEmail {
@@ -5894,6 +5909,23 @@ model CrmActivity {
   /// has something to check against.
   subjectType CrmActivitySubject
 
+  /// 🔴 WARP-2554 — READ THIS BEFORE WRITING ANY PURGE OR DELETE.
+  ///
+  /// All three subject relations are `onDelete: Cascade`, and they have to be:
+  /// `CrmActivity_subject_exactly_one` forbids an orphan, so a subject column
+  /// cannot be SetNull. The cascade is the only coherent behaviour.
+  ///
+  /// The consequence is NOT obvious and is the thing to know: deleting a
+  /// subject destroys EVERY activity attached to it — including ones a human
+  /// typed, whose own `origin` is LOCAL. So a purge written as
+  /// `deleteMany({ where: { origin: "EXTERNAL" } })` on this table reads as
+  /// though it spares the owner's notes and does not: deleting the synced
+  /// parent has already taken them.
+  ///
+  /// If a purge must preserve locally-authored activity, it has to re-parent
+  /// or export it BEFORE deleting the subject. `crm-activity-cascade.test.ts`
+  /// pins this for all three subject types so the behaviour is met as an
+  /// assertion rather than discovered in production.
   companyId String?
   company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
 

@@ -30,6 +30,12 @@ export const CONTACT_ERRORS = {
   /// The row belongs to an address-book source, which owns its fields. A local
   /// edit would be reverted by the next sync, so it is refused up front.
   CONTACT_IS_EXTERNAL: "contact_is_external",
+  /// WARP-2554 — the same refusal, for DELETE specifically, with somewhere to
+  /// go. Distinct from CONTACT_IS_EXTERNAL because the remedy differs: an
+  /// edit has no alternative (the source owns the field), whereas a delete
+  /// does — archive it. A caller that cannot tell the two apart can only
+  /// render a flat "no", which is the dead end this ticket removes.
+  CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD: "contact_is_external_archive_instead",
   EMAIL_NOT_FOUND: "contact_email_not_found",
   PHONE_NOT_FOUND: "contact_phone_not_found",
   DUPLICATE_EMAIL: "contact_email_duplicate",
@@ -68,6 +74,9 @@ export interface ApiContact {
   birthday: string | null;
   emails: ApiContactEmail[];
   phones: ApiContactPhone[];
+  /** WARP-2554 — owner state, not vendor state. The only column a sync must
+   *  never overwrite on a row it otherwise owns. */
+  archived: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -105,6 +114,7 @@ function toApi(row: ContactRow): ApiContact {
       label: p.label,
       isPrimary: p.isPrimary,
     })),
+    archived: row.isArchived,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -160,6 +170,14 @@ export interface ListContactsOptions {
   page?: number;
   /** Include rows owned by an address-book source. Defaults to true. */
   includeExternal?: boolean;
+  /**
+   * WARP-2554 — include rows the owner archived. Defaults to FALSE.
+   *
+   * Archiving is the only way to get a synced contact out of the way, so it
+   * has to actually get it out of the way: a default that still listed them
+   * would make the action pointless for the case it exists to serve.
+   */
+  includeArchived?: boolean;
 }
 
 export async function listContacts(
@@ -173,6 +191,9 @@ export async function listContacts(
 
   const where: Prisma.ContactWhereInput = { userId };
   if (opts.includeExternal === false) where.origin = "LOCAL";
+  // WARP-2554 — archived rows are hidden unless asked for. Filtered on the
+  // explicit column, never on `archivedAt IS NOT NULL` (WARP-884).
+  if (!opts.includeArchived) where.isArchived = false;
   if (q) {
     where.OR = [
       { displayName: { contains: q, mode: "insensitive" } },
@@ -367,8 +388,47 @@ export async function deleteContact(
 ): Promise<void> {
   const existing = await prisma.contact.findFirst({ where: { id, userId } });
   if (!existing) throw new Error(CONTACT_ERRORS.CONTACT_NOT_FOUND);
-  if (existing.origin === "EXTERNAL") throw new Error(CONTACT_ERRORS.CONTACT_IS_EXTERNAL);
+  // WARP-2554 — still refused, and still for the right reason: the next sync
+  // would simply put the row back, and a delete that silently un-deletes is
+  // worse than one that declines. What changed is that the caller is now told
+  // what to do instead. Hard removal of synced rows belongs to the disconnect
+  // purge (WARP-2461), which deletes by connection rather than by row.
+  if (existing.origin === "EXTERNAL") {
+    throw new Error(CONTACT_ERRORS.CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD);
+  }
   // Emails, phones and the CRM link rows cascade in the schema (WARP-2018 /
   // WARP-2117) — no hand-rolled sweep here, deliberately.
+  //
+  // ⚠ So do this contact's CrmActivity rows, INCLUDING any whose own `origin`
+  // is LOCAL. See the cascade note on `model CrmActivity`.
   await prisma.contact.delete({ where: { id } });
+}
+
+/**
+ * Archive or restore a contact — WARP-2554.
+ *
+ * Deliberately permitted on EXTERNAL rows, which is the whole point: it is the
+ * ONE action a human can take on a synced person. It records the owner's
+ * decision about their own view without contradicting the source, so a
+ * re-sync updates the row's fields and leaves it archived.
+ *
+ * A sync landing an update MUST NOT clear this flag. It is owner state, not
+ * vendor state — the only column on a synced row that is.
+ */
+export async function setContactArchived(
+  prisma: PrismaClient,
+  userId: string,
+  id: string,
+  archived: boolean,
+): Promise<ApiContact> {
+  const existing = await prisma.contact.findFirst({ where: { id, userId } });
+  if (!existing) throw new Error(CONTACT_ERRORS.CONTACT_NOT_FOUND);
+  const row = await prisma.contact.update({
+    where: { id },
+    // `archivedAt` is the audit timestamp and moves WITH the state so the two
+    // can never disagree; the state itself is always read from `isArchived`.
+    data: { isArchived: archived, archivedAt: archived ? new Date() : null },
+    include: CONTACT_INCLUDE,
+  });
+  return toApi(row);
 }
