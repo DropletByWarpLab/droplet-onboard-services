@@ -138,8 +138,12 @@ READS, WRITES = _load(STATEMENT_MANIFEST_PATH)
 def check_statement(kind: str, name: str, sql: str) -> str | None:
     """None when `sql` is a registered `kind` statement for `name`; otherwise
     the refusal code. Reads and writes are separate namespaces — a read name
-    is unknown on the write route, whatever its SQL says."""
-    table = READS if kind == "read" else WRITES
+    is unknown on the write route, whatever its SQL says.
+
+    `kind` is an internal literal ("read"/"write" at the two route call
+    sites); anything else is a bug that should surface as a KeyError, not be
+    quietly routed to either table."""
+    table = {"read": READS, "write": WRITES}[kind]
     skeletons = table.get(name)
     if skeletons is None:
         return UNKNOWN_STATEMENT
