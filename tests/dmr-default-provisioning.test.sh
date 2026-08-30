@@ -207,10 +207,50 @@ if [ -f "$ROLLBACK" ]; then
   else
     bad "rollback drops INFERENCE_RUNTIME instead of setting it — the next setup.sh re-flips the box to DMR"
   fi
-  if grep -q "newprofiles=\"\${newprofiles:+\$newprofiles,}ollama\"" "$ROLLBACK"; then
-    ok "rollback swaps the profile token dmr->ollama (not just deletes dmr)"
+  # WARP-2543 — assert the BEHAVIOUR, not the literal implementation string.
+  # This previously grepped for `newprofiles="${newprofiles:+$newprofiles,}ollama"`,
+  # which pinned one specific line of shell. That made it fail the moment the
+  # token rewrite moved into the shared set_runtime_profile_token helper, even
+  # though the behaviour was strictly better — and, worse, it would have gone on
+  # passing if the strip had been left unable to remove `dmr-cuda`, which was
+  # the actual bug. Exercise the helper the script now uses.
+  (
+    log_error() { :; }
+    # shellcheck source=../scripts/lib/gpu.sh
+    . "$REPO_ROOT/scripts/lib/gpu.sh"
+
+    got="$(set_runtime_profile_token 'linux,single-box,dmr' ollama)"
+    case ",$got," in
+      *,ollama,*) : ;;
+      *) printf 'NO_OLLAMA:%s\n' "$got"; exit 1 ;;
+    esac
+    case ",$got," in
+      *,dmr,*) printf 'DMR_SURVIVED:%s\n' "$got"; exit 1 ;;
+    esac
+
+    # 🔴 The case that was broken: `grep -vx 'dmr'` is an exact-line match, so
+    # the NVIDIA token survived it and the box ended up running TWO inference
+    # runtimes on one card (WARP-1826), with no container_name collision to
+    # catch it because droplet-dmr != droplet-ollama.
+    got="$(set_runtime_profile_token 'linux,single-box,dmr-cuda' ollama)"
+    case ",$got," in
+      *,dmr-cuda,*) printf 'DMR_CUDA_SURVIVED:%s\n' "$got"; exit 1 ;;
+    esac
+    case ",$got," in
+      *,ollama,*) : ;;
+      *) printf 'NO_OLLAMA_CUDA:%s\n' "$got"; exit 1 ;;
+    esac
+    exit 0
+  ) >/dev/null 2>&1 \
+    && ok "rollback swaps the runtime token to ollama and strips BOTH dmr and dmr-cuda" \
+    || bad "rollback token swap is wrong — a stale dmr/dmr-cuda survives beside ollama (two runtimes, one card)"
+
+  # And the script must actually USE the shared helper rather than its own
+  # hand-rolled strip, or the list of tokens drifts per-script again.
+  if grep -q 'set_runtime_profile_token' "$ROLLBACK"; then
+    ok "rollback uses the shared set_runtime_profile_token (one token list, three callers)"
   else
-    bad "rollback deletes dmr without adding ollama — box ends with NO runtime profile"
+    bad "rollback hand-rolls its own token strip — dmr-cuda will be forgotten again"
   fi
   if grep -q 'dc --profile ollama up -d --no-deps ollama' "$ROLLBACK"; then
     ok "rollback actually starts the ollama container"

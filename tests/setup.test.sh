@@ -233,6 +233,14 @@ echo "--- Phase 3: configure_single_box_env (single-box knobs) ---"
 # lib/single-box.sh is a sourceable lib (functions only; no top-level run).
 # logging.sh is already sourced above, and REPO_ROOT + a generated .env exist
 # from Phase 2 — so configure_single_box_env has everything it needs.
+# WARP-2543 — single-box.sh now calls configure_gpu_env (accelerator detection
+# decides the DMR profile and image), so gpu.sh is a hard dependency of it and
+# must be sourced FIRST, exactly as scripts/setup.sh does. Without this,
+# configure_single_box_env dies on an undefined function and every knob it
+# writes afterwards silently stops being written — which failed 33 assertions
+# in this file the first time round, none of them mentioning the GPU.
+# shellcheck source=../scripts/lib/gpu.sh
+source "$REPO_ROOT_REAL/scripts/lib/gpu.sh"
 # shellcheck source=../scripts/lib/single-box.sh
 source "$REPO_ROOT_REAL/scripts/lib/single-box.sh"
 
@@ -262,6 +270,46 @@ if configure_single_box_env >/dev/null 2>&1; then
 else
   fail "configure_single_box_env exited with an error"
 fi
+
+# --- WARP-2543: the GPU fix must actually be WIRED IN ------------------------
+#
+# 🔴 `configure_gpu_env "$env_target" || return 1` in single-box.sh is the ONE
+# line connecting scripts/lib/gpu.sh to the product, and until this assertion
+# existed it could be deleted with all three shell suites staying green:
+# tests/gpu-vendor-selection.test.sh sources gpu.sh and calls the function
+# itself, and tests/dmr-profile-survives-setup.test.sh writes GPU_VENDOR into
+# its own fixture .env before eval-ing the extracted block — so neither ever
+# depends on the real call having run. Deleting it makes the whole feature a
+# no-op: no GPU_VENDOR is written, the profile block falls back to
+# `${_gpu_vendor:-amd}`, and every box silently keeps the pre-WARP-2543 ROCm
+# shape. This is the only assertion that dies when that line goes.
+if grep -qE '^GPU_VENDOR=' "$TMP_ROOT/.env"; then
+  pass "configure_single_box_env wrote GPU_VENDOR (the GPU fix is wired into setup)"
+else
+  fail "no GPU_VENDOR in .env — configure_gpu_env is not being called; the WARP-2543 fix is inert"
+fi
+
+# The vendor must be one of the three the code can act on, not an empty or
+# junk value that would quietly select no DMR profile at all.
+SB_GPU_VENDOR="$(grep -E '^GPU_VENDOR=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2-)"
+case "$SB_GPU_VENDOR" in
+  nvidia|amd|none) pass "GPU_VENDOR is a recognised value ($SB_GPU_VENDOR)" ;;
+  *) fail "GPU_VENDOR='$SB_GPU_VENDOR' is not one of nvidia/amd/none" ;;
+esac
+
+# And the runtime profile token must agree with the detected vendor — a CUDA
+# profile beside a ROCm image (or vice versa) is the exact disagreement this
+# change exists to prevent.
+SB_PROFILES="$(grep -E '^COMPOSE_PROFILES=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2-)"
+case "$SB_GPU_VENDOR,$SB_PROFILES" in
+  nvidia,*dmr-cuda*) pass "nvidia vendor -> dmr-cuda token in COMPOSE_PROFILES" ;;
+  amd,*)  case ",$SB_PROFILES," in
+            *,dmr,*) pass "amd vendor -> the unchanged 'dmr' token (installed fleet safe)" ;;
+            *)       fail "amd vendor but no 'dmr' token (profiles: $SB_PROFILES)" ;;
+          esac ;;
+  none,*) pass "no GPU detected — profile left at the pre-existing shape ($SB_PROFILES)" ;;
+  *) fail "vendor '$SB_GPU_VENDOR' disagrees with COMPOSE_PROFILES '$SB_PROFILES'" ;;
+esac
 
 # The single-box shape runs the AP as a host hostapd (not a standalone UCI router),
 # so the device-bridge must read pairing-QR creds in hostapd mode. The install

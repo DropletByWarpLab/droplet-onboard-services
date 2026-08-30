@@ -17,6 +17,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# WARP-2543 — set_runtime_profile_token: the ONE place that knows every runtime
+# profile token (dmr / dmr-cuda / ollama).
+# shellcheck source=../lib/gpu.sh
+. "$REPO_ROOT/scripts/lib/gpu.sh"
 cd "$REPO_ROOT"
 OLLAMA_LOCAL_URL="${OLLAMA_LOCAL_URL:-http://127.0.0.1:11434}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-gpt-oss:20b}"
@@ -59,8 +63,15 @@ log "=== rolling back single-box serving: DMR -> Ollama ==="
 [ -f "$ROOT_ENV" ] && [ -f "$COMPOSE_ENV" ] || die "env files missing — are you on the box, repo root?"
 
 # --- 1. STOP DMR FIRST — free the card before anything tries to load Ollama ---
-dc --profile dmr stop dmr 2>/dev/null || true
-dc --profile dmr rm -f dmr 2>/dev/null || true
+# WARP-2543: stop BOTH DMR shapes. The service is `dmr` on an AMD box and
+# `dmr-cuda` on an NVIDIA one; naming only `dmr` here left the CUDA service
+# running and holding the card, and the droplet-dmr guard below would then
+# (correctly) refuse to continue — a rollback that cannot roll back. Both
+# share container_name droplet-dmr, so at most one can be up anyway.
+for _svc in dmr dmr-cuda; do
+  dc --profile "$_svc" stop "$_svc" 2>/dev/null || true
+  dc --profile "$_svc" rm -f "$_svc" 2>/dev/null || true
+done
 docker ps --format '{{.Names}}' | grep -q '^droplet-dmr$' && die "droplet-dmr is still running — refusing to continue while it can hold VRAM"
 ok "dmr stopped and removed (the dmr-models volume is KEPT — never 'down -v' here)"
 
@@ -86,15 +97,19 @@ done
 # steps below, which is exactly where this script would then die with dmr
 # already stopped and both env files already rewritten.
 profiles="$(grep -E '^COMPOSE_PROFILES=' "$COMPOSE_ENV" | tail -1 | cut -d= -f2- || true)"
-newprofiles="$(printf '%s' "$profiles" | tr ',' '\n' | grep -vx 'dmr' | grep -vx 'ollama' | paste -sd, - || true)"
-newprofiles="${newprofiles:+$newprofiles,}ollama"
+# WARP-2543: `grep -vx 'dmr'` is an EXACT-LINE match, so the NVIDIA token
+# `dmr-cuda` SURVIVED it — an NVIDIA box rolled back to Ollama ended up carrying
+# BOTH `dmr-cuda` and `ollama`. Unlike the dmr/dmr-cuda pair there is no shared
+# container_name to make that fail loudly (droplet-dmr vs droplet-ollama), so
+# `config` passes and `up` starts TWO inference runtimes on one card — the
+# WARP-1826 single-GPU-owner violation, reached from the rollback direction.
+newprofiles="$(set_runtime_profile_token "$profiles" ollama)"
 [ "$profiles" != "$newprofiles" ] && upsert "$COMPOSE_ENV" COMPOSE_PROFILES "$newprofiles"
 # The root .env is what setup.sh runs compose with (--env-file $REPO_ROOT/.env),
 # so the token has to be in BOTH files or the next scripted run disagrees with
 # this one. That split is what WARP-1865 was.
 rprofiles="$(grep -E '^COMPOSE_PROFILES=' "$ROOT_ENV" | tail -1 | cut -d= -f2- || true)"
-rnew="$(printf '%s' "$rprofiles" | tr ',' '\n' | grep -vx 'dmr' | grep -vx 'ollama' | paste -sd, - || true)"
-rnew="${rnew:+$rnew,}ollama"
+rnew="$(set_runtime_profile_token "$rprofiles" ollama)"
 [ "$rprofiles" != "$rnew" ] && upsert "$ROOT_ENV" COMPOSE_PROFILES "$rnew"
 ok "env restored in $ROOT_ENV and $COMPOSE_ENV (INFERENCE_RUNTIME=ollama, profile token swapped dmr->ollama, URLs and LLM_MODEL back to Ollama)"
 
