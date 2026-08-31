@@ -48,6 +48,17 @@ function mapServiceError(err: unknown, res: Response): boolean {
       // edit would be reverted. 409 says "not in this state", which is true.
       res.status(409).json({ error: msg });
       return true;
+    case contacts.CONTACT_ERRORS.CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD:
+      // WARP-2554 — same 409, but the body names the action that DOES work.
+      // A bare code here is what made this a dead end: the dashboard had
+      // nothing to offer the person beyond "no".
+      //
+      // `remediation` is a stable token, not prose: the client already knows
+      // the id it just tried to delete, so it can build the archive call
+      // itself. Returning a href from here would mean threading the request
+      // into an error mapper that deliberately only sees the response.
+      res.status(409).json({ error: msg, remediation: "archive" });
+      return true;
     case contacts.CONTACT_ERRORS.DUPLICATE_EMAIL:
     case "contact_needs_a_name":
       res.status(422).json({ error: msg });
@@ -95,6 +106,10 @@ const paginationQuery = z.object({
   page: z.coerce.number().int().positive().optional(),
 });
 
+/** WARP-2554. Required, not defaulted: the caller says which way it is going,
+ *  so an un-archive is never a request that forgot a field. */
+const archiveSchema = z.object({ archived: z.boolean() });
+
 export function createContactsRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -121,6 +136,10 @@ export function createContactsRouter(prisma: PrismaClient): Router {
           perPage: parsed.data.per_page,
           page: parsed.data.page,
           includeExternal: req.query.external !== "0" && req.query.external !== "false",
+          // WARP-2554 — archived rows are out of the default listing; ?archived=1
+          // brings them back, matching the `showArchived` affordance the CRM's
+          // company and deal lists already have.
+          includeArchived: req.query.archived === "1" || req.query.archived === "true",
         }),
       );
     } catch (err) {
@@ -160,6 +179,33 @@ export function createContactsRouter(prisma: PrismaClient): Router {
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
       res.json({ contact: await contacts.updateContact(prisma, owner, req.params.id, parsed.data) });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // WARP-2554 — the action a synced contact CAN take. Mounted before the
+  // `/contacts/:id` DELETE below only for readability; the paths are disjoint,
+  // so order carries no meaning here (unlike the catch-all cases app.ts warns
+  // about).
+  //
+  // Deliberately permitted on EXTERNAL rows: it is the one way a human can get
+  // a synced person out of their lists, and it does not fight the source —
+  // a re-sync updates the row's fields and leaves the owner's decision intact.
+  router.patch("/contacts/:id/archive", requireRole(...WRITE), async (req, res, next) => {
+    const owner = requireOwner(req, res);
+    if (!owner) return;
+    const parsed = archiveSchema.safeParse(req.body);
+    if (!parsed.success) return badRequest(res, parsed.error);
+    try {
+      const contact = await contacts.setContactArchived(
+        prisma,
+        owner,
+        req.params.id,
+        parsed.data.archived,
+      );
+      res.json({ contact });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
