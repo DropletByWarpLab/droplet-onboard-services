@@ -5923,9 +5923,12 @@ model CrmActivity {
   /// parent has already taken them.
   ///
   /// If a purge must preserve locally-authored activity, it has to re-parent
-  /// or export it BEFORE deleting the subject. `crm-activity-cascade.test.ts`
-  /// pins this for all three subject types so the behaviour is met as an
-  /// assertion rather than discovered in production.
+  /// or export it BEFORE deleting the subject.
+  /// `apps/orchestrator/src/__tests__/crm-activity-cascade.pg.test.ts` pins this
+  /// for all three subject types against real Postgres, so the behaviour is met
+  /// as an assertion rather than discovered in production. (The `.pg.` infix is
+  /// load-bearing: a mocked Prisma cannot prove a database cascade, so the suite
+  /// is RUN_PG_INTEGRATION-gated and runs in CI's pg-integration lane.)
   companyId String?
   company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
