@@ -246,6 +246,25 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Business",
     items: [
+      // WARP-2561 (ADR-044) — Planning: what is COMING. /reports answers how
+      // it went and has no business tile at all, so nothing in the product
+      // answered the forward question.
+      //
+      // Role-gated and NOT module-gated, for the reason spelled out on
+      // /reports above: it composes tiles from separately-gated sources and
+      // each degrades on its own, so a module gate here would delete the whole
+      // page because one tile's module is off. There is deliberately no
+      // `business` module — a ModuleId value costs a Prisma enum migration
+      // plus six mirrored sites, to buy a gate this page must not have.
+      //
+      // Same role array as /reports. A guest has access to almost nothing on
+      // it, so the nav never advertises a page that would be mostly locked.
+      {
+        href: "/business",
+        label: "Planning",
+        icon: Sparkles,
+        roles: ["owner", "admin", "family"],
+      },
       // The CRM's own door. Before this it had `navHrefs: []` and rendered as
       // sub-tabs on /projects, which made CRM-without-PM unrepresentable —
       // and that is the shape of most dental boxes.

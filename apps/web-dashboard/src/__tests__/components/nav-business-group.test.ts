@@ -40,8 +40,9 @@ describe("the Business group (WARP-2558)", () => {
     expect(labels.indexOf("Operations")).toBe(labels.indexOf("Business") + 1);
   });
 
-  it("holds Customers, Projects and Practice, in that order", () => {
+  it("holds Planning, Customers, Projects and Practice, in that order", () => {
     expect(businessItems().map((i) => i.href)).toEqual([
+      "/business",
       "/customers",
       "/projects",
       "/practice",
@@ -57,12 +58,12 @@ describe("the Business group (WARP-2558)", () => {
 describe("each entry survives its neighbour being off (WARP-2558)", () => {
   it("shows Customers alone on a CRM-on, Projects-off box", () => {
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only("crm"));
-    expect(visible.map((i) => i.href)).toEqual(["/customers", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/customers", "/practice"]);
   });
 
   it("shows Projects alone on a Projects-on, CRM-off box", () => {
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only("projects"));
-    expect(visible.map((i) => i.href)).toEqual(["/projects", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/projects", "/practice"]);
   });
 
   it("keeps Practice with every module off — it is role-gated, not module-gated", () => {
@@ -71,7 +72,7 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     // else's module id would delete the practice's whole day the moment that
     // module was toggled, which is the /reports lesson one surface over.
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only());
-    expect(visible.map((i) => i.href)).toEqual(["/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/practice"]);
   });
 
   it("shows all three when the modules are on", () => {
@@ -81,7 +82,7 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
       openCapabilities,
       only("crm", "projects"),
     );
-    expect(visible.map((i) => i.href)).toEqual(["/customers", "/projects", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/customers", "/projects", "/practice"]);
   });
 });
 
@@ -116,6 +117,39 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
     expect((integrations?.children ?? []).map((c) => c.href)).toEqual([
       "/integrations/credentials",
     ]);
+  });
+});
+
+describe("Planning is composed, so it outlives every module (WARP-2561)", () => {
+  const everyModuleOn = () => true;
+
+  it("survives every module being off — it is role-gated, not module-gated", () => {
+    // The /reports lesson, restated on the page that copies it: tagging a
+    // composed page with one tile's module id deletes the whole page the
+    // moment that module is toggled. There is deliberately no `business`
+    // module, and this is the assertion that stops one appearing.
+    const visible = visibleItems(businessItems(), "owner", openCapabilities, only());
+    expect(visible.map((i) => i.href)).toContain("/business");
+  });
+
+  it("claims no module for its route", () => {
+    expect(moduleForPath("/business")).toBeNull();
+  });
+
+  it("is visible to owner, admin and family — the /reports role array", () => {
+    for (const role of ["owner", "admin", "family"] as const) {
+      const visible = visibleItems(businessItems(), role, openCapabilities, everyModuleOn);
+      expect(visible.map((i) => i.href)).toContain("/business");
+    }
+  });
+
+  it("is hidden from guest, who would see almost nothing on it", () => {
+    const visible = visibleItems(businessItems(), "guest", openCapabilities, everyModuleOn);
+    expect(visible.map((i) => i.href)).not.toContain("/business");
+  });
+
+  it("is labelled Planning — the nav label and the page header are one word", () => {
+    expect(businessItems().find((i) => i.href === "/business")?.label).toBe("Planning");
   });
 });
 
