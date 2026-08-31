@@ -197,6 +197,37 @@ export const MODULES: readonly ModuleDef[] = [
     available: () => true, // native to the orchestrator
   },
   {
+    id: "crm", label: "CRM",
+    description: "Customers, deals and the sales pipeline, inside the Projects surface.",
+    category: "workspace", routePrefixes: ["/api/crm"],
+    // The CRM has no page of its own: WARP-2545 renders it as sub-tabs on
+    // /projects. Listing that href here would hide the PM surface whenever CRM
+    // is off, which is backwards — the dependency runs the other way.
+    navHrefs: [],
+    // WARP-2546 — claimed in the same change that adds the handlers, which is
+    // what the registry's `unknown domain` invariant enforces: a domain the
+    // tools-core catalog cannot resolve is a gate pointing at nothing.
+    toolDomains: ["crm"], core: false, defaultEnabled: false,
+    // WARP-2117 puts the CRM INSIDE /projects — it has no reachable surface of
+    // its own without it, which is exactly the bar this field documents. So
+    // Projects-off renders CRM blocked with a reason rather than offering a
+    // toggle that quietly does nothing.
+    requires: "projects",
+    available: () => true, // native to the orchestrator
+  },
+  {
+    id: "contacts", label: "Contacts",
+    description: "The address book — people entered here or synced from an address-book source.",
+    category: "workspace", routePrefixes: ["/api/contacts"],
+    // No surface yet; WARP-2038 adds /contacts and its nav entry. Same shape as
+    // `docs` above, which also carries none.
+    navHrefs: [],
+    // WARP-2038 owns the `contacts` tool domain; not claimed until it exists,
+    // so the registry never names a domain the tool catalog cannot resolve.
+    toolDomains: [], core: false, defaultEnabled: false,
+    available: () => true, // native to the orchestrator
+  },
+  {
     id: "voice", label: "Voice",
     description: "Hands-free voice assistant (speech in / speech out).",
     category: "operations", routePrefixes: ["/api/voice", "/api/stt"], navHrefs: ["/voice"],

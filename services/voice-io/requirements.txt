@@ -4,9 +4,9 @@ sounddevice==0.5.5        # PortAudio binding — preferred over PyAudio for cle
 # Audio buffer math. On numpy 2.x because scipy 1.18 requires
 # numpy>=2.0,<2.8 — pinning 1.26.4 makes the requirements file
 # unresolvable against the scipy pin below.
-numpy==2.5.1
+numpy==2.5.2
 fastapi==0.141.1          # Control surface
-uvicorn[standard]==0.52.1 # ASGI server for FastAPI
+uvicorn[standard]==0.52.4 # ASGI server for FastAPI
 pydantic==2.13.4           # Schemas
 httpx==0.28.1             # Async HTTP client for orchestrator/LLM proxying (used in subsequent commits)
 python-multipart==0.0.32  # FastAPI form-upload support (mic-test endpoint accepts audio uploads)
@@ -18,8 +18,8 @@ python-multipart==0.0.32  # FastAPI form-upload support (mic-test endpoint accep
 # Dockerfile installs `openwakeword` with `--no-deps` to skip the tflite-runtime
 # pin in its setup.py, and we ship the ONNX-side deps explicitly here so
 # `pip install -r requirements.txt` from a dev box still works.
-onnxruntime==1.28.0       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
-scipy==1.18.0             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
+onnxruntime==1.29.0       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
+scipy==1.18.1             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
 huggingface_hub==1.26.1   # First-run download of bundled models (hey_jarvis, alexa, etc.)
 tqdm==4.70.0              # Progress bar during model download
 pyyaml==6.0.3             # openWakeWord parses model config from YAML
@@ -58,4 +58,4 @@ vosk==0.3.45
 # WARP-1948 — OSV floor: the osv-nightly resolver scores transitive deps at
 # their minimum resolvable version; state the real minimum instead of
 # suppressing the advisory.
-idna>=3.15
+idna>=3.19

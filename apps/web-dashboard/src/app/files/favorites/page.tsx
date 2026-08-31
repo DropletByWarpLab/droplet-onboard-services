@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Star } from "lucide-react";
+import { Star } from "lucide-react";
 import { FileListSimple } from "@/components/FileManager/FileListSimple";
 import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
@@ -11,7 +10,6 @@ import { getDownloadUrl, toggleFavorite } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
-import { ShellPage } from "@/components/shell/ShellPage";
 
 export default function FavoritesPage() {
   const router = useRouter();
@@ -54,18 +52,7 @@ export default function FavoritesPage() {
   };
 
   return (
-    <ShellPage
-      icon={<Star size={15} />}
-      label="Favorites"
-      title="Favorites"
-      sub="Files and folders you've marked as favorites for quick access."
-      actions={
-        <Link href="/files" className="btn ghost" aria-label="Back to files">
-          <ArrowLeft size={15} />
-          Files
-        </Link>
-      }
-    >
+    <>
       {/* WARP-1555: `error` is forwarded so a failed fetch renders as a
           failure with a retry — never as "No favorites yet", which would
           tell the user they had un-starred everything. */}
@@ -87,6 +74,6 @@ export default function FavoritesPage() {
         onRemove={handleUnfavorite}
         removeTooltip="Remove from favorites"
       />
-    </ShellPage>
+    </>
   );
 }

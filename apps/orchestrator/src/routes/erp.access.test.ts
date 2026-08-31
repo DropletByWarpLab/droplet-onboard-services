@@ -54,6 +54,32 @@ vi.mock("../middleware/auth.js", () => ({
       }
       next();
     },
+  // WARP-2497 — the cloud dataset route's gate. Modelled on the real one:
+  // the MCP service principal is admitted ahead of the tier check (that is
+  // the whole reason the route uses it rather than `canRead`), everyone else
+  // falls through to the same role logic as above, so the 403 body and the
+  // `recordAccessDenied` row stay byte-identical for a human caller.
+  requireRoleOrMcpService:
+    (...allowed: string[]) =>
+    (req: Request, res: Response, next: NextFunction) => {
+      const user = (req as unknown as { user?: { id?: string; role?: string } }).user;
+      if (user?.id === "_service:mcp" && user.role === "service") {
+        next();
+        return;
+      }
+      const role = user?.role;
+      if (typeof role !== "string" || role.length === 0) {
+        recordAccessDeniedMock(req, "no-role");
+        res.status(403).json({ error: "Forbidden: no role on session" });
+        return;
+      }
+      if (!allowed.includes(role)) {
+        recordAccessDeniedMock(req, "role-not-permitted");
+        res.status(403).json({ error: "Forbidden: role not permitted" });
+        return;
+      }
+      next();
+    },
   recordAccessDenied: recordAccessDeniedMock,
 }));
 

@@ -2707,6 +2707,159 @@ class FabricApi:
 
 
 # ---------------------------------------------------------------------------
+# High-level API: Generic mDNS discovery (WARP-2019, scan-3)
+# ---------------------------------------------------------------------------
+
+# Well-formedness only — the allowlist below is the actual gate. This exists so
+# a caller-supplied `service` can never reach a ubus call as anything but a
+# service type.
+DISCOVERY_SERVICE_RE = re.compile(r"^_[a-z0-9-]{1,30}\._(tcp|udp)$")
+
+# The service types the product actually browses. Deliberately closed: the
+# routing service binds 0.0.0.0 inside a `network_mode: host` container
+# (docker-compose + its Dockerfile) and is gated by mTLS + bearer, NOT by
+# compose network isolation — so an open `?service=` would hand any
+# authenticated caller a general-purpose LAN scanner. `_ipp*` is listed now so
+# the printer workstream inherits discovery; submission is a separate ticket.
+DISCOVERY_SERVICE_ALLOWLIST = frozenset(
+    {
+        "_uscan._tcp",   # eSCL / AirScan / Mopria Scan, cleartext
+        "_uscans._tcp",  # eSCL over TLS
+        "_ipp._tcp",
+        "_ipps._tcp",
+    }
+)
+
+
+def discovery_service_allowed(service_type: str) -> bool:
+    """True when `service_type` is both well-formed and on the allowlist."""
+    return (
+        DISCOVERY_SERVICE_RE.match(service_type) is not None
+        and service_type in DISCOVERY_SERVICE_ALLOWLIST
+    )
+
+
+class DiscoveryApi:
+    """Read-only browse of one NON-Droplet mDNS service type.
+
+    `FabricApi` and `ApApi` own the `_droplet-*._tcp` inventory, and both drop
+    any record lacking a `mac=` TXT key — the MAC is the orchestrator's primary
+    key for a fabric device (ADR-035 §2). Third-party adverts do not carry one:
+    an eSCL scanner announces `rs=` / `ty=` / `uuid=` / `pdl=` / `is=` /
+    `duplex=` and never a MAC, so reusing either parser would return `None` for
+    100% of scanner records. Hence a parser of its own, keyed on `uuid=`, that
+    drops nothing and returns every TXT key verbatim.
+
+    Pure observation — no writes, no lifecycle state. The adopt/decommission
+    state machine lives in the orchestrator (WARP-2027).
+    """
+
+    def __init__(self, router: "DropletRouter"):
+        self._r = router
+
+    def browse_service(self, service_type: str) -> list[dict[str, Any]]:
+        """Parse `umdns browse` into records for one service type.
+
+        Returns one dict per announcement:
+            {
+                "service_type": "_uscan._tcp",
+                "hostname": "BRW001122334455",
+                "uuid": "e3248000-...",     # when the advert carries uuid=
+                "port": 80,                 # when announced
+                "last_ip": "192.168.9.61",  # when announced
+                "txt": {"rs": "eSCL", "ty": "...", ...},  # verbatim, blanks omitted
+            }
+
+        Same tolerance contract as `FabricApi.browse_members`: the WARP-1720
+        duplicate-key hook delivers repeated `txt` as a list and a single TXT
+        record as a bare string — both parse; umdns absent (NOT_FOUND /
+        NO_DATA) degrades to []; only network / auth failures bubble.
+
+        Callers are expected to have passed `service_type` through
+        `discovery_service_allowed` first.
+        """
+        # Ask before reading (WARP-1760) — see `_umdns_query`. Without this a
+        # scanner that reboots never returns to the inventory.
+        _umdns_query(self._r)
+        try:
+            raw = self._r._call("umdns", "browse")
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
+
+        services = raw if isinstance(raw, dict) else {}
+        entries = services.get(service_type)
+        if not isinstance(entries, dict):
+            # Nothing of this type in the cache — not an error, just quiet.
+            return []
+
+        records: list[dict[str, Any]] = []
+        for host_key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            record = self._parse_service_record(entry, service_type)
+            record["hostname"] = str(host_key)
+            records.append(record)
+        return records
+
+    @staticmethod
+    def _parse_service_record(
+        entry: dict[str, Any], service_type: str
+    ) -> dict[str, Any]:
+        """Tolerant TXT → record parse. Never returns None.
+
+        The deliberate difference from `_parse_member_txt` / `_parse_droplet_ap_txt`:
+        no mandatory key, so a record is never dropped for what it omits. Blank
+        values are omitted rather than stored as "", so a caller can test
+        presence instead of truthiness.
+        """
+        txt = entry.get("txt")
+        kv: dict[str, str] = {}
+        if isinstance(txt, str):
+            # A service with exactly ONE TXT record decodes to a bare string
+            # even with the WARP-1720 hook — it only lists keys that repeat.
+            txt = [txt]
+        if isinstance(txt, list):
+            for item in txt:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, _, value = item.partition("=")
+                key, value = key.strip(), value.strip()
+                if key and value:
+                    kv[key] = value
+        elif isinstance(txt, dict):
+            for raw_key, raw_value in txt.items():
+                key, value = str(raw_key).strip(), str(raw_value).strip()
+                if key and value:
+                    kv[key] = value
+
+        record: dict[str, Any] = {"service_type": service_type, "txt": kv}
+        # `uuid=` is the stable identity for a third-party advert the way `mac=`
+        # is for a fabric one. Promoted so the orchestrator's reconciler
+        # (WARP-2027, `Scanner.esclUuid @unique`) doesn't have to know TXT key
+        # names; still present in `txt`, which is documented as verbatim.
+        if uuid := kv.get("uuid"):
+            record["uuid"] = uuid
+
+        port = entry.get("port")
+        if isinstance(port, int):
+            record["port"] = port
+
+        # Same three-shape ipv4 tolerance as browse_discovered / browse_members:
+        # plain string, {address}/{ip} dict, or the WARP-1720 repeated-field
+        # list (first address wins).
+        ipv4 = entry.get("ipv4")
+        if isinstance(ipv4, list):
+            ipv4 = ipv4[0] if ipv4 else None
+        if isinstance(ipv4, dict):
+            ipv4 = ipv4.get("address") or ipv4.get("ip")
+        if isinstance(ipv4, str) and ipv4:
+            record["last_ip"] = ipv4
+        return record
+
+
+# ---------------------------------------------------------------------------
 # High-level API: File operations
 # ---------------------------------------------------------------------------
 class FileApi:
@@ -2769,6 +2922,7 @@ class DropletRouter:
         self.vpn = VPNApi(self)
         self.ap = ApApi(self)  # WARP-446: coverage extender onboarding
         self.fabric = FabricApi(self)  # WARP-1731: fabric member inventory
+        self.discovery = DiscoveryApi(self)  # WARP-2019: generic mDNS browse
         self.file = FileApi(self)
 
         if auto_login:

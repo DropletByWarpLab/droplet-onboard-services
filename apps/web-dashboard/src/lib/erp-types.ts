@@ -16,30 +16,69 @@ export type IntegrationStatus =
   | "CONNECTED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
+  | "NEEDS_RECONNECT"
   | "ERROR"
   | "DISABLED";
 
 /** Providers the hub knows about. Eaglesoft ships first; the rest are the
  *  framework placeholders that make the hub read as N-provider, not one-off. */
-export type ConnectorId = "eaglesoft" | "dentrix" | "opendental" | "quickbooks";
+export type ConnectorId =
+  | "eaglesoft"
+  | "dentrix"
+  | "opendental"
+  | "quickbooks"
+  // WARP-2466 — the WARP-2214 SaaS vendors. The union stays CLOSED and
+  // hand-maintained on purpose: `connectors.test.ts` pins the ids derived from
+  // the shared descriptors against these literals, so a descriptor introducing
+  // a card id the rest of the hub cannot address goes red rather than
+  // rendering a tile nothing can route to.
+  | "stripe"
+  | "hubspot"
+  | "mailchimp";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 
 export interface ConnectorMeta {
-  id: ConnectorId;
+  /**
+   * The tile's identity. Usually a {@link ConnectorId} from the catalog, but
+   * the hub also renders tiles for providers the box reports that the catalog
+   * does not list — `<vendor>-export` keys, M365, anything a newer box adds
+   * (WARP-2291). Narrowing this back to `ConnectorId` would make those
+   * connections unrepresentable, which is how they came to be dropped.
+   */
+  id: string;
   name: string;
   /** e.g. "Practice management", "Accounting". */
   category: string;
   /** One line: what connecting it does. */
   description: string;
   availability: ConnectorAvailability;
+  /**
+   * WARP-2342 — where the customer reads how to produce this provider's
+   * credential, carried through from the shared descriptor's catalog block.
+   *
+   * Rendered on the tile AND at the wizard's credential step, because a guide
+   * the customer cannot find is a guide they will not read. Optional HERE
+   * because the field is only *required* of a cloud track whose card is
+   * `available` — the descriptor type enforces that at the declaration site
+   * (`CloudProviderCatalogMeta`), which is the only place that can.
+   */
+  setupGuideHref?: string;
 }
 
 /** Resting write posture shown on the ERP hero. Read-only is the safe default. */
 export type WriteMode = "read-only" | "writes-enabled" | "writes-paused";
 
 export interface IntegrationConnection {
-  provider: ConnectorId;
+  /**
+   * The orchestrator's provider key, verbatim — free-form TEXT on
+   * `IntegrationConnection.provider` (`erp-provider.ts`), NOT a catalog id.
+   * `eaglesoft` is the only value that is byte-equal to a {@link ConnectorId};
+   * `eaglesoft-api`, `quickbooks-online`, `dentrix-ascend` and every
+   * `<vendor>-export` key are not. Typing this as `ConnectorId` was the lie
+   * that made the hub's `byId.get(meta.id)` join look correct (WARP-2291).
+   */
+  provider: string;
   status: IntegrationStatus;
   /** Eaglesoft server host/IP (mono). */
   host?: string;
@@ -58,6 +97,25 @@ export interface IntegrationConnection {
   nextSyncAt?: string;
   /** One-line human reason for a degraded / error / drift state. */
   reason?: string;
+  /**
+   * WARP-2453 — for a `DISABLED` connection, whether the credential material
+   * was actually removed from the row, or is still sitting there.
+   *
+   * The orchestrator derives it from two explicit persisted facts (the `status`
+   * enum and whether either credential column holds a blob) and always emits
+   * it, `false` included — see `integrations.service.ts:347-356`.
+   *
+   * OPTIONAL here on purpose. This interface is the dashboard's mirror of a
+   * JSON payload, not the payload itself, and a response that does not carry
+   * the key must not be read as either answer: `undefined` means "the box said
+   * nothing about the credential", which is a third fact and is rendered as
+   * neither "removed" nor "still stored" (WARP-2483). Making it required would
+   * force every construction site to assert a purge state it does not know.
+   *
+   * Meaningless outside `DISABLED`, where it is `false` — nothing was purged
+   * from a connection that is still connected, or was never configured.
+   */
+  credentialsPurged?: boolean;
 }
 
 export function writeModeOf(c: Pick<IntegrationConnection, "writeEnabled" | "writesPaused">): WriteMode {
@@ -128,11 +186,20 @@ export interface ErpAccess {
   canConfirmWrites: boolean;
 }
 
-/** Input the connect wizard collects before provisioning. */
-export interface EaglesoftConnectInput {
+/**
+ * Input the connect wizard collects before provisioning, for ANY LAN-database
+ * track (WARP-2451).
+ *
+ * `scopes` is `string[]` rather than `ErpScope[]` on purpose: the wizard reads
+ * the offered scopes off the provider descriptor, which lives in
+ * `@droplet/shared-types` and cannot import this union. The correspondence is
+ * PINNED by a test (`connectors.test.ts`) instead of asserted by a cast —
+ * "types can lie" is the wave-1 lesson this follows.
+ */
+export interface LanConnectInput {
   host: string;
   port: number;
-  scopes: ErpScope[];
+  scopes: string[];
   enableWrites: boolean;
 }
 

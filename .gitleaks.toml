@@ -39,4 +39,10 @@ regexes = [
   # gitleaks matches allowlist regexes against the captured secret value,
   # so this pattern targets the alphabet literal itself.
   '''abcdefghijkmnpqrstuvwxyz23456789''',
+  # packages/shared-types/src/provider-registry.ts:267 — Dentrix Ascend API
+  # hostnames in a descriptor's egressHosts. generic-api-key matched the
+  # substring "api" in "hs1api" and captured the hostname as a secret. These
+  # hosts are public and already registered in docs/security/allowed-egress.yaml.
+  # WARP-2217, 2026-08-27.
+  '''(prod|test)\.hs1api\.com''',
 ]

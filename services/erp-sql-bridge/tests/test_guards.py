@@ -8,9 +8,11 @@ proves the grant half against a real server.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from main import _is_select, _is_single_statement
+from main import _bare, _is_select, _is_single_statement
 from schemas import ExecRequest, IntrospectRequest, Statement, TargetSpec
 
 
@@ -90,6 +92,92 @@ class TestSingleStatementDetection:
         separator being looked for, and no amount of trailing punctuation may
         hide one."""
         assert _is_single_statement(sql) is False
+
+
+class TestLiteralsShieldComments:
+    """A comment marker INSIDE a string literal is data, not a comment.
+
+    The regex version stripped comments first and masked literals second, so
+    `'--'` swallowed the rest of the line — semicolon included — before the
+    literal mask ran, and a stacked write read as one statement. `_bare` now
+    lexes literals and comments in one pass (CodeQL py/polynomial-redos fix,
+    alerts #63/#64), which closes that as a side effect. These pin it.
+    """
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "UPDATE dba.appointment SET reason = '--' WHERE appt_id = ?; DROP TABLE dba.patient",
+            "UPDATE dba.appointment SET reason = '/*' WHERE appt_id = ?; DROP TABLE dba.patient",
+            "SELECT '--x' FROM dba.patient; DELETE FROM dba.patient",
+            # A quote inside a comment does not open a literal either.
+            "SELECT 1 /* it's */; DROP TABLE dba.patient",
+            "SELECT 1 -- don't\n; DROP TABLE dba.patient",
+        ],
+    )
+    def test_a_comment_marker_inside_a_literal_cannot_hide_a_separator(self, sql):
+        assert _is_single_statement(sql) is False
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT '--' FROM dba.patient",
+            "SELECT '/* not a comment */' FROM dba.patient",
+            "SELECT 'it''s -- fine; really' FROM dba.patient",
+            "-- it's\nSELECT 1",
+        ],
+    )
+    def test_a_comment_marker_inside_a_literal_is_plain_data(self, sql):
+        assert _is_single_statement(sql) is True
+        assert _is_select(sql) is True
+
+    def test_bare_masks_literals_and_replaces_comments_with_a_space(self):
+        assert _bare("SELECT 'a;b' /* c */ -- tail\n") == "SELECT ''"
+        assert _bare("SELECT 1 /* x */; ; ") == "SELECT 1"
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1 /* never closed; DROP TABLE dba.patient",
+            "SELECT 'never closed; DROP TABLE dba.patient",
+        ],
+    )
+    def test_unterminated_constructs_fail_closed(self, sql):
+        """An unterminated comment or literal is left visible, so a `;` inside
+        it still counts as a separator — refusing is the safe verdict."""
+        assert _is_single_statement(sql) is False
+
+
+class TestBareIsLinear:
+    """CodeQL py/polynomial-redos (alerts #63/#64).
+
+    `_bare` used to be `/\\*.*?\\*/|--[^\\n]*` plus `[\\s;]+$`, both applied to
+    request-controlled SQL and both quadratic: an unclosed `/*` followed by many
+    `a/*` re-scanned to the end for every opener, and a long run of tabs or
+    `; ` before a non-terminator backtracked on `$`. Measured at 50k chars the
+    old code took ~2 s and ~7 s respectively. The scanner is linear; these
+    inputs must come back essentially instantly, and the 50k cases are there so
+    a regression cannot hide inside a generous bound.
+    """
+
+    @staticmethod
+    def _cases(n):
+        return [
+            "SELECT 1" + "\t" * n + "x",          # many '\t' before a non-terminator
+            "/*" + "a/*" * (n // 3),               # unclosed '/*' with many openers
+            "SELECT 1" + "; " * (n // 2) + "x",    # many '; ' before a non-terminator
+        ]
+
+    @pytest.mark.parametrize("sql", _cases.__func__(5_000) + _cases.__func__(50_000))
+    def test_pathological_input_returns_promptly(self, sql):
+        started = time.perf_counter()
+        _bare(sql)
+        assert time.perf_counter() - started < 0.5
+
+    def test_pathological_input_still_gets_the_right_verdict(self):
+        assert _is_single_statement("SELECT 1" + "\t" * 5_000 + "x") is True
+        assert _is_single_statement("SELECT 1" + "; " * 2_500 + "x") is False
+        assert _is_select("/*" + "a/*" * 1_666) is False
 
 
 class TestSelectDetection:

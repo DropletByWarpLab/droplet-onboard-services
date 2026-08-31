@@ -35,6 +35,7 @@ import {
   MessagesSquare,
   Mic,
   Network,
+  KeyRound,
   ScrollText,
   Settings,
   ShieldCheck,
@@ -274,6 +275,19 @@ export const NAV_GROUPS: NavGroup[] = [
             href: "/integrations/eaglesoft",
             label: "Eaglesoft",
             icon: Stethoscope,
+            roles: ["owner", "admin"],
+          },
+          // WARP-2275: the SaaS credential configurator. `roles` on the child
+          // as well as the parent, for the same reason the sibling above
+          // carries it — a future widening of one must not silently widen the
+          // other. It mirrors the orchestrator's own
+          // `requireRole("owner","admin")` on /api/integrations/*/credentials,
+          // which is the guard that actually decides; this only keeps the nav
+          // from offering a page that would 403.
+          {
+            href: "/integrations/credentials",
+            label: "Credentials",
+            icon: KeyRound,
             roles: ["owner", "admin"],
           },
         ],

@@ -49,6 +49,9 @@ export const ACCESS_COPY = {
   // Authored here on the T9 precedent (`inviteRolesDegraded`): no §12 string
   // exists for a dependency block. Flagged for design-packet ratification.
   docsNeedsFiles: "Documents open from your file libraries — turn Files on to include them.",
+  // WARP-2117 — the CRM lives on the Projects page as sub-tabs, so it has no
+  // way to appear without it.
+  crmNeedsProjects: "The CRM lives inside Projects — turn Projects on to include it.",
   builderSubline: "What people with this role can see, do, and use.",
   cloudModelsToggle: "Let this role's assistant use cloud models",
   offBoxHeader: "Reaching outside your Droplet",

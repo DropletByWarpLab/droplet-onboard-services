@@ -20,6 +20,7 @@ vi.mock("../config.js", () => ({
 import {
   ncListFiles,
   ncUploadFile,
+  NcPreconditionFailedError,
   ncDownloadFile,
   ncCreateDirectory,
   ncMoveFile,
@@ -64,6 +65,50 @@ function mockResponse(init: {
     headers: new Headers(),
   } as unknown as Response;
 }
+
+describe("nextcloud.client — atomic create PUT (WARP-2523)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("sends If-None-Match: * only when the create-new option is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 201 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ncUploadFile("t", "alice", "/Documents", "q3.pdf", Buffer.from("x"), {
+      ifNoneMatch: true,
+    });
+    expect(fetchMock.mock.calls[0][1].headers["If-None-Match"]).toBe("*");
+
+    // The plain upload path (WARP-2096's documented clobber semantics) must
+    // stay byte-identical: no conditional header unless asked for.
+    await ncUploadFile("t", "alice", "/Documents", "q3.pdf", Buffer.from("x"));
+    expect(fetchMock.mock.calls[1][1].headers["If-None-Match"]).toBeUndefined();
+  });
+
+  it("maps a 412 under the create-new option to NcPreconditionFailedError", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 412 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      ncUploadFile("t", "alice", "/d", "f.pdf", Buffer.from("x"), { ifNoneMatch: true }),
+    ).rejects.toBeInstanceOf(NcPreconditionFailedError);
+  });
+
+  it("keeps the generic PUT error for a 412 without the option", async () => {
+    // A 412 with no If-None-Match sent is some other precondition failing —
+    // pretending it means "already exists" would be a lie.
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 412 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const err = await ncUploadFile("t", "alice", "/d", "f.pdf", Buffer.from("x")).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(NcPreconditionFailedError);
+  });
+});
 
 describe("nextcloud.client — move/copy/rename", () => {
   const realFetch = global.fetch;
@@ -332,6 +377,63 @@ describe("nextcloud.client — versions", () => {
     </d:propstat>
   </d:response>
 </d:multistatus>`;
+
+  // CodeQL js/request-forgery (#127–#132): the trashbin + versions URLs used
+  // to interpolate `user` raw. For the MCP service principal that value is the
+  // X-Nextcloud-User header, so it must be percent-encoded like every
+  // webdavUrl() call already is — otherwise `../`, `?` or `#` re-targets the
+  // request to a different path on the Nextcloud host.
+  describe("user segment encoding (CodeQL js/request-forgery)", () => {
+    const hostile = "../../ocs/v2.php?x=1#frag";
+    const encoded = encodeURIComponent(hostile);
+
+    function captureFetch() {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 204, text: "<d:multistatus/>" }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+      return fetchMock;
+    }
+
+    it("trashbin URLs stay inside the encoded user's trashbin namespace", async () => {
+      const fetchMock = captureFetch();
+      await ncListTrash("token", hostile);
+      await ncRestoreTrashItem("token", hostile, "a.txt.d1");
+      await ncDeleteTrashItem("token", hostile, "a.txt.d1");
+      await ncEmptyTrash("token", hostile);
+
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      for (const [url] of fetchMock.mock.calls) {
+        // `new URL` collapses any real `/../` — if the prefix survives, the
+        // hostile value never became a path separator, query or fragment.
+        const parsed = new URL(url);
+        expect(parsed.pathname.startsWith(`/remote.php/dav/trashbin/${encoded}/`)).toBe(true);
+        expect(parsed.search).toBe("");
+        expect(parsed.hash).toBe("");
+      }
+      // The MOVE Destination header is built the same way.
+      expect(fetchMock.mock.calls[1][1].headers.Destination).toBe(
+        `http://nextcloud.test/remote.php/dav/trashbin/${encoded}/restore/a.txt.d1`
+      );
+    });
+
+    it("versions URLs stay inside the encoded user's versions namespace", async () => {
+      const fetchMock = captureFetch();
+      await ncListVersions("token", hostile, 42);
+      await ncRestoreVersion("token", hostile, 42, "v1");
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      for (const [url] of fetchMock.mock.calls) {
+        const parsed = new URL(url);
+        expect(parsed.pathname.startsWith(`/remote.php/dav/versions/${encoded}/`)).toBe(true);
+        expect(parsed.search).toBe("");
+        expect(parsed.hash).toBe("");
+      }
+      expect(fetchMock.mock.calls[1][1].headers.Destination).toBe(
+        `http://nextcloud.test/remote.php/dav/versions/${encoded}/restore/target`
+      );
+    });
+  });
 
   describe("ncListVersions", () => {
     it("parses versions sorted most-recent first", async () => {

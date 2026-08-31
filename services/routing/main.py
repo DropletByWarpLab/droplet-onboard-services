@@ -42,6 +42,8 @@ from droplet_openwrt_sdk import (
     describe_network_for_llm,
     detect_deployment_topology,
     parse_ai_acl_scopes,
+    discovery_service_allowed,
+    DISCOVERY_SERVICE_ALLOWLIST,
 )
 from router_ports import (
     DeviceSectionNameExhausted,
@@ -88,6 +90,7 @@ from schemas import (
     ApTestSeedRequest,
     ApBandSteeringRequest,
     ApWirelessRequest,
+    DiscoveryTestSeedRequest,
 )
 import re
 
@@ -3637,5 +3640,84 @@ def fabric_members():
             if synthesized is not None:
                 members.append(synthesized)
         return {"members": members}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Generic mDNS discovery (WARP-2019, scan-3)
+# ---------------------------------------------------------------------------
+def _validate_discovery_service(service: str) -> str:
+    """Reject anything that is not a well-formed, allowlisted service type.
+
+    Two gates, both required. The regex keeps a caller-supplied value from
+    reaching a ubus call as anything but a service type; the allowlist keeps
+    this endpoint from being a general-purpose LAN scanner for whoever holds a
+    bearer token. Note the routing service binds 0.0.0.0 on a host-networked
+    container — it is NOT isolated by the compose network, so "internal only"
+    is not a property this endpoint can rely on.
+    """
+    candidate = (service or "").strip()
+    if not discovery_service_allowed(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "unsupported service type; allowed: "
+                + ", ".join(sorted(DISCOVERY_SERVICE_ALLOWLIST))
+            ),
+        )
+    return candidate
+
+
+@app.get("/discovery/mdns")
+def discovery_mdns(service: str):
+    """Read-only mDNS browse for one allowlisted, non-Droplet service type.
+
+    The `_droplet-*._tcp` fabric inventory keeps its own endpoints
+    (`/aps/discovered`, `/fabric/members`) and is untouched by this one —
+    their parsers drop records without a `mac=` anchor, which every eSCL
+    scanner advert lacks. `DiscoveryApi` exists for exactly that reason.
+
+    Observations only: no device writes, no lifecycle state. The scanner
+    adopt/decommission state machine lives in the orchestrator (WARP-2027),
+    which polls this endpoint.
+    """
+    service_type = _validate_discovery_service(service)
+    try:
+        r = get_router()
+        discovery = getattr(r, "discovery", None)
+        if discovery is None or not hasattr(discovery, "browse_service"):
+            return {"records": []}
+        return {"records": discovery.browse_service(service_type)}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/discovery/_test_seed", include_in_schema=False)
+def discovery_test_seed(req: DiscoveryTestSeedRequest):
+    """Inject an mDNS record into the mock router. Test-only.
+
+    Sibling of `/aps/_test_seed`: production discovery is multicast-driven and
+    cannot be simulated, so this is the seam that lets pytest and the
+    orchestrator's scanner poller (WARP-2027) run end-to-end without an eSCL
+    device. Returns 404 when the router isn't a MockRouter.
+    """
+    service_type = _validate_discovery_service(req.service)
+    try:
+        r = get_router()
+        discovery = getattr(r, "discovery", None)
+        if discovery is None or not hasattr(discovery, "seed"):
+            raise HTTPException(
+                status_code=404,
+                detail="_test_seed only available in ROUTING_MODE=mock",
+            )
+        discovery.seed(
+            service_type,
+            hostname=req.hostname,
+            port=req.port,
+            last_ip=req.last_ip,
+            txt=req.txt or {},
+        )
+        return {"status": "ok", "service": service_type, "hostname": req.hostname}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

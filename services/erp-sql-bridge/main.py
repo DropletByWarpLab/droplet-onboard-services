@@ -12,16 +12,20 @@ the orchestrator, and the LLM reaches reads through tools-core handlers.
 
 THE SAFETY MODEL, AND WHERE IT ACTUALLY LIVES
 ---------------------------------------------
-The real boundary is the DATABASE GRANT, not this process. `droplet_ro` holds
-SELECT and nothing else, so a read connection physically cannot write even if
-every check here were removed. The route-level assertions below are
-belt-and-braces on top of that — they make a mistake fail early and loudly
-instead of relying solely on the remote server's refusal.
+Three layers, outermost first:
 
-Those assertions are two SEPARATE properties, and every route checks both:
-exactly one statement (`_is_single_statement`), and the right kind of statement
-(`_is_select`). Keeping them separate is not stylistic — see the note on
-`_is_single_statement` for the bug that combining them produced.
+1. THE STATEMENT ALLOWLIST (WARP-2540, allowlist.py). `/read/{name}` and
+   `/write/{name}` refuse any statement that is not, shape-for-shape, the one
+   the registries in `@droplet/erp-connector` emit for that name. Before this
+   layer the bridge TRUSTED the wire to carry registry-built SQL (CodeQL's
+   finding: both routes executed a caller-supplied string); now it checks,
+   fail-closed, before any pool acquire.
+2. The route-level assertions: exactly one statement
+   (`_is_single_statement`), and the right kind of statement (`_is_select`).
+   These are two SEPARATE properties and every route checks both — see the
+   note on `_is_single_statement` for the bug that combining them produced.
+3. The DATABASE GRANT. `droplet_ro` holds SELECT and nothing else, so a read
+   connection physically cannot write even if every check here were removed.
 
 Statements arrive already built. See db.py for why they are not built here.
 """
@@ -29,7 +33,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys as _sys
 import time
 from contextlib import asynccontextmanager
@@ -49,6 +52,7 @@ import pyodbc
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from allowlist import STATEMENT_MISMATCH, UNKNOWN_STATEMENT, check_statement
 from db import (
     BridgeConfigError,
     ConnectionPool,
@@ -100,11 +104,72 @@ def _target_from(req: ExecRequest | IntrospectRequest) -> Target:
 
 # Comments are stripped before ANY classification, so `/*SELECT*/ UPDATE ...`
 # cannot masquerade as a read.
-_COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.S)
+#
+# CodeQL py/polynomial-redos (alerts #63/#64): this used to be two regexes —
+# `/\*.*?\*/|--[^\n]*` for comments and `[\s;]+$` for trailing terminators —
+# and both backtrack quadratically on request-controlled SQL (an unclosed `/*`
+# followed by many `a/*`, or a long run of tabs before a non-terminator: ~7 s
+# at 50k chars, measured). It is now one left-to-right scan; no regex touches
+# the statement at all.
+
+
+def _strip_comments_and_mask_literals(sql: str) -> str:
+    """One linear pass: block/line comments become a single space, single-quoted
+    literals become `''` (a doubled quote inside a literal stays inside it).
+
+    Doing both in ONE pass — rather than comments first and literals second, as
+    the regex version did — also closes a bypass that ordering had: a `--`
+    INSIDE a literal (`SET reason = '--'; DROP ...`) swallowed the rest of the
+    line, semicolon included, before the literal mask ever saw it, so a stacked
+    write read as a single statement. Lexed together, a quote opens a literal
+    and nothing inside it is a comment, and vice versa.
+
+    Unterminated constructs are left as-is so a stray `;` inside them still
+    counts as a separator (fail closed, same as before).
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    # Once a `/*` has no closing `*/` anywhere after it, no later `/*` has one
+    # either — remember that instead of re-scanning to the end for every
+    # opener, which is exactly the quadratic behaviour this replaces.
+    block_may_close = True
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            if j >= n:
+                out.append(sql[i:])  # unterminated literal: keep it visible
+                break
+            out.append("''")
+            i = j + 1
+        elif ch == "/" and block_may_close and sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                block_may_close = False
+                out.append(ch)
+                i += 1
+            else:
+                out.append(" ")
+                i = end + 2
+        elif ch == "-" and sql.startswith("--", i):
+            end = sql.find("\n", i)
+            out.append(" ")
+            i = n if end == -1 else end  # the newline itself is kept
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def _bare(sql: str) -> str:
-    """Comments removed, trailing terminators removed, string literals masked.
+    """Comments removed, string literals masked, trailing terminators removed.
 
     "Trailing terminators" means any run of semicolons and whitespace at the
     very end — `;`, `;;;`, and `; ; ` all normalize the same way. They are
@@ -115,11 +180,14 @@ def _bare(sql: str) -> str:
     verified). Only the END is stripped — an interior `;` is exactly the
     separator this is looking for and must survive.
 
-    Literals are masked AFTER that, so a semicolon INSIDE a value ('x;y') is
-    not mistaken for a separator either.
+    Literals are masked in the same pass as comments, so a semicolon INSIDE a
+    value ('x;y') is not mistaken for a separator either.
     """
-    stripped = re.sub(r"[\s;]+$", "", _COMMENT.sub(" ", sql).strip())
-    return re.sub(r"'(?:''|[^'])*'", "''", stripped)
+    bare = _strip_comments_and_mask_literals(sql).strip()
+    end = len(bare)
+    while end and (bare[end - 1] == ";" or bare[end - 1].isspace()):
+        end -= 1
+    return bare[:end]
 
 
 def _is_single_statement(sql: str) -> bool:
@@ -143,6 +211,27 @@ def _is_select(sql: str) -> bool:
 
 def _fail(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": redact(message)})
+
+
+def _assert_statement_registered(kind: str, name: str, sql: str) -> None:
+    """WARP-2540 — the first layer, run before anything else on both execute
+    routes. The wire may only carry a statement the registries emit for
+    `name`; the shipped manifest (statement_manifest.json) is the proof, and
+    an unknown name or a mismatched shape is refused before a connection is
+    even acquired. Identifier NAMES stay free — the schema map resolves them
+    per practice and the server checks they exist — but the statement's shape
+    may not vary by one character."""
+    code = check_statement(kind, name, sql)
+    if code is None:
+        return
+    logger.warning("refused %s '%s': %s", kind, name, code)
+    if code == UNKNOWN_STATEMENT:
+        raise _fail(400, UNKNOWN_STATEMENT, f"{kind} '{name}' is not a registered statement")
+    raise _fail(
+        400,
+        STATEMENT_MISMATCH,
+        f"{kind} '{name}' does not match its registered statement shape",
+    )
 
 
 def _assert_single_statement(what: str, name: str, sql: str) -> None:
@@ -194,21 +283,25 @@ def health() -> dict[str, Any]:
 def run_read(name: str, req: ExecRequest) -> dict[str, Any]:
     """Execute one already-built, parameterized SELECT as `droplet_ro`.
 
-    `name` is the registry query name. It is not used to build anything — it
-    exists so logs and errors say which named read failed, rather than leaving
-    an operator to reverse-engineer it from SQL.
+    `name` is the registry query name. It selects which registered statement
+    shape the wire SQL must match (WARP-2540) — it is still never used to
+    build anything — and it keeps logs and errors saying which named read
+    failed, rather than leaving an operator to reverse-engineer it from SQL.
     """
+    _assert_statement_registered("read", name, req.sql)
+    # Second layer. Any statement the allowlist accepts is a single SELECT by
+    # construction (tests pin that over the whole manifest); these stay so a
+    # manifest bug fails loudly here instead of reaching a connection.
     _assert_single_statement("read", name, req.sql)
     if not _is_select(req.sql):
-        # A non-SELECT here means a caller bug: the read registry only ever
-        # produces SELECTs. Refuse rather than hand it to a connection whose
-        # grants would (correctly) reject it with a less obvious error.
         raise _fail(400, "NOT_A_READ", f"read '{name}' was handed a non-SELECT statement")
 
-    target = _target_from(req)
     conn = None
     started = time.monotonic()
     try:
+        # Inside the try: an unconfigured box with no per-request target must
+        # answer NOT_CONFIGURED like the health route does, not a raw 500.
+        target = _target_from(req)
         conn = POOL.acquire(target, "read")
         cursor = conn.cursor()
         cursor.execute(req.sql, *tuple(req.params))
@@ -243,16 +336,18 @@ def apply_write(name: str, req: ExecRequest) -> dict[str, Any]:
     orchestrator maps to DISCREPANCY rather than retrying blindly over a
     front-desk edit.
     """
-    # Order matters: the batch check runs FIRST and unconditionally, so a
-    # stacked write cannot slip past a guard that only knows how to say "this
-    # is a SELECT".
+    _assert_statement_registered("write", name, req.sql)
+    # Second layer. Order still matters within it: the batch check runs
+    # before the kind check, so a stacked write cannot slip past a guard that
+    # only knows how to say "this is a SELECT".
     _assert_single_statement("write", name, req.sql)
     if _is_select(req.sql):
         raise _fail(400, "NOT_A_WRITE", f"write '{name}' was handed a SELECT")
 
-    target = _target_from(req)
     conn = None
     try:
+        # Inside the try — same NOT_CONFIGURED honesty as /read/*.
+        target = _target_from(req)
         conn = POOL.acquire(target, "write")
         cursor = conn.cursor()
         cursor.execute(req.sql, *tuple(req.params))
@@ -295,9 +390,10 @@ def introspect(req: IntrospectRequest) -> dict[str, Any]:
         if not _is_select(statement.sql):
             raise _fail(400, "NOT_A_READ", f"introspection query '{label}' is not a SELECT")
 
-    target = _target_from(req)
     conn = None
     try:
+        # Inside the try — same NOT_CONFIGURED honesty as /read/*.
+        target = _target_from(req)
         conn = POOL.acquire(target, "read")
         out: dict[str, list[dict[str, Any]]] = {}
         for label, statement in req.queries.items():

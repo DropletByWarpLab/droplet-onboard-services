@@ -35,10 +35,10 @@ import { SearchBar } from "@/components/FileManager/SearchBar";
 import { PreviewPane } from "@/components/FileManager/PreviewPane";
 import { DocEditorPanel } from "@/components/FileManager/DocEditorPanel";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
-import {
-  SpaceSwitcher,
-  spaceSwitcherVisible,
-} from "@/components/FileManager/SpaceSwitcher";
+import { SpaceSwitcher } from "@/components/FileManager/SpaceSwitcher";
+// WARP-1548 — the shared Home-mode gate. It moved to `lib/` when the places
+// rail became a third consumer alongside this page and the switcher itself.
+import { spaceSwitcherVisible } from "@/lib/space-rows";
 import {
   resolveSearchResultTarget,
   toSpaceRelativePath,

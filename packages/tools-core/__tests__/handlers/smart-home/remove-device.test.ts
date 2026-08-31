@@ -8,6 +8,7 @@
  * decommission call.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import removeDevice from "../../../src/handlers/smart-home/remove-device.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -34,9 +35,9 @@ const GROUPED = {
 };
 
 function ctxWith(overrides: {
-  listDevices?: ReturnType<typeof vi.fn>;
-  decommission?: ReturnType<typeof vi.fn>;
-}): { ctx: ToolContext; decommission: ReturnType<typeof vi.fn> } {
+  listDevices?: Mock;
+  decommission?: Mock;
+}): { ctx: ToolContext; decommission: Mock } {
   const decommission = overrides.decommission ?? vi.fn();
   const ctx: ToolContext = {
     matter: {

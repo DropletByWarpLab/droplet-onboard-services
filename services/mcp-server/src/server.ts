@@ -5,12 +5,16 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   TOOLS,
+  defaultToolCallInterceptor,
+  interceptOutcomeToToolResult,
   type PrivateEnhancement,
   type Tool,
+  type ToolCallInterceptor,
   type ToolResult,
 } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
 import { canCallTool, filterToolsForRole } from "./rbac.js";
+import { describeThrown } from "./thrown-cause.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
@@ -34,7 +38,35 @@ export type TrustContext =
   | { kind: "local-trusted" }
   | { kind: "authenticated"; claims: Claims };
 
-export function createServer(deps: ContextDeps, trust: TrustContext) {
+/**
+ * WARP-2305 / WARP-2340 — dispatch-path options.
+ *
+ * `additionalTools` is the seam for tools we did NOT author: a remote MCP
+ * server's tools under WARP-320 are not in the compile-time `registry.ts`
+ * array, and for that class handler-side enforcement cannot work even in
+ * principle because there is no handler of ours. Anything supplied here
+ * goes through the SAME RBAC check and the SAME interceptor as a registry
+ * tool. Registry tools win a name collision, so a remote server cannot
+ * shadow one of ours.
+ *
+ * `interceptor` is injectable for tests only; production uses the shared
+ * `defaultToolCallInterceptor` so the local agent loop and external MCP
+ * clients cannot drift onto two different gates.
+ */
+export interface ServerOptions {
+  additionalTools?: ReadonlyMap<string, Tool>;
+  interceptor?: ToolCallInterceptor;
+}
+
+export function createServer(
+  deps: ContextDeps,
+  trust: TrustContext,
+  options: ServerOptions = {},
+) {
+  const additionalTools = options.additionalTools;
+  const interceptor = options.interceptor ?? defaultToolCallInterceptor;
+  const resolveTool = (name: string): Tool | undefined =>
+    TOOLS.get(name) ?? additionalTools?.get(name);
   // Trust is derived solely from the declared posture, not from the presence
   // or absence of claims. Only `local-trusted` is trusted; everything else
   // (authenticated, or any unrecognized shape) is untrusted and RBAC-gated.
@@ -53,7 +85,10 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
     // caller's role. Trusted principal (stdio in-proc agent) sees every
     // tool. owner/admin see every tool. family/guest (and any HTTP request
     // with a missing role) see read-only tools.
-    const tools = filterToolsForRole(TOOLS.values(), claims?.role, {
+    const advertised = additionalTools
+      ? [...TOOLS.values(), ...additionalTools.values()]
+      : [...TOOLS.values()];
+    const tools = filterToolsForRole(advertised, claims?.role, {
       trustedPrincipal,
     }).map((t) => ({
       name: t.name,
@@ -64,7 +99,7 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-    const tool: Tool | undefined = TOOLS.get(req.params.name);
+    const tool: Tool | undefined = resolveTool(req.params.name);
     if (!tool) {
       return {
         content: [
@@ -153,14 +188,56 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
       metaUserRole,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+
+    // WARP-2305 — THE GENERIC CONFIRMATION GATE + RUNTIME DENY TIER.
+    //
+    // This is the only site in the repo that calls `tool.handler(...)`,
+    // and every dispatch path reaches it: the in-process agent loop
+    // (llm-agent.service.ts → McpClientService → stdio), ToolSpec runs,
+    // and external MCP clients over HTTP. Enforcing here is what makes
+    // `requiresConfirmation` a mechanism instead of a convention, and it
+    // covers tools we did not author, which have no handler of ours to do
+    // it (WARP-320).
+    //
+    // It runs BEFORE the handler, so an unconfirmed or denied call never
+    // reaches handler code and performs no write — asserted with a
+    // handler spy, not just on the response.
+    //
+    // The token arrives on `_meta`, the transport's channel for protocol
+    // metadata that must not become a tool argument (same channel as
+    // ncToken / userId / _enhancement). That keeps it clear of every
+    // tool's `additionalProperties: false` schema and keeps the binding
+    // hash over untouched arguments.
+    const confirmationToken =
+      meta && typeof meta.confirmationToken === "string" && meta.confirmationToken.length > 0
+        ? meta.confirmationToken
+        : undefined;
+    const outcome = interceptor.intercept(tool, args, { confirmationToken });
+    const refusal = interceptOutcomeToToolResult(tool, outcome);
+    if (refusal) {
+      return toolResultToContent(refusal);
+    }
+    // `outcome.args` — not `args`. On a call whose token verified, the
+    // interceptor sets `confirmed: true` for tools whose schema declares
+    // it, which is what stops the 16 hand-rolled `args.confirmed !== true`
+    // gates from raising a SECOND prompt (WARP-2322).
+    const effectiveArgs =
+      outcome.kind === "proceed" ? outcome.args : args;
+
     let result: ToolResult;
     try {
-      result = await tool.handler(args, ctx);
+      result = await tool.handler(effectiveArgs, ctx);
     } catch (err) {
       result = {
         ok: false,
         status: "error",
-        error: { code: "HANDLER_THREW", message: err instanceof Error ? err.message : String(err) },
+        // WARP-1480 — `describeThrown` appends the CAUSE CHAIN. Taking only
+        // `err.message` collapsed every undici failure to the same two words
+        // ("fetch failed") and discarded the errno on `err.cause`, which is
+        // the one value that tells a reset socket from a DNS failure from a
+        // headers timeout. That loss is why `read_file`'s intermittent error
+        // was unattributable.
+        error: { code: "HANDLER_THREW", message: describeThrown(err) },
       };
     }
     return toolResultToContent(result);
