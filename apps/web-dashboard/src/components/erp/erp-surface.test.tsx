@@ -127,7 +127,9 @@ describe("ConnectorCard", () => {
     meta: m,
     state: { kind: "reported" as const, connection },
     connect: { kind: "wizard" as const, catalogId: "eaglesoft" },
-    open: { kind: "route" as const, href: "/integrations/eaglesoft" },
+    // WARP-2560 (ADR-044) — the practice surface lives at /practice now. The
+    // hub tile still opens it; only the address changed.
+    open: { kind: "route" as const, href: "/practice" },
   });
 
   it("an available connector shows Connect", () => {

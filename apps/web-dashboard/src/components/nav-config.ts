@@ -261,6 +261,29 @@ export const NAV_GROUPS: NavGroup[] = [
       // module is off, so the nav never advertises a surface the box won't
       // serve.
       { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
+      // WARP-2560 (ADR-044) — the practice's day: schedule, KPIs, patient
+      // lookup. It rendered at /integrations/eaglesoft, filed in Operations
+      // beside the router, because that is where the CONNECTION is set up.
+      // This is not a connection screen.
+      //
+      // Gated by `roles` and NOT by `requiresModule`, because there is no
+      // `erp` module and this ticket does not invent one — connector reach is
+      // ADR-032 §5.4's connectors axis, not the feature axis. The array is
+      // the SAME one the /integrations/eaglesoft child carried, copied rather
+      // than widened, and it mirrors the orchestrator's own
+      // requireRole("owner","admin") on the admin-tier ERP routes.
+      //
+      // The label is a fixed word on purpose. ADR-044 records that the
+      // vertical's own noun (patient / client / guest) becomes a per-connector
+      // `partyNoun` on the connector descriptor; that is a later slice, and
+      // making the nav label data-driven before a second connector exists
+      // would be a mechanism with one caller.
+      {
+        href: "/practice",
+        label: "Practice",
+        icon: Stethoscope,
+        roles: ["owner", "admin"],
+      },
     ],
   },
   {
@@ -294,9 +317,11 @@ export const NAV_GROUPS: NavGroup[] = [
       // (design brief §2). Ordered Cameras · Network · Devices · Voice.
       { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
       { href: "/remote-access", label: "Remote Access", icon: Globe, requiresModule: "network" },
-      // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
-      // provider #1 (the Patterson dental PMS Droplet reads directly over its
-      // SQL Anywhere DB, on the LAN). The child reveals on /integrations/*.
+      // WARP-1101: the Integrations hub — connecting, credentials, connection
+      // status. WARP-2560 (ADR-044) removed the Eaglesoft child: the practice
+      // DATA surface moved to /practice in the Business group, and what stays
+      // here is the plumbing. Connecting a connector genuinely is
+      // infrastructure; reading the day's schedule is not.
       // WARP-1528 (nav-gate gap b): this item shipped with NO gate at all
       // while the orchestrator's erp.ts + integrations.ts both require
       // owner/admin — so family/guest were shown a hub that 403s. Mirrors the
@@ -311,12 +336,6 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Blocks,
         roles: ["owner", "admin"],
         children: [
-          {
-            href: "/integrations/eaglesoft",
-            label: "Eaglesoft",
-            icon: Stethoscope,
-            roles: ["owner", "admin"],
-          },
           // WARP-2275: the SaaS credential configurator. `roles` on the child
           // as well as the parent, for the same reason the sibling above
           // carries it — a future widening of one must not silently widen the
