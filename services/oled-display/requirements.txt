@@ -20,7 +20,7 @@ qrcode>=7.4
 # "FIPS not enabled" even where OpenSSL is genuinely enforcing. Same
 # fix class as WARP-1018 (file-indexer); kept in lockstep with
 # services/ai-gateway's pin.
-cryptography>=50.0.0
+cryptography>=50.0.1
 
 # WARP-1948 — OSV floors: the osv-nightly resolver scores transitive deps at
 # their minimum resolvable version; state the real minimum instead of
