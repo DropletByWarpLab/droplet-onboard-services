@@ -11,6 +11,8 @@
  * predicates unmockable independently of the chrome.
  */
 import type { LucideIcon } from "lucide-react";
+
+import type { AccessModuleId } from "@/lib/types";
 import {
   Activity,
   Blocks,
@@ -80,20 +82,20 @@ export type NavItem = {
    * child still disappears with its parent. (It used to be a documented no-op
    * on children, which meant a sub-destination could never be gated on its
    * own.)
+   *
+   * WARP-2577: this was a hand-listed union of twelve ids, and it had already
+   * drifted — `crm` and `contacts` shipped as gateable modules and were never
+   * added, so a nav entry for either could not be typed at all. It is now
+   * DERIVED from `AccessModuleId`, which is the vocabulary that describes
+   * itself as having no parallel list to drift; this union was that list.
+   *
+   * `chat` is excluded rather than omitted. It is a core module — the comment
+   * above says core modules are never tagged — and `Exclude` states that rule
+   * where the type is, instead of leaving it as an absence a reader has to
+   * notice. Adding a module id now reaches this field automatically; making a
+   * module core is the only edit that ever needs to touch it again.
    */
-  requiresModule?:
-    | "files"
-    | "email"
-    | "calendar"
-    | "projects"
-    | "knowledge"
-    | "docs"
-    | "cameras"
-    | "network"
-    | "smart_home"
-    | "managed_switch"
-    | "voice"
-    | "team_chat";
+  requiresModule?: Exclude<AccessModuleId, "chat">;
   /**
    * WARP-1807 — a tucked destination: rendered by NO nav surface (desktop
    * aside, mobile tab bar, More drawer), but still part of the nav

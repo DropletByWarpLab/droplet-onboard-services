@@ -5884,6 +5884,11 @@ model CrmDeal {
   @@index([companyId])
   @@index([ownerId, isArchived])
   @@index([expectedCloseOn])
+  // WARP-2577 — `projectId` is ON DELETE SET NULL and Postgres does not
+  // auto-index a foreign key column, so deleting a project had to seq-scan
+  // this table to find the deals it must null. Same hazard WARP-845 documents
+  // and indexes on its own relation; this one was missed.
+  @@index([projectId])
 }
 
 model CrmDealContact {
@@ -5990,4 +5995,14 @@ model CrmActivity {
   @@index([companyId, occurredAt])
   @@index([contactId, occurredAt])
   @@index([kind, occurredAt])
+  // WARP-2577 — the four reference columns are ON DELETE SET NULL, and
+  // Postgres does not auto-index a foreign key. Unindexed, deleting one note,
+  // email, calendar event or work item seq-scanned this whole table to find
+  // the rows to null — on the timeline table, which is the largest one here.
+  // The subject columns above are already covered by their composite indexes;
+  // these four were not covered by anything.
+  @@index([noteId])
+  @@index([emailMessageId])
+  @@index([calendarEventId])
+  @@index([workItemId])
 }

@@ -39,6 +39,14 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case crm.CRM_ERRORS.PIPELINE_NOT_FOUND:
     case crm.CRM_ERRORS.STAGE_NOT_FOUND:
     case crm.CRM_ERRORS.ACTIVITY_NOT_FOUND:
+    // WARP-2577 — the five columns whose bad ids used to reach Postgres as a
+    // P2003 and come back to the caller as a redacted 500. Each code names its
+    // own column, so "which id did I get wrong" is answerable from the body.
+    case crm.CRM_ERRORS.PROJECT_NOT_FOUND:
+    case crm.CRM_ERRORS.NOTE_NOT_FOUND:
+    case crm.CRM_ERRORS.EMAIL_MESSAGE_NOT_FOUND:
+    case crm.CRM_ERRORS.CALENDAR_EVENT_NOT_FOUND:
+    case crm.CRM_ERRORS.WORK_ITEM_NOT_FOUND:
       res.status(404).json({ error: msg });
       return true;
     case crm.CRM_ERRORS.INVALID_STAGE:
