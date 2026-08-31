@@ -339,7 +339,10 @@ CREATE TABLE dba.audience_member (
   email               varchar(200),
   subscription_status varchar(30),
   opted_in_at         timestamp,
-  last_changed_at     timestamp
+  -- WARP-2509 — renamed from `last_changed_at`. One name for the modification
+  -- column across every dataset that has one; the vendor's `last_changed`
+  -- spelling stays in the Mailchimp mapper.
+  updated_at          timestamp
 );
 
 -- WARP-2466 — a purchase as a MARKETING platform recorded it. No tax, no

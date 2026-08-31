@@ -78,7 +78,7 @@ import {
   sweepIntervalMsFor,
   type ErpDriftPrisma,
 } from "./drift-record.service.js";
-import { ERP_SYNC_ENTITIES, erpSyncEntity } from "./entities.js";
+import { ERP_SYNC_ENTITIES, erpSyncEntity, type ErpSyncEntity } from "./entities.js";
 import {
   buildDriftReport,
   diffForDrift,
@@ -435,20 +435,29 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
    * `DatasetNotServedError` was classified FATAL, the cursor parked FAILED,
    * and `foldSyncState` rendered the connection as a failed sync forever.
    *
-   * Cloud tracks ONLY. A lan track's descriptor lists the practice datasets,
-   * but its served set is runtime-computed — the export-drop connector serves
-   * invoices and bills whenever the practice's export carries them
-   * (`Connector.servedDatasets` is "computed, not declared" for that track) —
-   * so filtering it by the static declaration would silently stop the
-   * accounting sync the track shipped with. An unknown provider likewise
-   * keeps today's behaviour: no descriptor is no evidence either way, and a
-   * wrongly-registered cursor fails visibly while a never-registered one
-   * fails silently.
+   * A cloud descriptor answers directly. For anything else — a lan track,
+   * whose served set is runtime-computed, or a provider with no descriptor at
+   * all — there is no evidence to read, and the ENTITY decides via
+   * `openToUndeclaredTracks`.
+   *
+   * WARP-2509 replaced a bare `return true` there, and the difference only
+   * became load-bearing when that ticket took the table from two entities to
+   * ten. `true` was right while both were accounting datasets the export-drop
+   * connector genuinely serves whenever the practice's export carries them:
+   * filtering a lan track by its static declaration would have stopped the
+   * accounting sync it shipped with. Applied unchanged to eight CRM and
+   * marketing entities, the same line would have handed every Eaglesoft box
+   * eight cursors for datasets no lan track can serve — each failing its first
+   * tick with `DatasetNotServedError`, classified FATAL, parked FAILED, and
+   * folded by `foldSyncState` into "this connection's sync is failing".
+   *
+   * The two halves of the old comment were really two different claims, and
+   * only one of them generalised. The flag is where they now live apart.
    */
-  function entityServedBy(provider: string, entity: string): boolean {
+  function entityServedBy(provider: string, spec: ErpSyncEntity): boolean {
     const descriptor = providerDescriptor(provider);
-    if (!descriptor || descriptor.track !== "cloud") return true;
-    return (descriptor.datasets as readonly string[]).includes(entity);
+    if (!descriptor || descriptor.track !== "cloud") return spec.openToUndeclaredTracks;
+    return (descriptor.datasets as readonly string[]).includes(spec.entity);
   }
 
   return {
@@ -463,7 +472,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       });
       for (const conn of live) {
         for (const spec of ERP_SYNC_ENTITIES) {
-          if (!entityServedBy(conn.provider, spec.entity)) continue;
+          if (!entityServedBy(conn.provider, spec)) continue;
           await upsertErpCursor(prisma, conn.id, spec.entity);
         }
       }

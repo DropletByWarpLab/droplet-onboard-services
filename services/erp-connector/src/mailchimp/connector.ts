@@ -940,13 +940,20 @@ export interface MailchimpMemberPage {
  *
  * ## Where `updated_at` went
  *
- * It is absent from all three datasets, and only `audience_member` has a
- * modification time at all — Mailchimp's `last_changed`, which WARP-2466
- * spelled `last_changed_at` in the canonical vocabulary rather than
- * `updated_at`. So the poller's watermark for this track keys on
- * `last_changed_at`. The `updated_at` field WARP-2494 projects onto the raw
- * member payload in {@link MailchimpConnector.listMembers} is that same
- * instant under the other name, kept for callers of the named method.
+ * Only `audience_member` has a modification time at all — Mailchimp's
+ * `last_changed`. `campaign` and `ecommerce_order` genuinely have none, so
+ * their watermarks key on `sent_at` and `processed_at`, which are creation
+ * positions and cannot see an edit; that is a vendor limit, and the
+ * reconciliation sweep is what covers it.
+ *
+ * WARP-2466 spelled the member's column `last_changed_at`, mirroring the
+ * vendor. WARP-2509 renamed it `updated_at`: `watermarkValueOf` reads one
+ * column name for every track, so a second spelling of the same idea is a
+ * watermark that silently never advances on whichever track loses the
+ * coin-toss. The vendor's own field name survives in {@link mailchimpLookup},
+ * which is the layer whose job is translating it, and the pre-normalised
+ * `updated_at` WARP-2494 projects in {@link MailchimpConnector.listMembers}
+ * now has the same name as the canonical column it always represented.
  */
 function mailchimpLookup(dataset: DatasetName, record: Record<string, unknown>): VendorLookup {
   const nested = (key: string, field: string): unknown => {
@@ -976,7 +983,11 @@ function mailchimpLookup(dataset: DatasetName, record: Record<string, unknown>):
       case "timestamp_opt":
       case "opted_in_at":
         return record.timestamp_opt;
-      case "last_changed_at":
+      // WARP-2509 — the canonical column is `updated_at` now. The VENDOR field
+      // is still `last_changed`, and this line is exactly where that
+      // difference belongs: one spelling in the vocabulary, one translation
+      // per track.
+      case "updated_at":
         return record.last_changed;
 
       // The subject line lives under `settings`, not on the campaign root.
@@ -1431,10 +1442,11 @@ export class MailchimpConnector implements Connector {
           status === undefined
             ? rows
             : rows.filter((r) => String(r.subscription_status ?? "").toLowerCase() === status);
-        // `ORDER BY last_changed_at DESC, audience_member_id`.
+        // `ORDER BY updated_at DESC, audience_member_id` (WARP-2509 renamed
+        // the column; the SQL track's query orders by the same one).
         const byId = sortByKey(matched, "audience_member_id");
         return [...byId].sort((a, b) =>
-          String(b.last_changed_at ?? "").localeCompare(String(a.last_changed_at ?? "")),
+          String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")),
         );
       }
 

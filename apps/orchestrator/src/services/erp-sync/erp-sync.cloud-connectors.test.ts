@@ -13,21 +13,21 @@
  * asserts that fact rather than assuming it. Prisma stays a `vi.fn()` store,
  * per the team rule against mock-database integration tests.
  *
- * ## Why the entity table is mocked, and what that means
+ * ## The entity table used to be mocked here. WARP-2509 deleted the mock.
  *
- * `ERP_SYNC_ENTITIES` ships with exactly two rows — `invoice` and `bill`, both
- * accounting datasets that neither of these tracks serves. A cursor naming any
- * other entity is answered `ENTITY_NOT_SERVED` and fails, so on the SHIPPED
- * table these connectors are never asked for a read at all. That is a genuine
- * remaining gap, it is one line per dataset in `entities.ts`, and it is outside
- * this story's file boundary — so it is mocked here rather than changed, and
- * the mock IS the specification of the rows that file still needs.
+ * `ERP_SYNC_ENTITIES` shipped with exactly two rows — `invoice` and `bill`,
+ * both accounting datasets that neither of these tracks serves — so a cursor
+ * naming any other entity was answered `ENTITY_NOT_SERVED` and failed. This
+ * file mocked the table to get past that, and said so: the mock WAS the
+ * specification of the rows `entities.ts` still needed.
  *
- * What this test therefore proves: given a cursor for a CRM or marketing
- * dataset, the real connector answers `runRead` with canonical rows, the runner
- * identifies them on their canonical id column, and the watermark advances on
- * the canonical modification column. What it does NOT prove is that the shipped
- * scheduler ever creates such a cursor. It does not.
+ * Those rows now exist, so the mock is gone and these tests run against the
+ * real table. The difference matters. With the mock, this file proved that
+ * *given* a cursor for a CRM or marketing dataset the connector answers with
+ * canonical rows — and explicitly did NOT prove the shipped scheduler ever
+ * creates such a cursor. It did not. The `registerCursors` test at the bottom
+ * is the half that was missing, and it is the one that goes red if anybody
+ * removes a row from that table again.
  */
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -37,41 +37,7 @@ import {
   type Connector,
 } from "@droplet/erp-connector";
 
-// Mocked BEFORE the runner is imported, so the runner's module-level
-// `BY_ENTITY` map is built from these rows. `erpSyncEntity` is what the tick
-// calls; `ERP_SYNC_ENTITIES` is what `registerCursors` iterates.
-vi.mock("./entities.js", () => {
-  const ERP_SYNC_ENTITIES = [
-    {
-      entity: "contact",
-      readQuery: "find_contact",
-      sourceKeyField: "contact_id",
-      // The canonical modification column WARP-2494 added. This is the whole
-      // point of the story: before it existed the marker had to be an ordering
-      // key that could not see an edit.
-      markerField: "updated_at",
-    },
-    {
-      entity: "audience_member",
-      readQuery: "get_audience_members",
-      sourceKeyField: "audience_member_id",
-      // NOT `updated_at`. WARP-2466 spelled Mailchimp's `last_changed`
-      // `last_changed_at` in the canonical vocabulary, so this track's
-      // watermark keys on a differently-named column than every other one.
-      markerField: "last_changed_at",
-    },
-  ];
-  const BY_ENTITY = new Map(ERP_SYNC_ENTITIES.map((e) => [e.entity, e]));
-  return {
-    ERP_SYNC_ENTITIES,
-    erpSyncEntity: (entity: string) => BY_ENTITY.get(entity),
-  };
-});
-
-// A static import is correct despite the mock above: vitest hoists `vi.mock`
-// ahead of every import, so the runner still sees the mocked entity table. A
-// top-level `await import(...)` would do the same thing and not compile — this
-// file is emitted as CommonJS (TS1309).
+import { ERP_SYNC_ENTITIES } from "./entities.js";
 import { createErpSyncRunner } from "./erp-sync.service.js";
 
 const NOW = new Date("2026-08-27T12:00:00Z");
@@ -320,14 +286,16 @@ describe("scheduled sync over the real cloud connectors (WARP-2497)", () => {
     for (const url of f.calls) expect(url).toContain("api.hubapi.com");
   });
 
-  it("lands Mailchimp audience_member rows and advances the watermark on last_changed_at", async () => {
-    // The Mailchimp half of the same defect. `markerField` is
-    // `last_changed_at`, not `updated_at` — WARP-2466 named the column that
-    // way, so a runner entry copied from the HubSpot row would key on a column
-    // this dataset does not have and the watermark would never advance.
-    // Mutation: set the mocked markerField to "updated_at" → highWaterMark sees
-    //           no marker at all, coalesces to the previous watermark (null),
-    //           and the cursor never moves → red.
+  it("lands Mailchimp audience_member rows and advances the watermark on updated_at", async () => {
+    // The Mailchimp half of the same defect, and the reason WARP-2509 renamed
+    // the column: this track's modification time used to be spelled
+    // `last_changed_at` while every other track called the same idea
+    // `updated_at`, so a runner row keyed on the common name found nothing
+    // here and the watermark silently never advanced.
+    // Mutation: rename the canonical column back in `profiles.ts` without
+    //           updating the mapper → the row carries no `updated_at`,
+    //           highWaterMark coalesces to the previous watermark (null), and
+    //           the cursor never moves → red.
     const { c, f } = mailchimpConnector();
     const h = harness({
       provider: "mailchimp",
@@ -391,5 +359,85 @@ describe("scheduled sync over the real cloud connectors (WARP-2497)", () => {
     const mcAudit = JSON.stringify(mc.recorder.record.mock.calls);
     expect(mcAudit).not.toContain("203.0.113.7");
     expect(mcAudit).not.toContain("+15555550123");
+  });
+});
+
+/**
+ * WARP-2509 — the half the mocked entity table could never test.
+ *
+ * Everything above proves that GIVEN a cursor for a CRM or marketing dataset
+ * the connector answers it correctly. None of it proves the scheduler ever
+ * creates one, and until this ticket it did not: `ERP_SYNC_ENTITIES` held
+ * `invoice` and `bill`, `entityServedBy` filtered both out for a track that
+ * serves neither, and a connected HubSpot portal got zero cursors. Healthy,
+ * green, and never read.
+ *
+ * The entity lists are written out rather than imported from the connectors so
+ * that a dataset silently disappearing from `servesDatasets` is a failure here
+ * and not a fixture that quietly agrees with it.
+ */
+describe("registerCursors creates a cursor per dataset the track serves", () => {
+  /** The entity names `registerCursors` upserted, in registration order. */
+  async function registeredFor(provider: string): Promise<string[]> {
+    const h = harness({ provider, entity: "contact", connector: {} as Connector });
+    await h.runner.registerCursors();
+    return h.prisma.erpSyncCursor.upsert.mock.calls.map(
+      (call: any[]) => call[0].where.connectionId_entity.entity,
+    );
+  }
+
+  it("gives a HubSpot connection all five CRM datasets", async () => {
+    // MUTATION: delete any CRM row from ERP_SYNC_ENTITIES → red, naming it.
+    // Before WARP-2509 this returned [] — the defect, stated as a test.
+    expect((await registeredFor("hubspot")).sort()).toEqual([
+      "company",
+      "contact",
+      "deal",
+      "engagement",
+      "ticket",
+    ]);
+  });
+
+  it("gives a Mailchimp connection all three marketing datasets", async () => {
+    // MUTATION: delete any marketing row → red, naming it.
+    expect((await registeredFor("mailchimp")).sort()).toEqual([
+      "audience_member",
+      "campaign",
+      "ecommerce_order",
+    ]);
+  });
+
+  it("does not give either track the accounting datasets it cannot serve", async () => {
+    // The other direction, and the reason `entityServedBy` exists: an entity a
+    // track does not serve must not be registered at all. A cursor for one
+    // fails its first tick with DatasetNotServedError, parks FAILED, and
+    // `foldSyncState` renders the whole connection as a failed sync forever —
+    // so over-registering is not a harmless extra row.
+    for (const provider of ["hubspot", "mailchimp"]) {
+      const registered = await registeredFor(provider);
+      expect(registered, `${provider} must not get accounting cursors`).not.toContain("invoice");
+      expect(registered, `${provider} must not get accounting cursors`).not.toContain("bill");
+    }
+  });
+
+  it("registers every entity whose read the runner can actually call", async () => {
+    // The membership rule stated as an assertion: `runOneCursor` only ever
+    // passes `{}` or `{ since }`, so an entity here whose read needs another
+    // parameter would fail on every tick. Stripe's `charge` is the live
+    // example — `get_recent_charges` requires a [from, to) window — and it is
+    // deliberately absent.
+    //
+    // MUTATION: add a `charge` row → red, and the e2e Stripe read would send
+    // `created[gte]=undefined`.
+    const entities = ERP_SYNC_ENTITIES.map((e) => e.entity);
+    expect(entities).not.toContain("charge");
+    // Every row carries all four fields — a partially-filled row reads as
+    // configured and behaves as broken.
+    for (const spec of ERP_SYNC_ENTITIES) {
+      expect(spec.readQuery, `${spec.entity}.readQuery`).toBeTruthy();
+      expect(spec.sourceKeyField, `${spec.entity}.sourceKeyField`).toBeTruthy();
+      expect(spec.markerField, `${spec.entity}.markerField`).toBeTruthy();
+      expect(spec.updatedAtField, `${spec.entity}.updatedAtField`).toBeTruthy();
+    }
   });
 });

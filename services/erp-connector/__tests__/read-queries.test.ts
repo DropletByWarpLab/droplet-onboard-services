@@ -300,7 +300,8 @@ const TABLES: IntrospectedTable[] = [
       { name: "email", type: "varchar" },
       { name: "subscription_status", type: "varchar" },
       { name: "opted_in_at", type: "timestamp" },
-      { name: "last_changed_at", type: "timestamp" },
+      // WARP-2509 renamed this from `last_changed_at`.
+      { name: "updated_at", type: "timestamp" },
     ],
   },
   {

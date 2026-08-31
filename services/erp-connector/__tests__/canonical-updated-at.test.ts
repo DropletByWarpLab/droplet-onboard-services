@@ -63,6 +63,16 @@ const VENDOR_SOURCE: Readonly<Record<string, string>> = {
   company: "hs_lastmodifieddate",
   deal: "hs_lastmodifieddate",
   ticket: "hs_lastmodifieddate",
+  // WARP-2509 — an engagement is a CRM object like the four above and exposes
+  // the same property. WARP-2466 declared the dataset with `occurred_at`
+  // alone, which is when the activity happened rather than when the record
+  // last moved; a poller keyed on it cannot see a correction.
+  engagement: "hs_lastmodifieddate",
+  // WARP-2509 — Mailchimp's `last_changed`, now under the canonical name. It
+  // was in NO_HONEST_SOURCE not because the source was missing but because
+  // WARP-2466 had spelled the column `last_changed_at`; the source was always
+  // honest, the name was the problem.
+  audience_member: "last_changed",
   // Shopify — the only vendor whose own field is already called `updated_at`.
   order: "updated_at_min",
   product: "updated_at_min",
@@ -99,23 +109,19 @@ const NO_HONEST_SOURCE: Readonly<Record<string, string>> = {
   // resource nor the list resource carries a modification timestamp of its own.
   campaign: "Mailchimp exposes last_changed on members, not on campaigns",
   audience: "Mailchimp exposes last_changed on members, not on the list",
-  // ── WARP-2466's three (see the note above) ────────────────────────────────
-  // The list member IS a dataset now, and it DOES carry Mailchimp's
-  // `last_changed` — but WARP-2466 spelled that column `last_changed_at`
-  // rather than `updated_at`. So this dataset has an honest modification time
-  // under a different canonical name, which is why it is here rather than in
-  // VENDOR_SOURCE: the column named `updated_at` is genuinely absent.
-  audience_member: "its modification time is the canonical column last_changed_at",
+  // ── WARP-2466's three, resolved by WARP-2509 ──────────────────────────────
+  // `audience_member` and `engagement` MOVED to VENDOR_SOURCE above. Both were
+  // listed here for a reason that was never about the vendor: the member's
+  // modification time existed under the name `last_changed_at`, and the
+  // engagement's was simply not requested. Neither absence was honest, and an
+  // "unsourced" entry that really means "we did not decide yet" is exactly the
+  // kind of recorded non-decision this fixture is supposed to prevent.
+  //
   // `/ecommerce/stores/{id}/orders` documents no modification field and no
   // date filter of any kind — see MAILCHIMP_ECOMMERCE_ORDER_PARAMS, whose
   // completeness is the finding that makes an incremental read impossible.
+  // This one stays: the source genuinely is not there.
   ecommerce_order: "the orders resource exposes no modification field at all",
-  // WARP-2466 added this dataset with `occurred_at` — when the activity
-  // HAPPENED — and decided no modification column. HubSpot's engagement object
-  // does carry hs_lastmodifieddate, so this is an absence by omission rather
-  // than for want of a source; changing it is a vocabulary decision, not a
-  // connector one.
-  engagement: "WARP-2466 added it with occurred_at only; no modification column decided",
 };
 
 describe("updated_at exists exactly where a vendor can populate it", () => {

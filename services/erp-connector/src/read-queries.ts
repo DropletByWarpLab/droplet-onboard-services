@@ -671,7 +671,9 @@ const getAudienceMembers: ReadQuery = {
     const email = resolveColumn(map, "audience_member", "email");
     const status = resolveColumn(map, "audience_member", "subscription_status");
     const optedInAt = resolveColumn(map, "audience_member", "opted_in_at");
-    const lastChanged = resolveColumn(map, "audience_member", "last_changed_at");
+    // WARP-2509 renamed this column `updated_at` — the vendor still calls it
+    // `last_changed`, and the mapper is where that spelling belongs.
+    const lastChanged = resolveColumn(map, "audience_member", "updated_at");
     // The status filter is MANDATORY rather than optional. An unfiltered
     // member list mixes people who unsubscribed in with people who did not,
     // and the caller most likely to forget the distinction is the one about to
