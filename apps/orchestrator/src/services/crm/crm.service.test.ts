@@ -16,6 +16,7 @@ import {
   listDeals,
   moveDealStage,
   normalizeDomain,
+  updateDeal,
 } from "./crm.service.js";
 
 const stage = (over: Partial<Record<string, unknown>> = {}) => ({
@@ -249,7 +250,12 @@ describe("moveDealStage", () => {
     // moved with no record of who moved it.
     const dealUpdate = vi.fn().mockResolvedValue({});
     const activityCreate = vi.fn().mockResolvedValue({});
-    const transaction = vi.fn().mockResolvedValue([{}, {}]);
+    // Interactive form: the move is now a callback so `updateDeal` can commit
+    // it together with the rest of a PATCH. The stub runs the callback against
+    // a tx client, which is what proves both writes went through the SAME one
+    // rather than being issued loose on `prisma`.
+    const txClient = { crmDeal: { update: dealUpdate }, crmActivity: { create: activityCreate } };
+    const transaction = vi.fn(async (fn: (tx: typeof txClient) => Promise<unknown>) => fn(txClient));
     const prisma = {
       crmDeal: {
         findUnique: vi
@@ -294,8 +300,8 @@ describe("moveDealStage", () => {
     await moveDealStage(prisma, "d1", "s2", "user-1");
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    // Both writes were handed to the SAME $transaction call, not issued loose.
-    expect(transaction.mock.calls[0][0]).toHaveLength(2);
+    // Both writes went through the SAME $transaction call, not issued loose:
+    // the mocks live only on the tx client the callback was handed.
     expect(dealUpdate).toHaveBeenCalledTimes(1);
     expect(activityCreate).toHaveBeenCalledTimes(1);
 
@@ -350,7 +356,11 @@ describe("moveDealStage", () => {
         },
         crmPipelineStage: { findUnique: async () => stage({ id: "s2", kind: toKind }) },
         crmActivity: { create: vi.fn().mockResolvedValue({}) },
-        $transaction: vi.fn().mockResolvedValue([{}, {}]),
+        // The move writes through the transaction client, so the stub has to
+        // run the callback for `update` to see anything.
+        $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+          fn({ crmDeal: { update }, crmActivity: { create: vi.fn().mockResolvedValue({}) } }),
+        ),
       } as never;
       await moveDealStage(prisma, "d1", "s2", null);
       return update.mock.calls[0][0].data;
@@ -362,6 +372,166 @@ describe("moveDealStage", () => {
     // silently re-dating the sale.
     const kept = await move("WON", "WON", new Date("2026-01-01"));
     expect(kept.closedAt).toEqual(new Date("2026-01-01"));
+  });
+});
+
+describe("updateDeal", () => {
+  /** A deal row as `updateDeal`'s first read returns it. */
+  const existingDeal = (over: Partial<Record<string, unknown>> = {}) => ({
+    id: "d1",
+    pipelineId: "p1",
+    stageId: "s1",
+    closedAt: null,
+    amountMinor: null,
+    currency: null,
+    stage: stage({ id: "s1", name: "Lead" }),
+    ...over,
+  });
+
+  /** The DEAL_INCLUDE-shaped row the closing `getDeal` re-read returns. */
+  const fullDealRow = (over: Partial<Record<string, unknown>> = {}) => ({
+    ...existingDeal(),
+    title: "T",
+    company: null,
+    companyId: null,
+    expectedCloseOn: null,
+    closeReason: null,
+    ownerId: null,
+    projectId: null,
+    origin: "LOCAL",
+    externalSystem: null,
+    isArchived: false,
+    contactLinks: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...over,
+  });
+
+  it("does not move the stage when a later validation in the same PATCH fails", async () => {
+    // The bug this pins: `moveDealStage` committed its OWN transaction, and the
+    // companyId check ran AFTER it. A PATCH with a good stageId and a bad
+    // companyId therefore moved the deal and wrote its STAGE_CHANGE, then threw
+    // — the caller sees a 404 and assumes nothing happened while the board and
+    // the forecast have already changed. A PATCH is one write; it commits once
+    // or not at all.
+    //
+    // Mutation: move the `crmCompany.findUnique` check back below the
+    // `$transaction` call → red.
+    const dealUpdate = vi.fn().mockResolvedValue({});
+    const activityCreate = vi.fn().mockResolvedValue({});
+    const transaction = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ crmDeal: { update: dealUpdate }, crmActivity: { create: activityCreate } }),
+    );
+    const prisma = {
+      crmDeal: { findUnique: vi.fn().mockResolvedValue(existingDeal()), update: dealUpdate },
+      crmPipelineStage: { findUnique: async () => stage({ id: "s2", name: "Won", kind: "WON" }) },
+      crmCompany: { findUnique: async () => null }, // the company does not exist
+      crmActivity: { create: activityCreate },
+      $transaction: transaction,
+    } as never;
+
+    await expect(
+      updateDeal(prisma, "d1", { stageId: "s2", companyId: "nope" }, "user-1"),
+    ).rejects.toThrow(CRM_ERRORS.COMPANY_NOT_FOUND);
+
+    // Nothing was written at all — not the move, not the activity.
+    expect(transaction).not.toHaveBeenCalled();
+    expect(dealUpdate).not.toHaveBeenCalled();
+    expect(activityCreate).not.toHaveBeenCalled();
+  });
+
+  it("applies pipelineId instead of accepting it and doing nothing", async () => {
+    // `pipelineId` is accepted by dealPatchSchema (via dealCreateSchema.partial)
+    // and typed on DealInput, but updateDeal never read it: PATCH {pipelineId}
+    // answered 200 and left the deal where it was. Silently succeeding at
+    // nothing is worse than refusing.
+    //
+    // Mutation: drop `pipelineId` from applyStageMove's update data → red.
+    const dealUpdate = vi.fn().mockResolvedValue({});
+    const activityCreate = vi.fn().mockResolvedValue({});
+    const prisma = {
+      crmDeal: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce(existingDeal())
+          .mockResolvedValue(fullDealRow({ pipelineId: "p2", stageId: "s7" })),
+        update: dealUpdate,
+      },
+      crmPipeline: {
+        findUnique: async () => ({
+          id: "p2",
+          name: "Renewals",
+          isDefault: false,
+          sortOrder: 1,
+          isArchived: false,
+          // Lowest-ordered OPEN stage wins, same rule createDeal uses — so a
+          // pipeline whose first column is a triage bucket does not swallow it.
+          stages: [
+            stage({ id: "s9", pipelineId: "p2", name: "Lost", kind: "LOST", sortOrder: 0 }),
+            stage({ id: "s7", pipelineId: "p2", name: "Due", kind: "OPEN", sortOrder: 1 }),
+          ],
+        }),
+      },
+      crmPipelineStage: {
+        findUnique: async () => stage({ id: "s7", pipelineId: "p2", name: "Due", kind: "OPEN" }),
+      },
+      crmActivity: { create: activityCreate },
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ crmDeal: { update: dealUpdate }, crmActivity: { create: activityCreate } }),
+      ),
+    } as never;
+
+    await updateDeal(prisma, "d1", { pipelineId: "p2" }, "user-1");
+
+    // The stage-move write carries BOTH halves. A deal whose stageId belongs to
+    // a different pipeline than its pipelineId is the one state this model must
+    // never reach, so neither may be written without the other.
+    const moveData = dealUpdate.mock.calls[0][0].data;
+    expect(moveData.pipelineId).toBe("p2");
+    expect(moveData.stageId).toBe("s7");
+    expect(activityCreate.mock.calls[0][0].data.toStageId).toBe("s7");
+  });
+
+  it("validates a named stage against the pipeline being moved TO", async () => {
+    // Sending {pipelineId, stageId} together used to fail with a bewildering
+    // INVALID_STAGE, because moveDealStage checked the stage against the deal's
+    // UNCHANGED pipeline. The stage is valid — it just belongs to the pipeline
+    // the caller is moving into.
+    //
+    // Mutation: pass `existing.pipelineId` to requireStageInPipeline in the
+    // cross-pipeline branch → red.
+    const dealUpdate = vi.fn().mockResolvedValue({});
+    const prisma = {
+      crmDeal: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce(existingDeal())
+          .mockResolvedValue(fullDealRow({ pipelineId: "p2", stageId: "s7" })),
+        update: dealUpdate,
+      },
+      crmPipeline: {
+        findUnique: async () => ({
+          id: "p2",
+          name: "Renewals",
+          isDefault: false,
+          sortOrder: 1,
+          isArchived: false,
+          stages: [stage({ id: "s7", pipelineId: "p2", kind: "OPEN" })],
+        }),
+      },
+      crmPipelineStage: {
+        findUnique: async () => stage({ id: "s7", pipelineId: "p2", name: "Due" }),
+      },
+      crmActivity: { create: vi.fn().mockResolvedValue({}) },
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ crmDeal: { update: dealUpdate }, crmActivity: { create: vi.fn() } }),
+      ),
+    } as never;
+
+    await expect(
+      updateDeal(prisma, "d1", { pipelineId: "p2", stageId: "s7" }, null),
+    ).resolves.toBeDefined();
+    expect(dealUpdate.mock.calls[0][0].data.stageId).toBe("s7");
   });
 });
 
