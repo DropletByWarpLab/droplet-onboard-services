@@ -6,7 +6,8 @@ import { mutate } from "swr";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { EmptyBlock } from "@/components/projects/bits";
 import { useAuth } from "@/lib/auth";
-import { setAppModuleEnabled } from "@/lib/api";
+import { setAppModuleEnabled, type AppCapabilities } from "@/lib/api";
+import { APP_CAPABILITY_DEFAULTS } from "@/lib/hooks/useAppCapabilities";
 
 /**
  * WARP-2558 — the honest "module off" state for /customers.
@@ -44,11 +45,16 @@ export function CrmDisabled(): JSX.Element {
       // Merge rather than replace: the capabilities payload carries `projects`
       // and `contacts` too, and writing `{ crm: true }` alone would blank them
       // for every other reader of this cache key until the next probe.
+      //
+      // The shape and the pre-probe fallbacks are both imported rather than
+      // re-declared — a local `{ projects, crm, contacts }` type and a
+      // hand-copied `?? true` / `?? false` are two ways for this component to
+      // drift from the contract the hook actually serves.
       await mutate(
         "/api/capabilities",
-        (prev: { projects: boolean; crm: boolean; contacts: boolean } | undefined) => ({
-          projects: prev?.projects ?? true,
-          contacts: prev?.contacts ?? false,
+        (prev: AppCapabilities | undefined): AppCapabilities => ({
+          ...APP_CAPABILITY_DEFAULTS,
+          ...prev,
           crm: true,
         }),
         { revalidate: false },

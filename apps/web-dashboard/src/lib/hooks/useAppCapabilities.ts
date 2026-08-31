@@ -17,7 +17,8 @@ import { fetchAppCapabilities, type AppCapabilities } from "../api";
  * or version skew can never make a shipping surface vanish.
  *
  * The posture is now PER-FLAG rather than one rule for the object; see
- * DEFAULTS below for why the two WARP-2545/2038 flags go the other way.
+ * APP_CAPABILITY_DEFAULTS below for why the two WARP-2545/2038 flags go the
+ * other way.
  */
 /**
  * WARP-2545 — the default is per-flag, not one posture for the object.
@@ -34,7 +35,11 @@ import { fetchAppCapabilities, type AppCapabilities } from "../api";
  * removed for Projects; opening these by default would reintroduce it. A
  * surface that has never been on cannot vanish.
  */
-const DEFAULTS: AppCapabilities = { projects: true, crm: false, contacts: false };
+export const APP_CAPABILITY_DEFAULTS: AppCapabilities = {
+  projects: true,
+  crm: false,
+  contacts: false,
+};
 
 export function useAppCapabilities(): AppCapabilities {
   const { data } = useSWR<AppCapabilities>(
@@ -44,10 +49,10 @@ export function useAppCapabilities(): AppCapabilities {
       // Module state changes only when the box is reconfigured; match the
       // admin-capabilities cadence.
       refreshInterval: 600_000,
-      // A failing probe already resolves to DEFAULTS — don't hammer it.
+      // A failing probe already resolves to APP_CAPABILITY_DEFAULTS — don't hammer it.
       shouldRetryOnError: false,
     },
   );
 
-  return data ?? DEFAULTS;
+  return data ?? APP_CAPABILITY_DEFAULTS;
 }

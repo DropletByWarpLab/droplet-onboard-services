@@ -41,13 +41,22 @@ export interface AppCapabilities {
    *  enabled per the module-toggles layer) on this box. */
   projects: boolean;
   /**
-   * WARP-2545 — the CRM sub-tabs on the Projects page. Reported through the
-   * SAME effective-set read as `projects`, which means the registry's
-   * `requires: "projects"` edge is already applied: `getEffectiveModuleIds`
-   * runs `satisfiedModuleIds`, so a box with CRM enabled and Projects off
-   * answers `crm: false` here without this route knowing the dependency
-   * exists. Re-deriving it (`crm && projects`) would be a second copy of the
-   * edge, free to drift from the one the gate enforces.
+   * WARP-2558 (ADR-044) — the CRM's own surface at /customers. Reported
+   * through the SAME effective-set read as `projects`, and that is the whole
+   * contract: this route applies whatever edges the registry declares and
+   * declares none of its own.
+   *
+   * As of WARP-2558 the registry's `crm` entry has NO `requires: "projects"`
+   * edge — the CRM stopped borrowing the Projects page and got /customers, so
+   * a box with CRM enabled and Projects off is a supported shape (the dental
+   * box: customers, no PM) and answers `crm: true` here. `capabilities.test.ts`
+   * pins exactly that case.
+   *
+   * Re-deriving the old edge here (`crm && projects`) would be a second copy
+   * of a dependency the registry no longer has — it would silently recouple
+   * the two modules this route just decoupled. If an edge is ever wanted
+   * again, it belongs in `module-registry.ts` where `satisfiedModuleIds`
+   * applies it, never in this file.
    */
   crm: boolean;
   /** WARP-2038 — the /contacts surface. Off until that ticket builds it; the
@@ -75,8 +84,11 @@ export function createCapabilitiesRouter(
     try {
       const effective = await getEffectiveModuleIds(prisma, cfg);
       projects = effective.has("projects");
-      // Already dependency-resolved by `satisfiedModuleIds` inside
-      // getEffectiveModuleIds — see the note on AppCapabilities.crm.
+      // Whatever edges the registry declares are already applied by
+      // `satisfiedModuleIds` inside getEffectiveModuleIds; the `crm` entry
+      // declares none since WARP-2558, so this is a straight read and
+      // CRM-on/Projects-off answers true. Do not re-derive — see the note on
+      // AppCapabilities.crm.
       crm = effective.has("crm");
       contacts = effective.has("contacts");
     } catch (e) {
