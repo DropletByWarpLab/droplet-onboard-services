@@ -14,6 +14,10 @@
 import type { PrismaClient } from "@prisma/client";
 import { syncCalendarSource } from "./caldav.client.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
+// WARP-2022 — the registration-time half of the SSRF guard. The fetch-time
+// half lives in caldav.client.ts; both call the same module so there is one
+// rule table, not two that can drift.
+import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("calendar");
@@ -132,6 +136,12 @@ export interface SourceInput {
   username?: string | null;
   password?: string | null;
   syncIntervalSec?: number;
+  /**
+   * WARP-2022 — owner/admin opt-in to a CalDAV server inside the boundary.
+   * The ROUTE decides who may set this; the service only records it. Skips
+   * the private-address rules only; scheme and userinfo still apply.
+   */
+  allowPrivateHost?: boolean;
 }
 
 export async function createSource(
@@ -142,6 +152,15 @@ export async function createSource(
   if (input.authMode === "basic" && !(input.username && input.password)) {
     throw new Error("basic auth requires both username and password");
   }
+  // WARP-2022 — refuse a destination inside the trust boundary at WRITE time,
+  // so a bad URL is a 400 when the user saves it rather than a mystery
+  // lastSyncError fifteen minutes later. Structural check only (no DNS): the
+  // resolving half runs at fetch time, so saving a source while the box is
+  // offline still works, and a name that starts resolving somewhere private
+  // later is still caught then.
+  const allowPrivateHost = input.allowPrivateHost === true;
+  assertOutboundUrlAllowed(input.url, { allowPrivateHost });
+
   return prisma.calendarSource.create({
     data: {
       userId,
@@ -151,6 +170,7 @@ export async function createSource(
       username: input.username ?? null,
       passwordEnc: input.password ? encryptSecret(input.password) : null,
       syncIntervalSec: Math.max(60, Math.min(86400, input.syncIntervalSec ?? 900)),
+      allowPrivateHost,
     },
   });
 }
@@ -168,6 +188,10 @@ export async function listSources(prisma: PrismaClient, userId: string) {
     authMode: r.authMode,
     username: r.username,
     syncIntervalSec: r.syncIntervalSec,
+    // WARP-2022 — the panel has to be able to say "this one is allowed to
+    // reach the LAN", otherwise the exemption is invisible to the owner who
+    // granted it.
+    allowPrivateHost: r.allowPrivateHost === true,
     lastSyncAt: r.lastSyncAt,
     lastSyncError: r.lastSyncError,
     createdAt: r.createdAt,
@@ -219,6 +243,10 @@ export async function syncSource(
     authMode: source.authMode as "none" | "basic",
     username: source.username,
     password,
+    // WARP-2022 — `=== true` is the fail-closed comparison. This is the path
+    // the background poller drives, so a row whose column is absent (read
+    // back before a client regen) or null must be treated as NOT exempt.
+    allowPrivateHost: source.allowPrivateHost === true,
   });
   if (!result.ok) {
     await prisma.calendarSource.update({

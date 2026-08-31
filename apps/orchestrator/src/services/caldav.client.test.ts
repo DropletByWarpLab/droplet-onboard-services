@@ -16,7 +16,9 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 // The guard resolves hostnames, so every test that expects a request to be
 // ALLOWED needs a resolver answer. Default: a public address, overridden
 // per-test where the point is that the name resolves somewhere private.
-const lookup = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+const lookup = vi.fn(async (..._args: unknown[]) => [
+  { address: "93.184.216.34", family: 4 },
+]);
 vi.mock("node:dns/promises", () => ({
   lookup: (...args: unknown[]) => lookup(...args),
   default: { lookup: (...args: unknown[]) => lookup(...args) },
@@ -112,9 +114,17 @@ describe("syncCalendarSource — <calendar-data> entity decode", () => {
 // WARP-2022 — SSRF guard
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** A fetch that must never be reached. Any call is the defect. */
+/** A fetch that must never be reached. Any call is the defect.
+ *
+ *  The unused parameters are load-bearing for TYPES, not behaviour: vi.fn()
+ *  infers its signature from the implementation, so an implementation that
+ *  ignores its arguments records calls typed `[]` and makes
+ *  `spy.mock.calls[0][1]` a compile error — exactly the inspection these
+ *  tests rely on. */
 function sentinelFetch() {
-  const spy = vi.fn(async () => new Response("SHOULD NEVER BE REACHED", { status: 200 }));
+  const spy = vi.fn(async (_input: unknown, _init?: unknown) =>
+    new Response("SHOULD NEVER BE REACHED", { status: 200 }),
+  );
   vi.stubGlobal("fetch", spy);
   return spy;
 }
@@ -203,7 +213,7 @@ describe("WARP-2022 — DNS re-check on the fetch path", () => {
 
 describe("WARP-2022 — redirects are re-validated, not followed blindly", () => {
   it("refuses a 302 into private space and never dials the second hop", async () => {
-    const spy = vi.fn(async () =>
+    const spy = vi.fn(async (_input: unknown, _init?: unknown) =>
       new Response(null, {
         status: 302,
         headers: { location: "http://10.0.0.5/internal" },

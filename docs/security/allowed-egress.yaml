@@ -776,6 +776,40 @@ entries:
     review_by: 2027-07-04
     code_refs: [services/email-indexer/idle.py, services/email-indexer/outbound.py]
 
+  - id: user-calendar-servers
+    kind: dynamic
+    service: orchestrator
+    config_key: CalendarSource.url (per subscription row, user-registered)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      The user's own CalDAV server or public ICS feed for the calendar
+      subscriptions they register — inherently user-directed egress of their
+      own calendar. Same shape as user-mail-servers above: the destination is
+      a row in the database, so there is no hostname to write down and no
+      static entry could cover it. Fetched on demand via
+      POST /api/calendar/sources/:id/sync and on a recurring poll by
+      services/reminders-poller.ts.
+
+      THE ENFORCEMENT IS IN CODE, not here (WARP-2022). The orchestrator can
+      reach the LAN, the Docker network and localhost, so an unconstrained
+      user-supplied URL is an SSRF primitive rather than ordinary egress.
+      lib/outbound-url-guard.ts refuses non-http(s) schemes, credentials in
+      the authority, and the whole inside-the-boundary address space —
+      resolving the hostname and re-checking every answer — at BOTH
+      registration time and fetch time, including on each redirect hop.
+      Reaching a private destination requires an owner/admin to set the
+      explicit CalendarSource.allowPrivateHost column on that one source,
+      which is what makes a self-hosted Nextcloud/Radicale on the box's own
+      LAN legitimate without making the metadata endpoint reachable.
+    ticket: WARP-2022
+    added: 2026-08-31
+    review_by: 2027-08-31
+    code_refs:
+      - apps/orchestrator/src/lib/outbound-url-guard.ts
+      - apps/orchestrator/src/services/caldav.client.ts
+      - apps/orchestrator/src/services/calendar.service.ts
+
   - id: sso-custom-issuer
     kind: dynamic
     service: orchestrator
