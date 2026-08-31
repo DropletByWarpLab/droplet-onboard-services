@@ -65,6 +65,7 @@ import { deriveWebAuthnRp } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 import { browserMarkerHeader } from "../lib/browser-context.js";
+import { authRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("webauthn-routes");
 
@@ -180,7 +181,11 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   const router = Router();
 
   // ── Registration: generate creation options ──
-  router.post("/auth/webauthn/register/options", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — `authRateLimit` (20/min/IP) on all four
+  // WebAuthn handlers: attestation / assertion verification is CPU-bound and
+  // the authenticate pair is a session-issuing path (same posture as
+  // /auth/login).
+  router.post("/auth/webauthn/register/options", authRateLimit, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string; username: string; displayName: string } }).user;
       if (!user) {
@@ -226,7 +231,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Registration: verify attestation + store the credential ──
-  router.post("/auth/webauthn/register/verify", async (req, res, next) => {
+  router.post("/auth/webauthn/register/verify", authRateLimit, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string } }).user;
       if (!user) {
@@ -320,7 +325,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
   const router = Router();
 
   // ── Authentication: generate assertion options ──
-  router.post("/auth/webauthn/authenticate/options", async (req, res, next) => {
+  router.post("/auth/webauthn/authenticate/options", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(503).json({ error: "Directory unavailable" });
@@ -346,7 +351,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Authentication: verify assertion + issue the session ──
-  router.post("/auth/webauthn/authenticate/verify", async (req, res, next) => {
+  router.post("/auth/webauthn/authenticate/verify", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(503).json({ error: "Directory unavailable" });

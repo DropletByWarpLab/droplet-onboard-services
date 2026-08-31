@@ -686,6 +686,51 @@ class _MockAp:
         }
 
 
+class _MockDiscovery:
+    """In-memory non-Droplet mDNS records, seeded via `/discovery/_test_seed`.
+
+    WARP-2019 (scan-3). Mirrors `_MockAp._discovered`: production discovery is
+    multicast-driven and cannot be simulated in a test, so scan-4's scanner
+    poller drives this instead of needing a real eSCL device on the wire.
+    Records are stored already in `DiscoveryApi.browse_service()` shape.
+    """
+
+    def __init__(self) -> None:
+        # service_type -> hostname -> record
+        self._records: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def browse_service(self, service_type: str) -> list[dict[str, Any]]:
+        return [
+            dict(record)
+            for _, record in sorted(self._records.get(service_type, {}).items())
+        ]
+
+    def seed(
+        self,
+        service_type: str,
+        *,
+        hostname: str,
+        port: Optional[int] = None,
+        last_ip: Optional[str] = None,
+        txt: Optional[dict[str, str]] = None,
+    ) -> None:
+        # Blank values are omitted here too, so the seam can't produce a record
+        # shape the real parser would never emit.
+        kv = {k: v for k, v in (txt or {}).items() if v}
+        record: dict[str, Any] = {
+            "service_type": service_type,
+            "hostname": hostname,
+            "txt": kv,
+        }
+        if uuid := kv.get("uuid"):
+            record["uuid"] = uuid
+        if port is not None:
+            record["port"] = port
+        if last_ip:
+            record["last_ip"] = last_ip
+        self._records.setdefault(service_type, {})[hostname] = record
+
+
 class _MockUci:
     """Minimal uci mock — safe_apply happy path only."""
 
@@ -742,6 +787,7 @@ class MockRouter:
         self.uci = _MockUci()
         self.vpn = _MockVpn()
         self.ap = _MockAp()  # WARP-446
+        self.discovery = _MockDiscovery()  # WARP-2019
         self.file = _MockFile()
 
     def session_info(self) -> dict[str, Any]:

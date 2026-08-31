@@ -16,14 +16,23 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+// WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
+// and the wire payload cannot disagree.
+import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
+  narrowToolsToScope,
   resolveToolAccessScope,
+  toolAllowedForTier,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
 } from "../services/tool-access.service.js";
+// WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
+// domain selection, so it sizes the tools[] the model actually receives.
+import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
+import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
@@ -45,7 +54,7 @@ import {
   resolveActiveChatModel,
   localModelIdentifiers,
 } from "../services/active-model.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import {
   decideCloudTurn,
   isLocalProvider,
@@ -217,6 +226,34 @@ function logPollutedAnswer(
       ...result.pollutedDiagnostics,
     }),
   );
+}
+
+/**
+ * WARP-2469 / WARP-2486 — scrub the interceptor's confirmation secret from
+ * a trace entry before the NON-STREAMING path persists the trace or returns
+ * it to the client.
+ *
+ * A WARP-2305 challenge carries its single-use token in `error.details`
+ * (nested under `interceptor` AND flat, for the WARP-640 chip), and the
+ * agent loop's trace holds the raw payload. The streaming path already
+ * egresses only an opaque `challengeId` (llm-agent.service.ts registers the
+ * challenge and never forwards the token); this closes the same hole on the
+ * blocking path, where the full trace rides both `liveToolCalls` (persisted)
+ * and the response body. Only an INTERCEPTOR challenge is scrubbed — a
+ * WARP-640 scene challenge's flat token is the client-facing "Approve & run"
+ * handle by design and passes through untouched.
+ */
+function scrubInterceptorChallenge(result: unknown): unknown {
+  const r = result as {
+    status?: unknown;
+    error?: { details?: { interceptor?: { outcome?: unknown } } };
+  } | null;
+  if (r?.status !== "confirmation_required") return result;
+  if (r.error?.details?.interceptor?.outcome !== "confirmation_required") {
+    return result;
+  }
+  const { details: _details, ...error } = r.error as Record<string, unknown>;
+  return { ...(r as Record<string, unknown>), error };
 }
 
 // /llm/chat accepts tool-role messages on replay so a client can resume a
@@ -1233,6 +1270,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           conversationId && assistantMessageId
             ? createFileCitationService(prisma)
             : undefined,
+        // WARP-2469 — the chat approval round-trip. The SAME instance the
+        // `POST /api/llm/confirm/:challengeId` handler above writes to: a
+        // second store would put the approval somewhere the loop never
+        // looks, which is exactly the mint-a-token-nobody-can-redeem
+        // failure `confirm-dispatcher-coverage.guard.test.ts` exists for.
+        approvals: chatApprovalStore,
       };
       // Carry the authenticated user.id (UUID, not username) onto every
       // citation insert so the related-chats route can scope by owner.
@@ -1698,26 +1741,81 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const interviewBlock = interviewActive
           ? INTERVIEW_CONDUCTOR_BLOCK
           : "";
-        // Serialize the effective tools[] the same way llm-agent.service.ts
-        // does, so the estimate reflects what the model actually receives:
-        // an explicit allowed set verbatim, otherwise the WARP-1424 default
-        // chat scope (registry minus chat-tool-scope.ts exclusions).
-        const effectiveTools = allowedForUser
+        // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
+        // default chat scope (registry minus chat-tool-scope.ts exclusions).
+        const pooledTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
             )
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
+        // WARP-2556 — the §3 scope, applied BEFORE selection narrows further.
+        //
+        // `narrowAllowedToolsForRole` returns `undefined` for a privileged role
+        // with no explicit `allowed_tools`, regardless of `toolAccessScope`, so
+        // `allowedForUser` alone does not carry the scope. The agent loop
+        // applies `inScope` unconditionally from `req.toolAccessScope` — so
+        // without this line an admin on a restrictive AccessRole gets an
+        // estimate sized against the FULL pool while a smaller set goes on the
+        // wire, which is the estimate/actual divergence WARP-2552 exists to
+        // close, reopened for one role+scope combination.
+        //
+        // WARP-2497 had this filter; the conflict resolution that merged
+        // WARP-2552's shared-helper estimate over it kept the better estimate
+        // and lost the scope narrowing with the version it replaced. Restored
+        // here, and `tool-selection.parity.test.ts` now runs a SCOPED fixture
+        // so an unscoped one cannot pass for coverage again.
+        //
+        // Through the SHARED helper, not an inline re-expression of the same
+        // rule: an inline copy here is what drifted out of step with the
+        // dispatch-side filter in the first place.
+        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
+        // WARP-2552 — but the pool is NOT what the model receives, and sizing
+        // it as though it were is the defect this fixes.
+        //
+        // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
+        // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
+        // which the route passes UNCONDITIONALLY — there is no path that ships
+        // the whole pool except an operator setting TOOL_SELECTION_MODE=off).
+        // The comment that used to sit here still claimed the estimate
+        // "reflects what the model actually receives"; it had been false since
+        // selection landed. Measured on a 16384 window: the estimator charged
+        // ~14,986 tokens of tool schemas on a turn that ships ~3,426 — an
+        // ~11.5K-token phantom on EVERY turn.
+        //
+        // The consequence was not theoretical. `degradeToFit` below drops the
+        // business block, then the persona block, once the estimate exceeds
+        // the window; with the phantom included, identity + tool guidance +
+        // the pool alone came to ~15,853 tokens against a 15,360 ceiling. So
+        // on any box carrying durable memory facts, persona and business were
+        // being dropped from the system prompt on every turn — to make room
+        // for schemas that were never sent.
+        //
+        // Under `off` the pool genuinely IS the wire payload, so it is sized
+        // whole. `effectiveAdvertisedToolNames` is the SAME function the loop
+        // uses, so the two cannot drift; `tool-selection.parity.test.ts` pins
+        // that. Runtime-registered remote tools are not in this estimate — the
+        // route has no registry access — which is unchanged from before; the
+        // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
+        // the fully assembled advertisement.
+        const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
+          mode: config.TOOL_SELECTION_MODE,
+          messages: agentMessages,
+          priorToolNames,
+          pool: effectiveTools.map((t) => t.name),
+        });
         const toolSchemasJson = JSON.stringify(
-          effectiveTools.map((t) => ({
-            type: "function" as const,
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.inputSchema,
-            },
-          })),
+          effectiveTools
+            .filter((t) => advertisedNamesForEstimate.has(t.name))
+            .map((t) => ({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.inputSchema,
+              },
+            })),
         );
         // Everything already spliced onto agentMessages (pins, attachments,
         // history) counts toward the window; serialize it as one blob.
@@ -2019,6 +2117,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
+        // WARP-2486 — scrub interceptor confirmation secrets from the
+        // trace BEFORE anything downstream reads it: `liveToolCalls`
+        // (persisted below) and the `res.json` body both carry
+        // `result.trace`.
+        result = {
+          ...result,
+          trace: result.trace.map((t) => ({
+            ...t,
+            result: scrubInterceptorChallenge(t.result),
+          })),
+        };
         logBlankAnswer(result, conversationId, assistantMessageId);
         logPollutedAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
@@ -2476,6 +2585,143 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   //
   // The `inputSchema → parameters` rename mirrors the OpenAI
   // function-calling shape callers historically expected.
+  // ── WARP-2469 — the chat approval round-trip ──────────────────────
+  //
+  // WARP-2305's interceptor can REFUSE a write and mint a token bound to
+  // it. This is the only route that turns a human's thumbs-up into that
+  // token. Without it, the 8 registry tools that never had a handler-side
+  // check, every connector write tool, and every WARP-320 remote tool
+  // fail closed in chat with no path to approval.
+  //
+  // RBAC, two layers, both required:
+  //
+  //  1. AT REGISTRATION — `requireRole` excludes `guest` and every
+  //     service principal. A guest gets 403 *and* a `recordAccessDenied`
+  //     policy-violation row, from the shared guard rather than an
+  //     inlined role compare (WARP-1062: local guards that skip the row
+  //     deny silently, which is how an ACL breach becomes invisible).
+  //
+  //  2. IN THE HANDLER — `toolAllowedForTier` re-checks the CALLER's tier
+  //     against THIS tool. Registration cannot express "family may
+  //     approve a read-ish confirming tool but not a write", because the
+  //     tool is only known once the challenge is loaded. Same predicate
+  //     the chat dispatch path uses, so approval and execution cannot
+  //     disagree about what a tier may do.
+  //
+  // The response body deliberately does NOT carry the bound token. The
+  // agent loop that redeems it runs server-side on `/api/llm/chat` for
+  // EVERY caller — the dashboard and a raw API client alike — and claims
+  // the grant from the approval store itself, attaching the token via
+  // `_meta` when the model re-issues the call (see
+  // `chat-approval.service.ts`). No client ever needs the secret, so
+  // returning it would hand a live single-use write capability to
+  // whatever holds the HTTP response, for nothing.
+  const confirmDecisionSchema = z.object({
+    decision: z.enum(["approve", "deny"]),
+  });
+
+  router.post(
+    "/llm/confirm/:challengeId",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const user = (req as AuthedRequest).user;
+        const username = user?.username;
+        if (!username) {
+          // Defense in depth: `requireRole` has already established a
+          // role, but a principal with no username owns no challenge and
+          // must not be able to approve one.
+          recordAccessDenied(req, "confirm-no-username");
+          res.status(403).json({ error: "Forbidden: no user on session" });
+          return;
+        }
+
+        const parsed = confirmDecisionSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "decision must be 'approve' or 'deny'" });
+          return;
+        }
+
+        const challengeId = req.params.challengeId;
+        const challenge = chatApprovalStore.get(challengeId);
+        if (!challenge) {
+          res.status(404).json({ error: "Unknown or expired challenge" });
+          return;
+        }
+
+        // Layer 2. A `family` caller may not approve a write tool, even
+        // though the route admits the role.
+        if (!toolAllowedForTier(challenge.tool, user?.role)) {
+          recordAccessDenied(req, "confirm-tool-tier");
+          res.status(403).json({ error: "Forbidden: role not permitted for this tool" });
+          return;
+        }
+
+        if (parsed.data.decision === "deny") {
+          const denied = chatApprovalStore.deny(challengeId, username);
+          if (!denied.ok) {
+            res
+              .status(denied.reason === "expired" ? 410 : 409)
+              .json({ status: denied.reason, challengeId });
+            return;
+          }
+          // A refusal is a security-relevant decision and is audited with
+          // the same PHI-free shape the interceptor's own rows use: tool
+          // name and outcome, no arguments, and no field one could be put
+          // in.
+          await recordActivity({
+            kind: "tool_call",
+            severity: "warn",
+            sourceIcon: "shield-off",
+            what: `${denied.tool} refused by user`,
+            sub: `for ${username}`,
+            refs: {
+              name: denied.tool,
+              confirmation: "user_denied",
+              userId: username,
+              ticket: "WARP-2469",
+            },
+            actor: actorFromRequest(req),
+          });
+          res.json({ challengeId, status: "denied", tool: denied.tool });
+          return;
+        }
+
+        const approved = chatApprovalStore.approve(challengeId, username);
+        if (!approved.ok) {
+          res
+            .status(approved.reason === "expired" ? 410 : 409)
+            .json({ status: approved.reason, challengeId });
+          return;
+        }
+
+        await recordActivity({
+          kind: "tool_call",
+          severity: "info",
+          sourceIcon: "shield-check",
+          what: `${approved.tool} approved by user`,
+          sub: `for ${username}`,
+          refs: {
+            name: approved.tool,
+            confirmation: "user_approved",
+            userId: username,
+            ticket: "WARP-2469",
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.json({
+          challengeId,
+          status: "approved",
+          tool: approved.tool,
+          expiresAt: approved.expiresAt,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   router.get("/llm/tools", async (req, res, next) => {
     try {
       const tools = await mcpClient.listTools();

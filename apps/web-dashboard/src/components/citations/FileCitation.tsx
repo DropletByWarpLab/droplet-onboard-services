@@ -16,6 +16,8 @@ import { iconForMime } from "@/lib/mime-icons";
 import type { CitationHit } from "./CitationCard";
 import { relevancePct } from "@/lib/relevance";
 
+import type { JSX } from "react";
+
 export interface FileCitationProps {
   hit: CitationHit;
 }

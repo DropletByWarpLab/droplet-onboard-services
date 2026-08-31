@@ -45,6 +45,7 @@ import {
   scheduleDayBounds,
   type Connector,
 } from "@droplet/erp-connector";
+import { cloudProviderIds, providerDescriptor } from "@droplet/shared-types";
 import { createLogger } from "../lib/logger.js";
 import { ErpError } from "./erp-error.js";
 import {
@@ -78,6 +79,17 @@ const GRANTABLE_PHI_READ_ROLES = new Set(["family"]);
 const WRITE_ROLES = new Set(["owner", "admin"]);
 /** The registered write-command names — the validation allow-list (brief §11.3). */
 const WRITE_COMMAND_NAMES = new Set(WRITE_COMMANDS.map((c) => c.name));
+/**
+ * Roles that may read a cloud business dataset (WARP-2497).
+ *
+ * Admin-tier, matching `WRITE_ROLES` rather than the PHI ladder's
+ * family-and-up: revenue, pipeline and campaign data is not something a
+ * household member on a shared box should reach by typing a question, and
+ * there is no connector-grant axis for the cloud providers yet to widen it
+ * with. When one lands (the §5.4 connectors axis already models per-provider
+ * grants) this is the single set to relax.
+ */
+const CLOUD_DATASET_READ_ROLES = new Set(["owner", "admin"]);
 
 export interface ErpUser {
   id: string;
@@ -223,7 +235,70 @@ function reasonForConnectorError(err: unknown, phase: string): string {
   return "ERROR";
 }
 
+/**
+ * The cloud datasets the assistant may read, and the NAMED read query each one
+ * runs (WARP-2497).
+ *
+ * ## Why a map and not an inversion of `READ_QUERIES`
+ *
+ * `dependsOnTables` would let this be derived, and for twenty of the
+ * twenty-three names the derivation is unambiguous. It is not for `patient`,
+ * which three queries depend on (`find_patient`, `get_patient`,
+ * `get_recall_due`), so a generic inversion has to pick a winner — and picking
+ * one silently is precisely the "guessing state" this codebase forbids. An
+ * explicit table also makes the exposure decision reviewable: what the
+ * assistant can read from a cloud account is this list, not "whatever the
+ * registry happens to contain after the next connector lands".
+ *
+ * ## Why these ten
+ *
+ * They are exactly the datasets the three shipped cloud tracks declare in
+ * `servesDatasets` (Stripe `invoice`/`charge`, HubSpot's five, Mailchimp's
+ * three). The practice-management datasets are deliberately ABSENT: those are
+ * PHI, they are reached through the dedicated `/erp/*` routes under
+ * `erpConnectorReadGate`'s O-2 grant machinery, and routing them through a
+ * chat tool would move a PHI decision into a keyword regex.
+ *
+ * The tool's own `enum` in `@droplet/tools-core` mirrors these keys, and
+ * `cloud-dataset-tool.e2e.test.ts` asserts the two agree — a dataset added
+ * here and not there is registered-but-unreachable, which is the bug class
+ * `TOOL_ROUTES` exists to prevent.
+ */
+export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
+  // payments / accounting — Stripe
+  charge: "get_recent_charges",
+  invoice: "get_open_invoices",
+  // CRM — HubSpot
+  contact: "find_contact",
+  company: "get_company",
+  deal: "get_deals_by_stage",
+  ticket: "get_tickets_by_status",
+  engagement: "get_engagements",
+  // marketing — Mailchimp
+  campaign: "get_campaign_performance",
+  audience_member: "get_audience_members",
+  ecommerce_order: "get_ecommerce_orders",
+};
+
+/** The result of a cloud dataset read. `connected` and `reason` carry the same
+ *  honest-degradation contract as every other read on this service: a
+ *  capability gap reports `connected: true` with a reason, never an empty
+ *  success that reads as "you have no charges". */
+export interface DatasetQueryResult {
+  connected: boolean;
+  reason?: string;
+  dataset: string;
+  /** The provider the rows came from, or null when nothing is configured.
+   *  Named so the assistant can attribute an answer to an account. */
+  provider: string | null;
+  rows: unknown[];
+}
+
 export interface ErpService {
+  queryDataset(
+    input: { dataset: string; params: Record<string, unknown> },
+    user: ErpUser,
+  ): Promise<DatasetQueryResult>;
   getSchedule(input: { date: string }, user: ErpUser): Promise<ScheduleResult>;
   searchPatients(input: { query: string }, user: ErpUser): Promise<PatientsResult>;
   getPatient(patientId: string, user: ErpUser): Promise<PatientResult>;
@@ -299,6 +374,36 @@ export function createErpService(
     // No connected row anywhere: fall back to whichever exists, preserving the
     // historical API-before-SQL ordering and appending export-drop after it.
     return api ?? drop ?? sql;
+  }
+
+  /**
+   * The cloud connection that can answer for `dataset` (WARP-2497).
+   *
+   * Resolved through the provider REGISTRY rather than a hardcoded provider
+   * list, so a fourth cloud track becomes readable by declaring its datasets
+   * in its descriptor — there is no site here to forget. The descriptor is
+   * reconciled against the connector's own `servesDatasets` by
+   * `erp-provider.descriptor.test.ts`, so "the descriptor says so" and "the
+   * track will actually serve it" cannot drift apart.
+   *
+   * A CONNECTED row wins, exactly as `eaglesoftRow()` decides. Otherwise the
+   * first configured row is returned so the caller degrades with that row's
+   * real reason (PROVISIONING, NEEDS_RECONNECT) instead of the flat
+   * NOT_CONFIGURED that a null would produce — "reconnect Stripe" and "you
+   * have no Stripe" are different sentences and the owner can only act on one.
+   */
+  async function cloudRowForDataset(dataset: string): Promise<ConnRow | null> {
+    const providers = cloudProviderIds().filter((id) =>
+      (providerDescriptor(id)?.datasets ?? []).includes(dataset as never),
+    );
+    if (providers.length === 0) return null;
+    const connected = (await prisma.integrationConnection.findFirst({
+      where: { provider: { in: providers as string[] }, status: "CONNECTED" },
+    })) as ConnRow | null;
+    if (connected) return connected;
+    return (await prisma.integrationConnection.findFirst({
+      where: { provider: { in: providers as string[] } },
+    })) as ConnRow | null;
   }
 
   /** The export-drop connection row, preferring a CONNECTED one. */
@@ -488,6 +593,42 @@ export function createErpService(
         reason: r.reason,
         totalBalance: row?.total_balance ?? null,
         accountCount: row?.account_count ?? null,
+      };
+    },
+
+    async queryDataset({ dataset, params }, user) {
+      // NOT `assertCanReadPhi`. These are business records — money, pipeline,
+      // campaigns — and the PHI ladder is about patients. Reusing it would
+      // have been the easy line to write and would have made a Stripe charge
+      // inherit a dental patient's access rules, which is neither stricter nor
+      // looser in a way anyone could reason about, just wrong.
+      if (!CLOUD_DATASET_READ_ROLES.has(user.role)) throw ErpError.forbidden();
+
+      // An unrecognised dataset is a VALIDATION error, not an empty result.
+      // The tool advertises a closed enum, so anything else means the model
+      // invented a name — and answering "no rows" to "how many refunds did we
+      // issue" when `refund` is simply not wired would be a confident false
+      // statement about money.
+      const readName = CLOUD_DATASET_READS[dataset];
+      if (!readName) throw ErpError.validation(`unknown dataset "${dataset}"`);
+
+      const conn = await cloudRowForDataset(dataset);
+      const r = await runReadOrBlocked(conn, readName, params);
+      // Audit the SHAPE, never the values. `params` can carry a customer name
+      // or an email address (`find_contact`'s `query`), and §14's rule is that
+      // an audit row proves an access happened without becoming a second copy
+      // of the data. Keys only — asserted in erp.service.dataset.test.ts.
+      await audit(conn, user.id, `read:dataset:${dataset}`, {
+        dataset,
+        read: readName,
+        paramKeys: Object.keys(params).sort(),
+      });
+      return {
+        connected: r.connected,
+        reason: r.reason,
+        dataset,
+        provider: conn?.provider ?? null,
+        rows: r.rows,
       };
     },
 

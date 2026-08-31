@@ -15,6 +15,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import type { ToolConfirmationHandle } from "../types/sse-events.js";
 
 /**
  * Title length cap. Titles auto-generate from the first user message; we
@@ -41,11 +42,14 @@ export interface PersistedToolCall {
    * its TTL, and a consumed/expired token is rejected with 403 by
    * `approveScene`, so replay-on-reload is safe. (review #497)
    */
-  confirmation?: {
-    kind: string;
-    sceneId?: string;
-    confirmationToken: string;
-  };
+  /**
+   * WARP-2469 — the same shape the wire uses (`ToolConfirmationHandle`),
+   * so a persisted chip and a live one can never disagree. An interceptor
+   * challenge (`kind: "tool_confirmation"`) persists its `challengeId`
+   * and no token: reloading a conversation restores an approvable prompt
+   * whose authority still lives entirely in the orchestrator.
+   */
+  confirmation?: ToolConfirmationHandle;
 }
 
 export interface PersistedMessageInput {

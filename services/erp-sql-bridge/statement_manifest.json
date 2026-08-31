@@ -1,0 +1,100 @@
+{
+  "_comment": [
+    "WARP-2540 — registered statement shapes for the ERP SQL bridge.",
+    "One skeleton per registered statement (per SET-width for writes), as",
+    "emitted by the canonical registries in @droplet/erp-connector",
+    "(src/read-queries.ts, src/write-commands.ts), normalized by",
+    "allowlist.normalize_statement: double-quoted identifiers masked to <id>,",
+    "whitespace collapsed. Identifiers are masked because the registries",
+    "resolve PHYSICAL identifiers through the per-practice introspected schema",
+    "map — the template is the invariant, the names are not.",
+    "Pinned to the registries by",
+    "services/erp-connector/__tests__/statement-manifest-sync.test.ts:",
+    "edit a registry, re-run that suite, and copy its printed manifest here."
+  ],
+  "reads": {
+    "get_schedule_today": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id>"
+    ],
+    "find_patient": [
+      "SELECT <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
+    ],
+    "get_ar_summary": [
+      "SELECT COUNT(<id>) AS account_count, SUM(<id>) AS total_balance FROM <id>.<id>"
+    ],
+    "get_patient": [
+      "SELECT <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ?"
+    ],
+    "get_recall_due": [
+      "SELECT <id>, <id>, <id> FROM <id>.<id> ORDER BY <id>, <id>"
+    ],
+    "get_open_invoices": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> <> 0 ORDER BY <id>, <id>"
+    ],
+    "get_open_bills": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> <> 0 ORDER BY <id>, <id>"
+    ],
+    "get_ap_summary": [
+      "SELECT COUNT(<id>) AS vendor_count, SUM(<id>) AS total_balance FROM <id>.<id>"
+    ],
+    "get_recent_charges": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_refunds": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_payouts": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_processing_fees": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_subscriptions_by_status": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id>, <id>"
+    ],
+    "find_contact": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
+    ],
+    "get_company": [
+      "SELECT <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ?"
+    ],
+    "get_deals_by_stage": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_tickets_by_status": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id>, <id>"
+    ],
+    "get_recent_orders": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_low_stock_products": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> <= ? ORDER BY <id>, <id>"
+    ],
+    "find_customer": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
+    ],
+    "get_campaign_performance": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_audiences": [
+      "SELECT <id>, <id>, <id>, <id>, <id> FROM <id>.<id> ORDER BY <id> DESC, <id>"
+    ],
+    "get_engagements": [
+      "SELECT <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_audience_members": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? AND <id> = ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_ecommerce_orders": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ]
+  },
+  "writes": {
+    "reschedule_appointment": [
+      "UPDATE <id>.<id> SET <id> = ? WHERE <id> = ? AND <id> = ?",
+      "UPDATE <id>.<id> SET <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?",
+      "UPDATE <id>.<id> SET <id> = ?, <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?",
+      "UPDATE <id>.<id> SET <id> = ?, <id> = ?, <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?"
+    ]
+  }
+}

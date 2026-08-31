@@ -105,7 +105,14 @@ import {
 } from "./routes/network-throughput.js";
 import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
-import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
+import {
+  initActivityRecorder,
+  recordActivity,
+  getActivityRecorder,
+} from "./services/activity.singleton.js";
+import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
+import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
+import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
 import { runNightlyChainVerification } from "./services/audit-verify.service.js";
@@ -1168,6 +1175,113 @@ async function main() {
     runOnce: () => tlsIssuance.runOnce(),
     logger,
   });
+
+  // WARP-2218 — connector sync. The escape this closes: BEFORE this leg
+  // existed, no connector sync was scheduled anywhere in the product, and
+  // `lastHealthyAt` — the column the hub renders as "last synced" — was
+  // written in exactly one place, inside `connect()`. A connection that
+  // succeeded in March and had served reads ever since still displayed its
+  // March timestamp. "Last synced" meant "last connected", which is a
+  // confidently wrong statement about how fresh a customer's money data is.
+  //
+  // Two legs, deliberately on different cadences:
+  //
+  //   incremental  reads from the persisted watermark. Frequent and cheap.
+  //   sweep        re-enumerates from the beginning and emits a drift report.
+  //                Rare and expensive.
+  //
+  // The sweep is not an optimisation to add later. Xero's `UpdatedDateUTC`
+  // does not fire on DueDate / SentToContact / contact-balance changes,
+  // HubSpot's Search API is eventually consistent, and Stripe does not
+  // guarantee event ordering — so the incremental path can report SUCCESS
+  // while silently missing records, which is worse than failing, because the
+  // owner has no way to find out. See `services/erp-sync/reconcile.ts`.
+  //
+  // Both carry a `lockKey`: `cron-runtime.service.ts:154` `withAdvisoryLock`
+  // pins acquire+release to one backend connection inside a `$transaction` and
+  // SKIPS the tick when another replica holds it. Without it a multi-instance
+  // box double-polls every vendor and burns a shared rate budget twice.
+  //
+  // Errors propagate naked to `safeRun`, matching every other cron leg in this
+  // file — swallowing them would zero the per-handler consecutiveFailures
+  // canary that downstream alerting reads.
+  const erpSyncRecorder = getActivityRecorder();
+  if (erpSyncRecorder) {
+    const erpSyncRunner = createErpSyncRunner({
+      prisma: prisma as never,
+      recorder: erpSyncRecorder,
+    });
+
+    // Read at BOOT, inside main() — never at module import. A schedule frozen
+    // at import is the `INFERENCE_RUNTIME` bug again: `docker restart` does not
+    // re-read `env_file`, so the operator changes the value, restarts, and
+    // nothing happens. Reading here means `up -d --force-recreate` is enough.
+    const erpTickMs = Number(process.env.DROPLET_ERP_SYNC_TICK_MS ?? 15 * 60 * 1000);
+    const erpSweepLegMs = Number(process.env.DROPLET_ERP_SYNC_SWEEP_LEG_MS ?? 60 * 60 * 1000);
+
+    // Per-box jitter, derived from device identity — NOT `Math.random()`.
+    // Xero's rate limit is app-wide and POOLED at 10,000 calls/min across
+    // every box we ship, which saturates at roughly 1,250 boxes syncing on the
+    // same minute. On-prem appliances otherwise align on round times, and that
+    // is a limit we neither control nor can raise per customer. Deriving the
+    // offset keeps the same box in the same slot across restarts, so an
+    // incident can be explained rather than shrugged at.
+    const deviceId = config.DROPLET_DEVICE_ID;
+
+    cronRuntime.scheduleInterval(
+      jitteredPeriodMs(erpTickMs, deviceId),
+      async () => {
+        await erpSyncRunner.registerCursors();
+        const out = await erpSyncRunner.runIncrementalTick();
+        if (out.cursorsClaimed > 0) {
+          logger.info(out, "erp connector sync tick");
+        }
+      },
+      { lockKey: "droplet:erp-connector-sync" },
+    );
+
+    // The sweep LEG runs hourly; whether any cursor is actually re-enumerated
+    // is gated inside the runner on the persisted `lastSweepAt` (24h default).
+    // Splitting it this way means a box that was powered off over its sweep
+    // window picks the work up within the hour instead of skipping a full day,
+    // while the expensive re-enumeration itself still happens only daily.
+    cronRuntime.scheduleInterval(
+      jitteredPeriodMs(erpSweepLegMs, `${deviceId}:sweep`),
+      async () => {
+        const out = await erpSyncRunner.runReconciliationSweep();
+        const drifted = out.reports.filter((r) => r.driftDetected);
+        if (drifted.length > 0) {
+          logger.warn(
+            { connections: drifted.length, totalMissed: drifted.reduce((n, r) => n + r.totalMissed, 0) },
+            "erp reconciliation sweep found records the incremental path missed",
+          );
+        }
+      },
+      { lockKey: "droplet:erp-connector-reconciliation" },
+    );
+
+    // WARP-2463 — retention for the sweep's STORED drift report.
+    //
+    // The sweep writes one row per (connection, entity) per pass, INCLUDING a
+    // clean pass, so the table grows on a fixed schedule forever and needs a
+    // trim by construction. Its own leg at 03:30 rather than a line in the
+    // 03:00 daily-purge handler: that handler runs every retention sweep on
+    // the box inside ONE 60 s advisory-lock transaction, and adding a table
+    // spends from the same budget (see audit-retention-purge.service.ts, which
+    // is mostly an argument about exactly that). 03:30 continues the 03:00 /
+    // 03:15 spacing that keeps the legs off each other's lock pool.
+    //
+    // Window read at BOOT, like the two schedules above — never at module
+    // import, so `up -d --force-recreate` is enough to change it.
+    registerErpDriftRetention(cronRuntime, prisma as never, {
+      retentionDays: config.DROPLET_ERP_DRIFT_RETENTION_DAYS,
+      onTrimmed: (result) => {
+        if (result.deleted > 0 || result.skipped) {
+          logger.info(result, "erp drift record retention trim");
+        }
+      },
+    });
+  }
 
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.

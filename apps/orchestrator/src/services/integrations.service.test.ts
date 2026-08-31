@@ -306,7 +306,7 @@ describe("integrations.service (WARP-1137, DB-independent)", () => {
     });
 
     it("enabling writes flips the explicit column and audits the actor", async () => {
-      const detail = await svc.setWriteEnabled(true, { actor: "user-1" });
+      const detail = await svc.setWriteEnabled({ actor: "user-1" }, "eaglesoft", true);
       expect(detail.writeEnabled).toBe(true);
       const audit = mock._state.auditLog.at(-1)!;
       expect(audit.actor).toBe("user-1");
@@ -314,8 +314,8 @@ describe("integrations.service (WARP-1137, DB-independent)", () => {
     });
 
     it("disabling writes flips the column back and audits", async () => {
-      await svc.setWriteEnabled(true, { actor: "user-1" });
-      const detail = await svc.setWriteEnabled(false, { actor: "user-2" });
+      await svc.setWriteEnabled({ actor: "user-1" }, "eaglesoft", true);
+      const detail = await svc.setWriteEnabled({ actor: "user-2" }, "eaglesoft", false);
       expect(detail.writeEnabled).toBe(false);
       const audit = mock._state.auditLog.at(-1)!;
       expect(audit.actor).toBe("user-2");

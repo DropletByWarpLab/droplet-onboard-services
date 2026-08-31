@@ -11,6 +11,7 @@ describe("list_smart_home_devices", () => {
       sendCommand: vi.fn(),
       discover: vi.fn(),
       commission: vi.fn(),
+      decommission: vi.fn(),
       getAuditLog: vi.fn(),
     };
     const ctx: ToolContext = {

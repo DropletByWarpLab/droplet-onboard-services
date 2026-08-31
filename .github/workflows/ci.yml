@@ -89,8 +89,30 @@ jobs:
       python-services: ${{ steps.plan.outputs.python-services }}
       python-matrix: ${{ steps.plan.outputs.python-matrix }}
       storage-suites: ${{ steps.plan.outputs.storage-suites }}
+      fips-suites: ${{ steps.plan.outputs.fips-suites }}
+      hadolint-suites: ${{ steps.plan.outputs.hadolint-suites }}
+      ship-check-suites: ${{ steps.plan.outputs.ship-check-suites }}
     steps:
       - uses: actions/checkout@v7
+
+      # WARP-2351 — customer setup-guide drift gate. Deliberately a STEP of
+      # this job rather than a leg of its own: `detect` is the only job that
+      # runs on every PR and every main push, and ci-summary already requires
+      # it to succeed, so this reports under the required check with no new
+      # leg, no matrix entry, no `paths:` widening and no new `pull_request:`
+      # trigger (docs/ci-cost-budget.md — CI spend is capped). It also has to
+      # be here for correctness, not only for cost: a docs-only PR triggers NO
+      # other leg at all, and a docs-only PR is exactly what this gate exists
+      # to catch. It runs in ~1s of an already-running job.
+      #
+      # What it closes: a cloud provider shipping with no customer setup
+      # guide, a guide losing one of its six required sections or a
+      # commercially load-bearing fact (Shopify's Grow-plan price, Xero's
+      # per-organisation charge and country list, Stripe's rk_ prefix
+      # contract, HubSpot's super-admin requirement) to a well-meaning copy
+      # pass, and a rotted intra-docs link. See the script's own header.
+      - name: Customer setup guides — coverage, fact pins, link integrity
+        run: bash scripts/check-setup-guides.sh
 
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
@@ -147,6 +169,13 @@ jobs:
               # user-data edit must re-run this leg pre-merge, or a path typo
               # ships as a window that silently never opens.
               - "scripts/image/autoinstall/user-data"
+              # The /downloads staging tools. The orchestrator re-hashes these
+              # artifacts against catalog.json before serving a byte, so the
+              # generator and the stager are part of this service's contract
+              # even though they run on the host — a stager that picks the
+              # wrong `primary` is served faithfully and is still wrong.
+              - "scripts/app-downloads/**"
+              - "tests/app-downloads-stage.test.sh"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -195,6 +224,13 @@ jobs:
             device-identity-svc:
               - "services/device-identity-svc/**"
               - "proto/**"
+            # WARP-2211: the document renderer. Its suite round-trips every
+            # produced file through the reader a user's own application would
+            # use, which is the only thing that distinguishes a valid OOXML
+            # package from a broken one that still starts with "PK" — so it
+            # has to be a leg, not just a local run.
+            doc-render:
+              - "services/doc-render/**"
             # WARP-1988: the factory-reset bulk-storage wipe and the
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at
@@ -205,6 +241,66 @@ jobs:
               - "scripts/host/droplet-storage-pool.sh"
               - "tests/factory-reset-storage-wipe.test.sh"
               - "tests/storage-pool-destroy-superblock.test.sh"
+            # WARP-2481: the WARP-229 FIPS static source lint, moved here from
+            # test-fips.yml so its result reaches branch protection through
+            # ci-summary. This list is the EXACT `paths:` test-fips.yml used
+            # for the fips-lint job, so the leg fires on precisely the PRs it
+            # fired on before — no widening, no narrowing, delta ~0
+            # (docs/ci-cost-budget.md).
+            # `.github/workflows/test-fips.yml` stays in the list and is
+            # load-bearing, not vestigial: two of this leg's own suites GREP
+            # that file (fips-stack-logic.test.sh asserts the Docker-gated
+            # fips-stack job still wires tests/integration/fips-stack.test.sh),
+            # so gutting test-fips.yml has to turn this leg red.
+            fips:
+              - "apps/**"
+              - "services/**"
+              - "packages/**"
+              - "scripts/**"
+              - "docker/**"
+              - "docs/security/fips-exceptions.md"
+              - "docs/security/fips-allowed-algorithms.md"
+              - "tests/fips-sabotage.test.sh"
+              - "tests/fips-sabotage-logic.test.sh"
+              # WARP-2480/WARP-2481: the ONE addition to the inherited list.
+              # This leg's first step runs tests/test-fips-script/run.sh — the
+              # harness that gates the lint itself — but test-fips.yml never
+              # listed it, so a PR editing only that harness got no run at all.
+              # A few commits a year, so the spend is ~0.
+              - "tests/test-fips-script/**"
+              - "tests/nginx-fips.test.sh"
+              - "tests/fips-stack-logic.test.sh"
+              - "tests/integration/fips-stack.test.sh"
+              - ".github/workflows/test-fips.yml"
+            # WARP-2493: hadolint, moved here from hadolint.yml so its result
+            # reaches branch protection through ci-summary.
+            # hadolint.yml had NO trigger path filter — it ran on every PR and
+            # linted `git ls-files '*Dockerfile*'`. A `detect` filter is sound
+            # here (and it is not one in name only): the job's verdict is a
+            # pure function of the tracked Dockerfiles plus .hadolint.yaml, so
+            # a PR touching neither cannot change the result — it can only
+            # re-report the base branch's verdict. Scoping it is therefore a
+            # cost saving with no loss of signal, unlike path-filtering a
+            # diff-aware scanner. `Dockerfile*` is listed alongside
+            # `**/Dockerfile*` because picomatch's `**/` does not match a
+            # repo-root file (there is none today; this keeps a future one
+            # gated).
+            hadolint:
+              - "**/Dockerfile*"
+              - "Dockerfile*"
+              - ".hadolint.yaml"
+            # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
+            # mandated by the preflight skill but was executed by NO
+            # workflow — all eight `ship-check` mentions under .github/ were
+            # comments — so its bash-3.2 parse breakage reached stage with
+            # nobody noticing. Scoped to the gate itself: deliberately NOT
+            # widened to scripts/** or tests/**, which would put this leg on
+            # a large share of PRs for no added signal
+            # (docs/ci-cost-budget.md — widening a filter is a spend
+            # decision, not a style decision).
+            ship-check:
+              - "scripts/test/**"
+              - ".claude/skills/preflight/**"
 
       - name: Decide which legs run
         id: plan
@@ -217,8 +313,11 @@ jobs:
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
             "voice-io","device-identity-svc","erp-sql-bridge",
-            "inference-manager"]
+            "inference-manager","doc-render"]
           ALL_STORAGE: '["storage"]'
+          ALL_FIPS: '["fips"]'
+          ALL_HADOLINT: '["hadolint"]'
+          ALL_SHIP_CHECK: '["ship-check"]'
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
@@ -226,6 +325,9 @@ jobs:
             node=$(jq -c . <<<"$ALL_NODE")
             python=$(jq -c . <<<"$ALL_PYTHON")
             storage=$(jq -c . <<<"$ALL_STORAGE")
+            fips=$(jq -c . <<<"$ALL_FIPS")
+            hadolint=$(jq -c . <<<"$ALL_HADOLINT")
+            ship_check=$(jq -c . <<<"$ALL_SHIP_CHECK")
           else
             if jq -e 'index("node-global")' <<<"$CHANGED" >/dev/null; then
               node=$(jq -c . <<<"$ALL_NODE")
@@ -243,6 +345,21 @@ jobs:
               storage=$(jq -c . <<<"$ALL_STORAGE")
             else
               storage="[]"
+            fi
+            if jq -e 'index("fips")' <<<"$CHANGED" >/dev/null; then
+              fips=$(jq -c . <<<"$ALL_FIPS")
+            else
+              fips="[]"
+            fi
+            if jq -e 'index("hadolint")' <<<"$CHANGED" >/dev/null; then
+              hadolint=$(jq -c . <<<"$ALL_HADOLINT")
+            else
+              hadolint="[]"
+            fi
+            if jq -e 'index("ship-check")' <<<"$CHANGED" >/dev/null; then
+              ship_check=$(jq -c . <<<"$ALL_SHIP_CHECK")
+            else
+              ship_check="[]"
             fi
           fi
           # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
@@ -266,10 +383,16 @@ jobs:
             echo "python-services=$python"
             echo "python-matrix=$python_matrix"
             echo "storage-suites=$storage"
+            echo "fips-suites=$fips"
+            echo "hadolint-suites=$hadolint"
+            echo "ship-check-suites=$ship_check"
           } >> "$GITHUB_OUTPUT"
           echo "node legs: $node"
           echo "python legs: $python"
           echo "storage legs: $storage"
+          echo "fips legs: $fips"
+          echo "hadolint legs: $hadolint"
+          echo "ship-check legs: $ship_check"
 
   node:
     name: node / ${{ matrix.suite }}
@@ -390,6 +513,17 @@ jobs:
       - name: Test @droplet/orchestrator
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
+
+      # The staging half of /downloads. The orchestrator's own suite covers the
+      # serving half (parse, digest, refuse); this covers the script that puts
+      # an installer there in the first place — including the silent failure
+      # neither half would catch on its own, where a leftover installer from
+      # last release stays `primary` and the download button keeps handing out
+      # the older build with a catalog that parses and a digest that verifies.
+      # Runs on the orchestrator leg because that service owns the surface.
+      - name: App-download staging script
+        if: matrix.suite == 'orchestrator'
+        run: bash tests/app-downloads-stage.test.sh
 
       # WARP-1984: the SSH toggle's host half. The orchestrator's vitest guard
       # reads these artefacts as TEXT (it can prove `iptables` never appears);
@@ -571,6 +705,286 @@ jobs:
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
 
+  # WARP-229 FIPS 140-3 static SOURCE lint (scripts/test-fips.sh), moved here
+  # from test-fips.yml under WARP-2481. It lived in its own path-filtered
+  # workflow, which meant the job went red and the merge went through anyway:
+  # `fips-lint` was never a required context, and a path-filtered workflow
+  # cannot become one (docs/ci-required-checks.md — the WARP-2172 "Expected"
+  # trap). As a leg of ci.yml its verdict lands in `ci-summary`, which IS
+  # required on both rulesets. That is what makes the PR-BLOCKING claim in
+  # scripts/test-fips.sh true rather than aspirational.
+  #
+  # Distinct from the BUILD-TIME provider gate in docker-build.yml
+  # (install-fips-provider.sh KATs + positive/negative probes, fanned in via
+  # `docker-build ok`). This greps source for non-FIPS algorithms; it does NOT
+  # build images or check runtime enforcement. See scripts/test-fips.sh's
+  # header for the lint-vs-gate split.
+  #
+  # To register a new exception: add an entry under `exceptions:` in
+  # docs/security/fips-exceptions.md and reference it from source with a
+  # `fips:allowed: <id>` comment within +/-2 lines. Code review is the
+  # enforcement gate for new entries; the rationale and annual-review owner
+  # must be documented.
+  fips:
+    name: fips / static lint
+    needs: detect
+    # Same empty-list guard as the node/python/storage jobs above.
+    if: needs.detect.outputs.fips-suites != '[]'
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Pure static lint (no Docker, no pip/apt builds) — 15 min is
+    # a wide ceiling for a ~2 min suite.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run lint script's own unit tests
+        run: ./tests/test-fips-script/run.sh
+
+      - name: Run FIPS static lint (PR-blocking via ci-summary)
+        run: ./scripts/test-fips.sh
+
+      - name: Validate the FIPS-capable nginx gateway artifacts (WARP-1021)
+        # Docker-free: cipher-profile posture, entrypoint profile selection,
+        # compose + CI wiring. The image's own build-time self-test (provider
+        # KATs + nginx -t on both profiles) runs in docker-build.yml's
+        # gateway matrix leg.
+        run: bash tests/nginx-fips.test.sh
+
+      - name: Validate the sabotage-proof harness (Docker-free logic checks)
+        # WARP-316: asserts tests/fips-sabotage.test.sh encodes a real sabotage
+        # (build -> install -> rm fips.so -> assert provider gone) and skips
+        # cleanly without Docker. The Docker build itself runs in the
+        # fips-sabotage job, still in test-fips.yml.
+        run: bash tests/fips-sabotage-logic.test.sh
+
+      - name: Validate the FIPS stack harness (Docker-free logic checks)
+        # WARP-317: asserts tests/integration/fips-stack.test.sh encodes the
+        # real activation flow + assertions, that the compose file pins the
+        # FIPS boot gate OFF for non-provider images, and that the operator
+        # docs exist. The stack boot itself runs in the fips-stack job, still
+        # in test-fips.yml.
+        run: bash tests/fips-stack-logic.test.sh
+
+  # WARP-243 diff-aware SAST, moved here from semgrep.yml under WARP-2481 for
+  # the same reason as the fips leg: semgrep.yml's own header said it "runs
+  # unfiltered on every PR so it can be a required check", but it never became
+  # one — on PR #1815 semgrep was red, ci-summary was green, and the PR was
+  # mergeable. Folding it in is what closes that gap.
+  #
+  # DELIBERATELY NOT `detect`-GATED. Its value is scanning everything, and it
+  # was unfiltered before; a path filter here would be a coverage cut dressed
+  # up as a cost saving. `ci-summary` is passed a hard-coded non-empty suite
+  # list for this leg, so a skip can never be read as "nothing to do" —
+  # fail-closed, same contract as the filtered legs.
+  #
+  # BASELINE STRATEGY: diff-aware. `--baseline-commit <merge-base>` means only
+  # findings introduced by the PR block it; the 40 audited pre-existing
+  # findings on main (2026-07-04, 25 in prod code — burn-down tracked
+  # separately, see docs/SECURITY.md#semgrep) never fail anyone's PR.
+  # On main pushes the baseline is the parent sha (github.event.before) so a
+  # regression that somehow lands still turns main red without the whole
+  # backlog doing so.
+  semgrep:
+    name: semgrep / diff-aware SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # merge-base for --baseline-commit
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install semgrep 1.136.0 (pinned)
+        # semgrep 1.136.0 pulls a transitive opentelemetry-instrumentation
+        # that imports pkg_resources at load time. Python 3.12.13 runners no
+        # longer ship setuptools by default, and setuptools >= 81 removed
+        # pkg_resources entirely — so we pin setuptools < 81, which still
+        # bundles it (otherwise: ModuleNotFoundError: No module named
+        # 'pkg_resources' before semgrep scans anything).
+        run: pip install "setuptools<81" semgrep==1.136.0
+
+      - name: Resolve baseline commit
+        id: base
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=$(git merge-base origin/${{ github.base_ref }} HEAD)" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "sha=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Semgrep scan (blocks findings introduced by this change)
+        run: |
+          set -eu
+          BASELINE="${{ steps.base.outputs.sha }}"
+          ARGS=(--config p/owasp-top-ten --config .semgrep/ --metrics=off --error)
+          if [ -n "$BASELINE" ] && git cat-file -e "$BASELINE" 2>/dev/null; then
+            ARGS+=(--baseline-commit "$BASELINE")
+          fi
+          semgrep scan "${ARGS[@]}"
+
+  # WARP-243 secret scan, moved here from gitleaks.yml under WARP-2493 for the
+  # same reason as the fips/semgrep legs (WARP-2481): gitleaks.yml's header
+  # said it ran "unfiltered on every PR so it can be a required check", but it
+  # never became one. docs/SECURITY.md listed it as "Blocks PRs? yes"; it did
+  # not. Only ci-summary, egress-gate and the title lint are required.
+  #
+  # DELIBERATELY NOT `detect`-GATED: a secret can be added in any file, so
+  # there is no honest path filter. ci-summary is passed a hard-coded
+  # non-empty suite list for this leg, so a skip is never read as "nothing to
+  # do" — fail-closed, same contract as the filtered legs.
+  #
+  # Two passes:
+  #   1. Working-tree scan: any secret present in the files as they would
+  #      merge (config-allowlisted test fixtures excluded — .gitleaks.toml).
+  #   2. PR-commit-range scan: catches a secret committed then "removed" in
+  #      a later commit of the same PR (it would still live in history).
+  # Full-history scans are deliberately NOT run here: main's history has 112
+  # known fixture findings (audited 2026-07-04) and rewriting history is not
+  # on the table. History is gated from this point forward by pass 2.
+  #
+  # Uses the pinned gitleaks binary, NOT gitleaks/gitleaks-action: the action
+  # requires a paid GITLEAKS_LICENSE for organization repos; the MIT binary
+  # does not.
+  #
+  # NOTE: this is the SECOND of two independent secret gates. GitHub's push
+  # protection rejects known vendor token shapes at `git push`, before CI runs
+  # at all, and no .gitleaks.toml entry affects it. A fixture shaped like a
+  # real vendor key must be composed from parts at runtime (WARP-2379).
+  gitleaks:
+    name: gitleaks / secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # pass 2 scans the full PR commit range
+
+      - name: Install gitleaks v8.30.1 (pinned, checksummed)
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+
+      - name: Scan working tree
+        run: /tmp/gitleaks dir . --config .gitleaks.toml --no-banner --redact --exit-code 1
+
+      - name: Scan PR commit range (added-then-removed secrets)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -eu
+          /tmp/gitleaks git . --config .gitleaks.toml --no-banner --redact --exit-code 1 \
+            --log-opts "origin/${{ github.base_ref }}..HEAD"
+
+  # WARP-243 Dockerfile lint over every tracked Dockerfile (27 at time of
+  # writing — the git ls-files glob keeps the list live, so a new service's
+  # Dockerfile is gated automatically). Moved here from hadolint.yml under
+  # WARP-2493; docs/SECURITY.md claimed it blocked PRs and it did not.
+  # Baseline rationale lives in .hadolint.yaml.
+  #
+  # Unlike gitleaks this leg IS `detect`-gated — see the filter comment above
+  # for why that is sound rather than a coverage cut.
+  hadolint:
+    name: hadolint / Dockerfile lint
+    needs: detect
+    # Same empty-list guard as the node/python/storage/fips jobs above.
+    if: needs.detect.outputs.hadolint-suites != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install hadolint v2.14.0 (pinned, checksummed)
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  /tmp/hadolint" | sha256sum -c -
+          chmod +x /tmp/hadolint
+
+      - name: Lint all tracked Dockerfiles
+        run: |
+          set -eu
+          mapfile -t files < <(git ls-files '*Dockerfile*')
+          echo "Linting ${#files[@]} Dockerfiles"
+          /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+  # WARP-2455: the pre-PR gate's own gate. scripts/test/ship-check.sh is
+  # mandated by the preflight skill, but until this leg NO workflow executed
+  # it — all eight `ship-check` mentions under .github/ were comments of the
+  # form "warning severity to match ship-check's bar". That is how three
+  # bash-3.2 parse blockers (`declare -A`, an apostrophe in a `#` comment
+  # inside `$( )`, a `case` inside `$( )`) reached stage: every reviewer
+  # assumed the gate had run, and no machine ever ran it. `lifecycle-naming`
+  # in particular still has no other runner.
+  # This is the parse + self-test half ONLY. Running the full ship-check
+  # (tsc-full etc.) here would duplicate the node/python legs and cost real
+  # minutes — see docs/ci-cost-budget.md and WARP-2455's out-of-scope list.
+  shipcheck:
+    name: ship-check / parse + self-test
+    needs: detect
+    # Same empty-list guard as the node/python/storage jobs above.
+    if: needs.detect.outputs.ship-check-suites != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # The runner's own bash (5.x) — the floor ship-check is written for.
+      - name: Parse under the runner's bash 5
+        run: |
+          set -eu
+          bash --version | head -1
+          bash -n scripts/test/ship-check.sh
+          bash -n scripts/test/ship-check.test.sh
+
+      # The dev-Mac floor: macOS ships bash 3.2.57 and Homebrew bash is NOT
+      # assumed (WARP-2449). A construct that parses under 5.x but not 3.2 is
+      # invisible to every other check in this repo, and the parse check is
+      # what would have caught all three WARP-2449 blockers. The official
+      # `bash:3.2` image is ~15 MB, so this costs seconds, not minutes.
+      # A Docker Hub pull failure is infrastructure, not a code defect — it
+      # warns and skips; a real parse failure below is fatal.
+      - name: Parse under bash 3.2 (the dev-Mac floor)
+        run: |
+          set -eu
+          if ! docker pull bash:3.2 >/dev/null 2>&1; then
+            echo "::warning::could not pull bash:3.2 (Docker Hub rate limit?) - 3.2 parse check skipped"
+            exit 0
+          fi
+          docker run --rm -v "$PWD/scripts/test:/w:ro" bash:3.2 bash -c '
+            set -eu
+            bash --version | head -1
+            bash -n /w/ship-check.sh
+            bash -n /w/ship-check.test.sh
+          '
+
+      # --help must work on a machine that has run no setup — it is the first
+      # thing an operator (or an agent) types.
+      - name: ship-check --help
+        run: bash scripts/test/ship-check.sh --help
+
+      # The self-test's compose-config case shells out to `docker compose
+      # config`, which resolves the merged tree's `env_file: ../.env`
+      # directives and fails if that file is absent. .env is .gitignored, so
+      # a fresh checkout never has one. Seed it from the tracked example, or
+      # the self-test goes red on the runner for a reason that has nothing to
+      # do with the change under test. (compose-config itself still reads
+      # .env.example for values — see run_check_compose_config.)
+      - name: Seed .env for the compose-config case
+        run: cp .env.example .env
+
+      - name: Run the ship-check self-test
+        run: bash scripts/test/ship-check.test.sh
+
+
   # THE required check (WARP-968/969 merge policy). Runs even when legs fail
   # (`if: always()`) so it ALWAYS reports — no more PRs hung on "Expected".
   # Fails closed: a leg job may be skipped ONLY because detect proved its
@@ -581,7 +995,7 @@ jobs:
     name: ci-summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [detect, node, python, storage]
+    needs: [detect, node, python, storage, fips, semgrep, gitleaks, hadolint, shipcheck]
     if: always()
     steps:
       - name: Report leg results
@@ -598,6 +1012,14 @@ jobs:
           NODE_SUITES: ${{ needs.detect.outputs.node-suites }}
           PYTHON_SERVICES: ${{ needs.detect.outputs.python-services }}
           STORAGE_SUITES: ${{ needs.detect.outputs.storage-suites }}
+          FIPS_RESULT: ${{ needs.fips.result }}
+          FIPS_SUITES: ${{ needs.detect.outputs.fips-suites }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
+          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
+          HADOLINT_RESULT: ${{ needs.hadolint.result }}
+          HADOLINT_SUITES: ${{ needs.detect.outputs.hadolint-suites }}
+          SHIPCHECK_RESULT: ${{ needs.shipcheck.result }}
+          SHIPCHECK_SUITES: ${{ needs.detect.outputs.ship-check-suites }}
         run: |
           set -eu
           fail=0
@@ -623,5 +1045,15 @@ jobs:
           check_leg node "$NODE_RESULT" "$NODE_SUITES"
           check_leg python "$PYTHON_RESULT" "$PYTHON_SERVICES"
           check_leg storage "$STORAGE_RESULT" "$STORAGE_SUITES"
+          check_leg fips "$FIPS_RESULT" "$FIPS_SUITES"
+          # semgrep is unfiltered by design, so its suite list is a literal
+          # non-empty constant: there is no path change that makes "skipped"
+          # a legitimate outcome for it.
+          check_leg semgrep "$SEMGREP_RESULT" '["semgrep"]'
+          # gitleaks is unfiltered by design — same literal-suite-list
+          # treatment as semgrep. A secret can land in any file.
+          check_leg gitleaks "$GITLEAKS_RESULT" '["gitleaks"]'
+          check_leg hadolint "$HADOLINT_RESULT" "$HADOLINT_SUITES"
+          check_leg ship-check "$SHIPCHECK_RESULT" "$SHIPCHECK_SUITES"
           [ "$fail" -eq 0 ] || exit 1
           echo "ci-summary — every triggered leg succeeded"

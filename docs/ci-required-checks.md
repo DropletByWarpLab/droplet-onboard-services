@@ -6,8 +6,23 @@ each gate by the **check-run name string**. Nothing in GitHub validates that
 such a check exists, so a listed context whose workflow was renamed, deleted,
 or never merged sits there looking like a gate and enforcing nothing.
 
-That has happened twice on this repo (WARP-2167, WARP-2171). This file is the
-inventory that makes the next drift visible without an API call.
+That has happened twice on this repo (WARP-2167, WARP-2171). The mirror-image
+failure — a gate that runs, reports red, and blocks nothing because no ruleset
+names it — happened a third time with `fips-lint` and `semgrep` (WARP-2481).
+This file is the inventory that makes the next drift visible without an API
+call.
+
+> **WARP-2493, 2026-08-28.** `docs/SECURITY.md`'s scanner table separately
+> claimed `gitleaks`, `hadolint` and Trivy blocked PRs. None did. `gitleaks`
+> and `hadolint` are now `ci.yml` legs; Trivy is documented honestly as
+> advisory. That table now carries the one-line rule above.
+>
+> **WARP-229 history, corrected.** `test-fips.yml`'s header called the FIPS
+> static lint "PR-BLOCKING" from 2026-05-10. It never was: `fips-lint` was
+> never a required context and, living in a path-filtered workflow, could not
+> become one. The claim became true on 2026-08-28 (WARP-2481) when the lint
+> moved into `ci.yml` and its verdict started reaching branch protection
+> through `ci-summary`.
 
 ## What is required today
 
@@ -16,16 +31,9 @@ Verified 2026-08-24 against the live rulesets and against real PR heads
 
 ### `Stage Protection` — ruleset id 20877684, `refs/heads/stage`
 
-> **STALE as of 2026-08-26 (WARP-2187).** `stage` was deleted deliberately and
-> `branch-flow-guard` retired with it, but this ruleset is **still active** and
-> still targets `refs/heads/stage`. It now guards a ref that cannot exist, so it
-> gates nothing. Deleting a ruleset is a repo-admin action rather than a file
-> change, so it is tracked on WARP-2187 rather than done here. The contexts below
-> are recorded as they stand, not as a recommendation.
-
 | required context | emitted by | reports on every PR? |
 | --- | --- | --- |
-| `ci-summary` | `ci.yml`, job `ci-summary` | yes — `if: always()`, `needs` every leg, fails unless all legs pass. Designed to be the one always-reporting check (WARP-1007). |
+| `ci-summary` | `ci.yml`, job `ci-summary` | yes — `if: always()`, `needs` every leg, fails unless all legs pass. Designed to be the one always-reporting check (WARP-1007). Aggregates: `node`, `python`, `storage`, `fips`, `semgrep`. |
 | `egress-gate` | `egress-gate.yml`, job `egress-gate` | yes — unfiltered `pull_request:`, ~15 s job, kept unfiltered precisely so it can be required (WARP-269/968/969). |
 | `title carries a WARP key` | `pr-title-ticket-lint.yml`, job `title-carries-ticket` | yes — unfiltered `pull_request:`, no checkout. |
 
@@ -33,20 +41,58 @@ Verified 2026-08-24 against the live rulesets and against real PR heads
 
 | required context | emitted by | reports on every PR? |
 | --- | --- | --- |
-| `ci-summary` | `ci.yml` | yes |
+| `ci-summary` | `ci.yml` | yes — same fan-in as above |
 | `egress-gate` | `egress-gate.yml` | yes |
 
-Until 2026-08-26 `main` only ever received promotion PRs whose head was
-`stage`, and the title lint exempts those by design (`head.ref in (stage,
-main)`) — so requiring it here would have added a context that always passed
-trivially, and it was deliberately not listed.
+`main` only ever receives promotion PRs whose head is `stage`. The title lint
+exempts those by design (`head.ref in (stage, main)`), so requiring it here
+would add a context that always passes trivially — deliberately not listed.
 
-**That reasoning expired with the branch (WARP-2187).** `main` now receives
-feature PRs directly, and those are exactly the PRs the title lint is meant to
-catch — so `title carries a WARP key` is currently a gate that RUNS on every
-feature PR into `main` and is REQUIRED on none of them. The job qualifies under
-the rule below (unfiltered `pull_request:`, no checkout), so adding it to `Main
-Protection` is safe whenever someone with admin decides to. Open on WARP-2187.
+## What reaches branch protection through `ci-summary`
+
+Three contexts are required, but they are not the whole enforced surface —
+`ci-summary` is a fan-in, so every leg it `needs` is merge-blocking without
+being named in a ruleset. Legs today:
+
+| leg (job id) | check name | gating |
+| --- | --- | --- |
+| `node` | `node / <suite>` | `detect` path filter |
+| `python` | `python / <service>` | `detect` path filter |
+| `storage` | `storage / shell unit tests` | `detect` path filter |
+| `fips` | `fips / static lint` | `detect` path filter (WARP-2481) |
+| `semgrep` | `semgrep / diff-aware SAST` | **unfiltered — runs on every PR** (WARP-2481) |
+| `gitleaks` | `gitleaks / secret scan` | **unfiltered — runs on every PR** (WARP-2493) |
+| `hadolint` | `hadolint / Dockerfile lint` | `detect` path filter (WARP-2493) |
+
+**Adding a leg to `ci.yml` changes what blocks a merge.** That is the intended
+mechanism, and it is why the leg list is not a style choice: `ci-summary` is
+only as honest as the surface it aggregates, and it fails closed — a leg may
+report `skipped` only when `detect` proved its suite list `[]`.
+
+`semgrep` and `gitleaks` are passed a hard-coded non-empty suite list, so
+"skipped" can never be read as "nothing to do" for them.
+
+### The one-line rule
+
+**A check blocks a merge only if it is a `ci-summary` leg, or is itself a
+required context.** Everything else is advisory no matter how red it goes, and
+no amount of "PR-blocking" in a workflow header changes that. When you write
+that a gate blocks, name which of the two mechanisms it uses — if you cannot,
+it does not block.
+
+### The WARP-2481 correction
+
+Until 2026-08-28 `fips-lint` (`test-fips.yml`) and `semgrep` (`semgrep.yml`)
+each lived in their own workflow, and **neither blocked anything**. Both went
+red, the merge went through. Demonstrated on PR #1815: `fips-lint` red with 3
+violations, `semgrep` red with 1, `CodeQL` red with 2 high — while
+`ci-summary`, `egress-gate` and `title carries a WARP key`, the only three
+required contexts, were all green. One approval would have merged it.
+
+The fix was not to require those contexts — `test-fips.yml` is path-filtered,
+so requiring `fips-lint` would hang every out-of-filter PR on "Expected"
+forever (see the next section). Both were moved into `ci.yml` as legs, which
+needed **no ruleset change and no new required context**.
 
 ## The rule for adding a required context
 
@@ -63,8 +109,10 @@ starts. `docker-build ok` (`docker-build.yml`) is exactly this shape: it is a
 correct fan-in for a dynamic matrix, but `docker-build.yml` is path-filtered
 to Dockerfiles, `package*.json`, `requirements*.txt`, `docker/docker-compose.yml`,
 `docker/fips/**` and `docker/nginx/**`, so it is absent from #1729 and present
-on #1690. It is **not** requireable as written — see WARP-2172, which also
-covers `docs/security/fips-ci-gate-required.md` still instructing otherwise.
+on #1690. It is **not** requireable as written — see WARP-2172.
+`docs/security/fips-ci-gate-required.md` used to instruct adding it anyway;
+that instruction and its ruleset JSON were removed under WARP-2493, and the
+file now points back here.
 
 The two safe shapes:
 
@@ -116,10 +164,67 @@ when reading the result:
 ## Not required, and why
 
 `codeql / javascript-typescript`, `codeql / python`, `codeql / actions`,
-`semgrep`, `gitleaks`, `hadolint`, `ci-coverage`, `docker-build ok`, and the
+`CodeQL`, `ci-coverage`, `docker-build ok`, and the
 per-service `*-tests.yml` workflows are advisory. Most are path-filtered, so
 requiring them as-is would hit the trap above. `docs/SECURITY.md` and
 `codeql.yml` claimed CodeQL was merge-blocking via a ruleset `code_scanning`
 rule; no such rule exists on either ruleset (corrected under WARP-2167).
 Whether any of them *should* block is a live decision — make it deliberately,
 and update this table in the same change.
+
+`semgrep` was on this list until WARP-2481, and `gitleaks` + `hadolint` until
+WARP-2493. All three are now `ci.yml` legs and block through `ci-summary`.
+
+### `docker-build ok` / Trivy — a job status that still does not block {#trivy}
+
+Worth separating from CodeQL, because the reason differs. Trivy's verdict is an
+**ordinary job exit status** (`exit-code: "1"` in `docker-build.yml`; no SARIF
+upload, no `security-events` permission), and it already fans into the stable
+`docker-build ok` check. That fan-in is correct. What is missing is that
+`docker-build ok` is not a required context — and cannot be while
+`docker-build.yml` is path-filtered, which is the trap described below.
+
+Folding it into `ci-summary` would mean moving the entire 13-image build matrix
+into `ci.yml`; that is a real cost decision, not a wiring fix, and WARP-2493
+deliberately did not do it. The cheaper route is safe shape 2 below.
+[`docs/security/fips-ci-gate-required.md`](security/fips-ci-gate-required.md)
+documents the same conclusion for the FIPS build-time gate; it previously
+instructed adding `docker-build ok` as a required context, which would have
+hung every out-of-scope PR on "Expected" (WARP-2172). That instruction and the
+ruleset JSON it applied were removed under WARP-2493.
+
+### CodeQL is advisory and **cannot** be folded into `ci-summary` {#codeql}
+
+Verified 2026-08-28, and this is *not* the reason WARP-2481 anticipated.
+CodeQL here is a first-party workflow (`.github/workflows/codeql.yml`,
+advanced setup — GitHub's default setup is `not-configured`, confirmed via
+`gh api .../code-scanning/default-setup`). So "it is default setup, hands off"
+is **false**. Folding it still does not work, for a stronger reason:
+
+> **The alert signal is not the workflow job's exit status.** The three
+> `codeql / *` jobs succeed as long as the SARIF uploads. The check that goes
+> red on new alerts is a separate check-run named plain **`CodeQL`**, produced
+> by GitHub's code-scanning service from that SARIF.
+
+On PR #1815 the evidence is unambiguous:
+
+```
+failure   CodeQL                            <- the code-scanning verdict
+success   codeql / javascript-typescript    <- the workflow jobs, all green
+success   codeql / python
+success   codeql / actions
+```
+
+Fanning the three jobs into `ci-summary` would therefore aggregate three jobs
+that were **green on the very PR where CodeQL found 2 high-severity alerts** —
+pure cost, zero enforcement, and a fan-in that looks like a gate. Requiring the
+`CodeQL` check-run directly is also unsafe: `codeql.yml` is path-filtered, so
+on a PR outside its filter it never reports and hits the "Expected" trap above.
+
+**Therefore: CodeQL findings are advisory and are cleared by human review.** A
+reviewer is expected to read the Security tab / the PR's code-scanning
+annotations and either fix or consciously accept each new alert. Making CodeQL
+genuinely merge-blocking needs a different mechanism (an unfiltered wrapper
+workflow that polls the code-scanning API for the head sha and fans in, or a
+`code_scanning` ruleset rule) and is a deliberate decision, not a side effect
+of this file.

@@ -30,8 +30,11 @@
  *
  * The inference deliberately reads a negative score as a logit rather than
  * as a negative cosine: the retrieval SQL filters on `minSimilarity`
- * (default 0.3), so a negative cosine never reaches a citation chip, while
- * negative reranker logits are the common case.
+ * (default 0.65 since WARP-2196 recalibrated it for bge-small-en-v1.5; 0.3
+ * before that), so a negative cosine never reaches a citation chip, while
+ * negative reranker logits are the common case. The exact value does not
+ * change this inference — any positive floor rules out negative cosines —
+ * but naming a stale one invites the wrong conclusion later.
  */
 
 /**

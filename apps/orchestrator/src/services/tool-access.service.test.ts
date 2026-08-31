@@ -16,6 +16,7 @@ import {
   isLockLikeInvocation,
   lockOperationDenied,
   narrowToolNamesToScope,
+  narrowToolsToScope,
   resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
@@ -89,6 +90,50 @@ describe("narrowToolNamesToScope", () => {
     expect(
       narrowToolNamesToScope([read, write, other, "not_a_tool"], scopeOf(["files"])),
     ).toEqual([read]);
+  });
+});
+
+describe("narrowToolsToScope — the single narrowing expression (WARP-2556)", () => {
+  // Both the context estimate (`routes/llm.ts`) and the dispatch filter
+  // (`llm-agent.service.ts`) narrow through THIS function. They each used to
+  // re-express the rule inline, and one of the two copies was lost in a merge
+  // — the estimate then sized a pool the wire never carried. The behaviour is
+  // pinned here so the shared expression has a test of its own, rather than
+  // only being asserted by source-grep in the parity suite.
+  const toolsOf = (...names: string[]) => names.map((name) => ({ name, schema: {} }));
+
+  it("filters objects by scope, preserving order and dropping unknowns", () => {
+    const read = nameOf("files", false);
+    const write = nameOf("files", true);
+    const other = nameOf("cameras", false);
+    const tools = toolsOf(read, write, other, "not_a_tool");
+    expect(narrowToolsToScope(tools, scopeOf(["files"])).map((t) => t.name)).toEqual([read]);
+  });
+
+  it("agrees with narrowToolNamesToScope on the same input", () => {
+    // The two helpers exist because the call sites hold different shapes, not
+    // because the RULE differs. If they can ever disagree, the estimate and
+    // the dispatch can disagree, which is the whole defect.
+    const names = [nameOf("files", false), nameOf("files", true), nameOf("cameras", false)];
+    const scope = scopeOf(["files"], ["files"]);
+    expect(narrowToolsToScope(toolsOf(...names), scope).map((t) => t.name)).toEqual(
+      narrowToolNamesToScope(names, scope),
+    );
+  });
+
+  it("narrows nothing when the scope is absent, for both nullish forms", () => {
+    // The owner bypass and service principals. Carried in the helper so the
+    // two call sites cannot implement it differently — `routes/llm.ts` passes
+    // `undefined`, the agent loop's request field is typed `| null`.
+    const tools = toolsOf(nameOf("files", false), nameOf("cameras", true));
+    expect(narrowToolsToScope(tools, undefined)).toBe(tools);
+    expect(narrowToolsToScope(tools, null)).toBe(tools);
+  });
+
+  it("denies everything under the deny-all scope", () => {
+    // Fail-closed, same as the predicate: an empty scope is not "no scope".
+    const tools = toolsOf(nameOf("files", false), nameOf("cameras", true));
+    expect(narrowToolsToScope(tools, DENY_ALL_TOOL_SCOPE)).toEqual([]);
   });
 });
 

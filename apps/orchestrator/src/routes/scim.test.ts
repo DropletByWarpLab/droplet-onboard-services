@@ -25,11 +25,15 @@ import express from "express";
 // middleware/auth.ts (pulled in by scim-auth.ts for the WARP-1062 deny-row
 // helper) reads config keys at module-evaluation time, which would otherwise
 // hit the TDZ on a plain `const`.
-const { mockConfig } = vi.hoisted(() => ({
+const { mockConfig, revokeAllSessionsMock } = vi.hoisted(() => ({
   mockConfig: {
     DROPLET_SCIM_BEARER_TOKEN: "scim-token",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   } as Record<string, unknown>,
+  // WARP-2016: hoisted as a named spy so the suite can assert that a
+  // committed deactivation ran the rail-6 disable post-effects (revocation
+  // first), and that a REFUSED one revoked nothing.
+  revokeAllSessionsMock: vi.fn(async (_userId: string) => 0),
 }));
 vi.mock("../config.js", () => ({
   get config() {
@@ -41,11 +45,15 @@ vi.mock("../config.js", () => ({
 // WARP-247 session revocation — Redis-backed, and there is no Redis here.
 // Mocked at the leaf like every other guard-driving route suite.
 vi.mock("../services/session.service.js", () => ({
-  revokeAllSessions: vi.fn(async () => 0),
+  revokeAllSessions: revokeAllSessionsMock,
 }));
 
 import { createScimRouter } from "./scim.js";
-import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import type { RecordParams } from "../services/activity.service.js";
 
@@ -55,6 +63,7 @@ const recordedScim: RecordParams[] = [];
 import {
   SCIM_USER_SCHEMA,
   SCIM_LIST_RESPONSE_SCHEMA,
+  SCIM_ERROR_SCHEMA,
 } from "../services/scim-resource.js";
 
 interface UserRow {
@@ -133,8 +142,13 @@ function createPrismaMock(seed: UserRow[] = []) {
     update: vi.fn(async ({ where, data }: { where: any; data: any }) => {
       // WARP-1568: the guarded role write pins `role` in its where-clause; a
       // miss is Prisma's P2025 ("nothing applied, retry"), not a 500.
+      // WARP-2016: the guarded DEACTIVATE write pins `directoryStatus` the
+      // same way — the mock honors both pins so a miss behaves like Postgres.
       const u = self._users.find(
-        (x: UserRow) => x.id === where.id && (where.role === undefined || x.role === where.role),
+        (x: UserRow) =>
+          x.id === where.id &&
+          (where.role === undefined || x.role === where.role) &&
+          (where.directoryStatus === undefined || x.directoryStatus === where.directoryStatus),
       );
       if (!u) {
         const err = new Error("Record to update not found") as Error & { code: string };
@@ -195,6 +209,7 @@ beforeEach(() => {
   mockConfig.DROPLET_SCIM_BEARER_TOKEN = "scim-token";
   mockConfig.agentMaxIter = { defaultIter: 5, capIter: 10 };
   recordedScim.length = 0;
+  revokeAllSessionsMock.mockClear();
   _setActivityRecorderForTests(
     {
       record: async (p) => {
@@ -428,6 +443,181 @@ describe("PUT / PATCH / DELETE /scim/v2/Users/:id — update + soft-deactivation
     const del = await request(buildApp(prisma)).delete("/scim/v2/Users/nope").set(...AUTH);
     expect(put.status).toBe(404);
     expect(del.status).toBe(404);
+  });
+});
+
+describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", () => {
+  // The lockout scenario this ticket closes: every interactive
+  // person-mutation surface runs role-mutation-guard.service.ts, but SCIM
+  // deactivation wrote `directoryStatus` bare — Okta could deactivate the
+  // sole owner or the last active admin and strand the box with zero
+  // operators. PUT, PATCH and DELETE must all route through the ONE guarded
+  // funnel (scim.service.ts), refuse with the rail's machine-readable code
+  // in the SCIM Error envelope, and run the disable post-effects on commit.
+  function row(over: Partial<UserRow> & { id: string; username: string }): UserRow {
+    return {
+      displayName: over.username, email: `${over.username}@acme.test`,
+      passwordHash: null, role: "family", isLocal: true, directoryStatus: "ACTIVE",
+      createdAt: new Date("2026-05-31T00:00:00Z"), updatedAt: new Date("2026-05-31T00:00:00Z"),
+      ...over,
+    };
+  }
+  const owner = () => row({ id: "u-owner", username: "boss", role: "owner" });
+  const admin = () => row({ id: "u-adm", username: "adm", role: "admin" });
+  const secondAdmin = () => row({ id: "u-adm2", username: "adm2", role: "admin" });
+  const family = () => row({ id: "u-fam", username: "fam" });
+
+  const PATCH_DEACTIVATE = {
+    schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+    Operations: [{ op: "replace", path: "active", value: false }],
+  };
+  const PUT_DEACTIVATE = {
+    schemas: [SCIM_USER_SCHEMA],
+    userName: "boss@acme.test",
+    displayName: "Renamed By Okta",
+    active: false,
+  };
+
+  function expectRefusalEnvelope(
+    res: { status: number; body: Record<string, unknown> },
+    status: number,
+    code: string,
+  ): void {
+    // A SCIM Error object (RFC 7644 §3.12) carrying the rail's stable
+    // machine-readable code — never a bare Express error.
+    expect(res.status).toBe(status);
+    expect(res.body.schemas).toEqual([SCIM_ERROR_SCHEMA]);
+    expect(res.body.status).toBe(String(status));
+    expect(res.body.scimType).toBe(code);
+  }
+
+  describe("rail 1 — the owner is immutable on every verb (403 OWNER_IMMUTABLE)", () => {
+    it("DELETE targeting the sole owner → 403; the row stays ACTIVE, nothing revoked", async () => {
+      const prisma = createPrismaMock([owner(), family()]);
+      const res = await request(buildApp(prisma)).delete("/scim/v2/Users/u-owner").set(...AUTH);
+      expectRefusalEnvelope(res, 403, "OWNER_IMMUTABLE");
+      expect(prisma._users.find((u: UserRow) => u.id === "u-owner")!.directoryStatus).toBe("ACTIVE");
+      expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+      // No lifecycle audit row lies about a deactivation that never happened.
+      expect(recordedScim.some((p) => p.what === "SCIM user deactivated")).toBe(false);
+      expect(recordedScim.some((p) => p.what === "User disabled")).toBe(false);
+    });
+
+    it("PATCH active:false targeting the sole owner → 403; row stays ACTIVE", async () => {
+      const prisma = createPrismaMock([owner(), family()]);
+      const res = await request(buildApp(prisma))
+        .patch("/scim/v2/Users/u-owner").set(...AUTH).send(PATCH_DEACTIVATE);
+      expectRefusalEnvelope(res, 403, "OWNER_IMMUTABLE");
+      expect(prisma._users.find((u: UserRow) => u.id === "u-owner")!.directoryStatus).toBe("ACTIVE");
+    });
+
+    it("PUT active:false targeting the sole owner → 403; NOTHING mutated (displayName included)", async () => {
+      const prisma = createPrismaMock([owner(), family()]);
+      const res = await request(buildApp(prisma))
+        .put("/scim/v2/Users/u-owner").set(...AUTH).send(PUT_DEACTIVATE);
+      expectRefusalEnvelope(res, 403, "OWNER_IMMUTABLE");
+      const target = prisma._users.find((u: UserRow) => u.id === "u-owner")!;
+      expect(target.directoryStatus).toBe("ACTIVE");
+      // A refused full-replace applies NO part of the replace.
+      expect(target.displayName).toBe("boss");
+    });
+  });
+
+  describe("rail 5 — the last active operator survives every verb (409 LAST_OPERATOR_INVARIANT)", () => {
+    it("DELETE targeting the last ACTIVE admin-tier user → 409; row stays ACTIVE", async () => {
+      const prisma = createPrismaMock([admin(), family()]);
+      const res = await request(buildApp(prisma)).delete("/scim/v2/Users/u-adm").set(...AUTH);
+      expectRefusalEnvelope(res, 409, "LAST_OPERATOR_INVARIANT");
+      expect(prisma._users.find((u: UserRow) => u.id === "u-adm")!.directoryStatus).toBe("ACTIVE");
+      expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    });
+
+    it("PATCH active:false targeting the last ACTIVE admin → 409; row stays ACTIVE", async () => {
+      const prisma = createPrismaMock([admin(), family()]);
+      const res = await request(buildApp(prisma))
+        .patch("/scim/v2/Users/u-adm").set(...AUTH).send(PATCH_DEACTIVATE);
+      expectRefusalEnvelope(res, 409, "LAST_OPERATOR_INVARIANT");
+      expect(prisma._users.find((u: UserRow) => u.id === "u-adm")!.directoryStatus).toBe("ACTIVE");
+    });
+
+    it("PUT active:false targeting the last ACTIVE admin → 409; nothing mutated", async () => {
+      const prisma = createPrismaMock([admin(), family()]);
+      const res = await request(buildApp(prisma))
+        .put("/scim/v2/Users/u-adm").set(...AUTH)
+        .send({ ...PUT_DEACTIVATE, userName: "adm@acme.test" });
+      expectRefusalEnvelope(res, 409, "LAST_OPERATOR_INVARIANT");
+      const target = prisma._users.find((u: UserRow) => u.id === "u-adm")!;
+      expect(target.directoryStatus).toBe("ACTIVE");
+      expect(target.displayName).toBe("adm");
+    });
+
+    it("the rail is NOT unconditional: with a second ACTIVE admin the deactivate commits", async () => {
+      const prisma = createPrismaMock([admin(), secondAdmin()]);
+      const res = await request(buildApp(prisma))
+        .patch("/scim/v2/Users/u-adm").set(...AUTH).send(PATCH_DEACTIVATE);
+      expect(res.status).toBe(200);
+      expect(res.body.active).toBe(false);
+      expect(prisma._users.find((u: UserRow) => u.id === "u-adm")!.directoryStatus).toBe("DEACTIVATED");
+    });
+  });
+
+  describe("rail 6 — disable post-effects on a committed deactivation", () => {
+    it("DELETE that passes the rails revokes sessions and emits ONE auth/warn 'User disabled' row", async () => {
+      const prisma = createPrismaMock([admin(), secondAdmin()]);
+      const res = await request(buildApp(prisma)).delete("/scim/v2/Users/u-adm").set(...AUTH);
+      expect(res.status).toBe(204);
+      expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-adm");
+      const disabled = recordedScim.filter((p) => p.what === "User disabled");
+      expect(disabled).toHaveLength(1);
+      expect(disabled[0]).toMatchObject({
+        kind: "auth",
+        severity: "warn",
+        actor: { type: "system", id: null },
+      });
+    });
+
+    it("PATCH active:true (reactivation) runs NO disable rails and no disable post-effects", async () => {
+      // The sole DEACTIVATED admin can always come back — a reactivate
+      // removes no operator capacity, so no rail may refuse it.
+      const prisma = createPrismaMock([{ ...admin(), directoryStatus: "DEACTIVATED" as const }, family()]);
+      const res = await request(buildApp(prisma))
+        .patch("/scim/v2/Users/u-adm").set(...AUTH)
+        .send({
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+          Operations: [{ op: "replace", path: "active", value: true }],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.active).toBe(true);
+      expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+      expect(recordedScim.some((p) => p.what === "User disabled")).toBe(false);
+    });
+  });
+
+  describe("transaction + idempotency contract", () => {
+    it("the deactivate write runs at SERIALIZABLE and is pinned on the in-tx directoryStatus", async () => {
+      const prisma = createPrismaMock([family()]);
+      const res = await request(buildApp(prisma)).delete("/scim/v2/Users/u-fam").set(...AUTH);
+      expect(res.status).toBe(204);
+      expectAllTransactionsAt(prisma._seam, SERIALIZABLE_TX);
+      // The optimistic pin: `where` carries the directoryStatus the
+      // in-transaction re-read observed, so a status flip in the window is a
+      // 0-row P2025 no-op, never a decision made on stale state.
+      const write = prisma.user.update.mock.calls.find(
+        (c: any[]) => c[0]?.data?.directoryStatus === "DEACTIVATED",
+      );
+      expect(write?.[0]?.where).toEqual({ id: "u-fam", directoryStatus: "ACTIVE" });
+    });
+
+    it("re-deactivating an already-DEACTIVATED row is an idempotent 2xx — one 'User disabled' row per call", async () => {
+      const prisma = createPrismaMock([family(), admin()]);
+      const app = buildApp(prisma);
+      const first = await request(app).delete("/scim/v2/Users/u-fam").set(...AUTH);
+      const second = await request(app).delete("/scim/v2/Users/u-fam").set(...AUTH);
+      expect(first.status).toBe(204);
+      // Rail 5 early-returns for an already-DEACTIVATED target — no throw.
+      expect(second.status).toBe(204);
+      expect(recordedScim.filter((p) => p.what === "User disabled")).toHaveLength(2);
+    });
   });
 });
 

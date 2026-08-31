@@ -969,6 +969,17 @@ if [ -f /usr/local/sbin/droplet-set-box-name.sh ]; then
   log_success "Removed box-name write-back host executor"
 fi
 
+# NVR recordings-target write-back executor (WARP-2099). Same rationale as
+# the box-name executor above: install-device-bridge.sh reinstalls it on
+# re-provision, and the .env it writes NVR_MEDIA_SOURCE into is wiped
+# elsewhere in this reset -- generate_env then writes the explicit `nvrdata`
+# default afresh, so the next owner starts from a stated target rather than
+# an absent key.
+if [ -f /usr/local/sbin/droplet-set-nvr-media.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-set-nvr-media.sh 2>/dev/null || true
+  log_success "Removed NVR recordings-target write-back host executor"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then

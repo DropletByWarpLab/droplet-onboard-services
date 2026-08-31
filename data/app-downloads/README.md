@@ -3,9 +3,11 @@
 This is where the Droplet client apps (Windows installer, Android APK, iOS
 build) are staged so the box can serve them to a browser at `/downloads`.
 
-The apps ship **inside the appliance image**. Nothing here is fetched from
+Whatever is here is served **by the box itself**. Nothing is fetched from
 the internet at runtime, which is the point: a customer on a LAN with no
 internet can still install the client app for the box in front of them.
+Getting an artifact here in the first place is a separate problem, and
+today it is a manual one — see "Nothing stages these for you" below.
 
 ## How it works
 
@@ -26,33 +28,69 @@ refuses on mismatch. Running the generator is therefore what makes an
 artifact servable at all — a binary dropped in here without regenerating
 the catalog will not be served.
 
+## Nothing stages these for you
+
+Read this before believing any comment that says the artifacts arrive with
+the image. **They do not, and never have.** The box gets its code by
+`git clone` from GitHub (see `scripts/image/autoinstall/user-data`), the
+installers are git-ignored, and no build step, `setup.sh` path or CI job
+copies one in. Every box therefore boots with an empty staging root, and
+`/downloads` correctly reports that no apps are staged — which is the
+honest answer to a real absence, not a bug in the page.
+
+Until an artifact source exists that a box can reach on its own — a
+published `droplet-windows` release, or an OTA payload — staging is an
+operator action. `stage.sh` is that action.
+
 ## Staging an artifact
 
-1. Build the installer in its own repo (`droplet-windows`, `droplet-android`).
-2. Copy it into the matching platform directory here.
-3. Copy `platforms.example.json` to `platforms.json` and set the version.
-4. Generate the catalog:
+On a box, from the repo root:
+
+```bash
+./scripts/app-downloads/stage.sh ~/Droplet_0.2.0_x64-setup.exe
+```
+
+That copies it in, records the version, regenerates `catalog.json`,
+restarts the orchestrator (which memoises the catalog and would otherwise
+keep serving the old one), and proves the running container sees the
+result. `--verify-only` re-runs just the last check; `--dry-run` prints
+what it would do.
+
+Off-box — an image build, or a staging root you are assembling by hand —
+skip the wrapper and drive the engine directly:
+
+```bash
+node scripts/app-downloads/stage.mjs --dir data/app-downloads <installer>
+```
+
+Both end in the same two generator calls, and the second one is the point:
 
 ```bash
 node scripts/app-downloads/gen-catalog.mjs --dir data/app-downloads
-```
-
-5. Verify it is current (this is also the image-build / CI guard):
-
-```bash
 node scripts/app-downloads/gen-catalog.mjs --dir data/app-downloads --check
 ```
 
 `--check` exits non-zero when the staged bytes disagree with the catalog,
 which is what stops a stale catalog shipping next to swapped binaries.
 
+### Do not leave the previous release in place
+
+`gen-catalog`'s `pickPrimary()` takes the first `-setup.exe` in **sorted**
+order, so `Droplet_0.1.2_…` beats `Droplet_0.2.0_…` and the download
+button quietly hands out the older build — with a catalog that parses and
+a digest that verifies. `stage.sh` clears the platform directory for this
+reason. If you stage by hand, delete the old installer yourself.
+
 ## What is and isn't committed
 
 Installers are binaries built from other repos — they are **git-ignored**
-here and staged by the image build. Only `.gitignore`, this README, and
-`platforms.example.json` are tracked. A dev checkout therefore mounts an
-effectively empty directory, and `/downloads` honestly reports that no
-apps are staged rather than erroring.
+here, so git can never deliver one to a box. Only `.gitignore`, this
+README, and `platforms.example.json` are tracked. Every checkout and every
+freshly imaged box therefore mounts an effectively empty directory, and
+`/downloads` honestly reports that no apps are staged rather than
+erroring. `catalog.json` and the staged binaries are local state: they
+survive a `git pull` and a deploy, and they do not survive a factory reset
+or a reimage. Re-stage after either.
 
 ## Trust model — read before "hardening" this
 

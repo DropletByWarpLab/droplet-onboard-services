@@ -102,6 +102,14 @@ const EXPECTED_TOOL_NAMES = [
   "pm_list_work_items",
   "pm_list_workspaces",
   "pm_search_work_items",
+  // crm (WARP-2546)
+  "crm_search_customers",
+  "crm_get_customer",
+  "crm_list_deals",
+  "crm_get_deal",
+  "crm_pipeline_summary",
+  "crm_log_activity",
+  "crm_move_deal_stage",
   // WARP-1094 — ERP-connector (Eaglesoft) tools
   "erp_get_schedule_today",
   "erp_find_patient",
@@ -164,8 +172,16 @@ const EXPECTED_TOOL_NAMES = [
   "restore_file_version",
   "share_file",
   "create_document",
+  // WARP-2211/2212 — document generation (a finished file), as opposed to
+  // create_document's empty seed.
+  "create_pdf_report",
+  "create_word_document",
+  "create_spreadsheet",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
+  // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
+  // three vendors and all ten datasets; the dataset arg picks the provider.
+  "cloud_query_dataset",
 ];
 
 describe("TOOLS registry", () => {
@@ -319,6 +335,16 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("share_file")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("create_document")?.requiresWrite).toBe(true);
     expect(TOOLS.get("create_document")?.requiresConfirmation).toBe(false);
+    // WARP-2212 — the generators are plain writes too. They create a NEW file
+    // at a path the caller named, and POST /api/files/render refuses an
+    // existing one (409) — enforced atomically by the `If-None-Match: *`
+    // create-new guard on the WebDAV PUT itself (WARP-2523), with the exists?
+    // pre-check as a fast path — so there is no overwrite for a confirmation
+    // to guard against.
+    for (const name of ["create_pdf_report", "create_word_document", "create_spreadsheet"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

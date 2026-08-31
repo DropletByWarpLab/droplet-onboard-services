@@ -704,6 +704,18 @@ const envSchema = z.object({
   // .int() rejects sub-day floats and .finite() rejects Infinity.
   DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // WARP-2463: retention window (days) for ErpDriftRecord — the reconciliation
+  // sweep's stored drift report. Its own 03:30 cron leg trims rows older than
+  // this. 90 days mirrors the audit window and is the shortest horizon that
+  // still answers the question the table exists for: "has the incremental path
+  // been trustworthy for this vendor THIS MONTH, and was it better last
+  // month" needs two months of history to have a second month to compare to.
+  // Set 0 to disable the trim entirely — the explicit "keep forever" stance,
+  // NOT a sentinel: 0 parses here and trimErpDriftRecords treats <= 0 as skip
+  // (defense in depth). A negative window is nonsensical input, so the schema
+  // rejects it at startup rather than silently treating it as disable.
+  DROPLET_ERP_DRIFT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
   //   polls for cosign-signed OTA release manifests. Default is the
@@ -903,6 +915,19 @@ const envSchema = z.object({
   // when unset the /api/web routes fail CLOSED with 502 rather than call
   // the fetcher unauthenticated.
   WEB_FETCH_SERVICE_TOKEN: z.string().default(""),
+
+  // --- Document rendering (WARP-2211) ---
+  // DOC_RENDER_URL — compose-internal base URL of services/doc-render, the
+  // stateless .pdf/.docx/.xlsx writer behind POST /api/files/render. It holds
+  // no credentials and makes no egress; this route is its only caller.
+  DOC_RENDER_URL: z.string().default("http://doc-render:8020"),
+  // DOC_RENDER_SERVICE_TOKEN — outbound bearer for /api/files/render →
+  // doc-render. Minted by scripts/lib/secrets.sh (generate_env on a fresh
+  // install, migrate_env backfill on an existing box), so unlike
+  // WEB_FETCH_SERVICE_TOKEN this is populated without a hand edit. When it IS
+  // empty the route fails CLOSED with 502 rather than calling the renderer
+  // unauthenticated — and doc-render itself 503s, so both ends refuse.
+  DOC_RENDER_SERVICE_TOKEN: z.string().default(""),
 
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
