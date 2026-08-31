@@ -35,8 +35,6 @@ import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
-import { CrmTabs, type CrmTab } from "@/components/crm/CrmTabs";
-import { CrmSurface } from "@/components/crm/CrmSurface";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -63,26 +61,22 @@ export default function ProjectsPage(): JSX.Element {
   // capability flag (GET /api/capabilities), never by catching PM errors.
   // The hook fails open, so only an explicit `projects: false` lands here
   // (the sidebar entry is hidden by the same flag; this covers direct URLs).
-  const { projects: projectsEnabled, crm: crmEnabled } = useAppCapabilities();
+  const { projects: projectsEnabled } = useAppCapabilities();
   if (!projectsEnabled) return <ProjectsDisabled />;
-  // WARP-2545 — the CRM nests here rather than taking a route of its own, so
-  // its module flag only ever ADDS sub-tabs. `crm` is already resolved against
-  // its `requires: "projects"` edge server-side; a box with CRM on and
-  // Projects off never reaches this line anyway.
-  return <ProjectsWorkspace crmEnabled={crmEnabled} />;
+  // WARP-2558 (ADR-044) — this page reads the `projects` flag and nothing
+  // else. It used to also read `crm` and render the CRM's sub-tabs, which is
+  // why its header renamed itself when a module it does not own flipped. The
+  // CRM lives at /customers now.
+  return <ProjectsWorkspace />;
 }
 
-function ProjectsWorkspace({ crmEnabled }: { crmEnabled: boolean }): JSX.Element {
+function ProjectsWorkspace(): JSX.Element {
   const { user } = useAuth();
   const role = user?.role;
   const readOnly = !canWrite(role);
   const { toast } = useToast();
   const { person } = usePeople();
 
-  // WARP-2545. Defaults to "projects" so a box that turns the CRM on finds the
-  // surface it already had, unchanged, and discovers the new tabs beside it —
-  // rather than landing somewhere else the morning after an update.
-  const [crmTab, setCrmTab] = useState<CrmTab>("projects");
   const [view, setView] = useState<ProjectView | "index">("index");
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
@@ -162,37 +156,18 @@ function ProjectsWorkspace({ crmEnabled }: { crmEnabled: boolean }): JSX.Element
     }
   };
 
-  // The CRM tabs replace the PM content; the PM chrome (view switcher, saved
-  // views, filters) belongs to the Projects tab alone.
-  const onCrmTab = crmEnabled && crmTab !== "projects";
-  const isProjectView = !onCrmTab && (view === "board" || view === "list");
+  const isProjectView = view === "board" || view === "list";
 
-  // The nav label only becomes "CRM" once the module is on. A box that never
-  // enables it keeps the surface it bought.
-  const shellLabel = crmEnabled ? "CRM" : "Projects";
-
-  const headerTitle = onCrmTab
-    ? crmTab === "customers"
-      ? "Customers"
-      : "Deals"
-    : view === "index"
-      ? "Projects"
-      : project?.name ?? "Projects";
-  const headerSub = onCrmTab
-    ? undefined
-    : view === "index"
+  const headerTitle =
+    view === "index" ? "Projects" : project?.name ?? "Projects";
+  const headerSub =
+    view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : project
         ? `${project.openCount} open · ${project.doneCount} done`
         : undefined;
 
-  const actions = onCrmTab ? (
-    // The CRM's own create actions live beside the content they create, where
-    // the stage/column context that decides where a deal lands is visible.
-    <Link className="btn" href="/chat">
-      <PmIcon name="msg" size={14} /> Ask AI about your customers
-    </Link>
-  ) : view === "index" ? (
+  const actions = view === "index" ? (
       <>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
@@ -221,24 +196,10 @@ function ProjectsWorkspace({ crmEnabled }: { crmEnabled: boolean }): JSX.Element
 
   return (
     <PeopleContext.Provider value={person}>
-      <ShellPage icon={<FolderKanban size={15} />} label={shellLabel} title={headerTitle} sub={headerSub} actions={actions}>
+      <ShellPage icon={<FolderKanban size={15} />} label="Projects" title={headerTitle} sub={headerSub} actions={actions}>
         <div className="pm-scope">
           <div className="pm-page">
-            {crmEnabled && (
-              <div style={{ marginBottom: 14 }}>
-                <CrmTabs
-                  tab={crmTab}
-                  onTab={(t) => {
-                    setCrmTab(t);
-                    // Returning to Projects lands on the index, not on whatever
-                    // project was open three tab-switches ago.
-                    if (t === "projects") backToIndex();
-                  }}
-                />
-              </div>
-            )}
-
-            {!onCrmTab && view !== "index" && (
+            {view !== "index" && (
               <button className="pm-btn ghost sm" type="button" onClick={backToIndex} style={{ alignSelf: "flex-start", marginBottom: 14 }}>
                 <PmIcon name="chevL" size={14} /> All projects
               </button>
@@ -253,17 +214,14 @@ function ProjectsWorkspace({ crmEnabled }: { crmEnabled: boolean }): JSX.Element
                 <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
               </div>
             )}
-            {!onCrmTab && (view === "cycles" || view === "modules") && (
+            {(view === "cycles" || view === "modules") && (
               <div style={{ marginBottom: 14 }}>
                 <ViewSwitcher view={view} onView={(v) => setView(v)} />
               </div>
             )}
 
             <div style={{ flex: 1, minHeight: 0 }}>
-              {onCrmTab && (
-                <CrmSurface tab={crmTab === "customers" ? "customers" : "deals"} readOnly={readOnly} />
-              )}
-              {!onCrmTab && view === "index" && (
+              {view === "index" && (
                 <IndexView
                   projects={projects}
                   summary={summary}
@@ -279,7 +237,7 @@ function ProjectsWorkspace({ crmEnabled }: { crmEnabled: boolean }): JSX.Element
                   }}
                 />
               )}
-              {!onCrmTab && view === "board" && (
+              {view === "board" && (
                 <BoardView
                   states={states ?? []}
                   items={filtered}
@@ -290,11 +248,11 @@ function ProjectsWorkspace({ crmEnabled }: { crmEnabled: boolean }): JSX.Element
                   onNewItem={() => setModal("newitem")}
                 />
               )}
-              {!onCrmTab && view === "list" && (
+              {view === "list" && (
                 <ListView states={states ?? []} items={filtered} domain={boardDomain} onOpen={setDrawer} />
               )}
-              {!onCrmTab && view === "cycles" && <PlaceholderView kind="cycles" />}
-              {!onCrmTab && view === "modules" && <PlaceholderView kind="modules" />}
+              {view === "cycles" && <PlaceholderView kind="cycles" />}
+              {view === "modules" && <PlaceholderView kind="modules" />}
             </div>
           </div>
         </div>
