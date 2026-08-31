@@ -601,13 +601,23 @@ EOF
   # replacing the script under a running watcher.
   sudo systemctl enable droplet-openwrt-watch.service >/dev/null 2>&1
   sudo systemctl restart droplet-openwrt-watch.service >/dev/null 2>&1 || true
+  # WARP-2575: this enable is unconditional, and that is fine ONLY because the
+  # unit now carries ConditionPathExists=/sys/class/net/br-lan. A stock
+  # single-box has no br-lan (nothing here creates one — the netplan that
+  # would is the .example referenced above, and openwrt-attach only enslaves
+  # into an existing bridge), so an enabled-but-unconditioned unit crash-looped
+  # on `ip addr replace ... dev br-lan` every 5 s forever. Keep the condition
+  # in the unit rather than gating this line: a box that grows a br-lan later
+  # then starts serving DHCP on its own, with no second setup.sh run.
   sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
   # WARP-445: when the pre-rename unit was just stopped above, the renamed
   # unit must be STARTED now (not just enabled) — otherwise br-lan loses its
   # DHCP server + switch route until the next reboot. `restart` (not `start`)
   # so a half-alive instance from a torn earlier migration picks up the fresh
-  # files too. `|| true`: a start failure must not abort setup — the unit
-  # fails loudly in journalctl and Restart=on-failure keeps retrying.
+  # files too. `|| true`: a start failure must not abort setup — on a box with
+  # br-lan the unit fails loudly in journalctl and Restart=on-failure retries
+  # (now bounded by StartLimitBurst, WARP-2575); on a box without one the
+  # restart is a no-op skip, which is the whole point of the condition.
   if [ "$legacy_host_net_migrated" = 1 ]; then
     sudo systemctl restart droplet-host-net.service >/dev/null 2>&1 || true
     log_success "Migrated pre-rename host-net service — old unit disabled + files removed, droplet-host-net.service enabled + started"
