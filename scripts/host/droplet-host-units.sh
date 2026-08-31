@@ -42,8 +42,51 @@
 #            Exit 0 = nothing stale, or everything restarted and verified.
 #            Exit 1 = at least one unit did not come back (CRITICAL logged).
 #
-#   Both accept --json (machine-readable report on stdout).
+#   audit    Reconcile scripts/host/MANIFEST against what is actually on the
+#            box. Answers the question `check` structurally cannot (see the
+#            next section). Never touches anything — pure reads.
+#            Exit 0 = every artefact accounted for.
+#            Exit 1 = at least one is missing, drifted, or not enabled.
+#            Exit 4 = the manifest could not be located, so there is no
+#                     verdict to give (distinct from "everything is fine").
+#
+#   All three accept --json (machine-readable report on stdout).
 #   `refresh` accepts --force (retry units suspended after a failed restart).
+#
+# ── WHY `audit` EXISTS: `check` CANNOT SEE WHAT WAS NEVER INSTALLED ──────────
+# WARP-2574. `check` enumerates units FROM SYSTEMD and compares each running
+# process against its own sources, so it can only ever report on artefacts that
+# EXIST. A host artefact that was never installed has no unit to enumerate and
+# no process to compare — it is invisible to this script, to `systemctl status`
+# and to /api/health alike.
+#
+# Measured 2026-08-31 on the bench box: WARP-2190 (droplet-power-restore) and
+# WARP-2192 (the hardware watchdog) merged on 2026-08-26, the box's checkout
+# contained both, and NEITHER was installed. Both units read `not-found`,
+# /dev/watchdog0 did not exist, and the board's AC-loss policy was still
+# `always-off` — the box would have stayed dark after a power cut, five days
+# after the fix shipped. `check` reported everything current, correctly and
+# uselessly.
+#
+# The cause is structural, not a one-off: the box refresh flow updates the git
+# checkout and restarts CONTAINERS, and nothing re-runs
+# install_single_box_host_integration (scripts/lib/single-box.sh). So any
+# host-unit feature can merge, be marked Done, and run on zero boxes.
+#
+# `audit` closes that by reconciling from the OTHER direction — from the tree's
+# declared expectation (scripts/host/MANIFEST) to the filesystem — rather than
+# from whatever systemd happens to have loaded.
+#
+# THE MANIFEST IS READ FROM THE CHECKOUT, NEVER FROM AN INSTALLED COPY. The
+# question is "is this box running what the tree says", so the expectation must
+# come from the TREE. An installed copy would be stale in exactly the situation
+# this exists to catch — a checkout that pulled a new artefact whose installer
+# never re-ran — and would answer "nothing is missing" while the new artefact
+# sat uninstalled. That is why nothing installs MANIFEST to /usr/local.
+#
+# The manifest is kept honest by tests/host-artefacts.test.sh, which reconciles
+# it against install_single_box_host_integration in both directions on every PR:
+# a host artefact added without a manifest row fails CI.
 #
 # ── WHICH UNITS ARE IN SCOPE (enumerated, never hardcoded) ───────────────────
 # Units come from systemd itself (`systemctl list-units --all` filtered by
@@ -174,7 +217,11 @@
 #   DROPLET_HOST_UNITS_RESTART_LAST      space-separated, restarted last
 #   DROPLET_HOST_UNITS_SETTLE_SECONDS    post-restart settle wait
 #   DROPLET_HOST_UNITS_PAYLOAD_ROOTS     roots a shell launcher may exec from
-#   DROPLET_HOST_UNITS_REPO_ROOT         checkout used for install-drift
+#   DROPLET_HOST_UNITS_REPO_ROOT         checkout used for install-drift + audit
+#   DROPLET_HOST_UNITS_MANIFEST          manifest path (default: <repo>/scripts/host/MANIFEST)
+#   DROPLET_HOST_UNITS_ROOT_PREFIX       prefix for every manifest DESTINATION,
+#                                        so `audit` can run against a fixture
+#                                        filesystem with no root and no box
 #   (systemctl is resolved via PATH, so a stub earlier on PATH intercepts it)
 # =============================================================================
 # Deliberately NOT `set -e`: one unresolvable unit must never abort the sweep
@@ -189,6 +236,12 @@ HU_RESTART_LAST="${DROPLET_HOST_UNITS_RESTART_LAST:-droplet-device-bridge.servic
 HU_SETTLE="${DROPLET_HOST_UNITS_SETTLE_SECONDS:-3}"
 HU_PAYLOAD_ROOTS="${DROPLET_HOST_UNITS_PAYLOAD_ROOTS:-/usr/local/lib /usr/local/share /opt/droplet}"
 HU_REPO_ROOT="${DROPLET_HOST_UNITS_REPO_ROOT:-}"
+# WARP-2574 (audit). Empty by default: the manifest is resolved inside whatever
+# checkout this box actually runs, never pinned to a host-specific path.
+HU_MANIFEST="${DROPLET_HOST_UNITS_MANIFEST:-}"
+# Prefix applied to every manifest DESTINATION. Empty on a box (destinations are
+# absolute system paths); a tmpdir under test, so the whole audit runs unrooted.
+HU_ROOT_PREFIX="${DROPLET_HOST_UNITS_ROOT_PREFIX:-}"
 
 SUSPENDED_FILE="$HU_STATE_DIR/suspended"
 DIGEST_DIR="$HU_STATE_DIR/digests"
@@ -209,7 +262,7 @@ log_crit() { printf '[host-units] %s CRITICAL: %s\n' "$(now_iso)" "$*" >&2; }
 
 usage() {
   cat <<'USAGE'
-Usage: droplet-host-units <check|refresh> [--json] [--force]
+Usage: droplet-host-units <check|refresh|audit> [--json] [--force]
 
   check     Report every host systemd unit whose running process started
             BEFORE the sources it executes were last modified. Never touches
@@ -220,13 +273,25 @@ Usage: droplet-host-units <check|refresh> [--json] [--force]
             verified. Exit 0 = nothing to do or all verified back up,
             1 = at least one did not come back, 2 = usage error.
 
+  audit     Reconcile scripts/host/MANIFEST against what is installed and
+            enabled on this box. Pure reads — changes nothing.
+            Exit 0 = every artefact accounted for, 1 = at least one missing,
+            drifted or not enabled, 2 = usage error, 4 = no manifest found
+            (no verdict — NOT the same as "everything is fine").
+
   --json    Machine-readable report on stdout.
   --force   (refresh) Retry units suspended after a failed restart.
 
-Why this exists: host units execute their source out of the git working
-tree, and the box's refresh restarts containers only — so a merged fix can
-sit inert in a running process indefinitely while the repo, the file on
-disk and `systemctl status` all look correct. See WARP-1829.
+Why check/refresh exist: host units execute their source out of the git
+working tree, and the box's refresh restarts containers only — so a merged
+fix can sit inert in a running process indefinitely while the repo, the file
+on disk and `systemctl status` all look correct. See WARP-1829.
+
+Why audit exists: check enumerates units FROM systemd, so it cannot see an
+artefact that was never installed at all — there is no process to compare.
+Measured 2026-08-31: droplet-power-restore (WARP-2190) and the hardware
+watchdog (WARP-2192) were in the box's checkout for five days and installed
+on none of it. See WARP-2574.
 USAGE
 }
 
@@ -703,6 +768,262 @@ count_state() { # <state>
 }
 
 # =============================================================================
+# audit — reconcile scripts/host/MANIFEST against the box (WARP-2574)
+# =============================================================================
+# The counterpart to `check`. `check` walks systemd and asks "is this running
+# process older than its code"; `audit` walks the TREE'S DECLARED EXPECTATION
+# and asks "is this artefact here at all, and does it match". Only the second
+# question can see WARP-2190/WARP-2192 sitting in a checkout, installed nowhere.
+#
+# Every row lands in the report with an explicit state — nothing is ever
+# silently absent (architecture-guard: explicit enums, never inferred):
+#
+#   ok            present, and (policy=track) byte-identical + same mode
+#   missing       declared by the tree, not on this box  ← the WARP-2574 hole
+#   drift         present but the bytes or the mode differ from the repo source
+#   not_enabled   a unit the installer enables that systemd does not have enabled
+#   unverifiable  the repo source is absent, so nothing can be compared
+#                 (a torn checkout — the box cannot prove it is correct)
+#   skipped       deliberately not reconciled; the manifest's note says why
+#
+# Anything but ok/skipped sets exit 1. Drift is red here even though `check`
+# reports install_drift green: `check` is about a live process and can honestly
+# say "the fix is a setup.sh re-run away", whereas this audit exists precisely
+# because that re-run may never come. The measured cost of treating drift as
+# cosmetic (WARP-1829, 2026-08-10): /usr/local/sbin/droplet-watchdog ran 82
+# lines behind for ~3 weeks, and droplet-collect-logs.sh shipped support bundles
+# containing un-redacted bearer-equivalent tokens.
+
+A_KIND=(); A_SRC=(); A_DST=(); A_POLICY=(); A_STATE=(); A_REASON=()
+
+AUDIT_MANIFEST_PATH=""
+
+# Walk systemd's Exec lines for a path inside this box's checkout. Derived, not
+# a hardcoded location: droplet.service runs `docker compose -f
+# <repo>/docker/docker-compose.yml`, so any provisioned box names its own
+# checkout here even when NOTHING else from the manifest is installed — which is
+# the state this whole subcommand exists for.
+resolve_repo_root_from_systemd() {
+  [ -n "$REPO_ROOT_RESOLVED" ] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 1
+  local unit tokens token
+  while IFS= read -r unit; do
+    [ -n "$unit" ] || continue
+    load_unit "$unit"
+    # No pipeline into the loop: a `while` on the right of a pipe runs in a
+    # subshell and REPO_ROOT_RESOLVED would be set and immediately discarded.
+    tokens="$( { prop_all ExecStartPre; prop_all ExecStart; prop_all ExecStartPost; } \
+      | exec_argv | tr ' ' '\n' )"
+    for token in $tokens; do
+      case "$token" in /*) ;; *) continue ;; esac
+      [ -e "$token" ] || continue
+      resolve_repo_root "$(dirname "$token")" && return 0
+    done
+  done < <(list_units)
+  return 1
+}
+
+# Last resort: the egress-audit env file records DROPLET_ENV_FILE=<repo>/.env.
+# Also derived — setup.sh writes it from REPO_ROOT — so it stays correct on a
+# box whose checkout lives somewhere unusual.
+resolve_repo_root_from_egress_env() {
+  [ -n "$REPO_ROOT_RESOLVED" ] && return 0
+  local f="$HU_ROOT_PREFIX/etc/default/droplet-egress-audit" envfile
+  [ -f "$f" ] || return 1
+  envfile="$(sed -n 's/^DROPLET_ENV_FILE=//p' "$f" 2>/dev/null | head -1)"
+  [ -n "$envfile" ] || return 1
+  resolve_repo_root "$(dirname "$envfile")"
+}
+
+# 755 and 0755 are the same mode; stat and the manifest disagree on the padding.
+norm_mode() {
+  local m="$1"
+  while [ "${m#0}" != "$m" ] && [ "${#m}" -gt 1 ]; do m="${m#0}"; done
+  printf '%s' "$m"
+}
+
+file_mode() { # <path>
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+audit_add() { # <kind> <src> <dst> <policy> <state> <reason>
+  A_KIND+=("$1"); A_SRC+=("$2"); A_DST+=("$3")
+  A_POLICY+=("$4"); A_STATE+=("$5"); A_REASON+=("$6")
+}
+
+audit_count() { # <state>
+  local i n=0
+  for ((i = 0; i < ${#A_STATE[@]}; i++)); do
+    [ "${A_STATE[$i]}" = "$1" ] && n=$((n + 1))
+  done
+  printf '%d' "$n"
+}
+
+# Locate the manifest inside the box's own checkout. Returns 1 when it cannot —
+# the caller turns that into exit 4, because "I could not look" and "I looked
+# and everything is fine" must never share an exit code.
+audit_locate_manifest() {
+  if [ -n "$HU_MANIFEST" ]; then
+    AUDIT_MANIFEST_PATH="$HU_MANIFEST"
+    [ -r "$AUDIT_MANIFEST_PATH" ] && return 0
+    log "manifest not readable at $AUDIT_MANIFEST_PATH (DROPLET_HOST_UNITS_MANIFEST)"
+    return 1
+  fi
+  resolve_repo_root_from_systemd >/dev/null 2>&1 || true
+  resolve_repo_root_from_egress_env >/dev/null 2>&1 || true
+  if [ -z "$REPO_ROOT_RESOLVED" ]; then
+    log "could not locate this box's checkout — no verdict. Point at it with DROPLET_HOST_UNITS_REPO_ROOT=<checkout>"
+    return 1
+  fi
+  AUDIT_MANIFEST_PATH="$REPO_ROOT_RESOLVED/scripts/host/MANIFEST"
+  [ -r "$AUDIT_MANIFEST_PATH" ] && return 0
+  log "checkout $REPO_ROOT_RESOLVED has no readable scripts/host/MANIFEST — no verdict"
+  return 1
+}
+
+audit_row_file() { # <src> <dst> <mode> <policy> <note>
+  local src="$1" dst="$2" mode="$3" policy="$4" note="$5"
+  local target="$HU_ROOT_PREFIX$dst" repo_src="$REPO_ROOT_RESOLVED/$src"
+
+  if [ ! -e "$target" ]; then
+    audit_add file "$src" "$dst" "$policy" missing \
+      "declared in scripts/host/MANIFEST, absent from this box — the installer never placed it (or something removed it)"
+    return
+  fi
+
+  if [ "$policy" = presence ]; then
+    audit_add file "$src" "$dst" "$policy" ok \
+      "present; content deliberately not compared (${note:-no reason recorded})"
+    return
+  fi
+
+  if [ ! -f "$repo_src" ]; then
+    audit_add file "$src" "$dst" "$policy" unverifiable \
+      "present on the box, but the repo source $src is absent from the checkout — nothing to compare it against"
+    return
+  fi
+
+  if ! cmp -s "$repo_src" "$target"; then
+    audit_add file "$src" "$dst" "$policy" drift \
+      "installed copy differs from $src — the box is running an older build of this artefact"
+    return
+  fi
+
+  local have want
+  have="$(norm_mode "$(file_mode "$target")")"
+  want="$(norm_mode "$mode")"
+  if [ -n "$have" ] && [ -n "$want" ] && [ "$have" != "$want" ]; then
+    audit_add file "$src" "$dst" "$policy" drift \
+      "content matches $src but the mode is $have, not $want (a 0644 executable never runs)"
+    return
+  fi
+
+  audit_add file "$src" "$dst" "$policy" ok "matches $src"
+}
+
+audit_row_dir() { # <dst> <note>
+  local dst="$1" note="$2" target="$HU_ROOT_PREFIX$1"
+  if [ -d "$target" ]; then
+    audit_add dir - "$dst" present ok "present"
+  else
+    audit_add dir - "$dst" present missing \
+      "declared in scripts/host/MANIFEST, absent from this box${note:+ — $note}"
+  fi
+}
+
+audit_row_unit() { # <unit>
+  local unit="$1" state
+  if ! command -v systemctl >/dev/null 2>&1; then
+    audit_add unit - "$unit" enabled skipped \
+      "no systemctl on this host — enablement is unknowable here, not assumed fine"
+    return
+  fi
+  state="$(systemctl is-enabled "$unit" 2>/dev/null | head -1)"
+  [ -n "$state" ] || state="not-found"
+  case "$state" in
+    enabled | enabled-runtime)
+      audit_add unit - "$unit" enabled ok "is-enabled=$state" ;;
+    not-found)
+      audit_add unit - "$unit" enabled not_enabled \
+        "systemd has no such unit (is-enabled=not-found) — the unit file was never installed" ;;
+    *)
+      audit_add unit - "$unit" enabled not_enabled \
+        "is-enabled=$state — the installer enables this unit, systemd does not have it enabled" ;;
+  esac
+}
+
+audit_run() {
+  local kind src dst mode policy note
+  while read -r kind src dst mode policy note; do
+    case "$kind" in '' | \#*) continue ;; esac
+    case "$kind" in
+      file) audit_row_file "$src" "$dst" "$mode" "$policy" "$note" ;;
+      dir)  audit_row_dir "$dst" "$note" ;;
+      unit) audit_row_unit "$dst" ;;
+      skip) audit_add skip - "$dst" "$policy" skipped \
+              "${note:-no reason recorded}" ;;
+      *)
+        # An unknown kind is a manifest bug. Report it rather than dropping the
+        # row — a silently ignored row is a silently unchecked artefact, which
+        # is the failure this whole subcommand exists to end.
+        audit_add "$kind" "$src" "$dst" "${policy:--}" unverifiable \
+          "unknown manifest kind '$kind' — this row was not reconciled" ;;
+    esac
+  done < "$AUDIT_MANIFEST_PATH"
+}
+
+# Every failing label is a SINGLE whitespace-free token in column 1, and the
+# destination is column 2. That is a contract, not a formatting choice: the
+# watchdog's host_artefacts check awks this output to name the offenders, and a
+# two-word label ("NOT ENABLED") would shift the column and silently produce a
+# message listing the wrong field. tests/host-artefacts.test.sh pins it.
+report_audit_human() {
+  local i n
+  n="${#A_KIND[@]}"
+  printf '  host artefacts declared by %s: %d\n' "$AUDIT_MANIFEST_PATH" "$n"
+  printf '  checkout: %s\n' "${REPO_ROOT_RESOLVED:-<manifest path given directly>}"
+  for ((i = 0; i < n; i++)); do
+    case "${A_STATE[$i]}" in
+      missing)      printf '  MISSING       %-56s %s\n' "${A_DST[$i]}" "${A_REASON[$i]}" ;;
+      drift)        printf '  DRIFT         %-56s %s\n' "${A_DST[$i]}" "${A_REASON[$i]}" ;;
+      not_enabled)  printf '  NOT-ENABLED   %-56s %s\n' "${A_DST[$i]}" "${A_REASON[$i]}" ;;
+      unverifiable) printf '  UNVERIFIABLE  %-56s %s\n' "${A_DST[$i]}" "${A_REASON[$i]}" ;;
+      skipped)      printf '  skip          %-56s %s\n' "${A_DST[$i]}" "${A_REASON[$i]}" ;;
+      *)            printf '  ok            %-56s %s\n' "${A_DST[$i]}" "${A_REASON[$i]}" ;;
+    esac
+  done
+  local bad
+  bad=$(( $(audit_count missing) + $(audit_count drift) \
+        + $(audit_count not_enabled) + $(audit_count unverifiable) ))
+  if [ "$bad" -gt 0 ]; then
+    printf '\n  %d artefact(s) not accounted for. This box is not running what its checkout says.\n' "$bad"
+    printf '  Fix: re-run the installer from the checkout —  sudo ./scripts/setup.sh\n'
+  fi
+}
+
+report_audit_json() {
+  local i n first=1
+  n="${#A_KIND[@]}"
+  printf '{"generated_at":"%s","manifest":"%s","repo_root":"%s","missing_count":%d,"drift_count":%d,"not_enabled_count":%d,"unverifiable_count":%d,"artefacts":[' \
+    "$(now_iso)" "$(json_escape "$AUDIT_MANIFEST_PATH")" \
+    "$(json_escape "$REPO_ROOT_RESOLVED")" \
+    "$(audit_count missing)" "$(audit_count drift)" \
+    "$(audit_count not_enabled)" "$(audit_count unverifiable)"
+  for ((i = 0; i < n; i++)); do
+    [ "$first" -eq 1 ] || printf ','
+    first=0
+    printf '{"kind":"%s","source":"%s","destination":"%s","policy":"%s","state":"%s","reason":"%s"}' \
+      "$(json_escape "${A_KIND[$i]}")" \
+      "$(json_escape "${A_SRC[$i]}")" \
+      "$(json_escape "${A_DST[$i]}")" \
+      "$(json_escape "${A_POLICY[$i]}")" \
+      "$(json_escape "${A_STATE[$i]}")" \
+      "$(json_escape "${A_REASON[$i]}")"
+  done
+  printf ']}\n'
+}
+
+# =============================================================================
 # refresh
 # =============================================================================
 
@@ -802,7 +1123,7 @@ FORCE=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    check | refresh) SUBCOMMAND="$1"; shift ;;
+    check | refresh | audit) SUBCOMMAND="$1"; shift ;;
     --json)  AS_JSON=true; shift ;;
     --force) FORCE=true; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -815,14 +1136,42 @@ if [ -z "$SUBCOMMAND" ]; then
   exit 2
 fi
 
+[ -n "$HU_REPO_ROOT" ] && [ -d "$HU_REPO_ROOT" ] && REPO_ROOT_RESOLVED="$HU_REPO_ROOT"
+
+# --- audit ------------------------------------------------------------------
+# Handled before the systemctl gate below: a manifest audit is mostly file
+# reads, and it stays useful (and testable) on a host with no systemd. Unit
+# rows report `skipped` with that reason rather than being assumed fine.
+if [ "$SUBCOMMAND" = "audit" ]; then
+  if ! audit_locate_manifest; then
+    # Exit 4, never 0. "I could not look" is not "everything is fine" — the
+    # whole point of this subcommand is that a silence used to read as health.
+    if [ "$AS_JSON" = true ]; then
+      printf '{"generated_at":"%s","manifest":"","repo_root":"%s","missing_count":0,"drift_count":0,"not_enabled_count":0,"unverifiable_count":0,"artefacts":[],"error":"manifest not found"}\n' \
+        "$(now_iso)" "$(json_escape "$REPO_ROOT_RESOLVED")"
+    fi
+    exit 4
+  fi
+  audit_run
+  AUDIT_EXIT=0
+  if [ "$(audit_count missing)" -gt 0 ] || [ "$(audit_count drift)" -gt 0 ] \
+     || [ "$(audit_count not_enabled)" -gt 0 ] || [ "$(audit_count unverifiable)" -gt 0 ]; then
+    AUDIT_EXIT=1
+  fi
+  if [ "$AS_JSON" = true ]; then
+    report_audit_json
+  else
+    report_audit_human
+  fi
+  exit "$AUDIT_EXIT"
+fi
+
 if ! command -v systemctl >/dev/null 2>&1; then
   log "systemctl not found — nothing to check (not a systemd host)"
   [ "$AS_JSON" = true ] && printf '{"generated_at":"%s","match":"%s","stale_count":0,"failed_count":0,"units":[]}\n' \
     "$(now_iso)" "$(json_escape "$HU_MATCH")"
   exit 0
 fi
-
-[ -n "$HU_REPO_ROOT" ] && [ -d "$HU_REPO_ROOT" ] && REPO_ROOT_RESOLVED="$HU_REPO_ROOT"
 
 sweep
 
