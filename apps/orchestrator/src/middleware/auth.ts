@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
-import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
+import { verifyAccessToken, resolveNcSessionRole, type Role } from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
 import { isUserDenied } from "../services/auth-denylist.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -437,8 +437,11 @@ type OcsValidationResult =
  *     privilege-escalation vector (an attacker who somehow holds a valid
  *     OCS token for an unrelated NC user could otherwise mint a local row).
  *     `req.user.username` keeps the Nextcloud username for display, and
- *     `req.user.role` is still derived from OCS groups via `roleFromGroups`
- *     (the JWT path's role takes precedence when a JWT is present).
+ *     `req.user.role` is resolved by `resolveNcSessionRole` — the OCS
+ *     groups CAPPED at the local row's `User.role` (WARP-1636; before
+ *     that cap the groups alone decided, and Nextcloud's built-in
+ *     `admin` group mapped straight to `owner`). The JWT path's role
+ *     takes precedence when a JWT is present.
  *
  * Downstream invariant: every `req.user.id` consumer (people self-action
  * guard, camera pins, /auth/me, brain-memory ownership checks, etc.) may
@@ -540,7 +543,14 @@ async function validateNextcloudTokenDetailed(
       id: localUser.id,
       username: ncUsername,
       displayName: ocs.data["display-name"] || ncUsername,
-      role: roleFromGroups(groups),
+      // WARP-1636 — CAP the group-derived role at the role Droplet's own
+      // store holds. `roleFromGroups(groups)` alone read Nextcloud's
+      // built-in `admin` group back as `owner`, so a deliberately-narrowed
+      // admin (or anyone an NC administrator added to that group) could
+      // mint the one tier ADR-032 §3 says bypasses layer 2. `localUser` is
+      // already in hand from the WARP-485 lookup above, so the authority is
+      // free — see resolveNcSessionRole for the full rail.
+      role: resolveNcSessionRole(groups, localUser.role as Role),
     };
 
     await cacheSet(cacheKey, user, TOKEN_CACHE_TTL);
