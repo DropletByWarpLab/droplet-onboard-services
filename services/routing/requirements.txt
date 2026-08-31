@@ -3,7 +3,7 @@ uvicorn[standard]==0.52.4
 pydantic==2.13.4
 # WireGuard X25519 keypair generation lives in VPNApi (droplet_openwrt_sdk.py).
 # Doing keygen in Python avoids needing `file.exec` in the rpcd ACL.
-cryptography==50.0.0
+cryptography==50.0.1
 # WARP-470 (throughput sampler) + WARP-468 (egress meter): 60s
 # apscheduler ticks live in scheduler.py and egress_meter.py. APScheduler
 # is the canonical pattern per droplet-architecture-guard rule 9 (no

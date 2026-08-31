@@ -643,6 +643,33 @@ main() {
     log_info "Checking for host units left running stale code (WARP-1829)..."
     sudo /usr/local/sbin/droplet-host-units refresh \
       || log_warn "A host unit did not come back after its restart — run 'sudo droplet-host-units check' and 'systemctl status <unit>'"
+
+    # --- Did the install we just ran actually take? (WARP-2574) ---
+    # The refresh above answers "is anything running old code". This answers
+    # the question that went unasked for five days on the bench box: "is
+    # everything the checkout declares actually HERE". droplet-power-restore
+    # (WARP-2190) and the hardware watchdog (WARP-2192) merged, landed in the
+    # box's checkout, and were installed on none of it — every unit read
+    # `not-found` while the repo, the checkout and `systemctl status` all
+    # looked correct.
+    #
+    # Running it HERE, right after the installer, makes a provision verify its
+    # own work instead of assuming it: if install_single_box_host_integration
+    # silently skipped something (a missing source, a failed sudo, an early
+    # return), this is where it is said out loud rather than discovered on a
+    # dark box weeks later.
+    #
+    # Non-fatal, deliberately. An artefact this run could not place is real and
+    # loud in the log, but the box still comes up, and the watchdog's
+    # `host_artefacts` check keeps reporting it every ~3 minutes until it is
+    # fixed — failing the whole provision would trade a working appliance for
+    # an alarm that is already being raised.
+    log_info "Verifying the host integration actually landed (WARP-2574)..."
+    if ! sudo /usr/local/sbin/droplet-host-units audit; then
+      log_warn "The host integration this run just installed is INCOMPLETE (see the audit above)."
+      log_warn "  Anything listed MISSING is a feature that is in this checkout and inert on this box."
+      log_warn "  Detail: sudo droplet-host-units audit    Re-apply: sudo ./scripts/setup.sh"
+    fi
   fi
 
   # --- Leave nothing stale on the box ---

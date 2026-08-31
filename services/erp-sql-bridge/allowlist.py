@@ -67,13 +67,24 @@ def normalize_statement(sql: str) -> str | None:
     """Mask double-quoted identifiers to `<id>`, collapse whitespace.
 
     Returns None when the statement cannot be normalized — an unterminated
-    quoted identifier, or a raw `<id>` marker in the input (which could only
-    exist to impersonate a masked identifier). None is never a match, so the
-    caller refuses (fail closed).
+    quoted identifier, an unterminated string literal, or a raw `<id>` marker
+    in the input (which could only exist to impersonate a masked identifier).
+    None is never a match, so the caller refuses (fail closed).
 
     Single-quoted literals are NOT masked: the only literal a registry
     statement carries is `ESCAPE '\\'`, and keeping literals verbatim means an
     attacker cannot smuggle one in anywhere the skeleton has none.
+
+    They are, however, PARSED (WARP-2570). A `"` inside a `'...'` literal is
+    inert data to a SQL engine, so the walker has to know it is inside one; a
+    masker that tracks double-quote state alone would read that `"` as opening
+    an identifier and mask from there to the next `"` — somewhere else
+    entirely. That is a divergence between what this allowlist checks and what
+    the database executes, in the one module whose job is to make those two
+    agree, and it is the only thing standing in front of `cursor.execute`.
+    Not reachable today (the manifest's sole literal is the fixed `ESCAPE '\\'`,
+    which must match byte-for-byte), but it becomes reachable the moment any
+    registered statement carries free single-quoted content.
     """
     if _ID_MARK in sql:
         return None
@@ -93,6 +104,24 @@ def normalize_statement(sql: str) -> str | None:
             if j >= n:
                 return None  # unterminated identifier
             out.append(_ID_MARK)
+            i = j + 1
+        elif ch == "'":
+            # Copy the literal through verbatim, and — the point of this
+            # branch — consume it as ONE span, so nothing inside it is read as
+            # syntax. `''` is the only escape (a backslash is not one in a
+            # standard-conforming literal, which is why `ESCAPE '\'` is a
+            # complete two-character literal and not an escaped quote).
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2  # doubled quote: still inside the literal
+                        continue
+                    break
+                j += 1
+            if j >= n:
+                return None  # unterminated literal — fail closed
+            out.append(sql[i : j + 1])
             i = j + 1
         else:
             out.append(ch)

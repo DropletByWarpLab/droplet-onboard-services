@@ -245,18 +245,28 @@ else
   exit 1
 fi
 
-all_present=1
-for c in wifi voice_dsp docker_dns container_crashloop host_unit_staleness; do
-  s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
-  case "$s" in
-    ok|healed|heal_failed|escalated|not_applicable) : ;;
-    *) all_present=0 ;;
-  esac
-done
-if [ "$all_present" = 1 ]; then
-  pass "every known check carries an explicit enum status (none inferred from absence)"
+# The check list is read out of the script's own WD_ALL_CHECKS rather than
+# hand-copied here: a hand-copied list silently stops covering the newest check,
+# which is how host_artefacts (WARP-2574) and relay_dns went untested by this
+# assertion for as long as they did.
+ALL_CHECKS="$(grep -oE '^WD_ALL_CHECKS="[^"]+"' "$WATCHDOG" \
+  | sed -e 's/^WD_ALL_CHECKS="//' -e 's/"$//')"
+if [ -z "$ALL_CHECKS" ]; then
+  fail "could not read WD_ALL_CHECKS from droplet-watchdog.sh — this assertion would cover nothing"
 else
-  fail "a check is missing or carries a non-enum status: $(cat "$STATUS_JSON")"
+  all_present=1
+  for c in $ALL_CHECKS; do
+    s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
+    case "$s" in
+      ok|healed|heal_failed|escalated|not_applicable) : ;;
+      *) all_present=0 ;;
+    esac
+  done
+  if [ "$all_present" = 1 ]; then
+    pass "every check in WD_ALL_CHECKS ($ALL_CHECKS) carries an explicit enum status"
+  else
+    fail "a check is missing or carries a non-enum status: $(cat "$STATUS_JSON")"
+  fi
 fi
 
 # Checks not in DROPLET_WATCHDOG_CHECKS are explicitly not_applicable.
@@ -754,6 +764,155 @@ if [ "$(wd_field host_unit_staleness status)" = "not_applicable" ]; then
   pass "a detector that cannot run reports not_applicable, not a fake verdict"
 else
   fail "expected not_applicable for a broken detector, got $(wd_field host_unit_staleness status)"
+fi
+
+# =============================================================================
+# Phase 8b: host_artefacts (WARP-2574)
+# =============================================================================
+# The blind spot behind Phase 8. host_unit_staleness enumerates units FROM
+# SYSTEMD, so it can only report on artefacts that EXIST — an artefact that was
+# never installed has no unit and no process, and reads as nothing at all.
+# Measured 2026-08-31: droplet-power-restore (WARP-2190) and the hardware
+# watchdog (WARP-2192) sat in the bench box's checkout for five days, installed
+# on none of it, while Phase 8's check reported ok the entire time.
+echo "--- Phase 8b: host_artefacts ---"
+
+reset_work
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" \
+       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/absent" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
+  pass "host_artefacts: not_applicable when droplet-host-units is absent"
+else
+  fail "expected not_applicable, got $(wd_field host_artefacts status)"
+fi
+
+# Everything the checkout declares is installed.
+reset_work
+mk_host_units_stub
+echo 0 > "$WORK/host_units_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "ok" ]; then
+  pass "host_artefacts: ok when every declared artefact is installed"
+else
+  fail "expected ok, got $(wd_field host_artefacts status)"
+fi
+if grep -q 'droplet-host-units audit' "$WORK/host_units.log"; then
+  pass "host_artefacts delegates to the detector's read-only audit mode"
+else
+  fail "the check did not invoke the auditor: $(cat "$WORK/host_units.log" 2>/dev/null)"
+fi
+
+# --- the 2026-08-31 bench box, as the auditor would report it ----------------
+reset_work
+mk_host_units_stub
+echo 1 > "$WORK/host_units_exit"
+cat > "$WORK/host_units_out" <<'AUDIT_FIXTURE'
+  host artefacts declared by /home/droplet/edge-platform/scripts/host/MANIFEST: 60
+  checkout: /home/droplet/edge-platform
+  MISSING       /usr/local/sbin/droplet-power-restore                     declared in scripts/host/MANIFEST, absent from this box
+  MISSING       /etc/systemd/system/droplet-power-restore.service         declared in scripts/host/MANIFEST, absent from this box
+  MISSING       /etc/modules-load.d/droplet-watchdog-hw.conf              declared in scripts/host/MANIFEST, absent from this box
+  NOT-ENABLED   droplet-power-restore.timer                               systemd has no such unit (is-enabled=not-found)
+  DRIFT         /usr/local/sbin/droplet-watchdog                          installed copy differs from scripts/host/droplet-watchdog.sh
+  ok            /usr/local/sbin/droplet-host-net                          matches scripts/host/usr-local-sbin/droplet-host-net
+AUDIT_FIXTURE
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "heal_failed" ]; then
+  pass "host_artefacts: heal_failed when the box is missing what its checkout declares"
+else
+  fail "expected heal_failed, got $(wd_field host_artefacts status)"
+fi
+ha_msg="$(wd_field host_artefacts message)"
+case "$ha_msg" in
+  *droplet-power-restore*) pass "the message names the missing artefact" ;;
+  *) fail "message does not name the missing artefact: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *"3 missing"*) pass "the message counts the missing artefacts" ;;
+  *) fail "message does not count what is missing: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *"1 drifted"*) pass "the message counts drift separately from absence" ;;
+  *) fail "message does not distinguish drift from absence: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *"1 not enabled"*) pass "the message counts units that are not enabled" ;;
+  *) fail "message does not count not-enabled units: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *setup.sh*) pass "the message carries the one-line fix" ;;
+  *) fail "message does not say how to fix it: $ha_msg" ;;
+esac
+# `ok` rows must never be counted as problems — a check that cries wolf on a
+# healthy box is a check people learn to ignore.
+case "$ha_msg" in
+  *droplet-host-net*) fail "an ok row leaked into the failure message: $ha_msg" ;;
+  *) pass "ok rows are not reported as problems" ;;
+esac
+
+# The fix here is a full setup.sh run — apt, unit rewrites, service restarts.
+# A 3-minute timer must never start an unattended provision.
+if grep -qE 'setup\.sh|refresh' "$WORK/host_units.log"; then
+  fail "the watchdog tried to APPLY the fix: $(cat "$WORK/host_units.log")"
+else
+  pass "the watchdog never runs the installer (detect-and-report only)"
+fi
+
+# Two consecutive detections escalate — a CRITICAL line, not a quiet repeat.
+ha_out="$(run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts")"
+if [ "$(wd_field host_artefacts status)" = "escalated" ] \
+   && printf '%s\n' "$ha_out" | grep -q 'CRITICAL'; then
+  pass "a box that stays un-provisioned escalates to CRITICAL"
+else
+  fail "no escalation on the second detection: status=$(wd_field host_artefacts status)"
+fi
+
+# --- a very broken box must not write a multi-kilobyte status.json ----------
+reset_work
+mk_host_units_stub
+echo 1 > "$WORK/host_units_exit"
+: > "$WORK/host_units_out"
+for i in $(seq 1 40); do
+  printf '  MISSING       /usr/local/sbin/droplet-artefact-%02d   absent\n' "$i" \
+    >> "$WORK/host_units_out"
+done
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+ha_msg="$(wd_field host_artefacts message)"
+if [ "${#ha_msg}" -lt 700 ]; then
+  pass "a box missing 40 artefacts still writes a readable status message (${#ha_msg} chars)"
+else
+  fail "the status message ballooned to ${#ha_msg} chars — status.json becomes unreadable"
+fi
+case "$ha_msg" in
+  *"more)"*) pass "the truncated list says how many were elided" ;;
+  *) fail "the message truncates without saying so: $ha_msg" ;;
+esac
+
+# 4 = "I could not look", which must never be reported as health.
+reset_work
+mk_host_units_stub
+echo 4 > "$WORK/host_units_exit"
+printf 'could not locate this box checkout\n' > "$WORK/host_units_out"
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
+  pass "an unlocatable manifest reports not_applicable, never ok"
+else
+  fail "expected not_applicable for exit 4, got $(wd_field host_artefacts status)"
+fi
+case "$(wd_field host_artefacts message)" in
+  *MANIFEST*) pass "the not_applicable message says what could not be found" ;;
+  *) fail "the message does not explain why there is no verdict" ;;
+esac
+
+# An auditor that cannot run is not evidence the box is broken.
+reset_work
+mk_host_units_stub
+echo 2 > "$WORK/host_units_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
+  pass "an auditor that cannot run reports not_applicable, not a fake verdict"
+else
+  fail "expected not_applicable for a broken auditor, got $(wd_field host_artefacts status)"
 fi
 
 # =============================================================================

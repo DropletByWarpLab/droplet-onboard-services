@@ -1504,6 +1504,12 @@ model CalendarSource {
   // Format: iv||tag||ciphertext, base64-encoded. Never returned to clients.
   passwordEnc     String?
   syncIntervalSec Int       @default(900) // 15 minutes default
+  // WARP-2022 — owner/admin opt-in to a CalDAV server inside the boundary
+  // (a self-hosted Nextcloud/Radicale on the box's own LAN is a first-class
+  // use case on this appliance). An EXPLICIT column, never an exemption
+  // inferred from the URL, and never settable by a lower role. Skips the
+  // private-address rules ONLY: the scheme and userinfo rules still apply.
+  allowPrivateHost Boolean  @default(false)
   lastSyncAt      DateTime?
   lastSyncError   String?
   createdAt       DateTime  @default(now())

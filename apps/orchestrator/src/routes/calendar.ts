@@ -38,6 +38,9 @@ import {
 } from "../services/workspace-locations.service.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
+// WARP-2022 — tells a destination refusal apart from a transport failure
+// without string-matching the message.
+import { isOutboundUrlBlocked } from "../lib/outbound-url-guard.js";
 
 // WARP-1502: the place-suggestion shape + Nominatim fetch/formatting moved to
 // services/places.service.ts so the structured-formatting logic is unit-tested
@@ -104,12 +107,24 @@ const eventPatchSchema = z.object({
 
 const sourceCreateSchema = z.object({
   name: z.string().min(1).max(200),
+  // WARP-2022 — `z.string().url()` accepts http://127.0.0.1/,
+  // http://169.254.169.254/ and file:///etc/passwd. The real destination rule
+  // is assertOutboundUrlAllowed in calendar.service.ts's createSource; this
+  // only bounds the shape and the length.
   url: z.string().url().max(2048),
   authMode: z.enum(["none", "basic"]).default("none"),
   username: z.string().max(200).optional(),
   password: z.string().max(500).optional(),
   syncIntervalSec: z.number().int().min(60).max(86400).optional(),
+  /** WARP-2022 — owner/admin only; enforced in the handler, not here, so the
+   *  refusal is a 403 about authority rather than a 400 about shape. */
+  allowPrivateHost: z.boolean().optional(),
 });
+
+/** WARP-2022 — roles permitted to point a calendar source inside the box's
+ *  trust boundary. Mirrors the ADR-004 §3 matrix: an exemption from a
+ *  network-security control is an administrative act, not a household one. */
+const PRIVATE_HOST_ROLES = new Set(["owner", "admin"]);
 
 /** PUBLIC router — only the ICS publish endpoint. Mount BEFORE the auth
  *  middleware in app.ts. Auth is by HMAC token in the query string, NOT by
@@ -270,6 +285,14 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
         return;
       }
+      // WARP-2022 — the escape hatch is an administrative grant. Checked
+      // BEFORE createSource so a lower role gets "you may not do that"
+      // rather than a destination refusal that hides the real reason.
+      const allowPrivateHost = parsed.data.allowPrivateHost === true;
+      if (allowPrivateHost && !PRIVATE_HOST_ROLES.has(req.user?.role ?? "")) {
+        res.status(403).json({ error: "forbidden" });
+        return;
+      }
       const src = await createSource(prisma, getUser(req), {
         name: parsed.data.name,
         url: parsed.data.url,
@@ -277,6 +300,7 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
         username: parsed.data.username,
         password: parsed.data.password,
         syncIntervalSec: parsed.data.syncIntervalSec,
+        allowPrivateHost,
       });
       res.status(201).json({
         source: {
@@ -286,9 +310,18 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
           authMode: src.authMode,
           username: src.username,
           syncIntervalSec: src.syncIntervalSec,
+          allowPrivateHost: src.allowPrivateHost,
         },
       });
     } catch (err) {
+      // WARP-2022 — a refused destination is a 400 with the guard's FIXED
+      // string. `err.message` is safe to echo precisely because the guard
+      // bakes `blocked_destination` into it and keeps the specifics on a
+      // separate field; echoing the detail here would rebuild the probe
+      // oracle at the registration endpoint instead of the sync one.
+      if (isOutboundUrlBlocked(err)) {
+        return void res.status(400).json({ error: err.message });
+      }
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("basic auth requires")) return void res.status(400).json({ error: msg });
       next(err);
