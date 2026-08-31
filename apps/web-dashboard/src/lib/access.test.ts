@@ -110,16 +110,19 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
   // a feature whose parent the person does not hold). This copy exists only so
   // the builder can say so before they save, so the two MUST agree: docs
   // requires files, and nothing else declares a parent.
-  it("docs requires files, crm requires projects; knowledge stands alone", () => {
+  it("docs requires files; crm, knowledge and contacts stand alone", () => {
     const docs = GATEABLE_FEATURES.find((f) => f.moduleId === "docs")!;
     expect(docs.requires).toBe("files");
     expect(docs.requiresReason).toBe(ACCESS_COPY.docsNeedsFiles);
-    // WARP-2117 — the CRM renders as sub-tabs on the Projects page, so it has
-    // no surface of its own without it. Same shape as docs/files, and it must
-    // mirror the orchestrator registry's `requires` for the same reason.
+    // WARP-2558 (ADR-044) — the CRM used to declare `requires: "projects"`
+    // because it rendered as sub-tabs on the Projects page and had no surface
+    // of its own. /customers is that surface, so the edge is gone here exactly
+    // as it is in the orchestrator registry. A stale edge on this side is the
+    // worse failure of the two: it would tell a builder to switch on a module
+    // the surface does not need, and the server would grant the CRM anyway.
     const crm = GATEABLE_FEATURES.find((f) => f.moduleId === "crm")!;
-    expect(crm.requires).toBe("projects");
-    expect(crm.requiresReason).toBe(ACCESS_COPY.crmNeedsProjects);
+    expect(crm.requires).toBeUndefined();
+    expect(crm.requiresReason).toBeUndefined();
     // Knowledge reads the box's own chunk store behind the file indexer and
     // has its own page — it is NOT downstream of the file library, and its
     // toggle has to mean exactly what it says. Contacts likewise: WARP-2038
@@ -128,7 +131,7 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     expect(GATEABLE_FEATURES.find((f) => f.moduleId === "contacts")!.requires).toBeUndefined();
     expect(
       ACCESS_FEATURES.filter((f) => f.requires).map((f) => f.moduleId).sort(),
-    ).toEqual(["crm", "docs"]);
+    ).toEqual(["docs"]);
   });
 
   it("every declared parent is a real gateable feature, never self-referential", () => {
