@@ -125,7 +125,7 @@ In `/etc/systemd/system/multi-user.target.wants/`:
 - `/etc/droplet-host-net/lan-dhcp.conf` → captured as `etc-droplet-host-net/lan-dhcp.conf`
 - `/etc/dnsmasq.d/droplet-ap.conf` + `.pre-bridge` → captured as `etc-dnsmasq.d/*` (LEGACY — superseded by `droplet-host-net.service` + `etc-droplet-host-net/lan-dhcp.conf`; system dnsmasq is disabled)
 - `/etc/tmpfiles.d/droplet.conf` → captured as `etc-tmpfiles.d/droplet.conf`
-- `/etc/avahi/services/droplet.service` → captured as `etc-avahi/services/droplet.service`
+- `/etc/avahi/services/droplet.service` → captured as `etc-avahi/services/droplet.service` (capture RETIRED, WARP-2576: `_write_avahi_service_file()` in `scripts/lib/local-dns.sh` later became the writer and overwrote the installed copy on every run, so the captured file is no longer in the tree)
 
 ## What this means for "rebuild from scratch"
 
