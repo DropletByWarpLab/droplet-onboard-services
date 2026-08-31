@@ -12,8 +12,11 @@ on:
       - "scripts/host/etc-systemd-system/droplet-watchdog.*"
       - "scripts/host/etc-default/droplet-watchdog"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
-      # WARP-1829: the host_unit_staleness check delegates to this detector.
+      # WARP-1829 / WARP-2574: host_unit_staleness delegates to this
+      # detector's `check`, host_artefacts to its `audit`, and the audit
+      # reads the manifest.
       - "scripts/host/droplet-host-units.sh"
+      - "scripts/host/MANIFEST"
       # WARP-2189: the relay_dns check delegates to this helper, and
       # local-dns.sh is the setup-time caller that must keep it applied.
       - "scripts/host/droplet-relay-dns.sh"
@@ -31,6 +34,7 @@ on:
       - "scripts/host/etc-default/droplet-watchdog"
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
       - "scripts/host/droplet-host-units.sh"
+      - "scripts/host/MANIFEST"
       - "scripts/host/droplet-relay-dns.sh"
       - "scripts/lib/local-dns.sh"
       - "scripts/lib/single-box.sh"

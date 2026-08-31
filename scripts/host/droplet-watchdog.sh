@@ -40,6 +40,18 @@
 #                        device-bridge owns the panel feed and the console
 #                        handback, so a supervisor able to restart it on its
 #                        own cadence is the thundering herd, not the fix.
+#   host_artefacts       A host artefact the checkout declares is NOT INSTALLED
+#                        on this box at all — the blind spot the check above
+#                        structurally cannot see, because it enumerates units
+#                        from systemd and a never-installed artefact has no unit
+#                        (WARP-2574). Measured 2026-08-31: droplet-power-restore
+#                        (WARP-2190) and the hardware watchdog (WARP-2192) sat in
+#                        the box's checkout for five days, installed on none of
+#                        it, while host_unit_staleness reported ok. Delegates to
+#                        `droplet-host-units audit`. Detect-and-report only, and
+#                        not by preference: the fix is a full `setup.sh` run
+#                        (apt, unit rewrites, service restarts) — an unattended
+#                        provision is not something a 3-minute timer may start.
 #   relay_dns            The ADR-025 cloudflared relay resolves the box's FQDN
 #                        by dialling the box's OWN dnsmasq. dnsmasq binds only
 #                        explicitly listed addresses and the shipped template
@@ -100,7 +112,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness relay_dns}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -127,9 +139,11 @@ WD_DOCKER_DAEMON_JSON="${DROPLET_WATCHDOG_DOCKER_DAEMON_JSON:-/etc/docker/daemon
 WD_CRASHLOOP_THRESHOLD="${DROPLET_WATCHDOG_CRASHLOOP_THRESHOLD:-3}"
 WD_LOG_TAIL="${DROPLET_WATCHDOG_LOG_TAIL:-200}"
 
-# WARP-1829 — the standalone host-unit staleness detector this check delegates
-# to. Installed by setup.sh (scripts/lib/single-box.sh); not_applicable when
-# absent, so the check is safe on any shape.
+# WARP-1829 / WARP-2574 — the standalone detector both host_unit_staleness
+# (`check`) and host_artefacts (`audit`) delegate to. One binary, two questions:
+# "is this running process older than its code" and "is this artefact installed
+# at all". Installed by setup.sh (scripts/lib/single-box.sh); not_applicable
+# when absent, so both checks are safe on any shape.
 WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-host-units}"
 
 # WARP-2189 — the relay's DNS origin. The check delegates detection AND heal to
@@ -138,7 +152,7 @@ WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-ho
 WD_RELAY_DNS_BIN="${DROPLET_WATCHDOG_RELAY_DNS_BIN:-/usr/local/sbin/droplet-relay-dns}"
 WD_RELAY_CONTAINER="${DROPLET_WATCHDOG_RELAY_CONTAINER:-droplet-cloudflared}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness relay_dns"
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -607,6 +621,103 @@ wd_check_host_unit_staleness() {
   units="$(printf '%s\n' "$out" | awk '$1 == "STALE" || $1 == "FAILED" { print $2 }' | tr '\n' ' ')"
   CHECK_OUTCOME=heal_failed
   CHECK_MESSAGE="host units running code older than the tree: ${units:-<see detail>}— the process started before its own sources were last modified, so a merged fix is inert in it. Fix: sudo $WD_HOST_UNITS_BIN refresh (detail: $WD_HOST_UNITS_BIN check)"
+  return 0
+}
+
+# --- host_artefacts ----------------------------------------------------------
+# WARP-2574, and the reason host_unit_staleness above was not enough.
+#
+# That check enumerates units FROM SYSTEMD, so it can only report on artefacts
+# that exist. A host artefact that was NEVER INSTALLED has no unit to enumerate
+# and no process to compare — it is invisible to it, to `systemctl status`, and
+# to /api/health (which reports containers only).
+#
+# Measured 2026-08-31 on the bench box: WARP-2190 (droplet-power-restore) and
+# WARP-2192 (the hardware watchdog) merged 2026-08-26, the box's checkout
+# contained both, and neither was installed. Both units read `not-found`,
+# /dev/watchdog0 did not exist, and the AC-loss policy was still `always-off` —
+# the box would have stayed dark after a power cut, five days after the fix
+# shipped. host_unit_staleness reported ok throughout, correctly and uselessly.
+#
+# The cause is structural: the box refresh updates the checkout and restarts
+# CONTAINERS, and nothing re-runs install_single_box_host_integration. So any
+# host-unit feature can merge, be marked Done, and run on zero boxes. This check
+# is what makes the box say so on its own.
+#
+# DETECT-AND-REPORT ONLY, and here that is not a judgement call: the "heal" is
+# `sudo ./scripts/setup.sh`, which apt-installs packages, rewrites unit files,
+# restarts host units and re-enables services. Running that from a 3-minute
+# timer is not a self-heal, it is an unattended provision on a live appliance.
+# The watchdog names the artefacts and the one-line fix; a human or the deploy
+# path applies it.
+#
+# No deployment shape can be red here for merely being that shape:
+# install_single_box_host_integration is the ONLY installer of
+# /usr/local/sbin/droplet-watchdog, so this supervisor exists only on boxes
+# that ran the very installer the manifest describes. A shape that skips the
+# host integration skips the watchdog with it. Files the box legitimately
+# rewrites at runtime (the install-once /etc/default tuning files,
+# lan-dhcp.conf) are policy=presence in the manifest for the same reason — a
+# check that cries wolf on a healthy box is a check people learn to ignore.
+wd_check_host_artefacts() {
+  if [ ! -x "$WD_HOST_UNITS_BIN" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units not installed at $WD_HOST_UNITS_BIN (re-run ./scripts/setup.sh)"
+    return 0
+  fi
+
+  local out rc=0
+  out="$("$WD_HOST_UNITS_BIN" audit 2>&1)" || rc=$?
+
+  if [ "$rc" = 0 ]; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="every host artefact the checkout declares is installed, current and enabled"
+    return 0
+  fi
+  # 4 = the manifest could not be located, so there is no verdict. Saying
+  # not_applicable here is the honest answer; inventing "ok" would recreate the
+  # exact silence this check exists to end.
+  if [ "$rc" = 4 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units could not locate the checkout's scripts/host/MANIFEST — no verdict; inspect '$WD_HOST_UNITS_BIN audit'"
+    return 0
+  fi
+  if [ "$rc" != 1 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units audit could not run (exit $rc) — inspect '$WD_HOST_UNITS_BIN audit'"
+    return 0
+  fi
+
+  # Column 1 of the audit's human report is a single whitespace-free label and
+  # column 2 is the destination — a contract pinned by
+  # tests/host-artefacts.test.sh, so this awk cannot silently read the wrong
+  # field if the report is reformatted.
+  local n_missing n_drift n_disabled n_unverif names extra parts
+  n_missing="$(printf '%s\n' "$out" | awk '$1 == "MISSING" { n++ } END { print n + 0 }')"
+  n_drift="$(printf '%s\n' "$out" | awk '$1 == "DRIFT" { n++ } END { print n + 0 }')"
+  n_disabled="$(printf '%s\n' "$out" | awk '$1 == "NOT-ENABLED" { n++ } END { print n + 0 }')"
+  n_unverif="$(printf '%s\n' "$out" | awk '$1 == "UNVERIFIABLE" { n++ } END { print n + 0 }')"
+
+  parts=""
+  [ "$n_missing" -gt 0 ]  && parts="$parts, $n_missing missing"
+  [ "$n_drift" -gt 0 ]    && parts="$parts, $n_drift drifted"
+  [ "$n_disabled" -gt 0 ] && parts="$parts, $n_disabled not enabled"
+  [ "$n_unverif" -gt 0 ]  && parts="$parts, $n_unverif unverifiable"
+  parts="${parts#, }"
+
+  # Name the first few rather than all of them: this string goes into
+  # status.json, and a box missing the whole integration would otherwise write a
+  # multi-kilobyte value that nothing can read. The full list is one command away.
+  names="$(printf '%s\n' "$out" \
+    | awk '$1 == "MISSING" || $1 == "DRIFT" || $1 == "NOT-ENABLED" || $1 == "UNVERIFIABLE" { print $2 }' \
+    | head -6 | tr '\n' ' ')"
+  extra=$(( n_missing + n_drift + n_disabled + n_unverif - 6 ))
+  if [ "$extra" -gt 0 ]; then
+    names="${names}(+$extra more) "
+  fi
+
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="this box is not running what its checkout declares — ${parts}: ${names}a host feature merged and was never installed here, so it is inert no matter what the repo says. Fix: sudo ./scripts/setup.sh (detail: $WD_HOST_UNITS_BIN audit)"
   return 0
 }
 

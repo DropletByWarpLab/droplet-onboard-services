@@ -103,3 +103,8 @@ docker/nextcloud/* text eol=lf
 # are silent — the file reads correctly and the watchdog simply never arms.
 scripts/host/etc-modules-load.d/* text eol=lf
 scripts/host/etc-systemd-system.conf.d/* text eol=lf
+
+# WARP-2574 - the host artefact manifest. Read by droplet-host-units audit from
+# the box's checkout; a trailing CR would land inside a path and every lookup
+# would miss. Same hazard as the units above, same pin.
+scripts/host/MANIFEST text eol=lf
