@@ -100,6 +100,56 @@ export interface CrmActivity {
 /** WARP-2556 — mirrors `CrmStageValuation` in the orchestrator's crm.service. */
 export type CrmStageValuation = "priced" | "mixed_currencies" | "unpriced";
 
+/* ── The customer record (WARP-2563, ADR-044) ──────────────────
+   Mirrors `customer-record.service.ts`. One shape for one read: the
+   orchestrator composes the sections, so the page has one loading state and
+   one failure state rather than five that resolve in network order. */
+
+export interface RecordPerson {
+  contactId: string;
+  displayName: string;
+  /** Role at THIS company, which may differ from the contact's own jobTitle. */
+  title: string | null;
+  isPrimary: boolean;
+}
+
+export interface RecordProject {
+  id: string;
+  name: string;
+  identifier: string;
+  isArchived: boolean;
+  /** The deals that named this project — the edge walked back. Usually zero or
+   *  one; a phased job can have several. */
+  dealIds: string[];
+}
+
+export interface PartyLinkRow {
+  id: string;
+  contactId: string | null;
+  companyId: string | null;
+  /** `IntegrationConnection.provider` verbatim — a provider key, not a catalog
+   *  id, so never render it as a display name without mapping it. */
+  externalSystem: string;
+  externalId: string;
+  linkedBy: "MANUAL" | "MATCHED" | "IMPORTED";
+  confidence: number | null;
+  isArchived: boolean;
+  archivedAt: string | null;
+  createdAt: string;
+}
+
+export interface CustomerRecord {
+  company: CrmCompany;
+  people: RecordPerson[];
+  /** Split by OUTCOME, not by stage: stage names are owner-configurable, and
+   *  the record answers "what is live and what closed". */
+  openDeals: CrmDeal[];
+  closedDeals: CrmDeal[];
+  projects: RecordProject[];
+  timeline: CrmActivity[];
+  links: PartyLinkRow[];
+}
+
 export interface CrmStageSummary {
   stageId: string;
   stageName: string;

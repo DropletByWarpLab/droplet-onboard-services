@@ -223,6 +223,30 @@ export async function listPartyLinks(
 }
 
 /**
+ * The unarchived links on a COMPANY, with no owner scope (WARP-2563).
+ *
+ * Separate from `listPartyLinks` above rather than a flag on it, because the
+ * difference is not cosmetic: that function resolves a party and proves the
+ * caller may see it, and its contact branch is owner-scoped. A company is
+ * business-shared, so there is nothing to scope — and a `userId` parameter
+ * that is accepted and ignored is the kind of signature that gets copied to
+ * the contact side by someone reading it quickly.
+ *
+ * The caller is the customer-record read, which has already resolved the
+ * company and returned 404 if it does not exist.
+ */
+export async function listPartyLinksForCompany(
+  prisma: PrismaClient,
+  companyId: string,
+): Promise<ApiPartyLink[]> {
+  const rows = await prisma.partyLink.findMany({
+    where: { companyId, isArchived: false },
+    orderBy: [{ externalSystem: "asc" }, { createdAt: "asc" }],
+  });
+  return rows.map(toApi);
+}
+
+/**
  * Unlink, reversibly.
  *
  * NOT a delete. "These were never the same customer" is a claim worth keeping

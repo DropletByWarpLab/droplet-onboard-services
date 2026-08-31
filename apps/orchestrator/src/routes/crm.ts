@@ -22,6 +22,7 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import * as crm from "../services/crm/crm.service.js";
 import * as partyLinks from "../services/crm/party-link.service.js";
+import * as customerRecord from "../services/crm/customer-record.service.js";
 
 /** Actor for attribution — the local User.id UUID (WARP-485), or null for the
  *  MCP service principal. */
@@ -602,6 +603,26 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     try {
       const activity = await crm.logActivity(prisma, parsed.data, actor(req));
       res.status(201).json({ activity });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // ── The customer record (WARP-2563, ADR-044) ──
+  //
+  // One read for the whole page. Six separate fetches would each carry their
+  // own loading and failure state and the page would flicker through them in
+  // an order nobody chose.
+  //
+  // Gated by the `crm` module like every route in this file, and by nothing
+  // else — there is no PHI in this response. The practice block is WARP-2564
+  // and carries the connector check on top; a caller who may read a customer
+  // must not thereby read a patient.
+  router.get("/crm/companies/:id/record", async (req, res, next) => {
+    try {
+      const record = await customerRecord.getCustomerRecord(prisma, req.params.id);
+      res.json({ record });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
