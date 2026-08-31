@@ -1,5 +1,5 @@
 fastapi==0.141.1
-uvicorn[standard]==0.52.1
+uvicorn[standard]==0.52.4
 pydantic==2.13.4
 # WireGuard X25519 keypair generation lives in VPNApi (droplet_openwrt_sdk.py).
 # Doing keygen in Python avoids needing `file.exec` in the rpcd ACL.
