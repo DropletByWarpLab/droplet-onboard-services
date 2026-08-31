@@ -550,7 +550,7 @@ async function validateNextcloudTokenDetailed(
       // mint the one tier ADR-032 §3 says bypasses layer 2. `localUser` is
       // already in hand from the WARP-485 lookup above, so the authority is
       // free — see resolveNcSessionRole for the full rail.
-      role: resolveNcSessionRole(groups, localUser.role as Role),
+      role: resolveNcSessionRole(groups, localUser.role),
     };
 
     await cacheSet(cacheKey, user, TOKEN_CACHE_TTL);
