@@ -198,21 +198,26 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "crm", label: "CRM",
-    description: "Customers, deals and the sales pipeline, inside the Projects surface.",
+    description: "Customers, deals and the sales pipeline.",
     category: "workspace", routePrefixes: ["/api/crm"],
-    // The CRM has no page of its own: WARP-2545 renders it as sub-tabs on
-    // /projects. Listing that href here would hide the PM surface whenever CRM
-    // is off, which is backwards — the dependency runs the other way.
-    navHrefs: [],
+    // WARP-2558 (ADR-044) — the CRM has a door of its own. It shipped with
+    // `navHrefs: []` because WARP-2545 rendered it as sub-tabs on /projects,
+    // and naming that href here would have hidden the PM surface whenever CRM
+    // was off. /customers is the CRM's own route, so the entry is honest and
+    // the nav gate now has something to hide.
+    navHrefs: ["/customers"],
     // WARP-2546 — claimed in the same change that adds the handlers, which is
     // what the registry's `unknown domain` invariant enforces: a domain the
     // tools-core catalog cannot resolve is a gate pointing at nothing.
     toolDomains: ["crm"], core: false, defaultEnabled: false,
-    // WARP-2117 puts the CRM INSIDE /projects — it has no reachable surface of
-    // its own without it, which is exactly the bar this field documents. So
-    // Projects-off renders CRM blocked with a reason rather than offering a
-    // toggle that quietly does nothing.
-    requires: "projects",
+    // WARP-2558 — `requires: "projects"` is DELIBERATELY absent now.
+    //
+    // The bar for that field is "the child has no reachable surface of its own
+    // without the parent" (see ModuleDef.requires). That was true only while
+    // the CRM borrowed another module's page; with /customers it is false. A
+    // dental box wants Customers and no PM at all, and the old edge made that
+    // shape unrepresentable — turning Projects off took the customer list with
+    // it. Do not restore it without also taking /customers away.
     available: () => true, // native to the orchestrator
   },
   {

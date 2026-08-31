@@ -387,11 +387,14 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
   {
     // WARP-2117. Value-identical ladder to the server's access-catalog entry;
     // only the copy lives here.
+    //
+    // WARP-2558 (ADR-044) — `requires: "projects"` is gone, mirroring the
+    // orchestrator registry. The CRM owns /customers, so it is no longer
+    // unreachable without PM, and a builder gating Customers must not be told
+    // to turn on a module the surface does not need.
     moduleId: "crm",
     label: "CRM",
     description: "Customers, deals and the sales pipeline",
-    requires: "projects",
-    requiresReason: ACCESS_COPY.crmNeedsProjects,
     levels: [
       { value: "view", label: "View", grants: "See customers and the pipeline" },
       {

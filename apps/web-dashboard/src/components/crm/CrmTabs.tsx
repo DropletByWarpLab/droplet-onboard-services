@@ -1,24 +1,30 @@
 "use client";
 
-// WARP-2545 — the Customers / Deals / Projects switch at the top of the
-// (renamed) CRM page.
+// WARP-2545 — the Customers / Deals switch at the top of the CRM page.
 //
 // Built on the SAME `pm-pills` tablist as `ViewSwitcher` rather than a second
 // tab mechanism: one keyboard contract, one set of focus styles, and the two
 // switchers on this page cannot drift apart visually. Roving tabindex per the
 // WAI-ARIA tabs pattern, so the group is one tab stop and arrow keys move
 // within it.
+//
+// WARP-2558 (ADR-044) — the third tab, `projects`, is GONE, and with it the
+// reason this switch existed on someone else's page. It made /projects the
+// container AND one of the three things in the container, so the page had to
+// negate six render branches against `onCrmTab` and rename its own header
+// when the CRM module flipped. The CRM now has /customers; a tab that
+// navigates to a different SECTION is a nav entry, not a tab. Adding a third
+// entry here that is not a view of the same records reopens exactly that.
 
 import { useRef, type JSX } from "react";
 
 import { PmIcon } from "@/components/projects/icons";
 
-export type CrmTab = "customers" | "deals" | "projects";
+export type CrmTab = "customers" | "deals";
 
 const TABS: Array<[CrmTab, string, string]> = [
   ["customers", "Customers", "building"],
   ["deals", "Deals", "briefcase"],
-  ["projects", "Projects", "board"],
 ];
 
 export function CrmTabs({
