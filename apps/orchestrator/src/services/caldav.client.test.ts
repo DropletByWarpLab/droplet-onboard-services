@@ -341,6 +341,32 @@ describe("WARP-2022 — redirects are re-validated, not followed blindly", () =>
   });
 });
 
+describe("WARP-2022 — a refusal is a verdict, not a transport hiccup", () => {
+  it("does not retry a refused PROPFIND destination through the GET fallback", async () => {
+    // No `.ics` suffix, so this takes the PROPFIND branch — the one with a
+    // catch that falls back to a plain GET on a network/abort failure.
+    lookup.mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
+    const spy = sentinelFetch();
+
+    const result = await syncCalendarSource({
+      url: "https://rebind.example.test/dav/",
+      authMode: "none",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe(BLOCKED_DESTINATION_MESSAGE);
+    expect(spy).not.toHaveBeenCalled();
+    // The guard was consulted exactly ONCE. A second consultation means the
+    // refusal was re-run as a GET — the fallback classifying a POLICY
+    // decision as a transport failure. isOutboundUrlBlocked() is what stops
+    // that, and it stops it by TYPE: a fallback that instead string-matched
+    // the message would retry the moment a refusal message happened to
+    // contain "network" or "abort".
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("WARP-2022 — no probe oracle", () => {
   it("a refused destination reveals nothing about what is behind it", async () => {
     const spy = sentinelFetch();
