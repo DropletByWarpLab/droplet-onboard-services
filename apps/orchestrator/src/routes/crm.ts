@@ -52,6 +52,10 @@ function mapPartyLinkError(err: unknown, res: Response): boolean {
     case partyLinks.PARTY_LINK_ERRORS.CONTACT_NOT_FOUND:
     case partyLinks.PARTY_LINK_ERRORS.COMPANY_NOT_FOUND:
     case partyLinks.PARTY_LINK_ERRORS.LINK_NOT_FOUND:
+    // WARP-2562 — a link now names the connection it came from, so a bad
+    // connection id is its own 404 rather than an "already linked" 409 or a
+    // foreign-key 500.
+    case partyLinks.PARTY_LINK_ERRORS.CONNECTION_NOT_FOUND:
       // Another owner's contact lands here too, as a 404. A 403 would confirm
       // the row exists to someone who should not know that.
       res.status(404).json({ error: msg });
@@ -229,17 +233,21 @@ const activityCreateSchema = z.object({
 /**
  * WARP-2562 — party-link bodies.
  *
- * `externalSystem` is a bounded free string, not an enum: it carries
- * `IntegrationConnection.provider` verbatim, and `eaglesoft-api` /
- * `quickbooks-online` are provider keys rather than catalog ids. Constraining
- * it here would mean a migration for every new upstream, and would be the
- * WARP-2291 mistake in a second place.
+ * The caller names a CONNECTION, not a provider. The provider is derived from
+ * that connection in the service and is never accepted here, for two reasons:
+ * a body-supplied provider can contradict its own connection, and a provider
+ * alone cannot tell two HubSpot portals apart — whose object ids are
+ * portal-scoped and therefore collide.
+ *
+ * That also removes the WARP-2291 hazard rather than repeating it: there is no
+ * vendor vocabulary in this schema to constrain or to get wrong, so a new
+ * upstream still needs no migration here.
  */
 const partyLinkCreateSchema = z
   .object({
     contactId: z.string().max(64).optional(),
     companyId: z.string().max(64).optional(),
-    externalSystem: z.string().min(1).max(64),
+    connectionId: z.string().min(1).max(64),
     externalId: z.string().min(1).max(256),
     linkedBy: z.enum(["MANUAL", "MATCHED", "IMPORTED"]).optional(),
     confidence: z.number().int().min(0).max(100).nullable().optional(),

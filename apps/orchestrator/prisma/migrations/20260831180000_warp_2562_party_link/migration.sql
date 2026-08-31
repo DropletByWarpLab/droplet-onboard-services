@@ -7,6 +7,14 @@
 -- Predecessor: 20260830220000_warp_2554_contact_archive. That is the ordering
 -- fact worth pinning — "this migration sorts last" describes only the day it
 -- landed, and the next migration falsifies it.
+--
+-- Re-stamped 20260830230000 → 20260831180000 (WARP-2562 review). The original
+-- stamp predated `20260831040000_warp_2022_calendar_allow_private_host`, which
+-- had already reached `stage` — so deploying this branch would have run a
+-- migration numbered BEFORE one the box already applied. That is the exact
+-- ordering hazard the predecessor pin above exists to describe, arriving from
+-- the other direction: not "am I last", but "am I after everything that is
+-- already out there".
 
 -- CreateEnum
 --
@@ -25,6 +33,12 @@ CREATE TABLE "PartyLink" (
     "id" TEXT NOT NULL,
     "contactId" TEXT,
     "companyId" TEXT,
+    -- The CONNECTION, not merely the provider. A business can connect two
+    -- HubSpot portals; their object ids are portal-scoped and collide, and the
+    -- WARP-2461 purge walker keys on exactly this column. NOT NULL: a link
+    -- that cannot say which connection it came from cannot be purged, and a
+    -- nullable column would let that back in through the front door.
+    "connectionId" TEXT NOT NULL,
     "externalSystem" TEXT NOT NULL,
     "externalId" TEXT NOT NULL,
     "linkedBy" "PartyLinkOrigin" NOT NULL DEFAULT 'MANUAL',
@@ -39,23 +53,43 @@ CREATE TABLE "PartyLink" (
 
 -- CreateIndex
 --
--- One upstream record maps to at most one party. Two links to the same
--- (system, id) — even from two different parties — is a contradiction, not a
--- second opinion.
-CREATE UNIQUE INDEX "PartyLink_externalSystem_externalId_key" ON "PartyLink"("externalSystem", "externalId");
+-- One upstream record maps to at most one party. Two links to the same record
+-- — even from two different parties — is a contradiction, not a second
+-- opinion.
+--
+-- Scoped by CONNECTION rather than by provider, and that is load-bearing.
+-- HubSpot object ids are PORTAL-scoped, so under a
+-- `(externalSystem, externalId)` key a second portal's object `123` collides
+-- with the first portal's object `123` — two different customers, and the
+-- second one is refused as already linked to somebody else.
+CREATE UNIQUE INDEX "PartyLink_connectionId_externalId_key" ON "PartyLink"("connectionId", "externalId");
 
 -- CreateIndex
 -- "The links on this party" is the only read path the record page has.
 CREATE INDEX "PartyLink_contactId_idx" ON "PartyLink"("contactId");
 CREATE INDEX "PartyLink_companyId_idx" ON "PartyLink"("companyId");
+-- "Everything this connection landed" — the WARP-2461 purge walker's read.
+CREATE INDEX "PartyLink_connectionId_idx" ON "PartyLink"("connectionId");
 
 -- AddForeignKey
 --
--- CASCADE on both. A link to a deleted party is meaningless, and unlike
--- CrmActivity this destroys nothing a human authored: the row is a pointer,
--- and the upstream record it points at is untouched.
+-- CASCADE on both parties. A link to a deleted party is meaningless, and
+-- unlike CrmActivity this destroys nothing a human authored: the row is a
+-- pointer, and the upstream record it points at is untouched.
 ALTER TABLE "PartyLink" ADD CONSTRAINT "PartyLink_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "PartyLink" ADD CONSTRAINT "PartyLink_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "CrmCompany"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- RESTRICT on the connection, deliberately not CASCADE.
+--
+-- Nothing deletes an `IntegrationConnection` today — `disconnect()` flips the
+-- row to DISABLED and purges its secrets in place, precisely so "disconnected"
+-- is a state rather than an absence. So this constraint fires only if
+-- something new starts deleting them, and at that point the landed links must
+-- be purged DELIBERATELY, through the purge walker that knows to preserve what
+-- a human confirmed. A CASCADE here would delete a person's confirmed customer
+-- matches as a side effect of a row disappearing, with no audit and no
+-- decision.
+ALTER TABLE "PartyLink" ADD CONSTRAINT "PartyLink_connectionId_fkey" FOREIGN KEY ("connectionId") REFERENCES "IntegrationConnection"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- Exactly one party, enforced by the DATABASE.
 --

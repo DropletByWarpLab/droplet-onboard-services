@@ -31,7 +31,9 @@ export const PARTY_LINK_ERRORS = {
   CONTACT_NOT_FOUND: "contact_not_found",
   COMPANY_NOT_FOUND: "company_not_found",
   LINK_NOT_FOUND: "party_link_not_found",
-  /** The (externalSystem, externalId) pair is already linked to some party. */
+  /** No `IntegrationConnection` with that id. */
+  CONNECTION_NOT_FOUND: "connection_not_found",
+  /** This record in THIS connection is already linked to some party. */
   ALREADY_LINKED: "party_link_already_exists",
   /** A confidence on a link nobody computed, or a MATCHED link without one. */
   CONFIDENCE_NEEDS_MATCHED: "party_link_confidence_needs_matched",
@@ -41,6 +43,8 @@ export interface ApiPartyLink {
   id: string;
   contactId: string | null;
   companyId: string | null;
+  /** WARP-2562 — which connection's upstream, not merely which vendor. */
+  connectionId: string;
   externalSystem: string;
   externalId: string;
   linkedBy: PartyLinkOrigin;
@@ -55,6 +59,7 @@ function toApi(row: PartyLink): ApiPartyLink {
     id: row.id,
     contactId: row.contactId,
     companyId: row.companyId,
+    connectionId: row.connectionId,
     externalSystem: row.externalSystem,
     externalId: row.externalId,
     linkedBy: row.linkedBy,
@@ -111,7 +116,15 @@ async function resolveParty(
 }
 
 export interface CreatePartyLinkInput extends PartyRef {
-  externalSystem: string;
+  /**
+   * WARP-2562 — the connection whose upstream holds `externalId`.
+   *
+   * Replaces a caller-supplied `externalSystem`. The provider is now DERIVED
+   * from this connection, so a link cannot claim a vendor its own connection
+   * contradicts, and two connections on one provider stay distinguishable —
+   * which they must be, because HubSpot object ids are portal-scoped.
+   */
+  connectionId: string;
   externalId: string;
   linkedBy?: PartyLinkOrigin;
   confidence?: number | null;
@@ -138,14 +151,27 @@ export async function createPartyLink(
     throw new Error(PARTY_LINK_ERRORS.CONFIDENCE_NEEDS_MATCHED);
   }
 
+  // WARP-2562 — the connection must exist, and it is where the provider comes
+  // from. Read before the clash check so a bad connection id is a 404 about
+  // the connection rather than a confusing "already linked".
+  const connection = await prisma.integrationConnection.findUnique({
+    where: { id: input.connectionId },
+    select: { id: true, provider: true },
+  });
+  if (!connection) throw new Error(PARTY_LINK_ERRORS.CONNECTION_NOT_FOUND);
+
   // Checked before the write for a clean 409. The unique index is what
   // actually holds under a race, and the route maps Prisma's P2002 to the
   // same code — so two simultaneous links to one upstream record cannot both
   // succeed just because both passed this read.
+  //
+  // Scoped by CONNECTION. Under the old provider-scoped key, linking portal
+  // B's object `123` was refused because portal A already had an object `123`
+  // — two unrelated customers, and the second one unlinkable forever.
   const clash = await prisma.partyLink.findUnique({
     where: {
-      externalSystem_externalId: {
-        externalSystem: input.externalSystem,
+      connectionId_externalId: {
+        connectionId: connection.id,
         externalId: input.externalId,
       },
     },
@@ -157,7 +183,11 @@ export async function createPartyLink(
     data: {
       contactId: party.contactId,
       companyId: party.companyId,
-      externalSystem: input.externalSystem,
+      connectionId: connection.id,
+      // DERIVED, never taken from the request. A caller-supplied provider can
+      // disagree with its own connection, and nothing downstream could tell
+      // which half was true.
+      externalSystem: connection.provider,
       externalId: input.externalId,
       linkedBy,
       confidence,

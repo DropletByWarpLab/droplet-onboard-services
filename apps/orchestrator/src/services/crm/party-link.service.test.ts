@@ -22,6 +22,7 @@ const ROW = {
   id: "pl1",
   contactId: "c1",
   companyId: null,
+  connectionId: "conn-eagle",
   externalSystem: "eaglesoft-api",
   externalId: "4471",
   linkedBy: "MANUAL" as const,
@@ -37,6 +38,11 @@ function okPrisma(over: Record<string, unknown> = {}) {
   return {
     contact: { findFirst: vi.fn().mockResolvedValue({ id: "c1" }) },
     crmCompany: { findUnique: vi.fn().mockResolvedValue({ id: "co1" }) },
+    // WARP-2562 — the provider is READ from the connection, never taken from
+    // the caller, so every happy path needs one to exist.
+    integrationConnection: {
+      findUnique: vi.fn().mockResolvedValue({ id: "conn-eagle", provider: "eaglesoft-api" }),
+    },
     partyLink: {
       findUnique: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([ROW]),
@@ -48,7 +54,7 @@ function okPrisma(over: Record<string, unknown> = {}) {
 }
 
 describe("exactly one party", () => {
-  const base = { externalSystem: "eaglesoft-api", externalId: "4471" };
+  const base = { connectionId: "conn-eagle", externalId: "4471" };
 
   it("refuses a link naming both a contact and a company", async () => {
     await expect(
@@ -75,7 +81,7 @@ describe("exactly one party", () => {
 });
 
 describe("ownership", () => {
-  const base = { externalSystem: "eaglesoft-api", externalId: "4471", contactId: "c-other" };
+  const base = { connectionId: "conn-eagle", externalId: "4471", contactId: "c-other" };
 
   it("reads another owner's contact as absent, never as forbidden", async () => {
     // Same rule as contacts.service.ts, and it has to be: a 403 here would
@@ -98,7 +104,7 @@ describe("ownership", () => {
     const prisma = okPrisma();
     await createPartyLink(
       prisma,
-      { externalSystem: "x", externalId: "y", companyId: "co1" },
+      { connectionId: "conn-eagle", externalId: "y", companyId: "co1" },
       "u1",
       "u1",
     );
@@ -122,7 +128,7 @@ describe("ownership", () => {
 });
 
 describe("confidence belongs to a MATCHED link", () => {
-  const base = { externalSystem: "eaglesoft-api", externalId: "4471", contactId: "c1" };
+  const base = { connectionId: "conn-eagle", externalId: "4471", contactId: "c1" };
 
   it("refuses a confidence on a MANUAL link", async () => {
     await expect(
@@ -175,7 +181,7 @@ describe("one upstream record, one party", () => {
     await expect(
       createPartyLink(
         prisma,
-        { externalSystem: "eaglesoft-api", externalId: "4471", contactId: "c1" },
+        { connectionId: "conn-eagle", externalId: "4471", contactId: "c1" },
         "u1",
         "u1",
       ),
@@ -228,5 +234,114 @@ describe("listing and unlinking", () => {
       .partyLink.update;
     expect(update.mock.calls[0][0].data.isArchived).toBe(false);
     expect(update.mock.calls[0][0].data.archivedAt).toBeNull();
+  });
+});
+
+/**
+ * WARP-2562 review — a link belongs to a CONNECTION, not to a provider.
+ *
+ * The original shape keyed on `(externalSystem, externalId)` and took the
+ * provider from the request body. Two defects fell out of that, and neither
+ * was visible on a box with one connection per vendor:
+ *
+ *   1. HubSpot object ids are PORTAL-scoped. Under a provider-scoped unique,
+ *      the second portal's object `123` collides with the first portal's
+ *      object `123` — two unrelated customers, and the second is refused as
+ *      "already linked" to somebody else's party, permanently.
+ *   2. WARP-2461's purge walker keys on `connectionId`, and its own mutation
+ *      test proves that scoping a purge by provider destroys the sibling
+ *      connection's data. A link table with no `connectionId` cannot be purged
+ *      correctly at all.
+ */
+describe("WARP-2562 — links are scoped to a connection", () => {
+  /** Two connections on ONE provider — the shape the old key could not model. */
+  function twoPortals(clashOn: { connectionId: string; externalId: string } | null) {
+    const create = vi.fn().mockResolvedValue(ROW);
+    type ClashLookup = {
+      where: { connectionId_externalId?: { connectionId: string; externalId: string } };
+    };
+    const findUnique = vi.fn().mockImplementation(async (args: ClashLookup) => {
+      const where = args.where.connectionId_externalId;
+      if (!clashOn || !where) return null;
+      return where.connectionId === clashOn.connectionId && where.externalId === clashOn.externalId
+        ? { id: "existing" }
+        : null;
+    });
+    return {
+      prisma: {
+        contact: { findFirst: vi.fn().mockResolvedValue({ id: "c1" }) },
+        crmCompany: { findUnique: vi.fn().mockResolvedValue({ id: "co1" }) },
+        integrationConnection: {
+          findUnique: vi.fn().mockImplementation(async (args: { where: { id: string } }) => {
+            const id = args.where.id;
+            return id === "conn-north" || id === "conn-south"
+              ? { id, provider: "hubspot" }
+              : null;
+          }),
+        },
+        partyLink: { findUnique, create, findMany: vi.fn(), update: vi.fn() },
+      } as never,
+      create,
+    };
+  }
+
+  it("lets two portals on one provider link the same upstream id", async () => {
+    // MUTATION: put the unique back on (externalSystem, externalId) and this
+    // second link is refused as ALREADY_LINKED — the customer becomes
+    // unlinkable on whichever portal was connected second.
+    const { prisma, create } = twoPortals({ connectionId: "conn-north", externalId: "123" });
+
+    await createPartyLink(
+      prisma,
+      { connectionId: "conn-south", externalId: "123", companyId: "co1" },
+      "u1",
+      "u1",
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].data.connectionId).toBe("conn-south");
+  });
+
+  it("still refuses a second link to the same record in the SAME connection", async () => {
+    // The rule the scoping must not lose: one upstream record, one party.
+    const { prisma } = twoPortals({ connectionId: "conn-north", externalId: "123" });
+
+    await expect(
+      createPartyLink(
+        prisma,
+        { connectionId: "conn-north", externalId: "123", companyId: "co1" },
+        "u1",
+        "u1",
+      ),
+    ).rejects.toThrow(PARTY_LINK_ERRORS.ALREADY_LINKED);
+  });
+
+  it("derives the provider from the connection instead of trusting the caller", async () => {
+    // MUTATION: take `externalSystem` from the input again → a link can claim
+    // a vendor its own connection contradicts, and no reader can tell which
+    // half is true. The caller here cannot express a provider at all.
+    const { prisma, create } = twoPortals(null);
+
+    await createPartyLink(
+      prisma,
+      { connectionId: "conn-north", externalId: "123", companyId: "co1" },
+      "u1",
+      "u1",
+    );
+    expect(create.mock.calls[0][0].data.externalSystem).toBe("hubspot");
+  });
+
+  it("404s on a connection that does not exist, before any uniqueness check", async () => {
+    // Ordering matters: a bad connection id used to reach the create and come
+    // back as a foreign-key 500, or as a confusing "already linked".
+    const { prisma } = twoPortals(null);
+
+    await expect(
+      createPartyLink(
+        prisma,
+        { connectionId: "conn-gone", externalId: "123", companyId: "co1" },
+        "u1",
+        "u1",
+      ),
+    ).rejects.toThrow(PARTY_LINK_ERRORS.CONNECTION_NOT_FOUND);
   });
 });

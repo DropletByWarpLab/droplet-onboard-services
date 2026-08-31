@@ -4493,6 +4493,12 @@ model IntegrationConnection {
   /// the connection at the next refresh.
   providerTokensEnc String?
 
+  /// WARP-2562 — the parties linked to records in THIS connection's upstream.
+  /// Required for the WARP-2461 purge walker to answer "what did this
+  /// connection land", which it cannot do from the provider name alone when
+  /// two connections share one.
+  partyLinks PartyLink[]
+
   @@index([provider, status])
 }
 
@@ -5830,11 +5836,40 @@ model PartyLink {
   companyId String?
   company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
+  /// 🔴 The CONNECTION the upstream id belongs to — not merely the provider.
+  ///
+  /// A business can connect two HubSpot portals, and `externalSystem` alone
+  /// cannot tell them apart. Two consequences, both real:
+  ///
+  ///   • HubSpot object ids are PORTAL-scoped, so portal A's object `123` and
+  ///     portal B's object `123` are different records that collide under a
+  ///     `(externalSystem, externalId)` unique. The second portal's link is
+  ///     refused as "already linked" to someone else's customer.
+  ///   • WARP-2461's purge walker keys on `connectionId`, and its mutation
+  ///     test proves that scoping a purge by PROVIDER instead destroys the
+  ///     sibling connection's data. A link table with no `connectionId` cannot
+  ///     be purged correctly at all — disconnecting one portal would take the
+  ///     other's links with it.
+  ///
+  /// `Restrict`, not `Cascade`: a connection row is never deleted (disconnect
+  /// flips it to DISABLED and purges its secrets in place), so this can only
+  /// fire if something new starts deleting them — and when that happens the
+  /// landed links must be purged deliberately, not swept away by a foreign
+  /// key. Cascade here would silently delete a human's confirmed matches.
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
   /// Verbatim `IntegrationConnection.provider` — free TEXT, deliberately not
   /// an enum or a catalog id. `eaglesoft-api` and `quickbooks-online` are
   /// provider keys, not catalog ids, and typing this as a `ConnectorId` is the
   /// lie that broke the hub's join in WARP-2291. A new upstream needs no
   /// migration, exactly as `IntegrationConnection.provider` intends.
+  ///
+  /// DERIVED from `connection.provider` on write, never accepted from the
+  /// caller. It is denormalised so a link can be read and displayed without a
+  /// join; taking it from the request body instead would let a link claim a
+  /// provider its own connection contradicts, and nothing downstream could
+  /// tell which half was true.
   externalSystem String
   /// The upstream's own key — an Eaglesoft chart number, a Stripe customer id.
   externalId     String
@@ -5853,11 +5888,18 @@ model PartyLink {
   createdAt   DateTime @default(now())
 
   /// One upstream record maps to at most one party. Two links to the same
-  /// (system, id) — even from different parties — is a contradiction, not a
-  /// second opinion, and surfaces as a 409 rather than as two answers.
-  @@unique([externalSystem, externalId])
+  /// record — even from different parties — is a contradiction, not a second
+  /// opinion, and surfaces as a 409 rather than as two answers.
+  ///
+  /// Scoped by CONNECTION, not by provider: "the same record" means the same
+  /// id in the same portal. Under the old `(externalSystem, externalId)` key a
+  /// second HubSpot portal's object `123` was a contradiction with the first
+  /// portal's object `123`, which is two different customers.
+  @@unique([connectionId, externalId])
   @@index([contactId])
   @@index([companyId])
+  /// The purge walker's index (WARP-2461): "everything this connection landed".
+  @@index([connectionId])
 }
 
 /// Company↔Contact as a link table rather than a foreign key on `Contact`:
