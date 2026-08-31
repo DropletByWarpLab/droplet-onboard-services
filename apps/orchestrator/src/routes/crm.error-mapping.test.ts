@@ -23,15 +23,28 @@
  *   - add a new *_NOT_FOUND code to the service and forget the route
  *   - move a not-found code to the 422 or 409 arm
  */
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { CRM_ERRORS } from "../services/crm/crm.service.js";
 
-const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "crm.ts"), "utf8");
+/**
+ * Resolved from `process.cwd()`, not from `import.meta.url`: this app emits
+ * CommonJS, where `import.meta` is a compile error (TS1470). The candidate
+ * list is the shape the schema tests under `__tests__/` already use, so the
+ * file is found whether vitest runs from the app or from the repo root.
+ */
+const ROUTE_SOURCE = (() => {
+  const relative = join("src", "routes", "crm.ts");
+  for (const base of [process.cwd(), join(process.cwd(), "apps", "orchestrator")]) {
+    const candidate = join(base, relative);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Could not locate ${relative} from ${process.cwd()}`);
+})();
+const source = readFileSync(ROUTE_SOURCE, "utf8");
 
 /**
  * The `case crm.CRM_ERRORS.X:` labels attached to the arm that responds with
