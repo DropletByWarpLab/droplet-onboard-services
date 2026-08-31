@@ -283,11 +283,30 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     // proves the ROUTE performs it. It is the assertion whose absence let the
     // filter be dropped in a merge.
     //
-    // Mutation: delete the `effectiveTools` filter, or size
+    // Mutation: delete the `effectiveTools` narrowing, or size
     // `pooledTools` instead → red.
-    expect(ROUTE_SRC).toMatch(
-      /pooledTools\.filter\(\(t\) => toolAllowedInScope\(t\.name, toolAccessScope\)\)/,
-    );
+    //
+    // Pinned against the SHARED helper rather than an inline
+    // `pooledTools.filter((t) => toolAllowedInScope(...))`: the route used to
+    // re-express the rule locally, which is the duplication that let the
+    // estimate and dispatch sides drift apart. `narrowToolsToScope` is now the
+    // single expression of it, and `tool-access.service.test.ts` pins its
+    // behaviour — including that an absent scope narrows nothing.
+    expect(ROUTE_SRC).toMatch(/narrowToolsToScope\(pooledTools, toolAccessScope\)/);
     expect(ROUTE_SRC).toContain("pool: effectiveTools.map((t) => t.name)");
+  });
+
+  it("the estimate and the dispatch narrow through the SAME helper", () => {
+    // The real anti-drift guard, and the one whose absence let WARP-2556
+    // happen: it is not enough that each side narrows: they have to narrow by
+    // one shared expression, or a new access axis can be added to one and
+    // missed in the other with nothing going red.
+    //
+    // Mutation: re-inline `toolAllowedInScope` at either site → red.
+    expect(ROUTE_SRC).toContain("narrowToolsToScope");
+    expect(LOOP_SRC).toContain("narrowToolsToScope");
+    for (const src of [ROUTE_SRC, LOOP_SRC]) {
+      expect(src).not.toMatch(/\.filter\(\([a-z]+\) => toolAllowedInScope\(/);
+    }
   });
 });

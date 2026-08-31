@@ -1143,8 +1143,30 @@ export async function getPipelineSummary(
     const bucket = byStage.get(deal.stageId);
     if (!bucket) continue;
     bucket.count += 1;
-    if (deal.currency) bucket.currencies.add(deal.currency);
-    if (deal.amountMinor !== null) bucket.total += deal.amountMinor;
+    // ONE predicate decides whether this deal is priced, and it gates BOTH
+    // halves of the bucket.
+    //
+    // These used to be two independent conditions, and they disagreed on the
+    // empty string: `if (deal.currency)` skipped `currencies`, while the
+    // amount still landed in `total`. A row like `{ amountMinor: 50000n,
+    // currency: "" }` then left `currencies` empty — so the stage read
+    // `unpriced`, and `unpriced` reports `amountMinor: "0"`, silently
+    // discarding real money and telling the model "no amounts entered yet"
+    // for a stage that has some. Exactly the false-statement class WARP-2556
+    // set out to remove, reintroduced through a narrower door.
+    //
+    // Postgres only enforces null-PAIRING (`CHECK`: both null or both set),
+    // not non-emptiness, so an import, a migration, or a future caller of the
+    // exported deal writers can produce that row without going through the
+    // Zod schema that would reject it. Pairing the two conditions here makes
+    // `total` unconditionally the sum of amounts denominated in `currencies`
+    // — an invariant the three-state valuation below can rely on, instead of
+    // one the database happens not to violate today.
+    const currency = deal.currency?.trim() || null;
+    if (currency !== null && deal.amountMinor !== null) {
+      bucket.currencies.add(currency);
+      bucket.total += deal.amountMinor;
+    }
   }
 
   return {

@@ -149,6 +149,62 @@ describe("getPipelineSummary", () => {
     expect(summary.stages[0].dealCount).toBe(2);
   });
 
+  it("never counts money it cannot denominate (empty-string currency)", async () => {
+    // The two bucket conditions used to disagree on the empty string: the
+    // currency guard (`if (deal.currency)`) skipped it, the amount guard
+    // (`!== null`) did not. So this row put 50000 into `total` while leaving
+    // `currencies` empty — the stage classified as `unpriced`, and `unpriced`
+    // reports `amountMinor: "0"`, throwing the total away and telling the
+    // model "no amounts entered yet" about a stage holding money.
+    //
+    // Postgres `CHECK`s only null-PAIRING, not non-emptiness, so this row is
+    // reachable from an import or a migration without touching the Zod schema
+    // that would reject it.
+    //
+    // Mutation: split the pairing back into two independent `if`s → `total`
+    // takes the 50000 the currency set never accounts for, and the invariant
+    // asserted here breaks.
+    const prisma = {
+      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmDeal: {
+        findMany: async () => [
+          { stageId: "s1", amountMinor: 50000n, currency: "" },
+          { stageId: "s1", amountMinor: 25000n, currency: "   " },
+        ],
+      },
+    } as never;
+
+    const summary = await getPipelineSummary(prisma, "p1");
+    // Both deals are still REAL and still counted — only their unusable
+    // amounts are withheld.
+    expect(summary.stages[0].dealCount).toBe(2);
+    expect(summary.stages[0].valuation).toBe("unpriced");
+    expect(summary.stages[0].currency).toBeNull();
+    // "0" because nothing here is denominated — never because a real total
+    // was accumulated and then discarded.
+    expect(summary.stages[0].amountMinor).toBe("0");
+  });
+
+  it("a padded currency still prices the stage, normalised", async () => {
+    // The other side of the trim: `" USD "` is a usable currency, not an
+    // unpriced deal, and it must not split `USD` into two currency values and
+    // read as `mixed_currencies`.
+    const prisma = {
+      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmDeal: {
+        findMany: async () => [
+          { stageId: "s1", amountMinor: 50000n, currency: "USD" },
+          { stageId: "s1", amountMinor: 25000n, currency: " USD " },
+        ],
+      },
+    } as never;
+
+    const summary = await getPipelineSummary(prisma, "p1");
+    expect(summary.stages[0].valuation).toBe("priced");
+    expect(summary.stages[0].currency).toBe("USD");
+    expect(summary.stages[0].amountMinor).toBe("75000");
+  });
+
   it("reports every stage, including the ones holding nothing", async () => {
     // A kanban with a missing column is a worse bug than an empty one.
     const prisma = {

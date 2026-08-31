@@ -56,7 +56,7 @@ import {
 } from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
-  toolAllowedInScope,
+  narrowToolsToScope,
   toolDispatchDenial,
   type ToolAccessScope,
 } from "./tool-access.service.js";
@@ -1232,14 +1232,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // can be stale, so it is a request, never a grant. `undefined` scope (the
   // owner bypass / service principals / everyone with no AccessRole) leaves
   // the pool byte-for-byte as it was.
+  //
+  // Through the SHARED `narrowToolsToScope`, which also carries the
+  // absent-scope case — the estimate side in `routes/llm.ts` narrows via the
+  // same call, so the two cannot drift apart the way they did in the
+  // WARP-2497 × WARP-2552 conflict (WARP-2556).
   const scoped = req.toolAccessScope;
-  const inScope = (name: string): boolean =>
-    !scoped || toolAllowedInScope(name, scoped);
-  const filtered = (
+  const filtered = narrowToolsToScope(
     req.allowed_tools
       ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
-  ).filter((t) => inScope(t.name));
+      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
+    scoped,
+  );
   const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
     function: {

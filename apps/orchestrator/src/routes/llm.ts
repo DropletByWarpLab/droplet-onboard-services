@@ -22,9 +22,9 @@ import { effectiveAdvertisedToolNames } from "../services/tool-selection.service
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
+  narrowToolsToScope,
   resolveToolAccessScope,
   toolAllowedForTier,
-  toolAllowedInScope,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
@@ -1766,9 +1766,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // and lost the scope narrowing with the version it replaced. Restored
         // here, and `tool-selection.parity.test.ts` now runs a SCOPED fixture
         // so an unscoped one cannot pass for coverage again.
-        const effectiveTools = toolAccessScope
-          ? pooledTools.filter((t) => toolAllowedInScope(t.name, toolAccessScope))
-          : pooledTools;
+        //
+        // Through the SHARED helper, not an inline re-expression of the same
+        // rule: an inline copy here is what drifted out of step with the
+        // dispatch-side filter in the first place.
+        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
         // WARP-2552 — but the pool is NOT what the model receives, and sizing
         // it as though it were is the defect this fixes.
         //
