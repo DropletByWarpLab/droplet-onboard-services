@@ -532,7 +532,21 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
   // happened the day before, and sorting a timeline by write time reorders
   // history). Deliberately not merged into `ticket`: an engagement has no
   // status and nothing to resolve, it is a thing that HAPPENED.
-  engagement: ["engagement_id", "occurred_at", "type", "contact_id", "deal_id"],
+  engagement: [
+    "engagement_id",
+    "occurred_at",
+    "type",
+    "contact_id",
+    "deal_id",
+    // WARP-2509 — HubSpot `hs_lastmodifieddate`, which engagement objects
+    // expose like every other CRM object and which WARP-2494 already requests.
+    // WARP-2466 declared this dataset with `occurred_at` alone, and the two are
+    // NOT the same instant: `occurred_at` is when the call happened, this is
+    // when the record last moved. A meeting logged the next morning and
+    // corrected a week later has three dates and only one of them tells a
+    // poller there is something new to read.
+    "updated_at",
+  ],
 
   // ── commerce (WARP-2280) ──────────────────────────────────────────────────
 
@@ -614,10 +628,16 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "opens_unique",
     "clicks_unique",
   ],
-  // NO `updated_at` on either marketing dataset (WARP-2464). Mailchimp's
-  // `last_changed` is a field on a list MEMBER, which is not one of these
-  // twenty datasets; the campaign resource and the list resource each carry
-  // only a creation time. Mailchimp's e-commerce orders have none either.
+  // NO `updated_at` on `campaign` or `audience` (WARP-2464): the campaign
+  // resource and the list resource each carry only a creation time, and
+  // Mailchimp's e-commerce orders have none either.
+  //
+  // WARP-2509 corrects the rest of what this note used to say. It read
+  // "NO `updated_at` on either marketing dataset ... `last_changed` is a field
+  // on a list MEMBER, which is not one of these twenty datasets" — written
+  // before WARP-2466 made `audience_member` the twenty-first. It IS one of
+  // these datasets, it DOES have a modification time, and that time is now
+  // spelled `updated_at` like every other track's.
   //
   // A mailing list. `member_count` is CURRENT subscribed members, not everyone
   // who was ever on the list — `unsubscribe_count` is tracked separately
@@ -629,15 +649,25 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
   // cleaned / pending and is the column the whole row exists for: mailing
   // somebody who unsubscribed is the one unrecoverable mistake this dataset
   // can cause. `opted_in_at` is consent evidence, kept separate from
-  // `last_changed_at` because "when did they agree" and "when did this row
-  // last move" answer different questions — one of them legal.
+  // `updated_at` because "when did they agree" and "when did this row last
+  // move" answer different questions — one of them legal.
   audience_member: [
     "audience_member_id",
     "audience_id",
     "email",
     "subscription_status",
     "opted_in_at",
-    "last_changed_at",
+    // WARP-2509 — Mailchimp `last_changed`, and spelled `updated_at` like the
+    // modification column on all thirteen other datasets that have one.
+    //
+    // WARP-2466 named it `last_changed_at`, mirroring the vendor's own field.
+    // That is the wrong axis to mirror on: `watermarkValueOf` reads ONE column
+    // name, so a vocabulary with two spellings of "when did this row last
+    // move" makes a runner row that travels between tracks key on a column
+    // that is not there — and a watermark keyed on a missing column does not
+    // fail, it stays null and re-enumerates the whole audience every tick.
+    // The vendor's spelling still lives where it belongs, in the mapper.
+    "updated_at",
   ],
   // WARP-2466 — a purchase as a MARKETING platform recorded it, synced in by
   // a storefront integration. Deliberately NOT `order`: there is no tax split,
@@ -820,7 +850,9 @@ export const COLUMN_KIND: Readonly<Record<string, "text" | "money" | "count" | "
   audience_member_id: "text",
   subscription_status: "text",
   opted_in_at: "timestamp",
-  last_changed_at: "timestamp",
+  // WARP-2509 retired `last_changed_at` here — `updated_at` is already
+  // declared above with the other modification columns, and one name for one
+  // meaning is the point of the change.
   ecommerce_order_id: "text",
   store_id: "text",
   processed_at: "timestamp",
