@@ -153,8 +153,8 @@ describe("read tools", () => {
       res(true, 200, {
         pipelineId: "p1",
         stages: [
-          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 3, amountMinor: "0", currency: null },
-          { stageId: "s2", stageName: "Won", kind: "WON", sortOrder: 1, dealCount: 1, amountMinor: "250000", currency: "USD" },
+          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 3, valuation: "mixed_currencies", amountMinor: "0", currency: null },
+          { stageId: "s2", stageName: "Won", kind: "WON", sortOrder: 1, dealCount: 1, valuation: "priced", amountMinor: "250000", currency: "USD" },
         ],
       }),
     );
@@ -164,6 +164,58 @@ describe("read tools", () => {
     expect(stages[0].total_note).toContain("mixed currencies");
     expect(stages[0]).not.toHaveProperty("amount_minor");
     expect(stages[1]).toMatchObject({ amount_minor: "250000", currency: "USD" });
+  });
+
+  it("crm_pipeline_summary tells an unpriced stage apart from a mixed-currency one", async () => {
+    // WARP-2556 — the two used to arrive in the SAME wire shape
+    // (`amountMinor: "0"`, `currency: null`), and this handler branched on the
+    // null. So a stage of deals nobody had priced yet — the ordinary state of
+    // an early pipeline on a new box — was reported to the model as holding
+    // mixed currencies. The model then told the owner something that was not
+    // merely vague but false.
+    //
+    // Mutation: collapse the `unpriced` arm into the `mixed_currencies` one in
+    // pipeline-summary.ts → this goes red on the note.
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "p1",
+        stages: [
+          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 4, valuation: "unpriced", amountMinor: "0", currency: null },
+          { stageId: "s2", stageName: "Qualified", kind: "OPEN", sortOrder: 1, dealCount: 2, valuation: "mixed_currencies", amountMinor: "0", currency: null },
+        ],
+      }),
+    );
+    const out = await crmPipelineSummary.handler({}, ctx);
+    const stages = (out.data as { stages: Array<Record<string, unknown>> }).stages;
+
+    // Both withhold a total — that part was always right.
+    expect(stages[0]).toMatchObject({ deals: 4, total: null });
+    expect(stages[1]).toMatchObject({ deals: 2, total: null });
+
+    // What changed: they no longer say the same thing about WHY.
+    expect(stages[0].total_note).toBe("no amounts entered yet");
+    expect(stages[1].total_note).toBe("mixed currencies — not summed");
+    expect(stages[0].total_note).not.toBe(stages[1].total_note);
+    expect(stages[0].total_note).not.toContain("currenc");
+  });
+
+  it("crm_pipeline_summary reads the state, not the null", async () => {
+    // The guard against a well-meaning revert to `s.currency === null`: a
+    // PRICED stage is allowed to carry a null currency on the wire without
+    // being reclassified. Nothing produces that today, which is the point —
+    // the handler must not re-derive a state it is now told outright.
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "p1",
+        stages: [
+          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 1, valuation: "priced", amountMinor: "1500", currency: null },
+        ],
+      }),
+    );
+    const out = await crmPipelineSummary.handler({}, ctx);
+    const stages = (out.data as { stages: Array<Record<string, unknown>> }).stages;
+    expect(stages[0]).toMatchObject({ amount_minor: "1500" });
+    expect(stages[0]).not.toHaveProperty("total_note");
   });
 });
 

@@ -283,7 +283,24 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // ZERO turns — the same defect WARP-2058 fixed for `pm` and WARP-2454 fixed
   // for `team_chat`. `chat-tool-scope.test.ts` now fails if a domain with
   // in-scope tools has no rule, so a fourth instance cannot ship quietly.
-  { pattern: /\b(crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|won|win|lost|follow-?ups?)\b/i, domains: ["crm"] },
+  //
+  // WARP-2556 — `won` / `win` / `lost` were claimed bare and are not any more.
+  // They matched "did we win the game last night" and "I lost my keys",
+  // advertising six schemas on a turn that wanted none — the per-turn cost
+  // WARP-2552 exists to avoid. Real CRM sentences still land: "which deals did
+  // we win last quarter" matches `deals?`.
+  //
+  // 🔴 THE OVERLAP WITH `cloud` IS DELIBERATE, FOR NOW. That rule also claims
+  // `crm`, `deals?` and `pipelines?`, so "what deals are in the pipeline"
+  // matches both. By the cloud rule's own stated test — drop a word when
+  // ANOTHER DOMAIN OWNS IT — those three should move here now that a native
+  // CRM exists. They must not move YET: until WARP-2549 lands the connector
+  // landing seam, a HubSpot customer's deals are not in Crm* at all, and
+  // `cloud_query_dataset` is the ONLY tool that can answer the question for
+  // them. Moving the words early would break that customer and turn two of
+  // WARP-2497's deliberately pinned positives red. When 2549 lands and those
+  // deals reach Crm*, move them and re-point 2497's positives.
+  { pattern: /\b(crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|follow-?ups?)\b/i, domains: ["crm"] },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
@@ -508,7 +525,11 @@ export function effectiveAdvertisedToolNames(opts: {
   pool: readonly string[];
   runtimeTools?: readonly RuntimeToolDescriptor[];
 }): Set<string> {
-  if (opts.mode === "off") return new Set(opts.pool);
+  // WARP-2556 — no `off` short-circuit here on purpose. `selectAdvertisedTools`
+  // already returns the whole pool for `off`, and duplicating that branch meant
+  // two places to keep in step if its off-mode handling ever changed. This
+  // wrapper's job is to own the DERIVATION of the inputs, not to answer the
+  // question itself.
   const { advertised } = selectAdvertisedTools({
     mode: opts.mode,
     userMessage: lastUserMessageText(opts.messages),

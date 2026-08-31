@@ -8,7 +8,13 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 
 import { CrmTabs } from "./CrmTabs";
 import { DealBoard, CustomersView, Timeline } from "./views";
-import { formatMinor, type CrmCompany, type CrmDeal, type CrmStage } from "./types";
+import {
+  formatMinor,
+  type CrmCompany,
+  type CrmDeal,
+  type CrmStage,
+  type CrmStageSummary,
+} from "./types";
 import { toMinorUnits } from "./modals";
 
 const stage = (over: Partial<CrmStage> = {}): CrmStage => ({
@@ -202,16 +208,12 @@ describe("DealBoard", () => {
     expect(onMove).not.toHaveBeenCalled();
   });
 
-  it("hides the column total when the stage holds mixed currencies", () => {
-    // The server reports currency: null and amountMinor "0" for a mixed stage.
-    // Rendering "0" there would be a lie about the column's value.
+  const boardWithSummary = (summary: CrmStageSummary[]) =>
     render(
       <DealBoard
         stages={[stage({ id: "s1", name: "Lead", sortOrder: 0 })]}
         deals={[deal()]}
-        summary={[
-          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 2, amountMinor: "0", currency: null },
-        ]}
+        summary={summary}
         domain="populated"
         readOnly={false}
         onOpen={() => {}}
@@ -219,8 +221,48 @@ describe("DealBoard", () => {
         onNew={() => {}}
       />,
     );
+
+  const summaryRow = (over: Partial<CrmStageSummary> = {}): CrmStageSummary => ({
+    stageId: "s1",
+    stageName: "Lead",
+    kind: "OPEN",
+    sortOrder: 0,
+    dealCount: 2,
+    valuation: "priced",
+    amountMinor: "250000",
+    currency: "USD",
+    ...over,
+  });
+
+  it("renders the column total when the stage is priced", () => {
+    // WARP-2556 — the anchor for the two withholding cases below. Without it a
+    // DealBoard that renders NO total ever would pass both of them, and the
+    // pair would be green while saying nothing.
+    boardWithSummary([summaryRow()]);
+    expect(screen.getByText(/2,500\.00/)).toBeTruthy();
+  });
+
+  it("hides the column total when the stage holds mixed currencies", () => {
+    // The server reports currency: null and amountMinor "0" for a mixed stage.
+    // Rendering "0" there would be a lie about the column's value.
+    boardWithSummary([
+      summaryRow({ valuation: "mixed_currencies", amountMinor: "0", currency: null }),
+    ]);
     expect(screen.queryByText(/0\.00/)).toBeNull();
     // The count still renders — it is true and useful; only the total is withheld.
+    expect(screen.getByText("1")).toBeTruthy();
+  });
+
+  it("hides the column total when nothing in the stage is priced", () => {
+    // WARP-2556 — this arrives in the same `amountMinor: "0"` / `currency: null`
+    // shape as the mixed case, so a board that branches on the null cannot tell
+    // them apart. It has to branch on `valuation`.
+    //
+    // Mutation: change the guard in views.tsx back to `stat.currency !== null`
+    // → still green (both are null). Change it to `stat != null` → this and the
+    // mixed case both go red on the rendered "0.00".
+    boardWithSummary([summaryRow({ valuation: "unpriced", amountMinor: "0", currency: null })]);
+    expect(screen.queryByText(/0\.00/)).toBeNull();
     expect(screen.getByText("1")).toBeTruthy();
   });
 

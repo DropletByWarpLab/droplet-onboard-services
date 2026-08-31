@@ -19,8 +19,11 @@ import type { ToolResult } from "../../types.js";
 import { callOrch, OrchPmError } from "../pm/pm-orch.js";
 
 export { callOrch };
-/** The transport error. Named for its origin; it is not PM-specific. */
-export { OrchPmError as OrchError };
+// WARP-2556 — `OrchPmError` was re-exported here as `OrchError` and imported
+// by nobody: all seven handlers and the test go through `crmError()`. A second
+// public name for the same class is a second error-mapping path for a future
+// handler author to find, so it is gone. `crmError()` is the one entry point.
+
 
 // ── Wire shapes the tools return ─────────────────────────────────────────────
 // Deliberately a SUBSET of the orchestrator's Api* shapes: a tool result is

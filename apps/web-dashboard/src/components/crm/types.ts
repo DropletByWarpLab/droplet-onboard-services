@@ -97,15 +97,26 @@ export interface CrmActivity {
   createdAt: string;
 }
 
+/** WARP-2556 — mirrors `CrmStageValuation` in the orchestrator's crm.service. */
+export type CrmStageValuation = "priced" | "mixed_currencies" | "unpriced";
+
 export interface CrmStageSummary {
   stageId: string;
   stageName: string;
   kind: CrmStageKind;
   sortOrder: number;
   dealCount: number;
+  /**
+   * WARP-2556 — branch on THIS, never on `currency === null`.
+   *
+   * The server used to send `{ amountMinor: "0", currency: null }` for both
+   * "several currencies, cannot sum" and "nothing here is priced", so a null
+   * currency could not tell them apart.
+   */
+  valuation: CrmStageValuation;
+  /** Meaningful only when `valuation` is `"priced"`; "0" otherwise. */
   amountMinor: string;
-  /** Null when the stage holds deals in more than one currency — in which case
-   *  `amountMinor` is "0" and must NOT be rendered as a total. */
+  /** ISO-4217 when `valuation` is `"priced"`, null otherwise. */
   currency: string | null;
 }
 
