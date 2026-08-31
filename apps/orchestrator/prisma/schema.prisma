@@ -3911,8 +3911,27 @@ model PmProject {
   /// record intact (SetNull, not Cascade).
   crmDeals CrmDeal[]
 
+  /// WARP-2562 (ADR-044) — the customer this project is FOR.
+  ///
+  /// WARP-2117 gave the DEAL a project ("a won deal becomes the job that
+  /// delivers it"). This is the other direction, and it is not the same edge:
+  /// plenty of work for a customer never came through a deal at all — a
+  /// warranty callout, a second phase, anything begun before the CRM was
+  /// switched on. Reading the customer off `crmDeals` would leave those
+  /// projects unattributed.
+  ///
+  /// NULL is the common case and is not a gap: internal projects have no
+  /// customer, and on a home box that is most of them.
+  ///
+  /// SetNull, not Cascade — deleting a customer must not delete the work
+  /// delivered for them. The job happened.
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
+  /// "This customer's projects" is the customer record's own query.
+  @@index([companyId, isArchived])
 }
 
 /// Workflow state group — the kanban-column semantics. Explicit enum (no
@@ -5605,6 +5624,11 @@ model Contact {
   companyLinks    CrmCompanyContact[]
   dealLinks       CrmDealContact[]
   crmActivities   CrmActivity[]
+  /// WARP-2562 (ADR-044) — this person's records in upstream systems.
+  /// Distinct from `externalSystem`/`externalId` above, which say where this
+  /// ROW came from. See the PartyLink model for why those are not the same
+  /// question.
+  partyLinks      PartyLink[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
@@ -5744,11 +5768,96 @@ model CrmCompany {
   contactLinks CrmCompanyContact[]
   deals        CrmDeal[]
   activities   CrmActivity[]
+  /// WARP-2562 (ADR-044) — the work delivered for this customer, and this
+  /// customer's records in upstream systems. With `deals` and `contactLinks`
+  /// these are the four things the customer record reads.
+  projects     PmProject[]
+  partyLinks   PartyLink[]
 
   @@unique([externalSystem, externalId])
   @@index([name])
   @@index([domain])
   @@index([ownerId, isArchived])
+}
+
+/// WARP-2562 (ADR-044) — how a link came to exist. An explicit column, never
+/// inferred from `confidence IS NULL`: the same rule that made `origin` and
+/// `isArchived` real columns under WARP-884, and for the same reason — a
+/// reader must not have to work out which flavour of null they are holding.
+enum PartyLinkOrigin {
+  /// A human said these are the same customer.
+  MANUAL
+  /// A matcher proposed it and someone accepted. Carries a `confidence`.
+  MATCHED
+  /// Asserted by an upstream that already knew the correspondence.
+  IMPORTED
+}
+
+/// Joins a party this box owns — a `Contact` or a `CrmCompany` — to a record
+/// in an upstream system, WITHOUT copying that record in.
+///
+/// The ERP stays the system of record. This row is a POINTER: a provider key
+/// and an opaque id, holding no PHI of its own. Detail is fetched live through
+/// the existing connector, under the existing PHI gate.
+///
+/// 🔴 Why this is not `Contact.externalSystem` / `externalId`, which already
+/// exist and already carry a provider and an id:
+///
+/// That pair is `@@unique` ON THE PARTY, so it models PROVENANCE — one
+/// upstream owns this row, and a re-sync updates rather than duplicates. It
+/// cannot model CORRESPONDENCE: this person is a HubSpot contact AND patient
+/// #4471 in Eaglesoft AND customer cus_9f2 in Stripe. A customer is routinely
+/// all three. Overloading the pair would force a choice of which connector
+/// "owns" a customer, which is the wrong question — and the wrong answer would
+/// be re-litigated by every connector added after it.
+///
+/// 🔴 ADR-044 §3 — a row here is created ONLY by an explicit act: a human
+/// links a customer, or a proposed match is accepted. ERP patients are never
+/// projected into `Contact` (PHI spill: the address book has no `canViewPhi`
+/// gate, is reachable by `family`, and is readable by the local model through
+/// the `contacts` tool domain). Do not add a sync that writes these in bulk
+/// without re-reading that section.
+model PartyLink {
+  id String @id @default(uuid())
+
+  /// Exactly one of the two is set. Prisma cannot express an XOR, so the real
+  /// guard is the CHECK constraint `PartyLink_party_exactly_one` in the
+  /// migration; the service's own check is the friendly error, not the
+  /// invariant. `party-link.pg.test.ts` proves the database half — a mocked
+  /// Prisma cannot, which is why that file carries the `.pg.` infix.
+  contactId String?
+  contact   Contact?    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  /// Verbatim `IntegrationConnection.provider` — free TEXT, deliberately not
+  /// an enum or a catalog id. `eaglesoft-api` and `quickbooks-online` are
+  /// provider keys, not catalog ids, and typing this as a `ConnectorId` is the
+  /// lie that broke the hub's join in WARP-2291. A new upstream needs no
+  /// migration, exactly as `IntegrationConnection.provider` intends.
+  externalSystem String
+  /// The upstream's own key — an Eaglesoft chart number, a Stripe customer id.
+  externalId     String
+
+  linkedBy   PartyLinkOrigin @default(MANUAL)
+  /// 0-100, and only meaningful for `MATCHED`. A confidence on a link a human
+  /// made by hand is a number nobody computed.
+  confidence Int?
+
+  /// WARP-884 shape. Unlinking is reversible and auditable rather than a hard
+  /// delete — "these were never the same customer" is a claim worth keeping.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  /// One upstream record maps to at most one party. Two links to the same
+  /// (system, id) — even from different parties — is a contradiction, not a
+  /// second opinion, and surfaces as a 409 rather than as two answers.
+  @@unique([externalSystem, externalId])
+  @@index([contactId])
+  @@index([companyId])
 }
 
 /// Company↔Contact as a link table rather than a foreign key on `Contact`:
