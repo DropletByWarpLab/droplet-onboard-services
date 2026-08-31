@@ -2,17 +2,31 @@
 
 ## Branching model
 
-**Open your PR against `main`.** It is the only long-lived branch.
+Work flows through **`stage`** before it reaches **`main`**. Open your PR
+against `stage` — `main` only ever receives merges from `stage`.
 
-Work used to flow through a `stage` branch first, so a subset of real boxes
-installed a build ahead of everyone else. `stage` has been deleted
-(WARP-2187) and the CI guard that required it is gone, so that soak no
-longer exists: once a release is published from `main`, it reaches every box
-on the stable channel.
+```
+your branch ──PR──▶ stage ──PR──▶ main
+                      │             │
+                 channel: stage  channel: stable
+```
 
-That makes review the only thing standing between a merge and the fleet.
-What lands on `main` should be releasable on its own -- not "releasable once
-someone notices on stage".
+Both branches publish OTA releases, and a device subscribes to exactly
+one channel. So `stage` is not a staging *server* — it is the build a
+subset of real boxes will install, ahead of everyone else. What lands on
+`stage` should be releasable; what lands on `main` should have soaked.
+
+**`stage` is permanent — never delete it, and never push straight to it.**
+Every commit reaches `stage` through a PR and reaches `main` through a
+promotion PR. Because a promotion PR's head *is* `stage`, the *Delete
+branch* button GitHub offers on the merged promote deletes the release
+channel itself — it has been clicked four times, and each time GitHub
+silently auto-closed every open PR based on `stage` (2, then 9, then 39),
+none of which can be reopened once the base ref is gone.
+
+Promoting is an ordinary PR (`stage` → `main`), reviewed like any other.
+Hotfixes take the same route: skipping `stage` means shipping every box a
+build that has never run on one.
 
 Your PR must carry the WARP key it implements in its **title** —
 `WARP-123: …` or `fix(scope): … (WARP-123)`. That is a required check
@@ -21,12 +35,12 @@ with `[no-ticket]`. Keys you merely *reference* go in the body, never the
 title. The full list of gates that must go green, and the rule for adding
 one, is [`docs/ci-required-checks.md`](docs/ci-required-checks.md).
 
-Releases are published by dispatching `publish-release.yml` from the branch
-you want to ship -- the workflow derives the channel from the ref and
-refuses to run from anywhere else. See the "Branching and releases" section
-of [`CLAUDE.md`](CLAUDE.md) for the full contract, and
-[`docs/SECURITY.md`](docs/SECURITY.md) for how a device decides to trust a
-release.
+Releases are published by dispatching `publish-release.yml` from the
+branch you want to ship — the workflow derives the channel from the ref
+and refuses to run from anywhere else. See the "Branching and releases"
+section of [`CLAUDE.md`](CLAUDE.md) for the full contract, and
+[`docs/SECURITY.md`](docs/SECURITY.md) for how a device decides to trust
+a release.
 
 ## Architecture
 

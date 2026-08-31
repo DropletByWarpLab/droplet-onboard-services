@@ -3697,6 +3697,58 @@ export async function runSceneConfirmed(
 }
 
 /**
+ * WARP-2469 — the outcome of an in-chat tool approval.
+ *
+ * Deliberately WITHOUT the interceptor's bound token. Approving flips the
+ * challenge to `approved` in the orchestrator's store, and the agent loop
+ * that redeems the token runs SERVER-SIDE on `/api/llm/chat` for every
+ * caller — this dashboard and a raw API client alike. The loop claims the
+ * grant from that store itself and attaches the token via `_meta` when the
+ * model re-issues the call, so no client ever needs the secret; returning
+ * it would hand a live single-use write capability to whatever holds the
+ * HTTP response, for nothing.
+ */
+export interface ToolConfirmationOutcome {
+  challengeId: string;
+  status: "approved" | "denied";
+  tool: string;
+  /** Epoch ms until which the loop can still claim the approved grant. */
+  expiresAt?: number;
+}
+
+/**
+ * WARP-2469 — approve or deny a WARP-2305 interceptor challenge raised
+ * during a chat turn.
+ *
+ * The client holds only the opaque `challengeId`; the token stays in the
+ * orchestrator. A 403 means this role may not approve this tool, a 410
+ * means the challenge outlived its TTL (the prompt should render as
+ * expired and offer a re-request), and a 409 means it was already
+ * resolved. Each throws with `status` attached so the chip can tell
+ * those apart instead of showing one generic failure.
+ */
+export async function resolveToolConfirmation(
+  challengeId: string,
+  decision: "approve" | "deny",
+): Promise<ToolConfirmationOutcome> {
+  const res = await authFetch(`${BASE}/api/llm/confirm/${challengeId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(
+      data.error || data.status || `Couldn't record your decision (${res.status})`,
+    ) as Error & { status?: number; reason?: string };
+    err.status = res.status;
+    err.reason = typeof data.status === "string" ? data.status : undefined;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
  * A smart-home routine (Scene, WARP-474) as listed by `GET /api/scenes` — a
  * named batch of device actions an owner can run in one tap. `actionCount` is
  * how many device commands the routine fires.
@@ -7084,6 +7136,13 @@ export async function fetchCapabilities(): Promise<AdminCapabilities> {
 export interface AppCapabilities {
   /** The Projects (native PM, ADR-026) surface is enabled on this Droplet. */
   projects: boolean;
+  /** WARP-2545 — the CRM sub-tabs on the Projects page. Already resolved
+   *  against the `requires: "projects"` edge server-side, so this is safe to
+   *  read on its own; re-checking `projects` here would be a second copy of a
+   *  rule the box already applied. */
+  crm: boolean;
+  /** WARP-2038 — the /contacts surface. Ships false until that page exists. */
+  contacts: boolean;
 }
 
 /**
@@ -8093,4 +8152,127 @@ export async function fetchAppDownloads(
     generatedAt: parsed.generatedAt ?? null,
     platforms: Array.isArray(parsed.platforms) ? parsed.platforms : [],
   };
+}
+
+// --- WARP-2275: the descriptor-driven SaaS credential configurator ---------
+//
+// Shapes mirror the orchestrator's `SaasCredentialView` exactly. Note what is
+// NOT here: there is no field for a secret's value. The read view carries
+// `hasValue` booleans and nothing more, so a stored credential never reaches
+// the browser at all — which is why the form can be safely rendered by anyone
+// who passes the admin gate without the page becoming a credential viewer.
+
+/** One credential field, as the WARP-2217 descriptor declares it. */
+export interface SaasCredentialField {
+  name: string;
+  label: string;
+  type: "string" | "positiveInteger";
+  required: boolean;
+  secret: boolean;
+  storage: "providerConfig" | "encrypted" | "column";
+  help: string | null;
+  /** Validation regex SOURCE. A hint for the form; the server is the refusal. */
+  pattern: string | null;
+  /** Whether a secret is stored. `null` for a non-secret field. */
+  hasValue: boolean | null;
+}
+
+/**
+ * Connection state, straight from the orchestrator.
+ *
+ * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
+ * credential is not an absent one, and telling a person to "connect" when they
+ * already did is how a broken connection stays broken.
+ *
+ * `ERROR` is deliberately distinct from `NEEDS_RECONNECT` (WARP-2458, mirrored
+ * here by WARP-2517): the service folds a persisted `ERROR` status straight
+ * through, and it means something a new key will not fix — a vendor-side
+ * refusal like an IP access policy or a plan limit. This union mirrors the
+ * orchestrator's `SaasConnectionState` in `saas-credential.service.ts`;
+ * dropping a member the box can send is how `STATE_COPY[view.state]` came to
+ * crash the credentials page on the very rows it exists to repair.
+ */
+export type SaasConnectionState =
+  | "NOT_CONFIGURED"
+  | "PROVISIONING"
+  | "CONNECTED"
+  | "NEEDS_RECONNECT"
+  | "ERROR"
+  | "DEGRADED"
+  | "DRIFT_LOCKED"
+  | "DISABLED";
+
+export interface SaasCredentialView {
+  provider: string;
+  displayName: string;
+  category: string;
+  state: SaasConnectionState;
+  /**
+   * Whether EVERY declared secret is stored — an `every()`, so a provider
+   * declaring two with one stored reports `false`. It answers "is this
+   * connection usable", NOT "was the credential removed" (WARP-2489).
+   */
+  hasCredentials: boolean;
+  /**
+   * WARP-2489 — whether the credential material was actually removed from the
+   * row, straight from the box, derived there by the same `credentialsPurgedFor`
+   * that builds `IntegrationConnection.credentialsPurged` for the hub.
+   *
+   * OPTIONAL for the same reason it is optional on `IntegrationConnection`
+   * (`erp-types.ts`): this interface mirrors a JSON payload rather than being
+   * one, and a response that does not carry the key must not be read as either
+   * answer. `undefined` means "the box said nothing", which is a third fact and
+   * renders as neither sentence.
+   */
+  credentialsPurged?: boolean;
+  configured: boolean;
+  fields: SaasCredentialField[];
+  /** Non-secret field values only. */
+  values: Record<string, string | number>;
+  updatedAt: string | null;
+}
+
+export async function fetchSaasCredentials(): Promise<SaasCredentialView[]> {
+  const res = await authFetch(`${BASE}/api/integrations/credentials`);
+  if (!res.ok) throw new Error(`Failed to load integration credentials: ${res.status}`);
+  const body = await res.json();
+  return Array.isArray(body?.providers) ? body.providers : [];
+}
+
+/**
+ * Save a credential update.
+ *
+ * `fields` carries ONLY what the admin actually changed. That is the client
+ * half of the three-way rule: an omitted key keeps the stored secret, `""`
+ * clears it. Sending every field on every save — the obvious implementation —
+ * would either wipe secrets the form never had, or require the browser to hold
+ * them, and both are the bug this shape exists to avoid.
+ */
+export async function saveSaasCredential(
+  provider: string,
+  fields: Record<string, string | number>,
+): Promise<SaasCredentialView> {
+  const res = await authFetch(
+    `${BASE}/api/integrations/${encodeURIComponent(provider)}/credentials`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields }),
+    },
+  );
+  if (!res.ok) {
+    // The body may name which fields were refused; it never contains a value.
+    let detail = "";
+    try {
+      const body = await res.json();
+      const fieldErrors = body?.details?.fieldErrors as
+        | Record<string, string[]>
+        | undefined;
+      if (fieldErrors) detail = Object.values(fieldErrors).flat().join(" ");
+    } catch {
+      // A non-JSON error body is not worth a second failure mode.
+    }
+    throw new Error(detail || `Failed to save credentials: ${res.status}`);
+  }
+  return res.json();
 }

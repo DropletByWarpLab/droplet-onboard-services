@@ -208,9 +208,11 @@ describe("Users page — invite modal access-role picker (WARP-1533)", () => {
     expect(within(select).getByRole("option", { name: "Staff" })).toBeInTheDocument();
 
     // The honest caption names the degradation — the admin is told, not
-    // left to wonder where their roles went.
+    // left to wonder where their roles went. The roles read is its own
+    // chain (listAccessRoles → setAccessRolesFailed), independent of the
+    // roster fetch openInviteModal awaited, so the caption is awaited.
     expect(
-      screen.getByText(/couldn't load your custom roles/i),
+      await screen.findByText(/couldn't load your custom roles/i),
     ).toBeInTheDocument();
 
     // Inviting still works on a built-in tier.
@@ -459,8 +461,13 @@ describe("Users page — pending-invite role label (WARP-1566)", () => {
       invites: [pendingInvite({ role: "family", accessRoleId: FINANCE.id })],
     });
 
-    expect(await inviteRoleChip()).toBe("Finance");
-    expect((await inviteRow()).textContent).not.toMatch(/\buser\b/);
+    // The chip reads "Staff" (the tier label) until the roles list — its own
+    // fetch chain, independent of the invites fetch inviteRow awaits — has
+    // loaded and resolved the id to "Finance". Await that on the SAME row
+    // rather than mounting a second page to re-read it.
+    const row = await inviteRow();
+    await waitFor(() => expect(row.querySelector(".chip")?.textContent).toBe("Finance"));
+    expect(row.textContent).not.toMatch(/\buser\b/);
   });
 
   it("shows the built-in tier label for a plain-tier invite — never the legacy 'user'", async () => {

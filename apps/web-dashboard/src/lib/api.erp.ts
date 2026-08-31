@@ -10,8 +10,8 @@
 
 import { apiFetch, type ApiFetchOptions } from "./hooks/apiFetch";
 import type {
-  EaglesoftConnectInput,
   EaglesoftDetail,
+  LanConnectInput,
   IntegrationConnection,
   PatientResult,
   PatientSummary,
@@ -87,13 +87,24 @@ export interface ConnectionTestResult {
   message?: string;
 }
 
-/** Non-destructive reachability probe against host:port. */
-export async function testEaglesoftConnection(
-  input: Pick<EaglesoftConnectInput, "host" | "port">,
+/**
+ * Non-destructive reachability probe against host:port, for ANY LAN-database
+ * track (WARP-2451).
+ *
+ * The provider key is a PARAMETER rather than a literal in the path. It was a
+ * literal while exactly one LAN provider existed, which made the connect
+ * wizard un-generalisable without also rewriting its network calls — and a
+ * wizard that renders a second vendor's fields but posts to the first vendor's
+ * endpoint is worse than one that refuses. `encodeURIComponent` because the
+ * key is free-text TEXT on the row, not a closed union.
+ */
+export async function testLanConnection(
+  provider: string,
+  input: Pick<LanConnectInput, "host" | "port">,
 ): Promise<ConnectionTestResult> {
   // Backend returns { ok, reason, message } — adapt to { reachable, message }.
   const r = await apiFetch<{ ok: boolean; reason?: string; message?: string }>(
-    "/api/integrations/eaglesoft/test",
+    `/api/integrations/${encodeURIComponent(provider)}/test`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -104,31 +115,60 @@ export async function testEaglesoftConnection(
 }
 
 /** Runs provisioning + verification and lands the connection CONNECTED. */
-export function connectEaglesoft(
-  input: EaglesoftConnectInput,
+export function connectLanProvider(
+  provider: string,
+  input: LanConnectInput,
 ): Promise<EaglesoftDetail> {
-  return apiFetch<EaglesoftDetail>("/api/integrations/eaglesoft/connect", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return apiFetch<EaglesoftDetail>(
+    `/api/integrations/${encodeURIComponent(provider)}/connect`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
 }
 
-/** The write kill-switch / opt-in. */
-export function setEaglesoftWrites(
+/**
+ * The write kill-switch / opt-in, for ONE provider.
+ *
+ * WARP-2500 — `provider` is a required parameter and the URL is
+ * provider-scoped. This used to be `setEaglesoftWrites(enabled)` posting to a
+ * hardcoded `/api/integrations/eaglesoft/…`, which is the client half of the
+ * same defect: the orchestrator could only flip the Eaglesoft row, and the
+ * dashboard could only ask it to.
+ *
+ * `provider` is the row's own `connection.provider` — the orchestrator's
+ * free-form TEXT key, deliberately typed `string` and not `ConnectorId` (see
+ * the note on `IntegrationConnection.provider` in `erp-types.ts`), because a
+ * closed union here would make a wrong key a compile-time lie rather than a
+ * runtime 404.
+ */
+export function setProviderWrites(
+  provider: string,
   enabled: boolean,
 ): Promise<IntegrationConnection> {
   return apiFetch<IntegrationConnection>(
-    `/api/integrations/eaglesoft/${enabled ? "write-enable" : "write-disable"}`,
+    `/api/integrations/${encodeURIComponent(provider)}/${
+      enabled ? "write-enable" : "write-disable"
+    }`,
     { method: "POST" },
   );
 }
 
-/** Disconnect the integration — stops Droplet reading; Eaglesoft data untouched. */
-export function disconnectEaglesoft(): Promise<IntegrationConnection> {
-  return apiFetch<IntegrationConnection>("/api/integrations/eaglesoft/disconnect", {
-    method: "POST",
-  });
+/**
+ * Disconnect ONE provider — stops Droplet reading and purges the stored
+ * credential; the vendor's own data is untouched.
+ *
+ * WARP-2500 — provider-scoped; see {@link setProviderWrites}.
+ */
+export function disconnectProvider(
+  provider: string,
+): Promise<IntegrationConnection> {
+  return apiFetch<IntegrationConnection>(
+    `/api/integrations/${encodeURIComponent(provider)}/disconnect`,
+    { method: "POST" },
+  );
 }
 
 /** Stage a write (outbox) — never writes to Eaglesoft directly. */

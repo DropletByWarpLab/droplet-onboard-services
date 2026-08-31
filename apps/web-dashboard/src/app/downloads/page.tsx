@@ -2,8 +2,11 @@
  * /downloads — get the Droplet client app for whatever you're reading
  * this on.
  *
- * The apps ship INSIDE the appliance image and are served by the box
- * itself (GET /api/app-downloads), not fetched from a cloud endpoint.
+ * The apps live ON the box and are served by it (GET /api/app-downloads),
+ * not fetched from a cloud endpoint. They get there by an operator
+ * staging them (scripts/app-downloads/stage.sh) — NOT with the image, so
+ * "no apps staged" is the normal state of a box nobody has staged, and
+ * the copy must not tell a customer to wait for an update.
  * That is the point: a customer on a LAN with no internet can still
  * install the client, and the bytes are re-verified against the digest
  * that shipped before the box hands them over.
@@ -75,7 +78,7 @@ const PLATFORM_ORDER: AppDownloadPlatform[] = [
  */
 const REASON_COPY: Record<string, string> = {
   catalog_missing:
-    "No apps are staged on this box yet. They're built into the appliance image, so the next box update will bring them.",
+    "No apps have been added to this box yet. It only offers apps that were put on it directly, so waiting for an update won't bring them — whoever set the box up needs to add them.",
   catalog_unreadable:
     "The box couldn't read its app catalog. This is a fault on the box, not on your device.",
   malformed_catalog:
@@ -237,7 +240,7 @@ function PlatformCard({
       ) : (
         <p className="dl-note dl-note-muted">
           {entry?.note ??
-            `No ${label} app is staged on this box yet. It ships inside the appliance image, so a box update will bring it.`}
+            `No ${label} app has been added to this box yet. Ask whoever set it up to add the ${label} installer.`}
         </p>
       )}
     </Card>
@@ -323,10 +326,10 @@ export default function DownloadsPage() {
             }
           >
             <p className="dl-note">
-              These installers ship inside your appliance image — nothing is
-              fetched from the internet. Before sending a file, the box
-              re-checks its SHA-256 against the one recorded when the image
-              was built, and refuses to serve it if a single byte differs.
+              These installers live on your box — nothing is fetched from the
+              internet. Before sending a file, the box re-checks its SHA-256
+              against the one recorded when the app was added, and refuses to
+              serve it if a single byte differs.
               {attestation === "signed"
                 ? " The catalog itself carries a verified signature."
                 : ""}

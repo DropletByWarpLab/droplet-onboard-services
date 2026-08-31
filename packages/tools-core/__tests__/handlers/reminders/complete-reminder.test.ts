@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import completeReminder from "../../../src/handlers/reminders/complete-reminder.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  findUnique: ReturnType<typeof vi.fn>,
-  update: ReturnType<typeof vi.fn>,
+  findUnique: Mock,
+  update: Mock,
   userId = "alice",
 ): ToolContext {
   return {

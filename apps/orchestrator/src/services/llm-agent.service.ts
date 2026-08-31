@@ -45,17 +45,34 @@ import {
   toolResultPayloadValue,
   type ToolResultPayload,
 } from "./tool-result-payload.js";
+import {
+  describeToolError,
+  newAgentTurnId,
+} from "./tool-error-diagnostics.js";
+import type { ChatApprovalStore } from "./chat-approval.service.js";
+import {
+  boundControlEnvelopeForModel,
+  boundToolResultForModel,
+} from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import {
-  toolAllowedInScope,
+  narrowToolsToScope,
   toolDispatchDenial,
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import {
-  selectAdvertisedTools,
+  effectiveAdvertisedToolNames,
   domainOfTool,
   toolNamesForDomain,
 } from "./tool-selection.service.js";
+import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+// WARP-2544 — output-side guard on tool use: does the finished answer match
+// what the tools actually did? Deterministic, no inference call.
+import {
+  validateAnswerAgainstTrace,
+  describeToolUseVerdict,
+} from "./tool-use-validation.js";
+import { assertToolAdvertisementFitsBudget } from "./tool-budget.service.js";
 import {
   ITERATION_MIN_HEADROOM,
   OUTPUT_RESERVE,
@@ -106,8 +123,31 @@ export interface CitationDeps {
   ): void;
 }
 
+/**
+ * WARP-2469 — the loop's half of the chat approval round-trip.
+ *
+ * A narrow port rather than the concrete store, so a test can inject a
+ * two-method stub and so this module keeps no opinion about where
+ * approvals live. `chatApprovalStore` in
+ * `services/chat-approval.service.ts` is the production instance; the
+ * route half (`POST /api/llm/confirm/:challengeId`) uses the same one.
+ */
+export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
+
 export interface AgentDeps {
   mcp: McpClientService;
+  /**
+   * WARP-2469 — turns an interceptor challenge into something a human
+   * can approve, and an approval into the token the re-issued call
+   * presents.
+   *
+   * Optional: the ToolSpec runner and the voice pipeline drive this loop
+   * too, and neither has a human watching a chat stream. When it is
+   * absent a confirming tool is still refused (WARP-2305 is doing its
+   * job) — there is simply no in-chat path to approve it, which is the
+   * pre-WARP-2469 behaviour and is fail-closed.
+   */
+  approvals?: ChatApprovalPort;
   aiGateway: {
     chat: (
       req: {
@@ -227,7 +267,16 @@ export function presetForClass(cls: QueryClass, query?: string): AdaptivePreset 
         searchOverrides: { rerankCandidates: 80 },
       };
     case "conversational":
-      return { searchOverrides: { minSimilarity: 0.5, perArmK: 50 } };
+      // WARP-2196: 0.5 -> 0.75. This floor's job is to sit ABOVE what
+      // chit-chat scores against the corpus so a conversational turn
+      // retrieves nothing. Under MiniLM the ceiling for the conversational
+      // eval queries was 0.200 and 0.5 cleared it 2.5x over; under
+      // bge-small-en-v1.5 that ceiling is 0.590, so 0.5 would have admitted
+      // 8 of the 10 conversational fixture queries — the gate inverted from
+      // "skip retrieval" to "retrieve almost always". 0.75 is the measured
+      // bge-equivalent of MiniLM's 0.5 by irrelevant-pair selectivity (1.3%
+      // vs 1.4%). See services/similarity-floors.test.ts.
+      return { searchOverrides: { minSimilarity: 0.75, perArmK: 50 } };
     case "navigational": {
       const token = query ? extractFilenameToken(query) : undefined;
       return token ? { filenameContains: token } : {};
@@ -1146,6 +1195,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     ),
   );
   const trace: AgentTraceEntry[] = [];
+  // WARP-1480 — turn-scoped correlation id for `agent_tool_error`. `thread_id`
+  // cannot serve: it needs conversationId + assistantMessageId + citationUserId
+  // to ALL be truthy (routes/llm.ts), so an ephemeral or service-token turn has
+  // none and its failures would be unjoinable.
+  const turnId = newAgentTurnId();
   // Copy so we don't mutate the caller's array.
   const messages: ChatMessage[] = [...req.messages];
   const emit = deps.onEvent ?? (() => {});
@@ -1178,14 +1232,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // can be stale, so it is a request, never a grant. `undefined` scope (the
   // owner bypass / service principals / everyone with no AccessRole) leaves
   // the pool byte-for-byte as it was.
+  //
+  // Through the SHARED `narrowToolsToScope`, which also carries the
+  // absent-scope case — the estimate side in `routes/llm.ts` narrows via the
+  // same call, so the two cannot drift apart the way they did in the
+  // WARP-2497 × WARP-2552 conflict (WARP-2556).
   const scoped = req.toolAccessScope;
-  const inScope = (name: string): boolean =>
-    !scoped || toolAllowedInScope(name, scoped);
-  const filtered = (
+  const filtered = narrowToolsToScope(
     req.allowed_tools
       ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
-  ).filter((t) => inScope(t.name));
+      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
+    scoped,
+  );
   const toSpec = (t: (typeof filtered)[number]) => ({
     type: "function" as const,
     function: {
@@ -1200,40 +1258,65 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const fullPoolNames = new Set(filtered.map((t) => t.name));
   let activeTools = filtered;
   if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
-    const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
-    // WARP-1921 — continuity spans BOTH sources, and needs both:
-    //   • `prior_tool_names` — earlier TURNS, read from the persisted trace
-    //     by the route. `req.messages` cannot supply these: chatRequestSchema
-    //     declares no `tool_calls` field, so zod strips it from every
-    //     replayed assistant message.
-    //   • `req.messages` — earlier ITERATIONS of THIS turn, where the loop
-    //     pushes the model's raw message object with tool_calls intact. Still
-    //     required: those calls are not persisted until the turn finalizes.
-    const conversationToolNames = [
-      ...(req.prior_tool_names ?? []),
-      ...req.messages.flatMap((m) =>
-        m.role === "assistant" && m.tool_calls
-          ? m.tool_calls.map((tc) => tc.function.name)
-          : [],
-      ),
-    ];
-    // `content` is an array (multimodal — e.g. an image attachment) on some
-    // user turns; rule matching only understands plain text, so those turns
-    // yield "" here and fall back to core-only advertisement. That's an
-    // accepted gap, not a silent failure: the WARP-642 self-heal branch
-    // below re-admits any real tool the model still names, at the cost of
-    // one lost iteration.
-    const sel = selectAdvertisedTools({
+    // WARP-2552 — the derivation of `userMessage` and `conversationToolNames`
+    // moved into `effectiveAdvertisedToolNames` so that routes/llm.ts's budget
+    // estimate can ask the identical question through the identical code. It
+    // could not before: the route sized the whole pool while this loop
+    // advertised a subset, and the estimate charged ~14,986 tokens of schemas
+    // on a turn that ships ~3,426. `tool-selection.parity.test.ts` asserts the
+    // two sites agree, which is what makes the shared helper load-bearing
+    // rather than merely tidy.
+    //
+    // The behaviour is unchanged: continuity still spans BOTH `prior_tool_names`
+    // (earlier TURNS, from the persisted trace — zod strips `tool_calls` from
+    // replayed messages, so they cannot come from `req.messages`) and
+    // `req.messages` (earlier ITERATIONS of this turn, not yet persisted); and
+    // a multimodal turn whose `content` is an array still yields "" and falls
+    // back to core-only advertisement, with the WARP-642 self-heal branch below
+    // re-admitting any real tool the model names.
+    const selected = effectiveAdvertisedToolNames({
       mode: "domains",
-      userMessage:
-        typeof lastUser?.content === "string" ? lastUser.content : "",
+      messages: req.messages,
+      priorToolNames: req.prior_tool_names,
       pool: filtered.map((t) => t.name),
-      conversationToolNames,
+      // WARP-2443 — the dynamic half of the universe. Empty until WARP-2300
+      // registers a remote server, and selection is byte-identical to its
+      // pre-WARP-2443 behaviour while it is.
+      runtimeTools: runtimeToolRegistry.list(),
     });
-    const selected = new Set(sel.advertised);
     activeTools = filtered.filter((t) => selected.has(t.name));
   }
   let tools = activeTools.map(toSpec);
+  // WARP-2445 — the assembled advertisement must FIT, and an over-budget one
+  // must be loud. There is no truncation branch here on purpose: trimming
+  // tools until the request fits loses capability silently, and the resulting
+  // degradation gets attributed to model quality rather than to the budget.
+  //
+  // Gated on selection being ON. `TOOL_SELECTION_MODE=off` is the documented
+  // diagnostic/rollback path that deliberately advertises the whole chat pool,
+  // which has not fitted the window since WARP-1893 (measured: the full pool
+  // is ~14K tokens against a ~12.4K tools[] ceiling). That mode leans on the
+  // runtime degradeToFit gate by design, so throwing here would break the
+  // rollback lever rather than protect it. This gate polices SELECTION's
+  // output; when there is no selection there is nothing for it to police.
+  //
+  // Headroom, measured at this SHA: the worst single-domain turn is ~3.2K
+  // tokens and the worst four-domain turn ~8.0K, both far under the ceiling.
+  // The realistic route to tripping this is CONTINUITY ACCUMULATION — a long
+  // conversation touching many domains grows `conversationToolNames` and so
+  // the matched-domain set. That is precisely the case worth a loud failure
+  // rather than a quiet one.
+  if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+    assertToolAdvertisementFitsBudget({
+      specs: tools,
+      contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+      logContext: {
+        model: req.model,
+        selectionMode: req.tool_selection_mode,
+        poolSize: filtered.length,
+      },
+    });
+  }
   // WARP-642 — the exact set of tool names the model was advertised this
   // turn. Used to catch hallucinated tool names (e.g. gpt-oss:20b inventing
   // `knowledge_base_search` instead of the real `search_content`) BEFORE we
@@ -1632,6 +1715,69 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       if (visible && !(streamedTurn && streamContentReleased)) {
         emit({ type: "content_delta", text: visible });
       }
+      // WARP-2544 — the ONE point where the finished answer and the tool trace
+      // are both in hand, on BOTH transports. Everything above this line
+      // guards the INPUT side of tool use (WARP-1529 RBAC, WARP-642
+      // hallucinated names, WARP-1480 error logging); nothing had ever
+      // compared the ANSWER against what the tools actually did, so a model
+      // could say "I've turned the camera off" on a turn that dispatched
+      // nothing, or over a dispatch that returned status:"error", and the
+      // sentence reached the user unchallenged. These tools are physical, so
+      // that is a safety failure rather than a cosmetic one.
+      //
+      // Deterministic and local: no inference call, no network, no tokens —
+      // it adds no latency to the happy path, which matters on a box whose
+      // whole problem was latency (WARP-2543).
+      //
+      // ⚠ ADVISORY BY CONSTRUCTION. On the streaming path `visible` already
+      // left as content_delta frames — above, or incrementally during the
+      // stream — so there is nothing here to retract. A corrective re-prompt
+      // needs a hold-back buffer that would defeat streaming; that trade is a
+      // separate decision, and pretending otherwise would mean emitting a
+      // second answer contradicting one the user has already read.
+      const toolUse = validateAnswerAgainstTrace({
+        answer: visible,
+        trace,
+        // ⚠ A WEAK gate, and deliberately no longer load-bearing. The comment
+        // that used to sit here claimed a conversational turn runs with
+        // `tool_choice:"none"` and therefore advertises nothing. That is false
+        // for the surface that matters: the dashboard never sends
+        // `tool_choice`, so it defaults to "auto" and tools ARE advertised on
+        // every chat turn. `"none"` is produced only by voice-io's greeting
+        // path and email-analysis. Relying on this to suppress false positives
+        // meant ordinary sentences ("I've listed the options below") were
+        // claim-checked. The real protection is the narrowed, state-change-only
+        // verb list in tool-use-validation.ts; this only skips the genuinely
+        // tool-less turns.
+        toolsAdvertised: advertisedNames.size > 0,
+      });
+      if (toolUse.status !== "ok") {
+        logger.warn(
+          {
+            turnId,
+            iterations: iter + 1,
+            status: toolUse.status,
+            tools: toolUse.tools,
+            counts: toolUse.counts,
+            // 🔴 claimCount, not the claim TEXT. The excerpts are the model's
+            // own prose about whatever the user asked and whatever the tools
+            // returned — file contents, message bodies, device names. The
+            // logger is bare pino to stdout with no redact paths and its
+            // output is collected into the diagnostics bundle, so logging the
+            // sentences ships user content off the box. The client that is
+            // entitled to them still gets them on the SSE frame below.
+            claimCount: toolUse.claims.length,
+            threadId: req.citationContext?.threadId,
+          },
+          `agent_tool_use_unverified: ${describeToolUseVerdict(toolUse)}`,
+        );
+        emit({
+          type: "tool_use_validation",
+          status: toolUse.status,
+          claims: toolUse.claims,
+          tools: toolUse.tools,
+        });
+      }
       emit({
         type: "done",
         iterations: iter + 1,
@@ -1763,7 +1909,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: JSON.stringify(denialError).slice(0, 8000),
+          content: boundControlEnvelopeForModel(JSON.stringify(denialError)),
         });
         // Counted as a guard hit: a model that keeps re-issuing a refused
         // tool must still trip the FINDING 1 circuit breaker rather than
@@ -1789,9 +1935,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           // tell the model to retry: one lost iteration, not a failed turn.
           // Deliberately NOT counted as a guard hit (the model named a real
           // tool) and not a real dispatch either.
-          const domain = domainOfTool(call.function.name);
+          // WARP-2443 — resolve across BOTH layers, so a remote tool the
+          // model named self-heals by expanding its domain exactly as a local
+          // one does. Without the runtime list a remote tool would fall to
+          // the single-name branch and the rest of its server stays hidden.
+          const runtimeTools = runtimeToolRegistry.list();
+          const domain = domainOfTool(call.function.name, runtimeTools);
           const domainNames = new Set(
-            domain ? toolNamesForDomain(domain) : [call.function.name],
+            domain
+              ? toolNamesForDomain(domain, runtimeTools)
+              : [call.function.name],
           );
           const keep = new Set([
             ...advertisedNames,
@@ -1820,7 +1973,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           messages.push({
             role: "tool",
             tool_call_id: call.id,
-            content: JSON.stringify(heal).slice(0, 8000),
+            content: boundControlEnvelopeForModel(JSON.stringify(heal)),
           });
           continue;
         }
@@ -1859,12 +2012,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         });
         // Feed the same envelope back to the model as the tool's reply so
         // the next iteration sees the valid-tool list and can self-correct.
-        // Bound it with the same 8000-char cap as real tool results (below)
-        // so a large advertised-tool list can't inflate next-turn context.
+        // WARP-2203 — bounded by the loop's OWN static control-envelope cap,
+        // not by the tool-result reducer: this string is authored HERE, is
+        // fixed-shape, and its only variable part is the advertised-tool name
+        // list (2,439 chars for the whole 137-tool registry, canaried under
+        // the cap). Running a shape-driven reducer over it would change the
+        // CONTENT of the WARP-642 self-correction message.
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: guardText.slice(0, 8000),
+          content: boundControlEnvelopeForModel(guardText),
         });
         iterGuardHits++;
         continue;
@@ -1897,7 +2054,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: JSON.stringify(nudge).slice(0, 8000),
+          content: boundControlEnvelopeForModel(JSON.stringify(nudge)),
         });
         if (priorCalls >= 2) {
           finalizeReason = finalizeReason ?? "repetition";
@@ -1926,6 +2083,35 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           args,
           req.toolCallContext,
         );
+      }
+
+      // WARP-2469 — the closing arrow of the approval round-trip.
+      //
+      // The model has re-issued a call that a human approved. Attach the
+      // interceptor's bound token via `_meta` so WARP-2305's gate admits
+      // it. The grant is claimable only for the SAME tool with the SAME
+      // arguments (matched on the interceptor's own binding hash) and only
+      // for the user whose turn was challenged; it is spent on claim, so a
+      // second identical call in the same turn is challenged afresh.
+      //
+      // WARP-2305 deliberately never set `confirmationToken` from this
+      // loop, reasoning that "a loop re-attaching a token it was just
+      // handed is the model approving its own writes". That still holds
+      // and this does not breach it: a token becomes claimable ONLY after
+      // a human moved the challenge to `approved` through the
+      // `requireRole`-gated `POST /api/llm/confirm/:challengeId`. Nothing
+      // the model or the interceptor produces reaches this store on its
+      // own.
+      const approvalUserId = req.toolCallContext?.userId;
+      if (deps.approvals && approvalUserId) {
+        const grantedToken = deps.approvals.claimGrant({
+          tool: call.function.name,
+          args,
+          userId: approvalUserId,
+        });
+        if (grantedToken) {
+          toolContext = { ...(toolContext ?? {}), confirmationToken: grantedToken };
+        }
       }
 
       // ORCH-05 — a *thrown* tool dispatch (stdio hiccup, child-process
@@ -1964,6 +2150,29 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
+      // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
+      // streaming and non-streaming paths. Until now nothing in this repo had
+      // ever LOGGED a tool failure (`result.isError` was only ever read, below,
+      // to shape the SSE event and gate citation extraction), which is why
+      // `read_file`'s intermittent error burns the iteration budget
+      // unattributed. `confirmation_required` is excluded for free: mcp-server
+      // sets `isError` only for `status === "error"`.
+      if (result.isError) {
+        logger.warn(
+          describeToolError({
+            tool: call.function.name,
+            toolCallId: call.id,
+            turnId,
+            iter,
+            args,
+            payload,
+            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+            threadId: req.citationContext?.threadId,
+          }),
+          "agent_tool_error",
+        );
+      }
+
       // Translate the MCP envelope into an SSE tool_result event.
       // confirmation_required is NOT a hard error — surface ok=true so
       // the dashboard renders it as a "needs approval" chip rather than
@@ -1991,9 +2200,60 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // the action. Tools without a token (firewall etc.) omit this and the
         // chip stays display-only.
         const details = errObj?.details as
-          | { type?: string; sceneId?: string; confirmationToken?: string }
+          | {
+              type?: string;
+              sceneId?: string;
+              confirmationToken?: string;
+              interceptor?: {
+                outcome?: string;
+                tool?: string;
+                confirmationToken?: string;
+                expiresAt?: number;
+              };
+            }
           | undefined;
-        if (details && typeof details.confirmationToken === "string") {
+        // WARP-2469 — the OPENING arrow of the round-trip, and a token
+        // leak closed on the way.
+        //
+        // A WARP-2305 challenge carries the interceptor's 256-bit secret
+        // in `details` (both nested and, for the WARP-640 chip, flat).
+        // Forwarding that on the SSE stream would put the approval in the
+        // hands of whoever holds the stream — including a `guest`, who may
+        // approve nothing. So an interceptor challenge is registered here
+        // and the wire carries only an opaque `challengeId`, which
+        // authorises nothing by itself.
+        //
+        // The token is NEVER forwarded for an interceptor challenge, even
+        // when no approval store is wired (voice, ToolSpec runs). Without
+        // a store the chip is display-only — the pre-WARP-2469 posture for
+        // a tool with no in-chat approval path, and fail-closed.
+        const interceptorBlock = details?.interceptor;
+        const isInterceptorChallenge =
+          interceptorBlock?.outcome === "confirmation_required" &&
+          typeof interceptorBlock.confirmationToken === "string";
+
+        if (isInterceptorChallenge) {
+          if (deps.approvals && approvalUserId) {
+            const challenge = deps.approvals.register({
+              tool: call.function.name,
+              args,
+              token: interceptorBlock!.confirmationToken!,
+              expiresAt:
+                typeof interceptorBlock!.expiresAt === "number"
+                  ? interceptorBlock!.expiresAt
+                  : Date.now(),
+              userId: approvalUserId,
+            });
+            evt.confirmation = {
+              kind: "tool_confirmation",
+              challengeId: challenge.challengeId,
+              tool: challenge.tool,
+              status: challenge.status,
+              expiresAt: challenge.expiresAt,
+              summary: challenge.summary,
+            };
+          }
+        } else if (details && typeof details.confirmationToken === "string") {
           evt.confirmation = {
             kind: typeof details.type === "string" ? details.type : "generic",
             sceneId:
@@ -2032,12 +2292,43 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         }
       }
 
-      // Bound the tool result we feed back to the model so one giant
-      // payload doesn't blow the next-turn context window.
+      // WARP-2203 — bound the tool result we feed back to the model so one
+      // giant payload doesn't blow the next-turn context window. This used
+      // to be `text.slice(0, 8000)`, which cut JSON at a CHARACTER count:
+      // the result was invalid JSON with every field after the cut deleted.
+      // Paging tools put the bulk text FIRST and the continuation marker
+      // LAST, so the cut removed exactly the "there is more" signal and kept
+      // the fragment that looks complete — `read_file` and
+      // `read_document_text` were both inert on this path while their own
+      // suites were green, because the cap lives HERE and no tool-boundary
+      // test can see it.
+      //
+      // The bounded string has exactly one consumer: the model's next turn.
+      // The trace already holds `parsed` (line ~1974), the SSE event already
+      // carried it (~2039) and citation extraction already ran (~2046), so
+      // this step takes TEXT and returns TEXT and touches nothing else.
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: text.slice(0, 8000),
+        content: boundToolResultForModel(text, call.function.name, (refusal) => {
+          // The refusal branch DESYNCS the model from the operator trace:
+          // SSE already said `ok: true` and the trace holds the full payload,
+          // while the model's history now carries none of it. Without this
+          // line the two are unreconcilable after the fact. Sits alongside
+          // the `agent_tool_error` warn above, on the same correlation keys.
+          logger.warn(
+            {
+              tool: call.function.name,
+              tool_call_id: call.id,
+              turn_id: turnId,
+              iter,
+              input_chars: refusal.inputChars,
+              reason: refusal.reason,
+              ...(refusal.detail ? { detail: refusal.detail } : {}),
+            },
+            "agent_tool_result_refused",
+          );
+        }),
       });
     }
 

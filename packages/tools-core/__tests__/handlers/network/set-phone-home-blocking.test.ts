@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import setPhoneHomeBlocking from "../../../src/handlers/network/set-phone-home-blocking.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWithPatch(patch: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithPatch(patch: Mock): ToolContext {
   // The handler must use ctx.http.orchestrator (not routing) — give routing a
   // throwing patch so a regression to the wrong client fails loudly.
   const routingPatch = vi.fn(() => {

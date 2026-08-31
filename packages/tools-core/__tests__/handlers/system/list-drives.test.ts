@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listDrives from "../../../src/handlers/system/list-drives.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -6,7 +7,7 @@ import type { ToolContext } from "../../../src/types.js";
 // the same source of truth the dashboard's Drives page uses — not the
 // file-indexer (which has no /drives route and whose default URL pointed at
 // a port nothing listens on, so every chat tool call died as "fetch failed").
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

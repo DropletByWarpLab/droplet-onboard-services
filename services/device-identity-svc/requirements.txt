@@ -1,9 +1,9 @@
 grpcio>=1.83.0
 grpcio-tools>=1.83.0
-cryptography>=50.0.0
+cryptography>=50.0.1
 click>=8.4.2
 # Real backend dep — production only. Builds against libtss2-dev
 # from the Dockerfile's apt-get install. The mock backend never imports
 # this; the import lives inside RealBackend so dev machines without TPM
 # headers can still run the mock-only test suite.
-tpm2-pytss>=2.3.0; sys_platform == "linux"
+tpm2-pytss>=3.0.0; sys_platform == "linux"

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   PanelLeftOpen,
+  PanelRightOpen,
   Pencil,
   RotateCcw,
   Settings2,
@@ -19,6 +20,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
+import { ChatFileRail } from "@/components/chat/ChatFileRail";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import {
   InterviewIntroCard,
@@ -67,6 +69,14 @@ export default function ChatPage() {
   const historyHandleRef = useRef<ChatHistoryPanelHandle | null>(null);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // WARP-2205 — the file rail's mobile counterpart, mirroring the history
+  // drawer above it rather than inventing a second pattern.
+  const [mobileFilesOpen, setMobileFilesOpen] = useState(false);
+  const filesTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // Reported UP by the rail so the mobile trigger can be gated on it without
+  // the page re-fetching pins. Stable identity — the rail calls it from an
+  // effect keyed on the count.
+  const [fileCount, setFileCount] = useState(0);
 
   // WARP-104 dropped server-side persistence. WARP-304 restored it: every
   // turn now hits `ChatSession` / `ChatMessage` and the server hands back
@@ -125,6 +135,8 @@ export default function ChatPage() {
     editMessage,
     rateMessage,
     approveScene,
+    decideToolConfirmation,
+    rerequestApproval,
     clearMessages,
     attachments,
     sessionAttachments,
@@ -566,6 +578,37 @@ export default function ChatPage() {
     [regenerate, selectedModel, selectedProvider, systemPrompt],
   );
 
+  // WARP-2469: approve / decline a WARP-2305 interceptor challenge, and
+  // re-ask after one expired. Both continue the conversation on the
+  // currently-selected model, exactly like handleRegenerate above.
+  const handleToolDecision = useCallback(
+    (messageId: string, toolCallId: string, decision: "approve" | "deny") => {
+      if (!selectedModel) return;
+      void decideToolConfirmation(
+        messageId,
+        toolCallId,
+        decision,
+        selectedModel,
+        systemPrompt || undefined,
+        selectedProvider,
+      );
+    },
+    [decideToolConfirmation, selectedModel, selectedProvider, systemPrompt],
+  );
+
+  const handleRerequestApproval = useCallback(
+    (messageId: string) => {
+      if (!selectedModel) return;
+      void rerequestApproval(
+        messageId,
+        selectedModel,
+        systemPrompt || undefined,
+        selectedProvider,
+      );
+    },
+    [rerequestApproval, selectedModel, selectedProvider, systemPrompt],
+  );
+
   // WARP-844: edit & resend. Withheld while a stream is in flight (the
   // ChatMessage pencil is gated on the prop being present).
   const handleEdit = useCallback(
@@ -671,6 +714,23 @@ export default function ChatPage() {
           >
             <Settings2 size={16} aria-hidden="true" />
           </button>
+          {/* WARP-2205: mobile-only files-drawer trigger, mirroring the
+              history trigger on the other side of the header. Gated on the
+              rail's own count so it is never a door onto an empty room. */}
+          {fileCount > 0 && (
+            <button
+              ref={filesTriggerRef}
+              type="button"
+              onClick={() => setMobileFilesOpen(true)}
+              aria-label="Open files in this conversation"
+              aria-haspopup="dialog"
+              aria-expanded={mobileFilesOpen}
+              className="chat-iconbtn lg:hidden"
+              title="Files"
+            >
+              <PanelRightOpen size={18} aria-hidden="true" />
+            </button>
+          )}
           <button
             onClick={handleNewChat}
             disabled={messages.length === 0}
@@ -856,6 +916,8 @@ export default function ChatPage() {
                         onQuote={handleQuote}
                         onRegenerate={handleRegenerate}
                         onApproveScene={approveScene}
+                        onToolDecision={handleToolDecision}
+                        onRerequestApproval={handleRerequestApproval}
                         onFeedback={(id, fb) => void rateMessage(id, fb)}
                       />
                     );
@@ -917,6 +979,8 @@ export default function ChatPage() {
                 onQuote={handleQuote}
                 onRegenerate={handleRegenerate}
                 onApproveScene={approveScene}
+                onToolDecision={handleToolDecision}
+                onRerequestApproval={handleRerequestApproval}
                 onEdit={isStreaming ? undefined : handleEdit}
                 onFeedback={(id, fb) => void rateMessage(id, fb)}
               />
@@ -1041,6 +1105,39 @@ export default function ChatPage() {
           }
         />
       </div>
+
+      {/* WARP-2205: the file rail closes the layout on the right, mirroring
+          the conversation rail on the left. It renders its own <aside> and
+          returns null when the conversation has no files, so an empty chat
+          never pays 276px for a column with nothing in it. */}
+      <ChatFileRail
+        sessionId={conversationId}
+        attachments={sessionAttachments}
+        onCountChange={setFileCount}
+      />
+
+      {/* WARP-2205: the rail's mobile counterpart. Mounted only while open —
+          the always-mounted rail instance above is what reports the count. */}
+      <Dialog
+        open={mobileFilesOpen}
+        onClose={() => setMobileFilesOpen(false)}
+        triggerRef={filesTriggerRef}
+        labelledBy="mobile-files-heading"
+        placement="right"
+        flush
+      >
+        <div className="flex flex-col h-full w-full">
+          <h2 id="mobile-files-heading" className="sr-only">
+            Files in this conversation
+          </h2>
+          <ChatFileRail
+            sessionId={conversationId}
+            attachments={sessionAttachments}
+            variant="drawer"
+            onClose={() => setMobileFilesOpen(false)}
+          />
+        </div>
+      </Dialog>
 
       {/* WARP-331: mobile drawer — same ChatHistoryPanel, hosted in the
           Dialog placement=right primitive. No handleRef here: useChat

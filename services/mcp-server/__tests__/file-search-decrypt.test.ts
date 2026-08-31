@@ -20,9 +20,21 @@ __setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
 
 type DekRow = { keyId: string; version: number; wrappedDek: string };
 
+/**
+ * WARP-2524: `searchByVector` now issues `SET LOCAL hnsw.ef_search` inside an
+ * interactive transaction (mirroring the orchestrator's WARP-2193 fix), so
+ * the stub models `$transaction` by handing the callback a tx client whose
+ * `$queryRawUnsafe` is the same spy. Where the statements run is pinned by
+ * file-search-ef-search.test.ts; here only the row plumbing matters.
+ */
 function prismaStub(chunkRows: unknown[], dekRows: DekRow[]) {
+  const raw = vi.fn(async () => chunkRows);
   return {
-    $queryRawUnsafe: vi.fn(async () => chunkRows),
+    $queryRawUnsafe: raw,
+    $transaction: vi.fn(
+      async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ $queryRawUnsafe: raw, $executeRawUnsafe: vi.fn(async () => 0) }),
+    ),
     documentEncryptionKey: {
       findMany: vi.fn(async ({ where: { keyId } }: any) =>
         dekRows.filter((r) => (keyId.in as string[]).includes(r.keyId)),
@@ -78,10 +90,17 @@ describe("WARP-242 decrypt-on-read (mcp-server twin)", () => {
   });
 
   it("plaintext-only result sets never touch the DEK table", async () => {
+    // Deliberately NO documentEncryptionKey on this stub — reaching for the
+    // DEK table would throw, which is the assertion.
+    const raw = vi.fn(async () => [
+      { ...encRow("x", "plain"), brainItemId: null, source: "nextcloud" },
+    ]);
     const prisma = {
-      $queryRawUnsafe: vi.fn(async () => [
-        { ...encRow("x", "plain"), brainItemId: null, source: "nextcloud" },
-      ]),
+      $queryRawUnsafe: raw,
+      $transaction: vi.fn(
+        async (fn: (tx: unknown) => Promise<unknown>) =>
+          fn({ $queryRawUnsafe: raw, $executeRawUnsafe: vi.fn(async () => 0) }),
+      ),
     } as unknown as PrismaClient;
     const hits = await searchByVector(prisma, baseParams);
     expect(hits).toHaveLength(1);

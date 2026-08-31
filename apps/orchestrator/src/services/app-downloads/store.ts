@@ -13,10 +13,10 @@
  *      byte is served, the file is streamed through sha256 and compared
  *      to the catalog's pin. Mismatch, wrong size, or unreadable file →
  *      refusal, never a partial or "probably fine" download. This is
- *      what makes the surface honest: the artifacts ship inside the
- *      appliance image, so the image is the trust root, and the box's
- *      remaining job is proving the bytes it hands over are the bytes
- *      that shipped.
+ *      what makes the surface honest: an operator staged these artifacts
+ *      onto the box and the catalog pinned them at that moment, so the
+ *      stage is the trust root, and the box's remaining job is proving
+ *      the bytes it hands over are the bytes that were staged.
  *
  *   2. COSIGN over catalog.json (opt-in, off by default). Enforced only
  *      when `requireSignature` is set — which `config.ts` derives from
@@ -36,9 +36,14 @@
  * opinion — that signature is for the client's own updater and for a
  * customer verifying the download independently.
  *
- * Caching: the catalog is read once and memoised, because it ships with
- * the appliance image on a read-only mount and cannot change under a
- * running container.
+ * Caching: the catalog is read once and memoised. The mount is read-only
+ * from in here, so nothing this process does can change it — but the HOST
+ * side is writable and an operator staging an app does change it under a
+ * running container. That is a restart, not a bug: `stage.sh` restarts
+ * this service for exactly this reason, and a stage without one leaves
+ * the new installer on disk and invisible at /downloads. Do not "fix" it
+ * by re-reading per request — the invalidation point is a deliberate
+ * operator action, and per-request reads would buy nothing but I/O.
  * Digests are re-checked on EVERY download — the whole point is to
  * detect a file that changed after we last looked at it, so caching a
  * verification result would defeat the gate.
@@ -102,7 +107,8 @@ export type StoreFailureReason =
 export type AttestationLevel = "signed" | "digest-only";
 
 export interface AppDownloadsOptions {
-  /** Directory the appliance image stages artifacts into. */
+  /** Staging root, bind-mounted read-only. An operator fills it with
+   *  scripts/app-downloads/stage.sh; the image does not. */
   dir: string;
   /** Enforce the cosign signature over catalog.json. Default false. */
   requireSignature?: boolean;

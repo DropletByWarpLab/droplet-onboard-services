@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listNetworkDevices from "../../../src/handlers/network/list-network-devices.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -11,7 +12,7 @@ import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(rows: unknown[], findMany = vi.fn().mockResolvedValue(rows)): {
   ctx: ToolContext;
-  findMany: ReturnType<typeof vi.fn>;
+  findMany: Mock;
 } {
   const ctx = {
     prisma: {

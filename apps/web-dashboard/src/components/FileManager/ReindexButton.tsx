@@ -19,7 +19,7 @@
  *     the rewrite landed.
  */
 
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { RefreshCw } from "lucide-react";
 import { authFetch } from "@/lib/auth";
 

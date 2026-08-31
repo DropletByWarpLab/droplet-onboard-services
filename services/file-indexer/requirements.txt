@@ -40,7 +40,7 @@ Pillow>=12.3.0
 faster-whisper==1.2.1
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor
 # (both use python-magic for content-based MIME sniffing).
-extract-msg==0.56.0
+extract-msg==0.56.1
 python-magic==0.4.27
 # WARP-198 RAG Phase 2 video extractor (subtitle parsing for embedded SRT/mov_text/etc.)
 srt==3.5.3
@@ -62,7 +62,7 @@ imagehash==4.3.2
 # so we add a tiny FastAPI/uvicorn server alongside the watcher (same
 # stack as services/ai-gateway/ and services/routing/, kept in lockstep).
 fastapi>=0.140.7
-uvicorn>=0.52.1
+uvicorn>=0.52.4
 # WARP-435 (ADR-003 Phase 1) — sentence-aware chunking.
 # semantic-text-splitter is a Rust-backed Python wheel (~8 MB) that walks
 # Unicode sentence/word/character boundaries with an HF-tokenizer-aware
@@ -70,7 +70,7 @@ uvicorn>=0.52.1
 # (``TextSplitter.from_huggingface_tokenizer(tokenizer, capacity, overlap)``)
 # stabilised at 0.10 and we don't want a silent semantic-major bump.
 # ``tokenizers`` is its sibling — same HF Rust binding that loads the
-# all-MiniLM-L6-v2 tokenizer (the embedder's tokenizer) for capacity
+# bge-small-en-v1.5 tokenizer (the embedder's tokenizer) for capacity
 # accounting.
 semantic-text-splitter>=0.32.0,<0.33
 tokenizers>=0.23.1,<1.0
@@ -85,7 +85,7 @@ python-pptx>=1.0.2,<2.0
 # satisfied only transitively; pin it explicitly so a dependency-tree
 # shuffle can't silently drop the FIPS provider check. Kept in lockstep
 # with services/ai-gateway's pin.
-cryptography>=50.0.0
+cryptography>=50.0.1
 # WARP-1790 — .rtf carries a `text/` MIME, so the registry routes it to the
 # text extractor, which used to index the raw control-word stream as prose
 # (QA saw "\lsdpriority46 \lsdlocked0" in Knowledge snippets). striprtf is the
@@ -97,5 +97,5 @@ striprtf>=0.0.29
 
 # WARP-1948 — OSV floors (see block rationale in sibling services):
 # idna via httpx, scipy via imagehash.
-idna>=3.15
+idna>=3.19
 scipy>=1.10.0

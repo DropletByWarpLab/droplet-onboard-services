@@ -1,6 +1,6 @@
 fastapi>=0.141.1
 uvicorn>=0.52.1
-litellm>=1.95.0
+litellm>=1.98.0
 cryptography>=50.0.1
 pydantic>=2.13.4
 httpx>=0.28.1
@@ -50,7 +50,7 @@ idna>=3.15
 # fp32 graph needs ~3 GB RSS for a batch-8 forward pass, so the gateway's
 # mem_limit was raised accordingly — see docker/docker-compose.yml.
 optimum-onnx[onnxruntime]>=0.1.0,<1.0
-huggingface_hub>=0.24,<1.0
+huggingface_hub>=0.36.2,<1.0
 
 # WARP-437: zero-shot query classifier (deberta-v3-base-zeroshot-v2.0) used
 # by the orchestrator's adaptive retrieval router. transformers is already

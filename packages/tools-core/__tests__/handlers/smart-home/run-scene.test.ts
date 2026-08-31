@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import runScene from "../../../src/handlers/smart-home/run-scene.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  post: ReturnType<typeof vi.fn>,
-  get?: ReturnType<typeof vi.fn>,
+  post: Mock,
+  get?: Mock,
 ): ToolContext {
   return {
     http: {

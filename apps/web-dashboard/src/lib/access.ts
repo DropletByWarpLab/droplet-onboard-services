@@ -385,6 +385,59 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     ],
   },
   {
+    // WARP-2117. Value-identical ladder to the server's access-catalog entry;
+    // only the copy lives here.
+    moduleId: "crm",
+    label: "CRM",
+    description: "Customers, deals and the sales pipeline",
+    requires: "projects",
+    requiresReason: ACCESS_COPY.crmNeedsProjects,
+    levels: [
+      { value: "view", label: "View", grants: "See customers and the pipeline" },
+      {
+        value: "act",
+        label: "Work",
+        grants: "Log activity and move deals",
+        minTier: FAMILY,
+        dropNoun: "Work on deals",
+        dropVerb: "move deals",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Edit the pipeline and delete records",
+        minTier: FAMILY,
+        dropNoun: "Manage the CRM",
+        dropVerb: "manage the pipeline",
+      },
+    ],
+  },
+  {
+    // WARP-2018/2032.
+    moduleId: "contacts",
+    label: "Contacts",
+    description: "The address book",
+    levels: [
+      { value: "view", label: "View", grants: "See contacts" },
+      {
+        value: "act",
+        label: "Edit",
+        grants: "Add and update contacts",
+        minTier: FAMILY,
+        dropNoun: "Edit contacts",
+        dropVerb: "update contacts",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Connect an address book",
+        minTier: FAMILY,
+        dropNoun: "Manage contacts",
+        dropVerb: "connect an address book",
+      },
+    ],
+  },
+  {
     moduleId: "voice",
     label: "Voice",
     description: "Talking to the assistant out loud",
@@ -467,6 +520,12 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "email", label: "Email", domains: ["email"], feature: "email" },
   { id: "projects", label: "Projects", domains: ["pm"], feature: "projects" },
   { id: "memory", label: "Memory", domains: ["memory"], feature: "knowledge" },
+  // WARP-2497 — its own row rather than folded into System: the cloud
+  // connectors read customer, payment and mailing-list records, a different
+  // sensitivity class from System's box telemetry and pure-compute utilities,
+  // and an operator has to be able to withhold it on its own. No module gates
+  // it (there is no connectors AccessModuleId), so `feature` stays null.
+  { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
   { id: "system", label: "System", domains: ["system", "business", "data"], feature: null },
 ];
 

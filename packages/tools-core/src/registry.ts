@@ -53,6 +53,11 @@ import listFileVersions from "./handlers/files/list-file-versions.js";
 import restoreFileVersion from "./handlers/files/restore-file-version.js";
 import shareFile from "./handlers/files/share-file.js";
 import createDocument from "./handlers/files/create-document.js";
+// WARP-2212 — document GENERATION, as opposed to createDocument's empty seed.
+// These send a spec to POST /api/files/render; the model never handles bytes.
+import createPdfReport from "./handlers/files/create-pdf-report.js";
+import createWordDocument from "./handlers/files/create-word-document.js";
+import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -166,6 +171,17 @@ import pmListWorkItems from "./handlers/pm/list-work-items.js";
 import pmGetWorkItem from "./handlers/pm/get-work-item.js";
 import pmSearchWorkItems from "./handlers/pm/search-work-items.js";
 
+// WARP-2546 — CRM tools. The differentiator a cloud CRM cannot ship: the model
+// that reads the pipeline runs on the box, so "draft a follow-up to every deal
+// idle 14+ days" never sends a customer list to a vendor.
+import crmSearchCustomers from "./handlers/crm/search-customers.js";
+import crmGetCustomer from "./handlers/crm/get-customer.js";
+import crmListDeals from "./handlers/crm/list-deals.js";
+import crmGetDeal from "./handlers/crm/get-deal.js";
+import crmPipelineSummary from "./handlers/crm/pipeline-summary.js";
+import crmLogActivity from "./handlers/crm/log-activity.js";
+import crmMoveDealStage from "./handlers/crm/move-deal-stage.js";
+
 // ERP-connector framework (WARP-1094) — Eaglesoft as provider #1. DB-
 // independent slice: handlers return ERP_NOT_CONNECTED; the live read/write
 // paths ship in WARP-1095+. Read tools are Read-tier; the appointment
@@ -174,6 +190,12 @@ import erpGetScheduleToday from "./handlers/erp/get-schedule-today.js";
 import erpFindPatient from "./handlers/erp/find-patient.js";
 import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
 import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
+
+// cloud (WARP-2497) — the connected SaaS accounts (Stripe / HubSpot /
+// Mailchimp). Deliberately ONE tool for all three vendors and all ten record
+// shapes: the dataset name selects the provider inside the orchestrator, so
+// the registry's serialized size grows by one small block instead of ten.
+import cloudQueryDataset from "./handlers/cloud/query-dataset.js";
 
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
@@ -258,6 +280,9 @@ const allTools: Tool[] = [
   restoreFileVersion,
   shareFile,
   createDocument,
+  createPdfReport,
+  createWordDocument,
+  createSpreadsheet,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,
@@ -352,11 +377,22 @@ const allTools: Tool[] = [
   pmListWorkItems,
   pmGetWorkItem,
   pmSearchWorkItems,
+
+  crmSearchCustomers,
+  crmGetCustomer,
+  crmListDeals,
+  crmGetDeal,
+  crmPipelineSummary,
+  crmLogActivity,
+  crmMoveDealStage,
   // WARP-1094: ERP-connector (Eaglesoft) — 3 Read-tier + 1 Write-tier
   erpGetScheduleToday,
   erpFindPatient,
   erpGetArSummary,
   erpScheduleAppointment,
+  // WARP-2497: cloud connectors (Stripe/HubSpot/Mailchimp) — one Read-tier
+  // tool covering all ten datasets; the dataset arg picks the provider.
+  cloudQueryDataset,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
   // WARP-1685: Messages sends (Tier-2: write + two-phase confirmation)

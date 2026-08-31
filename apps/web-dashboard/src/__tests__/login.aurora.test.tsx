@@ -15,7 +15,7 @@ let searchString = "";
 // this helper (GET /api/sso/oidc/providers). Mock it so each test controls the
 // advertised set without standing up a network/IdP. Default: nothing
 // configured (a password-only appliance) — tests override per case.
-const getEnabledSsoProvidersMock = vi.fn<[], Promise<string[]>>();
+const getEnabledSsoProvidersMock = vi.fn<() => Promise<string[]>>();
 vi.mock("@/lib/api", () => ({
   getEnabledSsoProviders: () => getEnabledSsoProvidersMock(),
 }));

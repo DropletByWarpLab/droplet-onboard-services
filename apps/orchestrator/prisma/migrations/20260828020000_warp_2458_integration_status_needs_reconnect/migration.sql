@@ -1,0 +1,17 @@
+-- WARP-2458 — add NEEDS_RECONNECT to IntegrationStatus.
+--
+-- ADR-041 §5 fixes the connection-state vocabulary for every cloud connector
+-- and names `needs_reconnect` as mandatory; ADR-042 §6 makes it load-bearing
+-- for customer-supplied credentials, which mostly never expire and can only
+-- die by the customer revoking them outside our view. Without this member a
+-- revoked key reports `status: CONNECTED` alongside a separate boolean, so any
+-- surface reading only `status` renders a dead connection as healthy.
+--
+-- THIS STATEMENT IS ALONE IN THIS FILE ON PURPOSE.
+-- `ALTER TYPE ... ADD VALUE` cannot run inside a transaction block in
+-- PostgreSQL (it is non-transactional), and Prisma Migrate wraps a migration
+-- file in a transaction whenever it contains more than one statement. Adding a
+-- second statement here — even a comment-sized one — makes this migration fail
+-- at apply time on a real database while still looking correct in review.
+-- Anything else this change needs goes in its own migration file.
+ALTER TYPE "IntegrationStatus" ADD VALUE 'NEEDS_RECONNECT' BEFORE 'ERROR';

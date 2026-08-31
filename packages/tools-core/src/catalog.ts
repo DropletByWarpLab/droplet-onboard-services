@@ -41,7 +41,15 @@ export type ToolDomain =
   | "email"
   | "memory"
   | "pm"
+  // WARP-2546 — the CRM. Slug matches the `crm` ModuleId so the module
+  // toggle gates the domain.
+  | "crm"
   | "erp"
+  // WARP-2497 — the connected SaaS accounts (Stripe / HubSpot / Mailchimp).
+  // Its own domain rather than a slot under `erp`: `erp` is the on-prem
+  // practice-management connector, and the dashboard gates the two
+  // separately (`erp` reach is a connector grant, `cloud` a tool grant).
+  | "cloud"
   | "business"
   | "system"
   | "data"
@@ -111,6 +119,12 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "restore_file_version",
     "share_file",
     "create_document",
+    // WARP-2212 — document GENERATION, distinct from create_document's empty
+    // seed: these send a spec to POST /api/files/render and come back with a
+    // finished file.
+    "create_pdf_report",
+    "create_word_document",
+    "create_spreadsheet",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -185,12 +199,23 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "pm_get_work_item",
     "pm_search_work_items",
   ],
+  crm: [
+    "crm_search_customers",
+    "crm_get_customer",
+    "crm_list_deals",
+    "crm_get_deal",
+    "crm_pipeline_summary",
+    "crm_log_activity",
+    "crm_move_deal_stage",
+  ],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
     "erp_get_ar_summary",
     "erp_schedule_appointment",
   ],
+  // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
+  cloud: ["cloud_query_dataset"],
   business: ["business_profile_get"],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
@@ -284,6 +309,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   restore_file_version: "Roll a file back to an earlier version",
   share_file: "Create a shareable link to a file",
   create_document: "Create a new blank Word doc or spreadsheet",
+  // The contrast with create_document above is the whole point of the copy:
+  // that one makes an EMPTY file to type into, these three arrive finished.
+  create_pdf_report: "Write a finished PDF report and save it to your files",
+  create_word_document: "Write a Word document you can keep editing",
+  create_spreadsheet: "Build a spreadsheet from a table of data",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",
@@ -366,11 +396,22 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   pm_list_work_items: "See the tasks in a project",
   pm_get_work_item: "See the full details of one task",
   pm_search_work_items: "Search your tasks",
+  // CRM (customers, deals, pipeline)
+  crm_search_customers: "Find a customer by name or website",
+  crm_get_customer: "See one customer, their open deals and recent history",
+  crm_list_deals: "See your deals — including the ones going quiet",
+  crm_get_deal: "See one deal and what has happened on it",
+  crm_pipeline_summary: "See how much is in each stage of your pipeline",
+  crm_log_activity: "Add a call or note to a customer's history (you approve it first)",
+  crm_move_deal_stage: "Move a deal to a different stage (you approve it first)",
   // ERP (Eaglesoft practice-management integration)
   erp_get_schedule_today: "See the day's appointment schedule from your practice software",
   erp_find_patient: "Look up a patient in your practice software",
   erp_get_ar_summary: "See what patients still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
+  // Cloud connectors (Stripe / HubSpot / Mailchimp)
+  cloud_query_dataset:
+    "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
   // Business (business-knowledge profile)
   business_profile_get: "Look up what Droplet knows about your business",
   // Team chat (Messages)
