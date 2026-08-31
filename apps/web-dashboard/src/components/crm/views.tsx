@@ -318,10 +318,13 @@ export function DealBoard({
       {cols.map((s) => {
         const colDeals = deals.filter((d) => d.stageId === s.id);
         const stat = byStage.get(s.id);
-        // A mixed-currency column reports currency: null and amountMinor "0".
-        // Showing "0" there would be a lie about the column's value, so the
-        // total is omitted and the count carries the column instead.
-        const total = stat ? formatMinor(stat.amountMinor, stat.currency) : null;
+        // WARP-2556 — only a `priced` column has a total worth rendering.
+        // Showing "0" for a mixed-currency column would be a lie about its
+        // value, and showing it for an unpriced one would read as "these deals
+        // are worth nothing" rather than "nobody has priced them". In both
+        // cases the count carries the column instead.
+        const total =
+          stat?.valuation === "priced" ? formatMinor(stat.amountMinor, stat.currency) : null;
         return (
           <div
             key={s.id}

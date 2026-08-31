@@ -22,9 +22,9 @@ import { effectiveAdvertisedToolNames } from "../services/tool-selection.service
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
+  narrowToolsToScope,
   resolveToolAccessScope,
   toolAllowedForTier,
-  toolAllowedInScope,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
@@ -1743,13 +1743,34 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           : "";
         // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
         // default chat scope (registry minus chat-tool-scope.ts exclusions).
-        const effectiveTools = allowedForUser
+        const pooledTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
             )
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
+        // WARP-2556 — the §3 scope, applied BEFORE selection narrows further.
+        //
+        // `narrowAllowedToolsForRole` returns `undefined` for a privileged role
+        // with no explicit `allowed_tools`, regardless of `toolAccessScope`, so
+        // `allowedForUser` alone does not carry the scope. The agent loop
+        // applies `inScope` unconditionally from `req.toolAccessScope` — so
+        // without this line an admin on a restrictive AccessRole gets an
+        // estimate sized against the FULL pool while a smaller set goes on the
+        // wire, which is the estimate/actual divergence WARP-2552 exists to
+        // close, reopened for one role+scope combination.
+        //
+        // WARP-2497 had this filter; the conflict resolution that merged
+        // WARP-2552's shared-helper estimate over it kept the better estimate
+        // and lost the scope narrowing with the version it replaced. Restored
+        // here, and `tool-selection.parity.test.ts` now runs a SCOPED fixture
+        // so an unscoped one cannot pass for coverage again.
+        //
+        // Through the SHARED helper, not an inline re-expression of the same
+        // rule: an inline copy here is what drifted out of step with the
+        // dispatch-side filter in the first place.
+        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
         // WARP-2552 — but the pool is NOT what the model receives, and sizing
         // it as though it were is the defect this fixes.
         //

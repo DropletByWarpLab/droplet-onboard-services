@@ -16,9 +16,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, it, expect } from "vitest";
-import { TOOLS } from "@droplet/tools-core";
+import { TOOLS, TOOL_CATALOG } from "@droplet/tools-core";
 
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import {
+  narrowToolNamesToScope,
+  type ToolAccessScope,
+} from "./tool-access.service.js";
 import {
   conversationToolNamesFor,
   effectiveAdvertisedToolNames,
@@ -157,7 +161,7 @@ describe("the crm domain is reachable (WARP-2546)", () => {
     "show me my customers",
     "which clients have gone quiet?",
     "any leads worth a follow-up?",
-    "what did we win last quarter?",
+    "which deals did we win last quarter?",
   ];
 
   for (const message of CRM_TURNS) {
@@ -194,5 +198,115 @@ describe("the crm domain is reachable (WARP-2546)", () => {
       pool: POOL,
     });
     expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+  });
+
+  it.each([
+    "did we win the game last night",
+    "I lost my keys again",
+    "we won the pub quiz",
+  ])("does not fire on ordinary English: %s", (message) => {
+    // WARP-2556 — `won` / `win` / `lost` used to be claimed BARE, so each of
+    // these advertised six CRM schemas on a turn that wanted none. The words
+    // bought little: a real CRM sentence reaches the domain through `deals?`
+    // ("which deals did we win last quarter"), asserted above.
+    //
+    // Mutation: put `won|win|lost` back into the crm pattern → all three red.
+    const selected = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [{ role: "user", content: message }],
+      pool: POOL,
+    });
+    expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+  });
+});
+
+describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
+  // WARP-2497 filtered the estimate's pool through `toolAllowedInScope`.
+  // WARP-2552 replaced the same block with the shared-helper estimate, and the
+  // conflict resolution kept the better estimate and lost the scope narrowing
+  // with the version it replaced — for one role+scope combination the estimate
+  // went back to being sized against tools the wire never carries.
+  //
+  // Nothing went red, because every fixture in this file was UNSCOPED. These
+  // tests are the scoped one.
+
+  const scopeOf = (domains: string[], writeDomains: string[] = []): ToolAccessScope => ({
+    domains: new Set(domains),
+    writeDomains: new Set(writeDomains),
+    locks: false,
+  });
+
+  // Read the CRM domain off the catalog rather than hardcoding "crm" — the
+  // catalog is the thing under test's own source of truth.
+  const CRM_DOMAIN = TOOL_CATALOG.find((t) => t.name.startsWith("crm_"))?.domain;
+  const CRM_IN_POOL = POOL.filter((n) => n.startsWith("crm_"));
+
+  it("the CRM tools this fixture depends on are actually in the chat pool", () => {
+    // Guards the two tests below against passing because CRM left the pool.
+    expect(CRM_DOMAIN).toBeDefined();
+    expect(CRM_IN_POOL.length).toBeGreaterThan(0);
+  });
+
+  it("a scope without the CRM domain advertises no CRM tool, even on a CRM question", () => {
+    // The role is scoped away from CRM, so `crm_*` cannot be dispatched. Sizing
+    // them into the estimate charges the window for schemas the model will
+    // never see — the WARP-2552 phantom, reopened per-scope.
+    //
+    // Mutation: drop the `toolAllowedInScope` filter in routes/llm.ts (i.e.
+    // pass `pooledTools` straight through) → the route's pool contains crm_*
+    // again and the source assertion below goes red.
+    const scope = scopeOf(["general"]);
+    const narrowedPool = narrowToolNamesToScope(POOL, scope);
+    const selected = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [{ role: "user", content: "what deals are in the pipeline?" }],
+      pool: narrowedPool,
+    });
+    expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+  });
+
+  it("the SAME question does advertise CRM tools when the scope allows it", () => {
+    // Without this, the test above passes for a board that advertises nothing
+    // at all, and the scope filter could be deleted again unnoticed.
+    const scope = scopeOf([CRM_DOMAIN!]);
+    const narrowedPool = narrowToolNamesToScope(POOL, scope);
+    const selected = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [{ role: "user", content: "what deals are in the pipeline?" }],
+      pool: narrowedPool,
+    });
+    expect([...selected].filter((n) => n.startsWith("crm_")).length).toBeGreaterThan(0);
+  });
+
+  it("the route narrows the pool by scope before deriving the advertised set", () => {
+    // The behavioural tests above prove the composition is right; this one
+    // proves the ROUTE performs it. It is the assertion whose absence let the
+    // filter be dropped in a merge.
+    //
+    // Mutation: delete the `effectiveTools` narrowing, or size
+    // `pooledTools` instead → red.
+    //
+    // Pinned against the SHARED helper rather than an inline
+    // `pooledTools.filter((t) => toolAllowedInScope(...))`: the route used to
+    // re-express the rule locally, which is the duplication that let the
+    // estimate and dispatch sides drift apart. `narrowToolsToScope` is now the
+    // single expression of it, and `tool-access.service.test.ts` pins its
+    // behaviour — including that an absent scope narrows nothing.
+    expect(ROUTE_SRC).toMatch(/narrowToolsToScope\(pooledTools, toolAccessScope\)/);
+    expect(ROUTE_SRC).toContain("pool: effectiveTools.map((t) => t.name)");
+  });
+
+  it("the estimate and the dispatch narrow through the SAME helper", () => {
+    // The real anti-drift guard, and the one whose absence let WARP-2556
+    // happen: it is not enough that each side narrows: they have to narrow by
+    // one shared expression, or a new access axis can be added to one and
+    // missed in the other with nothing going red.
+    //
+    // Mutation: re-inline `toolAllowedInScope` at either site → red.
+    expect(ROUTE_SRC).toContain("narrowToolsToScope");
+    expect(LOOP_SRC).toContain("narrowToolsToScope");
+    for (const src of [ROUTE_SRC, LOOP_SRC]) {
+      expect(src).not.toMatch(/\.filter\(\([a-z]+\) => toolAllowedInScope\(/);
+    }
   });
 });

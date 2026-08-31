@@ -27,12 +27,15 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const { customer_id, timeline_limit } = args as unknown as Args;
   const id = encodeURIComponent(customer_id);
   try {
-    const company = await callOrch<{ company: Parameters<typeof toCompany>[0] }>(
-      ctx,
-      "get",
-      `/api/crm/companies/${id}`,
-    );
-    const [deals, activities] = await Promise.all([
+    // WARP-2556 — all three depend only on `customer_id`, which is known
+    // upfront, so awaiting the company first cost an extra round trip on every
+    // call for no correctness benefit. `get-deal.ts` already parallelizes.
+    const [company, deals, activities] = await Promise.all([
+      callOrch<{ company: Parameters<typeof toCompany>[0] }>(
+        ctx,
+        "get",
+        `/api/crm/companies/${id}`,
+      ),
       callOrch<{ deals?: Parameters<typeof toDeal>[0][] }>(
         ctx,
         "get",

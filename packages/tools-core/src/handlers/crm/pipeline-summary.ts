@@ -14,6 +14,8 @@ interface ApiStageSummary {
   kind: string;
   sortOrder: number;
   dealCount: number;
+  /** WARP-2556 — `priced` | `mixed_currencies` | `unpriced`. */
+  valuation: string;
   amountMinor: string;
   currency: string | null;
 }
@@ -32,14 +34,19 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
           stage: s.stageName,
           outcome: s.kind,
           deals: s.dealCount,
-          // A stage holding more than one currency reports currency: null, and
-          // the orchestrator does NOT sum across them. Passing the "0" through
-          // would read as an empty stage, so the total is omitted entirely and
-          // the reason is stated — the model can then say "mixed currencies"
-          // instead of reporting a stage worth nothing.
-          ...(s.currency === null
-            ? { total: null, total_note: "mixed currencies — not summed" }
-            : { amount_minor: s.amountMinor, currency: s.currency }),
+          // WARP-2556 — read the STATE, not the null.
+          //
+          // This branched on `s.currency === null`, which the server emitted
+          // for BOTH "several currencies, cannot sum" and "nothing here is
+          // priced". So an ordinary early-pipeline stage full of deals nobody
+          // had put a number on yet was reported to the model as mixed
+          // currencies — on essentially every new box, for the one question
+          // this tool exists to answer.
+          ...(s.valuation === "priced"
+            ? { amount_minor: s.amountMinor, currency: s.currency }
+            : s.valuation === "mixed_currencies"
+              ? { total: null, total_note: "mixed currencies — not summed" }
+              : { total: null, total_note: "no amounts entered yet" }),
         })),
       },
     };
@@ -51,7 +58,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "crm_pipeline_summary",
   description:
-    "Deal count and value per pipeline stage. `amount_minor` is a minor-units string; a mixed-currency stage reports `total: null`.",
+    "Deal count and value per pipeline stage. `amount_minor` is a minor-units string; a stage with no total says why in `total_note`.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

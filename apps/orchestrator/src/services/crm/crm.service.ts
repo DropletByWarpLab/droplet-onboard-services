@@ -155,15 +155,33 @@ export interface ApiCrmActivity {
   createdAt: string;
 }
 
+/**
+ * WARP-2556 — what a stage's money total MEANS, as three named states rather
+ * than as two shapes and a null nobody could tell apart.
+ *
+ *  • `priced`           — every priced deal shares one currency; the total is real.
+ *  • `mixed_currencies` — more than one currency present. NOT summed: adding
+ *                         500 EUR to 500 USD produces a number that looks
+ *                         authoritative and means nothing.
+ *  • `unpriced`         — no deal in the stage carries an amount at all. The
+ *                         common case on a new box, and previously reported as
+ *                         `mixed_currencies` because both rendered as
+ *                         `{ amountMinor: "0", currency: null }`.
+ */
+export type CrmStageValuation = "priced" | "mixed_currencies" | "unpriced";
+
 export interface ApiCrmStageSummary {
   stageId: string;
   stageName: string;
   kind: "OPEN" | "WON" | "LOST";
   sortOrder: number;
   dealCount: number;
-  /** Decimal string of minor units summed across the stage's deals. */
+  /** WARP-2556 — branch on THIS, never on `currency === null`. */
+  valuation: CrmStageValuation;
+  /** Decimal string of minor units. Meaningful only when `valuation` is
+   *  `"priced"`; "0" otherwise. */
   amountMinor: string;
-  /** ISO-4217 code, or null when the stage's deals carry mixed currencies. */
+  /** ISO-4217 code when `valuation` is `"priced"`, null otherwise. */
   currency: string | null;
 }
 
@@ -1125,23 +1143,66 @@ export async function getPipelineSummary(
     const bucket = byStage.get(deal.stageId);
     if (!bucket) continue;
     bucket.count += 1;
-    if (deal.currency) bucket.currencies.add(deal.currency);
-    if (deal.amountMinor !== null) bucket.total += deal.amountMinor;
+    // ONE predicate decides whether this deal is priced, and it gates BOTH
+    // halves of the bucket.
+    //
+    // These used to be two independent conditions, and they disagreed on the
+    // empty string: `if (deal.currency)` skipped `currencies`, while the
+    // amount still landed in `total`. A row like `{ amountMinor: 50000n,
+    // currency: "" }` then left `currencies` empty — so the stage read
+    // `unpriced`, and `unpriced` reports `amountMinor: "0"`, silently
+    // discarding real money and telling the model "no amounts entered yet"
+    // for a stage that has some. Exactly the false-statement class WARP-2556
+    // set out to remove, reintroduced through a narrower door.
+    //
+    // Postgres only enforces null-PAIRING (`CHECK`: both null or both set),
+    // not non-emptiness, so an import, a migration, or a future caller of the
+    // exported deal writers can produce that row without going through the
+    // Zod schema that would reject it. Pairing the two conditions here makes
+    // `total` unconditionally the sum of amounts denominated in `currencies`
+    // — an invariant the three-state valuation below can rely on, instead of
+    // one the database happens not to violate today.
+    const currency = deal.currency?.trim() || null;
+    if (currency !== null && deal.amountMinor !== null) {
+      bucket.currencies.add(currency);
+      bucket.total += deal.amountMinor;
+    }
   }
 
   return {
     pipelineId: pipeline.id,
     stages: pipeline.stages.map((stage) => {
       const bucket = byStage.get(stage.id)!;
-      const mixed = bucket.currencies.size > 1;
+      // WARP-2556 — THREE states, named. This used to be two, and the missing
+      // one was the common case.
+      //
+      // `currency: mixed ? null : ([...currencies][0] ?? null)` collapsed
+      // "several currencies, cannot sum" and "nothing here is priced" onto the
+      // identical wire shape — `{ amountMinor: "0", currency: null }` — and the
+      // tool read that as proof of mixing. So a fresh stage full of unpriced
+      // deals told the model "mixed currencies", on essentially every new box.
+      //
+      // Discriminated explicitly rather than inferred from a null, which is
+      // the same rule that made `origin` and `isArchived` real columns
+      // (WARP-884). A reader never has to work out which null they have.
+      const valuation: CrmStageValuation =
+        bucket.currencies.size > 1
+          ? "mixed_currencies"
+          : bucket.currencies.size === 0
+            ? "unpriced"
+            : "priced";
       return {
         stageId: stage.id,
         stageName: stage.name,
         kind: stage.kind,
         sortOrder: stage.sortOrder,
         dealCount: bucket.count,
-        amountMinor: mixed ? "0" : bucket.total.toString(),
-        currency: mixed ? null : ([...bucket.currencies][0] ?? null),
+        valuation,
+        // Only meaningful when `valuation === "priced"`. Kept as "0"/null in
+        // the other two rather than omitted so the field's TYPE does not vary
+        // by state — callers branch on `valuation`, never on these.
+        amountMinor: valuation === "priced" ? bucket.total.toString() : "0",
+        currency: valuation === "priced" ? [...bucket.currencies][0] : null,
       };
     }),
   };

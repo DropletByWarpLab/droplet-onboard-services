@@ -318,6 +318,32 @@ export function narrowToolNamesToScope(
 }
 
 /**
+ * The object-shaped sibling of `narrowToolNamesToScope`: filter a candidate
+ * list of tool-like objects to what `scope` may invoke (order kept).
+ *
+ * An absent scope (`null`/`undefined`) — the owner bypass, service principals,
+ * anyone with no AccessRole — narrows nothing, and the list is returned
+ * unchanged. Carrying that case HERE is the point: both call sites need it,
+ * and expressing it twice is how the two can disagree. Both nullish forms are
+ * accepted because the request field is `ToolAccessScope | null | undefined`.
+ *
+ * WARP-2556 follow-up. The "is this tool in scope" rule had drifted into three
+ * independent expressions — the estimate's pool filter in `routes/llm.ts`, the
+ * dispatch filter in `llm-agent.service.ts`, and this module's name-list
+ * helper. That is precisely the shape that let the estimate-side copy be lost
+ * in the WARP-2497 × WARP-2552 conflict resolution with no compiler signal,
+ * which is the defect WARP-2556 exists to fix. A new access axis added to
+ * `toolAllowedInScope` now reaches every narrowing site by construction.
+ */
+export function narrowToolsToScope<T extends { name: string }>(
+  tools: readonly T[],
+  scope: ToolAccessScope | null | undefined,
+): readonly T[] {
+  if (!scope) return tools;
+  return tools.filter((t) => toolAllowedInScope(t.name, scope));
+}
+
+/**
  * WARP-1580 — the whole-list PRE-FLIGHT: the first name in `names` this scope
  * may not invoke, or `null` when every name is in reach.
  *
