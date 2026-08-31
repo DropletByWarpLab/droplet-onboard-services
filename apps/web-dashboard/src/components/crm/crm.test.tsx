@@ -334,22 +334,33 @@ describe("CustomersView", () => {
 
 describe("CrmTabs", () => {
   it("is one tab stop with arrow-key movement", () => {
-    // Roving tabindex per the WAI-ARIA tabs pattern: three tabbable buttons
-    // would put three stops between the customer and the content.
+    // Roving tabindex per the WAI-ARIA tabs pattern: a tabbable button per tab
+    // would put a stop per tab between the customer and the content.
     const onTab = vi.fn();
-    render(<CrmTabs tab="projects" onTab={onTab} />);
+    render(<CrmTabs tab="deals" onTab={onTab} />);
     const list = screen.getByRole("tablist", { name: "CRM section" });
     const tabs = within(list).getAllByRole("tab");
-    expect(tabs.map((t) => t.getAttribute("tabindex"))).toEqual(["-1", "-1", "0"]);
+    expect(tabs.map((t) => t.getAttribute("tabindex"))).toEqual(["-1", "0"]);
 
-    fireEvent.keyDown(tabs[2], { key: "ArrowRight" });
+    fireEvent.keyDown(tabs[1], { key: "ArrowRight" });
     // Wraps to the first tab rather than stopping dead at the end.
     expect(onTab).toHaveBeenCalledWith("customers");
 
-    fireEvent.keyDown(tabs[2], { key: "Home" });
+    fireEvent.keyDown(tabs[1], { key: "Home" });
     expect(onTab).toHaveBeenLastCalledWith("customers");
     fireEvent.keyDown(tabs[0], { key: "End" });
-    expect(onTab).toHaveBeenLastCalledWith("projects");
+    expect(onTab).toHaveBeenLastCalledWith("deals");
+  });
+
+  it("switches SECTIONS with nav entries, not with tabs (WARP-2558)", () => {
+    // The regression this pins: CrmTabs used to carry a third entry,
+    // "projects", which made /projects the container AND one of the things in
+    // it. A tab that leaves for another section is a nav entry. Both remaining
+    // entries are views of the same records, which is what a tablist is for.
+    render(<CrmTabs tab="customers" onTab={() => {}} />);
+    const labels = screen.getAllByRole("tab").map((t) => t.textContent);
+    expect(labels).toHaveLength(2);
+    expect(labels.join(" ")).not.toMatch(/Projects/);
   });
 
   it("marks exactly one tab selected", () => {
