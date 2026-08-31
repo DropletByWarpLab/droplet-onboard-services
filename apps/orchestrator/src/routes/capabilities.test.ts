@@ -104,23 +104,28 @@ describe("GET /api/capabilities", () => {
     expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
   });
 
-  it("answers crm:true only when its parent module is on too", async () => {
-    // WARP-2545 — the CRM renders as sub-tabs on the Projects page, so the
-    // registry declares `requires: "projects"`. That edge is applied by
-    // `satisfiedModuleIds` inside getEffectiveModuleIds; this route must NOT
-    // re-derive it, because a second copy of the rule is free to drift from
-    // the one the module gate enforces.
+  it("answers crm:true with Projects OFF — the CRM has its own route now", async () => {
+    // WARP-2558 (ADR-044) — this assertion is the INVERSE of what it pinned
+    // under WARP-2545, and deliberately so.
     //
-    // Mutation: drop `requires: "projects"` from the crm module def, or write
-    // `crm = effective.has("crm") && projects` here → the first assertion
-    // below stops meaning anything.
+    // The CRM used to render as sub-tabs on the Projects page, so the registry
+    // declared `requires: "projects"` and a Projects-off box could not serve
+    // it. /customers is the CRM's own route, so that edge is gone and the
+    // shape it forbade — Customers with no PM at all — is the shape of most
+    // dental boxes.
+    //
+    // The route still must NOT re-derive any dependency of its own: whatever
+    // edges exist belong to `satisfiedModuleIds` inside getEffectiveModuleIds,
+    // and a second copy here is free to drift from the one the module gate
+    // enforces. Mutation: write `crm = effective.has("crm") && projects` →
+    // the first assertion below goes red.
     const crmOnProjectsOff = await request(
       appWithUser({ role: "owner" }, [
         { moduleId: "crm", enabled: true },
         { moduleId: "projects", enabled: false },
       ]),
     ).get("/api/capabilities");
-    expect(crmOnProjectsOff.body).toEqual({ projects: false, crm: false, contacts: false });
+    expect(crmOnProjectsOff.body).toEqual({ projects: false, crm: true, contacts: false });
 
     const bothOn = await request(
       appWithUser({ role: "owner" }, [

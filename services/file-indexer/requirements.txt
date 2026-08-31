@@ -85,7 +85,7 @@ python-pptx>=1.0.2,<2.0
 # satisfied only transitively; pin it explicitly so a dependency-tree
 # shuffle can't silently drop the FIPS provider check. Kept in lockstep
 # with services/ai-gateway's pin.
-cryptography>=50.0.0
+cryptography>=50.0.1
 # WARP-1790 — .rtf carries a `text/` MIME, so the registry routes it to the
 # text extractor, which used to index the raw control-word stream as prose
 # (QA saw "\lsdpriority46 \lsdlocked0" in Knowledge snippets). striprtf is the

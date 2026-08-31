@@ -1900,13 +1900,19 @@ export function createPublicAuthRouter(
       // can never disagree with the User.role written below).
       // WARP-171: the invite role is now the canonical Role enum (was
       // a free-form String). The mapping below preserves the
-      // pre-WARP-171 wire contract — "admin" invitee still lands in
-      // the Nextcloud "admin" group, which roleFromGroups() turns
-      // back into the "owner" session role on first login. The new
-      // enum values get explicit mappings so future invites can ask
-      // for them without ambiguity. `family` (formerly "user") is
-      // the empty-groups default so a regular household member lands
-      // in Nextcloud's default group set.
+      // pre-WARP-171 wire contract — an "admin" invitee still lands in
+      // the Nextcloud "admin" group. The new enum values get explicit
+      // mappings so future invites can ask for them without ambiguity.
+      // `family` (formerly "user") is the empty-groups default so a
+      // regular household member lands in Nextcloud's default group set.
+      //
+      // This comment used to add "…which roleFromGroups() turns back into
+      // the owner session role on first login". Twice wrong now, and both
+      // corrections matter: WARP-1051 made the session role the canonical
+      // invite role (see the auto-login block below), and WARP-1636 capped
+      // the Nextcloud OCS fallback at the holder's stored User.role — so
+      // membership of NC's built-in `admin` group no longer decides ANY
+      // session's tier. It is provisioning only. See ADR-032 §7.1.
       //
       // WARP-883: ADDITIONALLY add the household group so the shared
       // "Household" group folder (groupfolders) mounts into the invitee's

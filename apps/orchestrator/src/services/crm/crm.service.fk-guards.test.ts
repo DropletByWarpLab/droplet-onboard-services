@@ -166,9 +166,15 @@ describe("updateDeal — projectId", () => {
   it("allows the link to be cleared with an explicit null", async () => {
     const update = vi.fn().mockResolvedValue(undefined);
     const findUnique = vi.fn();
+    // WARP-2579 moved the field write inside an interactive `$transaction`, so
+    // the stub has to hand the service a tx client. The assertion below is on
+    // the write that happens ON that client, which is the point of that change:
+    // the update and any stage move commit together or not at all.
+    const tx = { crmDeal: { update } };
     const prisma = {
-      crmDeal: { findUnique: async () => dealRow({ projectId: "pr1" }), update },
+      crmDeal: { findUnique: async () => dealRow({ projectId: "pr1" }) },
       pmProject: { findUnique },
+      $transaction: vi.fn(async (fn: (c: typeof tx) => Promise<unknown>) => fn(tx)),
     } as never;
 
     await updateDeal(prisma, "d1", { projectId: null }, null);

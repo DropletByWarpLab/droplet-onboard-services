@@ -1,7 +1,7 @@
 fastapi>=0.141.1
 uvicorn>=0.52.1
 litellm>=1.98.0
-cryptography>=50.0.0
+cryptography>=50.0.1
 pydantic>=2.13.4
 httpx>=0.28.1
 sse-starlette>=3.4.8

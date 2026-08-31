@@ -397,12 +397,22 @@ EOF
   sudo systemctl enable droplet-ssh-access-boot-reset.service >/dev/null 2>&1 || true
   log_success "Installed the SSH-access toggle (droplet-ssh-access.path + service + boot reset)"
 
-  # --- /etc/tmpfiles.d/ and /etc/avahi/services/ --------------------------
+  # --- /etc/tmpfiles.d/ ---------------------------------------------------
   sudo install -m 0644 "$host_src/etc-tmpfiles.d/droplet.conf" \
     /etc/tmpfiles.d/droplet.conf
-  sudo install -d -m 0755 /etc/avahi/services
-  sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
-    /etc/avahi/services/droplet.service
+
+  # WARP-2576: /etc/avahi/services/droplet.service is deliberately NOT installed
+  # here, and there is no repo copy of it left to install. setup.sh calls this
+  # function and THEN setup_local_dns, whose _write_avahi_service_file()
+  # (scripts/lib/local-dns.sh) tees the real advert over that exact path — four
+  # service blocks, not two: _smb._tcp and _device-info._tcp are what put the
+  # box in macOS Finder's Network sidebar. So the static copy that used to be
+  # installed here was overwritten seconds later on every single run and never
+  # reached a box, while forcing scripts/host/MANIFEST to opt out of content
+  # checking for that row (a two-block file compared against the four-block one
+  # a healthy box actually has reads as permanent DRIFT). local-dns.sh creates
+  # the services directory itself. Single owner: local-dns.sh — put changes to
+  # what the box advertises there, not back here.
 
   # --- hardware watchdog (WARP-2192) --------------------------------------
   # The floor beneath every userspace recovery path: if the KERNEL wedges,

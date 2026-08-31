@@ -87,6 +87,71 @@ class TestNormalization:
         # identifier. It is not valid SQL either way; refuse outright.
         assert normalize_statement("SELECT <id> FROM <id>.<id>") is None
 
+    def test_a_mask_never_runs_across_a_literal_boundary(self):
+        # WARP-2570, and the sharp end of it: with two literals each holding a
+        # `"`, a walker that tracks double-quote state alone opens an
+        # "identifier" inside the first literal and closes it inside the
+        # second, masking the SQL BETWEEN them. The pre-fix walker returned
+        #     SELECT <id> FROM <id> WHERE <id> = 'x<id>d<id>q'
+        # for the statement below — the whole `AND "d" = ` predicate absorbed
+        # into masks and gone from the normalized form. Two statements with
+        # DIFFERENT where-clauses can then normalize alike, which is an
+        # allowlist collision: registering one admits the other. Note this is
+        # a wrong ANSWER, not a refusal — the fail-closed path never runs.
+        #
+        # Mutation: delete the `elif ch == "'"` branch → red.
+        assert (
+            normalize_statement(
+                """SELECT "a" FROM "t" WHERE "c" = 'x"y' AND "d" = 'p"q'"""
+            )
+            == """SELECT <id> FROM <id> WHERE <id> = 'x"y' AND <id> = 'p"q'"""
+        )
+
+    def test_a_double_quote_inside_a_literal_is_data_not_a_delimiter(self):
+        # WARP-2570. A SQL engine reads the `"` in `'a"b'` as inert data. A
+        # masker tracking double-quote state ALONE reads it as opening an
+        # identifier and masks from there to the next `"` — which is in the
+        # middle of the following identifier, producing a normalization that
+        # does not describe the statement the database would run.
+        #
+        # Mutation: delete the `elif ch == "'"` branch → the walker swallows
+        # `"b' AND "` into one `<id>` and this goes red.
+        assert (
+            normalize_statement("""SELECT "a" FROM "t" WHERE "c" = 'a"b'""")
+            == """SELECT <id> FROM <id> WHERE <id> = 'a"b'"""
+        )
+
+    def test_a_doubled_quote_stays_inside_one_literal(self):
+        # `'it''s'` is ONE literal containing `it's`. Ending the literal at the
+        # first inner quote would leave the walker parsing `s'` as syntax.
+        assert (
+            normalize_statement("""SELECT "a" FROM "t" WHERE "c" = 'it''s'""")
+            == """SELECT <id> FROM <id> WHERE <id> = 'it''s'"""
+        )
+
+    def test_an_unterminated_literal_cannot_be_normalized(self):
+        # Fail closed, exactly as an unterminated identifier does. Returning a
+        # best-effort normalization here would be the allowlist guessing.
+        assert normalize_statement("SELECT \"a\" FROM \"t\" WHERE \"c\" = 'oops") is None
+
+    def test_statements_differing_only_inside_a_literal_do_not_collide(self):
+        # The property that matters: a literal is part of the approved text,
+        # so two statements whose literals differ must NOT normalize alike —
+        # otherwise registering one would admit the other.
+        a = normalize_statement("""SELECT "x" FROM "t" WHERE "c" LIKE ? ESCAPE '\\'""")
+        b = normalize_statement("""SELECT "x" FROM "t" WHERE "c" LIKE ? ESCAPE '#'""")
+        assert a is not None and b is not None
+        assert a != b
+
+    def test_an_identifier_after_a_literal_still_masks(self):
+        # Proves the literal branch RESUMES normal parsing rather than
+        # swallowing the rest of the statement — the failure mode a naive
+        # "skip to the next quote" fix would introduce.
+        assert (
+            normalize_statement('''SELECT 'lit' AS "label" FROM "dba"."t"''')
+            == '''SELECT 'lit' AS <id> FROM <id>.<id>'''
+        )
+
 
 class TestManifestIntegrity:
     """The manifest ships in the image; a broken one must fail tests, not a

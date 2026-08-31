@@ -106,10 +106,26 @@ file  scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service  /et
 dir   -                                                                      /var/lib/droplet-ssh-access                                           -     present  root-owned, NOT group-writable — `state` is what the dashboard trusts
 dir   -                                                                      /var/lib/droplet-ssh-access/intent.d                                  -     present  the writable half; a directory not a file because a single-file bind detaches on rename (WARP-1908)
 
-# --- tmpfiles + mDNS ---------------------------------------------------------
+# --- tmpfiles ----------------------------------------------------------------
 file  scripts/host/etc-tmpfiles.d/droplet.conf                               /etc/tmpfiles.d/droplet.conf                                          0644  track
-dir   -                                                                      /etc/avahi/services                                                   -     present  avahi drops the service file here
-file  scripts/host/etc-avahi/services/droplet.service                        /etc/avahi/services/droplet.service                                   0644  presence  the repo copy here is NOT what ends up on a box — _write_avahi_service_file() in scripts/lib/local-dns.sh tees its own richer XML (adds _smb._tcp + _device-info._tcp) over it later in the same setup.sh run, and that heredoc is the real owner. Content-comparing this would report DRIFT on every healthy box forever. Worth retiring the duplicate: WARP-2574 follow-up
+
+# --- mDNS: deliberately absent from this table (WARP-2576) -------------------
+# /etc/avahi/services/droplet.service is on every healthy box, but this
+# installer does not put it there — _write_avahi_service_file() in
+# scripts/lib/local-dns.sh tees it, from a heredoc, with no repo source file to
+# compare against. It is out of scope for a table whose subject is
+# `install_single_box_host_integration`.
+#
+# It used to be in scope, and that is the cautionary half. A static copy under
+# scripts/host/etc-avahi/ was installed here first, then overwritten by the
+# local-dns.sh heredoc later in the SAME setup.sh run — it never reached a box.
+# Its row could only ever be `policy=presence`: the repo copy advertised two
+# services (_http, _https) and a real box has four (plus _smb._tcp and
+# _device-info._tcp, which are what Finder needs), so content-comparing it
+# reported DRIFT on every healthy box forever.
+#
+# If you are about to re-add that install line: don't. Change what the box
+# advertises in local-dns.sh, which is the single owner.
 
 # --- hardware watchdog (WARP-2192) -------------------------------------------
 # Both halves or nothing: systemd never loads watchdog drivers itself (no

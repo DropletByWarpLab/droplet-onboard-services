@@ -17,6 +17,7 @@ import {
   Activity,
   Blocks,
   BookOpen,
+  Building2,
   Calendar as CalendarIcon,
   ChartColumn,
   Cpu,
@@ -83,11 +84,16 @@ export type NavItem = {
    * on children, which meant a sub-destination could never be gated on its
    * own.)
    *
-   * WARP-2577: this was a hand-listed union of twelve ids, and it had already
-   * drifted — `crm` and `contacts` shipped as gateable modules and were never
-   * added, so a nav entry for either could not be typed at all. It is now
-   * DERIVED from `AccessModuleId`, which is the vocabulary that describes
-   * itself as having no parallel list to drift; this union was that list.
+   * WARP-2577: this was a hand-listed union, and it drifted exactly as a
+   * parallel list does. It named twelve ids while `AccessModuleId` carried
+   * fifteen; WARP-2558 then added `crm` to it by hand, because the CRM had
+   * just earned a route to gate — leaving `contacts` still missing and the
+   * next module still owing someone a second edit.
+   *
+   * It is now DERIVED from `AccessModuleId`, the vocabulary that describes
+   * itself as having no parallel list to drift. This union was that list, so
+   * a module id reaches this field the day it is declared and nobody has to
+   * remember.
    *
    * `chat` is excluded rather than omitted. It is a core module — the comment
    * above says core modules are never tagged — and `Exclude` states that rule
@@ -203,13 +209,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // NavItem type has no count field; out of scope).
       { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
-      // ADR-026: native PM surface — sits next to Calendar (both are
-      // time/workflow-oriented) and ahead of Knowledge (the read-only search
-      // index). Page at /projects renders natively off /api/pm/* under the
-      // dashboard session — no embedded stack, no second login.
-      // WARP-1154/1155: hidden when the orchestrator says the Projects module
-      // is off, so the nav never advertises a surface the box won't serve.
-      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
+      // WARP-2558 (ADR-044): /projects moved to the Business group below. The
+      // ROUTE is unchanged — it is live, deep-linked and named by PM tools —
+      // only its grouping moved.
       // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
       {
         href: "/knowledge",
@@ -223,6 +225,45 @@ export const NAV_GROUPS: NavGroup[] = [
       // /context is "what's indexed" by capability density.
       // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
       { href: "/context", label: "Context", icon: Sparkles, hidden: true },
+    ],
+  },
+  // WARP-2558 (ADR-044) — the Business group.
+  //
+  // Three systems describe the same business: who you sell to (CRM), the work
+  // you deliver (PM), and the practice you run day to day (the ERP surface,
+  // which arrives in slice 2). They were a lodger inside Projects, Projects
+  // itself, and a page filed next to the router. Grouping them says they are
+  // one subject without merging them into one page — the rejected shape, which
+  // only pushes the container-is-its-own-child problem down a level.
+  //
+  // Two rules this group holds:
+  //
+  //  1. A tab never renames itself. Each entry's `label` is constant; turning
+  //     a module on may ADD an entry, never rebrand one. That is the fix for
+  //     the shipped state where the sidebar said "Projects" and the page
+  //     header said "CRM" on the same box.
+  //  2. Every entry survives its neighbours being off. `visibleItems` already
+  //     filters per item and Sidebar drops empty groups, so a CRM-only box
+  //     shows Customers alone and a Projects-only box shows Projects alone —
+  //     no caption over an empty list, and no dependency between them.
+  {
+    label: "Business",
+    items: [
+      // The CRM's own door. Before this it had `navHrefs: []` and rendered as
+      // sub-tabs on /projects, which made CRM-without-PM unrepresentable —
+      // and that is the shape of most dental boxes.
+      {
+        href: "/customers",
+        label: "Customers",
+        icon: Building2,
+        requiresModule: "crm",
+      },
+      // ADR-026: native PM surface. Page at /projects renders natively off
+      // /api/pm/* under the dashboard session — no embedded stack, no second
+      // login. WARP-1154/1155: hidden when the orchestrator says the Projects
+      // module is off, so the nav never advertises a surface the box won't
+      // serve.
+      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
     ],
   },
   {

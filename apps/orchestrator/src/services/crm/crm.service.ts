@@ -204,7 +204,11 @@ const STAGE_SELECT = {
   probability: true,
 } satisfies Prisma.CrmPipelineStageSelect;
 
-function stageToApi(row: Prisma.CrmPipelineStageGetPayload<{ select: typeof STAGE_SELECT }>): ApiCrmStage {
+/** A stage row as every internal caller reads it. Carries `pipelineId`, which
+ *  is what makes the stage↔pipeline invariant checkable without a second read. */
+type StageRow = Prisma.CrmPipelineStageGetPayload<{ select: typeof STAGE_SELECT }>;
+
+function stageToApi(row: StageRow): ApiCrmStage {
   return {
     id: row.id,
     pipelineId: row.pipelineId,
@@ -765,7 +769,7 @@ async function requireStageInPipeline(
   prisma: PrismaClient,
   stageId: string,
   pipelineId: string,
-): Promise<Prisma.CrmPipelineStageGetPayload<{ select: typeof STAGE_SELECT }>> {
+): Promise<StageRow> {
   const stage = await prisma.crmPipelineStage.findUnique({ where: { id: stageId }, select: STAGE_SELECT });
   if (!stage) throw new Error(CRM_ERRORS.STAGE_NOT_FOUND);
   if (stage.pipelineId !== pipelineId) throw new Error(CRM_ERRORS.INVALID_STAGE);
@@ -937,22 +941,44 @@ export async function createDeal(
   return dealToApi(row);
 }
 
+/**
+ * A PATCH is one write, so it commits once or not at all.
+ *
+ * This used to call `moveDealStage` first — which commits its OWN transaction —
+ * and only then validate the amount/currency pairing and the company id. A
+ * `PATCH` carrying a good `stageId` and a bad `companyId` therefore moved the
+ * deal, wrote its `STAGE_CHANGE` activity, and *then* threw: the caller saw a
+ * 404 and reasonably concluded nothing had happened, while the board and the
+ * forecast had already changed. Everything that can throw now runs before
+ * anything writes, and the move rides in the same transaction as the field
+ * update.
+ *
+ * `pipelineId` is honoured here too. It is accepted by `dealPatchSchema`
+ * (inherited from `dealCreateSchema.partial()`) and typed on `DealInput`, but
+ * `updateDeal` never read it — a `PATCH {pipelineId}` answered 200 and moved
+ * nothing. Because a stage only means anything relative to a pipeline, moving
+ * pipelines has to land on a stage of the NEW one: pass `stageId` to choose it,
+ * or leave it out and get the same default `createDeal` uses.
+ */
 export async function updateDeal(
   prisma: PrismaClient,
   id: string,
   input: DealInput,
   actorId: string | null,
 ): Promise<ApiCrmDeal> {
-  const existing = await prisma.crmDeal.findUnique({ where: { id } });
+  const existing = await prisma.crmDeal.findUnique({
+    where: { id },
+    include: { stage: { select: STAGE_SELECT } },
+  });
   if (!existing) throw new Error(CRM_ERRORS.DEAL_NOT_FOUND);
 
-  // WARP-2577 — every id the caller named is resolved BEFORE the first write.
-  //
-  // The stage move below is a committed transaction that also writes a
-  // STAGE_CHANGE activity. Validating after it meant a PATCH carrying a good
-  // stage and a bad company id moved the deal, wrote the timeline entry, and
-  // then failed — half the request applied, and the half the caller can see on
-  // the board is the half that stuck.
+  // ── Everything that can throw, before anything writes ──────────────────
+
+  const { amountMinor, currency } = resolveAmount(input.amountMinor, input.currency, {
+    amountMinor: existing.amountMinor,
+    currency: existing.currency,
+  });
+
   if (input.companyId) {
     const company = await prisma.crmCompany.findUnique({
       where: { id: input.companyId },
@@ -961,6 +987,9 @@ export async function updateDeal(
     if (!company) throw new Error(CRM_ERRORS.COMPANY_NOT_FOUND);
   }
 
+  // WARP-2577 — the fifth FK this service used to write unchecked. Sits with
+  // the other pre-write validation for the reason WARP-2579 established: a
+  // PATCH that throws must not already have moved the deal.
   await requireReferencedRows([
     {
       id: input.projectId,
@@ -969,38 +998,59 @@ export async function updateDeal(
     },
   ]);
 
-  // A stage move through this route goes through the same path the board uses,
-  // so the timeline gets its STAGE_CHANGE either way rather than only when the
-  // caller happened to use the dedicated endpoint.
-  if (input.stageId && input.stageId !== existing.stageId) {
-    await moveDealStage(prisma, id, input.stageId, actorId);
+  const targetPipelineId = input.pipelineId ?? existing.pipelineId;
+  let targetStage: StageRow | null = null;
+
+  if (targetPipelineId !== existing.pipelineId) {
+    // Validate the stage against the pipeline being moved TO, not the one the
+    // deal is leaving — checking against the old one is what made
+    // `{pipelineId, stageId}` fail with a bewildering INVALID_STAGE.
+    const pipeline = await getPipeline(prisma, targetPipelineId);
+    const landingStageId =
+      input.stageId ??
+      pipeline.stages.find((s) => s.kind === "OPEN")?.id ??
+      pipeline.stages[0]?.id;
+    if (!landingStageId) throw new Error(CRM_ERRORS.STAGE_NOT_FOUND);
+    targetStage = await requireStageInPipeline(prisma, landingStageId, pipeline.id);
+  } else if (input.stageId && input.stageId !== existing.stageId) {
+    targetStage = await requireStageInPipeline(prisma, input.stageId, existing.pipelineId);
   }
 
-  const { amountMinor, currency } = resolveAmount(input.amountMinor, input.currency, {
-    amountMinor: existing.amountMinor,
-    currency: existing.currency,
-  });
+  // ── One transaction ───────────────────────────────────────────────────
 
-  await prisma.crmDeal.update({
-    where: { id },
-    data: {
-      title: input.title,
-      companyId: input.companyId === undefined ? undefined : input.companyId,
-      amountMinor,
-      currency,
-      expectedCloseOn:
-        input.expectedCloseOn === undefined
-          ? undefined
-          : input.expectedCloseOn === null
-            ? null
-            : new Date(input.expectedCloseOn),
-      closeReason: input.closeReason === undefined ? undefined : input.closeReason,
-      ownerId: input.ownerId === undefined ? undefined : input.ownerId,
-      projectId: input.projectId === undefined ? undefined : input.projectId,
-      ...(input.archived === undefined
-        ? {}
-        : { isArchived: input.archived, archivedAt: input.archived ? new Date() : null }),
-    },
+  await prisma.$transaction(async (tx) => {
+    if (targetStage) {
+      // Same path the board uses, so the timeline gets its STAGE_CHANGE
+      // whether or not the caller used the dedicated move endpoint.
+      await applyStageMove(
+        tx,
+        id,
+        { stageId: existing.stageId, stageName: existing.stage.name, closedAt: existing.closedAt },
+        targetStage,
+        actorId,
+      );
+    }
+    await tx.crmDeal.update({
+      where: { id },
+      data: {
+        title: input.title,
+        companyId: input.companyId === undefined ? undefined : input.companyId,
+        amountMinor,
+        currency,
+        expectedCloseOn:
+          input.expectedCloseOn === undefined
+            ? undefined
+            : input.expectedCloseOn === null
+              ? null
+              : new Date(input.expectedCloseOn),
+        closeReason: input.closeReason === undefined ? undefined : input.closeReason,
+        ownerId: input.ownerId === undefined ? undefined : input.ownerId,
+        projectId: input.projectId === undefined ? undefined : input.projectId,
+        ...(input.archived === undefined
+          ? {}
+          : { isArchived: input.archived, archivedAt: input.archived ? new Date() : null }),
+      },
+    });
   });
   return getDeal(prisma, id);
 }
@@ -1029,27 +1079,56 @@ export async function moveDealStage(
   const target = await requireStageInPipeline(prisma, stageId, deal.pipelineId);
   if (target.id === deal.stageId) return getDeal(prisma, dealId);
 
-  await prisma.$transaction([
-    prisma.crmDeal.update({
-      where: { id: dealId },
-      data: {
-        stageId: target.id,
-        closedAt: target.kind === "OPEN" ? null : (deal.closedAt ?? new Date()),
-      },
-    }),
-    prisma.crmActivity.create({
-      data: {
-        subjectType: "DEAL",
-        dealId,
-        kind: "STAGE_CHANGE",
-        summary: `${deal.stage.name} → ${target.name}`,
-        actorId,
-        fromStageId: deal.stageId,
-        toStageId: target.id,
-      },
-    }),
-  ]);
+  await prisma.$transaction((tx) =>
+    applyStageMove(
+      tx,
+      dealId,
+      { stageId: deal.stageId, stageName: deal.stage.name, closedAt: deal.closedAt },
+      target,
+      actorId,
+    ),
+  );
   return getDeal(prisma, dealId);
+}
+
+/**
+ * The stage move itself, in whatever transaction the caller supplies — so a
+ * PATCH that also changes other fields commits the move and those fields
+ * together, and a bare move still commits alone.
+ *
+ * Writes `pipelineId` as well as `stageId`. For `moveDealStage` that is a
+ * no-op (`requireStageInPipeline` has already pinned the stage to the deal's
+ * current pipeline); for a cross-pipeline `updateDeal` it is the whole point,
+ * and keeping both writes here is what stops the pair from drifting apart —
+ * a deal whose `stageId` belongs to a different pipeline than its
+ * `pipelineId` is the one state this model must never reach.
+ */
+async function applyStageMove(
+  tx: Prisma.TransactionClient,
+  dealId: string,
+  from: { stageId: string; stageName: string; closedAt: Date | null },
+  target: StageRow,
+  actorId: string | null,
+): Promise<void> {
+  await tx.crmDeal.update({
+    where: { id: dealId },
+    data: {
+      pipelineId: target.pipelineId,
+      stageId: target.id,
+      closedAt: target.kind === "OPEN" ? null : (from.closedAt ?? new Date()),
+    },
+  });
+  await tx.crmActivity.create({
+    data: {
+      subjectType: "DEAL",
+      dealId,
+      kind: "STAGE_CHANGE",
+      summary: `${from.stageName} → ${target.name}`,
+      actorId,
+      fromStageId: from.stageId,
+      toStageId: target.id,
+    },
+  });
 }
 
 export async function deleteDeal(prisma: PrismaClient, id: string): Promise<void> {

@@ -1382,11 +1382,13 @@ describe("canonical row mappers", () => {
 
   it("fills an audience member from the fields Mailchimp actually publishes", async () => {
     // A key-set test passes just as well on a mapper returning every column
-    // undefined. `last_changed_at` is the load-bearing one: it is this track's
-    // watermark column, and WARP-2466 spelled it `last_changed_at` rather than
-    // `updated_at`, so a mapper copied from the HubSpot track fills nothing.
-    // Mutation: `case "last_changed_at": return record.updated_at;` → undefined
-    //           → red.
+    // undefined. `updated_at` is the load-bearing one: it is this track's
+    // watermark column, and the VENDOR calls the field `last_changed`, so a
+    // mapper that assumed the vendor spelling matched the canonical one fills
+    // nothing. WARP-2509 renamed the canonical column from `last_changed_at`;
+    // the translation is what has to stay, not the second name.
+    // Mutation: `case "updated_at": return record.updated_at;` → undefined
+    //           → red, because the raw payload has no such field.
     const { c } = connector({ routes: mcRoutes({ members: [memberPayload("m-1")] }) });
     const [row] = (await c.runRead("get_audience_members", {})) as Record<string, unknown>[];
 
@@ -1396,7 +1398,7 @@ describe("canonical row mappers", () => {
       email: "m-1@example.test",
       subscription_status: "subscribed",
       opted_in_at: new Date(OPTED_IN).toISOString(),
-      last_changed_at: new Date(LAST_CHANGED).toISOString(),
+      updated_at: new Date(LAST_CHANGED).toISOString(),
     });
   });
 
@@ -1449,8 +1451,8 @@ describe("canonical row mappers", () => {
     const { c } = connector({ routes: mcRoutes({ members: [memberPayload("m-1")] }) });
     const [row] = (await c.runRead("get_audience_members", {})) as Record<string, unknown>[];
 
-    expect(row.last_changed_at).toBe("2026-08-20T09:30:00.000Z");
-    expect(row.last_changed_at).not.toBe(LAST_CHANGED);
+    expect(row.updated_at).toBe("2026-08-20T09:30:00.000Z");
+    expect(row.updated_at).not.toBe(LAST_CHANGED);
   });
 
   it("passes `since` to Mailchimp as the documented since_last_changed filter", async () => {

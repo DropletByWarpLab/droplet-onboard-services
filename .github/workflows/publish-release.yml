@@ -213,13 +213,16 @@ jobs:
             # portaudio/alsa import-time deps (mirrors voice-io-tests.yml)
             sysdeps: libportaudio2 alsa-utils
           - service: device-identity-svc
-          - service: inference-manager
             # tpm2-pytss builds against tss2-esapi headers
             # (mirrors device-identity-svc-tests.yml)
             sysdeps: libtss2-dev pkg-config
             reqs: requirements.txt
             extra_pip: pytest
             needs_pythonpath: "1"
+          - service: inference-manager
+            # Lock file, not requirements-dev.txt — mirrors ci.yml's detect
+            # plan and inference-manager-tests.yml.
+            reqs: requirements-dev.lock
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
