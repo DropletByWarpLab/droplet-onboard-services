@@ -19,15 +19,37 @@
  * Failure mode: returns a structured `SyncResult` instead of throwing so the
  * scheduler can persist `lastSyncError` cleanly. Network errors, non-2xx
  * responses, and parse failures all produce `{ ok: false, error }`.
+ *
+ * Destination safety (WARP-2022): the URL is operator-supplied and this
+ * process sits inside the box's trust boundary, so EVERY request goes
+ * through `assertOutboundDestinationAllowed` first. The guard lives in
+ * `fetchWithTimeout` rather than in each verb, so the GET path, the PROPFIND
+ * path, every redirect hop and any verb added later are covered by
+ * construction — there is no way to reach `fetch` from this module without
+ * passing it. A refused destination surfaces the fixed
+ * `blocked_destination` string and never an upstream status, so the sync
+ * endpoint is not a port scanner.
  */
 
 import { parseIcs, type IcsEvent } from "./ics.js";
+import {
+  assertOutboundDestinationAllowed,
+  isOutboundUrlBlocked,
+  OutboundUrlBlockedError,
+} from "../lib/outbound-url-guard.js";
 
 export interface FetchOptions {
   url: string;
   authMode: "none" | "basic";
   username?: string | null;
   password?: string | null;
+  /**
+   * WARP-2022 — owner/admin opt-in for a self-hosted CalDAV server on the
+   * box's own LAN. Explicit per source (a `CalendarSource` column), never
+   * inferred from the URL. Skips the private-range rules ONLY; the scheme
+   * and userinfo rules still apply.
+   */
+  allowPrivateHost?: boolean;
 }
 
 export type SyncResult =
@@ -49,16 +71,85 @@ function basicAuthHeader(user: string, pass: string): string {
   return "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 }
 
+/** Redirects are followed by hand so each hop can be re-validated. Three is
+ *  enough for the vendor patterns we see (an apex → www, plus a CDN hand-off)
+ *  and small enough that a redirect loop is a prompt error, not a hang. */
+const MAX_REDIRECT_HOPS = 3;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * The ONLY door to `fetch` in this module — and therefore the only place the
+ * SSRF guard has to be.
+ *
+ * `redirect: "manual"` is load-bearing, not a style choice. undici's default
+ * `"follow"` resolves hops inside the socket, where no guard can see them:
+ * a public URL that 302s to `http://169.254.169.254/` would be fetched with
+ * the request already past every check. Following by hand means each hop is
+ * re-parsed and re-vetted before it is dialled.
+ *
+ * The Authorization header is dropped on a cross-origin hop. The user
+ * consented to send their CalDAV password to the host they typed; a redirect
+ * is the remote end's choice, not theirs.
+ */
 async function fetchWithTimeout(
   url: string,
-  init: RequestInit & { timeoutMs?: number },
+  init: RequestInit & { timeoutMs?: number; allowPrivateHost?: boolean },
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
+  const { timeoutMs, allowPrivateHost, headers, ...rest } = init;
+  const guardOptions = { allowPrivateHost: allowPrivateHost === true };
+
+  let target = await assertOutboundDestinationAllowed(url, guardOptions);
+  const vettedOrigin = target.origin;
+  let outboundHeaders: Record<string, string> = {
+    ...((headers as Record<string, string> | undefined) ?? {}),
+  };
+
+  for (let hop = 0; ; hop++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs ?? FETCH_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      // Dial the URL the guard vetted, not the raw string — validating one
+      // parse and requesting a differently-parsed second one is the gap
+      // that makes guards decorative.
+      //
+      // The headers are COPIED per hop rather than handed over by reference:
+      // stripping Authorization below must not reach backwards and rewrite
+      // what an earlier hop was sent. A shared object makes the strip
+      // unobservable — to a test, and to anyone reading a captured request.
+      resp = await fetch(target.toString(), {
+        ...rest,
+        headers: { ...outboundHeaders },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const location = resp.headers.get("location");
+    if (!REDIRECT_STATUSES.has(resp.status) || !location) return resp;
+    if (hop >= MAX_REDIRECT_HOPS) {
+      throw new OutboundUrlBlockedError("redirect", `more than ${MAX_REDIRECT_HOPS} hops`);
+    }
+
+    let next: URL;
+    try {
+      next = new URL(location, target);
+    } catch {
+      throw new OutboundUrlBlockedError("redirect", "unparseable Location header");
+    }
+    target = await assertOutboundDestinationAllowed(next.toString(), guardOptions);
+    // Cross-origin hop: drop the credential. Matched case-INSENSITIVELY —
+    // HTTP header names are case-insensitive, so a caller that spelled it
+    // `authorization` must not slip a password past this strip.
+    if (target.origin !== vettedOrigin) {
+      outboundHeaders = Object.fromEntries(
+        Object.entries(outboundHeaders).filter(
+          ([name]) => name.toLowerCase() !== "authorization",
+        ),
+      );
+    }
   }
 }
 
@@ -93,7 +184,11 @@ export async function fetchIcsFeed(opts: FetchOptions): Promise<SyncResult> {
     if (opts.authMode === "basic" && opts.username && opts.password) {
       headers.Authorization = basicAuthHeader(opts.username, opts.password);
     }
-    const resp = await fetchWithTimeout(opts.url, { method: "GET", headers });
+    const resp = await fetchWithTimeout(opts.url, {
+      method: "GET",
+      headers,
+      allowPrivateHost: opts.allowPrivateHost,
+    });
     if (!resp.ok) {
       return { ok: false, error: `HTTP ${resp.status} ${resp.statusText}` };
     }
@@ -140,6 +235,7 @@ export async function syncCalendarSource(opts: FetchOptions): Promise<SyncResult
       method: "PROPFIND",
       headers,
       body: propfindBody,
+      allowPrivateHost: opts.allowPrivateHost,
     });
     // 405 = method not allowed → server isn't CalDAV. 404 likely too.
     if (resp.status === 404 || resp.status === 405) {
@@ -165,6 +261,12 @@ export async function syncCalendarSource(opts: FetchOptions): Promise<SyncResult
     }
     return { ok: true, events: allEvents };
   } catch (err) {
+    // WARP-2022 — a refused destination is a POLICY decision, checked before
+    // this branch's transport heuristics. Retrying it as a GET would just
+    // re-run the same guard, and letting it reach the substring test below
+    // would make the fallback depend on the refusal message not happening to
+    // contain "abort" or "network".
+    if (isOutboundUrlBlocked(err)) return { ok: false, error: err.message };
     const msg = err instanceof Error ? err.message : String(err);
     // Network / abort failures during PROPFIND — try the plain GET path
     // before giving up so a non-CalDAV server that doesn't accept the verb
