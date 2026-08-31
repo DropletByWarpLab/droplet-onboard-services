@@ -31,6 +31,7 @@ import { useCustomerRecord } from "@/components/crm/useCrm";
 import { CrmRequestError } from "@/components/crm/useCrm";
 
 import { Deals, Links, People, Projects, Section, Timeline } from "./sections";
+import { PracticeBlock } from "./PracticeBlock";
 import "../../projects/projects.css";
 import "./record.css";
 
@@ -125,6 +126,14 @@ function Record({ id }: { id: string | null }): JSX.Element {
                   <Links links={record.links} />
                 </Section>
               ) : null}
+
+              {/* WARP-2567 — fetched separately, behind the ERP's own
+                  connector gate, and rendering NOTHING when that gate refuses.
+                  It is not a section of the record response: that response is
+                  cleared by the CRM's gate, which `family` passes, and one
+                  more field on it would put a patient on a page the front desk
+                  can open. */}
+              {record.company.id ? <PracticeBlock companyId={record.company.id} /> : null}
 
               <Section title="Timeline">
                 <Timeline entries={record.timeline} />
