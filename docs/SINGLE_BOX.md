@@ -160,7 +160,7 @@ installs all three when single-box mode is active:
 | `/etc/default/droplet-openwrt-attach` | **Generated** from `scripts/host/etc-default/droplet-openwrt-attach.example` | `DROPLET_AP_PSK` from `.env` (placeholder if absent — setup wizard rotates). Mode 0600. Only written if missing — re-runs preserve a rotated PSK. |
 | `/etc/droplet-host-net/lan-dhcp.conf` | `scripts/host/etc-droplet-host-net/lan-dhcp.conf` | as-is |
 | `/etc/tmpfiles.d/droplet.conf` | `scripts/host/etc-tmpfiles.d/droplet.conf` | + `systemd-tmpfiles --create` |
-| `/etc/avahi/services/droplet.service` | `scripts/host/etc-avahi/services/droplet.service` | mDNS advert (http + https) |
+| `/etc/avahi/services/droplet.service` | **Generated** by `lib/local-dns.sh::_write_avahi_service_file` | mDNS advert: http, https, `_smb._tcp` (Finder Network sidebar), `_device-info._tcp`. Written by `setup_local_dns` later in the run — **not** by the host-integration step, and not from a file in `scripts/host/` (WARP-2576) |
 | `/etc/systemd/system/droplet.service` | **Generated** by `lib/systemd.sh::install_systemd_service` | `docker compose up -d` on boot |
 | `/usr/local/sbin/droplet-host-units` | `scripts/host/droplet-host-units.sh` | `install -m 0755`. WARP-1829 — see below |
 | `/etc/systemd/system/droplet-host-units.service` | `scripts/host/etc-systemd-system/droplet-host-units.service` | On-demand oneshot; deliberately **not** enabled and given no timer |

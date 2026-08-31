@@ -303,7 +303,7 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "                  host.docker.internal/docker0 default the multi-box keeps"
     log_info "  single-box: would install /usr/local/sbin/droplet-openwrt-attach +"
     log_info "                  droplet-host-net + 2 systemd units + /etc/default/"
-    log_info "                  configs + /etc/avahi/services/droplet.service"
+    log_info "                  configs"
     log_info "  single-box: would install automount udev rule → /etc/udev/rules.d/99-droplet-automount.rules"
     log_info "                  + droplet-automount@.service + mnt-droplet.mount → /etc/systemd/system/"
   fi
