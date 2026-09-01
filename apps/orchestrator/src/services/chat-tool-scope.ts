@@ -120,7 +120,7 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "set_port_poe",
   "detect_wan_port",
   "setup_camera_ports",
-  // crm: the pipeline WRITE only. WARP-2546 puts the six CRM reads and
+  // crm: the pipeline WRITE only. WARP-2546 put the CRM reads and
   // crm_log_activity in chat on purpose — "who have we not chased?",
   // "log that I called them" are the point of the suite. Moving a deal
   // between stages is a drag on the pipeline board WARP-2545 shipped, and
@@ -131,6 +131,13 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   // past it"). That reason is retired: the tripwire no longer works that
   // way. The POLICY reason above stands on its own, so the name stays —
   // but it now stays for one reason, not one-and-a-half.
+  //
+  // ADR-045 slice C — the five CRM READS are gone from the registry;
+  // `business_find` and `business_timeline` answer those questions from the
+  // `business` domain and are DELIBERATELY not listed here. That was the
+  // decision site 7 asks for: "who have we not chased" is the sentence the
+  // whole suite exists for, and a tool only the dashboard can reach cannot
+  // answer it.
   "crm_move_deal_stage",
   // WARP-2581 — money. Reachable over /api/money and MCP.
   //
@@ -153,16 +160,16 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "erp_find_patient",
   "erp_get_ar_summary",
   "erp_schedule_appointment",
-  // pm vertical suite (external MCP / dedicated UI)
+  // pm vertical suite (external MCP / dedicated UI). ADR-045 slice C removed
+  // the five pm_* READS from the registry entirely, so their names here became
+  // inert; dropped, because five dead entries in the one list a reader
+  // consults to answer "can chat do X" is how WARP-2058's comment went stale.
+  // Project and work-item READS are reachable from chat now, through
+  // `business_find`. The WRITES below stay out.
   "pm_create_work_item",
   "pm_update_work_item",
   "pm_add_work_item_comment",
   "pm_transition_work_item",
-  "pm_list_workspaces",
-  "pm_list_projects",
-  "pm_list_work_items",
-  "pm_get_work_item",
-  "pm_search_work_items",
   // developer data utilities (WARP-899/900/901 — MCP-client fare)
   "encode_text",
   "decode_text",

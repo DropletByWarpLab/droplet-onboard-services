@@ -9,6 +9,12 @@
  * throwable bubbles to the agent loop.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+// ADR-045 slice C — `pm_list_workspaces`, `pm_list_projects`,
+// `pm_list_work_items`, `pm_get_work_item` and `pm_search_work_items` are
+// gone; `business_find` reads projects and work items now, and its coverage
+// lives in __tests__/handlers/business/business-graph.test.ts. Delete the five
+// imports and the describe blocks that drive them; the write-tool cases in
+// this file are untouched.
 import type { ToolContext } from "../../../src/types.js";
 
 import pmListWorkspaces from "../../../src/handlers/pm/list-workspaces.js";

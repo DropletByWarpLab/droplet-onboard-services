@@ -73,9 +73,14 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     expect(byName.get("run_scene")?.domain).toBe("smart-home");
     expect(byName.get("email_search")?.domain).toBe("email");
     expect(byName.get("memory_recall")?.domain).toBe("memory");
-    expect(byName.get("pm_list_projects")?.domain).toBe("pm");
+    // ADR-045 slice C — `pm_list_projects` moved into the business graph, so
+    // the pm anchor is a write tool now; the reads it used to anchor are
+    // anchored on `business` below.
+    expect(byName.get("pm_create_project")?.domain).toBe("pm");
     expect(byName.get("get_system_health")?.domain).toBe("system");
     expect(byName.get("business_profile_get")?.domain).toBe("business");
+    expect(byName.get("business_find")?.domain).toBe("business");
+    expect(byName.get("business_timeline")?.domain).toBe("business");
     // WARP-899/WARP-900 — data-utility tools live in the data domain.
     expect(byName.get("encode_text")?.domain).toBe("data");
     expect(byName.get("decode_text")?.domain).toBe("data");

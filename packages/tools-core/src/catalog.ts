@@ -201,31 +201,23 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "search_contacts",
   ],
   memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
+  // ADR-045 slice C — the five PM reads moved to `business_find`. The domain
+  // keeps its write tools, so the `projects` module's `toolDomains: ["pm"]`
+  // gate still resolves (module-registry.ts's unknown-domain invariant).
   pm: [
     "pm_create_project",
     "pm_create_work_item",
     "pm_update_work_item",
     "pm_add_work_item_comment",
     "pm_transition_work_item",
-    "pm_list_workspaces",
-    "pm_list_projects",
-    "pm_list_work_items",
-    "pm_get_work_item",
-    "pm_search_work_items",
-  ],
-  crm: [
-    "crm_search_customers",
-    "crm_get_customer",
-    "crm_list_deals",
-    "crm_get_deal",
-    "crm_pipeline_summary",
-    "crm_log_activity",
-    "crm_move_deal_stage",
   ],
   // WARP-2581 — money at rest. Excluded from the chat pool (see
   // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
   // so it is MCP- and API-reachable and never advertised on a chat turn.
   money: ["money_list_open_documents"],
+  // ADR-045 slice C — likewise the five CRM reads. The two writes stay until
+  // slice D, which is what keeps `crm`'s module gate pointing at something.
+  crm: ["crm_log_activity", "crm_move_deal_stage"],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
@@ -234,7 +226,14 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
   cloud: ["cloud_query_dataset"],
-  business: ["business_profile_get"],
+  // ADR-045 slice C — `business` is an UNCLAIMED domain (access-catalog.ts's
+  // UNCLAIMED_DOMAINS: system / business / data / erp are not feature-gated),
+  // so unlike `crm`/`pm` these two are advertised regardless of the module
+  // toggles. The DATA stays gated at the route (`requireModuleEnabled` 404s
+  // `/api/crm/*` and `/api/pm/projects*`), and `_graph.ts`'s `businessError`
+  // turns that 404 into a sentence naming the switch — the same bargain
+  // `cloud_query_dataset` makes with `DatasetNotServedError`.
+  business: ["business_profile_get", "business_find", "business_timeline"],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   system: [
@@ -409,17 +408,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   pm_update_work_item: "Update the details of a task",
   pm_add_work_item_comment: "Add a comment to a task",
   pm_transition_work_item: "Move a task to a new status, like done",
-  pm_list_workspaces: "See your project tracker workspaces",
-  pm_list_projects: "See your projects",
-  pm_list_work_items: "See the tasks in a project",
-  pm_get_work_item: "See the full details of one task",
-  pm_search_work_items: "Search your tasks",
-  // CRM (customers, deals, pipeline)
-  crm_search_customers: "Find a customer by name or website",
-  crm_get_customer: "See one customer, their open deals and recent history",
-  crm_list_deals: "See your deals — including the ones going quiet",
-  crm_get_deal: "See one deal and what has happened on it",
-  crm_pipeline_summary: "See how much is in each stage of your pipeline",
+  // CRM (customers, deals, pipeline) — reads moved to the business graph
   crm_log_activity: "Add a call or note to a customer's history (you approve it first)",
   crm_move_deal_stage: "Move a deal to a different stage (you approve it first)",
   // ERP (Eaglesoft practice-management integration)
@@ -432,8 +421,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Cloud connectors (Stripe / HubSpot / Mailchimp)
   cloud_query_dataset:
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
-  // Business (business-knowledge profile)
+  // Business (business-knowledge profile, and the business graph)
   business_profile_get: "Look up what Droplet knows about your business",
+  business_find:
+    "Look up a customer, a contact, a deal, a project, a job, or your sales pipeline",
+  business_timeline: "See what has happened recently on a customer, deal or job",
   // Team chat (Messages)
   team_chat_send_message: "Send a Messages chat to someone for you (you approve it first)",
   team_chat_send_meeting_invite:

@@ -165,28 +165,38 @@ describe("the crm domain is reachable (WARP-2546)", () => {
   ];
 
   for (const message of CRM_TURNS) {
-    it(`advertises crm tools for: ${message}`, () => {
-      // Mutation: delete the crm DOMAIN_RULES entry → every one of these goes
-      // red, reproducing the ship-it-dead state exactly.
+    it(`advertises the business graph for: ${message}`, () => {
+      // Mutation: delete the merged business DOMAIN_RULES entry → every one of
+      // these goes red, reproducing the ship-it-dead state exactly.
+      //
+      // ADR-045 slice C — asserted on `business_find` rather than on a `crm_`
+      // prefix. After the collapse a prefix check passes on `crm_log_activity`
+      // alone, which is TRUE and measures nothing: the tool that has to be
+      // reachable for "which clients have gone quiet?" is the graph read.
       const selected = effectiveAdvertisedToolNames({
         mode: "domains",
         messages: [{ role: "user", content: message }],
         pool: POOL,
       });
-      const crm = [...selected].filter((n) => n.startsWith("crm_"));
-      expect(crm.length).toBeGreaterThan(0);
+      expect(selected.has("business_find")).toBe(true);
+      expect(selected.has("business_timeline")).toBe(true);
+      // ...and the CRM domain is still opened, which is what keeps
+      // crm_log_activity ("log that I called them") in reach on the same turn.
+      expect([...selected].filter((n) => n.startsWith("crm_")).length).toBeGreaterThan(0);
     });
   }
 
-  it("does not advertise crm tools for an unrelated turn", () => {
+  it("does not advertise the business graph for an unrelated turn", () => {
     // The rules are keyword-based, so over-claiming is the other failure mode.
-    // Mutation: widen the crm pattern to something like /\w+/ → red.
+    // Mutation: widen the business pattern to something like /\w+/ → red.
     const selected = effectiveAdvertisedToolNames({
       mode: "domains",
       messages: [{ role: "user", content: "turn the kitchen lights off" }],
       pool: POOL,
     });
     expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+    expect(selected.has("business_find")).toBe(false);
+    expect(selected.has("business_timeline")).toBe(false);
   });
 
   it("matches whole words only — 'won' must not fire inside 'wondering'", () => {
@@ -217,6 +227,22 @@ describe("the crm domain is reachable (WARP-2546)", () => {
       pool: POOL,
     });
     expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+    // ADR-045 slice C — the merged business rule is where `won|win|lost` would
+    // be re-added, so it carries the same three negatives.
+    expect(selected.has("business_find")).toBe(false);
+  });
+
+  it("a project question reaches the graph read, not just the pm write tools", () => {
+    // ADR-045 slice C — the project and work-item READS live in `business`
+    // now, so the `pm` rule has to open that domain too. Mutation: set the pm
+    // rule's domains back to ["pm"] → red, and "what's left on the kitchen
+    // job" advertises only tools that CREATE work.
+    const selected = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [{ role: "user", content: "what's still open on the kitchen remodel project?" }],
+      pool: POOL,
+    });
+    expect(selected.has("business_find")).toBe(true);
   });
 });
 
@@ -245,6 +271,20 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     // Guards the two tests below against passing because CRM left the pool.
     expect(CRM_DOMAIN).toBeDefined();
     expect(CRM_IN_POOL.length).toBeGreaterThan(0);
+
+    // ADR-045 slice C — and this half is why the assertion above was not
+    // enough. The collapse moved every CRM READ into `business_find`, so the
+    // `crm` domain now holds writes only. A scope that grants `crm` for read
+    // and not for write narrows this domain to ZERO, and the positive case
+    // below would have failed while looking like the scope filter was broken.
+    // Recomputed rather than asserted as a literal, so the day a CRM read
+    // comes back this simply stops requiring the write grant.
+    const writeOnly = CRM_IN_POOL.every((n) => TOOLS.get(n)?.requiresWrite === true);
+    expect(
+      writeOnly,
+      "the crm domain has a read tool again — the positive case below can drop " +
+        "its writeDomains grant",
+    ).toBe(true);
   });
 
   it("a scope without the CRM domain advertises no CRM tool, even on a CRM question", () => {
@@ -268,7 +308,12 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
   it("the SAME question does advertise CRM tools when the scope allows it", () => {
     // Without this, the test above passes for a board that advertises nothing
     // at all, and the scope filter could be deleted again unnoticed.
-    const scope = scopeOf([CRM_DOMAIN!]);
+    // The write grant is not decoration: since ADR-045 slice C the `crm`
+    // domain contains only write tools (the reads are `business_find` now), so
+    // a read-only grant admits nothing and this would prove nothing. The
+    // assertion above pins that reasoning to the live registry rather than to
+    // this comment.
+    const scope = scopeOf([CRM_DOMAIN!], [CRM_DOMAIN!]);
     const narrowedPool = narrowToolNamesToScope(POOL, scope);
     const selected = effectiveAdvertisedToolNames({
       mode: "domains",

@@ -314,33 +314,9 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "pm_update_work_item", client: "orchestrator", hops: [admit("patch", "/api/pm/work-items/:id")] },
   { tool: "pm_add_work_item_comment", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/comments")] },
   { tool: "pm_transition_work_item", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/transition")] },
-  { tool: "pm_list_workspaces", client: "orchestrator", hops: [admit("get", "/api/pm/workspaces")] },
-  { tool: "pm_list_projects", client: "orchestrator", hops: [admit("get", "/api/pm/projects")] },
-  { tool: "pm_list_work_items", client: "orchestrator", hops: [admit("get", "/api/pm/projects/:id/work-items")] },
-  { tool: "pm_get_work_item", client: "orchestrator", hops: [admit("get", "/api/pm/work-items/:id")] },
-  { tool: "pm_search_work_items", client: "orchestrator", hops: [admit("get", "/api/pm/work-items")] },
 
-  // WARP-2546 — CRM. `crm_get_customer` and `crm_get_deal` each make more than
-  // one call, so every hop is declared: the completeness gate checks the LIST,
-  // not just the first request, and an undeclared hop is how a tool ships with
-  // a route the mcp principal cannot reach.
-  { tool: "crm_search_customers", client: "orchestrator", hops: [admit("get", "/api/crm/companies")] },
-  {
-    tool: "crm_get_customer",
-    client: "orchestrator",
-    hops: [
-      admit("get", "/api/crm/companies/:id"),
-      admit("get", "/api/crm/deals"),
-      admit("get", "/api/crm/activities"),
-    ],
-  },
-  { tool: "crm_list_deals", client: "orchestrator", hops: [admit("get", "/api/crm/deals")] },
-  {
-    tool: "crm_get_deal",
-    client: "orchestrator",
-    hops: [admit("get", "/api/crm/deals/:id"), admit("get", "/api/crm/activities")],
-  },
-  { tool: "crm_pipeline_summary", client: "orchestrator", hops: [admit("get", "/api/crm/summary")] },
+  // WARP-2546 — CRM. ADR-045 slice C removed the five read rows; the two
+  // write rows stay until slice D.
   { tool: "crm_log_activity", client: "orchestrator", hops: [admit("post", "/api/crm/activities")] },
   { tool: "crm_move_deal_stage", client: "orchestrator", hops: [admit("post", "/api/crm/deals/:id/stage")] },
 
@@ -364,6 +340,44 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── business ────────────────────────────────────────────────────────────
   none("business_profile_get"), // ctx.prisma
+
+  // ADR-045 slice C — the business graph. `business_find` dispatches a
+  // different call per `entity`, and on `entity:"customer"` with an `id` it
+  // makes four, so EVERY branch is declared: the cross-check is bidirectional,
+  // and an undeclared hop is how a tool ships with a route the mcp principal
+  // cannot reach.
+  //
+  // `/api/crm/contacts` and `/api/crm/contacts/:id` are NEW in this change
+  // (routes/crm.ts). They exist because the CRM had no way to read its own
+  // people at all: `/api/contacts` is owner-scoped and 403s `_service:mcp`
+  // outright (`contacts_require_a_user`), so a hop there would ship dead.
+  {
+    tool: "business_find",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/crm/companies"),
+      admit("get", "/api/crm/companies/:id"),
+      admit("get", "/api/crm/contacts"),
+      admit("get", "/api/crm/contacts/:id"),
+      admit("get", "/api/crm/deals"),
+      admit("get", "/api/crm/deals/:id"),
+      admit("get", "/api/crm/summary"),
+      admit("get", "/api/pm/projects"),
+      admit("get", "/api/pm/projects/:id"),
+      admit("get", "/api/pm/projects/:id/work-items"),
+      admit("get", "/api/pm/work-items"),
+      admit("get", "/api/pm/work-items/:id"),
+    ],
+  },
+  {
+    tool: "business_timeline",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/crm/activities"),
+      admit("get", "/api/pm/work-items/:id/activity"),
+      admit("get", "/api/pm/work-items/:id/comments"),
+    ],
+  },
 
   // ── team chat (WARP-1685) ───────────────────────────────────────────────
   // Both tools act as the forwarded X-Droplet-User human; the routes admit

@@ -363,7 +363,14 @@ describe("worst-case fixed system-block budget", () => {
     // ~85K chars serialized).
     //
     // Re-baselined again 2026-08-30 for WARP-2546 — the seven-tool `crm`
-    // domain took this from ~99.4K to 100,561 and tripped the 100,000 line.
+    // domain took this from ~99.4K to ~100.6K and tripped the 100,000 line.
+    //
+    // ADR-045 slice C — the ten→two collapse took the full registry back to
+    // 98,566 chars over 137 tools, comfortably under this line again. The
+    // ceiling is deliberately NOT lowered to match: re-tightening it now would
+    // make the next author's first commit a re-baseline argument, and this
+    // number's job is to make a CROSSING a conscious decision, not to track
+    // the current value.
     // Raised deliberately rather than trimmed under, for two reasons:
     //
     //   1. This ceiling watches the MCP-facing surface, which has no context
@@ -384,6 +391,16 @@ describe("worst-case fixed system-block budget", () => {
     // ordinary growth widens its headroom instead of consuming it. See the
     // MEAN_CHAT_TOOL_CHARS_CEILING block above for the derivation and for why
     // the window is the wrong denominator for that particular quantity.
+    //
+    // ADR-045 slice C interacts with that scaling in the one direction worth
+    // naming: the collapse REMOVES tools, so it lowers the denominator. Ten
+    // noun-shaped reads become two verbs, and only FIVE of the ten were ever
+    // in chat scope (every `pm_*` read was excluded, and the sixth in-scope
+    // `crm_*` tool is the WRITE `crm_log_activity`), so the pool loses more
+    // chars than tools. The mean is what this assertion watches, and the two
+    // replacements are richer per tool than what they replace — measured, it
+    // still passes with room, but a future collapse that trades many small
+    // tools for one large one is exactly the shape that would not.
     const fullRegistryJson = JSON.stringify(
       Array.from(TOOLS.values()).map((t) => ({
         type: "function" as const,

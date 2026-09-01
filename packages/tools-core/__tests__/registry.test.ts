@@ -96,18 +96,11 @@ const EXPECTED_TOOL_NAMES = [
   "pm_create_work_item",
   "pm_transition_work_item",
   "pm_update_work_item",
-  // WARP-508 — Plane PM read tools
-  "pm_get_work_item",
-  "pm_list_projects",
-  "pm_list_work_items",
-  "pm_list_workspaces",
-  "pm_search_work_items",
-  // crm (WARP-2546)
-  "crm_search_customers",
-  "crm_get_customer",
-  "crm_list_deals",
-  "crm_get_deal",
-  "crm_pipeline_summary",
+  // WARP-508's five PM read tools and WARP-2546's five CRM read tools were
+  // replaced by `business_find` / `business_timeline` (ADR-045 slice C, listed
+  // under business below). Ten names removed here in the same change that
+  // removes their handlers — this list is what makes that a signed decision.
+  // crm (WARP-2546) — writes only until ADR-045 slice D
   "crm_log_activity",
   "crm_move_deal_stage",
   // WARP-1094 — ERP-connector (Eaglesoft) tools
@@ -117,6 +110,10 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // ADR-045 slice C — the business graph, read half. Two verbs over one typed
+  // graph, replacing ten noun-shaped CRM/PM reads. Both Tier-1.
+  "business_find",
+  "business_timeline",
   // WARP-1685 — Messages sends (Tier-2: write + two-phase confirmation)
   "team_chat_send_message",
   "team_chat_send_meeting_invite",
@@ -226,8 +223,14 @@ describe("TOOLS registry", () => {
     // tools (create / update / comment / transition) are
     // requiresWrite=true AND requiresConfirmation=true because every
     // Plane write hits a customer's tracked project state.
-    expect(TOOLS.get("pm_list_workspaces")?.requiresWrite).toBe(false);
-    expect(TOOLS.get("pm_get_work_item")?.requiresWrite).toBe(false);
+    // ADR-045 slice C — the PM read tools are gone; the graph reads that
+    // replaced them carry the Read tier now, and they are what this pair of
+    // assertions is for (a read that is silently flagged write loses nothing
+    // visible until RBAC narrows it away for a family role).
+    expect(TOOLS.get("business_find")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_find")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("business_timeline")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_timeline")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("pm_create_work_item")?.requiresWrite).toBe(true);
     expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);

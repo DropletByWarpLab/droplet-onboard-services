@@ -5,7 +5,7 @@ const inputSchema = {
   type: "object",
   properties: {
     deal_id: { type: "string" },
-    stage_id: { type: "string", description: "From crm_pipeline_summary; same pipeline." },
+    stage_id: { type: "string", description: 'From business_find entity:"pipeline"; same pipeline.' },
   },
   required: ["deal_id", "stage_id"],
   additionalProperties: false,

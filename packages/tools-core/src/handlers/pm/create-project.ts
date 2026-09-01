@@ -28,7 +28,7 @@ const inputSchema = {
     workspace_slug: {
       type: "string",
       description:
-        "Workspace to create the project in, from pm_list_workspaces. Omit to use the default workspace.",
+        "Workspace to create the project in. Omit to use the default workspace.",
     },
     identifier: {
       type: "string",

@@ -9,12 +9,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-import type { ToolContext, ToolResult } from "../../../src/types.js";
-import crmSearchCustomers from "../../../src/handlers/crm/search-customers.js";
-import crmGetCustomer from "../../../src/handlers/crm/get-customer.js";
-import crmListDeals from "../../../src/handlers/crm/list-deals.js";
-import crmGetDeal from "../../../src/handlers/crm/get-deal.js";
-import crmPipelineSummary from "../../../src/handlers/crm/pipeline-summary.js";
+// ADR-045 slice C — the five CRM READ handlers were replaced by
+// `business_find` / `business_timeline`. Their coverage (money as a string,
+// provenance from `origin`, the unsummed mixed-currency stage, the declared
+// hop list) moved WITH them, to __tests__/handlers/business/business-graph.
+// test.ts — it was not dropped. What remains here is the two write tools.
+import type { ToolContext } from "../../../src/types.js";
 import crmLogActivity from "../../../src/handlers/crm/log-activity.js";
 import crmMoveDealStage from "../../../src/handlers/crm/move-deal-stage.js";
 
@@ -28,44 +28,6 @@ const ctx = {
 
 function res(ok: boolean, status: number, body: unknown) {
   return { ok, status, json: async () => body };
-}
-
-// ── Narrowing `ToolResult` (WARP-2606) ──────────────────────────────────────
-//
-// `ToolResult` is a discriminated union: `data` lives ONLY on the `ok: true`
-// arm and `error` ONLY on the `ok: false` arm. Reading either through the
-// union is a TS2339 — which is exactly what `typecheck:tests` reported for the
-// seven `.data` reads below, and `vitest` never saw because esbuild strips
-// types without checking them.
-//
-// The two helpers narrow rather than cast, and that distinction is the point.
-// A cast (`out as { data: X }`) makes the compiler agree while leaving the
-// runtime free to hand back the OTHER arm: a handler that regressed into
-// returning an error would then fail with "cannot read properties of
-// undefined" — or, where the read feeds a `toMatchObject`, quietly compare
-// `undefined` against nothing. Narrowing turns that same regression into a
-// named failure carrying the tool's own error code, at the first line that
-// touches the result.
-type OkResult = Extract<ToolResult, { ok: true }>;
-type ErrResult = Extract<ToolResult, { ok: false }>;
-
-function expectOk(result: ToolResult): OkResult {
-  if (!result.ok) {
-    throw new Error(
-      `expected a successful ToolResult, got ${result.status}: ` +
-        `${result.error.code} — ${result.error.message}`,
-    );
-  }
-  return result;
-}
-
-function expectErr(result: ToolResult): ErrResult {
-  if (result.ok) {
-    throw new Error(
-      `expected a failed ToolResult, got ok with data ${JSON.stringify(result.data)}`,
-    );
-  }
-  return result;
 }
 
 const apiCompany = {
@@ -95,167 +57,12 @@ beforeEach(() => {
 });
 
 describe("read tools", () => {
-  it("are all read-only and ungated", () => {
-    for (const tool of [
-      crmSearchCustomers,
-      crmGetCustomer,
-      crmListDeals,
-      crmGetDeal,
-      crmPipelineSummary,
-    ]) {
-      expect(tool.requiresWrite, tool.name).toBe(false);
-      expect(tool.requiresConfirmation, tool.name).toBe(false);
-    }
-  });
-
-  it("crm_search_customers returns the total alongside the page", async () => {
-    // Without the total the model answers "you have 20 customers" whenever the
-    // page is full, which is wrong exactly when it matters.
-    get.mockResolvedValue(res(true, 200, { companies: [apiCompany], total: 137 }));
-    const out = await crmSearchCustomers.handler({ query: "roof" }, ctx);
-    expect(out.ok).toBe(true);
-    expect((expectOk(out).data as { total: number }).total).toBe(137);
-    expect(get.mock.calls[0][0]).toContain("q=roof");
-    expect(get.mock.calls[0][0]).toContain("per_page=20");
-  });
-
-  it("reports provenance from origin, not from the presence of an external id", async () => {
-    get.mockResolvedValue(
-      res(true, 200, {
-        companies: [{ ...apiCompany, origin: "LOCAL", externalSystem: "hubspot" }],
-        total: 1,
-      }),
-    );
-    const out = await crmSearchCustomers.handler({}, ctx);
-    const first = (expectOk(out).data as { customers: Array<{ synced_from: string | null }> })
-      .customers[0];
-    // origin is the explicit column; a stray externalSystem on a LOCAL row is
-    // data corruption, not a reason to tell the model the row is synced.
-    expect(first.synced_from).toBeNull();
-  });
-
-  it("carries a deal amount past 2^53 through as an untouched string", async () => {
-    // 9007199254740993 minor units. If anything on this path treated it as a
-    // number it would come back 9007199254740992 — off by one, in a figure
-    // somebody is about to quote to a customer.
-    get.mockResolvedValue(res(true, 200, { deals: [apiDeal], total: 1 }));
-    const out = await crmListDeals.handler({ outcome: "WON" }, ctx);
-    const deal = (expectOk(out).data as { deals: Array<{ amount_minor: string; outcome: string }> })
-      .deals[0];
-    expect(deal.amount_minor).toBe("9007199254740993");
-    expect(typeof deal.amount_minor).toBe("string");
-    // Outcome comes from stage.kind — the stage NAME here is "Closed — signed",
-    // which no string match would classify.
-    expect(deal.outcome).toBe("WON");
-  });
-
-  it("filters deals by outcome and idle days on the request, not after the fact", async () => {
-    get.mockResolvedValue(res(true, 200, { deals: [], total: 0 }));
-    await crmListDeals.handler({ outcome: "OPEN", idle_days: 14, customer_id: "c1" }, ctx);
-    const url = get.mock.calls[0][0] as string;
-    expect(url).toContain("kind=OPEN");
-    expect(url).toContain("idle_days=14");
-    expect(url).toContain("company=c1");
-  });
-
-  it("crm_get_customer declares all three of the calls it makes", async () => {
-    // The completeness gate checks the declared hop LIST. This asserts the
-    // handler really does make the three calls tool-routes.ts claims.
-    get.mockImplementation(async (url: string) => {
-      if (url.includes("/companies/")) return res(true, 200, { company: apiCompany });
-      if (url.includes("/deals")) return res(true, 200, { deals: [apiDeal] });
-      return res(true, 200, { activities: [] });
-    });
-    const out = await crmGetCustomer.handler({ customer_id: "c1" }, ctx);
-    expect(out.ok).toBe(true);
-    const urls = get.mock.calls.map((c) => c[0] as string);
-    expect(urls.some((u) => u.includes("/api/crm/companies/c1"))).toBe(true);
-    expect(urls.some((u) => u.includes("/api/crm/deals?company=c1&kind=OPEN"))).toBe(true);
-    expect(urls.some((u) => u.includes("subject_type=COMPANY"))).toBe(true);
-  });
-
-  it("crm_get_deal asks for the deal and its timeline", async () => {
-    get.mockImplementation(async (url: string) =>
-      url.includes("/activities")
-        ? res(true, 200, { activities: [{ id: "a1", kind: "NOTE", summary: "Called", occurredAt: "2026-08-02T00:00:00.000Z" }] })
-        : res(true, 200, { deal: apiDeal }),
-    );
-    const out = await crmGetDeal.handler({ deal_id: "d1" }, ctx);
-    expect(out.ok).toBe(true);
-    const data = expectOk(out).data as { timeline: Array<{ summary: string }> };
-    expect(data.timeline[0].summary).toBe("Called");
-  });
-
-  it("crm_pipeline_summary withholds a mixed-currency total instead of reporting zero", async () => {
-    // The server sends amountMinor "0" with currency null for a mixed stage.
-    // Passing that through would read as an empty stage.
-    get.mockResolvedValue(
-      res(true, 200, {
-        pipelineId: "p1",
-        stages: [
-          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 3, valuation: "mixed_currencies", amountMinor: "0", currency: null },
-          { stageId: "s2", stageName: "Won", kind: "WON", sortOrder: 1, dealCount: 1, valuation: "priced", amountMinor: "250000", currency: "USD" },
-        ],
-      }),
-    );
-    const out = await crmPipelineSummary.handler({}, ctx);
-    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
-    expect(stages[0]).toMatchObject({ deals: 3, total: null });
-    expect(stages[0].total_note).toContain("mixed currencies");
-    expect(stages[0]).not.toHaveProperty("amount_minor");
-    expect(stages[1]).toMatchObject({ amount_minor: "250000", currency: "USD" });
-  });
-
-  it("crm_pipeline_summary tells an unpriced stage apart from a mixed-currency one", async () => {
-    // WARP-2556 — the two used to arrive in the SAME wire shape
-    // (`amountMinor: "0"`, `currency: null`), and this handler branched on the
-    // null. So a stage of deals nobody had priced yet — the ordinary state of
-    // an early pipeline on a new box — was reported to the model as holding
-    // mixed currencies. The model then told the owner something that was not
-    // merely vague but false.
-    //
-    // Mutation: collapse the `unpriced` arm into the `mixed_currencies` one in
-    // pipeline-summary.ts → this goes red on the note.
-    get.mockResolvedValue(
-      res(true, 200, {
-        pipelineId: "p1",
-        stages: [
-          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 4, valuation: "unpriced", amountMinor: "0", currency: null },
-          { stageId: "s2", stageName: "Qualified", kind: "OPEN", sortOrder: 1, dealCount: 2, valuation: "mixed_currencies", amountMinor: "0", currency: null },
-        ],
-      }),
-    );
-    const out = await crmPipelineSummary.handler({}, ctx);
-    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
-
-    // Both withhold a total — that part was always right.
-    expect(stages[0]).toMatchObject({ deals: 4, total: null });
-    expect(stages[1]).toMatchObject({ deals: 2, total: null });
-
-    // What changed: they no longer say the same thing about WHY.
-    expect(stages[0].total_note).toBe("no amounts entered yet");
-    expect(stages[1].total_note).toBe("mixed currencies — not summed");
-    expect(stages[0].total_note).not.toBe(stages[1].total_note);
-    expect(stages[0].total_note).not.toContain("currenc");
-  });
-
-  it("crm_pipeline_summary reads the state, not the null", async () => {
-    // The guard against a well-meaning revert to `s.currency === null`: a
-    // PRICED stage is allowed to carry a null currency on the wire without
-    // being reclassified. Nothing produces that today, which is the point —
-    // the handler must not re-derive a state it is now told outright.
-    get.mockResolvedValue(
-      res(true, 200, {
-        pipelineId: "p1",
-        stages: [
-          { stageId: "s1", stageName: "Lead", kind: "OPEN", sortOrder: 0, dealCount: 1, valuation: "priced", amountMinor: "1500", currency: null },
-        ],
-      }),
-    );
-    const out = await crmPipelineSummary.handler({}, ctx);
-    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
-    expect(stages[0]).toMatchObject({ amount_minor: "1500" });
-    expect(stages[0]).not.toHaveProperty("total_note");
+  it("there are none left in this suite — the CRM reads are the business graph now", () => {
+    // ADR-045 slice C. Kept as a signpost rather than an empty file: the next
+    // person looking for "where did crm_get_customer's tests go" finds the
+    // answer here instead of in a git log.
+    expect(crmLogActivity.requiresWrite).toBe(true);
+    expect(crmMoveDealStage.requiresWrite).toBe(true);
   });
 });
 
@@ -311,20 +118,29 @@ describe("error mapping", () => {
     // 404 lets the model say "I couldn't find that deal"; 422 (a stage from
     // another pipeline) is a fixable mistake it can act on. Collapsing both
     // into one code makes the second unrecoverable.
-    get.mockResolvedValue(res(false, 404, { error: "deal_not_found" }));
-    const missing = await crmGetDeal.handler({ deal_id: "nope" }, ctx);
+    // ADR-045 slice C — driven through `crm_move_deal_stage` now that the
+    // reads have moved to the business graph. `crmError()` is one shared
+    // mapping for every crm_* handler, so which surviving tool exercises it
+    // does not matter; that it is still exercised does.
+    post.mockResolvedValue(res(false, 404, { error: "deal_not_found" }));
+    const missing = await crmMoveDealStage.handler({ deal_id: "nope", stage_id: "s2" }, ctx);
     expect(missing.ok).toBe(false);
-    expect(expectErr(missing).error.code).toBe("CRM_NOT_FOUND");
+    expect((missing as { error: { code: string } }).error.code).toBe("CRM_NOT_FOUND");
 
     post.mockResolvedValue(res(false, 422, { error: "invalid_stage" }));
     const wrong = await crmMoveDealStage.handler({ deal_id: "d1", stage_id: "sX" }, ctx);
-    expect(expectErr(wrong).error.code).toBe("CRM_INVALID_REQUEST");
-    expect(expectErr(wrong).error.message).toBe("invalid_stage");
+    expect((wrong as { error: { code: string; message: string } }).error.code).toBe(
+      "CRM_INVALID_REQUEST",
+    );
+    expect((wrong as { error: { message: string } }).error.message).toBe("invalid_stage");
   });
 
   it("maps anything else to a generic API error", async () => {
-    get.mockResolvedValue(res(false, 500, { error: "boom" }));
-    const out = await crmListDeals.handler({}, ctx);
-    expect(expectErr(out).error.code).toBe("CRM_API_ERROR");
+    post.mockResolvedValue(res(false, 500, { error: "boom" }));
+    const out = await crmLogActivity.handler(
+      { kind: "NOTE", summary: "x", customer_id: "c1" },
+      ctx,
+    );
+    expect((out as { error: { code: string } }).error.code).toBe("CRM_API_ERROR");
   });
 });

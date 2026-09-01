@@ -492,6 +492,50 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // ── Contacts (ADR-045) ──
+  //
+  // The CRM had no way to read its own people. `/api/contacts` is the address
+  // book: owner-scoped, and its `requireOwner` REFUSES the MCP service
+  // principal outright (`contacts_require_a_user`), which is right for a
+  // private address book and useless to a tool. `getCompany` returns
+  // `contactCount` and nothing else, so "who do I call at Acme" had no answer
+  // at any layer.
+  //
+  // These two are business-shared reads like companies and deals, and the
+  // scoping rule is the LINK rather than the owner — see `listCrmContacts` in
+  // crm.service.ts for why that line is where it is.
+  //
+  // Registered under a distinct first segment (`contacts`, not `companies`),
+  // so no `/crm/companies/:id` pattern can shadow either (app.ts documents the
+  // mount-order hazard, and `/crm/summary` is above for the same reason).
+  router.get("/crm/contacts", async (req, res, next) => {
+    const parsed = paginationQuery.safeParse(req.query);
+    if (!parsed.success) return badRequest(res, parsed.error);
+    try {
+      res.json(
+        await crm.listCrmContacts(prisma, {
+          query: req.query.q ? String(req.query.q) : undefined,
+          companyId: req.query.company ? String(req.query.company) : undefined,
+          dealId: req.query.deal ? String(req.query.deal) : undefined,
+          perPage: parsed.data.per_page,
+          page: parsed.data.page,
+        }),
+      );
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  router.get("/crm/contacts/:id", async (req, res, next) => {
+    try {
+      res.json({ contact: await crm.getCrmContact(prisma, req.params.id) });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
   // ── Deals ──
 
   router.get("/crm/deals", async (req, res, next) => {

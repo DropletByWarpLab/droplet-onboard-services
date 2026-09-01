@@ -160,6 +160,26 @@ const TURNS: Turn[] = [
     message: "set up a new project for the kitchen remodel",
     requires: "pm_create_project",
   },
+  // ── ADR-045 slice C — the business graph, reached from BOTH vocabularies ──
+  //
+  // The collapse joined two suites that used to be reached by two different
+  // rules. Both entry points get a whole sentence, because a graph read that
+  // only the CRM half of the vocabulary can reach is half a collapse.
+  {
+    label: "business graph / the CRM half",
+    message: "which customers have we not chased in a month?",
+    requires: "business_find",
+  },
+  {
+    label: "business graph / the PM half",
+    message: "what's still open on the kitchen remodel project?",
+    requires: "business_find",
+  },
+  {
+    label: "business graph / history, in the words a person uses",
+    message: "what's been happening with that roofing customer lately?",
+    requires: "business_timeline",
+  },
   {
     label: "REMOTE pm / server-derived domain",
     message: "which tickets are still open on the tracker?",
