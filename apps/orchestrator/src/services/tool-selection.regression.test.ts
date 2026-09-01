@@ -156,9 +156,20 @@ const TURNS: Turn[] = [
     requires: "business_profile_get",
   },
   {
-    label: "pm / local tracker",
+    // ADR-045 slice D — the same sentence, the same rule, a different tool.
+    // This turn is now the end-to-end proof that the collapse did not make
+    // the tracker unreachable: the sentence matches the `pm` rule, the pm
+    // domain is locally empty, and the write verb arrives only because that
+    // rule also claims `business`. Run it against a DOMAIN_RULES that lost
+    // that claim and it is red — which is the point of keeping it here
+    // rather than only in the unit test.
+    //
+    // Label prefix left as `pm` on purpose: the harness derives its
+    // domain-coverage floor from the prefix, and `business` is already
+    // covered by the opening-hours turn above.
+    label: "pm / local tracker, through the collapsed write verb",
     message: "set up a new project for the kitchen remodel",
-    requires: "pm_create_project",
+    requires: "business_create",
   },
   // ── ADR-045 slice C — the business graph, reached from BOTH vocabularies ──
   //

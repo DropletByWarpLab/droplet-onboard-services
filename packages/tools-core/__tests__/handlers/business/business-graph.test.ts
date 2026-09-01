@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import type { ToolContext } from "../../../src/types.js";
+import { expectOk } from "../../helpers/tool-result.js";
 import businessFind from "../../../src/handlers/business/find.js";
 import businessTimeline from "../../../src/handlers/business/timeline.js";
 
@@ -137,7 +138,7 @@ describe("business_find — searches", () => {
     // page is full, which is wrong exactly when it matters.
     get.mockResolvedValue(res(true, 200, { companies: [apiCompany], total: 137 }));
     const out = await businessFind.handler({ entity: "customer", query: "roof" }, ctx);
-    expect((out.data as { total: number }).total).toBe(137);
+    expect((expectOk(out).data as { total: number }).total).toBe(137);
     expect(get.mock.calls[0][0]).toContain("/api/crm/companies?");
     expect(get.mock.calls[0][0]).toContain("q=roof");
     expect(get.mock.calls[0][0]).toContain("per_page=20");
@@ -157,7 +158,7 @@ describe("business_find — searches", () => {
       }),
     );
     const out = await businessFind.handler({ entity: "customer" }, ctx);
-    const customers = (out.data as { customers: Array<{ synced_from: string | null }> })
+    const customers = (expectOk(out).data as { customers: Array<{ synced_from: string | null }> })
       .customers;
     expect(customers[0]!.synced_from).toBeNull();
   });
@@ -168,7 +169,7 @@ describe("business_find — searches", () => {
     // about to quote to a customer.
     get.mockResolvedValue(res(true, 200, { deals: [apiDeal], total: 1 }));
     const out = await businessFind.handler({ entity: "deal", status: "WON" }, ctx);
-    const deal = (out.data as { deals: Array<{ amount_minor: string; outcome: string }> }).deals[0];
+    const deal = (expectOk(out).data as { deals: Array<{ amount_minor: string; outcome: string }> }).deals[0];
     expect(deal.amount_minor).toBe("9007199254740993");
     expect(typeof deal.amount_minor).toBe("string");
     // Outcome comes from stage.kind — the stage NAME is "Closed — signed",
@@ -210,14 +211,14 @@ describe("business_find — searches", () => {
     // Twenty descriptions is the whole context window.
     get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
     const list = await businessFind.handler({ entity: "work_item" }, ctx);
-    expect((list.data as { work_items: Array<Record<string, unknown>> }).work_items[0]).not.toHaveProperty(
+    expect((expectOk(list).data as { work_items: Array<Record<string, unknown>> }).work_items[0]).not.toHaveProperty(
       "description_html",
     );
 
     vi.clearAllMocks();
     get.mockResolvedValue(res(true, 200, { work_item: apiWorkItem }));
     const one = await businessFind.handler({ entity: "work_item", id: "w1" }, ctx);
-    expect((one.data as { work_item: Record<string, unknown> }).work_item).toHaveProperty(
+    expect((expectOk(one).data as { work_item: Record<string, unknown> }).work_item).toHaveProperty(
       "description_html",
     );
   });
@@ -241,7 +242,7 @@ describe("business_find — the graph edges", () => {
     expect(urls.some((u) => u.includes("/api/crm/contacts?company=c1"))).toBe(true);
     expect(urls.some((u) => u.includes("/api/pm/projects?"))).toBe(true);
 
-    const data = out.data as {
+    const data = expectOk(out).data as {
       contacts: Array<{ name: string; title: string | null; phone: string | null }>;
       projects: Array<{ id: string; name: string }>;
     };
@@ -296,7 +297,7 @@ describe("business_find — the graph edges", () => {
     const urls = get.mock.calls.map((c) => c[0] as string);
     expect(urls.some((u) => u.includes("/api/pm/projects/p1"))).toBe(true);
     expect(urls.some((u) => u.includes("/api/pm/projects/p1/work-items"))).toBe(true);
-    expect((out.data as { work_items: unknown[] }).work_items).toHaveLength(1);
+    expect((expectOk(out).data as { work_items: unknown[] }).work_items).toHaveLength(1);
   });
 });
 
@@ -315,7 +316,7 @@ describe("business_find — the pipeline entity", () => {
       }),
     );
     const out = await businessFind.handler({ entity: "pipeline" }, ctx);
-    const stages = (out.data as { stages: Array<Record<string, unknown>> }).stages;
+    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
     expect(stages[0].total_note).toBe("no amounts entered yet");
     expect(stages[1].total_note).toBe("mixed currencies — not summed");
     expect(stages[2].amount_minor).toBe("250000");
@@ -359,7 +360,7 @@ describe("business_timeline", () => {
           }),
     );
     const out = await businessTimeline.handler({ entity: "work_item", id: "w1" }, ctx);
-    const feed = (out.data as { timeline: Array<{ id: string; kind: string; summary: string }> }).timeline;
+    const feed = (expectOk(out).data as { timeline: Array<{ id: string; kind: string; summary: string }> }).timeline;
     expect(feed.map((e) => e.id)).toEqual(["a2", "cm1", "a1"]);
     expect(feed[0].summary).toBe("state: Todo → In Progress");
     // Tags stripped, entities decoded — the model reads a line, not markup.
@@ -382,7 +383,7 @@ describe("business_timeline", () => {
           }),
     );
     const out = await businessTimeline.handler({ entity: "work_item", id: "w1" }, ctx);
-    expect((out.data as { timeline: unknown[] }).timeline).toHaveLength(1);
+    expect((expectOk(out).data as { timeline: unknown[] }).timeline).toHaveLength(1);
   });
 
   it("caps the MERGED feed, not each source", async () => {
@@ -407,7 +408,7 @@ describe("business_timeline", () => {
           }),
     );
     const out = await businessTimeline.handler({ entity: "work_item", id: "w1", limit: 3 }, ctx);
-    expect((out.data as { timeline: unknown[] }).timeline).toHaveLength(3);
+    expect((expectOk(out).data as { timeline: unknown[] }).timeline).toHaveLength(3);
   });
 
   it("refuses an entity with no feed rather than inventing a route", async () => {

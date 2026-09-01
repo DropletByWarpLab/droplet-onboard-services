@@ -159,11 +159,6 @@ import searchContacts from "./handlers/email/search-contacts.js";
 // WARP-509 — write tools
 // Project creation — completes the write surface: work items could only
 // ever be added to a project a human had already made by hand.
-import pmCreateProject from "./handlers/pm/create-project.js";
-import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
-import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
-import pmAddWorkItemComment from "./handlers/pm/add-work-item-comment.js";
-import pmTransitionWorkItem from "./handlers/pm/transition-work-item.js";
 // WARP-508's five PM read tools are GONE (ADR-045 slice C) — `business_find`
 // serves projects and work items now. The write tools above are untouched.
 
@@ -174,8 +169,6 @@ import pmTransitionWorkItem from "./handlers/pm/transition-work-item.js";
 // ADR-045 slice C removed the five CRM READS; the two write tools stay here
 // until slice D. `crm-orch.ts` survives with them and keeps the money and
 // provenance rules that `handlers/business/_graph.ts` imports.
-import crmLogActivity from "./handlers/crm/log-activity.js";
-import crmMoveDealStage from "./handlers/crm/move-deal-stage.js";
 
 // ERP-connector framework (WARP-1094) — Eaglesoft as provider #1. DB-
 // independent slice: handlers return ERP_NOT_CONNECTED; the live read/write
@@ -195,6 +188,13 @@ import cloudQueryDataset from "./handlers/cloud/query-dataset.js";
 
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
+// ADR-045 slice D — the WRITE half of the tool collapse. Three verbs over
+// the CRM and the tracker together, replacing seven single-purpose tools.
+// All three are Tier-2 (requiresWrite + requiresConfirmation, enforced by
+// the WARP-2305 interceptor; no handler-side prompt).
+import businessCreate from "./handlers/business/create.js";
+import businessUpdate from "./handlers/business/update.js";
+import businessLink from "./handlers/business/link.js";
 // business graph (ADR-045 slice C) — two verbs over one typed graph, replacing
 // ten noun-shaped CRM/PM reads. See handlers/business/find.ts for the full
 // rationale, including why `entity` is an enum and what the fallback is.
@@ -367,15 +367,8 @@ const allTools: Tool[] = [
   // WARP-1425: forget a remembered fact (Tier-2: write + confirmation)
   memoryForget,
   // WARP-509: native PM (write tools — requiresWrite + requiresConfirmation)
-  pmCreateProject,
-  pmCreateWorkItem,
-  pmUpdateWorkItem,
-  pmAddWorkItemComment,
-  pmTransitionWorkItem,
   // ADR-045 slice C: the PM read tools and the CRM read tools were replaced by
   // `business_find` / `business_timeline` (registered under business, below).
-  crmLogActivity,
-  crmMoveDealStage,
   // WARP-1094: ERP-connector (Eaglesoft) — 3 Read-tier + 1 Write-tier
   erpGetScheduleToday,
   erpFindPatient,
@@ -387,6 +380,10 @@ const allTools: Tool[] = [
   cloudQueryDataset,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
+  // ADR-045 slice D: business writes (Tier-2 — write + confirmation)
+  businessCreate,
+  businessUpdate,
+  businessLink,
   // ADR-045 slice C: the business graph (both read-only Tier 1)
   businessFind,
   businessTimeline,

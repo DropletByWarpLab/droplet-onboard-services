@@ -56,11 +56,31 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     // network is the first surface in the IA; pin it so the filter order
     // doesn't reshuffle under the user without a test catching it.
     expect(TOOL_DOMAINS[0]).toBe("network");
-    // every domain in the list is actually used by at least one tool
+    // Every domain in the list is used by at least one LOCAL tool — except
+    // the ones below, which exist only as a landing slot for a REMOTE catalog.
+    //
+    // ADR-045 collapsed every `pm_*` and `crm_*` tool into `business_*`, so
+    // both domains now hold zero local tools. They are kept rather than
+    // deleted because a domain is also the ROUTING vocabulary: a remote
+    // Atlassian tracker registers into `pm` (WARP-2316) and a remote HubSpot
+    // catalog into `crm`, and `EXCLUDED_FROM_CHAT_TOOLS` names local tools
+    // only, so the domain's DOMAIN_RULES entry is the ONLY route by which such
+    // a tool becomes selectable. Deleting them would un-reach a connected
+    // integration with nothing going red — the WARP-2058 defect, re-shipped.
+    //
+    // Pinned as an exact set, in this file's own "records exactly which…"
+    // idiom: an empty domain must be a decision somebody wrote down, not a
+    // leftover. If this set GROWS, either the domain has a remote consumer
+    // worth naming here, or its rule should be dropped.
+    const REMOTE_ONLY_DOMAINS = ["crm", "pm"];
     const used = new Set(TOOL_CATALOG.map((t) => t.domain));
-    for (const d of TOOL_DOMAINS) {
-      expect(used.has(d), `domain ${d} is declared but unused`).toBe(true);
-    }
+    const unused = TOOL_DOMAINS.filter((d) => !used.has(d)).sort();
+    expect(
+      unused,
+      "a domain with no local tools renders an empty filter chip on /tools. " +
+        "Either give it a tool, drop it from DOMAIN_GROUPS, or add it to " +
+        "REMOTE_ONLY_DOMAINS with the reason it has to survive.",
+    ).toEqual(REMOTE_ONLY_DOMAINS);
   });
 
   it("classifies known anchor tools into the expected domain", () => {
@@ -73,10 +93,13 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     expect(byName.get("run_scene")?.domain).toBe("smart-home");
     expect(byName.get("email_search")?.domain).toBe("email");
     expect(byName.get("memory_recall")?.domain).toBe("memory");
-    // ADR-045 slice C — `pm_list_projects` moved into the business graph, so
-    // the pm anchor is a write tool now; the reads it used to anchor are
-    // anchored on `business` below.
-    expect(byName.get("pm_create_project")?.domain).toBe("pm");
+    // ADR-045 — `pm` has no local anchor left to name. Slice C moved its
+    // reads and slice D its writes into `business_*`; the domain survives for
+    // remote catalogs only (see REMOTE_ONLY_DOMAINS above). Asserting its
+    // EMPTINESS is the anchor now, so this test still fails if a `pm_*` tool
+    // comes back without someone revisiting that decision.
+    expect(TOOL_CATALOG.filter((t) => t.domain === "pm")).toEqual([]);
+    expect(TOOL_CATALOG.filter((t) => t.domain === "crm")).toEqual([]);
     expect(byName.get("get_system_health")?.domain).toBe("system");
     expect(byName.get("business_profile_get")?.domain).toBe("business");
     expect(byName.get("business_find")?.domain).toBe("business");

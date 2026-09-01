@@ -204,20 +204,24 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // ADR-045 slice C — the five PM reads moved to `business_find`. The domain
   // keeps its write tools, so the `projects` module's `toolDomains: ["pm"]`
   // gate still resolves (module-registry.ts's unknown-domain invariant).
-  pm: [
-    "pm_create_project",
-    "pm_create_work_item",
-    "pm_update_work_item",
-    "pm_add_work_item_comment",
-    "pm_transition_work_item",
-  ],
+  // ADR-045 — EMPTY, and deliberately still declared. Slice C moved the five
+  // PM reads into `business_find`/`business_timeline`; slice D moved the five
+  // PM writes into `business_create`/`business_update`. The domain survives
+  // because it is the slot a REMOTE tracker catalog (Atlassian, WARP-2316)
+  // registers into, and its DOMAIN_RULES entry is how such a tool becomes
+  // selectable — the exclusion list names LOCAL tools only.
+  pm: [],
   // WARP-2581 — money at rest. Excluded from the chat pool (see
   // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
   // so it is MCP- and API-reachable and never advertised on a chat turn.
   money: ["money_list_open_documents"],
   // ADR-045 slice C — likewise the five CRM reads. The two writes stay until
   // slice D, which is what keeps `crm`'s module gate pointing at something.
-  crm: ["crm_log_activity", "crm_move_deal_stage"],
+  // ADR-045 — EMPTY for the same reason as `pm` above: slice C took the five
+  // reads, slice D took `crm_log_activity` (now `business_create({entity:"note"})`)
+  // and `crm_move_deal_stage` (now `business_update({entity:"deal", state})`).
+  // Kept as the landing slot for a remote HubSpot catalog.
+  crm: [],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
@@ -233,7 +237,17 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // `/api/crm/*` and `/api/pm/projects*`), and `_graph.ts`'s `businessError`
   // turns that 404 into a sentence naming the switch — the same bargain
   // `cloud_query_dataset` makes with `DatasetNotServedError`.
-  business: ["business_profile_get", "business_find", "business_timeline"],
+  // ADR-045 — `business` is now the ONE door to the CRM and the tracker
+  // alike, reads and writes together. That is the point of the collapse: the
+  // owner does not have to know which of two vocabularies their question is in.
+  business: [
+    "business_profile_get",
+    "business_find",
+    "business_timeline",
+    "business_create",
+    "business_update",
+    "business_link",
+  ],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   system: [
@@ -403,14 +417,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   email_send: "Send an email you've approved",
   search_contacts: "Find people you email, with their addresses",
   // Project tracker
-  pm_create_project: "Start a new project in your project tracker",
-  pm_create_work_item: "Add a new task to your project tracker",
-  pm_update_work_item: "Update the details of a task",
-  pm_add_work_item_comment: "Add a comment to a task",
-  pm_transition_work_item: "Move a task to a new status, like done",
   // CRM (customers, deals, pipeline) — reads moved to the business graph
-  crm_log_activity: "Add a call or note to a customer's history (you approve it first)",
-  crm_move_deal_stage: "Move a deal to a different stage (you approve it first)",
   // ERP (Eaglesoft practice-management integration)
   erp_get_schedule_today: "See the day's appointment schedule from your practice software",
   erp_find_patient: "Look up a patient in your practice software",
@@ -426,6 +433,15 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   business_find:
     "Look up a customer, a contact, a deal, a project, a job, or your sales pipeline",
   business_timeline: "See what has happened recently on a customer, deal or job",
+  // ADR-045 slice D. Home copy, not the agent-facing description (ADR-002):
+  // it names what the OWNER gets, and says the quiet part — these three ask
+  // first, every time, because they change the record.
+  business_create:
+    "Add a customer, a deal, a project, a task or a note to the record (you approve it first)",
+  business_update:
+    "Change a customer, a deal or a task — including moving it to a new stage or status (you approve it first)",
+  business_link:
+    "Connect two things to each other, like a deal to the job that delivers it (you approve it first)",
   // Team chat (Messages)
   team_chat_send_message: "Send a Messages chat to someone for you (you approve it first)",
   team_chat_send_meeting_invite:

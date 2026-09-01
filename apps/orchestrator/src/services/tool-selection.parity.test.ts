@@ -180,9 +180,14 @@ describe("the crm domain is reachable (WARP-2546)", () => {
       });
       expect(selected.has("business_find")).toBe(true);
       expect(selected.has("business_timeline")).toBe(true);
-      // ...and the CRM domain is still opened, which is what keeps
-      // crm_log_activity ("log that I called them") in reach on the same turn.
-      expect([...selected].filter((n) => n.startsWith("crm_")).length).toBeGreaterThan(0);
+      // ADR-045 slice D — and the WRITE half is reachable on the same turn.
+      // This replaces a `crm_` prefix count: after the collapse there is no
+      // `crm_*` tool left to count, and "log that I called them" is
+      // `business_create({entity:"note"})` now. Asserting the verb rather than
+      // the prefix is what keeps this measuring the capability instead of the
+      // naming convention.
+      expect(selected.has("business_create")).toBe(true);
+      expect(selected.has("business_update")).toBe(true);
     });
   }
 
@@ -194,7 +199,7 @@ describe("the crm domain is reachable (WARP-2546)", () => {
       messages: [{ role: "user", content: "turn the kitchen lights off" }],
       pool: POOL,
     });
-    expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+    expect([...selected].filter((n) => n.startsWith("business_"))).toEqual([]);
     expect(selected.has("business_find")).toBe(false);
     expect(selected.has("business_timeline")).toBe(false);
   });
@@ -207,7 +212,7 @@ describe("the crm domain is reachable (WARP-2546)", () => {
       messages: [{ role: "user", content: "I was wondering about the weather" }],
       pool: POOL,
     });
-    expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+    expect([...selected].filter((n) => n.startsWith("business_"))).toEqual([]);
   });
 
   it.each([
@@ -226,7 +231,7 @@ describe("the crm domain is reachable (WARP-2546)", () => {
       messages: [{ role: "user", content: message }],
       pool: POOL,
     });
-    expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+    expect([...selected].filter((n) => n.startsWith("business_"))).toEqual([]);
     // ADR-045 slice C — the merged business rule is where `won|win|lost` would
     // be re-added, so it carries the same three negatives.
     expect(selected.has("business_find")).toBe(false);
@@ -262,28 +267,27 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     locks: false,
   });
 
-  // Read the CRM domain off the catalog rather than hardcoding "crm" — the
-  // catalog is the thing under test's own source of truth.
-  const CRM_DOMAIN = TOOL_CATALOG.find((t) => t.name.startsWith("crm_"))?.domain;
-  const CRM_IN_POOL = POOL.filter((n) => n.startsWith("crm_"));
+  // ADR-045 — re-pointed from `crm` to `business`. The collapse emptied the
+  // `crm` domain of local tools entirely, so `TOOL_CATALOG.find(name starts
+  // with "crm_")` now returns undefined and this whole block would have
+  // measured nothing while looking green-adjacent. The domain that carries the
+  // customer question is `business`, so that is the one whose scope narrowing
+  // has to be proven. Read off the catalog rather than hardcoded, for the same
+  // reason as before: the catalog is the thing under test's own source of truth.
+  const BUSINESS_DOMAIN = TOOL_CATALOG.find((t) => t.name === "business_find")?.domain;
+  const BUSINESS_IN_POOL = POOL.filter((n) => n.startsWith("business_"));
 
-  it("the CRM tools this fixture depends on are actually in the chat pool", () => {
-    // Guards the two tests below against passing because CRM left the pool.
-    expect(CRM_DOMAIN).toBeDefined();
-    expect(CRM_IN_POOL.length).toBeGreaterThan(0);
-
-    // ADR-045 slice C — and this half is why the assertion above was not
-    // enough. The collapse moved every CRM READ into `business_find`, so the
-    // `crm` domain now holds writes only. A scope that grants `crm` for read
-    // and not for write narrows this domain to ZERO, and the positive case
-    // below would have failed while looking like the scope filter was broken.
-    // Recomputed rather than asserted as a literal, so the day a CRM read
-    // comes back this simply stops requiring the write grant.
-    const writeOnly = CRM_IN_POOL.every((n) => TOOLS.get(n)?.requiresWrite === true);
+  it("the business tools this fixture depends on are actually in the chat pool", () => {
+    // Guards the two tests below against passing because the domain left the
+    // pool — the failure mode where a scope test proves nothing because there
+    // was nothing to narrow.
+    expect(BUSINESS_DOMAIN).toBeDefined();
+    expect(BUSINESS_IN_POOL.length).toBeGreaterThan(0);
+    // At least one READ, so a read-only grant is a meaningful scope to test.
     expect(
-      writeOnly,
-      "the crm domain has a read tool again — the positive case below can drop " +
-        "its writeDomains grant",
+      BUSINESS_IN_POOL.some((n) => TOOLS.get(n)?.requiresWrite === false),
+      "the business domain is write-only — the positive case below needs a " +
+        "writeDomains grant to mean anything",
     ).toBe(true);
   });
 
@@ -302,25 +306,20 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
       messages: [{ role: "user", content: "what deals are in the pipeline?" }],
       pool: narrowedPool,
     });
-    expect([...selected].filter((n) => n.startsWith("crm_"))).toEqual([]);
+    expect([...selected].filter((n) => n.startsWith("business_"))).toEqual([]);
   });
 
   it("the SAME question does advertise CRM tools when the scope allows it", () => {
     // Without this, the test above passes for a board that advertises nothing
     // at all, and the scope filter could be deleted again unnoticed.
-    // The write grant is not decoration: since ADR-045 slice C the `crm`
-    // domain contains only write tools (the reads are `business_find` now), so
-    // a read-only grant admits nothing and this would prove nothing. The
-    // assertion above pins that reasoning to the live registry rather than to
-    // this comment.
-    const scope = scopeOf([CRM_DOMAIN!], [CRM_DOMAIN!]);
+    const scope = scopeOf([BUSINESS_DOMAIN!]);
     const narrowedPool = narrowToolNamesToScope(POOL, scope);
     const selected = effectiveAdvertisedToolNames({
       mode: "domains",
       messages: [{ role: "user", content: "what deals are in the pipeline?" }],
       pool: narrowedPool,
     });
-    expect([...selected].filter((n) => n.startsWith("crm_")).length).toBeGreaterThan(0);
+    expect([...selected].filter((n) => n.startsWith("business_")).length).toBeGreaterThan(0);
   });
 
   it("the route narrows the pool by scope before deriving the advertised set", () => {

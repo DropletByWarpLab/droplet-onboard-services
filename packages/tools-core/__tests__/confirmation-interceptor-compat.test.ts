@@ -80,11 +80,16 @@ function argsFor(tool: Tool): Record<string, unknown> {
 }
 
 describe("interceptor compatibility across every confirming tool (WARP-2322)", () => {
-  it("finds the confirming tools by flag, and there are at least 37", () => {
-    // A floor, not an equality: a 38th confirming tool must be covered
+  it("finds the confirming tools by flag, and there are at least 36", () => {
+    // A floor, not an equality: a 37th confirming tool must be covered
     // automatically, but silently DROPPING the flag from tools to make a
     // test pass must fail here.
-    expect(CONFIRMING.length).toBeGreaterThanOrEqual(37);
+    //
+    // 37 → 36 by ADR-045 slice D: seven confirming tools collapsed into
+    // three (40 − 7 + 3). The three replacements carry no confirmation code
+    // of their own, which is the point — the two-phase flow asserted below
+    // runs over them purely on the strength of the flag.
+    expect(CONFIRMING.length).toBeGreaterThanOrEqual(36);
   });
 
   it("splits into two non-empty, exhaustive partitions by declared owner (WARP-2472)", () => {

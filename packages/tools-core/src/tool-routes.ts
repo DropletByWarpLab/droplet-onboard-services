@@ -309,16 +309,16 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("memory_forget"), // ctx.prisma
 
   // ── pm (native, orchestrator /api/pm/* via callOrch) ────────────────────
-  { tool: "pm_create_project", client: "orchestrator", hops: [admit("post", "/api/pm/projects")] },
-  { tool: "pm_create_work_item", client: "orchestrator", hops: [admit("post", "/api/pm/projects/:id/work-items")] },
-  { tool: "pm_update_work_item", client: "orchestrator", hops: [admit("patch", "/api/pm/work-items/:id")] },
-  { tool: "pm_add_work_item_comment", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/comments")] },
-  { tool: "pm_transition_work_item", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/transition")] },
+  // ADR-045 slice D — the pm write rows moved to the `business_*` block
+  // below, which declares the same hops from one tool each.
 
   // WARP-2546 — CRM. ADR-045 slice C removed the five read rows; the two
   // write rows stay until slice D.
-  { tool: "crm_log_activity", client: "orchestrator", hops: [admit("post", "/api/crm/activities")] },
-  { tool: "crm_move_deal_stage", client: "orchestrator", hops: [admit("post", "/api/crm/deals/:id/stage")] },
+  // ADR-045 slice D — `crm_log_activity` → `business_create({entity:"note"})`
+  // and `crm_move_deal_stage` → `business_update({entity:"deal", state})`.
+  // Note the second one no longer needs `POST /api/crm/deals/:id/stage` at
+  // all: since WARP-2579 the PATCH applies the move inside the same
+  // transaction as the field update, STAGE_CHANGE timeline row included.
 
   // ── erp (ERP_NOT_CONNECTED stubs — no ctx.http hop yet) ─────────────────
   none("erp_get_schedule_today"),
@@ -340,6 +340,46 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
 
   // ── business ────────────────────────────────────────────────────────────
   none("business_profile_get"), // ctx.prisma
+
+  // ADR-045 slice D — the write verbs. `business_create` dispatches to SIX
+  // routes across two back ends, so every one is declared: the drift gate
+  // checks the LIST, and an undeclared hop is how a tool ships with a route
+  // the mcp principal cannot reach.
+  //
+  // Two routes are deliberately ABSENT because two entities are:
+  // `POST /api/crm/companies/:id/contacts` and `PATCH /api/pm/projects/:id`
+  // are both `requireRole(...WRITE)` and do NOT admit `_service:mcp`, so
+  // `contact` is not a creatable entity and `project` is not an updatable
+  // one. Adding either branch would ship a 403 with a schema in front of it.
+  {
+    tool: "business_create",
+    client: "orchestrator",
+    hops: [
+      admit("post", "/api/crm/companies"),
+      admit("post", "/api/crm/deals"),
+      admit("post", "/api/pm/projects"),
+      admit("post", "/api/pm/projects/:id/work-items"),
+      admit("post", "/api/crm/activities"),
+      admit("post", "/api/pm/work-items/:id/comments"),
+    ],
+  },
+  {
+    tool: "business_update",
+    client: "orchestrator",
+    hops: [
+      admit("patch", "/api/crm/companies/:id"),
+      admit("patch", "/api/crm/deals/:id"),
+      admit("patch", "/api/pm/work-items/:id"),
+    ],
+  },
+  // One hop, because both live edges are columns on the DEAL
+  // (`CrmDeal.projectId`, `CrmDeal.companyId` — WARP-2117). The other seven
+  // edges in LINK_EDGES are `not_built` and make no call at all.
+  {
+    tool: "business_link",
+    client: "orchestrator",
+    hops: [admit("patch", "/api/crm/deals/:id")],
+  },
 
   // ADR-045 slice C — the business graph. `business_find` dispatches a
   // different call per `entity`, and on `entity:"customer"` with an `id` it

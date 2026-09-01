@@ -74,10 +74,21 @@
  *     are excluded here. The rule therefore advertises nothing on any turn.
  *     A tool unreachable for two reasons at once; this is the documentation
  *     that AC asks for.
- *   • `pm` — WARP-2058 added the rule; nine of the ten local `pm_*` tools are
- *     excluded here, but `pm_create_project` is NOT, so the rule does real
- *     work today. WARP-2058's own comment ("not one pm_* tool was ever
- *     advertised") is no longer accurate.
+ *   • `pm` — ADR-045 slice D emptied it. Every local pm WRITE collapsed into
+ *     `business_create` / `business_update`, and the five surviving reads
+ *     were already excluded, so no local `pm_*` tool is in the pool and the
+ *     rule advertises nothing LOCAL — the second domain in that state after
+ *     `notifications`, and documented here for the same reason.
+ *
+ *     The rule is RETAINED, and not out of sentiment. Two jobs survive the
+ *     emptying: it is the route by which a remote Atlassian `pm` catalog
+ *     becomes selectable (WARP-2316 — this list names LOCAL tools, so a
+ *     remote tool never passes through it), and it now also claims the
+ *     `business` domain, which is where the writes went. "add a ticket for
+ *     the broken dishwasher" is a pm sentence that must reach
+ *     `business_create`, and the pm rule is what carries it there.
+ *     WARP-2058's comment ("not one pm_* tool was ever advertised") is
+ *     accurate again, for a completely different reason.
  *   • `switch`, `erp` — fully excluded AND ruleless. Coherent: no rule
  *     promises something the pool cannot deliver.
  *
@@ -120,25 +131,20 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "set_port_poe",
   "detect_wan_port",
   "setup_camera_ports",
-  // crm: the pipeline WRITE only. WARP-2546 put the CRM reads and
-  // crm_log_activity in chat on purpose — "who have we not chased?",
-  // "log that I called them" are the point of the suite. Moving a deal
-  // between stages is a drag on the pipeline board WARP-2545 shipped, and
-  // it is what the forecast reads.
+  // ADR-045 — the `crm_*` and `pm_*` families are gone from the registry
+  // entirely (slice C took the reads, slice D the writes), so `crm_move_deal_stage`
+  // and every `pm_*` name that used to sit here is unregistered and would be
+  // inert. They are removed rather than left: dead entries in the one list a
+  // reader consults to answer "can chat do X" are exactly how WARP-2058's
+  // comment went stale.
   //
-  // WARP-2547 — this entry carried a second, budget-shaped reason
-  // ("excluded to keep the full-pool tripwire green as the registry grew
-  // past it"). That reason is retired: the tripwire no longer works that
-  // way. The POLICY reason above stands on its own, so the name stays —
-  // but it now stays for one reason, not one-and-a-half.
+  // `business_find` and `business_timeline` are DELIBERATELY not listed. That
+  // is the decision site 7 asks for — "who have we not chased?" is the
+  // sentence the whole CRM suite exists for, and a tool only the dashboard can
+  // reach cannot answer it. `business_create` and `business_update` stay in
+  // chat for the same reason: an assistant that can describe a pipeline it
+  // cannot move is the state this collapse exists to end.
   //
-  // ADR-045 slice C — the five CRM READS are gone from the registry;
-  // `business_find` and `business_timeline` answer those questions from the
-  // `business` domain and are DELIBERATELY not listed here. That was the
-  // decision site 7 asks for: "who have we not chased" is the sentence the
-  // whole suite exists for, and a tool only the dashboard can reach cannot
-  // answer it.
-  "crm_move_deal_stage",
   // WARP-2581 — money. Reachable over /api/money and MCP.
   //
   // ⚠ WARP-2547 — this is the one entry in this list with NO policy reason.
@@ -155,21 +161,33 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   // should delete this line rather than re-derive the argument — but do not
   // cite budget as the reason it is still here, because that reason is spent.
   "money_list_open_documents",
+  // ADR-045 slice D — `business_link`, and the reason is POLICY, not budget.
+  //
+  // An earlier draft of this entry argued from the pool ceiling, the way
+  // `crm_move_deal_stage` used to. WARP-2547 spent that argument for every
+  // entry in this list at once (see the note above), and re-using it here
+  // would be citing a reason that no longer exists.
+  //
+  // The reason that survives is the one the list is for: only two of this
+  // tool's edges are live on this box (deal→project and deal→customer, both
+  // columns on CrmDeal); the rest return a self-describing refusal until
+  // their tables land. A verb whose dominant runtime behaviour is a refusal
+  // is config-heavy power-user fare — the same category as `create_scene` and
+  // `set_detection_zones` above it — and belongs to the dashboard and
+  // external MCP clients, which still get it.
+  //
+  // REVISIT WHEN a LINK_EDGES row flips to `live`: at that point it is doing
+  // real work on a chat turn and the policy reason expires too.
+  "business_link",
   // erp vertical suite (external MCP / dedicated UI)
   "erp_get_schedule_today",
   "erp_find_patient",
   "erp_get_ar_summary",
   "erp_schedule_appointment",
-  // pm vertical suite (external MCP / dedicated UI). ADR-045 slice C removed
-  // the five pm_* READS from the registry entirely, so their names here became
-  // inert; dropped, because five dead entries in the one list a reader
-  // consults to answer "can chat do X" is how WARP-2058's comment went stale.
-  // Project and work-item READS are reachable from chat now, through
-  // `business_find`. The WRITES below stay out.
-  "pm_create_work_item",
-  "pm_update_work_item",
-  "pm_add_work_item_comment",
-  "pm_transition_work_item",
+  // (The pm vertical suite's names lived here. See the ADR-045 note above the
+  // `business_link` entry: every one of them is unregistered now, and project
+  // and work-item work is reachable through `business_find` /
+  // `business_create` / `business_update` from the `business` domain.)
   // developer data utilities (WARP-899/900/901 — MCP-client fare)
   "encode_text",
   "decode_text",

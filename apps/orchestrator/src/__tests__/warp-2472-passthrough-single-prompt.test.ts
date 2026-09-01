@@ -249,16 +249,26 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // and neither is a pass-through — the roster below is unchanged, which is
     // the distinction this count exists to keep visible.
     //
-    // 41 as of WARP-2669: `delete_file`. Flag-gated by the interceptor, no
-    // `confirmed` boolean in its schema (so only a human-minted token gets
-    // through), and not a pass-through — the roster below is unchanged, which
-    // is the distinction this count exists to keep visible.
+    // 37, and this is the first time the number has gone DOWN.
     //
-    // RECONCILIATION NOTE: PR #1985 (WARP-2664) takes this same line to 42 for
-    // `organize_files` + `delete_files`. Both changes are independent and both
-    // are correct; whichever lands second must resolve the conflict to 43, not
-    // pick a side.
-    expect(confirming).toHaveLength(41);
+    // It reached 41 on stage with `delete_file` (WARP-2669). ADR-045 slice D
+    // then removed SEVEN confirming tools (`pm_create_project`,
+    // `pm_create_work_item`, `pm_update_work_item`, `pm_transition_work_item`,
+    // `pm_add_work_item_comment`, `crm_log_activity`, `crm_move_deal_stage`)
+    // and added THREE (`business_create`, `business_update`, `business_link`):
+    // 41 − 7 + 3 = 37. The arithmetic is written out because a SHRINKING count
+    // is exactly what a dropped flag looks like, and the two must stay
+    // tellable apart — a tool that quietly lost `requiresConfirmation` would
+    // move this number the same direction.
+    //
+    // (The reconciliation note this line used to carry, about PR #1985 taking
+    // it to 42 for `organize_files` + `delete_files`, is resolved: those tools
+    // are not in the registry at this SHA. If they land later the same rule
+    // applies — add their delta to 37, do not pick a side.)
+    //
+    // The pass-through roster below is again unchanged: none of the ten
+    // touched tools relays a 202.
+    expect(confirming).toHaveLength(37);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
