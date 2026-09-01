@@ -23,6 +23,7 @@ import {
   Film,
   FlaskConical,
   FolderKanban,
+  Receipt,
   FolderLock,
   FolderOpen,
   Globe,
@@ -91,6 +92,8 @@ export type NavItem = {
     // Before ADR-044 it had `navHrefs: []`, so there was no nav entry to gate
     // and no reason for the union to name it.
     | "crm"
+    // WARP-2581 — /money is the money module's own door, on the same terms.
+    | "money"
     | "knowledge"
     | "docs"
     | "cameras"
@@ -261,6 +264,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // module is off, so the nav never advertises a surface the box won't
       // serve.
       { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
+      // WARP-2581 — what the business is owed and what it owes, landed from a
+      // connected ledger. Gated on its own module: a box that keeps its books
+      // somewhere else has no /money entry at all rather than an empty page.
+      { href: "/money", label: "Money", icon: Receipt, requiresModule: "money" },
     ],
   },
   {
