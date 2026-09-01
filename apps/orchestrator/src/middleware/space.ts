@@ -75,6 +75,59 @@ export function rightMeets(actual: DepartmentRight, min: DepartmentRight): boole
   return RIGHT_RANK[actual] >= RIGHT_RANK[min];
 }
 
+/**
+ * WARP-2585 — every ACTIVE department this caller may READ, as one query.
+ *
+ * The same truth table as `checkSpaceAccess(..., "reader")`, read in bulk
+ * rather than per subject. It exists because a LISTING that hides rows is not
+ * a denial: `checkSpaceAccess` audits every refusal (`recordAccessDenied` →
+ * ActivityRow), so calling it per row would emit one warn row per hidden
+ * document per page load and drown the audit trail in non-events. It also
+ * turns an N-row page into 1 query instead of N.
+ *
+ * Two readers of one table drift, so the equivalence is PINNED across the
+ * role × membership matrix in `__tests__/entity-link.pg.test.ts`. If you change
+ * the rules above, that test is what tells you this went stale.
+ *
+ * Deliberately NOT for gating a single known department — use
+ * `checkSpaceAccess` there, so the denial IS audited. This answers only "which
+ * of these may I show at all".
+ *
+ * `caller.id` is the LOCAL `User.id` UUID, never an NC username or a service
+ * principal string — the same contract `SpaceAccessCaller` carries.
+ */
+export async function readableDepartmentIdsFor(
+  prisma: PrismaClient,
+  caller: SpaceAccessCaller,
+): Promise<ReadonlySet<string>> {
+  if (caller.role === "owner" || caller.role === "admin") {
+    // Audited see-all is an ALLOWED bypass in checkSpaceAccess, so it must be
+    // an allowed bypass here too. The ActivityRow belongs to a real entry into
+    // a space, not to a list that happened to include one.
+    const all = await prisma.department.findMany({
+      where: { state: "active" },
+      select: { id: true },
+    });
+    return new Set(all.map((d) => d.id));
+  }
+
+  // family and guest alike: membership decides, and `reader` is the floor of
+  // the rights ladder so `rightMeets(right, "reader")` holds for every right —
+  // which is also why the guest-write branch of checkSpaceAccess has no
+  // counterpart here. `removing` is a committed revocation whose Nextcloud
+  // push has not converged; treating it as absent is what makes "policy access
+  // dies at commit" true.
+  const memberships = await prisma.departmentMembership.findMany({
+    where: {
+      userId: caller.id,
+      syncState: { not: "removing" },
+      department: { state: "active" },
+    },
+    select: { department: { select: { id: true } } },
+  });
+  return new Set(memberships.map((m) => m.department.id));
+}
+
 // ── Space-token parsing ─────────────────────────────────────────────
 
 const uuidSchema = z.string().uuid();
