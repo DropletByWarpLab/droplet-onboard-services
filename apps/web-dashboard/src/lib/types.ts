@@ -2646,7 +2646,48 @@ export interface ToolCatalogResponse {
  */
 export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 
-export interface PendingComposerPayload {
+/**
+ * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
+ * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
+ * contract and change together.
+ *
+ * Declared HERE rather than in api.ts because the dependency runs api.ts ->
+ * types.ts, and the hand-off payload below needs the business half of it.
+ */
+export type ContextPinKind =
+  | "folder"
+  | "file"
+  | "email_thread"
+  | "camera"
+  | "camera_window"
+  | "customer"
+  | "deal"
+  | "project"
+  | "work_item";
+
+/** The kinds whose `ref` is a RECORD ID rather than a path or a device name.
+ *  These are the ones the orchestrator resolves to a display name. */
+export type BusinessContextPinKind = "customer" | "deal" | "project" | "work_item";
+
+/**
+ * WARP-2582 — how the orchestrator reports a business pin's target on GET
+ * /api/llm/:sessionId/pins. An EXPLICIT enum, so a client never has to infer
+ * "deleted" from a null label.
+ *
+ * `unavailable` means the caller may not read this kind at all (the module is
+ * off, or their AccessRole does not grant the domain). It is shown in the
+ * Context panel only so the pin can be removed; it is never rendered into the
+ * system prompt.
+ */
+export type ContextPinTargetState = "active" | "archived" | "missing" | "unavailable";
+
+export interface ContextPinTarget {
+  state: ContextPinTargetState;
+  label: string | null;
+  sublabel: string | null;
+}
+
+export interface PendingComposerToolPayload {
   kind: "tool";
   /** Registry tool name, e.g. `block_network_device`. Identity for the chip. */
   toolName: string;
@@ -2658,6 +2699,32 @@ export interface PendingComposerPayload {
   /** Plain-language starter line dropped into the composer for the user to edit. */
   seedText: string;
 }
+
+/**
+ * WARP-2582 — the record hand-off from /customers, /projects and the CRM
+ * record drawer. The second seed source WARP-829's `kind` discriminant was
+ * built to allow.
+ *
+ * It carries BOTH halves for one reason: context pins are per-session and a
+ * session id does not exist until the first turn mints one. So `seedText`
+ * names the record on turn 1, and `pin` is applied once the id appears and
+ * covers every turn after. Neither half auto-sends.
+ *
+ * `pin` is `null` for a LIST-scoped action ("Ask AI about your customers") —
+ * a pin needs a `ref` and a list has none. Explicit null rather than an
+ * absent field, so "nothing to pin" is a stated case and not an oversight.
+ */
+export interface PendingComposerPinPayload {
+  kind: "pin";
+  /** Display name — the chip label. Never sent as `ref`. */
+  label: string;
+  pin: { kind: BusinessContextPinKind; ref: string } | null;
+  seedText: string;
+}
+
+export type PendingComposerPayload =
+  | PendingComposerToolPayload
+  | PendingComposerPinPayload;
 
 /* ─────────────────────── Client-app downloads ─────────────────────── */
 

@@ -20,6 +20,7 @@ import "./projects.css";
 import { PmIcon } from "@/components/projects/icons";
 import { PeopleContext } from "@/components/projects/bits";
 import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
+import { stageRecordPinHandoff } from "@/lib/pin-handoff";
 import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import { isOverdue } from "@/components/projects/config";
 import {
@@ -180,7 +181,25 @@ function ProjectsWorkspace(): JSX.Element {
       </>
     ) : (
       <>
-        <Link className="btn" href="/chat">
+        {/* WARP-2582 — record-scoped, and `project` is in hand here, so this
+            hands over an identity instead of a bare navigation: the seed line
+            names the project on turn 1 and the pin scopes every turn after.
+            Note the honest limit — pm_list_projects / pm_get_work_item are in
+            EXCLUDED_FROM_CHAT_TOOLS, so a project pin scopes retrieval and
+            names the record; it does not unlock a PM read tool. */}
+        <Link
+          className="btn"
+          href="/chat"
+          onClick={() => {
+            if (project) {
+              stageRecordPinHandoff({
+                kind: "project",
+                id: project.id,
+                name: project.name,
+              });
+            }
+          }}
+        >
           <PmIcon name="msg" size={14} /> Ask AI about this project
         </Link>
         {!readOnly && project && (

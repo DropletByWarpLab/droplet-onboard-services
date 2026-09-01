@@ -76,6 +76,9 @@
  */
 import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
+// WARP-2582 — the pin block's domains. `context-pin-prompt` imports nothing
+// but a tools-core type, so this direction cannot cycle.
+import { pinnedToolDomainsFromMessages } from "./context-pin-prompt.js";
 
 export type ToolSelectionMode = "off" | "domains";
 
@@ -436,12 +439,24 @@ export function selectAdvertisedTools(opts: {
   conversationToolNames: string[];
   /** WARP-2443 — runtime-registered tools with no TOOL_CATALOG entry. */
   runtimeTools?: readonly RuntimeToolDescriptor[];
+  /**
+   * WARP-2582 — domains admitted for a reason that is not the SENTENCE.
+   *
+   * The relevance rules read the last user message, and a context pin is not
+   * one. So "summarise the last month" with a customer pinned matched no rule,
+   * the `crm` domain went unadvertised, and the model was handed a customer id
+   * with no tool to spend it on. Seeded into the same set the rules write to,
+   * so a pin's domain behaves exactly like a matched one — admitted WHOLE,
+   * still filtered by `pool`, and therefore still unable to widen past the
+   * RBAC/chat-scope ceiling this layer must never breach.
+   */
+  extraDomains?: readonly ToolDomain[];
 }): { advertised: string[]; matchedDomains: ToolDomain[] } {
   if (opts.mode === "off") {
     return { advertised: opts.pool, matchedDomains: [] };
   }
   const runtimeDomains = indexRuntimeDomains(opts.runtimeTools);
-  const domains = new Set<ToolDomain>();
+  const domains = new Set<ToolDomain>(opts.extraDomains ?? []);
   for (const rule of DOMAIN_RULES) {
     if (rule.pattern.test(opts.userMessage)) {
       for (const d of rule.domains) domains.add(d);
@@ -550,6 +565,15 @@ export function effectiveAdvertisedToolNames(opts: {
     pool: [...opts.pool],
     conversationToolNames: conversationToolNamesFor(opts.priorToolNames, opts.messages),
     runtimeTools: opts.runtimeTools,
+    // WARP-2582 — derived HERE, from `messages`, rather than passed in by each
+    // caller. That is the whole reason it is safe: the pin block is spliced
+    // onto `agentMessages`, and `agentMessages` is what BOTH routes/llm.ts
+    // (budget estimate) and llm-agent.service.ts (wire payload) hand in as
+    // `messages`. A new PARAMETER would have needed both sites to pass it and
+    // would have re-opened the WARP-2552 split the moment one of them didn't.
+    // Deriving it inside the one shared function makes the parity invariant
+    // structural instead of a convention.
+    extraDomains: pinnedToolDomainsFromMessages(opts.messages),
   });
   return new Set(advertised);
 }

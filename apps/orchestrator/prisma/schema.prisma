@@ -210,17 +210,46 @@ model ContextPin {
   addedAt   DateTime       @default(now())
 
   @@index([sessionId, addedAt])
+  /// WARP-2582 — one pin per record per thread. The record-drawer "Ask AI
+  /// about this customer" action makes a duplicate ONE CLICK, and a duplicate
+  /// is not cosmetic: it spends the pin block's char budget twice on every
+  /// turn thereafter. All three columns are NOT NULL, which is what makes this
+  /// safe as a P2002 target — a compound unique containing a NULLABLE column
+  /// never matches in Postgres (NULL = NULL is false) and an upsert against it
+  /// silently inserts forever. `meta` is excluded for that reason as much as
+  /// any other.
+  @@unique([sessionId, kind, ref])
 }
 
 /// WARP-460 — kinds of context the user can pin to a chat thread.
-/// Maps 1:1 to the dashboard's side-panel pill types and to the
-/// `context_pins` request shape in FEATURES.md §4.1.
+/// Maps 1:1 to the dashboard's side-panel pill types.
+///
+/// NOTE (WARP-2582): the "`context_pins` request shape in FEATURES.md §4.1"
+/// this comment used to cite was never implemented — no chat request field of
+/// that name exists in the orchestrator or the dashboard. Removed rather than
+/// left pointing at nothing. The consequence is real and load-bearing: a pin
+/// cannot exist before the first turn mints a session, so the dashboard's
+/// record hand-off seeds the composer for turn 1 and pins from turn 2.
+///
+/// WARP-2582 — the four BUSINESS kinds. Their `ref` is a record id, not a
+/// path, so unlike the first five they must be RESOLVED to a name before they
+/// can be rendered into the prompt (services/context-pin-targets.service.ts).
+/// They carry no foreign key deliberately: `ref` is polymorphic across all
+/// nine kinds, and giving four of them real FK columns would need four
+/// nullable columns plus an exactly-one-of CHECK Prisma cannot express — a lot
+/// of schema to buy a cascade whose absence is already handled. A dangling pin
+/// resolves to the explicit `missing` state, which is more useful than
+/// vanishing: the user gets a row they can remove.
 enum ContextPinKind {
   folder
   file
   email_thread
   camera
   camera_window
+  customer
+  deal
+  project
+  work_item
 }
 
 /// WARP-461 — Durable per-workspace memory facts the model can recall

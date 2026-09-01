@@ -99,6 +99,13 @@ function createPrismaMock() {
             .sort((a, b) => a.addedAt.getTime() - b.addedAt.getTime());
         },
       ),
+      // WARP-2582 — POST now counts the session's pins before creating one, so
+      // a thread cannot accumulate an unbounded prompt block. Runs for EVERY
+      // kind, not only the business ones, so this mock is required even though
+      // this suite creates only folder/file/camera_window pins.
+      count: vi.fn(async ({ where }: { where: { sessionId: string } }) =>
+        pins.filter((p) => p.sessionId === where.sessionId).length,
+      ),
       create: vi.fn(async ({ data }: { data: Omit<MockPin, "id" | "addedAt"> }) => {
         const created: MockPin = {
           id: `pin-${pins.length + 1}`,
