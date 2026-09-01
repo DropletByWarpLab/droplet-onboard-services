@@ -18,6 +18,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../../middleware/auth.js";
 import * as pm from "../../services/pm/pm.service.js";
+import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
 
 /** Actor for attribution/activity — the local User.id UUID (WARP-485 invariant),
  *  or null for the MCP service principal / unauthenticated dev sessions. */
@@ -409,9 +410,20 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // WARP-2586 — the detail read carries the item's relations alongside it, as
+  // a SIBLING key. Deliberately not a field inside `work_item`: that shape is
+  // consumed by routes/mobile/pm.ts and, through toPlaneWorkItem, by the
+  // `pm_get_work_item` MCP contract, which pm-orch.ts documents as byte-stable.
+  // An additive sibling key costs those consumers nothing.
+  //
+  // Only the DETAIL read. `listWorkItems` stays relation-free on purpose — a
+  // 200-card board must not become 200 relation queries, and the board does not
+  // render edges.
   router.get("/pm/work-items/:id", async (req, res, next) => {
     try {
-      res.json({ work_item: await pm.getWorkItem(prisma, req.params.id) });
+      const work_item = await pm.getWorkItem(prisma, req.params.id);
+      const relations = await listRelationsFor(prisma, req.params.id);
+      res.json({ work_item, relations });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);

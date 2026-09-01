@@ -1146,6 +1146,29 @@ export async function deleteWorkItem(
           newValue: null,
         });
       }
+      // WARP-2586: the PmWorkItemRelation FKs cascade on BOTH ends, so this
+      // delete silently erases every blocks/relates/duplicates edge touching
+      // the item — including edges into OTHER projects, whose owners have no
+      // other way to learn the link is gone. Same defect class as the
+      // parent_removed case above, and the same answer: emit the audit row on
+      // the SURVIVING end BEFORE the cascade, in the same transaction, so the
+      // DB behaviour is never the only record.
+      const relations = await tx.pmWorkItemRelation.findMany({
+        where: { OR: [{ fromId: id }, { toId: id }] },
+        select: { fromId: true, toId: true, kind: true },
+      });
+      for (const rel of relations) {
+        const otherId = rel.fromId === id ? rel.toId : rel.fromId;
+        await writeActivity(tx, {
+          workItemId: otherId,
+          actorId,
+          verb: "relation_removed",
+          field: "relation",
+          oldValue: `${rel.kind}:${id}`,
+          newValue: null,
+        });
+      }
+
       await tx.pmWorkItem.delete({ where: { id } });
     });
   } catch (err) {

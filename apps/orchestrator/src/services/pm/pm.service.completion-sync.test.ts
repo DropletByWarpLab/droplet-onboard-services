@@ -237,6 +237,10 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           return data;
         },
       },
+      // WARP-2586 — deleteWorkItem now reads the item's relations before the
+      // cascade, so it can emit a relation_removed audit row on the SURVIVING
+      // end. Empty here: these two cases are about parent_removed.
+      pmWorkItemRelation: { findMany: async () => [] },
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "parent-1" }) },
@@ -276,6 +280,10 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           return {};
         },
       },
+      // WARP-2586 — deleteWorkItem now reads the item's relations before the
+      // cascade, so it can emit a relation_removed audit row on the SURVIVING
+      // end. Empty here: these two cases are about parent_removed.
+      pmWorkItemRelation: { findMany: async () => [] },
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "leaf-1" }) },

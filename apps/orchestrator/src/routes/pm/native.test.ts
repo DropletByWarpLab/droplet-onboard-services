@@ -58,6 +58,11 @@ function makeFake(hooks: Hooks = {}) {
     itemLabels: [] as Row[],
     comments: [] as Row[],
     activity: [] as Row[],
+    // WARP-2586: the relation edge table. No test in this file creates one —
+    // relations have their own suite (routes/pm/relations.test.ts) — but the
+    // store and its model methods must exist, because the work-item DETAIL
+    // read and deleteWorkItem now both consult it.
+    relations: [] as Row[],
   };
 
   const resolveItem = (it: Row, include?: Row) => {
@@ -328,6 +333,27 @@ function makeFake(hooks: Hooks = {}) {
         const a = { id: uid("ac"), createdAt: new Date(), ...data };
         db.activity.push(a);
         return a;
+      },
+    },
+
+    // WARP-2586: consulted by the composed work-item detail read and by
+    // deleteWorkItem's pre-cascade relation audit. Both pass the two-arm
+    // `OR: [{ fromId }, { toId }]` shape; the store stays empty in this file,
+    // so the behaviour under test is "an item with no relations reads and
+    // deletes exactly as before".
+    pmWorkItemRelation: {
+      findMany: async ({ where, take }: { where: Row; take?: number }) => {
+        const or = (where.OR as Row[] | undefined) ?? [];
+        const rows = db.relations.filter((r) => {
+          if (where.kind !== undefined && r.kind !== where.kind) return false;
+          if (or.length === 0) return true;
+          return or.some(
+            (c) =>
+              (c.fromId !== undefined && r.fromId === c.fromId) ||
+              (c.toId !== undefined && r.toId === c.toId),
+          );
+        });
+        return take === undefined ? rows : rows.slice(0, take);
       },
     },
   };
