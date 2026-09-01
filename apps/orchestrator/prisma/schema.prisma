@@ -148,7 +148,7 @@ model ChatProject {
 }
 
 model ChatSession {
-  id              String           @id @default(uuid())
+  id              String            @id @default(uuid())
   userId          String
   title           String?
   model           String?
@@ -156,7 +156,7 @@ model ChatSession {
   /// WARP-845 — optional project membership. SetNull on project delete:
   /// the chats survive, falling back to the ungrouped date list.
   projectId       String?
-  project         ChatProject?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  project         ChatProject?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
   /// WARP-844 — the caller-supplied system prompt this conversation is
   /// held under. Persisted from the request's system message on every
   /// turn (latest wins) and returned on GET so the dashboard restores
@@ -168,10 +168,10 @@ model ChatSession {
   /// Both written together by setConversationPinned via raw SQL so the
   /// @updatedAt column is NOT bumped — unpinning must return the chat to
   /// its original chronological spot, not to "Today".
-  pinned          Boolean          @default(false)
+  pinned          Boolean           @default(false)
   pinnedAt        DateTime?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @default(now()) @updatedAt
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
   pins            ContextPin[]
   /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
@@ -610,8 +610,8 @@ model UserInvite {
   // acceptedAt/revokedAt, never deleted) — so an invitee's intended access
   // can never silently degrade to the bare tier and role deletion stays an
   // explicit service-layer flow ("reassign first", T3).
-  accessRoleId     String?
-  accessRole       AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId String?
+  accessRole   AccessRole? @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
 
   @@index([token])
   @@index([expiresAt])
@@ -789,18 +789,18 @@ model ResetJob {
 // --- Camera / Frigate NVR ---
 
 model Camera {
-  id             String                   @id @default(uuid())
-  name           String                   @unique
+  id             String   @id @default(uuid())
+  name           String   @unique
   displayName    String
   manufacturer   String?
   model          String?
   ipAddress      String
   macAddress     String?
-  enabled        Boolean                  @default(true)
-  autoDiscovered Boolean                  @default(false)
-  lastSeen       DateTime                 @default(now())
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
+  enabled        Boolean  @default(true)
+  autoDiscovered Boolean  @default(false)
+  lastSeen       DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   // WARP-1851 — storage allocation.
   //
@@ -835,9 +835,9 @@ model Camera {
   /// Frigate config the moment a budget is set.
   retentionCeiling   Json?
 
-  notifications  CameraNotificationPref[]
-  groupMembers   CameraGroupMember[]
-  accessGrants   CameraAccessGrant[]
+  notifications CameraNotificationPref[]
+  groupMembers  CameraGroupMember[]
+  accessGrants  CameraAccessGrant[]
 }
 
 /// WARP-1962 — who may see THIS camera.
@@ -864,7 +864,7 @@ model CameraAccessGrant {
   /// seed or migration-created grant doesn't have to invent an actor.
   grantedBy String?
 
-  camera    Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  camera Camera @relation(fields: [cameraId], references: [id], onDelete: Cascade)
 
   @@unique([userId, cameraId])
   @@index([userId])
@@ -1493,27 +1493,27 @@ model CalendarEvent {
 // fetches each one on its own interval and upserts events into CalendarEvent
 // keyed by externalUid.
 model CalendarSource {
-  id              String    @id @default(uuid())
-  userId          String
-  name            String // "Personal iCloud"
-  url             String // CalDAV calendar URL OR public ICS URL
+  id               String    @id @default(uuid())
+  userId           String
+  name             String // "Personal iCloud"
+  url              String // CalDAV calendar URL OR public ICS URL
   // basic|none. CalDAV usually basic. ICS feeds usually none.
-  authMode        String    @default("basic")
-  username        String?
+  authMode         String    @default("basic")
+  username         String?
   // Encrypted with the same aes-256-gcm key as DeviceClient.ncAppPassword.
   // Format: iv||tag||ciphertext, base64-encoded. Never returned to clients.
-  passwordEnc     String?
-  syncIntervalSec Int       @default(900) // 15 minutes default
+  passwordEnc      String?
+  syncIntervalSec  Int       @default(900) // 15 minutes default
   // WARP-2022 — owner/admin opt-in to a CalDAV server inside the boundary
   // (a self-hosted Nextcloud/Radicale on the box's own LAN is a first-class
   // use case on this appliance). An EXPLICIT column, never an exemption
   // inferred from the URL, and never settable by a lower role. Skips the
   // private-address rules ONLY: the scheme and userinfo rules still apply.
-  allowPrivateHost Boolean  @default(false)
-  lastSyncAt      DateTime?
-  lastSyncError   String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  allowPrivateHost Boolean   @default(false)
+  lastSyncAt       DateTime?
+  lastSyncError    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([userId])
 }
@@ -2164,10 +2164,10 @@ model User {
   // SetNull/Cascade): deleting an in-use role is blocked server-side
   // ("reassign first") and the DB backs that up — a role delete must never
   // silently strip or downgrade a person's assignment.
-  accessRoleId          String?
-  accessRole            AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId     String?
+  accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
-  accessExceptions      UserAccessException[]
+  accessExceptions UserAccessException[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -3573,6 +3573,10 @@ enum ModuleId {
   /// WARP-2117 — CRM (companies, deals, pipeline, timeline), nested inside
   /// the Projects surface.
   crm
+  /// WARP-2581 — invoices and bills landed from a cloud ledger. Its own
+  /// module because a box that keeps its books elsewhere should have no
+  /// /money surface at all, rather than an empty one.
+  money
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -4474,13 +4478,15 @@ model IntegrationConnection {
   /// the connection at the next refresh.
   providerTokensEnc String?
 
-
   /// WARP-2549 — what this connection landed. RESTRICT on the far side, so a
   /// delete here fails loudly rather than taking a customer's records with it.
   landedContacts  Contact[]
   landedCompanies CrmCompany[]
   landedDeals     CrmDeal[]
   landedPipeline  CrmPipeline?
+
+  /// WARP-2581 — the invoices and bills this connection landed.
+  documents ErpDocument[]
 
   @@index([provider, status])
 }
@@ -4706,6 +4712,123 @@ model ErpEntityCache {
   @@index([connectionId, entity])
 }
 
+/// What a document is: money owed TO the business, or money owed BY it.
+///
+/// Two kinds rather than two tables, because every column below is the same on
+/// both sides and only the counterparty's role differs — and because the
+/// question the owner asks ("what is overdue") crosses both.
+enum ErpDocumentKind {
+  /// An invoice. Money owed to the business.
+  RECEIVABLE
+  /// A bill. Money owed by the business — the half WARP-1991 records as
+  /// having had no data source anywhere in the product.
+  PAYABLE
+}
+
+/// WARP-2581 — an invoice or bill, landed from a CLOUD ACCOUNTING connection.
+///
+/// The first money this box keeps. Until now the only money in the product was
+/// one live-read accounts-receivable number on /reports, which vanished the
+/// moment the vendor's server was off, because nothing was stored.
+///
+/// 🔴 CLOUD ACCOUNTING TRACKS ONLY. A LAN practice-management track that
+/// declares `invoice` must never land here: its receivables are a patient
+/// ledger, and PHI on this box is read-through behind the ERP router's gate
+/// (ADR-044 §3). `land-money.ts` refuses a non-cloud provider, and the refusal
+/// is a test, not a comment.
+///
+/// 🔴 `amountMinor` and `balanceMinor` are DIFFERENT NUMBERS. An invoice
+/// part-paid still carries its original amount; summing amounts where you
+/// meant balances overstates receivables. Every surface says which it is.
+///
+/// Provenance is NOT NULL here, unlike the CRM tables: every row in this table
+/// is landed by definition, so there is no locally typed shape to allow for.
+model ErpDocument {
+  id String @id @default(uuid())
+
+  /// The connection that landed it. RESTRICT for the same reason the CRM
+  /// tables use it — nothing deletes an `IntegrationConnection` today, and if
+  /// something starts, this fails loudly rather than silently dropping a
+  /// business's ledger.
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  /// Vendor key, denormalised so a row can be displayed without a join.
+  /// Derived from `connection.provider` on write, never accepted from a caller.
+  externalSystem String
+  /// The vendor's own id for this document. Scoped to the CONNECTION: two
+  /// QuickBooks companies both number their invoices from 1.
+  externalId     String
+
+  kind ErpDocumentKind
+
+  issuedAt DateTime?
+  dueAt    DateTime?
+
+  /// The vendor's id for the customer or supplier. Opaque, and NOT a foreign
+  /// key: the counterparty may not have landed, may never land (a supplier is
+  /// not a CRM customer), and must not block the document.
+  counterpartyExternalId String?
+  /// The landed customer, when one matches. SetNull: losing the customer must
+  /// not lose the invoice.
+  companyId              String?
+  company                CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  /// The counterparty's name as the vendor gave it, so a document reads
+  /// correctly even when nothing matched.
+  counterpartyName       String?
+
+  /// 🔴 EXACT DECIMALS, not minor units — and the difference is forced, not
+  /// preferred.
+  ///
+  /// `CrmDeal` holds minor units because a deal's currency is always known, so
+  /// its exponent is known. A ledger document's is NOT: `invoice` and `bill`
+  /// are named in `SINGLE_CURRENCY_LEDGER_DATASETS`, exempt from the
+  /// money-needs-a-currency rule because a QuickBooks company file has ONE
+  /// home currency and its export carries no per-row currency column to map.
+  /// Minor units cannot be computed without an exponent, and guessing 2 is
+  /// wrong by a factor of 100 on a yen ledger.
+  ///
+  /// `NUMERIC(20,6)` holds any vendor decimal exactly, sums exactly in
+  /// Postgres, and crosses the API as a STRING — `Number()` would round above
+  /// 2^53 exactly as it does for the CRM.
+  amount  Decimal? @db.Decimal(20, 6)
+  /// What remains UNPAID. Not the same number as `amount` — an invoice
+  /// part-paid still carries its original amount, and summing amounts where
+  /// you meant balances overstates receivables.
+  balance Decimal? @db.Decimal(20, 6)
+
+  /// The vendor's currency when it names one per row, and NULL when the
+  /// ledger's own home currency is the only answer — which is the ordinary
+  /// case today.
+  ///
+  /// 🔴 A NULL here is why a total may only be computed PER CONNECTION. One
+  /// ledger is one currency by construction; two ledgers are not, and adding
+  /// them would produce a confident wrong number. Unknown behaves exactly like
+  /// mixed: the total is withheld.
+  currency String?
+
+  /// The vendor's own status word, carried verbatim. Not an enum: every vendor
+  /// spells this differently and mapping five vocabularies onto three values
+  /// would decide, silently, that "Voided" and "Paid" are the same thing.
+  status String?
+
+  /// When the VENDOR last changed it — never presented as "up to date".
+  /// Xero's `UpdatedDateUTC` does not fire on a due-date edit, a
+  /// send-to-contact, or a contact-balance change (WARP-2383).
+  vendorUpdatedAt DateTime?
+
+  /// When this box last read it. The only freshness claim the surface may make.
+  lastReadAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, kind, externalId])
+  @@index([connectionId, kind, dueAt])
+  @@index([companyId])
+  @@index([kind, dueAt])
+}
+
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
 /// pipeline (brief §11.1). Explicit enum; a write advances through these
 /// states and is never derived from a NULL. DISCREPANCY = Eaglesoft's own
@@ -4747,34 +4870,34 @@ model ErpWriteRequest {
 /// teams are nested one level under a department parent. Household is the
 /// legacy system department adopted from WS-5.
 model Department {
-  id              String                 @id @default(uuid())
-  name            String                 @unique // display + groupfolder mount_point
-  slug            String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
-  parentId        String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
-  parent          Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
-  teams           Department[]           @relation("DeptHierarchy")
-  description     String?
-  kind            DepartmentKind         @default(DEPARTMENT)
-  state           ProvisionState         @default(pending)
-  provisionError  String?
+  id                String                 @id @default(uuid())
+  name              String                 @unique // display + groupfolder mount_point
+  slug              String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
+  parentId          String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
+  parent            Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
+  teams             Department[]           @relation("DeptHierarchy")
+  description       String?
+  kind              DepartmentKind         @default(DEPARTMENT)
+  state             ProvisionState         @default(pending)
+  provisionError    String?
   /// WARP-1651: when this row FIRST failed to converge, or null while it is
   /// converging normally. The durable clock the reconciler bounds the
   /// re-verify state with — `updatedAt` cannot serve, because
   /// provisionDepartment rewrites `state` on every retry and so refreshes it
   /// each tick. Stamped once per failure episode, cleared on convergence.
   nonConvergedSince DateTime?
-  ncGroupRw       String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
-  ncGroupRo       String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
-  ncGroupfolderId Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
-  quotaBytes      BigInt? // null = unlimited; pushed via gfSetQuota
-  aclVersion      Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
-  createdBy       String // local User.id
-  createdAt       DateTime               @default(now())
-  updatedAt       DateTime               @updatedAt
-  archivedAt      DateTime?
-  memberships     DepartmentMembership[]
-  shares          DepartmentShare[]
-  inviteGrants    UserInviteDepartment[]
+  ncGroupRw         String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
+  ncGroupRo         String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
+  ncGroupfolderId   Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
+  quotaBytes        BigInt? // null = unlimited; pushed via gfSetQuota
+  aclVersion        Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
+  createdBy         String // local User.id
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  archivedAt        DateTime?
+  memberships       DepartmentMembership[]
+  shares            DepartmentShare[]
+  inviteGrants      UserInviteDepartment[]
 
   @@index([state])
 }
@@ -4851,18 +4974,18 @@ model UserUsagePolicy {
 /// transaction (T3), so every ADR-004 `requireRole` floor keeps working
 /// unchanged and the per-axis grant rows below can only NARROW within it.
 model AccessRole {
-  id          String  @id @default(uuid())
-  name        String
-  slug        String  @unique
-  description String?
+  id                 String   @id @default(uuid())
+  name               String
+  slug               String   @unique
+  description        String?
   // CHECK: admin|family|guest — never owner/service. Enforced in the service
   // layer + zod (T3 role-mutation-guard), deliberately NOT a DB check
   // constraint; the column stays the plain Role enum.
-  startingPoint Role
+  startingPoint      Role
   // active | archived. Stays a String default "active" (the ADR-032 §2 spec
   // shape); the two-value lifecycle is service-managed and archived roles
   // keep their rows (the design's archive-don't-delete affordance).
-  state         String @default("active")
+  state              String   @default("active")
   // axis c — usage DEFAULTS for people in this role; a person's
   // UserUsagePolicy row overrides per person. Null = box default.
   storageQuotaBytes  BigInt?
@@ -5565,7 +5688,7 @@ model Contact {
 
   /// Stable id in the upstream system — the reconcile key that stops two
   /// connectors from each creating their own copy of one person.
-  externalId String?
+  externalId   String?
   /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
   /// (a locally typed row has no connection), but a landed row without one is
   /// forbidden by the `*_provenance_complete` CHECK below.
@@ -5626,11 +5749,11 @@ model Contact {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  emails          ContactEmail[]
-  phones          ContactPhone[]
-  companyLinks    CrmCompanyContact[]
-  dealLinks       CrmDealContact[]
-  crmActivities   CrmActivity[]
+  emails        ContactEmail[]
+  phones        ContactPhone[]
+  companyLinks  CrmCompanyContact[]
+  dealLinks     CrmDealContact[]
+  crmActivities CrmActivity[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
@@ -5755,7 +5878,7 @@ model CrmCompany {
   /// `PmProject.leadId`).
   ownerId String?
 
-  origin         CrmRecordOrigin @default(LOCAL)
+  origin         CrmRecordOrigin        @default(LOCAL)
   externalSystem String?
   externalId     String?
   /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
@@ -5774,8 +5897,8 @@ model CrmCompany {
   /// purges in place), so this fires only if something new starts deleting
   /// them — at which point the landed rows must be purged deliberately, by a
   /// walker that knows to keep what a human wrote against them.
-  connectionId String?
-  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  connectionId   String?
+  connection     IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
   /// (WARP-884). `archivedAt` is the audit timestamp only.
@@ -5789,6 +5912,9 @@ model CrmCompany {
   contactLinks CrmCompanyContact[]
   deals        CrmDeal[]
   activities   CrmActivity[]
+
+  /// WARP-2581 — money owed by or to this customer, when a document matched.
+  documents ErpDocument[]
 
   @@unique([connectionId, externalId])
   @@index([connectionId])
@@ -5837,7 +5963,7 @@ model CrmPipeline {
   /// stage names nobody reconciled, or dump every synced deal into whichever
   /// stage happened to sort first. A pipeline of its own keeps the owner's
   /// board theirs and makes the purge scope obvious.
-  connectionId String? @unique
+  connectionId String?                @unique
   connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   isDefault Boolean @default(false)
@@ -5870,7 +5996,7 @@ model CrmPipelineStage {
 
   /// What landing here means for the deal. Owner-configurable stage NAMES,
   /// fixed outcome SEMANTICS.
-  kind CrmStageKind @default(OPEN)
+  kind        CrmStageKind @default(OPEN)
   /// WARP-2549 — the vendor's own value for this stage (HubSpot `dealstage`),
   /// on a synced pipeline. The reconcile key: stage NAMES are owner-editable
   /// and re-landing must not create a second stage because someone renamed one.
@@ -5927,7 +6053,7 @@ model CrmDeal {
   projectId String?
   project   PmProject? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
-  origin         CrmRecordOrigin @default(LOCAL)
+  origin         CrmRecordOrigin        @default(LOCAL)
   externalSystem String?
   externalId     String?
   /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
@@ -5946,8 +6072,8 @@ model CrmDeal {
   /// purges in place), so this fires only if something new starts deleting
   /// them — at which point the landed rows must be purged deliberately, by a
   /// walker that knows to keep what a human wrote against them.
-  connectionId String?
-  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  connectionId   String?
+  connection     IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   isArchived Boolean   @default(false)
   archivedAt DateTime?
