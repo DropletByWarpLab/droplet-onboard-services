@@ -151,13 +151,21 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  * TWO-LAYER NOTE (WARP-2448): matching a domain here does not by itself make
  * a tool reachable. `chat-tool-scope.ts` removes whole groups from the POOL
  * before selection runs, so a rule can match a domain whose local tools were
- * all excluded upstream and legitimately advertise nothing — `pm` is exactly
- * that case today, and `erp`/`switch` have no rules at all. The two layers
- * answer different questions (policy vs relevance) and the interaction is
- * asserted by `chat-tool-scope.test.ts` rather than left for someone to
+ * all excluded upstream and legitimately advertise nothing — `notifications`
+ * is exactly that case today, and `erp`/`switch` have no rules at all. The two
+ * layers answer different questions (policy vs relevance) and the interaction
+ * is asserted by `chat-tool-scope.test.ts` rather than left for someone to
  * rediscover. Remote tools registered into such a domain are NOT affected:
  * the exclusion list names local tools, so an Atlassian `pm` tool matched by
- * the `pm` rule is advertised even though every local `pm_*` tool is not.
+ * the `pm` rule is advertised even though nine of ten local `pm_*` tools are not.
+ *
+ * ⚠ WARP-2580 — this paragraph named `pm` as the dead-rule example and had
+ * been wrong since 2026-08-17, when `pm_create_project` landed and was not
+ * added to the exclusion block beside its nine siblings. `pm` is NOT dead:
+ * exactly one local tool survives in it. `chat-tool-scope.test.ts` has pinned
+ * that ("the pm rule is NOT dead — WARP-2058's comment is stale") since before
+ * this correction; the comment simply never followed. `notifications` is the
+ * genuine dead-rule case and is what that test's `deadRules` set contains.
  *
  * WARP-1921 — vocabulary widened from the original WARP-1207 cut, which was
  * written from the TOOL NAMES rather than from how people talk. The tell:
