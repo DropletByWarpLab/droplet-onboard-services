@@ -53,14 +53,37 @@ describe.skipIf(!RUN)("CrmActivity cascades take LOCAL notes with the subject (W
   // parallel, so an unscoped deleteMany() would eat another suite's rows.
   const OURS = { startsWith: "warp2554-" } as const;
 
+  /**
+   * WARP-2549 — a synced row now carries the CONNECTION it came from, and the
+   * `*_provenance_complete` CHECK refuses one that does not. These fixtures
+   * predate that column; they get a real connection rather than a relaxed
+   * constraint, because the constraint is the point.
+   */
+  let connectionId: string;
+
   beforeEach(async () => {
     // FK-ordered, and scoped. Activities first so a failed run cannot leave a
-    // row whose subject we are about to delete.
+    // row whose subject we are about to delete; the connection LAST, because
+    // every landed row references it with RESTRICT.
     await prisma.crmActivity.deleteMany({ where: { summary: OURS } });
     await prisma.crmDeal.deleteMany({ where: { title: OURS } });
     await prisma.crmCompany.deleteMany({ where: { name: OURS } });
     await prisma.contact.deleteMany({ where: { displayName: OURS } });
     await prisma.crmPipeline.deleteMany({ where: { name: OURS } });
+    await prisma.integrationConnection.deleteMany({ where: { secretRef: OURS } });
+
+    connectionId = (
+      await prisma.integrationConnection.create({
+        data: {
+          provider: "warp2554-vendor",
+          status: "CONNECTED",
+          host: "warp2554-host",
+          databaseName: "",
+          secretRef: "warp2554-secret",
+        },
+        select: { id: true },
+      })
+    ).id;
   });
 
   async function pipelineWithStage(): Promise<{ pipelineId: string; stageId: string }> {
@@ -85,6 +108,7 @@ describe.skipIf(!RUN)("CrmActivity cascades take LOCAL notes with the subject (W
         pipelineId,
         stageId,
         origin: "EXTERNAL",
+        connectionId,
         externalSystem: "warp2554-vendor",
         externalId: "warp2554-deal-1",
       },
@@ -115,6 +139,7 @@ describe.skipIf(!RUN)("CrmActivity cascades take LOCAL notes with the subject (W
       data: {
         name: "warp2554-company",
         origin: "EXTERNAL",
+        connectionId,
         externalSystem: "warp2554-vendor",
         externalId: "warp2554-co-1",
       },
@@ -142,6 +167,7 @@ describe.skipIf(!RUN)("CrmActivity cascades take LOCAL notes with the subject (W
         userId: "warp2554-owner",
         displayName: "warp2554-person",
         origin: "EXTERNAL",
+        connectionId,
         externalSystem: "warp2554-vendor",
         externalId: "warp2554-contact-1",
       },
@@ -176,6 +202,7 @@ describe.skipIf(!RUN)("CrmActivity cascades take LOCAL notes with the subject (W
         pipelineId,
         stageId,
         origin: "EXTERNAL",
+        connectionId,
         externalSystem: "warp2554-vendor",
         externalId: "warp2554-deal-2",
       },
