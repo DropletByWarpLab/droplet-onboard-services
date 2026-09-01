@@ -55,6 +55,7 @@ import {
 // WARP-2482 — the sync side owns what a cursor reset MEANS; this service owns
 // WHEN one happens. Exposed as a single call so the credential lifecycle never
 // hand-writes the cursor field set (see `UNSTARTED_ERP_CURSOR`).
+import { purgeLandedRecords } from "./crm/landed-purge.js";
 import { resetCursorsForConnection } from "./erp-sync/cursor.service.js";
 import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
@@ -973,6 +974,19 @@ export function createIntegrationsService(
           },
         });
         const cursorsReset = await resetCursorsForConnection(tx, row.id);
+        // WARP-2549 — ADR-041 §4's other binding constraint: "deletion is a
+        // real operation". The credential purge above stops the box READING
+        // this account; this stops it KEEPING what it already read.
+        //
+        // In the same transaction, for the same reason the purge is one
+        // `update`: two transactions can half-commit, and a box whose
+        // credentials are gone but whose landed customers are not is a box
+        // that tells an owner it disconnected and did half of it.
+        //
+        // Records carrying a note a human typed are ARCHIVED, not deleted —
+        // every `CrmActivity` subject relation is `onDelete: Cascade`, so
+        // deleting the parent silently destroys the owner's own prose.
+        const landed = await purgeLandedRecords(tx, row.id, new Date());
         await tx.erpAuditLog.create({
           data: {
             connectionId: row.id,
@@ -995,7 +1009,14 @@ export function createIntegrationsService(
             // constant. An audit whose provider is hardcoded cannot be used to
             // find out that the wrong provider was purged, which is precisely
             // the question this row exists to answer.
-            scope: { provider: row.provider, purged: true, cursorsReset },
+            scope: {
+              provider: row.provider,
+              purged: true,
+              cursorsReset,
+              // Counts, never names — the same rule the line above follows.
+              landedDeleted: landed.deleted,
+              landedArchived: landed.archived,
+            },
           },
         });
         return updated;

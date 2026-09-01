@@ -180,11 +180,26 @@ export interface StubPrisma {
   erpAuditLog: Record<string, ReturnType<typeof vi.fn>>;
   erpSyncCursor: Record<string, ReturnType<typeof vi.fn>>;
   erpDriftRecord: Record<string, ReturnType<typeof vi.fn>>;
+  /** WARP-2549 — the CRM rows this connection landed, purged with it. */
+  crmCompany: Record<string, ReturnType<typeof vi.fn>>;
+  contact: Record<string, ReturnType<typeof vi.fn>>;
+  crmDeal: Record<string, ReturnType<typeof vi.fn>>;
+  crmPipeline: Record<string, ReturnType<typeof vi.fn>>;
+  crmPipelineStage: Record<string, ReturnType<typeof vi.fn>>;
+  crmActivity: Record<string, ReturnType<typeof vi.fn>>;
   $transaction: TransactionSeam["$transaction"];
   /** The live connection rows, so a test can read back what was written. */
   rows: Array<Record<string, unknown>>;
   /** The live cursor rows, same reason. */
   cursors: Array<Record<string, unknown>>;
+  /** Landed CRM rows, seeded by a test and MUTATED by the purge. */
+  landed: {
+    companies: Array<Record<string, unknown>>;
+    contacts: Array<Record<string, unknown>>;
+    deals: Array<Record<string, unknown>>;
+    /** Ids that carry a note a human typed — the archive-not-delete trigger. */
+    withLocalActivity: Set<string>;
+  };
   seam: TransactionSeam;
 }
 
@@ -209,6 +224,31 @@ function stubPrisma(
   const seeded = row === null ? [] : Array.isArray(row) ? row : [row];
   const rows = seeded.map((r) => ({ ...r }));
   const cursorRows = cursors.map((c) => ({ ...c }));
+
+  // WARP-2549 — landed rows live alongside the connection rows, and the purge
+  // mutates them in place, so a later read observes the write.
+  const landedCompanies: Array<Record<string, unknown>> = [];
+  const landedContacts: Array<Record<string, unknown>> = [];
+  const landedDeals: Array<Record<string, unknown>> = [];
+  const localActivity = new Set<string>();
+
+  const landedTable = (store: Array<Record<string, unknown>>) => ({
+    findMany: vi.fn(async (args?: { where?: { connectionId?: string } }) =>
+      store
+        .filter((r) => !args?.where?.connectionId || r.connectionId === args.where.connectionId)
+        .map((r) => ({ id: r.id as string })),
+    ),
+    delete: vi.fn(async (args: { where: { id: string } }) => {
+      const i = store.findIndex((r) => r.id === args.where.id);
+      if (i >= 0) store.splice(i, 1);
+      return {};
+    }),
+    update: vi.fn(async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      const row = store.find((r) => r.id === args.where.id);
+      if (row) Object.assign(row, args.data);
+      return row ?? {};
+    }),
+  });
 
   const self = {
     integrationConnection: {
@@ -303,15 +343,49 @@ function stubPrisma(
       findMany: vi.fn(async () => []),
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
+    /**
+     * WARP-2549 — the landed CRM rows. Present and MUTATED for the same reason
+     * `erpDriftRecord` is present: a stub without these models would make
+     * "the purge removed the landed rows" pass by making the removal
+     * impossible, which proves nothing.
+     */
+    crmCompany: landedTable(landedCompanies),
+    contact: landedTable(landedContacts),
+    crmDeal: landedTable(landedDeals),
+    crmPipeline: {
+      findFirst: vi.fn(async () => null),
+      delete: vi.fn(async () => ({})),
+    },
+    crmPipelineStage: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    crmActivity: {
+      findFirst: vi.fn(async (args: { where: Record<string, unknown> }) => {
+        const id = (args.where.companyId ??
+          args.where.contactId ??
+          args.where.dealId) as string;
+        return localActivity.has(id) ? { id: "act-1" } : null;
+      }),
+    },
   } as unknown as StubPrisma;
 
   const seam = createTransactionSeam({
     client: () => self,
-    stores: { rows, cursors: cursorRows },
+    stores: {
+      rows,
+      cursors: cursorRows,
+      landedCompanies,
+      landedContacts,
+      landedDeals,
+    },
   });
   self.$transaction = seam.$transaction;
   self.rows = rows;
   self.cursors = cursorRows;
+  self.landed = {
+    companies: landedCompanies,
+    contacts: landedContacts,
+    deals: landedDeals,
+    withLocalActivity: localActivity,
+  };
   self.seam = seam;
   return self;
 }
@@ -1197,5 +1271,79 @@ describe("a known but unconfigured provider answers about ITSELF", () => {
       message: expect.stringContaining(target),
     });
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-2549 — disconnecting also removes what the connection landed", () => {
+  /** Seed the rows a sync would have landed under this connection. */
+  function withLanded(
+    prisma: ReturnType<typeof stubPrisma>,
+    opts: { companies?: string[]; withNotes?: string[] } = {},
+  ) {
+    const connectionId = prisma.rows[0].id as string;
+    for (const id of opts.companies ?? []) {
+      prisma.landed.companies.push({
+        id,
+        connectionId,
+        origin: "EXTERNAL",
+        externalSystem: "eaglesoft",
+        externalId: `x-${id}`,
+        isArchived: false,
+      });
+    }
+    for (const id of opts.withNotes ?? []) prisma.landed.withLocalActivity.add(id);
+    return prisma;
+  }
+
+  it("deletes a landed record nobody wrote against", async () => {
+    const prisma = withLanded(stubPrisma(connectedRow()), { companies: ["co-1"] });
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
+
+    expect(prisma.landed.companies).toHaveLength(0);
+  });
+
+  it("🔴 ARCHIVES one that carries a note a human typed", async () => {
+    // Every CrmActivity subject relation is `onDelete: Cascade`, so deleting
+    // the parent takes the owner's own prose with it — proven against real
+    // Postgres in crm-activity-cascade.pg.test.ts.
+    const prisma = withLanded(stubPrisma(connectedRow()), {
+      companies: ["co-1"],
+      withNotes: ["co-1"],
+    });
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
+
+    expect(prisma.landed.companies).toHaveLength(1);
+    expect(prisma.landed.companies[0]).toMatchObject({ isArchived: true });
+  });
+
+  it("purges the records in the SAME transaction as the credentials", async () => {
+    // Mutation: move the record purge outside the transaction → the rollback
+    // leaves the credentials intact and the customer's records gone.
+    const prisma = withLanded(stubPrisma(connectedRow()), { companies: ["co-1"] });
+    prisma.erpSyncCursor.updateMany.mockRejectedValueOnce(new Error("reset failed"));
+
+    await expect(
+      serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft"),
+    ).rejects.toThrow("reset failed");
+
+    expect(prisma.landed.companies).toHaveLength(1);
+    expect(prisma.rows[0].apiCredentialsEnc).not.toBeNull();
+  });
+
+  it("counts what it removed into the audit scope, never what it was", async () => {
+    const prisma = withLanded(stubPrisma(connectedRow()), {
+      companies: ["co-1", "co-2"],
+      withNotes: ["co-2"],
+    });
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
+
+    const call = prisma.erpAuditLog.create.mock.calls[0] as unknown as [
+      { data: { scope: Record<string, unknown> } },
+    ];
+    expect(call[0].data.scope).toMatchObject({ landedDeleted: 1, landedArchived: 1 });
+    expect(JSON.stringify(call[0].data.scope)).not.toContain("co-1");
   });
 });
