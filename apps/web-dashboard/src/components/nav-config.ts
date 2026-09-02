@@ -11,6 +11,8 @@
  * predicates unmockable independently of the chrome.
  */
 import type { LucideIcon } from "lucide-react";
+
+import type { AccessModuleId } from "@/lib/types";
 import {
   Activity,
   Blocks,
@@ -81,24 +83,25 @@ export type NavItem = {
    * child still disappears with its parent. (It used to be a documented no-op
    * on children, which meant a sub-destination could never be gated on its
    * own.)
+   *
+   * WARP-2577: this was a hand-listed union, and it drifted exactly as a
+   * parallel list does. It named twelve ids while `AccessModuleId` carried
+   * fifteen; WARP-2558 then added `crm` to it by hand, because the CRM had
+   * just earned a route to gate — leaving `contacts` still missing and the
+   * next module still owing someone a second edit.
+   *
+   * It is now DERIVED from `AccessModuleId`, the vocabulary that describes
+   * itself as having no parallel list to drift. This union was that list, so
+   * a module id reaches this field the day it is declared and nobody has to
+   * remember.
+   *
+   * `chat` is excluded rather than omitted. It is a core module — the comment
+   * above says core modules are never tagged — and `Exclude` states that rule
+   * where the type is, instead of leaving it as an absence a reader has to
+   * notice. Adding a module id now reaches this field automatically; making a
+   * module core is the only edit that ever needs to touch it again.
    */
-  requiresModule?:
-    | "files"
-    | "email"
-    | "calendar"
-    | "projects"
-    // WARP-2558 — `crm` earns a place here the moment it owns a route.
-    // Before ADR-044 it had `navHrefs: []`, so there was no nav entry to gate
-    // and no reason for the union to name it.
-    | "crm"
-    | "knowledge"
-    | "docs"
-    | "cameras"
-    | "network"
-    | "smart_home"
-    | "managed_switch"
-    | "voice"
-    | "team_chat";
+  requiresModule?: Exclude<AccessModuleId, "chat">;
   /**
    * WARP-1807 — a tucked destination: rendered by NO nav surface (desktop
    * aside, mobile tab bar, More drawer), but still part of the nav
