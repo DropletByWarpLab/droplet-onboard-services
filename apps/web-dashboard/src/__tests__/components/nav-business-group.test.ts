@@ -12,6 +12,13 @@
  *     honestly instead of the page rendering a surface every request 404s.
  *  3. The mobile tab cap is NOT reopened. Business routes through the More
  *     drawer; WARP-290 measured four tabs at 360px and that stands.
+ *
+ * WARP-2581 added a third entry, Money. The pins below move WITH the group
+ * by design: this file exists so that adding a Business route is a decision
+ * somebody writes down, not a silent nav change. Each entry still has to
+ * survive its neighbours being off, because the module gates are
+ * independent -- a practice that keeps its books elsewhere has no /money
+ * entry at all.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -40,8 +47,12 @@ describe("the Business group (WARP-2558)", () => {
     expect(labels.indexOf("Operations")).toBe(labels.indexOf("Business") + 1);
   });
 
-  it("holds Customers and Projects, in that order", () => {
-    expect(businessItems().map((i) => i.href)).toEqual(["/customers", "/projects"]);
+  it("holds Customers, Projects and Money, in that order", () => {
+    expect(businessItems().map((i) => i.href)).toEqual([
+      "/customers",
+      "/projects",
+      "/money",
+    ]);
   });
 
   it("no longer keeps Projects in Workspace — the route moved groups, not addresses", () => {
@@ -61,7 +72,12 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     expect(visible.map((i) => i.href)).toEqual(["/projects"]);
   });
 
-  it("renders nothing — and so no lone caption — when both are off", () => {
+  it("shows Money alone on a books-on, CRM-off, Projects-off box", () => {
+    const visible = visibleItems(businessItems(), "owner", openCapabilities, only("money"));
+    expect(visible.map((i) => i.href)).toEqual(["/money"]);
+  });
+
+  it("renders nothing — and so no lone caption — when all are off", () => {
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only());
     expect(visible).toEqual([]);
   });
@@ -93,6 +109,10 @@ describe("route ownership (WARP-2558)", () => {
   it("leaves /projects with the projects module", () => {
     expect(moduleForPath("/projects")?.moduleId).toBe("projects");
   });
+
+  it("gives /money to the money module, so a box without books blocks it honestly", () => {
+    expect(moduleForPath("/money")?.moduleId).toBe("money");
+  });
 });
 
 describe("the mobile tab cap is not reopened (WARP-290)", () => {
@@ -103,5 +123,6 @@ describe("the mobile tab cap is not reopened (WARP-290)", () => {
   it("does not promote a Business route into the bar", () => {
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/customers");
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/projects");
+    expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/money");
   });
 });
