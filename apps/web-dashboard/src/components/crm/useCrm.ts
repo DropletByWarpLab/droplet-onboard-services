@@ -108,15 +108,30 @@ export function useDeals(pipelineId: string | null): {
   return { deals: data?.deals, error, isLoading, mutate: () => void mutate() };
 }
 
+/**
+ * WARP-2561 — now reports `error` and `isLoading`, like every sibling hook in
+ * this file.
+ *
+ * It returned neither, which is survivable on the deal board (the board has
+ * its own columns and the summary only decorates them) and is not survivable
+ * on a tile whose entire content IS the summary: with only `stages`, a failed
+ * read and a slow one are the same `undefined`, so the tile must either show a
+ * skeleton forever or invent a zero. Both lie in a different direction.
+ */
 export function useCrmSummary(pipelineId: string | null): {
   stages: CrmStageSummary[] | undefined;
+  error: unknown;
+  isLoading: boolean;
   mutate: () => void;
 } {
-  const { data, mutate } = useSWR<{ pipelineId: string; stages: CrmStageSummary[] }>(
+  const { data, error, isLoading, mutate } = useSWR<{
+    pipelineId: string;
+    stages: CrmStageSummary[];
+  }>(
     pipelineId ? `/api/crm/summary?pipeline=${encodeURIComponent(pipelineId)}` : null,
     getJson,
   );
-  return { stages: data?.stages, mutate: () => void mutate() };
+  return { stages: data?.stages, error, isLoading, mutate: () => void mutate() };
 }
 
 export function useTimeline(subject: { type: CrmSubject; id: string } | null): {
