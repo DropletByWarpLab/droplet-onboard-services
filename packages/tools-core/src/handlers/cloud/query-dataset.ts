@@ -3,15 +3,20 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 /**
  * WARP-2497 — the ONE cloud-connector read tool.
  *
- * The connected SaaS accounts (Stripe, HubSpot, Mailchimp) expose ~10 record
- * shapes between them. A tool per vendor — let alone per dataset — would add
- * ten `{type,function:{…}}` blocks to every completion request, and the
- * full-registry serialization canary already sits within 3 KB of its 100 KB
- * ceiling. So the vendor is NOT a tool axis and not an argument either: the
- * dataset name determines the provider (`charge`/`invoice` ⇒ Stripe,
- * `contact`…`engagement` ⇒ HubSpot, `campaign`/`audience_member`/
- * `ecommerce_order` ⇒ Mailchimp), and the orchestrator route owns that
- * mapping. One tool, one route, one small schema.
+ * The connected SaaS accounts expose ~11 record shapes between them. A tool per
+ * vendor — let alone per dataset — would add a `{type,function:{…}}` block per
+ * vendor to every completion request, and the full-registry serialization
+ * canary already sits within 3 KB of its 100 KB ceiling. So the vendor is NOT a
+ * tool axis and not an argument either: the DATASET name determines the
+ * provider, and the orchestrator route owns that mapping through the provider
+ * registry rather than a table here. One tool, one route, one small schema.
+ *
+ * Which is also why the description below names no vendor. It used to list
+ * "(Stripe, HubSpot, Mailchimp)", which put the vendor back on the tool's face
+ * after this docstring had just argued it off — and made every new connector a
+ * mandatory edit to a string that ships inside the context window. WARP-2383
+ * added the fourth vendor and the fifth dataset-to-provider mapping without
+ * touching either.
  *
  * Exported so the orchestrator's cross-package drift test can assert the
  * route's dataset vocabulary and this enum are the same list — the two sides
@@ -20,6 +25,11 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 export const CLOUD_QUERY_DATASETS = [
   "charge",
   "invoice",
+  // WARP-2383 — the one dataset Xero adds that no other cloud track served.
+  // Its absence was load-bearing in the wrong direction: `tool-selection`'s
+  // cloud pattern already claims `bill|billed|billing`, so "what do we owe?"
+  // selected this tool and then met an enum with no way to ask.
+  "bill",
   "contact",
   "company",
   "deal",
@@ -106,8 +116,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "cloud_query_dataset",
   description:
-    "Read business records from the connected cloud accounts (Stripe, HubSpot, Mailchimp) " +
-    "by dataset name. Read-only; the dataset picks the provider.",
+    "Read business records from the connected cloud accounts by dataset name. " +
+    "Read-only; the dataset picks the provider.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -20,12 +20,14 @@
  * the team rule after the mock/prod divergence incident is that DB paths stay
  * stubbed with `vi.fn()` rather than run against a mock database.
  */
+import { providerDescriptor } from "@droplet/shared-types";
 import {
   classifySyncFailure,
   computeBackoffMs,
   parseRetryAfter,
   type SyncFailureLike,
 } from "../m365/sync-policy.js";
+import { jitteredPeriodMs } from "./schedule-jitter.js";
 import { redactSyncErrorText } from "./redact.js";
 
 /**
@@ -70,6 +72,83 @@ export interface ClaimedErpCursor {
   previousState: ErpSyncStateName;
   consecutiveFailures: number;
   lastSweepAt: Date | null;
+  /**
+   * When this cursor last completed a read, or null for one that never has.
+   *
+   * Carried on the claim since WARP-2417 because it is what the per-provider
+   * cadence floor is measured from. NULL is load-bearing and is NOT "a long
+   * time ago": a cursor that has never synced is always due, so a newly
+   * connected organisation is read immediately rather than four hours later.
+   */
+  lastSyncedAt: Date | null;
+}
+
+/**
+ * WARP-2417 — how often a provider's cursors may be read, at most.
+ *
+ * `ProviderDescriptor.pollIntervalFloorMs` has existed since WARP-2217 and had
+ * NO consumer: Stripe declared 900,000 ms and nothing read it, so the field
+ * documented a policy the scheduler did not apply. Xero is the track that makes
+ * it matter — its per-tenant allowance is 5,000 calls a day and the limit that
+ * actually binds is app-wide and POOLED at 10,000 calls a minute across every
+ * box we ship — so the floor is now enforced here, generically, for every
+ * descriptor that declares one.
+ *
+ * A provider with no floor is unchanged: it is due whenever the tick runs,
+ * which is what every track did before this.
+ */
+export interface ClaimOptions {
+  /**
+   * This box's identity, for the per-box jitter.
+   *
+   * Passed in rather than read from `config` here, for the reason
+   * `schedule-jitter.ts` states: a module-import config read is the
+   * `INFERENCE_RUNTIME` bug, where `docker restart` cannot change the value.
+   * Absent means no jitter — correct for a unit test, and the runner always
+   * supplies it in production.
+   */
+  readonly deviceId?: string;
+  /** Override the floor lookup. The default reads the provider descriptor;
+   *  tests inject their own so a fixture provider needs no descriptor. */
+  readonly pollFloorMsFor?: (provider: string) => number | undefined;
+}
+
+/** The default floor lookup: whatever the provider's descriptor declares. */
+function descriptorPollFloorMs(provider: string): number | undefined {
+  return providerDescriptor(provider)?.pollIntervalFloorMs;
+}
+
+/**
+ * Has this cursor's provider-declared cadence floor elapsed?
+ *
+ * `true` — i.e. claimable — in every case where there is no evidence to say
+ * otherwise: no provider on the row, no declared floor, or a cursor that has
+ * never synced. That asymmetry is deliberate. A wrongly-skipped tick leaves a
+ * customer's books stale with nothing reporting it, while a wrongly-taken one
+ * costs a handful of vendor calls; the failure that is invisible is the one to
+ * avoid defaulting into.
+ *
+ * The floor is JITTERED per box by the same derivation the schedule uses, so
+ * two appliances never share a due-time. Without it a fleet on a four-hour
+ * cadence converges on the same four instants a day, which is precisely how a
+ * pooled per-minute vendor limit is saturated by boxes that are each modest.
+ */
+function pollFloorElapsed(
+  cursor: Pick<ClaimedErpCursor, "lastSyncedAt">,
+  provider: string | undefined,
+  now: Date,
+  options: ClaimOptions,
+): boolean {
+  if (!provider) return true;
+  if (cursor.lastSyncedAt === null) return true;
+  const floor = (options.pollFloorMsFor ?? descriptorPollFloorMs)(provider);
+  if (floor === undefined || !Number.isFinite(floor) || floor <= 0) return true;
+  // Keyed on device AND provider, so one box's Xero and Stripe cursors do not
+  // land on the same offset and fire together.
+  const period = options.deviceId
+    ? jitteredPeriodMs(floor, `${options.deviceId}:${provider}`)
+    : floor;
+  return now.getTime() - cursor.lastSyncedAt.getTime() >= period;
 }
 
 /** The Prisma surface this module needs. Structural so tests stub it. */
@@ -105,6 +184,7 @@ export async function claimDueErpCursors(
   prisma: ErpCursorPrisma,
   limit: number,
   now: Date = new Date(),
+  options: ClaimOptions = {},
 ): Promise<ClaimedErpCursor[]> {
   const pollable = await prisma.integrationConnection.findMany({
     where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
@@ -112,6 +192,7 @@ export async function claimDueErpCursors(
   });
   const pollableIds = pollable.map((c) => c.id);
   if (pollableIds.length === 0) return [];
+  const providerOf = new Map(pollable.map((c) => [c.id, c.provider]));
 
   const candidates = await prisma.erpSyncCursor.findMany({
     where: {
@@ -138,10 +219,14 @@ export async function claimDueErpCursors(
     previousState: String(row.state) as ErpSyncStateName,
     consecutiveFailures: Number(row.consecutiveFailures ?? 0),
     lastSweepAt: (row.lastSweepAt as Date | null) ?? null,
+    lastSyncedAt: (row.lastSyncedAt as Date | null) ?? null,
   }));
 
   const claimed: ClaimedErpCursor[] = [];
   for (const snap of snapshots) {
+    // WARP-2417 — the per-provider cadence floor, checked before the claim so
+    // a not-yet-due cursor costs one predicate rather than a write.
+    if (!pollFloorElapsed(snap, providerOf.get(snap.connectionId), now, options)) continue;
     const { count } = await prisma.erpSyncCursor.updateMany({
       // The compare half of a compare-and-swap, and the reason this is an
       // `updateMany` rather than an `update`: only `updateMany` reports how

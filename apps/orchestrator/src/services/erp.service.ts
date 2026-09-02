@@ -40,6 +40,12 @@ import {
   AscendAuthorizationError,
   UnsafeBaseUrlError,
   UnsafeAscendBaseUrlError,
+  // WARP-2383 — the Xero track's two classifiable errors. Its scope and
+  // rate-limit errors are deliberately absent: neither is an outcome of a
+  // healthy connection the way an exhausted quota is, and both already carry
+  // their own remediation text.
+  XeroReauthorizationRequiredError,
+  UnsafeXeroBaseUrlError,
   WRITE_COMMANDS,
   exportProviders,
   scheduleDayBounds,
@@ -214,6 +220,12 @@ function cloudReasonFor(err: unknown): "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED
   if (err instanceof QuotaExhaustedError) return "QUOTA_EXHAUSTED";
   if (err instanceof ReauthorizationRequiredError) return "REAUTHORIZE_REQUIRED";
   if (err instanceof AscendAuthorizationError) return "REAUTHORIZE_REQUIRED";
+  // WARP-2383. A Xero Custom Connection reaches this state ROUTINELY rather
+  // than only on revocation: editing it in Xero's developer portal (to change
+  // scopes, say) DEACTIVATES it until it is re-authorised, so the owner's own
+  // maintenance produces it. Reporting that as ERROR would send them looking
+  // for a fault on the box.
+  if (err instanceof XeroReauthorizationRequiredError) return "REAUTHORIZE_REQUIRED";
   return null;
 }
 
@@ -227,7 +239,11 @@ function cloudReasonFor(err: unknown): "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED
  */
 function reasonForConnectorError(err: unknown, phase: string): string {
   if (err instanceof ConnectorBlockedError) return "ERP_NOT_CONNECTED";
-  if (err instanceof UnsafeBaseUrlError || err instanceof UnsafeAscendBaseUrlError) {
+  if (
+    err instanceof UnsafeBaseUrlError ||
+    err instanceof UnsafeAscendBaseUrlError ||
+    err instanceof UnsafeXeroBaseUrlError
+  ) {
     logger.error({ err, phase }, "erp connection names a destination we refuse to dial");
     return "ERP_NOT_CONNECTED";
   }
@@ -252,9 +268,13 @@ function reasonForConnectorError(err: unknown, phase: string): string {
  *
  * ## Why these ten
  *
- * They are exactly the datasets the three shipped cloud tracks declare in
+ * They are exactly the datasets the four shipped cloud tracks declare in
  * `servesDatasets` (Stripe `invoice`/`charge`, HubSpot's five, Mailchimp's
- * three). The practice-management datasets are deliberately ABSENT: those are
+ * three, Xero's `invoice`/`bill`/`contact`). Two of Xero's three were already
+ * here — which is the registry doing its job: `cloudRowForDataset` resolves a
+ * dataset to whichever CONNECTED provider declares it, so a fourth vendor
+ * needed one new key rather than a vendor arm. The practice-management
+ * datasets are deliberately ABSENT: those are
  * PHI, they are reached through the dedicated `/erp/*` routes under
  * `erpConnectorReadGate`'s O-2 grant machinery, and routing them through a
  * chat tool would move a PHI decision into a keyword regex.
@@ -265,9 +285,15 @@ function reasonForConnectorError(err: unknown, phase: string): string {
  * `TOOL_ROUTES` exists to prevent.
  */
 export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
-  // payments / accounting — Stripe
+  // payments / accounting — Stripe, QuickBooks Online, Xero
   charge: "get_recent_charges",
   invoice: "get_open_invoices",
+  // WARP-2383 — money owed BY the business. Xero is the first cloud track to
+  // serve it, and it is the half `docs/integrations/README.md` recorded as
+  // having no data source anywhere in the product. `[]` here would read as
+  // "you owe nobody anything", which is why it is a dataset rather than a
+  // silent omission.
+  bill: "get_open_bills",
   // CRM — HubSpot
   contact: "find_contact",
   company: "get_company",

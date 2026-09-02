@@ -355,7 +355,13 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // will never have that data" and say so, instead of finding no tool and
   // inventing an outage. Dropping the words would trade an honest refusal
   // for a hallucinated one.
-  { pattern: /\b(stripe|hubspot|mailchimp|crm|invoices?|invoicing|bill|billed|billing|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
+  //
+  // WARP-2383 added `xero` and `suppliers?`/`vendors?`. The bill words were
+  // ALREADY claimed here and had nothing to answer them — no cloud track
+  // served the `bill` dataset — so "what do we owe?" selected this reader and
+  // met an enum with no way to ask. The Xero track serves it, and the enum
+  // now carries it; the words did not change, the answer did.
+  { pattern: /\b(stripe|hubspot|mailchimp|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.

@@ -679,6 +679,78 @@ entries:
     review_by: 2027-08-27
     code_refs: [services/erp-connector/src/hubspot/connector.ts]
 
+  - id: xero-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.xero.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Xero accounting connector (ADR-041, ADR-042) — reads the books of ONE Xero
+      organisation the owner explicitly connected: customer invoices (ACCREC),
+      supplier bills (ACCPAY), the contacts both hang off, and the manual
+      journals the bookkeeper posted by hand. Carries that financial content in
+      the response — amounts, counterparty names, due dates. Nothing box-local
+      is ever sent and nothing is sent opportunistically; the connector only
+      ever dials out, because the box accepts no inbound connections and Xero
+      webhooks are therefore structurally unavailable to it. This host also
+      serves /connections, which the connector reads to learn the connection id
+      and DELETEs to sever the connection at Xero on decommission — the one
+      vendor-side revocation this product performs, and it exists because a
+      Custom Connection left behind keeps BILLING the customer monthly.
+      READ-ONLY otherwise: the connector requests read scopes only
+      (accounting.transactions.read, accounting.contacts.read,
+      accounting.settings.read) and applyWrite refuses by construction.
+      accounting.journals.read is deliberately NOT requested — Xero stopped
+      granting it to new Custom Connections on 2026-04-29, so the Advanced-tier
+      /Journals ledger is unreachable and /ManualJournals is read instead. Like
+      the QuickBooks, Stripe and HubSpot tracks and unlike the M365 one, it does
+      NOT persist what it reads: reads are answered read-through, so no synced
+      copy exists to encrypt and the connector does not become the first writer
+      of the unencrypted ErpEntityCache (ADR-041 §4, WARP-2028). Off until the
+      owner connects an organisation. Metered by Xero at 60 calls/minute and
+      5,000/day per organisation, and — the limit that actually binds — 10,000
+      calls/minute APP-WIDE across the whole fleet, which is why the sync runs
+      on a 4-hour cadence jittered per box and sends If-Modified-Since plus
+      summaryOnly on every list read.
+    ticket: WARP-2383
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [services/erp-connector/src/xero/connector.ts]
+
+  - id: xero-identity
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [identity.xero.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Xero's OAuth token endpoint (POST /connect/token) for the Custom
+      Connection grant. Carries OAuth protocol traffic only — the customer's
+      client id and client secret go out, an access token comes back — and no
+      ledger content, no box-local content. A SEPARATE entry from xero-api with
+      a different data_class on purpose, following the m365-graph-api /
+      m365-entra-login pair: one host receives a credential and returns a token,
+      the other returns the customer's books, and folding them into one entry
+      would make the registry unable to say which is which. Exercised on a
+      SCHEDULE rather than only at connect time: a Custom Connection access
+      token lasts 30 minutes and Xero issues NO refresh token for this grant
+      type, so the connector re-mints from the stored client credential rather
+      than refreshing (ADR-042 §6). Xero also publishes a token-REVOCATION
+      endpoint on this host which the connector deliberately does not call — it
+      revokes a refresh token, and this grant has none; severing happens through
+      DELETE /connections on xero-api instead.
+    ticket: WARP-2383
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [services/erp-connector/src/xero/connector.ts]
+
   - id: ref-dentrix-ascend-spec
     kind: reference
     service: orchestrator

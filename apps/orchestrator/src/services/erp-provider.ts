@@ -60,6 +60,10 @@ import {
   MAILCHIMP_PROVIDER,
   HUBSPOT_TRACK_REMEDIATION,
   MAILCHIMP_TRACK_REMEDIATION,
+  // WARP-2383 — the Xero accounting track.
+  XeroConnector,
+  XERO_PROVIDER,
+  XERO_TRACK_REMEDIATION,
   exportProviders,
   parseProfileJson,
   vendorFromExportProvider,
@@ -80,6 +84,7 @@ import {
   parseProviderConfigWith,
   providerConfigNumber,
   providerConfigString,
+  CREDENTIAL_VARIANT_FIELD,
   type ProviderConfig,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
@@ -837,6 +842,57 @@ registerConnectorFactory(MAILCHIMP_PROVIDER, ({ selector: sel, config: cfg }) =>
       baseUrl: providerConfigString(cfg, "baseUrl"),
     },
     { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
+
+/**
+ * WARP-2383 — the Xero accounting track.
+ *
+ * Three things are refused HERE rather than inside the connector, all for the
+ * QuickBooks reason — the row is known to be unconfigured at this point, and a
+ * connector built anyway would look correct and then spend a metered call to
+ * find out:
+ *
+ *   - **no connection id.** It is the minted-token cache's key. Without one,
+ *     two connections would share a cache slot and one organisation's token
+ *     could be presented against another's books.
+ *   - **no client id.** The Custom Connection cannot be authenticated without
+ *     it, and an empty one produces a Basic header of `:<secret>` — a request
+ *     that ships the secret to Xero for no possible benefit.
+ *   - **the wrong credential variant.** `assertXeroVariantImplemented` inside
+ *     the connector's constructor turns a `pkce-app` row into a named,
+ *     actionable refusal rather than an obscure failure at read time. It throws
+ *     from the constructor, which is inside `connectorFor`'s try in both call
+ *     sites, so it degrades like every other absent-material path.
+ */
+registerConnectorFactory(XERO_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const clientId = providerConfigString(cfg, "clientId");
+  if (!sel.connectionId || !clientId) {
+    throw new ConnectorBlockedError(
+      sel.connectionId
+        ? "construct (no Xero client id configured)"
+        : "construct (no Xero connection row id)",
+      XERO_TRACK_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new XeroConnector(
+    {
+      connectionId: sel.connectionId,
+      clientId,
+      // Read from the parsed config, which `parseProviderConfigResult` writes
+      // under `CREDENTIAL_VARIANT_FIELD` for every variants-declaring
+      // descriptor. NEVER defaulted here: which authentication path a
+      // connection is on is persisted state, and guessing it is the
+      // no-guessing-from-absence rule. An absent value reaches
+      // `assertXeroVariantImplemented` and is refused by name.
+      credentialVariant: providerConfigString(cfg, CREDENTIAL_VARIANT_FIELD) ?? "",
+      credentialsSecretRef: sel.secretRef ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+    },
+    // `resolveSecret` left undefined when nothing is sealed, so the connector
+    // keeps `blockedXeroSecretResolver` and says what is missing.
+    { resolveSecret: resolve ? (field: string) => resolve(field) : undefined },
   );
 });
 

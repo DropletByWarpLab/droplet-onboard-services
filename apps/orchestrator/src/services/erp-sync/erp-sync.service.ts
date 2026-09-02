@@ -50,6 +50,10 @@ import {
   ConnectorBlockedError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
+  // WARP-2383 — the Xero track's three named states.
+  XeroRateLimitedError,
+  XeroReauthorizationRequiredError,
+  XeroScopeMissingError,
   DEFAULT_CALL_CEILING,
 } from "@droplet/erp-connector";
 import { providerDescriptor } from "@droplet/shared-types";
@@ -142,6 +146,17 @@ export interface ErpSyncDeps {
    * earns a longer wait, and one miss puts it straight back to this base.
    */
   sweepIntervalMs?: number;
+  /**
+   * WARP-2417 — this box's identity, for the per-provider cadence floor's
+   * jitter (`claimDueErpCursors`).
+   *
+   * Absent means no jitter, i.e. every box on a floor-declaring provider comes
+   * due on the same instant. That is fine in a unit test and wrong in the
+   * fleet, which is why `index.ts` passes `config.DROPLET_DEVICE_ID` — the same
+   * value the schedule itself is jittered from, so the two derivations agree
+   * about which box this is.
+   */
+  deviceId?: string;
 }
 
 /** What one tick did, for the caller and for the tests. */
@@ -231,6 +246,27 @@ function asSyncFailure(err: unknown): {
     // watermark and the connection is flagged needsReconnect — never ERROR.
     return { code: "REAUTHORIZE_REQUIRED", statusCode: 401, message: err.message };
   }
+  if (err instanceof XeroReauthorizationRequiredError) {
+    // WARP-2383. AUTH, so the cursor keeps its watermark and the connection is
+    // flagged needsReconnect. Routine rather than exceptional at this vendor:
+    // editing a Custom Connection in Xero's portal deactivates it until it is
+    // re-authorised, so an owner changing their own scopes produces it.
+    return { code: "REAUTHORIZE_REQUIRED", statusCode: 401, message: err.message };
+  }
+  if (err instanceof XeroScopeMissingError) {
+    // Also AUTH (403), deliberately NOT fatal. The credential is fine and the
+    // connection is intact — a scope the owner has to tick is a re-consent, and
+    // FATAL would park the cursor forever and fold the whole connection into
+    // "this sync is failing" while it is one checkbox from working. Keeping
+    // the watermark means re-authorising does not cost a full re-enumeration.
+    return { code: "XERO_SCOPE_MISSING", statusCode: 403, message: err.message };
+  }
+  if (err instanceof XeroRateLimitedError) {
+    // TRANSIENT, and it carries Xero's own `Retry-After` — `retryAfterOf`
+    // reads it off the error, and `computeBackoffMs` obeys it exactly.
+    // Retrying earlier than a vendor asked deepens the throttle it is escaping.
+    return { code: "XERO_RATE_LIMITED", statusCode: 429, message: err.message };
+  }
   if (err instanceof ConnectorBlockedError) {
     // Not configured, or the vendor is unreachable. Retrying is reasonable.
     return { code: "CONNECTOR_BLOCKED", statusCode: 503, message: err.message };
@@ -256,6 +292,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
   const budgetFor = deps.budgetFor ?? defaultBudgetFor;
   const tickLimit = deps.tickLimit ?? DEFAULT_TICK_LIMIT;
   const sweepIntervalMs = deps.sweepIntervalMs ?? 24 * 60 * 60 * 1000;
+  const deviceId = deps.deviceId;
 
   /**
    * One audit row per tick, on BOTH paths.
@@ -479,7 +516,11 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
     },
 
     async runIncrementalTick() {
-      const claimed = await claimDueErpCursors(prisma, tickLimit, now());
+      // WARP-2417 — `deviceId` reaches the claim so a provider that declares
+      // `pollIntervalFloorMs` (Xero: four hours) is read at that cadence,
+      // jittered per box. A provider that declares none is claimed exactly as
+      // before.
+      const claimed = await claimDueErpCursors(prisma, tickLimit, now(), { deviceId });
       const states: ErpSyncStateName[] = [];
       for (const cursor of claimed) {
         states.push(await runOneCursor(cursor));

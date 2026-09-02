@@ -112,6 +112,8 @@ import {
 } from "./services/activity.singleton.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
+// WARP-2408 — the Xero minted-token cache's expiry sweep. See its cron leg.
+import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -1205,11 +1207,41 @@ async function main() {
   // Errors propagate naked to `safeRun`, matching every other cron leg in this
   // file — swallowing them would zero the per-handler consecutiveFailures
   // canary that downstream alerting reads.
+  // WARP-2383 / WARP-2408 — expire minted Xero access tokens out of process
+  // memory.
+  //
+  // A Xero Custom Connection issues NO refresh token and a 30-minute access
+  // token (ADR-042 §6), so the connector re-mints from the stored client
+  // credential and caches the result per CONNECTION — module-level, because
+  // `erp.service` builds and closes a connector per read and a per-instance
+  // cache would mint a token for every read.
+  //
+  // This leg is deliberately NOT a proactive re-mint. Against the four-hour
+  // poll cadence the token is expired at every tick by construction, so
+  // refreshing it on a timer would mint ~57 tokens a day to use six of them,
+  // spending the very daily allowance the cadence exists to protect. What it
+  // buys instead is that a token belonging to a connection nobody has read
+  // from since this morning is not still sitting in memory this evening, and
+  // that the cache cannot grow on a box whose connections come and go.
+  //
+  // Ten minutes, on `cron-runtime` and never a `while (true)`: a third of the
+  // token's life, so nothing dead lingers long, and cheap enough that the
+  // frequency is not worth tuning.
+  cronRuntime.scheduleInterval(10 * 60 * 1000, async () => {
+    const dropped = pruneExpiredXeroTokens();
+    if (dropped > 0) logger.debug({ dropped }, "expired xero access tokens dropped from memory");
+  });
+
   const erpSyncRecorder = getActivityRecorder();
   if (erpSyncRecorder) {
     const erpSyncRunner = createErpSyncRunner({
       prisma: prisma as never,
       recorder: erpSyncRecorder,
+      // WARP-2417 — the same device identity the schedule below is jittered
+      // from. It reaches `claimDueErpCursors`, which applies each provider's
+      // declared `pollIntervalFloorMs` (Xero: four hours) on top of the tick,
+      // jittered per box so the fleet does not converge on the same instants.
+      deviceId: config.DROPLET_DEVICE_ID,
     });
 
     // Read at BOOT, inside main() — never at module import. A schedule frozen

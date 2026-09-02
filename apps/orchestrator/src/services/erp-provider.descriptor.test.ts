@@ -97,6 +97,17 @@ const CLOUD_ERP_PROVIDERS_BEFORE = ["quickbooks-online", "dentrix-ascend"] as co
  */
 const SAAS_PROVIDERS_WARP_2214 = ["stripe", "hubspot", "mailchimp"] as const;
 
+/**
+ * WARP-2383 — Xero, the fourth WARP-2214 SaaS vendor and the first descriptor
+ * to declare `credentialVariants`.
+ *
+ * Its own const rather than a fourth entry in the list above, for exactly the
+ * reason that list's docstring gives: each of these is a record of what shipped
+ * on one ticket, and appending to an older one turns a regression anchor into a
+ * running total. The assertions compose them explicitly.
+ */
+const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
+
 afterEach(() => {
   __resetRegisteredProvidersForTest();
   __resetCallBudgetsForTest();
@@ -111,7 +122,11 @@ describe("the descriptor set covers exactly the providers that shipped before", 
   it("descriptor ids are the pre-change set PLUS the WARP-2214 vendors", () => {
     // Mutation: delete one descriptor from provider-registry.ts → red.
     expect(new Set(buildableProviderIds())).toEqual(
-      new Set([...KNOWN_ERP_PROVIDERS_BEFORE, ...SAAS_PROVIDERS_WARP_2214]),
+      new Set([
+        ...KNOWN_ERP_PROVIDERS_BEFORE,
+        ...SAAS_PROVIDERS_WARP_2214,
+        ...SAAS_PROVIDERS_WARP_2383,
+      ]),
     );
   });
 
@@ -123,7 +138,11 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // Mutation: flip `dentrix-ascend`'s track to "lan", or any SaaS vendor's
     // → red.
     expect(new Set(cloudProviderIds())).toEqual(
-      new Set([...CLOUD_ERP_PROVIDERS_BEFORE, ...SAAS_PROVIDERS_WARP_2214]),
+      new Set([
+        ...CLOUD_ERP_PROVIDERS_BEFORE,
+        ...SAAS_PROVIDERS_WARP_2214,
+        ...SAAS_PROVIDERS_WARP_2383,
+      ]),
     );
   });
 
@@ -136,12 +155,14 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     ]);
     expect(KNOWN_ERP_PROVIDERS.slice(KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
+      ...SAAS_PROVIDERS_WARP_2383,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
+      ...SAAS_PROVIDERS_WARP_2383,
     ]);
   });
 
@@ -866,6 +887,8 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "stripe",
       "hubspot",
       "mailchimp",
+      // WARP-2383 — Xero, at `catalog.order: 7`.
+      "xero",
     ]);
   });
 });
