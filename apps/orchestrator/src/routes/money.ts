@@ -15,11 +15,19 @@
  * this surface. `guest` is refused — a household guest has no business reading
  * the practice's receivables — and the per-person feature gate narrows from
  * there.
+ *
+ * `/money/documents` uses `requireRoleOrMcpService` with that SAME role tuple,
+ * not a wider one: `money_list_open_documents` dispatches through it as the
+ * pinned `_service:mcp` principal, and a plain `requireRole` would 403 the tool
+ * on every call — the dead-tool class `TOOL_ROUTES` and
+ * `tools-mcp-admission.test.ts` exist to make impossible. Human RBAC is
+ * unchanged: the guard defers to `requireRole("owner", "admin", "family")` for
+ * everyone who is not that one service id at the `service` role.
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import {
   createMoneyService,
   MONEY_PAGE_LIMIT,
@@ -73,7 +81,7 @@ export function createMoneyRouter(prisma: PrismaClient, now: () => Date = () => 
    */
   router.get(
     "/money/documents",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next) => {
       try {
         const documents = await money.documents({

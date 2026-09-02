@@ -124,8 +124,13 @@
   border-bottom: none;
 }
 
+/* The accent wash comes from the shell scope's `--brand-subtle`, not the
+   pre-DESIGN.md accent-subtle token: reports.css names that swap as THE
+   migration, and scripts/check-dashboard-classes.sh (rule legacy-token)
+   fails the build on the legacy one. Colour is near-identical -- the dark
+   value is byte-identical -- so this is a token fix, not a redesign. */
 .money-table tbody tr:hover {
-  background: var(--color-accent-subtle, var(--color-surface-secondary));
+  background: var(--brand-subtle);
 }
 
 .money-cell--num {
