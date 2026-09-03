@@ -250,6 +250,12 @@ jobs:
               - "scripts/host/droplet-storage-pool.sh"
               - "tests/factory-reset-storage-wipe.test.sh"
               - "tests/factory-reset-secrets-wipe.test.sh"
+              # WARP-2638: so a change to the guards themselves fires the leg.
+              # Both are static greps of scripts/factory-reset.sh, which is
+              # already in this list — the only PRs this widening newly catches
+              # are the rare ones touching a guard and nothing else.
+              - "tests/factory-reset-volume-wipe.test.sh"
+              - "tests/factory-reset-purge-scope.test.sh"
               - "tests/storage-pool-destroy-superblock.test.sh"
             # WARP-2481: the WARP-229 FIPS static source lint, moved here from
             # test-fips.yml so its result reaches branch protection through
@@ -721,6 +727,18 @@ jobs:
       # which is exactly a box a factory reset has to work on.
       - name: Run factory-reset live-secrets wipe unit tests
         run: bash tests/factory-reset-secrets-wipe.test.sh
+
+      # WARP-2638 — the two STATIC guards over scripts/factory-reset.sh
+      # (volume-wipe robustness + --purge-images scope) ran in NO workflow at
+      # all: they were written as regression guards and then never wired, so
+      # the WARP-605 project-name bug and the `docker system prune -af` sibling
+      # -image bug they pin were both unguarded at PR time. They are pure greps
+      # of one file, < 1 s each, and this leg ALREADY fires on
+      # scripts/factory-reset.sh — marginal spend is ~0.
+      - name: Run factory-reset volume-wipe + purge-scope guards
+        run: |
+          bash tests/factory-reset-volume-wipe.test.sh
+          bash tests/factory-reset-purge-scope.test.sh
 
   # WARP-229 FIPS 140-3 static SOURCE lint (scripts/test-fips.sh), moved here
   # from test-fips.yml under WARP-2481. It lived in its own path-filtered
