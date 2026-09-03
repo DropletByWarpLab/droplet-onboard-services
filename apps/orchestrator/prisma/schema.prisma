@@ -3209,6 +3209,13 @@ model ToolSchedule {
   specId     String
   spec       ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
   rrule      String
+  /// WARP-2665 — IANA timezone the rrule's wall-clock time is interpreted in,
+  /// matching SceneSchedule.timezone (KAN-6). Without it a routine scheduled
+  /// for "07:00" fires at 07:00 UTC and drifts an hour at every DST boundary.
+  /// Added with the write path (WARP-2665) rather than after it, so no row
+  /// ever gets created under the UTC-only reading. Defaults to "UTC", which
+  /// keeps nextFireFromRrule's UTC fast-path unchanged.
+  timezone   String   @default("UTC")
   nextFireAt DateTime
   enabled    Boolean  @default(true)
   createdAt  DateTime @default(now())

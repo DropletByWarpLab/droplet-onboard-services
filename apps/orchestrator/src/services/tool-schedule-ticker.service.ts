@@ -96,6 +96,9 @@ interface ScheduleRow {
   id: string;
   specId: string;
   rrule: string;
+  /** WARP-2665 — IANA zone the rrule's wall-clock is read in. "UTC" for every
+   *  row written before the column existed, which is the parser's fast path. */
+  timezone: string;
   nextFireAt: Date;
   enabled: boolean;
 }
@@ -275,7 +278,9 @@ async function advanceOrDisable(
   schedule: ScheduleRow,
   now: Date,
 ): Promise<void> {
-  const next = nextFireFromRrule(schedule.rrule, now);
+  // WARP-2665 — the zone is the third argument, not a default. Dropping it
+  // here is what made a "07:00" routine a 07:00-UTC routine.
+  const next = nextFireFromRrule(schedule.rrule, now, schedule.timezone ?? "UTC");
   if (next === null) {
     // Malformed or unsupported rule. Disable + audit so an operator
     // can fix the editor input rather than the ticker silently
