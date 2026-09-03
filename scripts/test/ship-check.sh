@@ -403,41 +403,33 @@ run_check_tsc_full() {
   local rc=0
   local out
 
-  # Phase 1: prisma generate (orchestrator's @prisma/client must reflect
-  # the current schema or every Prisma-typed call site shows TS2305).
+  # Phases 1 + 2 (prisma generate, then build the leaf workspaces so their
+  # dist + .d.ts exist for downstream type resolution) are DELEGATED to
+  # scripts/bootstrap.sh — the same `npm run bootstrap` a developer runs after
+  # `npm ci`. WARP-2620: the leaf list was duplicated between this function,
+  # CONTRIBUTING.md and ci.yml and had already drifted (this copy omitted
+  # @droplet/shared-types; CONTRIBUTING's copy omitted @droplet/mcp-server),
+  # so a fresh checkout failed differently depending on which list you
+  # followed. One list now, in one file.
   #
-  # Pinned to the orchestrator workspace's `db:generate` script (WARP-492).
-  # The script body is `prisma generate`; npm resolves it through the
-  # workspace's `node_modules/.bin/prisma`, which is the `^5.14.0` pin
-  # declared in apps/orchestrator/package.json. The earlier form
-  # (`npx prisma generate`) silently fetched the LATEST published prisma
-  # (7.x at time of writing) off the npm registry whenever no local
-  # node_modules tree was present — and prisma 7 rejects this schema with
-  # P1012 ("datasource property `url` is no longer supported"), wedging
-  # ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
-  # ("prisma is not recognized" / "Missing script") when node_modules is
-  # missing instead of misleading the operator with a phantom P1012.
-  if [ -d "$REPO_ROOT/apps/orchestrator/prisma" ]; then
-    if ! out="$(cd "$REPO_ROOT" && npm run -w @droplet/orchestrator db:generate 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
-      printf '%s\n' "$out" | sed 's/^/    | /' >&2
-      _record_result "$label" fail
-      return 1
-    fi
+  # Two behaviours that live in bootstrap.sh and matter here:
+  #   - prisma generate is pinned to the orchestrator workspace's
+  #     `db:generate` script (WARP-492) rather than `npx prisma generate`,
+  #     which silently fetches the LATEST published prisma off the registry
+  #     when no local binary resolves — and prisma 7 rejects this schema with
+  #     P1012 ("datasource property `url` is no longer supported"), wedging
+  #     ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
+  #     instead. The WARP-492 self-test case still discriminates on this.
+  #   - each leaf `dist/` is removed before its build. `tsc` emits but never
+  #     prunes, so a file moved out of `src/` survives in `dist/` forever —
+  #     that is how a clean checkout reds the WARP-2515 guard on a phantom
+  #     `handlers/pm/pm-orch.test.js`.
+  if ! out="$(cd "$REPO_ROOT" && bash scripts/bootstrap.sh 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — workspace bootstrap failed (npm run bootstrap)\n" "$label"
+    printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
+    _record_result "$label" fail
+    return 1
   fi
-
-  # Phase 2: build leaf workspaces so their dist + .d.ts exist for
-  # downstream type resolution. These are the same RUN steps the
-  # orchestrator Dockerfile executes.
-  local leaf_pkg
-  for leaf_pkg in @droplet/erp-connector @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
-    if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
-      printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
-      _record_result "$label" fail
-      return 1
-    fi
-  done
 
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).

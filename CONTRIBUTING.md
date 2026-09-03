@@ -86,7 +86,12 @@ npm ls --workspaces --depth 0
 cd droplet-onboard-services
 
 # Install Node.js dependencies (all workspaces)
-npm install
+npm ci
+
+# Make the checkout buildable: prisma generate, then build the leaf
+# workspaces (see "Workspace builds come first" — skipping this is the usual
+# cause of a "broken" fresh checkout). Takes ~7 s.
+npm run bootstrap
 
 # Set up the AI Gateway Python environment
 cd services/ai-gateway
@@ -95,24 +100,32 @@ source .venv/bin/activate    # or .venv\Scripts\activate on Windows
 pip install -r requirements-dev.txt
 cd ../..
 
-# Build the @droplet/* packages the apps import (see "Workspace builds come
-# first" — skipping this is the usual cause of a "broken" fresh checkout)
-npm run build -w @droplet/shared-types -w @droplet/tools-core \
-              -w @droplet/fips-selftest -w @droplet/auth-policy \
-              -w @droplet/erp-connector
-
-# Generate Prisma client
-cd apps/orchestrator && npx prisma generate && cd ../..
-
 # Run all tests
 npm run test
 ```
 
 ### Workspace builds come first
 
+`npm ci` alone does not leave this monorepo in a state where `tsc`, Vitest or a
+workspace `build` can run — that is what `npm run bootstrap`
+(`scripts/bootstrap.sh`) is for. It does three things, in order:
+
+1. **`prisma generate`** for `apps/orchestrator/prisma/schema.prisma`. Until it
+   runs, `node_modules/.prisma/client` is Prisma's placeholder, which declares
+   `export declare const PrismaClient: any` — so `ctx.prisma.<model>` is `any`
+   and every destructure of a row is a `TS7031`.
+2. **`rm -rf` each leaf `dist/`**. `tsc` emits but never prunes, so a file moved
+   out of `src/` survives in `dist/` indefinitely and reds guards that are
+   asserting about the *source* tree.
+3. **Builds the five leaf workspaces** in dependency order:
+   `@droplet/shared-types` → `@droplet/fips-selftest` → `@droplet/erp-connector`
+   → `@droplet/tools-core` → `@droplet/mcp-server`.
+
 Three of those five resolve through their built `dist/` — `@droplet/tools-core`,
 `@droplet/fips-selftest` and `@droplet/erp-connector` all point `main`, `types`
-and every `exports` condition at `dist/`. `turbo.json`'s `test` task does **not**
+and every `exports` condition at `dist/`. `@droplet/mcp-server` does too
+(`dist/lib.js` + `dist/lib.d.ts`), and the orchestrator's mcp-client tests spawn
+its `dist/index.js` as a child process. `turbo.json`'s `test` task does **not**
 declare `dependsOn: ["^build"]`, so nothing builds them implicitly, and on a
 fresh checkout `tsc` and Vitest fail against packages that are present and
 healthy in the tree:
@@ -130,14 +143,25 @@ is the only one of the five that lives under `services/` rather than
 `apps/orchestrator/Dockerfile`; a local checkout is the only place you have to
 do it yourself.
 
-The other two — `@droplet/shared-types` and `@droplet/auth-policy` — point
-`main`, `types` and `exports.import` at `./src/index.ts`, so TypeScript and
-Vitest resolve them straight from source and they do **not** need building for
-either. Only their `exports.require` condition points at `dist/`, so a CommonJS
-`require()` of one of them is the single path that does. They stay in the build
-command above because building all five is one line, costs seconds, and removes
-the need to remember which two are the exception — not because a fresh checkout
-fails without them.
+`@droplet/shared-types` and `@droplet/auth-policy` point `main`, `types` and
+`exports.import` at `./src/index.ts`, so TypeScript and Vitest resolve them
+straight from source. `shared-types` is still on the bootstrap list because
+`tools-core`'s **emitted** CommonJS resolves it through `exports.require` →
+`dist/` (WARP-1874); `auth-policy` has no such consumer and is deliberately
+absent.
+
+**Re-run `npm run bootstrap` after every merge or rebase** that touches a leaf
+workspace or the Prisma schema — a `dist/` from the previous commit type-checks
+happily against the wrong types. If `tsc` or Vitest is reporting something that
+looks impossible, `npm run bootstrap:check` says in one line whether the tree is
+bootstrapped at all; the root `npm run test` runs that check for you first.
+
+Deliberately **not** a `postinstall` hook: `services/mcp-server/Dockerfile` runs
+`npm ci` before it `COPY`s `apps/orchestrator/prisma`, so a hook would generate
+against a schema that is not in the image yet, and every CI leg that needs the
+client already runs `npm run -w @droplet/orchestrator db:generate` explicitly —
+a hook would only add duplicate work to every `npm ci` in the org's metered
+minutes (`docs/ci-cost-budget.md`).
 
 ### Optional: pre-commit secret scanning
 
