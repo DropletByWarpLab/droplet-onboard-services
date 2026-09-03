@@ -53,13 +53,18 @@ else
   echo "FAILURES=$FAILURES"; exit 1
 fi
 
-if grep -qF 'lib/secrets-wipe.sh' "$RESET"; then
+# Every assertion below reads COMMENT-STRIPPED code. The comments in this
+# region deliberately name both `rm`s and the wipe function to explain the
+# ordering, so a whole-file grep would pass on prose alone.
+CODE_NUM="$(grep -nvE '^[[:space:]]*#' "$RESET")"
+
+if printf '%s\n' "$CODE_NUM" | grep -qF 'lib/secrets-wipe.sh'; then
   pass "factory-reset sources the secrets-wipe library"
 else
   fail "factory-reset does not source scripts/lib/secrets-wipe.sh"
 fi
 
-if grep -qF 'secw_wipe_live_secrets' "$RESET"; then
+if printf '%s\n' "$CODE_NUM" | grep -qE '^[0-9]+:secw_wipe_live_secrets '; then
   pass "factory-reset calls secw_wipe_live_secrets"
 else
   fail "factory-reset never calls secw_wipe_live_secrets — the live secrets survive the reset"
@@ -68,10 +73,6 @@ fi
 # ORDERING IS THE FIX. The wipe has to run while the symlinks still resolve;
 # once `rm -f "$REPO_ROOT/.env"` has unlinked the link, the target on /data is
 # unreachable from this script and the secrets stay on the box forever.
-# Comments are stripped first: the code deliberately NAMES both `rm`s in the
-# comment that explains the ordering, so a whole-file grep would match the
-# prose above the call and report the wrong order.
-CODE_NUM="$(grep -nvE '^[[:space:]]*#' "$RESET")"
 WIPE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -E '^[0-9]+:secw_wipe_live_secrets ' | head -n 1 | cut -d: -f1 || true)"
 UNLINK_LINE="$(printf '%s\n' "$CODE_NUM" | grep -F 'rm -f "$REPO_ROOT/.env"' | head -n 1 | cut -d: -f1 || true)"
 SECRETS_RM_LINE="$(printf '%s\n' "$CODE_NUM" | grep -F 'rm -rf "$REPO_ROOT/data/secrets"' | head -n 1 | cut -d: -f1 || true)"
