@@ -312,7 +312,7 @@ function ProviderForm({
           Save and behind its own confirmation: the two actions are opposites
           and must not be adjacent buttons. */}
       {offersDisconnect(view) && (
-        <div className="pt-3 border-t border-separator">
+        <div className="pt-3" style={{ borderTop: "1px solid var(--border)" }}>
           <DisconnectControl
             provider={view.provider}
             displayName={view.displayName}

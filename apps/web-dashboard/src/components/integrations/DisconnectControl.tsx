@@ -93,21 +93,32 @@ export function DisconnectControl({
     }
   }
 
+  // Tokens follow `settings/DestructiveConfirm.tsx`, not the sheet this block
+  // came out of: `ManageSheet` is grandfathered in
+  // `scripts/dashboard-token-allowlist.txt` and this file is new, so the
+  // ratified DESIGN.md tokens are the only ones it may use. The literal
+  // `#ef4444` pair is that component's destructive treatment verbatim —
+  // deliberately NOT `bg-accent`, which is where the white-on-accent contrast
+  // failure lives.
   if (phase.kind === "confirming" || phase.kind === "busy") {
     const busy = phase.kind === "busy";
     return (
-      <div className="rounded-sm bg-system-red/8 p-3" data-testid="disconnect-confirm">
+      <div
+        className="rounded-[var(--radius-input)] bg-[rgba(239,68,68,0.1)] p-3"
+        data-testid="disconnect-confirm"
+      >
         {/* The purge is stated BEFORE it happens, which is the half ADR-041 §2
             calls a capability statement. The old sheet's wording promised only
             that Droplet would stop reading. */}
-        <p className="type-footnote text-label-primary">
+        <p className="type-footnote" style={{ color: "var(--text)" }}>
           Disconnect {displayName}? Droplet stops reading it and removes the stored
           credential. Your {displayName} data is untouched.
         </p>
         <div className="mt-3 flex items-center gap-2">
           <button
             type="button"
-            className="type-footnote text-label-secondary px-2"
+            className="type-footnote px-2 min-h-[44px]"
+            style={{ color: "var(--text-muted)" }}
             disabled={busy}
             onClick={() => setPhase({ kind: "idle" })}
           >
@@ -115,9 +126,9 @@ export function DisconnectControl({
           </button>
           <button
             type="button"
-            className="dp-btn-primary"
-            style={{ background: "var(--color-system-red)" }}
+            className="type-subheadline px-4 rounded-[var(--radius-input)] bg-[#ef4444] text-white hover:bg-[#dc2626] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[44px]"
             disabled={busy}
+            aria-busy={busy || undefined}
             onClick={run}
           >
             {busy ? "Disconnecting…" : "Disconnect"}
