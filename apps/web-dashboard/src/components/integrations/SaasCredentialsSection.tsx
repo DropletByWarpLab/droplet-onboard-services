@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import { useAuth } from "@/lib/auth";
+import { DisconnectControl } from "@/components/integrations/DisconnectControl";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
 import {
   fetchSaasCredentials,
@@ -139,10 +140,31 @@ function secretPlaceholder(field: SaasCredentialField): string {
   return field.hasValue ? "Saved — replace to change" : "Paste the value";
 }
 
+/**
+ * WARP-2518 — whether this provider's card offers Disconnect.
+ *
+ * The mirror of `ConnectorCard`'s rule, over `SaasConnectionState` instead of
+ * `IntegrationStatus`, and deliberately NOT over `hasCredentials`: that is an
+ * `every()` over the declared secret fields, so a provider with two declared
+ * and one stored answers `false` while a live key sits on the row — the exact
+ * confusion WARP-2489 removed from the state line, which would come straight
+ * back if the button that PURGES the key were hidden by it.
+ *
+ * `NOT_CONFIGURED` has nothing to disconnect. A `DISABLED` row the box says is
+ * already purged has nothing left either, and offering it would contradict the
+ * "credential removed" line the same card is rendering.
+ */
+export function offersDisconnect(view: SaasCredentialView): boolean {
+  if (view.state === "NOT_CONFIGURED") return false;
+  if (view.state === "DISABLED" && view.credentialsPurged === true) return false;
+  return true;
+}
+
 function ProviderForm({
   view,
   status,
   onSave,
+  onDisconnected,
 }: {
   view: SaasCredentialView;
   status: Status;
@@ -151,6 +173,10 @@ function ProviderForm({
    *  `status` keeps the clearing tied to THIS submit, not to whatever the
    *  shared status happened to be when the component next rendered. */
   onSave: (provider: string, fields: Record<string, string>) => Promise<boolean>;
+  /** Fired after the box confirmed a disconnect — the panel answers by
+   *  re-reading, which is what refreshes `credentialsPurged` and the state
+   *  line derived from it. */
+  onDisconnected: () => void;
 }) {
   // Non-secret values pre-fill from the server; secrets start empty, always.
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
@@ -279,6 +305,21 @@ function ProviderForm({
           </span>
         )}
       </div>
+
+      {/* WARP-2518 — the far side of the page. This is the one surface where a
+          credential is handed over, so it is the one where ADR-041 §2's
+          promise that disconnecting REMOVES it is most owed a control. Below
+          Save and behind its own confirmation: the two actions are opposites
+          and must not be adjacent buttons. */}
+      {offersDisconnect(view) && (
+        <div className="pt-3 border-t border-separator">
+          <DisconnectControl
+            provider={view.provider}
+            displayName={view.displayName}
+            onDisconnected={onDisconnected}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -362,6 +403,13 @@ function SaasCredentialsPanel() {
             view={view}
             status={status}
             onSave={handleSave}
+            // WARP-2518 — re-read rather than patch the row in place. The
+            // disconnect response is an `IntegrationConnection`, a different
+            // shape from the `SaasCredentialView` this page renders, and
+            // hand-mapping one onto the other is how the two surfaces would
+            // come to disagree about `credentialsPurged`. Only the box derives
+            // that fact; the page asks it again.
+            onDisconnected={() => void load()}
           />
         ))
       )}
