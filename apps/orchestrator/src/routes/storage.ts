@@ -99,9 +99,25 @@ function deriveBus(device: string): string {
 
 // ── WARP-827: data-drive inclusion filter ──
 //
-// What the home-user (ADR-002) is allowed to see on the /storage page is
-// ONLY real, user-relevant data drives. They must NEVER see firmware/boot/
-// swap/loop pseudo-devices or the OS/system disk dressed up as "your drive".
+// What may appear in the `drives` LIST is ONLY real, user-relevant data
+// drives. Firmware/boot/swap/loop pseudo-devices and the OS/system disk must
+// NEVER appear here dressed up as "your drive".
+//
+// WARP-2098 SCOPE NOTE — read this before relaxing anything below. This
+// predicate governs `drives[]`, and the sibling filter further down governs
+// `disks[]`. Both are unchanged, and both must stay: every destructive picker
+// in the product iterates one of those two arrays (drive rename/eject, the
+// Settings reformat list, the setup wizard's poolable and reclaimable lists,
+// Erase & adopt), and their only OS-disk protection is this filter. What
+// WARP-2098 added is a THIRD, separate key — `system_disk` — so the install
+// disk can be DISPLAYED without ever being an element of a list something acts
+// on. "The owner may not see it" was never the rule; "it may not be offered as
+// storage they can spend or erase" is. Hiding it entirely had a real cost: the
+// docker data-root (and so Nextcloud's uploaded files) lives on that disk, so
+// it is the disk that fills first, and the owner had no way to see it.
+//
+// The ADR-002 home-user persona this block used to cite as its authority was
+// retired wholesale by WARP-1341; the rule stands on its own merits.
 //
 // Layered rule (defense in depth):
 //   • The device-bridge (services/oled-display/device-bridge.py) is the FIRST
@@ -204,7 +220,79 @@ interface BridgeDrivesSnapshot {
   /** WARP-936: whole-disk inventory with explicit states. Absent on an older
    *  bridge — the route then forwards an empty list, never an error. */
   disks?: BridgeDisk[];
+  /** WARP-2098: the appliance's OWN install disk, reported by the bridge in a
+   *  key of its own. Absent on an older bridge, and absent when the bridge
+   *  could not measure the root filesystem — never null, never zeroed, so
+   *  "nothing to say" stays distinguishable from "empty". */
+  system_disk?: BridgeSystemDisk;
   snapshot_at: string;
+}
+
+/**
+ * WARP-2098 — the box's own system/install disk.
+ *
+ * This is NOT a member of `drives` or `disks`, and must never become one.
+ * Those two lists feed every destructive picker in the product (adopt,
+ * reclaim, pool-create, the Settings reformat list), and the WARP-827 rules
+ * that keep the OS disk out of them are unchanged by this ticket. What
+ * changes is only that the disk is now *reportable* — the owner can see the
+ * Droplet's own disk and how full it is, which matters here because
+ * Nextcloud's data directory lives on it while the storage pool is attached
+ * to Nextcloud only as external storage.
+ *
+ * `used_bytes`/`free_bytes` are `null` when the bridge identified the disk but
+ * could not measure anything on it. Rendering that as 0 would claim a pristine
+ * empty disk, so the UI shows capacity with no meter instead.
+ */
+interface BridgeSystemDisk {
+  /** Whole-disk kernel name, e.g. "nvme0n1". The bridge omits the whole object
+   *  rather than sending an unresolved or partition-shaped name. */
+  name: string;
+  /** The PHYSICAL disk. `used_bytes` is the sum across `filesystems`, so
+   *  unallocated LVM extents correctly land in `free_bytes`. */
+  size_bytes: number;
+  used_bytes: number | null;
+  free_bytes: number | null;
+  model: string;
+  serial: string;
+  bus: string;
+  /** Every mounted filesystem on this disk, one per backing device. On a
+   *  provisioned box that is root, /boot/efi and /data — and /data is the one
+   *  that matters, since the docker data-root (and so Nextcloud's files) lives
+   *  there. `role` is assigned by the bridge so no client pattern-matches host
+   *  paths. */
+  filesystems: Array<{
+    mount: string;
+    role: "root" | "boot" | "data";
+    fs: string;
+    size_bytes: number;
+    used_bytes: number;
+    free_bytes: number;
+  }>;
+}
+
+/**
+ * WARP-2098 — the box's real data-storage figure.
+ *
+ * Summed over the SAME post-filter `drives` array this route returns, so the
+ * OS-disk exclusion that already governs that array governs the total for
+ * free. Summing anything earlier (`snap.drives`) would silently re-admit every
+ * OS partition; summing `disks` would double-count a pool, whose members
+ * appear there as `pool_member` while the pool's real capacity is the one
+ * mounted md filesystem already in `drives`.
+ *
+ * This is NOT pool capacity and must never be labelled as such — ADR-019
+ * deleted a client-side "Total pooled storage" byte-sum for exactly that
+ * reason, and drives-panel.pools.test.tsx still guards the phrase.
+ */
+interface DataStorageTotals {
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  drive_count: number;
+  /** Explicit provenance so a reader of the payload (or the LLM, via
+   *  list_drives) can never mistake this for pool or box-wide capacity. */
+  source: "data_drives";
 }
 
 // ── BUG-3 / ADR-019: storage pools ──
@@ -273,6 +361,58 @@ async function bridgePoolCommand(
     });
     const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
     return { ok: r.ok, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * WARP-2098 — totals over an ALREADY-FILTERED data-drive list.
+ *
+ * Takes the filtered array as its argument rather than the raw snapshot, on
+ * purpose: the only way this figure can be wrong is by being computed one step
+ * too early, so the function is given no way to reach the unfiltered list. Both
+ * GET /storage and GET /storage/drives call it with the output of
+ * isUserDataDrive, which is what keeps the two endpoints agreeing.
+ *
+ * Returns null for an empty list — "there is nothing to total", which a client
+ * renders as an empty state. A zeroed object would read as "you have drives and
+ * they are empty", which is a different and false claim.
+ */
+function computeDataTotals(dataDrives: readonly BridgeDrive[]): DataStorageTotals | null {
+  if (dataDrives.length === 0) return null;
+  return {
+    size_bytes: dataDrives.reduce((n, d) => n + (d.size_bytes || 0), 0),
+    used_bytes: dataDrives.reduce((n, d) => n + (d.used_bytes || 0), 0),
+    free_bytes: dataDrives.reduce((n, d) => n + (d.free_bytes || 0), 0),
+    drive_count: dataDrives.length,
+    source: "data_drives",
+  };
+}
+
+/**
+ * Read the device-bridge's /drives snapshot. Shared by GET /storage and
+ * GET /storage/drives so there is ONE definition of the request (auth header,
+ * timeout, non-ok handling). Throws on a non-ok reply; connection failures
+ * propagate as-is for isBridgeConnectionError to classify.
+ */
+async function fetchBridgeDrives(): Promise<BridgeDrivesSnapshot> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    // WARP-659: /drives is token-gated on the bridge (it is LAN-reachable via
+    // BRIDGE_BIND=0.0.0.0). Send the same shared secret the eject path uses.
+    const token = bridgeAuthToken();
+    const r = await fetch(`${BRIDGE_URL}/drives`, {
+      signal: ctrl.signal,
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+    });
+    if (!r.ok) {
+      const err = new Error(`bridge returned ${r.status}`);
+      (err as { status?: number }).status = r.status;
+      throw err;
+    }
+    return (await r.json()) as BridgeDrivesSnapshot;
   } finally {
     clearTimeout(timer);
   }
@@ -371,28 +511,103 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     }
   }
 
-  router.get("/storage", async (req, res, next) => {
+  /**
+   * GET /api/storage — the box's storage at a glance.
+   *
+   * WARP-2098 changed what the four headline numbers MEAN, and the reason is
+   * the whole point of the ticket.
+   *
+   * They used to be the signed-in user's Nextcloud quota. On this appliance
+   * that is not a description of the owner's storage: nothing sets a quota, so
+   * Nextcloud reports free space of the filesystem holding its data directory —
+   * and that directory is a plain named volume under the docker data-root on
+   * `/data`, an LV on the OS/boot disk (docs/security/at-rest-encryption.md).
+   * The storage pool is attached to Nextcloud only as `files_external`, which
+   * OCS quota does not count. So the one box-level storage figure the API
+   * produced described the INSTALL DISK while being labelled "your storage" —
+   * the boot disk and the pool lumped into a single wrong number.
+   *
+   * They are now the sum over the same os_disk-filtered data-drive list
+   * GET /storage/drives returns (computeDataTotals). The install disk is
+   * reported separately as `system`, and the Nextcloud figure is still
+   * available, honestly named, as `cloud`.
+   *
+   * The four scalars keep their names and types. That is deliberate: the iOS
+   * client decodes them as non-optional (`StorageOverview`), and it already
+   * presents them as the appliance's storage rather than as a cloud quota — so
+   * it gets a correct number without a release, and adding sibling objects
+   * cannot break its decoder.
+   */
+  // standardRateLimit joins the other bridge-proxied readers: as of WARP-2098
+  // this handler fetches the device-bridge, so it falls under the same CodeQL
+  // js/missing-rate-limiting ceiling /storage/drives already carries.
+  router.get("/storage", standardRateLimit, async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        // No resolvable Nextcloud credential — most likely an orphan session
-        // that pre-dates the NC-session store. Fall back to empty stats so
-        // the dashboard renders cleanly rather than 500-ing.
-        res.json({ used: 0, total: 0, available: 0, percentage: 0 } as StorageStats);
-        return;
+      // The Nextcloud quota is still worth reporting — it is what the user's
+      // own cloud account can hold — it just is not the box's storage. Failing
+      // to read it must not fail the whole response, so it degrades to null.
+      let cloud: StorageStats | null = null;
+      try {
+        const token = await resolveNcToken(req);
+        // No resolvable credential is the orphan-session case (a session that
+        // pre-dates the NC-session store), not an error.
+        const quota = token ? await ncGetUserQuota(token) : null;
+        if (quota) {
+          const total = quota.total ?? 0;
+          const used = quota.used ?? 0;
+          const available = quota.free ?? Math.max(0, total - used);
+          cloud = {
+            used,
+            total,
+            available,
+            percentage: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
+          };
+        }
+      } catch (err) {
+        logger.warn({ err }, "Failed to fetch Nextcloud quota");
       }
-      const quota = await ncGetUserQuota(token);
-      if (!quota) {
-        res.json({ used: 0, total: 0, available: 0, percentage: 0 } as StorageStats);
-        return;
+
+      let totals: DataStorageTotals | null = null;
+      let system: BridgeSystemDisk | undefined;
+      try {
+        const snap = await fetchBridgeDrives();
+        // SAME filter as GET /storage/drives — the OS disk is excluded here by
+        // construction, not by a second rule that could drift from the first.
+        totals = computeDataTotals(
+          (snap.drives ?? []).filter((d) => isUserDataDrive(d, snap.os_disk)),
+        );
+        system = snap.system_disk;
+      } catch (err) {
+        // The bridge is optional (OLED/display profile) and host-side. Without
+        // it we have no honest drive figures — so report zeroes and say why,
+        // rather than falling back to the Nextcloud number, which is the exact
+        // boot-disk figure this ticket removed.
+        if (isBridgeConnectionError(err)) {
+          logger.info({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable; no storage totals");
+        } else {
+          logger.warn({ err }, "Failed to fetch drives from device-bridge");
+        }
       }
-      const total = quota.total ?? 0;
-      const used = quota.used ?? 0;
-      const available = quota.free ?? Math.max(0, total - used);
-      const percentage = total > 0 ? Math.round((used / total) * 1000) / 10 : 0;
-      res.json({ used, total, available, percentage } as StorageStats);
+
+      res.json({
+        // Headline = the owner's DATA drives. Zeroes when there are none, which
+        // clients already treat as "no capacity to show" (iOS: hasCapacity).
+        used: totals?.used_bytes ?? 0,
+        total: totals?.size_bytes ?? 0,
+        available: totals?.free_bytes ?? 0,
+        percentage:
+          totals && totals.size_bytes > 0
+            ? Math.round((totals.used_bytes / totals.size_bytes) * 1000) / 10
+            : 0,
+        // Provenance for the four numbers above, so no future reader has to
+        // guess which disks they cover. null when the bridge said nothing.
+        totals,
+        // The install disk, never folded into the numbers above.
+        ...(system !== undefined ? { system_disk: system } : {}),
+        // The Nextcloud account quota, under a name that says what it is.
+        cloud,
+      });
     } catch (err) {
-      logger.warn({ err }, "Failed to fetch Nextcloud quota");
       next(err);
     }
   });
@@ -454,22 +669,22 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   // udev/unmount work on the host, so they get the tighter sensitive preset.
   router.get("/storage/drives", standardRateLimit, async (_req, res) => {
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 4000);
-      // WARP-659: /drives is now token-gated on the bridge (it's LAN-reachable
-      // via BRIDGE_BIND=0.0.0.0). Send the same shared secret the eject path uses.
-      const token = bridgeAuthToken();
-      const r = await fetch(`${BRIDGE_URL}/drives`, {
-        signal: ctrl.signal,
-        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
-      });
-      clearTimeout(timer);
-      if (!r.ok) {
-        res.status(502).json({ drives: [], count: 0,
-          error: `bridge returned ${r.status}` });
+      // WARP-2098: shared with GET /storage so both endpoints ask the bridge
+      // the same question the same way.
+      let snap: BridgeDrivesSnapshot;
+      try {
+        snap = await fetchBridgeDrives();
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        if (status === undefined) throw err; // connection failure — outer catch
+        // WARP-2098: totals is explicitly null on every degraded path — the
+        // client branches on null to render "no data drives" rather than a 0 B
+        // meter, and a missing key would be indistinguishable from an older
+        // orchestrator that never sends totals at all.
+        res.status(502).json({ drives: [], count: 0, totals: null,
+          error: `bridge returned ${status}` });
         return;
       }
-      const snap = (await r.json()) as BridgeDrivesSnapshot;
 
       // WARP-827: drop firmware/boot/swap/loop pseudo-devices and the OS disk
       // at the orchestrator boundary so the home-user only ever sees real data
@@ -518,12 +733,25 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           ? snap.disks.filter((d) => !snap.os_disk || d.name !== snap.os_disk)
           : undefined;
 
+      // WARP-2098: the box's data-storage total, summed over the post-filter
+      // list — never snap.drives, never disks. Same helper GET /storage uses.
+      const totals = computeDataTotals(dataDrives);
+
+      // WARP-2098: forward the install disk VERBATIM in its own key. It is
+      // deliberately not spread into `drives`, not counted in `count`, and not
+      // added into `totals` — see BridgeSystemDisk. Absent (not null) on an
+      // older bridge, matching how `disks` degrades, so the dashboard hides
+      // the card rather than rendering an empty one.
+      const systemDisk = snap.system_disk;
+
       // count reflects the FILTERED set the dashboard renders, not the raw
       // bridge count (which may include the junk we just dropped).
       res.json({
         drives,
         count: drives.length,
+        totals,
         ...(disks !== undefined ? { disks } : {}),
+        ...(systemDisk !== undefined ? { system_disk: systemDisk } : {}),
         snapshot_at: snap.snapshot_at,
       });
     } catch (err) {
@@ -536,14 +764,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           { bridgeUrl: BRIDGE_URL },
           "device-bridge not reachable; reporting no drives (bridge_unavailable)",
         );
-        res.json({ drives: [], count: 0, reason: "bridge_unavailable" });
+        res.json({ drives: [], count: 0, totals: null, reason: "bridge_unavailable" });
         return;
       }
       // A reachable-but-misbehaving bridge (timeout, bad JSON, etc.) is a real
       // problem worth a louder log; still return the 200 empty shape so the
       // dashboard renders.
       logger.warn({ err }, "Failed to fetch drives from device-bridge");
-      res.json({ drives: [], count: 0,
+      res.json({ drives: [], count: 0, totals: null,
         error: (err as Error).message || "bridge unreachable" });
     }
   });

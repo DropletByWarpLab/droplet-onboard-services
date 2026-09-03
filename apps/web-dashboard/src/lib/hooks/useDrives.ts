@@ -16,6 +16,16 @@ export function useDrives() {
     // WARP-936: whole-disk inventory (present-but-unmounted disks included).
     // Empty on an older orchestrator/bridge that predates the field.
     disks: data?.disks ?? [],
+    // WARP-2098: total across the DATA drives only — never the system disk,
+    // never a sum of pool members. `null` (not zeroes) while loading, when
+    // there are no data drives, and on an older orchestrator, so a caller
+    // renders an empty state instead of a full-looking 0 B meter.
+    totals: data?.totals ?? null,
+    // WARP-2098: the box's own install disk, reported separately so it can be
+    // SHOWN without ever joining the lists that feed destructive actions.
+    // undefined when the bridge doesn't report it — the card is then omitted.
+    // Deliberately NOT `?? null`: absent must stay falsy AND distinguishable.
+    systemDisk: data?.system_disk,
     isLoading,
     error,
     bridgeError:

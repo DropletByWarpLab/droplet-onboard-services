@@ -43,8 +43,13 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "list_drives",
+  // WARP-2098: this handler returns the orchestrator body VERBATIM, so the
+  // route's new `totals` and `system_disk` keys reach the model with no code
+  // change here. The description must therefore name them — otherwise the model
+  // sees an unexplained disk object and can mistake the box's install disk for
+  // a data drive it may offer to erase or add to a pool.
   description:
-    "List every data drive mounted under /mnt on the device — NVMe partitions plus any hot-plugged USB drives. Returns device, mount point, label, total/used/free bytes. A drive whose filesystem lives on a storage pool (mdadm array) carries pool: \"<mdN>\" naming its array; pool is null for a standalone drive.",
+    "List every data drive mounted under /mnt on the device — NVMe partitions plus any hot-plugged USB drives. Returns device, mount point, label, total/used/free bytes. A drive whose filesystem lives on a storage pool (mdadm array) carries pool: \"<mdN>\" naming its array; pool is null for a standalone drive. `totals` sums the drives listed here (null when there are none) and is the box's data-storage figure — it is NOT pool capacity. `system_disk` describes the Droplet's OWN install disk, which is deliberately NOT one of the drives: the system software and the app's own data live there, it is never browsable, renameable, ejectable, adoptable or poolable, and its bytes are not in `totals`. Never offer to erase, reformat, adopt or pool the system disk.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

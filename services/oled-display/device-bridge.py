@@ -1680,6 +1680,156 @@ def _walk_block_children(node):
         yield from _walk_block_children(child)
 
 
+def _os_disk_filesystems(mount_meta, os_disk):
+    """WARP-2098 — every mounted filesystem that physically lives on `os_disk`,
+    measured, ONE row per backing device. Feeds system_disk_info; kept separate
+    because this half touches the host (lsblk walks + statvfs) while that half
+    is pure.
+
+    Discovery, not a hardcoded path list: `/data` exists only after
+    droplet-luks-provision.sh has moved the docker data-root there, and an
+    operator-written daemon.json can leave it absent. Asking which mounts sit on
+    the root disk answers correctly on every box shape, including the one where
+    root, /boot and /data are three LVs on one NVMe.
+
+    Deduplicated by BACKING DEVICE, keeping the shortest mount path. This is
+    load-bearing, not tidiness: the automounter bind-mounts "/" at
+    /mnt/droplet, so the root filesystem appears in /proc/mounts twice with
+    identical statvfs numbers. Summing both would report double the used bytes —
+    the same phantom-capacity mistake WARP-1960 fixed in camera storage.
+
+    `mount_meta` is the /proc/mounts pass the caller already did, keyed by mount
+    point. Mounts whose statvfs fails are dropped rather than reported as zero —
+    an unmeasurable filesystem must not read as an empty one.
+    """
+    if not os_disk:
+        return []
+    by_device = {}
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                dev, mp = parts[0], _unescape_mount(parts[1])
+                # Real block devices only: skips tmpfs/proc/sysfs/overlay, which
+                # are not on any disk and would inflate the total.
+                if not dev.startswith("/dev/") or not os.path.exists(dev):
+                    continue
+                if _whole_disk(dev) != os_disk:
+                    continue
+                previous = by_device.get(dev)
+                if previous is not None and len(previous["mount"]) <= len(mp):
+                    continue
+                total, used, free = _bytes_for(mp)
+                if total <= 0:
+                    continue
+                fs, _ro = mount_meta.get(mp, ("", True))
+                by_device[dev] = {
+                    "mount": mp,
+                    "fs": fs,
+                    "size_bytes": total,
+                    "used_bytes": used,
+                    "free_bytes": free,
+                }
+    except Exception:                                                  # noqa: BLE001
+        # Best-effort, exactly like the drive-enumeration passes above: a
+        # partial (or empty) list yields honest partial usage, never an error.
+        pass
+    return sorted(by_device.values(), key=lambda r: r["mount"])
+
+
+def system_disk_info(lsblk_tree, os_disk, os_filesystems):
+    """WARP-2098 — the appliance's OWN install disk, as its own object.
+
+    WARP-827 removed the OS/boot disk from BOTH lists this bridge emits: from
+    `drives` (any mount whose whole disk is the root disk) and from `disks`
+    (classify_disks below). That is still correct and stays correct — every one
+    of those lists feeds a destructive picker somewhere above (adopt, reclaim,
+    pool-create, reformat), and the system disk must never be an option in any
+    of them.
+
+    What WARP-827 also did was make the disk INVISIBLE. The owner had no answer
+    to "what is the Droplet's own disk, and how full is it?" — and on this
+    appliance that is the disk that fills first. Nextcloud's data directory is a
+    plain named volume under the docker data-root, which droplet-luks-provision
+    points at /data: an LV on the OS disk (docs/security/at-rest-encryption.md).
+    The storage pool reaches Nextcloud only as external storage. So uploads land
+    on the install disk, and the install disk was the one thing the owner could
+    not see.
+
+    This reports it in a key of its OWN, never as a member of any list.
+
+    `os_filesystems` is every mounted filesystem the CALLER has already resolved
+    to this disk and measured — root, /boot, /boot/efi and (on a provisioned
+    box) /data. Measuring only "/" would be the wrong answer: on an LVM install
+    root is a small LV and /data holds everything, so a root-only figure reports
+    a nearly-empty disk while the box is out of room. Host lookups stay in the
+    caller so this stays pure and fixture-testable.
+
+    `used_bytes` sums those filesystems — legitimate here, unlike the pooled sum
+    ADR-019 forbids, because they are disjoint extents of ONE physical device.
+    `free_bytes` is measured against the whole disk, so unallocated LVM extents
+    correctly count as free.
+
+    Returns None (the key is then omitted entirely) when the disk cannot be
+    identified — the same fail-open contract as the WARP-827 filters.
+    """
+    if not os_disk:
+        return None
+    # `os_disk` must name a WHOLE DISK in the tree. _whole_disk() falls back to
+    # basename(device) when lsblk is unavailable, so _os_disk() can hand back a
+    # PARTITION name ("nvme0n1p2"); reporting that as the system disk would
+    # quote a partition's geometry as the disk's. Omit instead.
+    node = None
+    for dev in (lsblk_tree or {}).get("blockdevices") or []:
+        if (dev.get("type") or "") == "disk" and (dev.get("name") or "") == os_disk:
+            node = dev
+            break
+    if node is None:
+        return None
+    try:
+        disk_size = int(node.get("size") or 0)
+    except (TypeError, ValueError):
+        disk_size = 0
+
+    filesystems = []
+    for fs in os_filesystems or []:
+        mount = fs.get("mount") or ""
+        filesystems.append({
+            "mount": mount,
+            # Plain-language grouping for the UI, decided here so the dashboard
+            # never has to pattern-match host paths.
+            "role": "root" if mount == "/" else (
+                "boot" if mount == "/boot" or mount.startswith("/boot/") else "data"),
+            "fs": fs.get("fs") or "",
+            "size_bytes": fs.get("size_bytes") or 0,
+            "used_bytes": fs.get("used_bytes") or 0,
+            "free_bytes": fs.get("free_bytes") or 0,
+        })
+
+    if filesystems:
+        used = sum(f["used_bytes"] for f in filesystems)
+        free = max(0, disk_size - used) if disk_size else None
+    else:
+        # The disk is real but nothing on it could be measured (statvfs denied,
+        # no visible mounts). Report null, NEVER 0 — a zero would render as a
+        # pristine empty disk, which is a claim and a false one.
+        used = None
+        free = None
+
+    return {
+        "name": os_disk,
+        "size_bytes": disk_size,
+        "used_bytes": used,
+        "free_bytes": free,
+        "model": (node.get("model") or "").strip(),
+        "serial": (node.get("serial") or "").strip(),
+        "bus": (node.get("tran") or "").lower(),
+        "filesystems": filesystems,
+    }
+
+
 def classify_disks(lsblk_tree, os_disk):
     """Classify the lsblk -J tree into the WARP-936 `disks` list.
 
@@ -1928,15 +2078,30 @@ def drives_snapshot(invalidate=False):
         by_device[dev] = e
     mounts = list(by_device.values())
 
+    # One lsblk walk feeds both the inventory and the system-disk lookup —
+    # the classifier used to call this inline, which would now run lsblk twice
+    # per snapshot.
+    lsblk_tree = _lsblk_disks_json()
+
     snap = {
         "drives": mounts,
         "count": len(mounts),
         "os_disk": os_disk,
         # WARP-936: whole-disk inventory with explicit states. Degrades to []
         # (never a missing key, never an error) on a host without lsblk.
-        "disks": classify_disks(_lsblk_disks_json(), os_disk),
+        "disks": classify_disks(lsblk_tree, os_disk),
         "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+    # WARP-2098: the install disk, in a key of its own. ABSENT (never null,
+    # never a zeroed object) when it can't be identified, so a consumer can tell
+    # "this bridge has nothing to say about the system disk" apart from "the
+    # system disk is empty". Added AFTER the two lists above and never merged
+    # into either — see system_disk_info.
+    system_disk = system_disk_info(
+        lsblk_tree, os_disk, _os_disk_filesystems(mount_meta, os_disk))
+    if system_disk is not None:
+        snap["system_disk"] = system_disk
     _drives_cache["snap"] = snap
     _drives_cache["at"] = now
     return snap
