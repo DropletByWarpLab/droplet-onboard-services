@@ -2721,3 +2721,64 @@ export interface AppDownloadCatalog {
   generatedAt?: string | null;
   platforms: AppDownloadPlatformEntry[];
 }
+
+// --- Routines (WARP-2671) — the ToolSpec surface at /routines ---
+//
+// `ToolSpec` is the orchestrator's name for a stored, replayable sequence of
+// tool calls. The user-facing noun is "routine": `/tools` is already the
+// read-only catalog of the box's built-in capabilities, and a routine is
+// something a person composed out of them.
+
+export type RoutineStatus = "live" | "draft" | "suggested";
+
+export interface RoutineStep {
+  id: string;
+  idx: number;
+  /** "call" | "summarize" — a plain String column, extensible by design. */
+  kind: string;
+  /** `{tool, args}` for a call, `{prompt?}` for a summarize. */
+  args: Record<string, unknown> | null;
+}
+
+export interface Routine {
+  id: string;
+  slug: string;
+  name: string;
+  category: string | null;
+  description: string | null;
+  version: number;
+  status: RoutineStatus;
+  ownerId: string | null;
+  share: string | null;
+  safety: number;
+  /** Derived server-side from the steps since WARP-2665 — never self-declared. */
+  writes: boolean;
+  reversible: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** Present on the detail fetch, absent from the list. */
+  steps?: RoutineStep[];
+}
+
+export interface RoutineRun {
+  id: string;
+  triggeredBy: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  status: "pending" | "running" | "ok" | "failed" | "cancelled";
+  error: string | null;
+  /** Per-step `{idx, tool, args, ok, result|error, as?}` records. */
+  trace: unknown;
+}
+
+export interface RoutineSchedule {
+  id: string;
+  specId: string;
+  rrule: string;
+  /** IANA zone the rrule's wall-clock is read in (WARP-2665). */
+  timezone: string;
+  nextFireAt: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
