@@ -136,36 +136,6 @@ function money(value: Prisma.Decimal | null): string | null {
   return value === null ? null : value.toString();
 }
 
-/** Exact decimal addition on strings, so a total never meets a float. */
-function addDecimal(a: string, b: string): string {
-  const scale = Math.max(fractionDigits(a), fractionDigits(b));
-  const sum = toScaled(a, scale) + toScaled(b, scale);
-  return fromScaled(sum, scale);
-}
-
-function fractionDigits(value: string): number {
-  const dot = value.indexOf(".");
-  return dot === -1 ? 0 : value.length - dot - 1;
-}
-
-function toScaled(value: string, scale: number): bigint {
-  const negative = value.startsWith("-");
-  const bare = negative ? value.slice(1) : value;
-  const [whole, fraction = ""] = bare.split(".");
-  const digits = `${whole}${fraction.padEnd(scale, "0")}`;
-  const scaled = BigInt(digits === "" ? "0" : digits);
-  return negative ? -scaled : scaled;
-}
-
-function fromScaled(value: bigint, scale: number): string {
-  if (scale === 0) return value.toString();
-  const negative = value < BigInt(0);
-  const digits = (negative ? -value : value).toString().padStart(scale + 1, "0");
-  const whole = digits.slice(0, digits.length - scale);
-  const fraction = digits.slice(digits.length - scale);
-  return `${negative ? "-" : ""}${whole}.${fraction}`;
-}
-
 /**
  * Is this document still owed?
  *
@@ -173,13 +143,23 @@ function fromScaled(value: bigint, scale: number): string {
  * vendor sent something this box would not guess at — and unknown counts as
  * open, because dropping a document the business may still owe is the worse
  * of the two errors.
+ *
+ * 🔴 THIS PREDICATE LIVES IN SQL, not in a `.filter()`. It is the `where` the aggregates
+ * below run under, so the count Postgres returns and the rows the table lists
+ * can never drift apart.
  */
-function isOpen(row: DocumentRow): boolean {
-  return row.balance === null || !row.balance.isZero();
+const OPEN: Prisma.ErpDocumentWhereInput = {
+  OR: [{ balance: null }, { balance: { not: 0 } }],
+};
+
+/** Open, and past its due date. A document with no due date cannot be late. */
+function overdueWhere(now: Date): Prisma.ErpDocumentWhereInput {
+  return { ...OPEN, dueAt: { lt: now } };
 }
 
 function isOverdue(row: DocumentRow, now: Date): boolean {
-  return row.dueAt !== null && row.dueAt.getTime() < now.getTime() && isOpen(row);
+  const open = row.balance === null || !row.balance.isZero();
+  return row.dueAt !== null && row.dueAt.getTime() < now.getTime() && open;
 }
 
 function toView(row: DocumentRow, now: Date): MoneyDocumentView {
@@ -206,49 +186,70 @@ function toView(row: DocumentRow, now: Date): MoneyDocumentView {
   };
 }
 
-function summariseSide(rows: readonly DocumentRow[], now: Date): MoneySide {
-  const open = rows.filter(isOpen);
-  const byLedger = new Map<string, MoneyLedgerTotal>();
+/**
+ * The columns one ledger's total is keyed by.
+ *
+ * Connection AND currency: a multi-currency ledger that DOES name its rows
+ * must not have them added together either. `externalSystem` rides along
+ * because it is denormalised from `connection.provider` on write and is
+ * therefore constant within a connection — grouping by it adds no rows and
+ * saves a join.
+ */
+const LEDGER_KEY = ["kind", "connectionId", "externalSystem", "currency"] as const;
 
-  for (const row of open) {
-    // Keyed on connection AND currency: a multi-currency ledger that does name
-    // its rows must not have them added together either.
-    const key = `${row.connectionId} ${row.currency ?? ""}`;
-    const current = byLedger.get(key) ?? {
-      connectionId: row.connectionId,
-      provider: row.externalSystem,
-      currency: row.currency,
-      balance: "0",
-      documentCount: 0,
-      overdueCount: 0,
-      overdueBalance: "0",
-    };
-    const balance = money(row.balance);
-    const overdue = isOverdue(row, now);
-    byLedger.set(key, {
-      ...current,
+/** One row of `GROUP BY kind, connectionId, externalSystem, currency`. */
+interface LedgerGroup {
+  kind: MoneyKind;
+  connectionId: string;
+  externalSystem: string;
+  currency: string | null;
+  _count: { _all: number };
+  _sum: { balance: Prisma.Decimal | null };
+}
+
+function ledgerKey(group: LedgerGroup): string {
+  return `${group.connectionId} ${group.currency ?? ""}`;
+}
+
+/**
+ * A summed NUMERIC as a decimal string.
+ *
+ * `SUM()` over rows whose balance is entirely NULL is NULL, and that means
+ * "nothing readable to add", which prints as `"0"` beside a non-zero count --
+ * the same honest disagreement the per-row rule produces.
+ */
+function sum(value: Prisma.Decimal | null): string {
+  return value === null ? "0" : value.toString();
+}
+
+function sideFrom(open: readonly LedgerGroup[], overdue: readonly LedgerGroup[]): MoneySide {
+  const overdueByKey = new Map(overdue.map((group) => [ledgerKey(group), group]));
+
+  const ledgers: MoneyLedgerTotal[] = open.map((group) => {
+    const late = overdueByKey.get(ledgerKey(group));
+    return {
+      connectionId: group.connectionId,
+      provider: group.externalSystem,
+      currency: group.currency,
       // A document whose balance could not be read still COUNTS — it is money
       // somebody owes — but contributes nothing to the figure. The count and
       // the total disagreeing is the honest signal that one is unreadable.
-      balance: balance === null ? current.balance : addDecimal(current.balance, balance),
-      documentCount: current.documentCount + 1,
-      overdueCount: current.overdueCount + (overdue ? 1 : 0),
-      overdueBalance:
-        overdue && balance !== null
-          ? addDecimal(current.overdueBalance, balance)
-          : current.overdueBalance,
-    });
-  }
+      balance: sum(group._sum.balance),
+      documentCount: group._count._all,
+      overdueCount: late?._count._all ?? 0,
+      overdueBalance: late === undefined ? "0" : sum(late._sum.balance),
+    };
+  });
 
-  const ledgers = [...byLedger.values()].sort((a, b) =>
+  ledgers.sort((a, b) =>
     a.connectionId === b.connectionId
       ? (a.currency ?? "").localeCompare(b.currency ?? "")
       : a.connectionId.localeCompare(b.connectionId),
   );
 
   return {
-    documentCount: open.length,
-    overdueCount: open.filter((row) => isOverdue(row, now)).length,
+    documentCount: ledgers.reduce((total, ledger) => total + ledger.documentCount, 0),
+    overdueCount: ledgers.reduce((total, ledger) => total + ledger.overdueCount, 0),
     ledgers,
   };
 }
@@ -267,39 +268,70 @@ export interface MoneyService {
 export const MONEY_PAGE_LIMIT = 200;
 
 export function createMoneyService(prisma: MoneyDb): MoneyService {
-  async function allRows(kind?: MoneyKind): Promise<DocumentRow[]> {
-    return (await prisma.erpDocument.findMany({
-      where: kind === undefined ? {} : { kind },
-      orderBy: [{ dueAt: "asc" }, { externalId: "asc" }],
-    })) as unknown as DocumentRow[];
-  }
-
   return {
+    /**
+     * 🔴 THE ADDING HAPPENS IN POSTGRES, and that is not a micro-optimisation.
+     *
+     * This used to `findMany()` every landed document — unbounded — and sum
+     * them in JS. `useMoney.ts` polls `/api/money` every five minutes per open
+     * tab, so a practice with a few years of ledger paid for its whole
+     * document table, over the wire and into the heap, on a timer. Three
+     * bounded queries replace it: the open totals, the overdue totals, and the
+     * read window. `NUMERIC` sums exactly in Postgres, so nothing is lost by
+     * moving the arithmetic there — the exact-decimal string helpers this
+     * service used to carry are gone with it.
+     */
     async summary(now) {
-      const rows = await allRows();
-      const reads = rows.map((row) => row.lastReadAt.getTime());
+      const [open, overdue, reads] = await Promise.all([
+        prisma.erpDocument.groupBy({
+          by: [...LEDGER_KEY],
+          where: OPEN,
+          _count: { _all: true },
+          _sum: { balance: true },
+        }) as unknown as Promise<LedgerGroup[]>,
+        prisma.erpDocument.groupBy({
+          by: [...LEDGER_KEY],
+          where: overdueWhere(now),
+          _count: { _all: true },
+          _sum: { balance: true },
+        }) as unknown as Promise<LedgerGroup[]>,
+        // Deliberately unfiltered: the read window describes when the BOX last
+        // spoke to the vendor, which a settled document evidences as well as
+        // an open one.
+        prisma.erpDocument.aggregate({
+          _max: { lastReadAt: true },
+          _min: { lastReadAt: true },
+        }),
+      ]);
+
+      const ofKind = (kind: MoneyKind) => (group: LedgerGroup) => group.kind === kind;
       return {
-        receivable: summariseSide(
-          rows.filter((row) => row.kind === "RECEIVABLE"),
-          now,
-        ),
-        payable: summariseSide(
-          rows.filter((row) => row.kind === "PAYABLE"),
-          now,
-        ),
+        receivable: sideFrom(open.filter(ofKind("RECEIVABLE")), overdue.filter(ofKind("RECEIVABLE"))),
+        payable: sideFrom(open.filter(ofKind("PAYABLE")), overdue.filter(ofKind("PAYABLE"))),
         // Both ends, because one number cannot describe a box whose Xero
         // connection answered this morning and whose Stripe one has been
         // failing for a week.
-        lastReadAt: reads.length === 0 ? null : new Date(Math.max(...reads)).toISOString(),
-        oldestReadAt: reads.length === 0 ? null : new Date(Math.min(...reads)).toISOString(),
+        lastReadAt: reads._max.lastReadAt?.toISOString() ?? null,
+        oldestReadAt: reads._min.lastReadAt?.toISOString() ?? null,
       };
     },
 
+    /**
+     * The page is taken in SQL — `where` + `take` — not sliced out of a full
+     * table read. Settled documents are excluded by the same `OPEN` predicate
+     * the summary counts under, so the ledger and the figure above it always
+     * describe the same rows.
+     */
     async documents({ kind, overdueOnly = false, limit = MONEY_PAGE_LIMIT, now }) {
-      const rows = await allRows(kind);
-      const open = rows.filter(isOpen);
-      const wanted = overdueOnly ? open.filter((row) => isOverdue(row, now)) : open;
-      return wanted.slice(0, Math.min(limit, MONEY_PAGE_LIMIT)).map((row) => toView(row, now));
+      const rows = (await prisma.erpDocument.findMany({
+        where: {
+          ...(kind === undefined ? {} : { kind }),
+          ...(overdueOnly ? overdueWhere(now) : OPEN),
+        },
+        orderBy: [{ dueAt: "asc" }, { externalId: "asc" }],
+        take: Math.min(limit, MONEY_PAGE_LIMIT),
+      })) as unknown as DocumentRow[];
+      return rows.map((row) => toView(row, now));
     },
   };
 }
