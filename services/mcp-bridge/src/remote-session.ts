@@ -57,6 +57,19 @@ export interface RemoteToolDescriptor {
 export interface RemoteToolCallOutcome {
   content: { type: string; text?: string }[];
   isError: boolean;
+  /**
+   * The tool's structured half, when the server sent one.
+   *
+   * WARP-2316: carried because two Atlassian guards need to read it —
+   * `truncation.ts` reads a page's `remainingCount` out of it, and
+   * `atlassian.ts` treats its ABSENCE on a tool that should have it as the
+   * legible form of upstream #213. `undefined` therefore means "the server
+   * sent none", an explicit fact, and is never conflated with an empty object.
+   *
+   * Unlike `annotations` (dropped at the copy, ADR-043 §2) this is DATA, not a
+   * privilege claim: nothing reads it to decide whether a tool may run.
+   */
+  structuredContent?: unknown;
 }
 
 /**

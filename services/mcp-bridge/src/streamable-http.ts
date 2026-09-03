@@ -21,6 +21,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import type {
   RemoteMcpConnection,
   RemoteMcpConnectInput,
@@ -33,6 +34,26 @@ export const MCP_BRIDGE_CLIENT_INFO = {
   name: "droplet-mcp-bridge",
   version: "0.1.0",
 } as const;
+
+/**
+ * Per-server overrides of the handshake.
+ *
+ * Both fields exist because of ONE server, and both are documented at their
+ * Atlassian call sites (`atlassian.ts`): `clientInfo` because upstream #213
+ * makes the client's NAME change what the server returns, and
+ * `pinnedProtocolVersion` because the SDK otherwise adopts whatever version
+ * the server answers with (`protocol-pin.ts`). Neither is a general knob — a
+ * second server should state its own reason before setting either.
+ */
+export interface StreamableHttpConnectionOptions {
+  clientInfo?: { name: string; version: string };
+  /**
+   * Refuse the session unless the negotiated protocol version is exactly this,
+   * then keep sending exactly this. Omitted means the SDK's default: accept
+   * and adopt any of its five supported versions.
+   */
+  pinnedProtocolVersion?: string;
+}
 
 /**
  * Reconnection is handled by {@link RemoteMcpSession}, on a classification of
@@ -56,6 +77,7 @@ const TRANSPORT_RECONNECTION = {
  */
 export const createStreamableHttpConnection = async (
   input: RemoteMcpConnectInput,
+  opts: StreamableHttpConnectionOptions = {},
 ): Promise<RemoteMcpConnection> => {
   const transport = new StreamableHTTPClientTransport(new URL(input.url), {
     // The credential rides here and nowhere else. `headers` is built fresh by
@@ -65,8 +87,24 @@ export const createStreamableHttpConnection = async (
     reconnectionOptions: { ...TRANSPORT_RECONNECTION },
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
   });
-  const client = new Client(MCP_BRIDGE_CLIENT_INFO, { capabilities: {} });
+  const client = new Client(opts.clientInfo ?? MCP_BRIDGE_CLIENT_INFO, {
+    capabilities: {},
+  });
   await client.connect(transport);
+  if (opts.pinnedProtocolVersion !== undefined) {
+    // Immediately after connect and before ANY other request: the SDK has
+    // just stored the server's chosen version on the transport, and every
+    // subsequent request would carry it. `protocol-pin.ts` explains why that
+    // is a downgrade we must not accept silently. A refusal here leaves the
+    // transport open, so close it rather than leaking a socket to a server we
+    // are declining to talk to.
+    try {
+      pinTransportProtocolVersion(transport, opts.pinnedProtocolVersion);
+    } catch (err) {
+      await client.close().catch(() => undefined);
+      throw err;
+    }
+  }
 
   return {
     async listTools(): Promise<RemoteToolDescriptor[]> {
@@ -88,6 +126,9 @@ export const createStreamableHttpConnection = async (
       return {
         content: (res.content ?? []) as { type: string; text?: string }[],
         isError: Boolean(res.isError),
+        // Carried, not interpreted here. Its ABSENCE is meaningful (upstream
+        // #213) so it is passed through as `undefined` rather than defaulted.
+        structuredContent: res.structuredContent,
       };
     },
     async close(): Promise<void> {

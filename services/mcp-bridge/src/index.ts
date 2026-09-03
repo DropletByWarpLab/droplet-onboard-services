@@ -11,11 +11,57 @@
  * reconnect, health, the four failure states, the exact-host guard and the
  * credential shapes (including the Atlassian headless Basic path).
  *
- * WHAT IS NOT: an HTTP listener, a Dockerfile, compose wiring, and any host
- * literal. All four land with the first registered server (WARP-2316), which
- * is also the PR where `docs/security/allowed-egress.yaml` gains the entry
- * and a security reviewer sees the registration and the guard together.
+ * WHAT WARP-2316 ADDED: the first registered server. `atlassian.ts` holds the
+ * one host literal in this workspace (`mcp.atlassian.com`, registered in
+ * `docs/security/allowed-egress.yaml` in the same PR), the protocol pin, the
+ * concurrency ceiling and the three guards that close upstream defects #213,
+ * #221 and #171.
+ *
+ * WHAT IS STILL NOT HERE: an HTTP listener, a Dockerfile and compose wiring.
+ * ADR-043 §5 requires them before the ORCHESTRATOR can hold a session, so
+ * nothing in `apps/orchestrator` constructs one today — see the gap note in
+ * WARP-2316's PR body. The session core, the Atlassian profile and the
+ * classification table are all reachable and tested without them.
  */
+export {
+  ATLASSIAN_ALLOWED_MCP_HOSTS,
+  ATLASSIAN_CLOUD_ID_ARG,
+  ATLASSIAN_MCP_CLIENT_INFO,
+  ATLASSIAN_MCP_CLIENT_NAME,
+  ATLASSIAN_MCP_CLIENT_VERSION,
+  ATLASSIAN_MCP_HOST,
+  ATLASSIAN_MCP_PROTOCOL_VERSION,
+  ATLASSIAN_MCP_URL,
+  ATLASSIAN_SERVER_ID,
+  ATLASSIAN_STRUCTURED_CONTENT_TOOLS,
+  AtlassianStructuredContentUnavailableError,
+  assertStructuredContentPresent,
+  createAtlassianMcpSession,
+  withAtlassianCloudId,
+  withAtlassianGuards,
+  withAtlassianStructuredContentGuard,
+  withAtlassianTruncationGuard,
+  withScheduler,
+  type AtlassianMcpSessionOptions,
+} from "./atlassian.js";
+export {
+  DEFAULT_MAX_CONCURRENT_CALLS,
+  MAX_HONOURED_PAUSE_MS,
+  RemoteCallScheduler,
+  type RemoteCallSchedulerOptions,
+  type RemoteCallSchedulerStats,
+} from "./call-scheduler.js";
+export {
+  assertPinnedProtocolVersion,
+  pinTransportProtocolVersion,
+  ProtocolVersionMismatchError,
+  type ProtocolVersionedTransport,
+} from "./protocol-pin.js";
+export {
+  assertNotTruncated,
+  ATLASSIAN_SEARCH_NODE_CAP,
+  TruncatedResultError,
+} from "./truncation.js";
 export {
   basicCredential,
   bearerCredential,
@@ -51,4 +97,5 @@ export {
 export {
   createStreamableHttpConnection,
   MCP_BRIDGE_CLIENT_INFO,
+  type StreamableHttpConnectionOptions,
 } from "./streamable-http.js";
