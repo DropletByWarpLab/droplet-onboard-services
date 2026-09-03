@@ -89,9 +89,15 @@ const connectedRow: RemoteMcpConnectionRow = {
   providerConfig: { email: "ops@vendor.example", cloudId: "00000000-0000-4000-8000-000000000000" },
 };
 
+/**
+ * A prisma double whose row can CHANGE between calls — which is the only way
+ * to test that the gate is re-read per call rather than captured at attach.
+ */
 function prismaWith(row: RemoteMcpConnectionRow | null) {
+  const state = { row };
   return {
-    integrationConnection: { findFirst: vi.fn(async () => row) },
+    state,
+    integrationConnection: { findFirst: vi.fn(async () => state.row) },
   };
 }
 
@@ -198,6 +204,28 @@ describe("allowlisted + a CONNECTED row with a credential", () => {
     expect(out.isError).toBe(false);
     const call = h.bridge.calls.find((c) => c.path.endsWith("/call"));
     expect(call?.body).toEqual({ name: "getJiraIssue", args: { issueKey: "WARP-1" } });
+  });
+
+  it("re-reads the gate on EVERY call — disconnecting mid-session stops the next one", async () => {
+    // The reason the port takes a gate FUNCTION rather than a decision. An
+    // operator who disconnects the account has to stop reaching the vendor on
+    // the next call, not on the next reboot — and a session already attached is
+    // exactly the case where a captured decision would keep working.
+    const h = harness({ allowlist: ["atlassian"] });
+    await h.attach();
+    const before = await h.mux.callTool("atlassian__getJiraIssue", {});
+    expect(before.isError).toBe(false);
+
+    h.prisma.state.row = { ...connectedRow, status: "DISABLED" };
+
+    const callsBefore = h.bridge.calls.filter((c) => c.path.endsWith("/call")).length;
+    const after = await h.mux.callTool("atlassian__getJiraIssue", {});
+    expect(after.isError).toBe(true);
+    expect(JSON.parse(after.content[0]!.text!)).toMatchObject({
+      error: "REMOTE_MCP_GATE_REFUSED",
+    });
+    // And it did not dial: the refusal is a refusal, not a failed call.
+    expect(h.bridge.calls.filter((c) => c.path.endsWith("/call"))).toHaveLength(callsBefore);
   });
 });
 
