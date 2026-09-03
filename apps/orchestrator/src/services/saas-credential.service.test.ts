@@ -394,7 +394,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     expect(resolved.providerTokensEnc).toBeNull();
     expect(resolved.hasSecret).toBe(false);
     expect(resolved.cleared).toBe(true);
-    expect(statusAfterCredentialUpdate("CONNECTED", resolved.hasSecret)).toBe(
+    expect(statusAfterCredentialUpdate(FIXTURE, "CONNECTED", resolved.hasSecret)).toBe(
       "NOT_CONFIGURED",
     );
   });

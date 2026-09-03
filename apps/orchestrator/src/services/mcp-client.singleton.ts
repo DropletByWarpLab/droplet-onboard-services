@@ -20,9 +20,20 @@
  */
 import path from "node:path";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
+import { createAtlassianRemoteCallPolicy } from "./atlassian-tool-policy.js";
+import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { McpClientService } from "./mcp-client.service.js";
-import { McpToolMultiplexer } from "./mcp-multiplexer.service.js";
-import { parseRemoteMcpAllowlist } from "./remote-mcp-servers.js";
+import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.service.js";
+import {
+  ATLASSIAN_REMOTE_SERVER_ID,
+  attachAtlassianRemote,
+  parseRemoteMcpAllowlist,
+  type AttachAtlassianDeps,
+  type RemoteAttachResult,
+} from "./remote-mcp-servers.js";
+
+const logger = createLogger("mcp-client-singleton");
 
 const SERVER_BIN =
   process.env.MCP_SERVER_BIN ??
@@ -63,15 +74,38 @@ const localClient = new McpClientService({
  *
  * The allowlist is read once at module load and ships EMPTY
  * (`REMOTE_MCP_SERVER_ALLOWLIST`, config.ts), so on any box that has not been
- * configured `attachRemote` refuses every server. The remote call policy is
- * left at its default — {@link McpToolMultiplexer}'s deny-everything — because
- * ADR-043 §3 forbids invoking a remote tool before WARP-2321's classification
- * table exists.
+ * configured `attachRemote` refuses every server.
+ *
+ * WARP-2316 — the remote call policy is no longer the bare deny-everything
+ * default. It is the ATLASSIAN policy, layered OVER that default: a name in
+ * `atlassian-tool-policy.ts`'s explicit read list is allowed, and everything
+ * else — every Atlassian write, every Atlassian tool nobody classified, and
+ * every tool of every other server — falls through to
+ * {@link DENY_ALL_REMOTE_TOOLS}.
+ *
+ * That is ADR-043 §3 read as written rather than relaxed: *"Read-only
+ * invocation of tools an operator has explicitly demoted to read status under
+ * §2 may ship before those land. Writes may not."* The table §2 requires now
+ * exists, in this repo, reviewed as a diff on
+ * `docs/security/atlassian-mcp-tool-surface.json`. Writes stay blocked.
+ *
+ * The observable behaviour on a shipping box is UNCHANGED, because the
+ * allowlist is empty and no server can attach — the policy only matters once
+ * an operator opts in.
  */
 const remoteAllowlist = parseRemoteMcpAllowlist(config.REMOTE_MCP_SERVER_ALLOWLIST);
 
 export const mcpClient = new McpToolMultiplexer(localClient, {
   isServerAllowed: (serverId) => remoteAllowlist.has(serverId),
+  // `api-token` because that is the only credential a v1 box can hold: ADR-043
+  // §7 classifies Atlassian as the customer-created-credential model and the
+  // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
+  // parameter rather than an assumption so the Compass half of the auth-mode
+  // matrix is expressible and testable.
+  remoteCallPolicy: createAtlassianRemoteCallPolicy({
+    authMode: "api-token",
+    fallback: DENY_ALL_REMOTE_TOOLS,
+  }),
 });
 
 let started = false;
@@ -86,4 +120,38 @@ export async function stopMcp(): Promise<void> {
   if (!started) return;
   await localClient.stop();
   started = false;
+}
+
+/**
+ * WARP-2627 — attach the outbound Atlassian session, if this box is entitled.
+ *
+ * Called once from `index.ts` after the stdio child is up. On the SHIPPING
+ * default — `REMOTE_MCP_SERVER_ALLOWLIST` empty — this returns
+ * `not_allowlisted` having touched no network and constructed no client, so the
+ * boot path is byte-identical to before this PR on every unconfigured box.
+ *
+ * The socket lives in `services/mcp-bridge` (ADR-043 §5); what is constructed
+ * here is an HTTP client for it, wrapped by the gate → audit front.
+ */
+export async function ensureRemoteMcpAttached(
+  prisma: AttachAtlassianDeps["prisma"],
+): Promise<RemoteAttachResult> {
+  const result = await attachAtlassianRemote({
+    mux: mcpClient,
+    prisma,
+    allowlist: remoteAllowlist,
+    createClient: () =>
+      new McpBridgeClient({
+        baseUrl: config.MCP_BRIDGE_URL,
+        serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN,
+        serverId: ATLASSIAN_REMOTE_SERVER_ID,
+      }),
+  });
+  if (result.attached) {
+    logger.info(
+      { serverId: result.serverId, tools: result.sync.registered.length },
+      "remote_mcp_attached",
+    );
+  }
+  return result;
 }
