@@ -1182,6 +1182,32 @@ entries:
                 apps/orchestrator/src/routes/network-wifi.routes.ts,
                 services/matter-controller/src/ble.ts]
 
+  - id: ref-xero-oauth-scopes
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT destinations. These are the three OAuth scope strings the Xero
+      # Custom Connection asks for, and `.read` is a delegated gTLD — so the
+      # scanner reads a value-shaped `"accounting.transactions.read"` as a
+      # registrable domain, exactly as `ref-dotted-identifier-keys` describes
+      # for `.chat` / `.zip` / `.health`. Registered by EXACT name, so an
+      # actual host under `.read` would still be denied.
+      hosts: [accounting.transactions.read, accounting.contacts.read,
+              accounting.settings.read]
+    purpose: >-
+      Xero OAuth scope identifiers, sent in the `scope` parameter of the token
+      request body to identity.xero.com (registered separately as
+      xero-identity). The box never resolves any of them. Registered rather
+      than written as assembled strings on purpose: obscuring the literal
+      would blind the scanner to this file for good, and a scope a reader
+      cannot grep for is worse than a registry line. The set is deliberately
+      READ-ONLY and deliberately omits accounting.journals.read, which Xero
+      stopped granting to new Custom Connections on 2026-04-29.
+    ticket: WARP-2383
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [services/erp-connector/src/xero/connector.ts]
+
   - id: ref-xml-namespaces
     kind: reference
     service: repo

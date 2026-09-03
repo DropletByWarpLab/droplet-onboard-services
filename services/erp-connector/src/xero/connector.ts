@@ -347,11 +347,31 @@ export function assertXeroVariantImplemented(raw: unknown): XeroCredentialVarian
  * opposite of minimum-necessary — the setup guide lists it as optional, which
  * is a customer's choice to make and not one we make for them.
  */
+const SCOPE_TRANSACTIONS = "accounting.transactions.read";
+const SCOPE_CONTACTS = "accounting.contacts.read";
+const SCOPE_SETTINGS = "accounting.settings.read";
+
 export const XERO_SCOPES: readonly string[] = [
-  "accounting.transactions.read",
-  "accounting.contacts.read",
-  "accounting.settings.read",
+  SCOPE_TRANSACTIONS,
+  SCOPE_CONTACTS,
+  SCOPE_SETTINGS,
 ];
+
+/**
+ * Which scope a 403 on a resource is asking for.
+ *
+ * A table, not a guess: the message tells the owner what to tick in Xero's
+ * portal, and a wrong scope name sends them to re-authorise for nothing —
+ * which at this vendor costs an outage and, if they trim the wrong one, is
+ * irreversible. Anything not listed is a transactions read.
+ *
+ * Built from the same three constants {@link XERO_SCOPES} is, so the set the
+ * token request asks for and the set the error messages name cannot drift.
+ */
+const SCOPE_BY_RESOURCE: Readonly<Record<string, string>> = {
+  Contacts: SCOPE_CONTACTS,
+  Organisation: SCOPE_SETTINGS,
+};
 
 /**
  * Documented life of a Custom Connection access token (ADR-042 §2).
@@ -1142,13 +1162,10 @@ export class XeroConnector implements Connector {
     }
   }
 
-  /** Which scope a 403 on a resource is asking for. A table, not a guess: the
-   *  message tells the owner what to tick, and a wrong scope name sends them to
-   *  re-authorise for nothing. */
+  /** Which scope a 403 on a resource is asking for. See
+   *  {@link SCOPE_BY_RESOURCE}. */
   private static scopeFor(resource: string): string {
-    if (resource === "Contacts") return "accounting.contacts.read";
-    if (resource === "Organisation") return "accounting.settings.read";
-    return "accounting.transactions.read";
+    return SCOPE_BY_RESOURCE[resource] ?? SCOPE_TRANSACTIONS;
   }
 
   /**

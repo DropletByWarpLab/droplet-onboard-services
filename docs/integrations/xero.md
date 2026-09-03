@@ -3,7 +3,7 @@
 > **Audience:** the person who owns the Xero subscription.
 > **Time:** about ten minutes — **but read the first two sections before you spend any of it.** Xero is the one connector that can be impossible for you, and the one that costs you money every month.
 > **What Droplet does with what you paste:** [`credential-handling.md`](credential-handling.md).
-> **Sources checked 2026-08-27** — against Xero's own developer documentation and the credential facts recorded in ADR-042 §2 (pinned to WARP-2383). **Not yet walked through the live Xero developer portal by us**, so treat the screen and button names below as a close guide rather than a screenshot. Xero rebuilt its developer commercial model on 2026-03-02; anything you read elsewhere that is older than that may describe pricing and limits which no longer apply.
+> **Sources checked 2026-08-27; reconciled against the shipped connector 2026-09-02** (WARP-2383). **Not yet walked through the live Xero developer portal by us**, so treat the screen and button names below as a close guide rather than a screenshot. Xero rebuilt its developer commercial model on 2026-03-02; anything you read elsewhere that is older than that may describe pricing and limits which no longer apply.
 
 ---
 
@@ -15,7 +15,7 @@ Droplet connects to Xero through a **Custom Connection**, and Xero makes Custom 
 
 This is a qualification question, not a troubleshooting step. It is here at the top because the alternative is discovering it fifteen minutes in and reasonably assuming something is broken.
 
-*(There is a second technical route Xero offers, and we are not offering it yet: whether it can work for an on-premises box at all is still an open engineering question. When that resolves, this page will say so. Until then, Custom Connection is the only path, and the four countries above are the whole map.)*
+*(There is a second technical route Xero offers — an app you register yourself, using a sign-in redirect. **We are not offering it, and now we know why rather than merely suspecting it.** That route sends you back to a web address after you sign in, and Droplet deliberately has no web address the internet can reach: the box accepts no incoming connections at all, which is most of what makes it a Droplet. There is nothing for Xero to redirect to. If you configure a connection for that route anyway, Droplet says so in plain words rather than failing obscurely. Custom Connection is the only path, and the four countries above are the whole map.)*
 
 ---
 
@@ -83,14 +83,19 @@ Repeat the whole sequence for each additional organisation you want connected. T
 
 ## Scopes and permissions
 
-Grant read scopes only. Droplet does not write to Xero.
+Grant read scopes only. Droplet does not write to Xero — it never asks Xero for permission to write, so a write is impossible rather than merely unimplemented.
+
+**Droplet asks for exactly these three.** Tick all three: the box requests them together, and Xero refuses the whole request if the connection was not granted one of them.
 
 | Scope | What it buys you |
 |---|---|
-| `accounting.transactions.read` | Invoices, bills and payments — the core of "who owes us" and "what do we owe". Bills and invoices share one place in Xero, so this one scope covers both. |
+| `accounting.transactions.read` | Invoices, bills and the manual journal entries your bookkeeper posts by hand — the core of "who owes us" and "what do we owe". Bills and invoices share one place in Xero, so this one scope covers both. |
 | `accounting.contacts.read` | The customers and suppliers those transactions belong to, so an amount has a name attached. |
-| `accounting.settings.read` | The chart of accounts — **and your bank accounts**, which Xero treats as accounts rather than as their own thing. Without it, balances have no account names and bank accounts are invisible. |
-| `accounting.reports.read` | Standard reports such as profit and loss and aged receivables. Optional; skip it if you only want transaction-level questions answered. |
+| `accounting.settings.read` | The organisation's own details, which is what Droplet reads to confirm the connection is live before it reads anything else. |
+
+**`accounting.reports.read` is not on the list, and you do not need it.** Droplet reads no report endpoint, so granting it would be a permission nobody uses — and an unused permission is the opposite of what this page is trying to help you do. If you granted it on an earlier reading of this guide, nothing is broken; it simply does nothing.
+
+**There is a fourth scope you may see mentioned and cannot have.** Xero's general-ledger journals feed (`accounting.journals.read`) stopped being available to **new** Custom Connections on **2026-04-29**. Droplet does not use it — it reads your manual journal entries instead, which the transactions scope above already covers — so the retirement does not affect this connection at all. If an older guide tells you to tick it, that is why it is not on the list.
 
 **Grant less if you want to.** A narrower connection is a working connection, and Droplet names the missing permission rather than returning an empty list.
 
@@ -104,9 +109,42 @@ This is genuinely unusual and worth reading twice.
 Two consequences:
 
 1. **Droplet cannot adjust your scopes for you.** Every scope change costs you a round-trip through the Xero portal. That is a Xero constraint, not a missing Droplet feature.
-2. **Do not narrow scopes speculatively.** Grant the set you want from the start. If you are unsure, grant the four above; trimming one later may not be reversible.
+2. **Do not narrow scopes speculatively.** Grant the three above from the start. Trimming one later may not be reversible.
 
-Separately, Xero has been retiring scopes on a schedule: the general-ledger journals scope stopped being available to **new** Custom Connections on **2026-04-29**, and Xero has said broad scopes end on **2027-09-13**. Droplet does not depend on the journals scope, so neither deadline affects this connection — but if you are reading an older setup guide that tells you to tick it, that is why it is not on the list above.
+Separately, Xero has said broad scopes end on **2027-09-13**. Droplet's three scopes are unaffected, and the journals scope it deliberately does not use is covered above.
+
+---
+
+## What Droplet reads, and what it refuses
+
+Read this as the capability statement it is. It describes what the box will and will not do with the access you are about to grant, and it is checked by tests rather than promised in prose.
+
+**What it reads, on a four-hour cycle:**
+
+| | |
+|---|---|
+| **Invoices** | The ones you have issued and that are not fully paid — who owes you, how much, and when it was due. |
+| **Bills** | The same, pointed the other way: who you owe. |
+| **Contacts** | The customers and suppliers those amounts belong to, so a number has a name. |
+| **Manual journals** | The adjustments your bookkeeper posted by hand. |
+
+Each read asks Xero for **only what changed since the last one**, and asks for the summary form where Xero offers it. Both are there to keep the box well inside Xero's call limits — this connection shares a fleet-wide ceiling with every other Droplet, so a box that reads more than it needs is taking it from somebody else.
+
+**What it refuses, by construction:**
+
+- **It never writes to Xero.** The three permissions above are read-only, so a write would be refused by Xero even if Droplet tried — and Droplet's own code refuses first.
+- **It never reads your full general ledger.** That is Xero's `/Journals` feed, on a plan tier and a permission that new Custom Connections cannot be granted. Droplet reads your manual journal entries instead and does not pretend the two are the same thing.
+- **It never keeps a copy of your books on the box.** Every read goes to Xero and comes back; nothing is stored. That is a deliberate choice about your accounts specifically — the freshest copy of a ledger is always Xero's, and a stale local one would be worse than none.
+- **It never dials anywhere but Xero.** Two Xero addresses are registered, and the box refuses to send your credential anywhere else even if something on the box says otherwise.
+- **Nothing it reads is ever used to train anything.** See below.
+
+### Your accounts never reach anything that learns
+
+Droplet can be asked to build a training set from how people here use it, so the assistant gets better at using its own tools. **Anything read from a connected account is excluded from that**, and the exclusion is a rule in the code with a test behind it, not a habit.
+
+The reason it is stated this plainly: the scrubbing that protects passwords and keys works by recognising what a secret looks like. A customer's name and an invoice amount look like ordinary text, so no scrubber removes them. The only safe answer is not to let that material in at all, which is what Droplet does.
+
+*(For engineers: this is ADR-041's cloud-connector class and ADR-042's customer-supplied-credential model. The connector persists nothing — no entity cache, no local copy — and the fine-tuning export excludes every connector-sourced tool result outright rather than redacting it, because a redacted result is a worse training target than no result. Both boundaries are pinned by tests named for the mutation that must break them.)*
 
 ---
 
@@ -136,7 +174,9 @@ So **you will never be asked to reconnect Xero because a token expired.** If Dro
 
 **If you suspect the box has been tampered with**, delete the Custom Connection at Xero first — that takes effect immediately and does not depend on the box being reachable or cooperative.
 
-> **One thing we are not going to guess at.** Xero publishes a token-revocation endpoint, but it revokes a *refresh token* — and a Custom Connection does not have one. So that endpoint does not apply to this connection type, and we have not yet confirmed with Xero what the supported severing procedure is beyond deleting the connection in the portal. **Deleting the connection in My Apps is the step we are confident about; do that.** If you need a documented revocation procedure for an audit, ask Xero directly rather than relying on this page — and tell us, so we can write down the answer.
+> **The token-revocation endpoint does not apply here, and this is the answer to the question the earlier version of this page left open.** Xero publishes one, but it revokes a *refresh token* — and a Custom Connection does not have one, which is why the box re-requests a short-lived token instead of refreshing anything. The supported way to sever a Custom Connection is to delete it, and Droplet now knows how to ask Xero to do that as part of decommissioning a box.
+>
+> **What that does and does not change for you today:** the Disconnect button still does the box-side half only — it purges the credential and stops all reading. It does not yet delete the connection at Xero on your behalf, so **the My Apps step above is still yours to do, and it is the one that stops the monthly charge.** If you need a documented revocation procedure for an audit, deleting the connection in My Apps is it.
 
 **What a revoked or deleted connection looks like on the dashboard:** the connection moves to a named state saying the credential no longer works, and sync pauses. It does not show zero invoices.
 

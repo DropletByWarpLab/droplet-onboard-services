@@ -204,13 +204,24 @@ describe("the credential variants are a discriminated choice", () => {
 // ===========================================================================
 
 describe("the base-URL guard", () => {
-  it("allows exactly the two registered hosts and nothing that merely ends in them", () => {
-    // Mutation: change the membership test to `endsWith(".xero.com")` →
-    // `api.xero.com.evil.test` is accepted and every credential goes there.
+  it("allows exactly the two registered hosts — an EXACT set, never a suffix", () => {
+    // Two rejections, and they fail different mutations. `api.xero.com.evil.test`
+    // catches a naive `includes`; `login.xero.com` catches `endsWith("xero.com")`
+    // — and it is not a strawman, it is a REAL Xero host that ADR-042 §Egress
+    // lists and that this track deliberately does not register, so a suffix
+    // match would dial a screened-adjacent host the registry never approved.
+    // The first cut of this test asserted only the `.evil.test` case and stayed
+    // GREEN under the suffix mutation, which is why both are here.
     expect([...XERO_ALLOWED_API_HOSTS].sort()).toEqual(["api.xero.com", "identity.xero.com"]);
     expect(assertSafeXeroBaseUrl(XERO_API_BASE_URL)).toBe(XERO_API_BASE_URL);
     expect(assertSafeXeroBaseUrl(XERO_IDENTITY_BASE_URL)).toBe(XERO_IDENTITY_BASE_URL);
     expect(() => assertSafeXeroBaseUrl("https://api.xero.com.evil.test")).toThrow(
+      UnsafeXeroBaseUrlError,
+    );
+    expect(() => assertSafeXeroBaseUrl("https://login.xero.com")).toThrow(
+      UnsafeXeroBaseUrlError,
+    );
+    expect(() => assertSafeXeroBaseUrl("https://evil.xero.com")).toThrow(
       UnsafeXeroBaseUrlError,
     );
   });
