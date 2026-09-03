@@ -2085,7 +2085,19 @@ export class ShopifyConnector implements Connector {
     const filter = this.deltaFilter(dataset, undefined);
     // No `first:` and no cursor — a bulk query must carry neither, and one that
     // does is rejected by Shopify rather than silently paginated.
-    const inner = `{ ${field}${filter ? `(query: "${filter.replace(/"/g, '\\"')}")` : ""} { edges { node { ${NODE_SELECTION[dataset]} } } } }`;
+    // `JSON.stringify` rather than a hand-rolled quote escape: it emits a
+    // complete double-quoted GraphQL string literal, escaping backslashes and
+    // control characters as well as quotes. The previous `replace(/"/g, …)`
+    // escaped quotes only, so a backslash in `filter` would have terminated
+    // the literal early — CodeQL js/incomplete-sanitization, and correct.
+    //
+    // Not reachable today: `deltaFilter(dataset, undefined)` can only return
+    // `undefined` or an internally generated `updated_at:>='<ISO>'`, and an
+    // ISO timestamp carries neither character. This closes it at the sink
+    // anyway, because the safety currently rests on that caller passing
+    // `undefined` — the day someone threads a caller-supplied `since` in
+    // here, the escape is what stands between it and GraphQL injection.
+    const inner = `{ ${field}${filter ? `(query: ${JSON.stringify(filter)})` : ""} { edges { node { ${NODE_SELECTION[dataset]} } } } }`;
     const start = await this.graphql(
       op,
       `mutation DropletBulkExport($query: String!) {
