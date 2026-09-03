@@ -148,7 +148,7 @@ model ChatProject {
 }
 
 model ChatSession {
-  id              String            @id @default(uuid())
+  id              String           @id @default(uuid())
   userId          String
   title           String?
   model           String?
@@ -156,7 +156,7 @@ model ChatSession {
   /// WARP-845 — optional project membership. SetNull on project delete:
   /// the chats survive, falling back to the ungrouped date list.
   projectId       String?
-  project         ChatProject?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  project         ChatProject?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
   /// WARP-844 — the caller-supplied system prompt this conversation is
   /// held under. Persisted from the request's system message on every
   /// turn (latest wins) and returned on GET so the dashboard restores
@@ -168,10 +168,10 @@ model ChatSession {
   /// Both written together by setConversationPinned via raw SQL so the
   /// @updatedAt column is NOT bumped — unpinning must return the chat to
   /// its original chronological spot, not to "Today".
-  pinned          Boolean           @default(false)
+  pinned          Boolean          @default(false)
   pinnedAt        DateTime?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @default(now()) @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @default(now()) @updatedAt
   messages        ChatMessage[]
   pins            ContextPin[]
   /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
@@ -610,8 +610,8 @@ model UserInvite {
   // acceptedAt/revokedAt, never deleted) — so an invitee's intended access
   // can never silently degrade to the bare tier and role deletion stays an
   // explicit service-layer flow ("reassign first", T3).
-  accessRoleId String?
-  accessRole   AccessRole? @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId     String?
+  accessRole       AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
 
   @@index([token])
   @@index([expiresAt])
@@ -789,18 +789,18 @@ model ResetJob {
 // --- Camera / Frigate NVR ---
 
 model Camera {
-  id             String   @id @default(uuid())
-  name           String   @unique
+  id             String                   @id @default(uuid())
+  name           String                   @unique
   displayName    String
   manufacturer   String?
   model          String?
   ipAddress      String
   macAddress     String?
-  enabled        Boolean  @default(true)
-  autoDiscovered Boolean  @default(false)
-  lastSeen       DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  enabled        Boolean                  @default(true)
+  autoDiscovered Boolean                  @default(false)
+  lastSeen       DateTime                 @default(now())
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
 
   // WARP-1851 — storage allocation.
   //
@@ -835,9 +835,9 @@ model Camera {
   /// Frigate config the moment a budget is set.
   retentionCeiling   Json?
 
-  notifications CameraNotificationPref[]
-  groupMembers  CameraGroupMember[]
-  accessGrants  CameraAccessGrant[]
+  notifications  CameraNotificationPref[]
+  groupMembers   CameraGroupMember[]
+  accessGrants   CameraAccessGrant[]
 }
 
 /// WARP-1962 — who may see THIS camera.
@@ -864,7 +864,7 @@ model CameraAccessGrant {
   /// seed or migration-created grant doesn't have to invent an actor.
   grantedBy String?
 
-  camera Camera @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  camera    Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
 
   @@unique([userId, cameraId])
   @@index([userId])
@@ -1493,27 +1493,27 @@ model CalendarEvent {
 // fetches each one on its own interval and upserts events into CalendarEvent
 // keyed by externalUid.
 model CalendarSource {
-  id               String    @id @default(uuid())
-  userId           String
-  name             String // "Personal iCloud"
-  url              String // CalDAV calendar URL OR public ICS URL
+  id              String    @id @default(uuid())
+  userId          String
+  name            String // "Personal iCloud"
+  url             String // CalDAV calendar URL OR public ICS URL
   // basic|none. CalDAV usually basic. ICS feeds usually none.
-  authMode         String    @default("basic")
-  username         String?
+  authMode        String    @default("basic")
+  username        String?
   // Encrypted with the same aes-256-gcm key as DeviceClient.ncAppPassword.
   // Format: iv||tag||ciphertext, base64-encoded. Never returned to clients.
-  passwordEnc      String?
-  syncIntervalSec  Int       @default(900) // 15 minutes default
+  passwordEnc     String?
+  syncIntervalSec Int       @default(900) // 15 minutes default
   // WARP-2022 — owner/admin opt-in to a CalDAV server inside the boundary
   // (a self-hosted Nextcloud/Radicale on the box's own LAN is a first-class
   // use case on this appliance). An EXPLICIT column, never an exemption
   // inferred from the URL, and never settable by a lower role. Skips the
   // private-address rules ONLY: the scheme and userinfo rules still apply.
-  allowPrivateHost Boolean   @default(false)
-  lastSyncAt       DateTime?
-  lastSyncError    String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  allowPrivateHost Boolean  @default(false)
+  lastSyncAt      DateTime?
+  lastSyncError   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@index([userId])
 }
@@ -2164,10 +2164,10 @@ model User {
   // SetNull/Cascade): deleting an in-use role is blocked server-side
   // ("reassign first") and the DB backs that up — a role delete must never
   // silently strip or downgrade a person's assignment.
-  accessRoleId     String?
-  accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId          String?
+  accessRole            AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
-  accessExceptions UserAccessException[]
+  accessExceptions      UserAccessException[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -4478,6 +4478,7 @@ model IntegrationConnection {
   /// the connection at the next refresh.
   providerTokensEnc String?
 
+
   /// WARP-2549 — what this connection landed. RESTRICT on the far side, so a
   /// delete here fails loudly rather than taking a customer's records with it.
   landedContacts  Contact[]
@@ -4870,34 +4871,34 @@ model ErpWriteRequest {
 /// teams are nested one level under a department parent. Household is the
 /// legacy system department adopted from WS-5.
 model Department {
-  id                String                 @id @default(uuid())
-  name              String                 @unique // display + groupfolder mount_point
-  slug              String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
-  parentId          String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
-  parent            Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
-  teams             Department[]           @relation("DeptHierarchy")
-  description       String?
-  kind              DepartmentKind         @default(DEPARTMENT)
-  state             ProvisionState         @default(pending)
-  provisionError    String?
+  id              String                 @id @default(uuid())
+  name            String                 @unique // display + groupfolder mount_point
+  slug            String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
+  parentId        String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
+  parent          Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
+  teams           Department[]           @relation("DeptHierarchy")
+  description     String?
+  kind            DepartmentKind         @default(DEPARTMENT)
+  state           ProvisionState         @default(pending)
+  provisionError  String?
   /// WARP-1651: when this row FIRST failed to converge, or null while it is
   /// converging normally. The durable clock the reconciler bounds the
   /// re-verify state with — `updatedAt` cannot serve, because
   /// provisionDepartment rewrites `state` on every retry and so refreshes it
   /// each tick. Stamped once per failure episode, cleared on convergence.
   nonConvergedSince DateTime?
-  ncGroupRw         String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
-  ncGroupRo         String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
-  ncGroupfolderId   Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
-  quotaBytes        BigInt? // null = unlimited; pushed via gfSetQuota
-  aclVersion        Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
-  createdBy         String // local User.id
-  createdAt         DateTime               @default(now())
-  updatedAt         DateTime               @updatedAt
-  archivedAt        DateTime?
-  memberships       DepartmentMembership[]
-  shares            DepartmentShare[]
-  inviteGrants      UserInviteDepartment[]
+  ncGroupRw       String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
+  ncGroupRo       String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
+  ncGroupfolderId Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
+  quotaBytes      BigInt? // null = unlimited; pushed via gfSetQuota
+  aclVersion      Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
+  createdBy       String // local User.id
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  archivedAt      DateTime?
+  memberships     DepartmentMembership[]
+  shares          DepartmentShare[]
+  inviteGrants    UserInviteDepartment[]
 
   @@index([state])
 }
@@ -4974,18 +4975,18 @@ model UserUsagePolicy {
 /// transaction (T3), so every ADR-004 `requireRole` floor keeps working
 /// unchanged and the per-axis grant rows below can only NARROW within it.
 model AccessRole {
-  id                 String   @id @default(uuid())
-  name               String
-  slug               String   @unique
-  description        String?
+  id          String  @id @default(uuid())
+  name        String
+  slug        String  @unique
+  description String?
   // CHECK: admin|family|guest — never owner/service. Enforced in the service
   // layer + zod (T3 role-mutation-guard), deliberately NOT a DB check
   // constraint; the column stays the plain Role enum.
-  startingPoint      Role
+  startingPoint Role
   // active | archived. Stays a String default "active" (the ADR-032 §2 spec
   // shape); the two-value lifecycle is service-managed and archived roles
   // keep their rows (the design's archive-don't-delete affordance).
-  state              String   @default("active")
+  state         String @default("active")
   // axis c — usage DEFAULTS for people in this role; a person's
   // UserUsagePolicy row overrides per person. Null = box default.
   storageQuotaBytes  BigInt?
@@ -5688,7 +5689,7 @@ model Contact {
 
   /// Stable id in the upstream system — the reconcile key that stops two
   /// connectors from each creating their own copy of one person.
-  externalId   String?
+  externalId String?
   /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
   /// (a locally typed row has no connection), but a landed row without one is
   /// forbidden by the `*_provenance_complete` CHECK below.
@@ -5749,11 +5750,11 @@ model Contact {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  emails        ContactEmail[]
-  phones        ContactPhone[]
-  companyLinks  CrmCompanyContact[]
-  dealLinks     CrmDealContact[]
-  crmActivities CrmActivity[]
+  emails          ContactEmail[]
+  phones          ContactPhone[]
+  companyLinks    CrmCompanyContact[]
+  dealLinks       CrmDealContact[]
+  crmActivities   CrmActivity[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
@@ -5878,7 +5879,7 @@ model CrmCompany {
   /// `PmProject.leadId`).
   ownerId String?
 
-  origin         CrmRecordOrigin        @default(LOCAL)
+  origin         CrmRecordOrigin @default(LOCAL)
   externalSystem String?
   externalId     String?
   /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
@@ -5897,8 +5898,8 @@ model CrmCompany {
   /// purges in place), so this fires only if something new starts deleting
   /// them — at which point the landed rows must be purged deliberately, by a
   /// walker that knows to keep what a human wrote against them.
-  connectionId   String?
-  connection     IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
   /// (WARP-884). `archivedAt` is the audit timestamp only.
@@ -5963,7 +5964,7 @@ model CrmPipeline {
   /// stage names nobody reconciled, or dump every synced deal into whichever
   /// stage happened to sort first. A pipeline of its own keeps the owner's
   /// board theirs and makes the purge scope obvious.
-  connectionId String?                @unique
+  connectionId String? @unique
   connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   isDefault Boolean @default(false)
@@ -5996,7 +5997,7 @@ model CrmPipelineStage {
 
   /// What landing here means for the deal. Owner-configurable stage NAMES,
   /// fixed outcome SEMANTICS.
-  kind        CrmStageKind @default(OPEN)
+  kind CrmStageKind @default(OPEN)
   /// WARP-2549 — the vendor's own value for this stage (HubSpot `dealstage`),
   /// on a synced pipeline. The reconcile key: stage NAMES are owner-editable
   /// and re-landing must not create a second stage because someone renamed one.
@@ -6053,7 +6054,7 @@ model CrmDeal {
   projectId String?
   project   PmProject? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
-  origin         CrmRecordOrigin        @default(LOCAL)
+  origin         CrmRecordOrigin @default(LOCAL)
   externalSystem String?
   externalId     String?
   /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
@@ -6072,8 +6073,8 @@ model CrmDeal {
   /// purges in place), so this fires only if something new starts deleting
   /// them — at which point the landed rows must be purged deliberately, by a
   /// walker that knows to keep what a human wrote against them.
-  connectionId   String?
-  connection     IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   isArchived Boolean   @default(false)
   archivedAt DateTime?
