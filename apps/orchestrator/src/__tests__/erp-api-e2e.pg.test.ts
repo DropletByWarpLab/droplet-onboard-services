@@ -116,10 +116,40 @@ describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft b
     await prisma?.$disconnect();
   });
 
+  // Namespaced like every sibling pg suite (party-link, crm-activity-cascade,
+  // landing-provenance): the pg-gated files share ONE throwaway database and
+  // run serially (--no-file-parallelism), so a `deleteMany({})` here is this
+  // file claiming rows it never created.
+  //
+  // `connect()` resolves the provider BEFORE it writes anything, so
+  // "eaglesoft-api" is the COMPLETE set of IntegrationConnection rows this
+  // suite can land -- including the `port: 1` row that stays PROVISIONING. The
+  // "not-a-real-erp" post is rejected 4xx and lands nothing at all.
+  const OURS = { provider: "eaglesoft-api" } as const;
+
   beforeEach(async () => {
-    await prisma.erpAuditLog.deleteMany({});
-    await prisma.erpWriteRequest.deleteMany({});
-    await prisma.integrationConnection.deleteMany({});
+    // Ids first: ErpAuditLog.connectionId and ErpWriteRequest.connectionId are
+    // plain columns with no relation and no foreign key, so they cannot be
+    // scoped by a relation filter -- they have to be scoped by id.
+    const ours = await prisma.integrationConnection.findMany({
+      where: OURS,
+      select: { id: true },
+    });
+    const connectionIds = ours.map((r: { id: string }) => r.id);
+    await prisma.erpAuditLog.deleteMany({
+      where: { connectionId: { in: connectionIds } },
+    });
+    await prisma.erpWriteRequest.deleteMany({
+      where: { connectionId: { in: connectionIds } },
+    });
+    // Last, and scoped. `PartyLink.connectionId` is onDelete: Restrict
+    // (WARP-2562) on purpose -- nothing may sweep away a human's confirmed
+    // customer match. Unscoped, this line reached the connection that
+    // party-link.pg.test.ts deliberately leaves behind (it runs just before
+    // this file: vitest orders the serial pg lane largest-file-first) and died
+    // on `PartyLink_connectionId_fkey`. That FK was doing its job; deleting
+    // another suite's rows was never this file's job.
+    await prisma.integrationConnection.deleteMany({ where: OURS });
   });
 
   /** The connect payload an installer would POST, pointed at the harness box. */

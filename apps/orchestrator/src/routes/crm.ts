@@ -21,6 +21,7 @@ import type { PrismaClient } from "@prisma/client";
 
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import * as crm from "../services/crm/crm.service.js";
+import * as partyLinks from "../services/crm/party-link.service.js";
 
 /** Actor for attribution — the local User.id UUID (WARP-485), or null for the
  *  MCP service principal. */
@@ -28,6 +29,56 @@ function actor(req: Request): string | null {
   const id = req.user?.id;
   if (!id || id === "_service:mcp") return null;
   return id;
+}
+
+/**
+ * The owner whose contacts a party-link request may touch (WARP-2562).
+ *
+ * Distinct from `actor()` above, which answers "who gets the credit" and is
+ * allowed to be null. This answers "whose address book is this", and a null
+ * here is not attribution-less — it is unscoped, so the caller is refused
+ * rather than served someone else's rows. Mirrors `contacts.ts:ownerId`,
+ * including the `_service:` prefix test rather than one hard-coded principal.
+ */
+function ownerId(req: Request): string | null {
+  const id = req.user?.id;
+  if (!id || id.startsWith("_service:")) return null;
+  return id;
+}
+
+function mapPartyLinkError(err: unknown, res: Response): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  switch (msg) {
+    case partyLinks.PARTY_LINK_ERRORS.CONTACT_NOT_FOUND:
+    case partyLinks.PARTY_LINK_ERRORS.COMPANY_NOT_FOUND:
+    case partyLinks.PARTY_LINK_ERRORS.LINK_NOT_FOUND:
+    // WARP-2562 — a link now names the connection it came from, so a bad
+    // connection id is its own 404 rather than an "already linked" 409 or a
+    // foreign-key 500.
+    case partyLinks.PARTY_LINK_ERRORS.CONNECTION_NOT_FOUND:
+      // Another owner's contact lands here too, as a 404. A 403 would confirm
+      // the row exists to someone who should not know that.
+      res.status(404).json({ error: msg });
+      return true;
+    case partyLinks.PARTY_LINK_ERRORS.PARTY_AMBIGUOUS:
+    case partyLinks.PARTY_LINK_ERRORS.CONFIDENCE_NEEDS_MATCHED:
+      // The request is well-formed but self-contradictory — 422, not 400, so
+      // it does not read as a malformed body.
+      res.status(422).json({ error: msg });
+      return true;
+    case partyLinks.PARTY_LINK_ERRORS.ALREADY_LINKED:
+      res.status(409).json({ error: msg });
+      return true;
+    default:
+      // The unique index is the real guard under a race; the service's
+      // pre-check can lose it. Map Prisma's own violation to the same 409 so
+      // a concurrent duplicate is not a 500.
+      if (typeof err === "object" && err !== null && "code" in err && err.code === "P2002") {
+        res.status(409).json({ error: partyLinks.PARTY_LINK_ERRORS.ALREADY_LINKED });
+        return true;
+      }
+      return false;
+  }
 }
 
 function mapServiceError(err: unknown, res: Response): boolean {
@@ -185,6 +236,47 @@ const activityCreateSchema = z.object({
   emailMessageId: z.string().max(64).nullable().optional(),
   calendarEventId: z.string().max(64).nullable().optional(),
   workItemId: z.string().max(64).nullable().optional(),
+});
+
+/**
+ * WARP-2562 — party-link bodies.
+ *
+ * The caller names a CONNECTION, not a provider. The provider is derived from
+ * that connection in the service and is never accepted here, for two reasons:
+ * a body-supplied provider can contradict its own connection, and a provider
+ * alone cannot tell two HubSpot portals apart — whose object ids are
+ * portal-scoped and therefore collide.
+ *
+ * That also removes the WARP-2291 hazard rather than repeating it: there is no
+ * vendor vocabulary in this schema to constrain or to get wrong, so a new
+ * upstream still needs no migration here.
+ */
+const partyLinkCreateSchema = z
+  .object({
+    contactId: z.string().max(64).optional(),
+    companyId: z.string().max(64).optional(),
+    connectionId: z.string().min(1).max(64),
+    externalId: z.string().min(1).max(256),
+    linkedBy: z.enum(["MANUAL", "MATCHED", "IMPORTED"]).optional(),
+    confidence: z.number().int().min(0).max(100).nullable().optional(),
+  })
+  // Both-or-neither is caught by the service (and by the CHECK constraint),
+  // but catching it here too keeps the 422 body pointing at the field.
+  .refine((v) => (v.contactId === undefined) !== (v.companyId === undefined), {
+    message: "exactly one of contactId or companyId",
+    path: ["contactId"],
+  });
+
+const partyLinkQuerySchema = z.object({
+  contactId: z.string().max(64).optional(),
+  companyId: z.string().max(64).optional(),
+  archived: z.string().max(8).optional(),
+});
+
+const partyLinkArchiveSchema = z.object({
+  /** Absent means archive. `false` un-archives — the same route both ways, so
+   *  an accidental unlink is undone where it was made. */
+  archived: z.boolean().optional(),
 });
 
 export function createCrmRouter(prisma: PrismaClient): Router {
@@ -520,6 +612,67 @@ export function createCrmRouter(prisma: PrismaClient): Router {
       res.status(201).json({ activity });
     } catch (err) {
       if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // ── Party links (WARP-2562, ADR-044) ──
+  //
+  // "This contact and that upstream record are the same customer." No route
+  // here admits the MCP service principal, unlike the CRM routes above, and
+  // that is deliberate: a contact-side link is resolved against
+  // `Contact.userId`, and the service principal has no owner. A tool that
+  // needs to link on someone's behalf has to carry that person, which is a
+  // decision for the landing seam (WARP-2549), not a default granted here.
+
+  router.get("/crm/party-links", async (req, res, next) => {
+    const owner = ownerId(req);
+    if (!owner) return res.status(403).json({ error: "user_required" });
+    const parsed = partyLinkQuerySchema.safeParse(req.query);
+    if (!parsed.success) return badRequest(res, parsed.error);
+    try {
+      const links = await partyLinks.listPartyLinks(
+        prisma,
+        { contactId: parsed.data.contactId, companyId: parsed.data.companyId },
+        owner,
+        parsed.data.archived === "1" || parsed.data.archived === "true",
+      );
+      res.json({ links });
+    } catch (err) {
+      if (mapPartyLinkError(err, res)) return;
+      next(err);
+    }
+  });
+
+  router.post("/crm/party-links", requireRole(...WRITE), async (req, res, next) => {
+    const owner = ownerId(req);
+    if (!owner) return res.status(403).json({ error: "user_required" });
+    const parsed = partyLinkCreateSchema.safeParse(req.body);
+    if (!parsed.success) return badRequest(res, parsed.error);
+    try {
+      const link = await partyLinks.createPartyLink(prisma, parsed.data, owner, owner);
+      res.status(201).json({ link });
+    } catch (err) {
+      if (mapPartyLinkError(err, res)) return;
+      next(err);
+    }
+  });
+
+  router.patch("/crm/party-links/:id/archive", requireRole(...WRITE), async (req, res, next) => {
+    const owner = ownerId(req);
+    if (!owner) return res.status(403).json({ error: "user_required" });
+    const parsed = partyLinkArchiveSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return badRequest(res, parsed.error);
+    try {
+      const link = await partyLinks.archivePartyLink(
+        prisma,
+        req.params.id,
+        owner,
+        parsed.data.archived ?? true,
+      );
+      res.json({ link });
+    } catch (err) {
+      if (mapPartyLinkError(err, res)) return;
       next(err);
     }
   });
