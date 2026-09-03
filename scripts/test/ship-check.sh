@@ -2223,8 +2223,17 @@ main() {
   printf "  ──────────────────────────────────\n"
 
   if [ -n "$single_check" ]; then
-    _dispatch_check "$single_check"
-    local rc=$?
+    # `|| rc=$?`, not a bare call. `set -e` is in force, so a plain
+    # `_dispatch_check` that returned non-zero exited the script on the spot:
+    # the rc capture below, the invalid-name branch and _summarize were all
+    # unreachable for every failing single-check run, which is why
+    # `ship-check.sh <check>` printed a FAIL line and no summary block.
+    # WARP-2646 — the exit code now comes from _summarize in BOTH paths, so
+    # the skip verdict is decided in one place instead of arriving here by
+    # accident of errexit. Same codes as before: 2 invalid name, 1 a check
+    # failed, 77 a check skipped, 0 all clear.
+    local rc=0
+    _dispatch_check "$single_check" || rc=$?
     if [ "$rc" -eq 2 ]; then
       return 2
     fi
