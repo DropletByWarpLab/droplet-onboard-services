@@ -31,6 +31,10 @@
  *     interceptor-owned partition reds on zero challenges
  *   - hardcode the tool list → the provenance guard reds
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import { readFileSync } from "node:fs";
