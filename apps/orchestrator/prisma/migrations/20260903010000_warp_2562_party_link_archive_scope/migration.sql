@@ -1,15 +1,17 @@
 -- WARP-2562 review — archiving a party link must FREE its slot.
 --
--- Predecessor ON STAGE: 20260831180000_warp_2562_party_link, the migration
--- this one amends. That is the ordering fact worth pinning — "this migration
--- sorts last" describes only the day it landed, and the next migration
--- falsifies it.
+-- Predecessor ON STAGE: 20260901050000_warp_2581_erp_document. The migration
+-- this one AMENDS is the earlier 20260831180000_warp_2562_party_link — the two
+-- are different questions and both are worth pinning. "This migration sorts
+-- last" describes only the day it landed, and the next migration falsifies it.
 --
--- The stamp is 0903 rather than 0901 because three migrations were in flight
--- on unmerged branches when this was written — 20260901041500 (WARP-2549),
--- 20260901045000 and 20260901050000 (WARP-2581) — and whichever of them lands
--- must not end up numbered AFTER a migration a box has already applied. That
--- is the hazard the 20260831180000 header describes from the other side.
+-- The stamp is 0903 rather than 0901 because three migrations were still in
+-- flight on unmerged branches when this was written — 20260901041500
+-- (WARP-2549) and 20260901045000 / 20260901050000 (WARP-2581). All three have
+-- since landed on stage, which is exactly why the stamp was chosen this way:
+-- a migration must never end up numbered BEFORE one a box has already applied.
+-- That is the hazard the 20260831180000 header describes from the other side,
+-- and it was a live risk here rather than a hypothetical one.
 --
 -- A SEPARATE migration rather than an edit to
 -- 20260831180000_warp_2562_party_link, deliberately: that one is merged to
