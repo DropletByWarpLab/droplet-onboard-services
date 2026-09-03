@@ -59,6 +59,13 @@ SKIPPED_IDS=()
 # node_modules-gated cases skipped and the job went green).
 _SKIP_RC=77
 
+# The code ship-check.sh ITSELF exits when every check that ran passed but one
+# could not run (WARP-2646). Same number, same autotools convention, different
+# subject: _SKIP_RC is a case of this suite declining to run, _GATE_SKIP_RC is
+# the gate under test declining to evaluate. Kept as two names because they can
+# appear in the same assertion and conflating them would read as a tautology.
+_GATE_SKIP_RC=77
+
 _pass() { PASSED=$((PASSED + 1)); printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; }
 # $1 = stable skip id, $2 = display name.
 _skip() {
@@ -161,6 +168,66 @@ _assert_check_passes() {
     return 1
   fi
   return 0
+}
+
+# _assert_check_skips_matching <root> <check> <ERE> [<ERE>…]
+#
+# The SKIP counterpart of _assert_check_fails_matching (WARP-2646). Asserts
+# that ship-check.sh CHECK_NAME exits with the gate's skip code AND says why in
+# a way the patterns pin. Both halves are load-bearing:
+#
+#   - the CODE, because a skip that exits 0 is a false green in every caller
+#     (`ship-check.sh compose-config && git push`), which is the whole reason
+#     the gate has a distinct code at all;
+#   - the REASON, because "skipped" without a named cause is indistinguishable
+#     from a gate that has quietly stopped evaluating anything — the WARP-2637
+#     / WARP-2645 defect, one level down.
+_assert_check_skips_matching() {
+  local synthetic_root="$1" check_name="$2"
+  shift 2
+  if [ "$#" -eq 0 ]; then
+    printf "    _assert_check_skips_matching called with no pattern\n" >&2
+    return 1
+  fi
+
+  local output rc
+  output="$(REPO_ROOT="$synthetic_root" bash "$SHIP_CHECK" "$check_name" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne "$_GATE_SKIP_RC" ]; then
+    printf "    expected the gate's skip exit %d, got %d\n" "$_GATE_SKIP_RC" "$rc" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  local pattern
+  for pattern in "$@"; do
+    if ! printf '%s\n' "$output" | grep -Eq -- "$pattern"; then
+      printf "    %s skipped, but NOT for the reason under test\n" "$check_name" >&2
+      printf "    expected the output to match /%s/\n" "$pattern" >&2
+      printf '%s\n' "$output" | sed 's/^/    | /' >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Build a throwaway REPO_ROOT holding just what `compose-config` reads, and
+# echo its path. Deliberately a COPY, not a symlink: `docker compose` resolves
+# `env_file: ../.env` against the directory of the -f argument as given, so a
+# symlinked docker/ would send it back to the real repo root and the case would
+# silently test the developer's machine instead of the fixture.
+#
+# `.git` is a plain file — ship-check's precondition only tests existence, and
+# a file keeps the fixture from being mistaken for a checkout by anything else.
+# The caller decides whether to put a `.env` in it; that choice IS the fixture.
+_make_compose_only_root() {
+  local root
+  root="$(mktemp -d "${TMPDIR:-/tmp}/ship-check-composeroot.XXXXXX")" || return 1
+  mkdir -p "$root/docker" || return 1
+  cp "$REPO_ROOT_REAL/docker/docker-compose.yml" "$root/docker/docker-compose.yml" || return 1
+  cp "$REPO_ROOT_REAL/.env.example" "$root/.env.example" || return 1
+  : > "$root/.git" || return 1
+  printf '%s\n' "$root"
 }
 
 # --- Isolated git index (WARP-2479) ------------------------------------------
@@ -365,9 +432,23 @@ test_compose_config_catches_yaml_breakage() {
   # shellcheck disable=SC2064
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
 
-  # 1. Sanity: passes on the unmutated tree.
-  if ! _assert_check_passes "$REPO_ROOT_REAL" compose-config; then
+  # 1. Sanity: passes on the unmutated tree — with a third outcome. WARP-2646
+  #    gave the gate a skip verdict for the two environmental causes that used
+  #    to red it here (no `.env` at the repo root, an unreachable daemon), and
+  #    on a host in either state this case cannot evaluate its mutation at all.
+  #    That is a SKIP of the case, not a pass and not a red: asking the gate is
+  #    also how the reason gets reported, so the two do not drift apart.
+  local baseline rc
+  baseline="$(REPO_ROOT="$REPO_ROOT_REAL" bash "$SHIP_CHECK" compose-config 2>&1)" \
+    && rc=0 || rc=$?
+  if [ "$rc" -eq "$_GATE_SKIP_RC" ]; then
+    printf "    ${_YELLOW}SKIP${_RESET}  compose-config cannot evaluate this worktree; the gate says why:\n"
+    printf '%s\n' "$baseline" | sed 's/^/          | /'
+    return "$_SKIP_RC"
+  fi
+  if [ "$rc" -ne 0 ]; then
     printf "    baseline compose-config failed against unmodified real repo\n" >&2
+    printf '%s\n' "$baseline" | sed 's/^/    | /' >&2
     return 1
   fi
 
@@ -390,6 +471,119 @@ test_compose_config_catches_yaml_breakage() {
   _assert_check_fails_matching "$REPO_ROOT_REAL" compose-config \
     'rejected docker/docker-compose\.yml' \
     "could not find expected ':'"
+}
+
+# =============================================================================
+# Test: compose-config SKIPS (does not fail) when the worktree has no .env
+# =============================================================================
+#
+# WARP-2646. `.env` is .gitignored and written by scripts/setup.sh, so a fresh
+# clone — and every new `git worktree add` — has none. The gate reads
+# `.env.example` for VALUES, but `docker/docker-compose.yml` also declares
+# `env_file: ../.env`, and compose resolves that while merging the tree no
+# matter what `--env-file` says. The result was
+#
+#   FAIL  compose-config — "docker compose config" rejected docker/docker-compose.yml
+#     | env file /…/.env not found: stat /…/.env: no such file or directory
+#
+# — a green tree reported as a broken compose file, and the first thing a
+# developer meets on their first run of the mandated pre-PR gate. CI never saw
+# it because the workflow seeds .env from .env.example before the suite runs.
+#
+# The fixture is a throwaway root holding only the compose file and
+# .env.example, so the assertion holds whether or not the developer running
+# this suite happens to have a .env. What it pins is not "the gate skipped" but
+# "the gate skipped, said .env was the reason, and exited with the code that
+# means skipped" — a fail-open regression (exit 0) is as wrong as the old red.
+test_compose_config_skips_when_env_missing() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return "$_SKIP_RC"
+  fi
+
+  local root
+  root="$(_make_compose_only_root)" || {
+    printf "    could not build the compose-only fixture root\n" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$root'" RETURN EXIT
+
+  if [ -f "$root/.env" ]; then
+    printf "    fixture root unexpectedly has a .env — the case would prove nothing\n" >&2
+    return 1
+  fi
+
+  _assert_check_skips_matching "$root" compose-config \
+    'SKIP.*compose-config.*no \.env in this worktree' \
+    'env_file: \.\./\.env'
+}
+
+# =============================================================================
+# Test: compose-config SKIPS (does not fail) when the Docker client cannot
+# reach its daemon
+# =============================================================================
+#
+# WARP-2646's other environmental cause. Note what is NOT being asserted: that
+# a stopped daemon breaks this check. It does not. `docker compose config` is a
+# client-side merge, and the measurements behind this case (docker 29.5.2 /
+# compose v2, 2026-09-02) are that with DOCKER_HOST pointed at a dead socket,
+# and again with `docker info` shimmed to fail while compose still works, the
+# check RUNS and PASSES. That is precisely why the gate does not carry a
+# `docker info` preflight like docker-build-smoke's: a preflight would skip a
+# check that can run, manufacturing the vacuous gate WARP-2645 spent a PR
+# removing.
+#
+# What can still happen is a client that cannot reach the daemon for ANY call,
+# compose included — a broken context, a socket that vanished under it. Then
+# compose says so and the gate has validated nothing, so it must not report a
+# rejected compose file. The shim reproduces exactly that and nothing more, and
+# it is a PATH shim precisely so the real daemon (and the other cases that need
+# it) are left alone.
+test_compose_config_skips_when_daemon_unreachable() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return "$_SKIP_RC"
+  fi
+
+  local shim_dir
+  shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-check-dockershim.XXXXXX")" || {
+    printf "    could not create the shim directory\n" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$shim_dir'" RETURN EXIT
+
+  cat > "$shim_dir/docker" <<'SHIM'
+#!/usr/bin/env bash
+# Every call, `compose` included, fails the way a Docker client that cannot
+# reach its daemon fails. Verbatim wording from the real CLI — the gate
+# classifies on that sentence, so paraphrasing it here would test nothing.
+echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+exit 1
+SHIM
+  chmod 755 "$shim_dir/docker"
+
+  local root
+  root="$(_make_compose_only_root)" || {
+    printf "    could not build the compose-only fixture root\n" >&2
+    return 1
+  }
+  # The fixture needs a .env so that a skip can only be attributed to the
+  # daemon: without one, the .env branch above would fire first and this case
+  # would pass while asserting the wrong thing.
+  cp "$root/.env.example" "$root/.env" || return 1
+
+  local saved_path="$PATH" rc
+  PATH="$shim_dir:$PATH"
+  _assert_check_skips_matching "$root" compose-config \
+    'SKIP.*compose-config.*Docker daemon not reachable' \
+    'Cannot connect to the Docker daemon' \
+    && rc=0 || rc=$?
+  PATH="$saved_path"
+
+  rm -rf "$root"
+  return "$rc"
 }
 
 # =============================================================================
@@ -1889,6 +2083,14 @@ _run_test "tsc-full-prisma-pin" \
 _run_test "compose-config-yaml-breakage" \
   "compose-config catches YAML breakage in docker-compose.yml" \
   test_compose_config_catches_yaml_breakage
+
+_run_test "compose-config-skips-without-env" \
+  "compose-config skips with a reason when the worktree has no .env (WARP-2646)" \
+  test_compose_config_skips_when_env_missing
+
+_run_test "compose-config-skips-without-daemon" \
+  "compose-config skips with a reason when the Docker client cannot reach its daemon (WARP-2646)" \
+  test_compose_config_skips_when_daemon_unreachable
 
 _run_test "frigate-env-scan-unresolved-var" \
   "frigate-env-scan catches unresolved {VAR} substitution" \
