@@ -55,6 +55,9 @@ import {
   CREDENTIAL_VARIANT_FIELD,
   type CredentialFieldDef,
   type ProviderDescriptor,
+  // WARP-2639 — the ONE `IntegrationStatus`, imported under the name this
+  // module has always exported it as. Re-exported below.
+  type IntegrationStatus as IntegrationStatusName,
   // WARP-2633 — the ONE `SaasConnectionState`. Re-exported below so this
   // module stays the name every existing caller imports it under.
   type SaasConnectionState,
@@ -69,23 +72,17 @@ import {
 } from "./column-crypto.service.js";
 import { credentialsPurgedFor } from "./integrations.service.js";
 
-/** The `IntegrationStatus` values this service reads and writes. Mirrors the
- *  Prisma enum; kept as a local union so the service is testable against a
- *  structural stub rather than a generated client. */
-export type IntegrationStatusName =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  // WARP-2623 — usable, with ONE dataset refused by the vendor's plan or the
-  // app's scope grant.
-  | "CAPABILITY_LIMITED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  // WARP-2458 — the persisted enum finally carries what `SaasConnectionState`
-  // below could only derive, so the two unions in this file now agree.
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * The `IntegrationStatus` values this service reads and writes. Kept as a
+ * union rather than the generated Prisma enum so the service stays testable
+ * against a structural stub rather than a generated client.
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here, because this module was
+ * one of FOUR hand-copied unions of the same enum. Same move, and for the same
+ * reason, as `SaasConnectionState` below.
+ */
+export type { IntegrationStatusName };
 
 /**
  * What the configurator tells a person about a connection.
