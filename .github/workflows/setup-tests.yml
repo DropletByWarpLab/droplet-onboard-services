@@ -1,7 +1,13 @@
 name: setup-tests
 
 # Fast unit tests for scripts/setup.sh and scripts/lib/* — secret generation,
-# .env permissions, idempotency, compose.sh psql wiring. < 5s, no Docker.
+# .env permissions, idempotency, compose.sh psql wiring. No Docker.
+#
+# WARP-2647 widened the remit slightly: this is now the home for EVERY
+# Docker-free shell suite over `scripts/**` whose subject has no more specific
+# lane, because ci.yml has no setup-script leg and adding one would mean a new
+# job. The trigger has not changed — `scripts/**` already fired this lane for
+# all of them; they simply had no `run:` step anywhere. Total runtime ~10 s.
 
 on:
   pull_request:
@@ -38,6 +44,19 @@ on:
       - "tests/gpu-vendor-selection.test.sh"
       # WARP-1947: single-box derives the overlay home endpoint IP
       - "tests/wireguard-home-endpoint.test.sh"
+      # WARP-2647: seven Docker-free suites over scripts/setup.sh and
+      # scripts/lib/* that ran in NO workflow at all. `scripts/**` above
+      # already fires this lane for every change to the code they guard —
+      # these lines exist so an edit to a GUARD ITSELF also fires it, which
+      # is the only PR class they newly catch.
+      - "tests/systemd.test.sh"
+      - "tests/redis-acl.test.sh"
+      - "tests/internal-ca.test.sh"
+      - "tests/image-pipeline.test.sh"
+      - "tests/single-box-openwrt-readiness.test.sh"
+      - "tests/external-edge-router-survives-setup.test.sh"
+      - "tests/framebuffer-panel-survives-reset.test.sh"
+      - "tests/env-values-with-spaces-survive-sourcing.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -80,6 +99,19 @@ on:
       - "tests/gpu-vendor-selection.test.sh"
       # WARP-1947: single-box derives the overlay home endpoint IP
       - "tests/wireguard-home-endpoint.test.sh"
+      # WARP-2647: seven Docker-free suites over scripts/setup.sh and
+      # scripts/lib/* that ran in NO workflow at all. `scripts/**` above
+      # already fires this lane for every change to the code they guard —
+      # these lines exist so an edit to a GUARD ITSELF also fires it, which
+      # is the only PR class they newly catch.
+      - "tests/systemd.test.sh"
+      - "tests/redis-acl.test.sh"
+      - "tests/internal-ca.test.sh"
+      - "tests/image-pipeline.test.sh"
+      - "tests/single-box-openwrt-readiness.test.sh"
+      - "tests/external-edge-router-survives-setup.test.sh"
+      - "tests/framebuffer-panel-survives-reset.test.sh"
+      - "tests/env-values-with-spaces-survive-sourcing.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -204,3 +236,67 @@ jobs:
         # DEVICE_SECRET_KEY (production sudo has a scrubbed env), interrupt-safe
         # keyslot ordering, and fail-fast when the recovery key is underivable.
         run: bash tests/usb-luks-enroll.test.sh
+
+      # ── WARP-2647: suites that ran in NO workflow at all ──────────────────
+      # Each of these guards a file already covered by this lane's `scripts/**`
+      # trigger, so the job they join was going to run anyway; together they
+      # add ~4 s. They live here rather than in a ci.yml leg because ci.yml has
+      # no `setup-script` leg and adding one means a new job — a new required
+      # check and a new per-PR runner allocation (docs/ci-cost-budget.md). They
+      # are NOT in a new workflow and add NO new trigger: this lane has fired
+      # on `pull_request` + `scripts/**` since it was written.
+      - name: Run systemd unit-render tests
+        # WARP-571: render_systemd_unit() in scripts/lib/systemd.sh — the unit
+        # text setup.sh installs on the box. Distinct from
+        # systemd-unit-sandbox-tests.yml, which checks the TRACKED unit files
+        # under scripts/host/etc-systemd-system/; nothing checked the rendered
+        # ones. No Docker, no sudo.
+        run: bash tests/systemd.test.sh
+
+      - name: Run Redis ACL generation tests
+        # WARP-234: _generate_redis_acl in scripts/lib/secrets.sh — that the
+        # materialised users.acl carries ONLY sha256 hashes (never a plaintext
+        # password byte), that `default` stays PING-only, and that each service
+        # keeps its least-privilege shape. The DOCKER half of this invariant is
+        # scripts/test/redis-tls.test.sh, which is declared developer-only; this
+        # is the half a runner can prove.
+        run: bash tests/redis-acl.test.sh
+
+      - name: Run internal-CA issuance tests
+        # WARP-236: scripts/lib/internal-ca.sh — CA mint idempotency, leaf
+        # issuance, SAN shape and rotation. Pure openssl. Three suites this lane
+        # already runs (mosquitto-conf, internal-mtls-wiring, mqtt staging) are
+        # downstream of this library, and none of them exercised it directly.
+        run: bash tests/internal-ca.test.sh
+
+      - name: Run appliance image-pipeline tests
+        # WARP-663 / ADR-020: the `droplet-image` CLI and scripts/image/
+        # manifest tooling — sign↔verify round-trip with a throwaway ECDSA-P256
+        # key, tamper detection, schema rejection, and the four `flash`
+        # pre-flight refusals under DROPLET_IMAGE_DRY_RUN=1. No real block
+        # device, no root.
+        run: bash tests/image-pipeline.test.sh
+
+      - name: Run single-box OpenWrt readiness tests
+        # WARP-826: provision_single_box_openwrt must poll a REAL readiness
+        # signal (ubus answering) rather than `.State.Running`, which flips true
+        # seconds before procd is up — the race that brought the router back
+        # offline after a factory reset. Docker is stubbed on PATH.
+        run: bash tests/single-box-openwrt-readiness.test.sh
+
+      - name: Run external-edge-router preservation tests
+        # WARP-1980: a setup re-run must not re-point a box off its real edge
+        # router. Silent when it regresses — the bundled container answers, so
+        # the routing service just starts describing a router nobody is on.
+        run: bash tests/external-edge-router-survives-setup.test.sh
+
+      - name: Run framebuffer-panel provisioning tests
+        # WARP-1981: setup must write DISPLAY_BACKEND=fb explicitly on a box
+        # with a framebuffer panel, because factory-reset deletes .env and the
+        # runtime `auto` probe deliberately never selects fb.
+        run: bash tests/framebuffer-panel-survives-reset.test.sh
+
+      - name: Run .env whitespace-survives-sourcing tests
+        # WARP-1987: .env is `.`-sourced in four places, so a bare `KEY=a b c`
+        # exits 127 and fails the enclosing step — the 2026-08-13 customer wipe.
+        run: bash tests/env-values-with-spaces-survive-sourcing.test.sh
