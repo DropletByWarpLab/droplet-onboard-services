@@ -26,3 +26,12 @@ jobs:
         run: bash tests/storage-pool-destroy-superblock.test.sh
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
+      # WARP-2629 — the live-secrets wipe on /data. Kept in step with ci.yml's
+      # `storage` leg so the dispatch copy and the PR copy do not drift.
+      - name: Run factory-reset live-secrets wipe unit tests
+        run: bash tests/factory-reset-secrets-wipe.test.sh
+      # WARP-2638 — same reason: kept in step with ci.yml's `storage` leg.
+      - name: Run factory-reset volume-wipe + purge-scope guards
+        run: |
+          bash tests/factory-reset-volume-wipe.test.sh
+          bash tests/factory-reset-purge-scope.test.sh
