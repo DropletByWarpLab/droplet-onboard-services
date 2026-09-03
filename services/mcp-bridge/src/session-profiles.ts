@@ -41,6 +41,15 @@ export interface OpenSessionInput {
   /** Overridable ONLY so a test can point at an RFC 2606 host. Screened
    *  against the profile's own allowed-host set either way. */
   url?: string;
+  /**
+   * WARP-2651 — the catalog the caller has already vetted, carried across a
+   * restart of THIS container.
+   *
+   * Not a credential and not a capability: it can only make the new session
+   * refuse to dispatch (`catalog_changed`), never widen what it will serve. It
+   * is absent on a first open, which is why it is optional rather than `[]`.
+   */
+  knownTools?: readonly string[];
 }
 
 export type SessionFactory = (input: OpenSessionInput) => RemoteMcpSession;
@@ -68,6 +77,9 @@ export const SESSION_FACTORIES: Readonly<Record<string, SessionFactory>> =
         cloudId: input.cloudId,
         connect: atlassianConnect,
         ...(input.url !== undefined ? { url: input.url } : {}),
+        ...(input.knownTools !== undefined
+          ? { knownToolNames: input.knownTools }
+          : {}),
       }),
   });
 

@@ -115,6 +115,25 @@ export interface McpBridgeOpenInput {
   cloudId: string;
   /** Test-only override; the bridge screens it against its own host set. */
   url?: string;
+  /**
+   * WARP-2651 — the catalog this process last vetted, handed back so a
+   * RE-OPENED session can still detect that the vendor's surface moved.
+   *
+   * Omitted on a first open, and that absence is meaningful: an empty array
+   * would claim we vetted a surface with no tools in it, and every tool the
+   * server advertises would then read as `added` drift on a brand-new box.
+   */
+  knownTools?: readonly string[];
+}
+
+/** What `GET /health` answers. The one bridge route served without a bearer,
+ *  so the compose healthcheck needs no secret. */
+export interface McpBridgeHealth {
+  status: string;
+  knownServers: string[];
+  /** Every session the BRIDGE currently holds — including ones this process
+   *  does not own, which is the whole point of reading it (WARP-2651). */
+  sessions: RemoteMcpSessionHealth[];
 }
 
 export interface McpBridgeClientOptions {
@@ -150,6 +169,18 @@ export class McpBridgeClient implements McpClientPort {
    */
   #opened = false;
 
+  /**
+   * The tool names the BRIDGE advertised on the last successful `listTools`.
+   *
+   * WARP-2651's drift baseline, and it is the bridge's names rather than the
+   * multiplexer's vetted subset on purpose: a tool the multiplexer drops (an
+   * illegal wire name, a collision with a local tool) is still a tool the
+   * vendor advertises, so baselining on the subset would make it read as
+   * `added` drift on every re-open and pin the session in `catalog_changed`
+   * for good.
+   */
+  #lastAdvertised: readonly string[] = [];
+
   constructor(opts: McpBridgeClientOptions) {
     this.serverId = opts.serverId;
     this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -178,7 +209,26 @@ export class McpBridgeClient implements McpClientPort {
       "GET",
       `/sessions/${this.serverId}/tools`,
     );
+    this.#lastAdvertised = body.tools.map((t) => t.name);
     return body.tools;
+  }
+
+  /** {@link #lastAdvertised}. Empty until a listing has succeeded — never a
+   *  guess about what the server would have said. */
+  lastAdvertisedToolNames(): readonly string[] {
+    return this.#lastAdvertised;
+  }
+
+  /**
+   * The bridge's own health, and every session IT holds.
+   *
+   * The reconciler's read. Deliberately a whole-component read rather than
+   * `state()` per server: case (1) of WARP-2651 is a session the orchestrator
+   * does NOT know about, and a per-server read can only ever confirm what the
+   * caller already named.
+   */
+  async health(): Promise<McpBridgeHealth> {
+    return this.#send<McpBridgeHealth>("GET", "/health");
   }
 
   /**

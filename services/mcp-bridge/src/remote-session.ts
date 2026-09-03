@@ -118,6 +118,31 @@ export interface RemoteMcpSessionOptions {
   scheduleRetry?: (delayMs: number, run: () => void) => void;
   /** Injected clock, for the same reason. */
   now?: () => number;
+  /**
+   * WARP-2651 — the catalog the CALLER has already vetted, so the fourth
+   * failure state survives a restart of this container.
+   *
+   * A session's `catalog_changed` detection compares one `listTools()` against
+   * the previous one, and both live in this process's memory. That is correct
+   * while the process lives and useless the moment it does not: after a bridge
+   * restart the orchestrator re-opens, the first listing has nothing to compare
+   * against, and a surface that moved while we were down is absorbed as if it
+   * had always looked like that — which is precisely the "a tool that vanished
+   * must not surface as 'there is nothing to do'" rule of ADR-043 §1, defeated
+   * by a restart rather than by a bug.
+   *
+   * So the baseline is an INPUT. The orchestrator holds the last catalog it
+   * vetted and hands it back on re-open; the first listing then compares
+   * against it and flips to `catalog_changed` exactly as an in-process second
+   * listing would, blocking dispatch until {@link acknowledgeCatalog}.
+   *
+   * Absent (the boot case) means "no vetted baseline exists", which is a
+   * different fact from an empty one and is why this is optional rather than
+   * defaulting to `[]`: an empty array would claim the caller vetted a surface
+   * with no tools in it, and every tool the server advertises would read as
+   * `added` drift on the first listing of a brand-new box.
+   */
+  knownToolNames?: readonly string[];
 }
 
 const DEFAULTS = {
@@ -179,6 +204,14 @@ export class RemoteMcpSession {
       opts.maxReconnectDelayMs ?? DEFAULTS.maxReconnectDelayMs;
     this.#reconnectDelayGrowthFactor =
       opts.reconnectDelayGrowthFactor ?? DEFAULTS.reconnectDelayGrowthFactor;
+    // WARP-2651: seed the drift baseline, but do NOT seed `#catalog` — the
+    // names are what drift is computed from, while `#catalog` is what this
+    // session actually served and `health().toolCount` reports. Claiming a tool
+    // count for a listing that has not happened would be the same guess the
+    // state enum exists to forbid.
+    if (opts.knownToolNames !== undefined) {
+      this.#catalogNames = new Set(opts.knownToolNames);
+    }
   }
 
   get state(): RemoteMcpSessionState {

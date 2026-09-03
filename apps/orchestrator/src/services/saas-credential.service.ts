@@ -59,6 +59,11 @@ import {
   type CredentialFieldDef,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
+import {
+  remoteMcpLifecycle,
+  type RemoteMcpAttachView,
+  type RemoteMcpLifecycleRegistry,
+} from "./remote-mcp-lifecycle.service.js";
 
 import {
   decryptColumn,
@@ -232,6 +237,25 @@ export interface SaasCredentialView {
    * action. Two facts, two fields — never one field guessing at both.
    */
   credentialExpiry: CredentialExpiryVerdict | null;
+  /**
+   * WARP-2651 — whether this box is actually ATTACHED to the vendor's MCP
+   * server right now, or `null` for every track that has no such concept.
+   *
+   * Carried alongside `state` rather than folded into it, for the same reason
+   * `credentialExpiry` is: `IntegrationStatus` is what the OPERATOR configured
+   * and it is persisted; this is what the RUNTIME currently is, it lives in
+   * this process's memory, and the two are legitimately different. A connection
+   * whose credential is perfect and whose bridge container is restarting is
+   * genuinely `CONNECTED` *and* genuinely not reaching anything — one field
+   * guessing at both is how "looks connected and quietly does nothing" ships.
+   *
+   * `null` for a `cloud` or `lan` track is "there is no session concept here",
+   * and `null` for an `mcp` track is "no attach has ever been attempted on this
+   * box" — which is the shipping default (the allowlist is empty) and is not an
+   * error state. Both are absence of a REGISTRATION, never absence of a session
+   * id: the state itself is always a declared value.
+   */
+  remoteMcp: RemoteMcpAttachView | null;
 }
 
 /** Raised when a submitted field fails the descriptor's own validation. The
@@ -365,6 +389,9 @@ export function buildCredentialView(
   /** Injected so the expiry verdict is testable without freezing a clock
    *  process-wide. Defaults to now, like every other read of the time here. */
   now: Date = new Date(),
+  /** Injected for the same reason: a test drives its own registry instead of
+   *  the process-wide attachment. */
+  lifecycle: RemoteMcpLifecycleRegistry = remoteMcpLifecycle,
 ): SaasCredentialView {
   const storedSecrets: Record<string, string> = (() => {
     if (!row?.providerTokensEnc) return {};
@@ -467,6 +494,11 @@ export function buildCredentialView(
     // value. A second read of `row.providerConfig` here could disagree with the
     // form after a failed parse.
     credentialExpiry: credentialExpiryVerdict(descriptor, config, now) ?? null,
+    // Keyed on the TRACK, never on a provider id: an `mcp` vendor added later
+    // gets this for free, and no other track can accidentally grow a session
+    // state it has no session for.
+    remoteMcp:
+      descriptor.track === "mcp" ? lifecycle.view(descriptor.mcpServerId) : null,
   };
 }
 

@@ -196,6 +196,9 @@ export interface AtlassianMcpSessionOptions {
   maxReconnectAttempts?: number;
   scheduleRetry?: (delayMs: number, run: () => void) => void;
   now?: () => number;
+  /** WARP-2651 — the caller's already-vetted catalog, so `catalog_changed`
+   *  survives a restart of this container. See `remote-session.ts`. */
+  knownToolNames?: readonly string[];
 }
 
 /**
@@ -221,6 +224,9 @@ export function createAtlassianMcpSession(
       : {}),
     ...(opts.scheduleRetry ? { scheduleRetry: opts.scheduleRetry } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.knownToolNames !== undefined
+      ? { knownToolNames: opts.knownToolNames }
+      : {}),
   });
 }
 
