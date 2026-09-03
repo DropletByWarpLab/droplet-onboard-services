@@ -26,8 +26,39 @@
  * now has the method (and a controllable `ensureConversation`, since the route
  * only reads continuity once a conversation row exists), and two cases pull
  * the two levers.
+ *
+ * WARP-2642, the rename. This file was `tool-domain-narrowing.route.test.ts`,
+ * and "tool-domain narrowing" names BOTH mechanisms that run on this turn: the
+ * §3 RBAC scope (this file's subject, and its two siblings'
+ * `tool-domain-narrowing.{catalog,dispatch}.test.ts`) and WARP-1921's
+ * relevance-based advertisement, which also narrows by domain. Both #1955 and
+ * #1966 had to spend a paragraph disambiguating it. The siblings keep the old
+ * name deliberately — neither touches selection, so neither is ambiguous; this
+ * is the only file where the two meet, and so the only one whose name had to
+ * say which one it is about.
+ *
+ * WARP-2642, the fixture. The Prisma double now renders the two prompt blocks
+ * it was silently dropping. Same defect
+ * class as the WARP-2631 one above, one layer over: `assistantPersona.create`
+ * and `businessProfile.create` were bare `vi.fn()`s returning `undefined`, so
+ * `getPersona` / `getBusinessProfile` handed `undefined` to the composers,
+ * BOTH threw, and the deliberate fail-opens at `routes/llm.ts:1694/1719`
+ * swallowed it. 20 stderr lines per run (10 tests × 2 composers) under a green
+ * suite. Nobody reads a passing suite's stderr — which is exactly how the
+ * missing `getConversationToolNames` hid until WARP-2631.
+ *
+ * It mattered because every turn here was measured against a system prompt
+ * missing two blocks the product always sends, and missing them in the
+ * direction that HIDES overflow: a prompt that is smaller than the real one
+ * can never reproduce a budget the real one blows. The rows below are the
+ * shipped shapes — schema defaults for the persona (what `getPersona`'s
+ * create-on-first-read materialises on a real box) and a completed profile for
+ * the business block (the state the block exists for). The `renders the two
+ * prompt blocks` describe asserts both are present so a fixture regression is
+ * red instead of silent, and the `afterEach` guard below makes the fail-open
+ * itself audible for every case in this file, present and future.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
@@ -130,11 +161,58 @@ vi.mock("../services/effective-access.service.js", () => ({
 }));
 
 import { createLlmRouter } from "../routes/llm.js";
+import type { ChatMessage } from "../types/index.js";
 import type { ToolAccessScope } from "../services/tool-access.service.js";
 import {
   effectiveAdvertisedToolNames,
   type SelectionMessage,
 } from "../services/tool-selection.service.js";
+// WARP-2642 — the markers the two composers emit. Both are exported constants
+// the composers build their output from (`PERSONA_BLOCK_PREFIX` is the literal
+// first line of a persona block; `BUSINESS_BLOCK_DELIMITER_OPEN` is the §15
+// data-framing opener), so asserting on them pins the shipped text rather than
+// a copy of it.
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+
+/** The persona singleton at its SCHEMA DEFAULTS (`prisma/schema.prisma:314-325`
+ *  — warm_friendly / balanced / first names / no custom instructions). This is
+ *  exactly the row `getPersona` create-on-first-read materialises, so the block
+ *  composed from it is the one a box that has never touched the persona
+ *  settings actually sends. Matches llm-chat.interview.test.ts's row. */
+const PERSONA_ROW = {
+  id: "singleton",
+  preset: "warm_friendly",
+  verbosity: "balanced",
+  useFirstNames: true,
+  customInstructions: "",
+  updatedBy: null,
+  updatedAt: new Date("2026-09-02T00:00:00Z"),
+};
+
+/** A COMPLETED business profile — the state the business block exists for. A
+ *  fresh (`not_started`, all-empty) profile composes to "" by design, which
+ *  would leave the block absent for a legitimate reason and make the presence
+ *  assertion below untrue rather than merely unenforced. Short, obviously-fake
+ *  values: the point is that the block renders, not what it says. */
+const BUSINESS_PROFILE_ROW = {
+  id: "singleton",
+  onboardingState: "completed",
+  interviewChatId: null,
+  summary: "A fixture business.",
+  whatWeDo: "Fixture work.",
+  customers: "Fixture customers.",
+  teamShape: "Two fixtures.",
+  toolsUsed: "Fixture tools.",
+  typicalDay: "Fixture days.",
+  goals: "Fixture goals.",
+  lastSource: "onboarding",
+  reviewNudgeState: "none",
+  reviewDueAt: null,
+  reviewDismissedAt: null,
+  updatedBy: null,
+  updatedAt: new Date("2026-09-02T00:00:00Z"),
+};
 
 const REGISTRY = [
   { name: "list_files" },
@@ -155,8 +233,22 @@ function createPrismaMock(accessRoleId: string | null) {
       })),
     },
     workspace: { findUnique: vi.fn(async () => ({ id: 1, type: "BUSINESS" })) },
-    businessProfile: { findUnique: vi.fn(async () => null), create: vi.fn() },
-    assistantPersona: { findUnique: vi.fn(async () => null), create: vi.fn(), upsert: vi.fn() },
+    // WARP-2642 — these two returned `null` from `findUnique` and `undefined`
+    // from `create`, which is not "no block": `getBusinessProfile` /
+    // `getPersona` create-on-first-read and hand whatever `create` returned
+    // straight to the composer, so `undefined.summary` / `undefined.preset`
+    // threw on every turn and the route's fail-open ate it. `findUnique` now
+    // returns the row (the seeded-box path); `create` returns the same row so
+    // the create-on-first-read path cannot silently reintroduce `undefined`.
+    businessProfile: {
+      findUnique: vi.fn(async () => BUSINESS_PROFILE_ROW),
+      create: vi.fn(async () => BUSINESS_PROFILE_ROW),
+    },
+    assistantPersona: {
+      findUnique: vi.fn(async () => PERSONA_ROW),
+      create: vi.fn(async () => PERSONA_ROW),
+      upsert: vi.fn(),
+    },
     memoryFact: { findMany: vi.fn(async () => []) },
     brainMemoryItem: { findMany: vi.fn(async () => []) },
     fileContentChunk: { findMany: vi.fn(async () => []) },
@@ -213,12 +305,55 @@ const advertisedFromAgentRequest = (pool: string[]): Set<string> => {
   });
 };
 
+/** WARP-2642 — the assembled system prompt the route handed the loop. Mirrors
+ *  llm-chat.business-block.test.ts's helper of the same name. */
+const systemPromptText = (): string => {
+  const req = mockRunAgent.mock.calls.at(-1)![1] as { messages: ChatMessage[] };
+  const sys = req.messages[0]!;
+  expect(sys.role).toBe("system");
+  return typeof sys.content === "string" ? sys.content : "";
+};
+
 const chat = (app: express.Express, body: Record<string, unknown> = {}) =>
   request(app)
     .post("/api/llm/chat")
     .send({ model: "m1", messages: [{ role: "user", content: "hi" }], ...body });
 
+/**
+ * WARP-2642 — the fail-opens around block composition, made audible.
+ *
+ * `routes/llm.ts` wraps each block composer in a try/catch that `console.warn`s
+ * and continues. That is correct for production — a persona read failure must
+ * not cost the user their answer — but under a test double it converts "the
+ * fixture is wrong" into a silent, green run. This suite has no case that
+ * WANTS either composer to throw, so any such warn here is a broken fixture,
+ * and an `afterEach` is what turns it red for every case in the file including
+ * ones not yet written.
+ *
+ * Scoped to the two composer signatures on purpose, not "any warn": the route
+ * warns legitimately elsewhere (context-budget degradation, draft adoption),
+ * and the continuity fail-open next door uses `console.error`, which the
+ * WARP-2631 rejection case exercises deliberately.
+ *
+ * Not vitest's `onConsoleLog`: that hook is config-level only, so using it
+ * would impose the guard on all 632 orchestrator files — and 15 of them are
+ * red under it today (see the PR body). A spy is the per-file equivalent, and
+ * `vi.spyOn` without `mockImplementation` still calls through, so the stderr
+ * stays visible while it is also being asserted on.
+ */
+const FAIL_OPEN_SIGNATURES = ["persona load failed", "business-profile load failed"];
+let warnSpy: ReturnType<typeof vi.spyOn>;
+
+afterEach(() => {
+  const swallowed = warnSpy.mock.calls
+    .map((args) => String(args[0]))
+    .filter((first) => FAIL_OPEN_SIGNATURES.some((sig) => first.includes(sig)));
+  warnSpy.mockRestore();
+  expect(swallowed).toEqual([]);
+});
+
 beforeEach(() => {
+  warnSpy = vi.spyOn(console, "warn");
   h.config.TOOL_SELECTION_MODE = "domains";
   persistence.sessionId = null;
   persistence.getConversationToolNames.mockReset();
@@ -233,6 +368,32 @@ beforeEach(() => {
   mockListTools.mockReset();
   mockListTools.mockResolvedValue(REGISTRY);
   resolveEffectiveAccessMock.mockReset();
+});
+
+/**
+ * WARP-2642 — the fixture-integrity floor.
+ *
+ * Not a test of the persona or business feature (that is
+ * llm-chat.persona-block.test.ts / llm-chat.business-block.test.ts, which own
+ * the ordering, role-leak and budget contracts). It is the statement that the
+ * turns measured in the rest of THIS file run against the prompt the product
+ * assembles, blocks included — the thing that was quietly untrue. One
+ * assertion per block, on the marker each composer emits, so a fixture
+ * regression names which block went missing.
+ */
+describe("/api/llm/chat — the route renders the two prompt blocks (fixture floor)", () => {
+  it("assembles a system prompt carrying both the persona and the business block", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "admin",
+      toolDomains: ["files"],
+      locks: false,
+    });
+    const res = await chat(buildApp(createPrismaMock("role-1"), "admin"));
+    expect(res.status).toBe(200);
+    const sys = systemPromptText();
+    expect(sys).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
 });
 
 describe("/api/llm/chat — §3 tool scope wiring", () => {
