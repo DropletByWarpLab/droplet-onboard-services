@@ -28,6 +28,7 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import {
   plannedToolNames,
+  referencedStepNames,
   runToolSpec,
   type StepDispatcher,
   type Summarizer,
@@ -52,6 +53,14 @@ type SpecStatus = (typeof SPEC_STATUSES)[number];
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
+ * WARP-2670 — the name a step may publish its result under, for later steps
+ * to read as `${steps.<name>}`. Lowercase snake so the reference syntax needs
+ * no quoting or escaping, and so two names cannot differ only by case.
+ */
+const OUTPUT_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
+const outputNameSchema = z.string().regex(OUTPUT_NAME_RE).optional();
+
+/**
  * A step is either a tool CALL or — since WARP-1996 — a SUMMARIZE, which
  * turns what the earlier steps gathered into prose. `call` stays the default
  * so every spec authored before this keeps parsing unchanged.
@@ -64,12 +73,14 @@ const callStepSchema = z.object({
   kind: z.literal("call").default("call"),
   tool: z.string().min(1).max(64),
   args: z.record(z.unknown()).optional(),
+  as: outputNameSchema,
 });
 
 const summarizeStepSchema = z.object({
   kind: z.literal("summarize"),
   /** Optional framing; the runner supplies its default when absent. */
   prompt: z.string().min(1).max(4000).optional(),
+  as: outputNameSchema,
 });
 
 const stepSchema = z.union([callStepSchema, summarizeStepSchema]);
@@ -86,10 +97,63 @@ type ParsedStep = z.infer<typeof stepSchema>;
  * malformed on the next run.
  */
 function storedArgsFor(s: ParsedStep): Record<string, unknown> {
+  // WARP-2670 — `as` rides in the same JSON blob for both kinds. It is not a
+  // column because `ToolStep.args` is Json and `kind` is a plain String, the
+  // seam C1's schema comment already nominated for exactly this; a column
+  // would cost a migration to store something only the walker reads.
+  const named = s.as ? { as: s.as } : {};
   if (s.kind === "summarize") {
-    return s.prompt ? { prompt: s.prompt } : {};
+    return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
   }
-  return { tool: s.tool, args: s.args ?? {} };
+  return { tool: s.tool, args: s.args ?? {}, ...named };
+}
+
+/**
+ * WARP-2670 — refuse a reference graph the runner could not satisfy.
+ *
+ * Three ways to write a spec that parses but cannot run:
+ *   - two steps publishing the same name (the second silently shadows);
+ *   - `${steps.x}` where nothing is named `x`;
+ *   - `${steps.x}` where `x` is published by a LATER step, or by this one.
+ *
+ * The walker catches all three, but only on the first fire — and for a
+ * scheduled spec the first fire is at 03:00 with nobody reading. Checking
+ * here means the author is told while they are still looking at the step
+ * they typed. This is the same argument the schedule routes make for
+ * parsing an rrule at write time instead of auto-disabling it later.
+ *
+ * Paths are NOT checked: `${steps.invoices.0.total}` depends on what the
+ * tool returns at run time, which authoring cannot know. Only the name
+ * graph — which is static — is decided here.
+ */
+function stepReferenceError(steps: ParsedStep[]): Record<string, unknown> | null {
+  const published = new Set<string>();
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    for (const ref of referencedStepNames(storedArgsFor(step))) {
+      if (!published.has(ref)) {
+        return {
+          error: `Step ${i} refers to \${steps.${ref}}, which no earlier step publishes`,
+          detail:
+            "give the producing step an `as` name, and make sure it comes first",
+          step: i,
+          reference: ref,
+        };
+      }
+    }
+    if (step.as) {
+      if (published.has(step.as)) {
+        return {
+          error: `Two steps publish the name "${step.as}"`,
+          detail: "step output names must be unique within a spec",
+          step: i,
+          reference: step.as,
+        };
+      }
+      published.add(step.as);
+    }
+  }
+  return null;
 }
 
 /**
@@ -409,6 +473,13 @@ export function createToolsRouter(
         // all key on req.user.id.
         const actor = req.user?.id ?? null;
 
+        // WARP-2670 — refuse a reference graph the walker could not satisfy.
+        const refError = stepReferenceError(parsed.data.steps);
+        if (refError) {
+          res.status(400).json(refError);
+          return;
+        }
+
         // WARP-2665 — classify from the steps, not from the body.
         const reconciled = reconcileWrites(
           parsed.data.writes,
@@ -484,6 +555,18 @@ export function createToolsRouter(
         if (!existing) {
           res.status(404).json({ error: "Spec not found" });
           return;
+        }
+
+        // WARP-2670 — only when the steps are being replaced. A patch that
+        // leaves them alone cannot have introduced a bad reference, and
+        // re-validating stored steps would turn an unrelated rename into a
+        // 400 on a spec that has been running fine.
+        if (parsed.data.steps) {
+          const refError = stepReferenceError(parsed.data.steps);
+          if (refError) {
+            res.status(400).json(refError);
+            return;
+          }
         }
 
         const reconciled = reconcileWrites(

@@ -9,9 +9,13 @@
  * Semantics:
  *   - Steps walk in ascending `idx`.
  *   - Step N's parsed result is exposed to step N+1's args via simple
- *     `${prev.json_path}` template substitution. v1 supports the
- *     special variable `${prev}` (the entire previous result JSON);
- *     more elaborate JSONPath is C2 territory.
+ *     `${prev}` template substitution (the entire previous result JSON).
+ *   - WARP-2670: a step may also publish its result under a name
+ *     (`args.as`), which any LATER step reads as `${steps.<name>}` or
+ *     `${steps.<name>.<path>}` — dotted, with numeric segments indexing
+ *     arrays. This is what lets step 3 see step 1; with `${prev}` alone a
+ *     spec is a pipeline, and anything needing two earlier results had to
+ *     collapse into a single tool call.
  *   - A step failure stops the walk — step N+1 onwards is NOT
  *     attempted. The ToolRun row is written with `status=failed` and
  *     `error` populated from the failing step.
@@ -114,6 +118,10 @@ export interface RunStepTrace {
   ok: boolean;
   result?: unknown;
   error?: string;
+  /** WARP-2670 — the name this step's result was published under, when it
+   *  was given one. Present in the trace so the run-detail drawer can show
+   *  which step a later `${steps.x}` was actually reading. */
+  as?: string;
 }
 
 export interface RunOutcome {
@@ -149,34 +157,159 @@ interface RunArgs {
 }
 
 /**
- * Resolve `${prev}` template references in the args of step N+1
- * against the parsed result of step N. v1 deliberately supports only
- * the bare `${prev}` substitution; richer JSONPath is C2 scope.
- *
- * Substitution is structural: a string value of exactly `${prev}`
- * becomes the previous result; any other string is returned as-is
- * (no partial-string substitution to avoid surprise stringification).
+ * WARP-2670 — a reference that named a step, or a path inside one, that the
+ * run cannot supply. Thrown by `resolveRefs` and caught by the walk, which
+ * records it as an ordinary failed step rather than letting it escape.
  */
-function resolvePrev(
-  raw: unknown,
-  prev: unknown,
-): unknown {
+export class StepReferenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepReferenceError";
+  }
+}
+
+/** `${steps.<name>}` / `${steps.<name>.<path>.<into>}`. */
+const STEP_REF_RE = /^\$\{steps\.([a-z][a-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)\}$/;
+
+/**
+ * Read a dotted path out of a step result.
+ *
+ * Numeric segments index arrays, so `${steps.invoices.0.id}` works without a
+ * second syntax. A missing key is distinguished from a present-but-null value
+ * with `in` / bounds checks: `null` is a legitimate result a spec may want to
+ * pass on, and treating it as "missing" would fail runs that are fine.
+ */
+function readPath(
+  root: unknown,
+  segments: string[],
+): { ok: true; value: unknown } | { ok: false; at: string } {
+  let cur = root;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const here = segments.slice(0, i + 1).join(".");
+    if (Array.isArray(cur)) {
+      const idx = Number.parseInt(seg, 10);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= cur.length) {
+        return { ok: false, at: here };
+      }
+      cur = cur[idx];
+      continue;
+    }
+    if (typeof cur === "object" && cur !== null && seg in (cur as object)) {
+      cur = (cur as Record<string, unknown>)[seg];
+      continue;
+    }
+    return { ok: false, at: here };
+  }
+  return { ok: true, value: cur };
+}
+
+/**
+ * The results a step may refer to: the immediately previous one, and every
+ * earlier step that was given a name.
+ */
+export interface RefContext {
+  prev: unknown;
+  named: ReadonlyMap<string, unknown>;
+}
+
+/**
+ * WARP-2670 — resolve template references in a step's args.
+ *
+ * Two forms, and the distinction between them is deliberate:
+ *
+ *   `${prev}`               — the whole previous result. UNCHANGED from C1,
+ *                             including the fact that step 0 resolves it to
+ *                             `undefined` rather than failing. Existing specs
+ *                             keep behaving byte-for-byte; making the old form
+ *                             strict would break stored programs written
+ *                             against the documented v1 semantics.
+ *   `${steps.name.path}`    — a NAMED earlier result, optionally indexed into.
+ *                             Strict: an unknown name or an unreadable path
+ *                             fails the step. This form is new, so there is no
+ *                             history to preserve, and a silent `undefined`
+ *                             reaching a tool as an argument is exactly the
+ *                             class of bug the summarizer contract already
+ *                             refuses to tolerate elsewhere in this file.
+ *
+ * Named results are what lift a spec from a pipeline to a procedure: with
+ * `${prev}` alone, step 3 cannot see step 1, so anything that needs two
+ * earlier results has to be one giant tool call.
+ *
+ * Substitution stays STRUCTURAL — a string equal to exactly `${...}` becomes
+ * the value; any other string is returned as-is. No partial-string
+ * interpolation, for the same reason C1 gave: surprise stringification of an
+ * object into the middle of a sentence.
+ */
+function resolveRefs(raw: unknown, ctx: RefContext): unknown {
   if (raw === null || raw === undefined) return raw;
   if (typeof raw === "string") {
-    if (raw === "${prev}") return prev;
-    return raw;
+    if (raw === "${prev}") return ctx.prev;
+    const m = STEP_REF_RE.exec(raw);
+    if (!m) return raw;
+    const [, name, rest] = m;
+    if (!ctx.named.has(name)) {
+      throw new StepReferenceError(
+        `no earlier step is named "${name}" (referenced as ${raw})`,
+      );
+    }
+    const segments = rest ? rest.slice(1).split(".") : [];
+    const read = readPath(ctx.named.get(name), segments);
+    if (!read.ok) {
+      throw new StepReferenceError(
+        `step "${name}" has no value at "${read.at}" (referenced as ${raw})`,
+      );
+    }
+    return read.value;
   }
   if (Array.isArray(raw)) {
-    return raw.map((v) => resolvePrev(v, prev));
+    return raw.map((v) => resolveRefs(v, ctx));
   }
   if (typeof raw === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      out[k] = resolvePrev(v, prev);
+      out[k] = resolveRefs(v, ctx);
     }
     return out;
   }
   return raw;
+}
+
+/**
+ * WARP-2670 — every `${steps.X}` name a step's args refer to.
+ *
+ * Exported so the create/patch routes can refuse a forward or unknown
+ * reference at AUTHORING time. The runner would catch it too, but only on the
+ * first fire — which for a scheduled spec is at 03:00 with nobody reading.
+ */
+export function referencedStepNames(raw: unknown, into: Set<string> = new Set()): Set<string> {
+  if (typeof raw === "string") {
+    const m = STEP_REF_RE.exec(raw);
+    if (m) into.add(m[1]);
+    return into;
+  }
+  if (Array.isArray(raw)) {
+    for (const v of raw) referencedStepNames(v, into);
+    return into;
+  }
+  if (typeof raw === "object" && raw !== null) {
+    for (const v of Object.values(raw as Record<string, unknown>)) {
+      referencedStepNames(v, into);
+    }
+  }
+  return into;
+}
+
+/**
+ * The output name a stored step was given, if any. Lives inside `args` rather
+ * than in its own column: `ToolStep.args` is a Json blob and `kind` is a plain
+ * String, which the C1 schema comment already nominates as the extension seam
+ * ("future kinds may include branch, wait"). No migration.
+ */
+export function stepOutputName(step: { args: unknown }): string | null {
+  if (typeof step.args !== "object" || step.args === null) return null;
+  const as = (step.args as Record<string, unknown>).as;
+  return typeof as === "string" && as.length > 0 ? as : null;
 }
 
 /**
@@ -259,6 +392,10 @@ export async function runToolSpec(
 ): Promise<{ runId: string; outcome: RunOutcome }> {
   const trace: RunStepTrace[] = [];
   let prev: unknown = undefined;
+  // WARP-2670 — results published by earlier steps that carried an `as` name.
+  // Only successful steps land here: a failed step halts the walk, so nothing
+  // downstream can read a result that was never produced.
+  const named = new Map<string, unknown>();
   let outcome: RunOutcome = { status: "ok", trace, error: null };
 
   // ── WARP-1580 pre-flight: refuse a forbidden spec WHOLE ──────────
@@ -314,13 +451,16 @@ export async function runToolSpec(
         // The facts are the trace SO FAR — a copy, so the summarizer cannot
         // mutate the run's own record of what happened.
         const prose = await args.summarizer.summarize(summarizeStep.prompt, [...trace]);
+        const outName = stepOutputName(step);
         trace.push({
           idx: step.idx,
           tool: SUMMARIZE_PSEUDO_TOOL,
           args: { prompt: summarizeStep.prompt },
           ok: true,
           result: prose,
+          ...(outName ? { as: outName } : {}),
         });
+        if (outName) named.set(outName, prose);
         prev = prose;
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
@@ -351,10 +491,29 @@ export async function runToolSpec(
       break;
     }
 
-    const resolvedArgs = resolvePrev(parsed.args, prev) as Record<
-      string,
-      unknown
-    >;
+    // WARP-2670 — a bad `${steps.x}` reference is a step failure, not a
+    // thrown request. It is recorded like any other so the run-detail drawer
+    // can say "step 2 of 5 failed: no earlier step is named ..." instead of
+    // surfacing a 500 with no trace at all.
+    let resolvedArgs: Record<string, unknown>;
+    try {
+      resolvedArgs = resolveRefs(parsed.args, { prev, named }) as Record<
+        string,
+        unknown
+      >;
+    } catch (err) {
+      if (!(err instanceof StepReferenceError)) throw err;
+      const msg = `step ${step.idx} (${parsed.tool}): ${err.message}`;
+      trace.push({
+        idx: step.idx,
+        tool: parsed.tool,
+        args: {},
+        ok: false,
+        error: err.message,
+      });
+      outcome = { status: "failed", trace, error: msg };
+      break;
+    }
 
     // WARP-1580 — the boundary. Same predicate the agent loop runs before
     // `mcp.callTool`, applied to the args this step will ACTUALLY send: only
@@ -379,13 +538,16 @@ export async function runToolSpec(
 
     try {
       const result = await dispatcher.call(parsed.tool, resolvedArgs);
+      const outName = stepOutputName(step);
       trace.push({
         idx: step.idx,
         tool: parsed.tool,
         args: resolvedArgs,
         ok: true,
         result,
+        ...(outName ? { as: outName } : {}),
       });
+      if (outName) named.set(outName, result);
       prev = result;
     } catch (err) {
       const msg = (err as Error).message ?? String(err);
