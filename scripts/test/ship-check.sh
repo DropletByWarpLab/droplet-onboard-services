@@ -507,7 +507,13 @@ run_check_compose_config() {
     return 1
   fi
   if ! command -v docker >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH (required for `compose config`)\n" "$label"
+    # WARP-2645: the backticks that used to be here were inside a
+    # double-quoted printf, so bash ran `compose config` as a command
+    # substitution every time this branch was taken — a gate reporting
+    # "docker is missing" was shelling out to a docker subcommand to
+    # compose its own message. Single quotes, no substitution.
+    printf '  %sFAIL%s  %s — docker not on PATH (required for "docker compose config")\n' \
+      "$_RED" "$_RESET" "$label"
     _record_result "$label" fail
     return 1
   fi
@@ -527,7 +533,19 @@ run_check_compose_config() {
 
   local out
   if ! out="$(docker compose -f "$compose" --env-file "$env_file" config --quiet 2>&1)"; then
-    printf "  ${_RED}FAIL${_RESET}  %s — `docker compose config` rejected the merged tree\n" "$label"
+    # WARP-2645: same command-substitution defect as the branch above, and
+    # here it was actively harmful — reporting that the merged tree was
+    # rejected ran a SECOND, argument-less `docker compose config` in the
+    # caller's cwd, whose "no configuration file provided: not found" landed
+    # on the operator's terminal one line ABOVE the real diagnostic.
+    #
+    # The message also has to NAME the file it rejected. Every environmental
+    # way this branch can be reached — daemon down, missing .env, docker
+    # missing at exec time — produces the same banner otherwise, which is
+    # what let a self-test assert "compose-config failed" and call that proof
+    # the planted YAML break was caught.
+    printf '  %sFAIL%s  %s — "docker compose config" rejected %s\n' \
+      "$_RED" "$_RESET" "$label" "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
     _record_result "$label" fail

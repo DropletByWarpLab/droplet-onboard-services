@@ -1029,9 +1029,17 @@ jobs:
       # The trade this leaves standing: the WARP-329 and WARP-492 cases are
       # developer-machine gates only. Running them in CI is a spend decision,
       # not an oversight.
+      #
+      # WARP-2645 — the value is a list of SKIP IDS, not display names. The
+      # ids are declared beside each `_run_test` registration in
+      # scripts/test/ship-check.test.sh. Keying this on the display name made
+      # it a prose-shaped wire contract: rewording a case's name — which
+      # happens whenever its rationale sharpens — silently stopped allowing
+      # that case's skip and reddened this job for a case nobody had touched.
+      # Changing an id now takes a deliberate edit in both files.
       - name: Run the ship-check self-test
         env:
-          SHIPCHECK_ALLOW_SKIP: "tsc-full catches WARP-329 fixture regression,tsc-full uses workspace-pinned prisma (WARP-492)"
+          SHIPCHECK_ALLOW_SKIP: "tsc-full-warp329-fixture,tsc-full-prisma-pin"
         run: bash scripts/test/ship-check.test.sh
 
 
