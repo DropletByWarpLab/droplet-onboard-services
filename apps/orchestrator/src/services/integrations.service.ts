@@ -42,7 +42,10 @@ import {
   integrationStatusForHealthFailure,
   statusAfterHealthProbe,
 } from "./cloud-connection-state.js";
-import { providerDescriptor } from "@droplet/shared-types";
+import {
+  providerDescriptor,
+  type IntegrationStatus as IntegrationStatusName,
+} from "@droplet/shared-types";
 import {
   connectorForProvider,
   encodeApiCredentials,
@@ -66,26 +69,23 @@ const logger = createLogger("integrations-service");
 // EAGLESOFT_PROVIDER from this module.
 export { EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER };
 
-/** The explicit lifecycle states (mirror of the Prisma `IntegrationStatus`
- *  enum). A provider with no row is reported as NOT_CONFIGURED — the explicit
- *  constant, never a derived-from-null value. */
-export type IntegrationStatusName =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  // WARP-2623 — the connection works and ONE dataset is refused by the
-  // vendor's plan or scope grant. Distinct from ERROR because a new credential
-  // fixes nothing, and distinct from CONNECTED because the owner is owed the
-  // fact that a dataset is missing.
-  | "CAPABILITY_LIMITED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  // WARP-2458 — the eighth member. ADR-041 §5 names it mandatory; a revoked
-  // customer credential is neither "never configured" nor "broken", and a
-  // surface reading only `status` must not render it as healthy.
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * The explicit lifecycle states (the Prisma `IntegrationStatus` enum). A
+ * provider with no row is reported as NOT_CONFIGURED — the explicit constant,
+ * never a derived-from-null value.
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here, because this module was
+ * one of FOUR hand-copied unions of the same enum. The member docs live with
+ * the definition; the Prisma-parity gate is
+ * `__tests__/integration-status.schema.test.ts`.
+ *
+ * Re-exported under the name this module already used rather than left to
+ * callers to import from the package, so every existing
+ * `from "./integrations.service.js"` import keeps working and the move stays a
+ * refactor rather than a rename of the whole surface.
+ */
+export type { IntegrationStatusName };
 
 /** Hub row (brief §13 `GET /api/integrations`). No PHI, no secret. */
 export interface IntegrationSummary {

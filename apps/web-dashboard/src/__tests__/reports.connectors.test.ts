@@ -8,6 +8,7 @@
  * alphabetically behind three healthy ones is a connector nobody notices.
  */
 import { describe, it, expect } from "vitest";
+import { INTEGRATION_STATUSES, type IntegrationStatus } from "@droplet/shared-types";
 import {
   PILL,
   providerMark,
@@ -17,6 +18,7 @@ import {
   statusWeight,
 } from "@/app/reports/connectors";
 import type { IntegrationStatusName } from "@/app/reports/api";
+import type { IntegrationStatus as ErpIntegrationStatus } from "@/lib/erp-types";
 
 const ALL: IntegrationStatusName[] = [
   "NOT_CONFIGURED",
@@ -31,6 +33,51 @@ const ALL: IntegrationStatusName[] = [
 ];
 
 const NOW = new Date("2026-08-14T09:41:00.000Z");
+
+/**
+ * WARP-2639 — the dashboard half of the one-definition gate.
+ *
+ * The Prisma-parity half lives in the orchestrator
+ * (`apps/orchestrator/src/__tests__/integration-status.schema.test.ts`), which
+ * is the only workspace holding `schema.prisma`. It cannot reach these two
+ * modules, and they were the pair with nothing comparing them at all — the
+ * WARP-2458 gate imported the two ORCHESTRATOR copies and only claimed to
+ * cover four.
+ *
+ * `tsc` makes the two dashboard surfaces agree for free now that both
+ * re-export the shared union. What it cannot object to is somebody
+ * re-declaring a local union that HAPPENS to match on the day it is written:
+ * `PILL`/`WEIGHT` would still be total, every suite would stay green, and the
+ * copy would then drift the next time Prisma grows a member — which is the
+ * WARP-2517 defect (`PILL[status]` `undefined` on the reports page) reshipped.
+ */
+describe("IntegrationStatus — one definition, re-exported (WARP-2639)", () => {
+  it("keeps both dashboard names assignable to the shared union, both ways", () => {
+    // Mutation: give `app/reports/api.ts` or `lib/erp-types.ts` its own
+    // `export type … =` again, with any member difference → `tsc --noEmit` red
+    // here. (`vitest` alone would not notice: esbuild strips types.)
+    const reports: IntegrationStatusName = "CAPABILITY_LIMITED" as IntegrationStatus;
+    const erp: ErpIntegrationStatus = "CAPABILITY_LIMITED" as IntegrationStatus;
+    const backToShared: IntegrationStatus = "CAPABILITY_LIMITED" as IntegrationStatusName;
+    const across: IntegrationStatusName = "CAPABILITY_LIMITED" as ErpIntegrationStatus;
+    expect([reports, erp, backToShared, across]).toEqual(
+      Array(4).fill("CAPABILITY_LIMITED"),
+    );
+  });
+
+  it("renders a pill for every member of the shared list", () => {
+    // The direction that ships a broken page: Prisma and the shared list grow
+    // a member, and this surface never learns to draw it. `PILL` is a total
+    // `Record` so `tsc` catches it too — this states it as a runtime failure
+    // as well, because a reader of a red suite should see WHICH status has no
+    // pill rather than only a TS2741. Mutation: delete a `PILL` entry → red.
+    // Deliberately NOT cast: if the shared union and `PILL`'s key type ever
+    // stop being the same type, this index is a compile error, and that is the
+    // finding.
+    const missing = INTEGRATION_STATUSES.filter((s) => PILL[s] === undefined);
+    expect(missing).toEqual([]);
+  });
+});
 
 describe("PILL — all nine statuses stay distinct", () => {
   it("covers every status", () => {

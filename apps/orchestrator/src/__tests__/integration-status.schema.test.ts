@@ -2,31 +2,53 @@
  * WARP-2458 — `IntegrationStatus` is mirrored by hand in four TypeScript
  * unions and nothing checked it. This is the check.
  *
+ * WARP-2639 — there is no longer anything to keep in step: the four copies
+ * became one `INTEGRATION_STATUSES` array in `@droplet/shared-types`, derived
+ * into the `IntegrationStatus` union, and all four modules re-export it. So
+ * this file no longer compares mirrors to each other (`tsc` does that for
+ * free, in every workspace, on every build). What is left is the ONE thing a
+ * compiler cannot see: the Prisma enum, which is a text file.
+ *
  * The house pattern for a schema-enum test (`role-enum.schema.test.ts:26-61`,
  * `ap-device.schema.test.ts:45`) asserts each EXPECTED member is present. That
  * catches a member dropped from Prisma; it does not catch a member added to
  * Prisma and forgotten in the union, because the expected list is a hand-typed
  * literal that drifts with everything else. So this file is bidirectional in
  * the shape `packages/tools-core/__tests__/registry.test.ts:177-186` uses —
- * `{missing, extra}` set-compared both ways — and derives its expected list
- * from the TS union itself rather than from a literal.
+ * `{missing, extra}` set-compared both ways.
  *
- * The derivation is the load-bearing part. A union type has no runtime value,
- * so `STATUS_NAMES` is the key set of a `Record<IntegrationStatusName, true>`:
- * `tsc` refuses the object literal if a member is missing AND refuses a key
- * that is not in the union, which makes the array provably the union. The
- * orchestrator's `tsconfig.json` carries `include: ["src/**\/*"]` with no test
- * exclusion, so this file is compiled by `tsc --noEmit` and the assertion is
- * real — unlike a `@ts-expect-error` in a package whose tests are excluded,
- * which asserts nothing in a green suite forever.
+ * The expected list is now the shared array itself rather than the key set of
+ * a `Record<IntegrationStatusName, true>`, because the array IS the definition
+ * the union is derived from; a `Record` keyed off a union derived from that
+ * same array would only be asserting that the array equals itself.
+ *
+ * The one thing `tsc` still needs help with is the module boundary: nothing
+ * stops a future edit re-declaring a local union in one of the four modules,
+ * and if the copy happens to match on the day it is written, every compiler
+ * and every set comparison stays green. The assignability assertions below are
+ * the gate against that. The orchestrator's `tsconfig.json` carries
+ * `include: ["src/**\/*"]` with no test exclusion, so this file is compiled by
+ * `tsc --noEmit` and those assertions are real. The dashboard's two modules
+ * cannot be reached from here (a test in `apps/orchestrator` cannot import
+ * from `apps/web-dashboard`); their half lives in
+ * `apps/web-dashboard/src/__tests__/reports.connectors.test.ts`.
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  INTEGRATION_STATUSES,
+  NON_CONNECTION_INTEGRATION_STATUSES,
+  SAAS_CONNECTION_STATES,
+  type IntegrationStatus,
+  type SaasConnectionState,
+} from "@droplet/shared-types";
+
 import type { IntegrationStatusName } from "../services/integrations.service.js";
 import type { IntegrationStatusName as SaasIntegrationStatusName } from "../services/saas-credential.service.js";
+import type { SaasConnectionState as ServiceSaasConnectionState } from "../services/saas-credential.service.js";
 
 function findPrismaDir(): string {
   const candidates = [
@@ -45,26 +67,10 @@ const PRISMA_DIR = findPrismaDir();
 const schema = readFileSync(join(PRISMA_DIR, "schema.prisma"), "utf8");
 
 /**
- * The TS union, as data. Every value is `true` and never read — the KEYS are
- * the assertion, and the exhaustive `Record` is what makes them provably the
- * union rather than a list somebody maintained alongside it.
- *
- * Mutation: delete a line → `tsc` red (the Record is not total). Add a line
- * that is not in the union → `tsc` red (excess property).
+ * The union, as data — WARP-2639, straight from the one definition rather
+ * than from a `Record` re-listing it here.
  */
-const STATUS_MEMBERS: Record<IntegrationStatusName, true> = {
-  NOT_CONFIGURED: true,
-  PROVISIONING: true,
-  CONNECTED: true,
-  // WARP-2623 — the ninth member.
-  CAPABILITY_LIMITED: true,
-  DEGRADED: true,
-  DRIFT_LOCKED: true,
-  NEEDS_RECONNECT: true,
-  ERROR: true,
-  DISABLED: true,
-};
-const STATUS_NAMES = Object.keys(STATUS_MEMBERS).sort();
+const STATUS_NAMES = [...INTEGRATION_STATUSES].sort();
 
 /** Parse the members out of a Prisma enum block, ignoring `///` docstrings —
  *  which every member of this enum now carries. */
@@ -87,8 +93,16 @@ describe("IntegrationStatus — Prisma enum ↔ TypeScript union (WARP-2458)", (
     // ships a `status` value no surface can render.
     const actual = prismaEnumMembers("IntegrationStatus");
     const missing = STATUS_NAMES.filter((n) => !actual.includes(n));
-    const extra = actual.filter((n) => !STATUS_NAMES.includes(n));
+    const extra = actual.filter((n) => !(STATUS_NAMES as string[]).includes(n));
     expect({ missing, extra }).toEqual({ missing: [], extra: [] });
+  });
+
+  it("derives the union from the list, so the list cannot carry a duplicate", () => {
+    // WARP-2639. `(typeof INTEGRATION_STATUSES)[number]` de-duplicates
+    // silently — the TYPE is identical whether or not a member appears twice,
+    // so nothing in the compiler notices, and the set comparison above would
+    // not notice either. Mutation: repeat a member in the array → red.
+    expect(STATUS_NAMES).toEqual([...new Set(INTEGRATION_STATUSES)].sort());
   });
 
   it("carries NEEDS_RECONNECT, the member ADR-041 §5 names as mandatory", () => {
@@ -113,13 +127,22 @@ describe("IntegrationStatus — Prisma enum ↔ TypeScript union (WARP-2458)", (
     }
   });
 
-  it("keeps the saas-credential service's copy of the union in step", () => {
-    // A second hand-maintained mirror in a different module. Mutation: add a
-    // member to one union and not the other → `tsc` red at this assignment,
-    // because each side must be assignable to the other.
+  it("has one definition, re-exported by the orchestrator's two modules", () => {
+    // WARP-2639 — these were two hand-maintained mirrors; both now re-export
+    // `@droplet/shared-types`. The assertion is the gate against undoing that:
+    // give either module its own `export type IntegrationStatusName =` again
+    // with a member the shared list lacks (or lacking one it has) and `tsc`
+    // goes red at BOTH of these assignments, because each side must be
+    // assignable to the other. A test that only compared the two to each other
+    // would stay green on a pair of matching local copies, which is exactly
+    // the state this refactor removed.
     const forward: SaasIntegrationStatusName = "NEEDS_RECONNECT" as IntegrationStatusName;
     const backward: IntegrationStatusName = "NEEDS_RECONNECT" as SaasIntegrationStatusName;
-    expect([forward, backward]).toEqual(["NEEDS_RECONNECT", "NEEDS_RECONNECT"]);
+    const shared: IntegrationStatus = "NEEDS_RECONNECT" as IntegrationStatusName;
+    const roundTrip: IntegrationStatusName = "NEEDS_RECONNECT" as IntegrationStatus;
+    expect([forward, backward, shared, roundTrip]).toEqual(
+      Array(4).fill("NEEDS_RECONNECT"),
+    );
   });
 });
 
@@ -234,5 +257,103 @@ describe("the NEEDS_RECONNECT migration (WARP-2458)", () => {
       expect(creating, "no migration creates IntegrationStatus").toBeDefined();
       expect(dirsFor()[0] > creating!).toBe(true);
     });
+  });
+});
+
+/**
+ * WARP-2633 — `SaasConnectionState` had the WARP-2458 defect too, and worse.
+ *
+ * `IntegrationStatus` was mirrored four times and gated by the suite above.
+ * `SaasConnectionState` — the union the credentials page renders through a
+ * TOTAL `Record` — was mirrored TWICE, by hand, with nothing comparing the two
+ * to each other or either to the Prisma enum. WARP-2623 had to edit both
+ * copies; WARP-2517's ticket claimed the union had already moved into
+ * `packages/shared-types`, and it had not.
+ *
+ * There is now one definition (`@droplet/shared-types/saas-connection-state`)
+ * and both former copies re-export it, so `tsc` makes the two SURFACES agree
+ * for free. What `tsc` cannot see is the third party to the agreement: the
+ * Prisma enum, which is a text file. That is what this block is.
+ */
+describe("SaasConnectionState ↔ Prisma IntegrationStatus (WARP-2633)", () => {
+  const statuses = prismaEnumMembers("IntegrationStatus");
+
+  it("has one definition, re-exported by the two modules that used to copy it", () => {
+    // Mutation: give either module its own `export type SaasConnectionState =`
+    // again with a member the shared list lacks → `tsc` red at BOTH of these
+    // assignments, because each side must be assignable to the other. This is
+    // the `integration-status.schema.test.ts:114-121` pattern, applied to the
+    // union the credentials page actually renders from.
+    const forward: ServiceSaasConnectionState = "CONNECTED" as SaasConnectionState;
+    const backward: SaasConnectionState = "CONNECTED" as ServiceSaasConnectionState;
+    expect([forward, backward]).toEqual(["CONNECTED", "CONNECTED"]);
+  });
+
+  it("derives the type from the list, so the list cannot carry a duplicate", () => {
+    // `(typeof SAAS_CONNECTION_STATES)[number]` de-duplicates silently — the
+    // TYPE is identical whether or not a member appears twice, so nothing in
+    // the compiler notices. Every OTHER assertion here is a set comparison and
+    // would not notice either. Mutation: repeat a member in the array → red.
+    expect([...SAAS_CONNECTION_STATES].sort()).toEqual(
+      [...new Set(SAAS_CONNECTION_STATES)].sort(),
+    );
+  });
+
+  it("covers every IntegrationStatus except the ones excluded ON PURPOSE", () => {
+    // The direction that ships a broken page: Prisma grows a member, the box
+    // sends it, and `STATE_COPY[view.state]` is `undefined`.
+    //
+    // The exclusion list is read, not inferred. A status missing from the
+    // union because somebody forgot it and a status missing because it is
+    // internal look identical to a set difference — this is the "no guessing
+    // state" rule, applied to a union instead of a column. It is empty today
+    // and the assertion is the same either way.
+    //
+    // Mutation: remove CAPABILITY_LIMITED from SAAS_CONNECTION_STATES → red,
+    // naming it under `uncovered`.
+    const uncovered = statuses.filter(
+      (s) =>
+        !(SAAS_CONNECTION_STATES as readonly string[]).includes(s) &&
+        !NON_CONNECTION_INTEGRATION_STATUSES.includes(s),
+    );
+    expect(uncovered).toEqual([]);
+  });
+
+  it("declares no state the Prisma enum cannot produce", () => {
+    // The other direction: a member in the union that no `status` column value
+    // ever maps to is dead copy on the credentials page, and a typo in it is
+    // invisible — `STATE_COPY` stays total, `tsc` stays green, and the row it
+    // was meant for renders as something else.
+    //
+    // Mutation: add a bogus member to SAAS_CONNECTION_STATES → red here, AND
+    // `tsc` red in the dashboard because `STATE_COPY` is no longer total.
+    const unknown = (SAAS_CONNECTION_STATES as readonly string[]).filter(
+      (s) => !statuses.includes(s),
+    );
+    expect(unknown).toEqual([]);
+  });
+
+  it("never both includes and excludes a status", () => {
+    // The exclusion list is only meaningful if it is disjoint from the union.
+    // Both are hand-edited literals; nothing else would catch a member added
+    // to one without being removed from the other, and the result would be a
+    // state the page renders while the gate believes nobody ever sees it.
+    // Mutation: add any current member to NON_CONNECTION_INTEGRATION_STATUSES
+    // → red.
+    const both = NON_CONNECTION_INTEGRATION_STATUSES.filter((s) =>
+      (SAAS_CONNECTION_STATES as readonly string[]).includes(s),
+    );
+    expect(both).toEqual([]);
+  });
+
+  it("excludes only statuses that exist", () => {
+    // A typo in the exclusion list silences the coverage assertion for a
+    // status that is still uncovered — the gate would go green on the exact
+    // defect it exists to catch. Vacuous today, and it is the assertion that
+    // keeps the list honest the first time somebody adds to it.
+    const bogus = NON_CONNECTION_INTEGRATION_STATUSES.filter(
+      (s) => !statuses.includes(s),
+    );
+    expect(bogus).toEqual([]);
   });
 });

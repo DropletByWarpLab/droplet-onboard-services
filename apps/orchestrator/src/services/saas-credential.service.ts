@@ -55,6 +55,12 @@ import {
   CREDENTIAL_VARIANT_FIELD,
   type CredentialFieldDef,
   type ProviderDescriptor,
+  // WARP-2639 — the ONE `IntegrationStatus`, imported under the name this
+  // module has always exported it as. Re-exported below.
+  type IntegrationStatus as IntegrationStatusName,
+  // WARP-2633 — the ONE `SaasConnectionState`. Re-exported below so this
+  // module stays the name every existing caller imports it under.
+  type SaasConnectionState,
 } from "@droplet/shared-types";
 
 import {
@@ -66,62 +72,41 @@ import {
 } from "./column-crypto.service.js";
 import { credentialsPurgedFor } from "./integrations.service.js";
 
-/** The `IntegrationStatus` values this service reads and writes. Mirrors the
- *  Prisma enum; kept as a local union so the service is testable against a
- *  structural stub rather than a generated client. */
-export type IntegrationStatusName =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  // WARP-2623 — usable, with ONE dataset refused by the vendor's plan or the
-  // app's scope grant.
-  | "CAPABILITY_LIMITED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  // WARP-2458 — the persisted enum finally carries what `SaasConnectionState`
-  // below could only derive, so the two unions in this file now agree.
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * The `IntegrationStatus` values this service reads and writes. Kept as a
+ * union rather than the generated Prisma enum so the service stays testable
+ * against a structural stub rather than a generated client.
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here, because this module was
+ * one of FOUR hand-copied unions of the same enum. Same move, and for the same
+ * reason, as `SaasConnectionState` below.
+ */
+export type { IntegrationStatusName };
 
 /**
  * What the configurator tells a person about a connection.
  *
- * Modelled on `M365ConnectionState` (`schema.prisma:4990-5012`), whose docstring
- * requires NEEDS_RECONNECT stay distinguishable from DISCONNECTED, because the
- * two look identical to a "does a token decrypt?" check and mean opposite
- * things to a human: one asks them to sign in, the other says nothing is wrong.
+ * WARP-2633 — the definition moved to `@droplet/shared-types`
+ * (`saas-connection-state.ts`) and is re-exported here, because this module
+ * was one of TWO hand-maintained copies (the other was the dashboard's
+ * `lib/api.ts`) with nothing asserting they agreed. The member docs and the
+ * `NON_CONNECTION_INTEGRATION_STATUSES` exclusion live with the definition;
+ * the Prisma-parity gate is `__tests__/integration-status.schema.test.ts`.
  *
- * The same distinction is what this configurator exists to protect. A credential
- * the vendor REJECTED is not "not configured" — the admin pasted something and
- * it is present — and it is emphatically not CONNECTED. Collapsing either way
- * produces the failure mode the story is named for: a silent empty result
- * standing in for a broken connection.
+ * Re-exported rather than left to callers to import from the package, so the
+ * dozen existing `from "./saas-credential.service.js"` imports keep working
+ * and the move stays a refactor rather than a rename of the whole surface.
  *
- * Derived from two EXPLICIT persisted facts — the `status` enum column and
- * whether the credential column holds a blob — never from a null standing in
- * for a state. This is the same derivation `m365-auth.service.ts` `toView` does
- * for an expired pending flow.
+ * The properties the state carries have not changed. It is still modelled on
+ * `M365ConnectionState` (`schema.prisma:4990-5012`), whose docstring requires
+ * NEEDS_RECONNECT stay distinguishable from DISCONNECTED — the two look
+ * identical to a "does a token decrypt?" check and mean opposite things to a
+ * human. And it is still derived from two EXPLICIT persisted facts, the
+ * `status` enum column and whether the credential column holds a blob, never
+ * from a null standing in for a state.
  */
-export type SaasConnectionState =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "NEEDS_RECONNECT"
-  // WARP-2623 — the persisted `CAPABILITY_LIMITED`, passed straight through
-  // rather than folded into ERROR. The configurator is the page an owner lands
-  // on to repair a connection, and this is the state where there is nothing on
-  // it to repair: the credential is valid and stored, and the missing dataset
-  // is a plan or scope decision in the vendor's own console.
-  | "CAPABILITY_LIMITED"
-  // WARP-2458 — present since NEEDS_RECONNECT stopped being inferred from it.
-  // Terminal in the sense the enum's docstring means: reconnecting will not
-  // fix it, so the view must be able to say so rather than folding it into an
-  // instruction to paste a new key.
-  | "ERROR"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "DISABLED";
+export type { SaasConnectionState };
 
 /** The row columns this service touches. Structural, so tests pass a literal. */
 export interface SaasConnectionRow {

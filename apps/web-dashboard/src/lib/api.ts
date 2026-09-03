@@ -2,6 +2,9 @@ import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
 } from "@droplet/shared-types";
+// WARP-2633 — the ONE `SaasConnectionState`; re-exported below (see the
+// docstring there) so `@/lib/api` stays the name every consumer imports from.
+import type { SaasConnectionState } from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -8180,33 +8183,19 @@ export interface SaasCredentialField {
 /**
  * Connection state, straight from the orchestrator.
  *
- * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
- * credential is not an absent one, and telling a person to "connect" when they
- * already did is how a broken connection stays broken.
+ * WARP-2633 — this was a hand-maintained MIRROR of the orchestrator's union
+ * and is now a re-export of the shared definition in `@droplet/shared-types`
+ * (`saas-connection-state.ts`), which both sides import. Mirroring is what
+ * WARP-2517 shipped and what WARP-2623 had to edit twice; dropping a member
+ * the box can send is how `STATE_COPY[view.state]` came to crash the
+ * credentials page on the very rows it exists to repair, and there is no
+ * longer a second list to drop it from.
  *
- * `ERROR` is deliberately distinct from `NEEDS_RECONNECT` (WARP-2458, mirrored
- * here by WARP-2517): the service folds a persisted `ERROR` status straight
- * through, and it means something a new key will not fix — a vendor-side
- * refusal like an IP access policy or a plan limit. This union mirrors the
- * orchestrator's `SaasConnectionState` in `saas-credential.service.ts`;
- * dropping a member the box can send is how `STATE_COPY[view.state]` came to
- * crash the credentials page on the very rows it exists to repair.
+ * Re-exported from here, rather than every consumer being retargeted at the
+ * package, because `SaasCredentialView` below carries it and the components
+ * import the pair together from `@/lib/api`.
  */
-export type SaasConnectionState =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "NEEDS_RECONNECT"
-  // WARP-2623 — the box's `CAPABILITY_LIMITED`, folded straight through by
-  // `saasConnectionState`. Mirrored here for the same reason `ERROR` was: a
-  // member the box can send and this union lacks makes `STATE_COPY[view.state]`
-  // `undefined` and takes the credentials page down on the very row it exists
-  // to explain.
-  | "CAPABILITY_LIMITED"
-  | "ERROR"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "DISABLED";
+export type { SaasConnectionState };
 
 export interface SaasCredentialView {
   provider: string;
