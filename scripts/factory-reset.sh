@@ -765,6 +765,16 @@ log_divider
 
 log_step 4 5 "Cleaning generated files"
 
+# WARP-2621 / WARP-2624: once relocate_secrets_to_data has run, $REPO_ROOT/.env
+# is a SYMLINK and secrets.sh writes its backup / torn / staging copies beside
+# the link's REAL target inside the encrypted /data. Resolve BEFORE the rm
+# below unlinks the symlink and the target becomes unreachable from here.
+_env_reset_target="$REPO_ROOT/.env"
+if [ -L "$_env_reset_target" ]; then
+  _env_reset_target="$(readlink -f "$_env_reset_target" 2>/dev/null || readlink "$_env_reset_target")"
+  [ -n "$_env_reset_target" ] || _env_reset_target="$REPO_ROOT/.env"
+fi
+
 # .env (device secrets)
 if [ -f "$REPO_ROOT/.env" ]; then
   rm -f "$REPO_ROOT/.env"
@@ -776,11 +786,20 @@ fi
 # (.env.tmp.*, .env.migrate.*, .env.upsert.*) carry the SAME device secrets
 # as .env itself — a factory reset must not leak the prior owner's
 # credentials through them.
+# Both directions are swept (WARP-2624): the resolved-target copies secrets.sh
+# writes today, AND the link-side copies a box upgraded mid-life still carries.
+# On a box whose .env is a plain file the two glob sets are identical and the
+# `[ -f "$f" ]` guard makes the second pass a no-op.
 for f in "$REPO_ROOT"/.env.bak.* \
          "$REPO_ROOT"/.env.torn.* \
          "$REPO_ROOT"/.env.tmp.* \
          "$REPO_ROOT"/.env.migrate.* \
-         "$REPO_ROOT"/.env.upsert.*; do
+         "$REPO_ROOT"/.env.upsert.* \
+         "$_env_reset_target".bak.* \
+         "$_env_reset_target".torn.* \
+         "$_env_reset_target".tmp.* \
+         "$_env_reset_target".migrate.* \
+         "$_env_reset_target".upsert.*; do
   [ -f "$f" ] && rm -f "$f" && log_success "Removed $(basename "$f")"
 done
 

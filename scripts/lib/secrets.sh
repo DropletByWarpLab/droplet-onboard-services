@@ -277,10 +277,15 @@ generate_env() {
   if [ -f "$env_file" ] && [ "${REGENERATE_ENV:-false}" != "true" ] && _env_file_is_torn "$env_file"; then
     log_warn ".env is incomplete — torn write from an interrupted setup run detected"
     local newest_backup
-    newest_backup="$(ls -1t "$env_file".bak.* 2>/dev/null | head -n 1 || true)"
+    # WARP-2624: backups now land beside the RESOLVED target, but a box
+    # upgraded mid-life still has pre-WARP-2624 backups beside the LINK — read
+    # BOTH and take the newest, so an interrupted upgrade can still recover.
+    # (When .env is not a symlink the two patterns are the same path; `ls -1t`
+    # just lists it twice and `head -n 1` still picks the newest.)
+    newest_backup="$(ls -1t "$env_write_target".bak.* "$env_file".bak.* 2>/dev/null | head -n 1 || true)"
     if [ -n "$newest_backup" ] && ! _env_file_is_torn "$newest_backup"; then
       local torn_copy
-      torn_copy="$env_file.torn.$(date +%s)"
+      torn_copy="$env_write_target.torn.$(date +%s)"
       cp "$env_file" "$torn_copy"
       # A legacy torn file sits at umask-default 644 (the pre-atomic writer
       # died BEFORE its chmod) and `cp` preserves that mode — force 600 so the
@@ -311,9 +316,12 @@ generate_env() {
   fi
 
   # --- Backup existing .env if regenerating ---
+  # WARP-2624: beside the RESOLVED target — a .bak of a relocated .env is a
+  # complete copy of every device secret, so writing it beside the LINK would
+  # put it back on the unencrypted boot disk.
   if [ -f "$env_file" ]; then
     # shellcheck disable=SC2155  # `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
-    local backup="$env_file.bak.$(date +%s)"
+    local backup="$env_write_target.bak.$(date +%s)"
     cp "$env_file" "$backup"
     # On the torn-no-backup regen path the source is a legacy 644 torn file
     # (see the torn_copy chmod above) — force the backup to 600 regardless.
@@ -957,7 +965,9 @@ migrate_env() {
   # SYMLINK onto the encrypted /data. Stage beside the link's REAL target and
   # rename onto it — renaming onto the LINK would replace it with a plain file
   # on the unencrypted boot disk, and the .env.migrate.* stage (a full copy of
-  # every secret) would have been written there too.
+  # every secret) would have been written there too. WARP-2624: the two
+  # pre-migration .env.bak.* copies below are complete secret snapshots for the
+  # same reason, so they are written beside the resolved target as well.
   local env_target="$env_file"
   if [ -L "$env_file" ]; then
     env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
@@ -993,7 +1003,7 @@ migrate_env() {
     if ! grep -qE "^${key}=" "$stage" 2>/dev/null; then
       if [ "$backed_up" = "false" ]; then
         # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
-        local backup="$env_file.bak.$(date +%s)"
+        local backup="$env_target.bak.$(date +%s)"
         cp "$env_file" "$backup"
         log_info "Backed up existing .env to $backup before migration"
         backed_up=true
@@ -1229,7 +1239,7 @@ migrate_env() {
   if grep -qE '^MQTT_BROKER(_LOCAL)?=mqtt://' "$stage" 2>/dev/null; then
     if [ "$backed_up" = "false" ]; then
       # shellcheck disable=SC2155  # Same rationale as above: `date +%s` cannot meaningfully fail.
-      local backup="$env_file.bak.$(date +%s)"
+      local backup="$env_target.bak.$(date +%s)"
       cp "$env_file" "$backup"
       log_info "Backed up existing .env to $backup before migration"
       backed_up=true
