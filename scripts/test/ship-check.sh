@@ -228,10 +228,11 @@ EXAMPLES
 CHECKS
 
   tsc-full              Run `npx tsc --noEmit` in every TypeScript workspace
-                        (orchestrator, web-dashboard, tools-core, fips-selftest,
-                        shared-types, mcp-server, erp-connector). Prisma
-                        generate runs first so orchestrator's `@prisma/client`
-                        import resolves.
+                        (orchestrator, web-dashboard, auth-policy,
+                        fips-selftest, shared-types, tools-core, erp-connector,
+                        matter-controller, mcp-server). Prisma generate runs
+                        first so orchestrator's `@prisma/client` import
+                        resolves.
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
@@ -241,9 +242,11 @@ CHECKS
                         config and may legitimately exclude its tests — as
                         `packages/tools-core` did, leaving all 133 of its
                         `__tests__/` files unchecked by anything, since
-                        `vitest` strips types without checking them. A
-                        workspace joins this pass by adding the file; there is
-                        no second list to keep in sync.
+                        `vitest` strips types without checking them. A listed
+                        workspace joins this pass by adding the file; the one
+                        list both passes walk is `ws_list` in
+                        run_check_tsc_full, gated against the tree by the
+                        self-test (WARP-2617).
 
   compose-config        Run `docker compose config --quiet` against
                         docker/docker-compose.yml using .env.example (falls
@@ -439,13 +442,38 @@ run_check_tsc_full() {
     fi
   done
 
+  # WARP-2617 — the ONE list of TypeScript workspaces phases 3 and 4 walk.
+  # It used to be written out twice, once per phase, and that was the bug: a
+  # workspace absent from the lists is skipped by BOTH passes, so
+  # `services/matter-controller` (6 test files, `__tests__` in its tsconfig
+  # `exclude`) and `packages/auth-policy` (3 test files) had neither their
+  # source nor their tests checked by anything — and adding a
+  # `tsconfig.test.json` to either would have changed nothing on its own.
+  # That is how the hole survived PR #1943, which closed the same class in
+  # four other workspaces.
+  #
+  # Kept explicit rather than globbed so the set under check is reviewable in
+  # the diff. `scripts/test/ship-check.test.sh` gates it against the tree: any
+  # apps/*, services/* or packages/* directory shipping a tsconfig.json that
+  # is missing here fails the self-test.
+  local ws_list=(
+    apps/orchestrator
+    apps/web-dashboard
+    packages/auth-policy
+    packages/fips-selftest
+    packages/shared-types
+    packages/tools-core
+    services/erp-connector
+    services/matter-controller
+    services/mcp-server
+  )
+
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
   local ws
   local checked=0
   local failed_workspaces=()
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
-           packages/shared-types services/mcp-server services/erp-connector; do
+  for ws in "${ws_list[@]}"; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.json" ]; then
       continue
     fi
@@ -472,11 +500,12 @@ run_check_tsc_full() {
   # TS2322 test fixture through, and `vitest` cannot close it because esbuild
   # strips types without checking them.
   #
-  # Opt-in by file existence rather than a second hardcoded list, so a
-  # workspace joins this pass by adding the config — no edit here required.
+  # Opt-in by file existence, so a workspace ALREADY IN `ws_list` above joins
+  # this pass by adding the config — no edit here required. It has to be in
+  # that list first: WARP-2617 found `services/matter-controller` outside it,
+  # where a `tsconfig.test.json` would have been read by nobody.
   local tested=0
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
-           packages/shared-types services/mcp-server services/erp-connector; do
+  for ws in "${ws_list[@]}"; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
       continue
     fi
