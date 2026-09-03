@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { Sect, Toggle } from "@/components/shell/primitives";
@@ -35,7 +35,11 @@ import { buildGreeting, PRESET_TILES } from "@/lib/persona-preview";
  * and the raw customInstructions text is owner/admin-only anyway (§7.3).
  * This component owns the whole "Workspace" Settings group; the business
  * profile card (Phase 3) slots in after the personality card inside the
- * same <section>.
+ * same <section>, passed as `children` — that is the only way a headless
+ * card (one with no <Sect> of its own) can land under this group's heading
+ * with intra-group spacing instead of the 40px mb-10 gap that separates
+ * groups. Children ride the same owner/admin gate: Settings is an admin
+ * surface (§6.3), and every card in this group is owner/admin-only anyway.
  *
  * Copy is VERBATIM from the design brief §9 — sentence case, no emoji, no
  * exclamation marks. Indigo shell tokens only (.card / .btn primary / shell
@@ -57,7 +61,7 @@ const VERBOSITY_OPTIONS: Array<{ value: PersonaVerbosity; label: string }> = [
 const SAVE_ERROR_LINE =
   "That didn’t save — your answers are still here. Try again.";
 
-export function PersonalityCard() {
+export function PersonalityCard({ children }: { children?: ReactNode }) {
   const { user } = useAuth();
   const { toast } = useToast();
   const isAdmin = user?.role === "owner" || user?.role === "admin";
@@ -356,6 +360,11 @@ export function PersonalityCard() {
           </>
         )}
       </div>
+
+      {/* Design brief §6 Card 2 — the business profile card renders here, in
+          this group's <section>, so the two Workspace cards sit 12px apart
+          like every other intra-group pair rather than 40px apart. */}
+      {children ? <div className="mt-3">{children}</div> : null}
     </section>
   );
 }
