@@ -25,6 +25,7 @@ import {
   connectorSetupGuideHref,
   providerKeyForConnector,
 } from "./connectors";
+import type { ConnectorId } from "./erp-types";
 
 /**
  * The catalog EXACTLY as `connectors.ts` hand-declared it on `origin/stage`
@@ -108,6 +109,16 @@ const CATALOG_WARP_2214 = [
     availability: "available",
     setupGuideHref: "/help/integrations/shopify",
   },
+  {
+    // WARP-2383 — the fifth SaaS card, at catalog.order 8.
+    id: "xero",
+    name: "Xero",
+    category: "Accounting",
+    description:
+      "Invoices, bills and contacts read from one Xero organisation — never written to.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/xero",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -130,7 +141,17 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     // This is what makes the `as ConnectorId` cast in connectors.ts safe. A
     // descriptor introducing an unlisted card id goes red here instead of rendering
     // a card `useIntegrations` cannot key status onto.
-    expect(CONNECTORS.map((c) => c.id).sort()).toEqual([
+    //
+    // WARP-2383 — the annotation is load-bearing, and was missing. `catalog.id`
+    // is declared `string` on the descriptor (`provider-descriptor.ts:204`), so
+    // `id as ConnectorId` in `connectors.ts:49` is a widening cast tsc accepts
+    // unconditionally: with `| "xero"` deleted from the union and everything
+    // else on this branch left alone, `tsc --noEmit` on this workspace is
+    // GREEN. The union was documentation, not a check. Typing this list as
+    // `ConnectorId[]` is what finally makes it one — adding an id here without
+    // adding it to the union is now a compile error, while the runtime
+    // assertion below goes on pinning the DERIVED ids against it.
+    const allowed: ConnectorId[] = [
       "dentrix",
       "eaglesoft",
       "hubspot",
@@ -139,7 +160,9 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "quickbooks",
       "shopify",
       "stripe",
-    ]);
+      "xero",
+    ];
+    expect(CONNECTORS.map((c) => c.id).sort()).toEqual(allowed);
   });
 
   it("still answers connectorMeta by id", () => {

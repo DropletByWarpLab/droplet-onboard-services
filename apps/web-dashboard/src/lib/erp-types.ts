@@ -36,7 +36,13 @@ export type ConnectorId =
   | "hubspot"
   | "mailchimp"
   // WARP-2296 — the fourth SaaS vendor.
-  | "shopify";
+  | "shopify"
+  // WARP-2383 — the fifth, and the second accounting card next to
+  // `quickbooks`. Added HERE, by hand, rather than widening the union to
+  // whatever `catalogDescriptors()` returns: deriving it would delete the
+  // tripwire above, which is the only thing that makes a descriptor landing a
+  // card the hub cannot route go red instead of silent.
+  | "xero";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 
