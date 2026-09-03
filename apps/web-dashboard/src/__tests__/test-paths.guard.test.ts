@@ -14,9 +14,20 @@
  * a test in the suite that already runs.
  *
  * The rule is narrow on purpose: **path resolution** must be anchored to the
- * owning file. `__dirname` and `fileURLToPath(import.meta.url)` both satisfy
- * that and are both already in use here; `process.cwd()` never does, because
- * cwd is a property of whoever typed the command, not of the tree under test.
+ * owning file. `process.cwd()` never is, because cwd is a property of whoever
+ * typed the command, not of the tree under test.
+ *
+ * WARP-2654 adds the second half. `__dirname` and
+ * `fileURLToPath(import.meta.url)` BOTH anchor to the owning file, so neither
+ * was ever the bug — but this package carried both (17 files against 10) with
+ * the two sets of header comments giving contradictory reasons, and a reader
+ * picking a pattern got no answer. It is now `__dirname` everywhere, which is
+ * what `vitest.config.ts` already uses for its `server.fs.allow` roots
+ * (WARP-2613) and what the two CommonJS workspaces are forced onto (TS1470).
+ * That is a convention, not a correctness rule, so it is gated the cheap way:
+ * one assertion below, in a suite that already runs. The full argument, and
+ * the one case that would justify the other spelling, is in
+ * `helpers/test-paths.ts`.
  */
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -83,5 +94,40 @@ describe("test path resolution is anchored to the owning file", () => {
         "import PACKAGE_ROOT / REPO_ROOT / readPackageFile / readRepoFile from " +
         "src/__tests__/helpers/test-paths (WARP-2632).",
     ).toEqual([]);
+  });
+
+  /**
+   * WARP-2654 — one anchoring idiom, not two.
+   *
+   * Mutation: put `fileURLToPath(import.meta.url)` back into any dashboard
+   * test → red, naming the file.
+   */
+  it("anchors on __dirname everywhere, the idiom vitest.config.ts uses", () => {
+    const offenders = testFiles(SRC)
+      .filter((f) => relative(PACKAGE_ROOT, f) !== SELF)
+      .filter((f) => code(readFileSync(f, "utf8")).includes("import.meta.url"))
+      .map((f) => relative(PACKAGE_ROOT, f));
+
+    expect(
+      offenders,
+      "This package anchors test paths on `__dirname` — the spelling " +
+        "`vitest.config.ts` already uses for `server.fs.allow`, and the one " +
+        "apps/orchestrator and packages/tools-core are forced onto by their " +
+        "CommonJS output. `fileURLToPath(import.meta.url)` is equally correct " +
+        "and equally anchored; carrying both is what left this package with " +
+        "two sets of comments contradicting each other. See " +
+        "src/__tests__/helpers/test-paths.ts (WARP-2654).",
+    ).toEqual([]);
+  });
+
+  it("the idiom assertion is not vacuous — vitest.config.ts really does use __dirname", () => {
+    // Otherwise the rule above is a preference with nothing behind it, and
+    // `toEqual([])` over an empty scan would pass either way.
+    expect(readFileSync(packagePath("vitest.config.ts"), "utf8")).toContain(
+      "const packageRoot = __dirname;",
+    );
+    expect(code(readFileSync(packagePath("src/__tests__/helpers/test-paths.ts"), "utf8"))).toContain(
+      "const here = __dirname;",
+    );
   });
 });
