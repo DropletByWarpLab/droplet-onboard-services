@@ -22,6 +22,27 @@ export const FILE_AUTH_REQUIRED_MESSAGE =
 /** Files one `organize_files` call moves; the rest are reported as remaining. */
 export const ORGANIZE_MAX_MOVES = 500;
 
+/**
+ * WARP-2664 — the one thing these tools cannot determine, stated in the result
+ * rather than papered over.
+ *
+ * `GET /api/files` does not surface an upstream failure to its caller: when
+ * Nextcloud is unreachable or answers 5xx, `ncListFiles` throws and
+ * `handleFileError(err, res, next, [])` turns it into **200 with `[]`**
+ * (`isUpstreamUnavailable` matches any `: 5xx` message shape). A 404 is
+ * unaffected — that branch runs first — so a genuinely missing folder still
+ * surfaces properly.
+ *
+ * The consequence is that "this folder is empty" and "the file service is
+ * having a moment" are the SAME answer at this layer. Reporting an empty scan
+ * as a clean folder would have the assistant tell someone their drive is tidy
+ * during an outage, so every result that could be explained by the degrade
+ * carries this instead. `delete_files` refuses directories outright for the
+ * same reason — see that handler's header.
+ */
+export const DEGRADED_LISTING_CAVEAT =
+  "An empty folder listing and an unreachable file service look identical here, so this result may reflect a temporary outage rather than what is really stored. Say so rather than reporting the folder as clean, and offer to re-run it.";
+
 /** One row of a `GET /api/files?path=` listing, as the tools read it. */
 export interface CleanupEntry {
   name: string;
@@ -219,7 +240,16 @@ export interface DuplicateGroup {
   /** The normalized name the copies share. */
   name: string;
   size: number;
-  paths: string[];
+  /**
+   * The copy to KEEP. Chosen, not incidental: reclaimable bytes are computed
+   * as `size × (copies - 1)`, i.e. on the assumption that exactly one copy
+   * survives, so the group has to say WHICH one. Without that the model can
+   * hand every path in the group to `delete_files` and the user loses the
+   * file outright, while the report claims the space was merely reclaimed.
+   */
+  keep: string;
+  /** The other copies, best-original first. Never includes `keep`. */
+  duplicates: string[];
 }
 
 /**
@@ -230,18 +260,44 @@ export interface DuplicateGroup {
  * Sorted by reclaimable bytes (size × extra copies), largest first.
  */
 export function duplicateGroups(files: readonly CleanupEntry[]): DuplicateGroup[] {
-  const byKey = new Map<string, DuplicateGroup>();
+  const byKey = new Map<string, { name: string; size: number; entries: CleanupEntry[] }>();
   for (const f of files) {
     if (f.isDirectory || f.size <= 0) continue;
     const name = normalizeCopyName(f.name);
-    const key = `${name} ${f.size}`;
+    // NUL separates the two key parts because a filename cannot contain
+    // one, so no name can forge a boundary. Written as an ESCAPE, never as
+    // a raw control byte: a literal 0x00 in tracked source makes
+    // grep/ripgrep treat the whole file as binary and skip it silently.
+    const key = `${name}\u0000${f.size}`;
     const group = byKey.get(key);
-    if (group) group.paths.push(f.path);
-    else byKey.set(key, { name, size: f.size, paths: [f.path] });
+    if (group) group.entries.push(f);
+    else byKey.set(key, { name, size: f.size, entries: [f] });
   }
   return [...byKey.values()]
-    .filter((g) => g.paths.length > 1)
-    .sort((a, b) => b.size * (b.paths.length - 1) - a.size * (a.paths.length - 1));
+    .filter((g) => g.entries.length > 1)
+    .map((g) => {
+      // Keep the likeliest ORIGINAL: the copy whose own name survived
+      // normalization untouched ("report.pdf" beats "report (1).pdf"),
+      // then the shallowest path, then lexicographic, so the choice is
+      // deterministic rather than dependent on the order the walk
+      // happened to reach them in.
+      const ranked = [...g.entries].sort((a, b) => {
+        const aOriginal = a.name.toLowerCase() === g.name ? 0 : 1;
+        const bOriginal = b.name.toLowerCase() === g.name ? 0 : 1;
+        if (aOriginal !== bOriginal) return aOriginal - bOriginal;
+        const aDepth = a.path.split("/").length;
+        const bDepth = b.path.split("/").length;
+        if (aDepth !== bDepth) return aDepth - bDepth;
+        return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+      });
+      return {
+        name: g.name,
+        size: g.size,
+        keep: ranked[0].path,
+        duplicates: ranked.slice(1).map((e) => e.path),
+      };
+    })
+    .sort((a, b) => b.size * b.duplicates.length - a.size * a.duplicates.length);
 }
 
 // ── Organize plans ───────────────────────────────────────────────────
@@ -340,7 +396,14 @@ export interface WalkOptions {
 
 export interface WalkResult {
   entries: CleanupEntry[];
-  /** Folders below root that were listed and came back empty. */
+  /**
+   * Folders below root whose listing came back with no entries.
+   *
+   * NOT proof they are empty: the listing route answers 200 `[]` for an
+   * unreachable Nextcloud too, so a folder that merely failed to read lands
+   * here rather than in `errors` — see {@link DEGRADED_LISTING_CAVEAT}. The
+   * report labels these accordingly, and nothing acts on them destructively.
+   */
   emptyDirectories: string[];
   /** Listing calls made, root included. */
   listed: number;
@@ -394,6 +457,16 @@ export async function walkTree(
       if (entry.isDirectory && next.depth < opts.maxDepth) {
         queue.push({ dir: entry.path, depth: next.depth + 1 });
       }
+    }
+    // Check the entry cap HERE as well as at the top of the loop. The
+    // top-of-loop check only fires when there is another directory to list,
+    // so a single folder holding more than `maxEntries` files would otherwise
+    // drain the queue and report `truncated: false` — presenting a partial
+    // scan as a complete one, which is the one thing this flag exists to
+    // prevent.
+    if (result.entries.length >= opts.maxEntries) {
+      result.truncated = true;
+      break;
     }
   }
   return result;

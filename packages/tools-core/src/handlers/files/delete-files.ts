@@ -1,31 +1,66 @@
 /**
  * WARP-2664 — `delete_files` (Write-tier + confirmation).
  *
- * Bulk delete for a cleanup: the junk, stale copies and empty folders the
- * user picked out of an `analyze_file_cleanup` report, in one approved
- * step instead of one `delete_file` prompt per path. Everything goes to
- * the Nextcloud trash, exactly as `delete_file` does, so a wrong pick is
- * recoverable from the dashboard. Emptying the trash — the only
+ * Bulk delete for a cleanup: the junk and stale copies the user picked out of
+ * an `analyze_file_cleanup` report, in one approved step instead of one
+ * `delete_file` prompt per path. Everything goes to the Nextcloud trash, so a
+ * wrong pick is recoverable from the dashboard. Emptying the trash — the only
  * irreversible step — is not a tool, on purpose (ADR-019's line).
  *
  * What makes this the SAFE bulk form rather than a loop over `delete_file`:
  *
  *   - the list is explicit and bounded (`DELETE_FILES_MAX_PATHS`), and the
- *     confirmation token is bound to that exact list;
- *   - every path is looked up in its parent's listing first, so a folder
- *     passed where a file was meant is refused, not recursively trashed;
- *   - folders are only deleted when `allow_folders` is set AND they are
- *     empty. A folder with contents always points the model at
- *     `delete_file`, whose description says it is recursive.
+ *     confirmation token is bound to that exact list, so one approval
+ *     authorises exactly the paths the user saw;
+ *   - every path is resolved in its parent's listing first, so this tool only
+ *     ever deletes something it has positively seen;
+ *   - THIS TOOL DELETES FILES ONLY. A directory is refused, always.
  *
- * Confirmation is the generic interceptor's (`docs/tool-confirmation-
- * contract.md` §12): no `confirmed` boolean in the schema, so a token a
- * human minted is the only way through.
+ * ## Why directories are refused outright, and not merely "unless empty"
+ *
+ * The first cut of this handler accepted an `allow_folders` flag and deleted a
+ * directory once a second listing came back empty. That guard cannot be made
+ * sound at this layer, and an unsound guard on a recursive delete is worse
+ * than no feature:
+ *
+ *   `GET /api/files` DEGRADES. When Nextcloud is unreachable or answers 5xx,
+ *   `ncListFiles` throws, `handleFileError(err, res, next, [])` catches it, and
+ *   the route answers **200 with `[]`** (routes/files.ts, and
+ *   `isUpstreamUnavailable` matches any `: 5xx` message). An empty listing is
+ *   therefore NOT evidence of an empty folder — it is equally consistent with a
+ *   container restart, a proxy 502, or a PROPFIND timeout on a large folder.
+ *
+ * So the sequence "user approves deleting an empty folder → probe listing
+ * degrades → folder reads as empty → DELETE" trashes a full directory tree
+ * recursively, having satisfied every check. The check was satisfied BY the
+ * outage. There is no positive signal available here to replace it: the parent
+ * listing carries no child count, and a collection's `getcontentlength` is
+ * absent, so `size` is 0 for every directory whether or not it holds anything.
+ *
+ * Deleting only files removes the inference, and with it the failure mode.
+ * `analyze_file_cleanup` still REPORTS empty directories so the user knows they
+ * are there; removing them is a Files-app action, where a human sees the folder
+ * before it goes.
+ *
+ * The refusal deliberately does NOT name `delete_file` as the way around it.
+ * That tool is `requiresConfirmation: false` and its own description says
+ * "Recursive for directories" — telling the model to switch to it would make
+ * this handler's refusal a signpost to an UNCONFIRMED recursive delete rather
+ * than a control.
+ *
+ * Confirmation is the generic interceptor's (`docs/tool-confirmation-contract.md`
+ * §12): no `confirmed` boolean in the schema, so a token a human minted is the
+ * only way through.
  */
 import { posix as posixPath } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
-import { FILE_AUTH_REQUIRED_MESSAGE, parseEntries, type CleanupEntry } from "./_cleanup.js";
+import {
+  DEGRADED_LISTING_CAVEAT,
+  FILE_AUTH_REQUIRED_MESSAGE,
+  parseEntries,
+  type CleanupEntry,
+} from "./_cleanup.js";
 
 export const DELETE_FILES_MAX_PATHS = 100;
 
@@ -35,13 +70,7 @@ const inputSchema = {
     paths: {
       type: "array",
       items: { type: "string" },
-      description:
-        "Full paths to delete (1-100): files, or empty folders when allow_folders is true.",
-    },
-    allow_folders: {
-      type: "boolean",
-      description:
-        "Also delete EMPTY folders in the list. Default false. A folder with contents is always skipped; use delete_file for that.",
+      description: "Full paths of the FILES to delete (1-100). Directories are refused.",
     },
   },
   required: ["paths"],
@@ -56,6 +85,7 @@ interface Listing {
   ok: boolean;
   status: number;
   byPath: Map<string, CleanupEntry>;
+  empty: boolean;
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -67,7 +97,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (raw.length > DELETE_FILES_MAX_PATHS) {
     return err("INVALID_ARGS", `at most ${DELETE_FILES_MAX_PATHS} paths per call`);
   }
-  const allowFolders = args.allow_folders === true;
 
   // Validate EVERYTHING before touching anything: a malformed entry at
   // index 40 must not leave the first 39 deleted.
@@ -76,7 +105,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   for (let i = 0; i < raw.length; i++) {
     const v = validateNcPath(raw[i]);
     if (!v.ok) return err("INVALID_PATH", `paths[${i}]: ${v.error}`);
-    if (v.path === "/") return err("INVALID_PATH", `paths[${i}]: refusing to delete the top-level folder`);
+    if (v.path === "/") {
+      return err("INVALID_PATH", `paths[${i}]: refusing to delete the top-level folder`);
+    }
     if (seen.has(v.path)) continue;
     seen.add(v.path);
     targets.push(v.path);
@@ -87,8 +118,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     "X-Nextcloud-User": ctx.userId,
   };
 
-  // One listing per distinct folder: cleanup targets cluster by parent, so
-  // a hundred paths usually cost a handful of reads.
+  // One listing per distinct parent: cleanup targets cluster by folder, so a
+  // hundred paths usually cost a handful of reads.
   const listings = new Map<string, Listing>();
   async function listDir(dir: string): Promise<Listing> {
     const cached = listings.get(dir);
@@ -98,7 +129,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     if (res.ok) {
       for (const e of parseEntries(await res.json().catch(() => null))) byPath.set(e.path, e);
     }
-    const listing: Listing = { ok: res.ok, status: res.status, byPath };
+    const listing: Listing = { ok: res.ok, status: res.status, byPath, empty: res.ok && byPath.size === 0 };
     listings.set(dir, listing);
     return listing;
   }
@@ -106,6 +137,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const deleted: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
   const failed: Array<{ path: string; reason: string }> = [];
+  let sawEmptyListing = false;
 
   for (const target of targets) {
     if (ctx.signal.aborted) {
@@ -115,35 +147,27 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     const parent = posixPath.dirname(target);
     const listing = await listDir(parent);
     if (!listing.ok) {
-      failed.push({ path: target, reason: `could not read ${parent} (nextcloud returned ${listing.status})` });
+      failed.push({
+        path: target,
+        reason: `could not read ${parent} (nextcloud returned ${listing.status})`,
+      });
       continue;
     }
+    if (listing.empty) sawEmptyListing = true;
     const entry = listing.byPath.get(target);
     if (!entry) {
       failed.push({ path: target, reason: "not found" });
       continue;
     }
     if (entry.isDirectory) {
-      if (!allowFolders) {
-        skipped.push({
-          path: target,
-          reason:
-            "is a folder; pass allow_folders: true to delete an empty folder, or use delete_file to delete a folder with its contents",
-        });
-        continue;
-      }
-      const inner = await listDir(target);
-      if (!inner.ok) {
-        failed.push({ path: target, reason: `could not read the folder (nextcloud returned ${inner.status})` });
-        continue;
-      }
-      if (inner.byPath.size > 0) {
-        skipped.push({
-          path: target,
-          reason: "folder is not empty; use delete_file to delete it with its contents",
-        });
-        continue;
-      }
+      // No `allow_folders` escape hatch — see the header. Do not name a
+      // less-guarded tool here.
+      skipped.push({
+        path: target,
+        reason:
+          "is a folder, and this tool deletes files only. Deleting a folder together with everything inside it is not something to do from a bulk list — ask the user to remove it from the Files app, where they can see the contents first.",
+      });
+      continue;
     }
     const res = await ctx.http.nextcloud.delete(`/?path=${encodeURIComponent(target)}`, { headers });
     if (res.ok) deleted.push(target);
@@ -158,6 +182,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       failed,
       counts: { deleted: deleted.length, skipped: skipped.length, failed: failed.length },
       note: "Deleted items are in the Nextcloud trash and can be restored from the dashboard.",
+      // Only when it could actually explain a result: a "not found" that is
+      // really an outage looks identical to a file that is genuinely gone.
+      ...(sawEmptyListing && failed.length > 0 ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
     },
   };
 }
@@ -165,7 +192,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "delete_files",
   description:
-    "Delete several files (and empty folders, with allow_folders) to the Nextcloud trash in one step, up to 100 paths. Refuses the top-level folder and any folder with contents (use delete_file for a folder and its contents). Pass exactly the paths the user agreed to, for example from analyze_file_cleanup. Asks the user for approval.",
+    "Delete several FILES to the Nextcloud trash in one step, up to 100 paths, so one approval covers the whole list. Folders are refused — this deletes files only. Each path must exist in its folder listing or it is reported as not found; nothing is deleted permanently. Pass exactly the paths the user agreed to, for example from analyze_file_cleanup. Asks the user for approval.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

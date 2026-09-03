@@ -173,6 +173,43 @@ function chatToolSizes(): { name: string; chars: number }[] {
  */
 const PER_TOOL_MAX_CHARS = 2000;
 
+/**
+ * Growth tripwire on the FULL chat pool — the wire payload of
+ * `TOOL_SELECTION_MODE=off`.
+ *
+ * Re-baselined 60,000 → 64,000 by WARP-2664 (the three file-cleanup tools,
+ * +2,435 chars). Measured at that SHA, not asserted:
+ *
+ *   worst-case SELECTED turn (`core ∪ files`, the shipping default)
+ *       6,985 tokens against a 15,360 ceiling — 45%, 8,375 tokens spare
+ *   full chat pool AFTER   62,423 chars = 15,606 tok; +2,950 fixed ⇒ over by 3,196
+ *   full chat pool BEFORE  59,985 chars = 14,997 tok; +2,950 fixed ⇒ over by 2,587
+ *
+ * The last line is why this raise does not degrade a working configuration:
+ * `off` did NOT fit the window before this change either, exactly as the
+ * assertion's own note below says ("passed 15360 tokens during WARP-1893 and
+ * is NOT expected to come back under it"). The line is a growth canary on an
+ * already-over diagnostic path; the number that bounds every SHIPPING turn is
+ * the per-domain assertion above, and it is at 45%.
+ *
+ * The alternatives were measured and rejected: trimming prose cannot close a
+ * 2,400-char gap that is essentially the whole feature (and per WARP-2552,
+ * shaving descriptions to buy a green assertion fixes nothing), and
+ * `EXCLUDED_FROM_CHAT_TOOLS` makes a tool unreachable in chat ENTIRELY rather
+ * than merely deselected — for three tools whose whole use case is a chat
+ * request ("clean up my downloads") that is not a budget lever, it is
+ * shipping them dead.
+ *
+ * WARP-2547 still owns the standing decision between re-baselining this line
+ * and dropping a vertical suite from chat scope. This is the re-baseline for
+ * WARP-2664, not a resolution of that ticket.
+ *
+ * NEVER raise this to go green on your own change. Trim the schema, or scope
+ * the tool out of default chat, and if neither is honest, come with the two
+ * measurements above.
+ */
+const CHAT_POOL_MAX_CHARS = 64000;
+
 describe("worst-case fixed system-block budget", () => {
   it("keeps identity + persona + business + guidance + memory + interview under BASE_PROMPT_MAX_CHARS", () => {
     const fixedBlockChars =
@@ -249,7 +286,7 @@ describe("worst-case fixed system-block budget", () => {
     expect(
       poolChars,
       `full chat pool is ${poolChars} chars over ${chatToolSizes().length} tools`,
-    ).toBeLessThan(60000);
+    ).toBeLessThan(CHAT_POOL_MAX_CHARS);
 
     // Regression ceiling on the FULL registry serialization (growth
     // tripwire for the MCP-facing surface, which advertises everything).

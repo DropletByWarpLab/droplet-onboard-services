@@ -6,7 +6,7 @@
  * uses, repeated per subfolder inside hard bounds — and reports what a
  * cleanup could act on: totals by category, the largest files, stale
  * files, junk an OS or editor left behind, duplicate candidates, empty
- * subfolders, and the exact move list `organize_files` would apply.
+ * subfolders, and what `organize_files` would do.
  *
  * Nothing moves and nothing is deleted here. The writes are
  * `organize_files` and `delete_files`, each behind its own confirmation,
@@ -14,24 +14,49 @@
  * is why the report exists at all: a confirmation prompt for "organize
  * /Downloads" means nothing if the user has never seen the plan.
  *
- * Every list is SAMPLED so the result fits the orchestrator's 8,000-char
- * tool-result cap (`tool-result-bounding.ts`) instead of being cut mid-
- * array; the counts and byte totals are always complete even when the
- * samples are not.
+ * ## Everything here is bounded, because the result has a hard ceiling
+ *
+ * The orchestrator caps a tool result at 8,000 chars
+ * (`tool-result-bounding.ts` `MODEL_TOOL_RESULT_CAP_CHARS`) and reduces
+ * anything larger by shortening the biggest values — which on a nested
+ * report means whole sections get emptied, silently, including the very
+ * path lists `delete_files` needs. A report that overflows is therefore not
+ * "verbose", it is BROKEN: the model relays a partial cleanup as a complete
+ * one.
+ *
+ * The first cut of this handler serialized to ~14,000 chars on a genuinely
+ * messy folder. Two things fixed that, and both are also better reporting:
+ *
+ *   1. Every sampled list states `shown` and `of` explicitly, so a sample
+ *      can never be read as the whole set.
+ *   2. `organize_plan` carries a COUNT PER DESTINATION rather than example
+ *      paths. "812 to Documents, 604 to Images" is a tenth the size of
+ *      twenty sample paths and tells the user more about what will happen.
+ *
+ * `__tests__/handlers/files/analyze-file-cleanup.test.ts` pins the whole
+ * result under the cap against a deliberately messy fixture.
+ *
+ * ## What this tool cannot know
+ *
+ * An empty listing is not proof of an empty folder — see
+ * {@link DEGRADED_LISTING_CAVEAT}. Results that the degrade could explain
+ * say so rather than reporting a clean drive during an outage.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
 import {
+  DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
   ORGANIZE_MAX_MOVES,
   ORGANIZE_RULES,
   categoryOf,
   clampInt,
+  destinationFolderFor,
   duplicateGroups,
   humanBytes,
   isOrganizeRule,
+  isDotfile,
   junkReason,
-  planOrganize,
   walkTree,
   type CleanupEntry,
   type FileCategory,
@@ -44,8 +69,22 @@ export const ANALYZE_MAX_ENTRIES = 5000;
 export const ANALYZE_MAX_LISTINGS = 300;
 export const ANALYZE_DEFAULT_STALE_DAYS = 365;
 
-/** Sample sizes per section — counts stay exact, items are the head. */
-const SAMPLE = { largest: 10, stale: 20, junk: 30, duplicates: 15, empty: 20, plan: 20 } as const;
+/**
+ * Sample sizes. Counts and byte totals are always COMPLETE and exact; only
+ * the example lists are cut. Sized from a measurement against long
+ * real-world paths, not guessed — see the header and the cap test.
+ */
+export const SAMPLE = {
+  largest: 5,
+  stale: 5,
+  junk: 10,
+  /** Duplicate groups shown, and copies listed within each group. */
+  duplicateGroups: 5,
+  duplicatePaths: 3,
+  empty: 6,
+  /** Destination folders named in the organize plan. */
+  planFolders: 12,
+} as const;
 
 const inputSchema = {
   type: "object",
@@ -70,10 +109,6 @@ const inputSchema = {
 
 function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
-}
-
-function fileItem(e: CleanupEntry) {
-  return { path: e.path, size: e.size, size_human: humanBytes(e.size), modified_at: e.modifiedAt };
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -115,12 +150,17 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     categories.set(category, current);
   }
   const by_category = [...categories.entries()]
-    .map(([category, c]) => ({ category, files: c.files, bytes: c.bytes, size_human: humanBytes(c.bytes) }))
-    .sort((a, b) => b.bytes - a.bytes);
+    .map(([category, c]) => ({ category, files: c.files, size_human: humanBytes(c.bytes) }))
+    .sort((a, b) => b.files - a.files);
 
-  const largest = [...files].sort((a, b) => b.size - a.size).slice(0, SAMPLE.largest).map(fileItem);
+  const largest = [...files]
+    .sort((a, b) => b.size - a.size)
+    .slice(0, SAMPLE.largest)
+    .map((f) => ({ path: f.path, size_human: humanBytes(f.size) }));
 
   const cutoff = Date.now() - staleDays * 86_400_000;
+  // Oldest first: the point of the list is which files have gone longest
+  // untouched, so the sample must be the most stale, not the least.
   const stale = files
     .filter((f) => {
       const t = Date.parse(f.modifiedAt);
@@ -136,9 +176,50 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const junkBytes = junk.reduce((n, f) => n + f.size, 0);
 
   const duplicates = duplicateGroups(files);
-  const reclaimable = duplicates.reduce((n, g) => n + g.size * (g.paths.length - 1), 0);
+  const reclaimable = duplicates.reduce((n, g) => n + g.size * g.duplicates.length, 0);
 
-  const plan = planOrganize(v.path, walk.entries, rule, ORGANIZE_MAX_MOVES);
+  // The plan, from the same helper organize_files uses, so the preview and
+  // the write cannot disagree about what would move.
+  const planFiles = walk.entries.filter(
+    (e) => !e.isDirectory && !isDotfile(e.name) && parentOf(e.path) === v.path,
+  );
+  const movesByFolder = new Map<string, number>();
+  for (const f of planFiles) {
+    const folder = destinationFolderFor(f, rule);
+    movesByFolder.set(folder, (movesByFolder.get(folder) ?? 0) + 1);
+  }
+  const rankedFolders = [...movesByFolder.entries()].sort((a, b) => b[1] - a[1]);
+  const moves_by_folder: Record<string, number> = {};
+  for (const [folder, n] of rankedFolders.slice(0, SAMPLE.planFolders)) {
+    moves_by_folder[folder] = n;
+  }
+
+  const organize_plan =
+    v.path === "/"
+      ? {
+          rule,
+          applicable: false,
+          // organize_files refuses "/" outright, so a plan for it could never
+          // be applied. Saying that beats handing over an approvable-looking
+          // plan the very next call rejects.
+          note: "organize_files does not act on the top-level folder. Analyze a specific folder such as /Downloads to get an applicable plan.",
+        }
+      : {
+          rule,
+          applicable: true,
+          files_to_move: planFiles.length,
+          moves_by_folder,
+          folders_shown: Object.keys(moves_by_folder).length,
+          folders_total: rankedFolders.length,
+          ...(planFiles.length > ORGANIZE_MAX_MOVES
+            ? { note_partial: `organize_files moves up to ${ORGANIZE_MAX_MOVES} files per call, so this needs more than one run.` }
+            : {}),
+          note: "Only files directly inside this folder move; subfolders and hidden files stay put. Apply with organize_files.",
+        };
+
+  // A result the outage could explain must not read as a clean drive.
+  const nothingFound = walk.entries.length === 0;
+  const someFolderRead = walk.emptyDirectories.length > 0;
 
   return {
     ok: true,
@@ -147,7 +228,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       scanned: {
         files: files.length,
         directories,
-        bytes: totalBytes,
         size_human: humanBytes(totalBytes),
         max_depth: maxDepth,
         directories_listed: walk.listed,
@@ -158,48 +238,54 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       stale: {
         older_than_days: staleDays,
         count: stale.length,
-        bytes: staleBytes,
         size_human: humanBytes(staleBytes),
-        items: stale.slice(0, SAMPLE.stale).map(fileItem),
+        shown: Math.min(stale.length, SAMPLE.stale),
+        items: stale
+          .slice(0, SAMPLE.stale)
+          .map((f) => ({ path: f.path, modified_at: f.modifiedAt.slice(0, 10) })),
       },
       junk: {
         count: junk.length,
-        bytes: junkBytes,
         size_human: humanBytes(junkBytes),
-        items: junk.slice(0, SAMPLE.junk),
+        shown: Math.min(junk.length, SAMPLE.junk),
+        items: junk.slice(0, SAMPLE.junk).map((j) => ({ path: j.path, reason: j.reason })),
       },
       duplicate_candidates: {
         groups: duplicates.length,
-        reclaimable_bytes: reclaimable,
         reclaimable_human: humanBytes(reclaimable),
-        items: duplicates.slice(0, SAMPLE.duplicates).map((g) => ({
-          name: g.name,
-          size: g.size,
+        shown: Math.min(duplicates.length, SAMPLE.duplicateGroups),
+        items: duplicates.slice(0, SAMPLE.duplicateGroups).map((g) => ({
           size_human: humanBytes(g.size),
-          paths: g.paths,
+          keep: g.keep,
+          delete_candidates: g.duplicates.slice(0, SAMPLE.duplicatePaths),
+          copies: g.duplicates.length + 1,
         })),
-        note: "Matched by name and size, not by content. Ask before deleting a copy.",
+        note: "Matched by name and size, not by content. `keep` is the copy to keep; the reclaimable figure assumes only the delete_candidates go. Confirm with the user before deleting any copy.",
       },
       empty_directories: {
         count: walk.emptyDirectories.length,
+        shown: Math.min(walk.emptyDirectories.length, SAMPLE.empty),
         items: walk.emptyDirectories.slice(0, SAMPLE.empty),
+        note: "Listed as empty, which is not proof — a folder that failed to read looks the same. delete_files will not remove folders; they are removed from the Files app.",
       },
-      organize_plan: {
-        rule,
-        files_to_move: plan.moves.length + plan.remaining,
-        folders: plan.folders,
-        sample: plan.moves.slice(0, SAMPLE.plan).map(({ from, to }) => ({ from, to })),
-        note: "Only files directly inside path move; subfolders stay put. Apply with organize_files.",
-      },
+      organize_plan,
       unreadable_directories: walk.errors,
+      ...(nothingFound || someFolderRead ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
     },
   };
+}
+
+/** Parent of a posix path, without pulling in node:path for one call. */
+function parentOf(p: string): string {
+  const i = p.lastIndexOf("/");
+  if (i <= 0) return "/";
+  return p.slice(0, i);
 }
 
 const tool: Tool = {
   name: "analyze_file_cleanup",
   description:
-    "Read-only cleanup report for a folder: totals by category, largest files, stale files, junk (temp, lock and thumbnail files), duplicate candidates (same name and size), empty subfolders, and the exact plan organize_files would apply. Run this first and show the user what it found, then use organize_files or delete_files for the parts they approve.",
+    "Read-only cleanup report for a folder: totals by category, largest files, stale files, junk (temp, lock and thumbnail files), duplicate candidates (each naming the copy to keep), empty subfolders, and what organize_files would do. Lists are samples with shown/of counts; the totals are exact. Run this first and show the user what it found, then use organize_files or delete_files for the parts they approve.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

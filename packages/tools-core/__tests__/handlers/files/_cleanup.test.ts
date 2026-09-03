@@ -125,13 +125,50 @@ describe("duplicateGroups", () => {
     ]);
     // photo.jpg reclaims 9,000; report.pdf reclaims 1,000 — largest first.
     expect(groups).toEqual([
-      { name: "photo.jpg", size: 9000, paths: ["/A/photo.jpg", "/B/photo.jpg"] },
+      { name: "photo.jpg", size: 9000, keep: "/A/photo.jpg", duplicates: ["/B/photo.jpg"] },
       {
         name: "report.pdf",
         size: 500,
-        paths: ["/A/report.pdf", "/B/report (1).pdf", "/C/Report - Copy.pdf"],
+        keep: "/A/report.pdf",
+        duplicates: ["/B/report (1).pdf", "/C/Report - Copy.pdf"],
       },
     ]);
+  });
+
+  // `reclaimable` is computed as size x duplicates.length, i.e. assuming ONE
+  // copy survives — so the group has to name which. Without it the model can
+  // hand every path to delete_files and the file goes entirely.
+  it("keeps the copy whose own name survived normalization, whatever the walk order", () => {
+    const [g] = duplicateGroups([
+      entry("/D/Copies/report (2).pdf", { size: 40 }),
+      entry("/D/Copies/report - Copy.pdf", { size: 40 }),
+      entry("/D/report.pdf", { size: 40 }), // the original, reached LAST
+    ]);
+    expect(g.keep).toBe("/D/report.pdf");
+    expect(g.duplicates).toEqual(["/D/Copies/report (2).pdf", "/D/Copies/report - Copy.pdf"]);
+    expect(g.duplicates).not.toContain(g.keep);
+  });
+
+  it("falls back to the shallowest path, then lexicographic, when no copy is the original", () => {
+    const [g] = duplicateGroups([
+      entry("/D/deep/nested/report (3).pdf", { size: 40 }),
+      entry("/D/report (2).pdf", { size: 40 }),
+      entry("/D/report (1).pdf", { size: 40 }),
+    ]);
+    // Both /D entries are equally shallow, so lexicographic decides.
+    expect(g.keep).toBe("/D/report (1).pdf");
+    expect(g.duplicates).toEqual(["/D/report (2).pdf", "/D/deep/nested/report (3).pdf"]);
+  });
+
+  it("is deterministic across input orderings", () => {
+    const files = [
+      entry("/D/report (1).pdf", { size: 40 }),
+      entry("/D/report.pdf", { size: 40 }),
+      entry("/D/x/report - Copy.pdf", { size: 40 }),
+    ];
+    const forward = duplicateGroups(files);
+    const reversed = duplicateGroups([...files].reverse());
+    expect(reversed).toEqual(forward);
   });
 });
 

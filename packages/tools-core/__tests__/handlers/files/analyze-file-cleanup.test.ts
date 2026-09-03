@@ -1,12 +1,25 @@
-// WARP-2664 — analyze_file_cleanup: the read-only preview. The invariant
-// that matters most is the last describe: this tool never issues a write.
+// WARP-2664 — analyze_file_cleanup: the read-only preview. Two invariants
+// matter most and each has its own test at the bottom: this tool never issues
+// a write, and its result never exceeds the orchestrator's tool-result cap.
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import type { Mock } from "vitest";
 import analyzeFileCleanup, {
   ANALYZE_DEFAULT_DEPTH,
   ANALYZE_DEFAULT_STALE_DAYS,
+  ANALYZE_MAX_ENTRIES,
+  SAMPLE,
 } from "../../../src/handlers/files/analyze-file-cleanup.js";
 import type { ToolContext } from "../../../src/types.js";
+
+/**
+ * `MODEL_TOOL_RESULT_CAP_CHARS` from
+ * `apps/orchestrator/src/services/tool-result-bounding.ts`. Restated here
+ * because tools-core cannot import from the app; if that constant moves, this
+ * number has to move with it. Past the cap the orchestrator SHORTENS the
+ * largest values, which on a nested report empties whole sections — including
+ * the path lists delete_files needs — so overflowing is a defect, not verbosity.
+ */
+const MODEL_TOOL_RESULT_CAP_CHARS = 8000;
 
 // WARP-1844 class: "stale" is measured against the clock, so a fixture with
 // wall-clock dates silently changes meaning as time passes — RECENT below
@@ -47,6 +60,7 @@ type Row = { path: string; isDirectory?: boolean; size?: number; mimeType?: stri
 
 const RECENT = "2026-08-01T00:00:00.000Z";
 const ANCIENT = "2019-05-05T00:00:00.000Z";
+const MIDDLE = "2022-06-06T00:00:00.000Z";
 
 function row(path: string, o: Omit<Row, "path"> = {}): Row {
   return { path, isDirectory: false, size: 100, mimeType: "application/octet-stream", modifiedAt: RECENT, ...o };
@@ -148,11 +162,11 @@ describe("analyze_file_cleanup", () => {
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.error.code).toBe("NOT_FOUND");
 
-    const broken = await analyzeFileCleanup.handler({ path: "/D" }, ctxWith(treeGet({ "/D": 503 })));
+    const broken = await analyzeFileCleanup.handler({ path: "/D" }, ctxWith(treeGet({ "/D": 403 })));
     expect(broken.ok).toBe(false);
     if (!broken.ok) {
       expect(broken.error.code).toBe("LIST_FAILED");
-      expect(broken.error.message).toContain("503");
+      expect(broken.error.message).toContain("403");
     }
   });
 
@@ -167,61 +181,66 @@ describe("analyze_file_cleanup", () => {
     expect(d.scanned).toEqual({
       files: 8,
       directories: 3,
-      bytes: 5_000 + 5_000 + 40_000 + 90_000 + 6 + 70_000 + 5_000 + 1,
       size_human: expect.any(String),
       max_depth: ANALYZE_DEFAULT_DEPTH,
       directories_listed: 4,
       truncated: false,
     });
 
-    // Categories, largest first by bytes.
-    expect(d.by_category[0]).toEqual({ category: "Installers", files: 1, bytes: 90_000, size_human: "87.9 KB" });
     expect(d.by_category.map((c: { category: string }) => c.category)).toContain("Documents");
 
-    expect(d.largest[0].path).toBe("/Downloads/setup.exe");
-    expect(d.largest[0].size_human).toBe("87.9 KB");
+    expect(d.largest[0]).toEqual({ path: "/Downloads/setup.exe", size_human: "87.9 KB" });
 
     expect(d.stale.older_than_days).toBe(ANALYZE_DEFAULT_STALE_DAYS);
     expect(d.stale.count).toBe(2);
-    expect(d.stale.items.map((i: { path: string }) => i.path).sort()).toEqual([
-      "/Downloads/Old/report.pdf",
-      "/Downloads/setup.exe",
+    expect(d.stale.shown).toBe(2);
+    expect(d.stale.items).toEqual([
+      { path: "/Downloads/setup.exe", modified_at: "2019-05-05" },
+      { path: "/Downloads/Old/report.pdf", modified_at: "2019-05-05" },
     ]);
 
     expect(d.junk.count).toBe(2);
     expect(d.junk.items).toEqual(
       expect.arrayContaining([
-        { path: "/Downloads/.DS_Store", size: 6, reason: "macOS folder metadata" },
-        { path: "/Downloads/movie.mkv.part", size: 70_000, reason: "unfinished download" },
+        { path: "/Downloads/.DS_Store", reason: "macOS folder metadata" },
+        { path: "/Downloads/movie.mkv.part", reason: "unfinished download" },
       ]),
     );
 
+    // Duplicates name the copy to KEEP and only offer the others for deletion.
     expect(d.duplicate_candidates.groups).toBe(1);
-    expect(d.duplicate_candidates.reclaimable_bytes).toBe(10_000);
     expect(d.duplicate_candidates.items[0]).toEqual({
-      name: "report.pdf",
-      size: 5_000,
       size_human: "4.9 KB",
-      paths: ["/Downloads/report.pdf", "/Downloads/report (1).pdf", "/Downloads/Old/report.pdf"],
+      // Two copies are named "report.pdf", so the shallower one is kept;
+      // Old/report.pdf still outranks "report (1).pdf" because its own name
+      // survived normalization untouched.
+      keep: "/Downloads/report.pdf",
+      delete_candidates: ["/Downloads/Old/report.pdf", "/Downloads/report (1).pdf"],
+      copies: 3,
     });
+    expect(d.duplicate_candidates.items[0].delete_candidates).not.toContain(
+      d.duplicate_candidates.items[0].keep,
+    );
     expect(d.duplicate_candidates.note).toMatch(/not by content/);
 
-    expect(d.empty_directories).toEqual({ count: 1, items: ["/Downloads/Empty"] });
+    expect(d.empty_directories.count).toBe(1);
+    expect(d.empty_directories.items).toEqual(["/Downloads/Empty"]);
+    expect(d.empty_directories.note).toMatch(/not proof/);
 
-    // The organize preview covers direct children only, by_type by default.
-    expect(d.organize_plan.rule).toBe("by_type");
-    expect(d.organize_plan.files_to_move).toBe(5); // .DS_Store hidden, 2 folders
-    expect(d.organize_plan.folders).toEqual([
-      "/Downloads/Documents",
-      "/Downloads/Images",
-      "/Downloads/Installers",
-      "/Downloads/Other",
-    ]);
-    expect(d.organize_plan.sample).toContainEqual({
-      from: "/Downloads/holiday.jpg",
-      to: "/Downloads/Images/holiday.jpg",
+    // The plan is per-destination COUNTS, not example paths.
+    expect(d.organize_plan).toEqual({
+      rule: "by_type",
+      applicable: true,
+      files_to_move: 5, // .DS_Store is hidden; the 2 folders and Old/* are out
+      moves_by_folder: { Documents: 2, Images: 1, Installers: 1, Other: 1 },
+      folders_shown: 4,
+      folders_total: 4,
+      note: expect.stringMatching(/Apply with organize_files/),
     });
     expect(d.unreadable_directories).toEqual([]);
+    // An empty subfolder was seen, and an empty listing is indistinguishable
+    // from an unreachable one, so the caveat rides along.
+    expect(d.caveat).toMatch(/unreachable file service/i);
   });
 
   it("honours max_depth (0 lists only the folder itself) and stale_days", async () => {
@@ -252,27 +271,180 @@ describe("analyze_file_cleanup", () => {
     if (!r.ok) return;
     const d = r.data as Record<string, any>;
     expect(d.organize_plan.rule).toBe("by_year");
-    expect(d.organize_plan.folders).toEqual(["/Downloads/2026", "/Downloads/2019"]);
+    expect(d.organize_plan.moves_by_folder).toEqual({ "2026": 4, "2019": 1 });
+  });
+
+  // organize_files refuses "/" outright, so a plan for it could never be
+  // applied. Handing over an approvable-looking plan the next call rejects is
+  // worse than saying so.
+  it("marks the organize plan inapplicable at the top-level folder", async () => {
+    const r = await analyzeFileCleanup.handler({ path: "/" }, ctxWith(treeGet({ "/": [row("/a.pdf")] })));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    expect(d.organize_plan.applicable).toBe(false);
+    expect(d.organize_plan.moves_by_folder).toBeUndefined();
+    expect(d.organize_plan.note).toMatch(/does not act on the top-level folder/);
+  });
+
+  it("reports the full job even when it exceeds one organize_files run", async () => {
+    const many = Array.from({ length: 620 }, (_, i) => row(`/Downloads/f${i}.pdf`, { mimeType: "application/pdf" }));
+    const r = await analyzeFileCleanup.handler(
+      { path: "/Downloads", max_depth: 0 },
+      ctxWith(treeGet({ "/Downloads": many })),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    // The honest total, not the per-call cap — understating it by 120 files is
+    // how the assistant tells someone a folder is sorted when it is not.
+    expect(d.organize_plan.files_to_move).toBe(620);
+    expect(d.organize_plan.note_partial).toMatch(/more than one run/);
   });
 
   it("notes a subfolder it could not read and keeps going", async () => {
     const r = await analyzeFileCleanup.handler(
       { path: "/Downloads" },
-      ctxWith(treeGet({ ...TREE, "/Downloads/Old": 500 })),
+      ctxWith(treeGet({ ...TREE, "/Downloads/Old": 403 })),
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.data as Record<string, any>;
-    expect(d.unreadable_directories).toEqual([{ path: "/Downloads/Old", status: 500 }]);
+    expect(d.unreadable_directories).toEqual([{ path: "/Downloads/Old", status: 403 }]);
     expect(d.empty_directories.items).toEqual(["/Downloads/Empty"]);
+  });
+
+  it("flags a truncated scan rather than presenting it as complete", async () => {
+    const many = Array.from({ length: ANALYZE_MAX_ENTRIES + 10 }, (_, i) => row(`/Big/f${i}.txt`, { size: 1 }));
+    const r = await analyzeFileCleanup.handler({ path: "/Big" }, ctxWith(treeGet({ "/Big": many })));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.data as any).scanned.truncated).toBe(true);
+  });
+
+  it("caveats a scan that found nothing at all", async () => {
+    const r = await analyzeFileCleanup.handler({ path: "/Downloads" }, ctxWith(treeGet({ "/Downloads": [] })));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    expect(d.scanned.files).toBe(0);
+    // Never "your folder is clean" — an outage produces exactly this result.
+    expect(d.caveat).toMatch(/unreachable file service/i);
+  });
+
+  describe("bounded output", () => {
+    // Built to overrun EVERY sample cap, with long real-world names — the cap
+    // has to hold for the messy folder, not the tidy one.
+    function messyTree() {
+      const files: Row[] = [];
+      const LONG = "Quarterly business review and appendix, final revision";
+      for (let i = 0; i < 200; i++) {
+        const ext = ["pdf", "jpg", "mp4", "mp3", "zip", "exe", "docx", "csv"][i % 8];
+        files.push(row(`/Messy/${LONG} ${i}.${ext}`, { size: 1000 + i * 977, modifiedAt: ANCIENT }));
+      }
+      for (let g = 0; g < 40; g++) {
+        for (const suffix of ["", " (1)", " - Copy", " copy 2"]) {
+          files.push(row(`/Messy/Scanned contract for the north site ${g}${suffix}.pdf`, {
+            size: 500_000 + g,
+            mimeType: "application/pdf",
+            modifiedAt: MIDDLE,
+          }));
+        }
+      }
+      // Junk with names that are genuinely junk-SHAPED: a folder can only
+      // hold one ".DS_Store", so a realistic mess is a handful of exact
+      // names plus many extension-matched leftovers. (Prefixing the exact
+      // names to make them unique would stop them matching at all, which is
+      // how an earlier version of this fixture reported 12 junk files
+      // instead of 60 and looked like a detection bug.)
+      for (const exact of [".DS_Store", "Thumbs.db", "desktop.ini", ".localized"]) {
+        files.push(row(`/Messy/${exact}`, { size: 4096, modifiedAt: ANCIENT }));
+      }
+      for (let i = 0; i < 56; i++) {
+        const ext = ["tmp", "part", "bak", "crdownload"][i % 4];
+        files.push(row(`/Messy/${LONG} ${i}.${ext}`, { size: 4096 + i, modifiedAt: ANCIENT }));
+      }
+      const dirs: Row[] = [];
+      for (let i = 0; i < 50; i++) {
+        dirs.push(row(`/Messy/Empty archive folder number ${i}`, { isDirectory: true, size: 0, mimeType: null }));
+      }
+      const tree: Record<string, Row[] | number> = { "/Messy": [...files, ...dirs] };
+      for (const d of dirs) tree[d.path] = [];
+      return tree;
+    }
+
+    it("keeps the whole result under the orchestrator's tool-result cap", async () => {
+      const r = await analyzeFileCleanup.handler({ path: "/Messy" }, ctxWith(treeGet(messyTree())));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const chars = JSON.stringify(r.data).length;
+      expect(
+        chars,
+        `analyze_file_cleanup serialized to ${chars} chars on a messy folder; past ` +
+          `${MODEL_TOOL_RESULT_CAP_CHARS} the orchestrator empties whole sections, including the ` +
+          `path lists delete_files needs. Trim a sample size in SAMPLE, do not raise this number.`,
+      ).toBeLessThan(MODEL_TOOL_RESULT_CAP_CHARS);
+    });
+
+    it("caps every sampled list while keeping the counts exact", async () => {
+      const r = await analyzeFileCleanup.handler({ path: "/Messy" }, ctxWith(treeGet(messyTree())));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+
+      expect(d.largest).toHaveLength(SAMPLE.largest);
+      expect(d.stale.items).toHaveLength(SAMPLE.stale);
+      expect(d.junk.items).toHaveLength(SAMPLE.junk);
+      expect(d.duplicate_candidates.items).toHaveLength(SAMPLE.duplicateGroups);
+      expect(d.empty_directories.items).toHaveLength(SAMPLE.empty);
+      for (const g of d.duplicate_candidates.items) {
+        expect(g.delete_candidates.length).toBeLessThanOrEqual(SAMPLE.duplicatePaths);
+      }
+      expect(Object.keys(d.organize_plan.moves_by_folder).length).toBeLessThanOrEqual(SAMPLE.planFolders);
+
+      // The counts are the whole set, and each sampled list says so.
+      expect(d.stale.count).toBeGreaterThan(SAMPLE.stale);
+      expect(d.stale.shown).toBe(SAMPLE.stale);
+      expect(d.junk.count).toBe(60);
+      expect(d.junk.shown).toBe(SAMPLE.junk);
+      expect(d.duplicate_candidates.groups).toBe(40);
+      expect(d.duplicate_candidates.shown).toBe(SAMPLE.duplicateGroups);
+      expect(d.empty_directories.count).toBe(50);
+      expect(d.empty_directories.shown).toBe(SAMPLE.empty);
+    });
+
+    it("samples the OLDEST stale files, not whichever the walk reached first", async () => {
+      const r = await analyzeFileCleanup.handler(
+        { path: "/Mixed", max_depth: 0 },
+        ctxWith(
+          treeGet({
+            "/Mixed": [
+              row("/Mixed/newest.txt", { modifiedAt: "2025-01-01T00:00:00.000Z" }),
+              row("/Mixed/oldest.txt", { modifiedAt: "2001-01-01T00:00:00.000Z" }),
+              row("/Mixed/middle.txt", { modifiedAt: "2010-01-01T00:00:00.000Z" }),
+            ],
+          }),
+        ),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // Order asserted by POSITION — normalising it away with .sort() would
+      // let a reversed comparator ship the least-stale files as the answer.
+      expect((r.data as any).stale.items.map((i: { path: string }) => i.path)).toEqual([
+        "/Mixed/oldest.txt",
+        "/Mixed/middle.txt",
+        "/Mixed/newest.txt",
+      ]);
+    });
   });
 
   // THE invariant. A preview that writes is not a preview.
   it("never issues a POST or DELETE, whatever it finds", async () => {
     const post = vi.fn();
     const del = vi.fn();
-    const r = await analyzeFileCleanup.handler({ path: "/Downloads" }, ctxWith(treeGet(TREE), { post, del }));
-    expect(r.ok).toBe(true);
+    for (const path of ["/Downloads", "/", "/Downloads/Empty"]) {
+      await analyzeFileCleanup.handler({ path }, ctxWith(treeGet(TREE), { post, del }));
+    }
     expect(post).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
   });

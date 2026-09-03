@@ -1,9 +1,13 @@
-// WARP-2664 — delete_files: validate everything, look every path up in its
-// parent's listing, delete to trash, refuse folders unless empty + allowed.
+// WARP-2664 — delete_files: validate everything, resolve every path in its
+// parent listing, delete FILES to trash, refuse directories outright.
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import deleteFiles, { DELETE_FILES_MAX_PATHS } from "../../../src/handlers/files/delete-files.js";
 import type { ToolContext } from "../../../src/types.js";
+
+// Full argument lists on purpose: `vi.fn(async () => …)` types `mock.calls`
+// as the empty tuple, so `calls[i][1]` is a tsc error vitest cannot see.
+type Opts = { headers?: Record<string, string> } | undefined;
 
 function ctxWith(
   mocks: { get?: Mock; del?: Mock; post?: Mock },
@@ -32,10 +36,6 @@ function ctxWith(
 }
 
 type Row = { path: string; isDirectory?: boolean };
-// Full argument lists on purpose: `vi.fn(async () => …)` types `mock.calls`
-// as the empty tuple, so `calls[i][1]` is a tsc error vitest cannot see.
-type Opts = { headers?: Record<string, string> } | undefined;
-
 function treeGet(tree: Record<string, Row[] | number>) {
   return vi.fn(async (url: string, _opts?: Opts) => {
     const m = /^\/\?path=(.*)$/.exec(url);
@@ -61,6 +61,7 @@ const TREE: Record<string, Row[] | number> = {
   "/Downloads": [
     { path: "/Downloads/a.tmp" },
     { path: "/Downloads/b.tmp" },
+    { path: "/Downloads/c.tmp" },
     { path: "/Downloads/Empty", isDirectory: true },
     { path: "/Downloads/Full", isDirectory: true },
   ],
@@ -75,6 +76,18 @@ describe("delete_files", () => {
     expect(deleteFiles.requiresConfirmation).toBe(true);
     const props = (deleteFiles.inputSchema as { properties: Record<string, unknown> }).properties;
     expect("confirmed" in props).toBe(false);
+  });
+
+  // The emptiness probe this flag used to gate was satisfiable by an OUTAGE:
+  // GET /api/files answers 200 [] when Nextcloud is unreachable, so a full
+  // folder read as empty and got recursively trashed. The flag is gone.
+  it("exposes no allow_folders escape hatch", () => {
+    const schema = deleteFiles.inputSchema as {
+      properties: Record<string, unknown>;
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(schema.properties)).toEqual(["paths"]);
+    expect(schema.additionalProperties).toBe(false);
   });
 
   it("returns AUTH_REQUIRED without ncToken / userId, before any HTTP", async () => {
@@ -109,8 +122,25 @@ describe("delete_files", () => {
         expect(r.error.message).toMatch(msg);
       }
     }
+    // THE ordering guarantee: a bad entry LATE in the list must not leave the
+    // earlier, valid ones deleted.
     expect(get).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
+  });
+
+  // Tested from BELOW as well as above, so an off-by-one that refuses the
+  // documented maximum cannot pass.
+  it("accepts exactly DELETE_FILES_MAX_PATHS paths", async () => {
+    const paths = Array.from({ length: DELETE_FILES_MAX_PATHS }, (_, i) => `/Bulk/f${i}.tmp`);
+    const del = okDelete();
+    const r = await deleteFiles.handler(
+      { paths },
+      ctxWith({ get: treeGet({ "/Bulk": paths.map((p) => ({ path: p })) }), del }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.data as any).counts.deleted).toBe(DELETE_FILES_MAX_PATHS);
+    expect(del).toHaveBeenCalledTimes(DELETE_FILES_MAX_PATHS);
   });
 
   it("deletes files it finds in the parent listing, listing each parent once, with the acting-user headers", async () => {
@@ -148,6 +178,7 @@ describe("delete_files", () => {
     expect(d.failed).toEqual([]);
     expect(d.counts).toEqual({ deleted: 3, skipped: 0, failed: 0 });
     expect(d.note).toMatch(/trash/);
+    expect(d.caveat).toBeUndefined();
   });
 
   it("reports a path missing from its parent listing as failed: not found, without a DELETE", async () => {
@@ -173,38 +204,73 @@ describe("delete_files", () => {
     expect(del).not.toHaveBeenCalled();
   });
 
-  it("skips a folder unless allow_folders is set — never a recursive trash by accident", async () => {
-    const del = okDelete();
-    const r = await deleteFiles.handler({ paths: ["/Downloads/Empty"] }, ctxWith({ get: treeGet(TREE), del }));
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect((r.data as any).skipped).toEqual([
-      { path: "/Downloads/Empty", reason: expect.stringMatching(/allow_folders: true.*delete_file/) },
-    ]);
-    expect(del).not.toHaveBeenCalled();
-  });
-
-  it("with allow_folders, deletes an EMPTY folder and skips one with contents", async () => {
-    const get = treeGet(TREE);
+  // A "not found" that is really an outage looks identical to a file that is
+  // genuinely gone, so the result has to say so.
+  it("caveats a not-found that an empty (possibly degraded) listing could explain", async () => {
     const del = okDelete();
     const r = await deleteFiles.handler(
-      { paths: ["/Downloads/Empty", "/Downloads/Full"], allow_folders: true },
-      ctxWith({ get, del }),
+      { paths: ["/Downloads/a.tmp"] },
+      ctxWith({ get: treeGet({ "/Downloads": [] }), del }),
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.data as Record<string, any>;
-    expect(d.deleted).toEqual(["/Downloads/Empty"]);
-    expect(d.skipped).toEqual([
-      { path: "/Downloads/Full", reason: "folder is not empty; use delete_file to delete it with its contents" },
-    ]);
-    // Parent once, then each folder once to check emptiness.
-    expect(get.mock.calls.map((c) => decodeURIComponent(String(c[0]).slice("/?path=".length)))).toEqual([
-      "/Downloads",
-      "/Downloads/Empty",
-      "/Downloads/Full",
-    ]);
-    expect(del).toHaveBeenCalledTimes(1);
+    expect(d.failed).toEqual([{ path: "/Downloads/a.tmp", reason: "not found" }]);
+    expect(d.caveat).toMatch(/unreachable file service/i);
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  describe("directories are refused outright", () => {
+    it("skips an EMPTY directory and never issues a DELETE for it", async () => {
+      const get = treeGet(TREE);
+      const del = okDelete();
+      const r = await deleteFiles.handler({ paths: ["/Downloads/Empty"] }, ctxWith({ get, del }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect((r.data as any).skipped).toEqual([
+        { path: "/Downloads/Empty", reason: expect.stringMatching(/is a folder/) },
+      ]);
+      expect(del).not.toHaveBeenCalled();
+      // No second listing: with no emptiness inference there is nothing to probe.
+      expect(get).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips a directory WITH contents just the same", async () => {
+      const del = okDelete();
+      const r = await deleteFiles.handler({ paths: ["/Downloads/Full"] }, ctxWith({ get: treeGet(TREE), del }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect((r.data as any).counts).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+      expect(del).not.toHaveBeenCalled();
+    });
+
+    // delete_file is requiresConfirmation:false AND recursive for directories,
+    // so naming it here would turn this refusal into a signpost to an
+    // UNCONFIRMED recursive delete.
+    it("does not point the model at delete_file", async () => {
+      const r = await deleteFiles.handler(
+        { paths: ["/Downloads/Full"] },
+        ctxWith({ get: treeGet(TREE), del: okDelete() }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const reason = (r.data as any).skipped[0].reason as string;
+      expect(reason).not.toMatch(/delete_file/);
+      expect(reason).toMatch(/Files app/);
+      expect(deleteFiles.description).not.toMatch(/delete_file\b/);
+    });
+
+    it("keeps deleting the files in the same list", async () => {
+      const del = okDelete();
+      const r = await deleteFiles.handler(
+        { paths: ["/Downloads/Full", "/Downloads/a.tmp"] },
+        ctxWith({ get: treeGet(TREE), del }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect((r.data as any).deleted).toEqual(["/Downloads/a.tmp"]);
+      expect(del).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("a DELETE the server refuses is reported as failed and the rest continue", async () => {
@@ -222,22 +288,48 @@ describe("delete_files", () => {
     expect(d.deleted).toEqual(["/Downloads/b.tmp"]);
   });
 
-  it("does not attempt anything once the request is aborted", async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const get = vi.fn();
-    const del = vi.fn();
-    const r = await deleteFiles.handler(
-      { paths: ["/Downloads/a.tmp"] },
-      ctxWith({ get, del }, { signal: controller.signal }),
-    );
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect((r.data as any).skipped).toEqual([
-      { path: "/Downloads/a.tmp", reason: expect.stringMatching(/cancelled/) },
-    ]);
-    expect(get).not.toHaveBeenCalled();
-    expect(del).not.toHaveBeenCalled();
+  describe("cancellation", () => {
+    it("does not attempt anything when the signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const get = vi.fn();
+      const del = vi.fn();
+      const r = await deleteFiles.handler(
+        { paths: ["/Downloads/a.tmp"] },
+        ctxWith({ get, del }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect((r.data as any).skipped).toEqual([
+        { path: "/Downloads/a.tmp", reason: expect.stringMatching(/cancelled/) },
+      ]);
+      expect(get).not.toHaveBeenCalled();
+      expect(del).not.toHaveBeenCalled();
+    });
+
+    // The per-iteration check is the whole point on the tool that removes
+    // data: hoisting it out of the loop must turn this red.
+    it("STOPS PARTWAY when aborted mid-run, leaving the rest unattempted", async () => {
+      const controller = new AbortController();
+      const del = vi.fn(async (_path: string, _opts?: Opts) => {
+        controller.abort();
+        return new Response("{}", { status: 200 });
+      });
+      const r = await deleteFiles.handler(
+        { paths: ["/Downloads/a.tmp", "/Downloads/b.tmp", "/Downloads/c.tmp"] },
+        ctxWith({ get: treeGet(TREE), del }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(del).toHaveBeenCalledTimes(1);
+      expect(d.deleted).toEqual(["/Downloads/a.tmp"]);
+      expect(d.skipped).toEqual([
+        { path: "/Downloads/b.tmp", reason: expect.stringMatching(/cancelled/) },
+        { path: "/Downloads/c.tmp", reason: expect.stringMatching(/cancelled/) },
+      ]);
+      expect(d.counts).toEqual({ deleted: 1, skipped: 2, failed: 0 });
+    });
   });
 
   it("never calls POST", async () => {

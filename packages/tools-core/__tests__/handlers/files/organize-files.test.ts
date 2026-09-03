@@ -3,7 +3,14 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import organizeFiles from "../../../src/handlers/files/organize-files.js";
+import { ORGANIZE_MAX_MOVES } from "../../../src/handlers/files/_cleanup.js";
 import type { ToolContext } from "../../../src/types.js";
+
+// Mocks declare the full HttpClient argument list rather than taking none:
+// `vi.fn(async () => …)` types `mock.calls` as the empty tuple, so every
+// `calls[i][1]` assertion below is a tsc error the (type-stripping) vitest
+// run cannot see.
+type Opts = { headers?: Record<string, string> } | undefined;
 
 function ctxWith(
   mocks: { get?: Mock; post?: Mock; del?: Mock },
@@ -31,7 +38,14 @@ function ctxWith(
   };
 }
 
-type Row = { path: string; isDirectory?: boolean; size?: number; mimeType?: string | null; modifiedAt?: string };
+type Row = {
+  path: string;
+  name?: string;
+  isDirectory?: boolean;
+  size?: number;
+  mimeType?: string | null;
+  modifiedAt?: string;
+};
 function row(path: string, o: Omit<Row, "path"> = {}): Row {
   return {
     path,
@@ -42,12 +56,6 @@ function row(path: string, o: Omit<Row, "path"> = {}): Row {
     ...o,
   };
 }
-// Mocks declare the full HttpClient argument list rather than taking none:
-// `vi.fn(async () => …)` types `mock.calls` as the empty tuple, so every
-// `calls[i][1]` assertion below is a tsc error the (type-stripping) vitest
-// run cannot see.
-type Opts = { headers?: Record<string, string> } | undefined;
-
 function listingOf(rows: Row[], status = 200) {
   return vi.fn(async (_path: string, _opts?: Opts) =>
     new Response(JSON.stringify(rows.map((r) => ({ name: r.path.split("/").pop(), ...r }))), { status }),
@@ -146,7 +154,103 @@ describe("organize_files", () => {
     expect(d.created_folders).toEqual(["/Downloads/Documents", "/Downloads/Images"]);
     expect(d.skipped).toEqual([{ path: "/Downloads/.hidden", reason: "hidden file" }]);
     expect(d.remaining).toBe(0);
+    expect(d.cancelled).toBeUndefined();
     expect(d.note).toMatch(/nothing was deleted/);
+  });
+
+  // POST /files/mkdir answers 200 whether or not it created anything
+  // (ncCreateDirectory treats WebDAV MKCOL 405 "exists" as success), so
+  // `mk.ok` alone cannot tell the two apart. The fresh listing can.
+  it("does not report a destination that already existed as created", async () => {
+    const post = okPost();
+    const r = await organizeFiles.handler(
+      { path: "/Downloads" },
+      ctxWith({
+        get: listingOf([
+          row("/Downloads/a.pdf"),
+          row("/Downloads/b.JPG"),
+          row("/Downloads/Documents", { isDirectory: true, size: 0, mimeType: null }),
+        ]),
+        post,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    expect(d.created_folders).toEqual(["/Downloads/Images"]);
+    expect(d.moved_count).toBe(2);
+  });
+
+  it("reports a destination blocked by a same-named FILE once, and moves nothing into it", async () => {
+    const post = okPost();
+    const r = await organizeFiles.handler(
+      { path: "/Downloads" },
+      ctxWith({
+        get: listingOf([
+          row("/Downloads/a.pdf"),
+          row("/Downloads/b.pdf"),
+          // A plain file literally named "Documents" sits where the folder goes.
+          row("/Downloads/Documents"),
+        ]),
+        post,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    // The blocking file itself has no extension, so by_type sends it to
+    // Other — moving it is right, and is what unblocks the folder next run.
+    expect(d.moved_count).toBe(1);
+    expect(d.moved).toEqual([{ from: "/Downloads/Documents", to: "/Downloads/Other/Documents" }]);
+    expect(d.skipped).toEqual([
+      { path: "/Downloads/Documents", reason: expect.stringMatching(/a file already has this name/) },
+      { path: "/Downloads/a.pdf", reason: expect.stringMatching(/blocked by a file of the same name/) },
+      { path: "/Downloads/b.pdf", reason: expect.stringMatching(/blocked by a file of the same name/) },
+    ]);
+    // Blocked files are named as skipped, NOT rolled into `remaining` — which
+    // would read as "a later run picks these up" when nothing will.
+    expect(d.remaining).toBe(0);
+    // The blocked destination was never created, and nothing moved into it.
+    const mkdirs = post.mock.calls.filter((c) => c[0] === "/mkdir").map((c) => (c[1] as any).path);
+    expect(mkdirs).toEqual(["/Downloads/Other"]);
+    const moves = post.mock.calls.filter((c) => c[0] === "/move").map((c) => (c[1] as any).to);
+    expect(moves).toEqual(["/Downloads/Other/Documents"]);
+  });
+
+  // P11 chokepoint: destinations are BUILT from listing-supplied names, so
+  // they are validated next to the call that uses them rather than trusted
+  // because today's producer happens not to emit a separator.
+  it("refuses a destination built from a hostile listing name instead of moving to it", async () => {
+    const post = okPost();
+    const r = await organizeFiles.handler(
+      { path: "/Downloads" },
+      ctxWith({
+        get: vi.fn(async (_p: string, _o?: Opts) =>
+          new Response(
+            JSON.stringify([
+              {
+                name: "../../escape.pdf",
+                path: "/Downloads/../../escape.pdf",
+                isDirectory: false,
+                size: 1,
+                mimeType: "application/pdf",
+                modifiedAt: "2024-03-09T10:00:00.000Z",
+              },
+              { name: "ok.pdf", path: "/Downloads/ok.pdf", isDirectory: false, size: 1, mimeType: "application/pdf", modifiedAt: "2024-03-09T10:00:00.000Z" },
+            ]),
+            { status: 200 },
+          ),
+        ),
+        post,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    // The traversal entry never reaches /move; the legitimate one still does.
+    const moves = post.mock.calls.filter((c) => c[0] === "/move").map((c) => c[1]);
+    expect(moves).toEqual([{ from: "/Downloads/ok.pdf", to: "/Downloads/Documents/ok.pdf", overwrite: false }]);
+    expect(d.moved_count).toBe(1);
   });
 
   it("a failed move is reported as skipped and the rest still move", async () => {
@@ -178,21 +282,45 @@ describe("organize_files", () => {
     expect(d.moved_count).toBe(3);
   });
 
-  it("is a no-op with no writes when nothing sits directly inside the folder", async () => {
-    const post = vi.fn();
-    const r = await organizeFiles.handler(
-      { path: "/Downloads" },
-      ctxWith({
-        get: listingOf([row("/Downloads/Images", { isDirectory: true }), row("/Downloads/.hidden")]),
-        post,
-      }),
-    );
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    const d = r.data as Record<string, any>;
-    expect(post).not.toHaveBeenCalled();
-    expect(d.moved_count).toBe(0);
-    expect(d.note).toMatch(/Nothing to organize/);
+  describe("nothing-to-do notes say which nothing it was", () => {
+    it("distinguishes an empty folder from one holding only hidden files", async () => {
+      const onlyHidden = await organizeFiles.handler(
+        { path: "/Downloads" },
+        ctxWith({ get: listingOf([row("/Downloads/.hidden"), row("/Downloads/Images", { isDirectory: true })]), post: vi.fn() }),
+      );
+      expect(onlyHidden.ok).toBe(true);
+      if (onlyHidden.ok) {
+        expect((onlyHidden.data as any).note).toMatch(/only files directly inside this folder are hidden/i);
+      }
+      const trulyEmpty = await organizeFiles.handler(
+        { path: "/Downloads" },
+        ctxWith({ get: listingOf([row("/Downloads/Images", { isDirectory: true })]), post: vi.fn() }),
+      );
+      expect(trulyEmpty.ok).toBe(true);
+      if (trulyEmpty.ok) {
+        expect((trulyEmpty.data as any).note).toMatch(/no files sit directly inside/i);
+      }
+    });
+
+    it("does not claim files were moved when every one was skipped", async () => {
+      const post = vi.fn(async (url: string, _b?: unknown, _o?: Opts) =>
+        new Response("{}", { status: url === "/move" ? 500 : 200 }),
+      );
+      const r = await organizeFiles.handler({ path: "/Downloads" }, ctxWith({ get: listingOf(DOWNLOADS), post }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(d.moved_count).toBe(0);
+      expect(d.note).toMatch(/Nothing moved/);
+      expect(d.note).not.toMatch(/Files were moved/);
+    });
+
+    it("caveats an empty listing, which an outage explains just as well", async () => {
+      const r = await organizeFiles.handler({ path: "/Downloads" }, ctxWith({ get: listingOf([]), post: vi.fn() }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect((r.data as any).caveat).toMatch(/unreachable file service/i);
+    });
   });
 
   it("by_month files by modification month", async () => {
@@ -206,21 +334,62 @@ describe("organize_files", () => {
     expect(post.mock.calls[1][1]).toEqual({ from: "/Downloads/a.pdf", to: "/Downloads/2024-03/a.pdf", overwrite: false });
   });
 
-  it("stops moving once the request is aborted and counts the rest as remaining", async () => {
-    const controller = new AbortController();
-    const post = vi.fn(async (url: string, _body?: unknown, _opts?: Opts) => {
-      if (url === "/move") controller.abort();
-      return new Response("{}", { status: 200 });
-    });
-    const r = await organizeFiles.handler(
-      { path: "/Downloads" },
-      ctxWith({ get: listingOf(DOWNLOADS), post }, { signal: controller.signal }),
-    );
+  // The overflow term in `remaining` is load-bearing: drop it and a 620-file
+  // folder reports "fully sorted" with 120 files still loose.
+  it("reports the ORGANIZE_MAX_MOVES overflow as remaining, and bounds the echoed lists", async () => {
+    const many = Array.from({ length: ORGANIZE_MAX_MOVES + 120 }, (_, i) => row(`/Downloads/f${i}.pdf`));
+    const post = okPost();
+    const r = await organizeFiles.handler({ path: "/Downloads" }, ctxWith({ get: listingOf(many), post }));
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.data as Record<string, any>;
-    expect(d.moved_count).toBe(1);
-    expect(d.remaining).toBe(2);
+    expect(d.moved_count).toBe(ORGANIZE_MAX_MOVES);
+    expect(d.remaining).toBe(120);
+    // Counts stay exact; the echoed sample is bounded so the result cannot
+    // blow the orchestrator's 8,000-char tool-result cap.
+    expect(d.moved.length).toBeLessThanOrEqual(20);
+    expect(d.moved_shown).toBe(d.moved.length);
+    expect(JSON.stringify(d).length).toBeLessThan(8000);
+  });
+
+  describe("cancellation", () => {
+    it("creates nothing when the signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const post = vi.fn();
+      const r = await organizeFiles.handler(
+        { path: "/Downloads" },
+        ctxWith({ get: listingOf(DOWNLOADS), post }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      // The mkdir loop's guard is what stops this: without it a cancelled
+      // request still litters the drive with empty subfolders.
+      expect(post).not.toHaveBeenCalled();
+      expect(d.created_folders).toEqual([]);
+      expect(d.moved_count).toBe(0);
+      expect(d.cancelled).toBe(true);
+    });
+
+    it("stops moving once aborted mid-run and counts the rest as remaining", async () => {
+      const controller = new AbortController();
+      const post = vi.fn(async (url: string, _body?: unknown, _opts?: Opts) => {
+        if (url === "/move") controller.abort();
+        return new Response("{}", { status: 200 });
+      });
+      const r = await organizeFiles.handler(
+        { path: "/Downloads" },
+        ctxWith({ get: listingOf(DOWNLOADS), post }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(d.moved_count).toBe(1);
+      expect(d.remaining).toBe(2);
+      expect(d.cancelled).toBe(true);
+      expect(d.note).toMatch(/Cancelled partway/);
+    });
   });
 
   it("never calls DELETE", async () => {
