@@ -17,6 +17,11 @@ on:
       # reads the manifest.
       - "scripts/host/droplet-host-units.sh"
       - "scripts/host/MANIFEST"
+      # WARP-2666: the app_downloads check delegates to this auditor, which
+      # reads the release declaration. Both are outside scripts/host/ because
+      # the auditor must run from the CHECKOUT, never an installed copy.
+      - "scripts/app-downloads/audit.sh"
+      - "data/app-downloads/EXPECTED"
       # WARP-2189: the relay_dns check delegates to this helper, and
       # local-dns.sh is the setup-time caller that must keep it applied.
       - "scripts/host/droplet-relay-dns.sh"
@@ -35,6 +40,8 @@ on:
       - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
       - "scripts/host/droplet-host-units.sh"
       - "scripts/host/MANIFEST"
+      - "scripts/app-downloads/audit.sh"
+      - "data/app-downloads/EXPECTED"
       - "scripts/host/droplet-relay-dns.sh"
       - "scripts/lib/local-dns.sh"
       - "scripts/lib/single-box.sh"

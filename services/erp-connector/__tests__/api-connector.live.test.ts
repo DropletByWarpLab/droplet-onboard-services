@@ -173,6 +173,11 @@ describe.skipIf(!HAS_OPENSSL)("EaglesoftApiConnector — live dummy box", () => 
       const c = makeConnector({}, { dispatcher: undefined });
       const err = await c.connect().catch((e: Error) => e);
       expect(err).toBeInstanceOf(ConnectorBlockedError);
+      // `connect()` resolves to `void`, so the `.catch` union is `void | Error`
+      // and `expect(...).toBeInstanceOf` narrows nothing for the compiler. The
+      // guard is what makes `.message` below legal — and it fails loudly if
+      // `connect()` ever stops rejecting.
+      if (!(err instanceof Error)) throw new Error("expected connect() to reject");
       expect(err.message).toContain(API_TRACK_REMEDIATION);
       expect(err.message).not.toContain("SAP SQL Anywhere client");
       // ...while the SQL track keeps its own, unchanged text.

@@ -443,10 +443,15 @@ describe("AI tools & connectors (axis 4)", () => {
   it("renders the connectors empty state with the Integrations link", () => {
     renderSheet({ connectors: [] });
     expect(screen.getByText(ACCESS_COPY.emptyConnectors)).toBeInTheDocument();
-    // setup.ts mocks next/link into a plain string, so assert the deep-link
-    // copy (+ its target) rather than an anchor role.
-    expect(screen.getByText(/Open Integrations/)).toBeInTheDocument();
-    expect(screen.getByText(/\/integrations/)).toBeInTheDocument();
+    // WARP-2563 — this asserted the deep-link copy and the raw href as TEXT,
+    // with a comment explaining that setup.ts mocked next/link into a plain
+    // string. It did, and that mock was a bug: React renders a returned string
+    // as text, so every <Link> on every surface rendered as escaped markup and
+    // no test could see a link as a link. The mock builds a real element now,
+    // so this asserts what the reader actually gets — an anchor, pointing at
+    // Integrations.
+    const link = screen.getByRole("link", { name: /Open Integrations/ });
+    expect(link).toHaveAttribute("href", "/integrations");
   });
 });
 

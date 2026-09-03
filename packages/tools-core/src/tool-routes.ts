@@ -350,6 +350,13 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("erp_get_ar_summary"),
   none("erp_schedule_appointment"),
 
+  // ── money (WARP-2581) ───────────────────────────────────────────────────
+  {
+    tool: "money_list_open_documents",
+    client: "orchestrator",
+    hops: [admit("get", "/api/money/documents")],
+  },
+
   // ── cloud (WARP-2497) ───────────────────────────────────────────────────
   // Lives under /api/erp/* because the cloud connectors reuse the ERP
   // route surface and its connector-grant gate; the tool domain is `cloud`.

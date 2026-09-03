@@ -1084,6 +1084,86 @@ run_psl_case "psl drift: a snapshot with no VERSION line is a config error" 2 \
   "2026-08-28" "$PSL_NO_VERSION"
 rm -f "$PSL_NO_VERSION"
 
+# =============================================================================
+# WARP-2516 — a regex literal is not a string, and not a divide.
+#
+# `scan_source` did not know about regex literals, so the apostrophe in
+# `/[^']/` opened a phantom string that never closed: comment stripping
+# stopped for the rest of the file, and a hostname in a `//` comment below it
+# counted as a NON-COMMENT literal and backed a registry entry that should
+# have been reported as unreferenced. That is the escape WARP-2452 exists to
+# close, reachable with one regex.
+# =============================================================================
+
+# The reproduction. The docs comment carries the host, so the denial pass is
+# satisfied either way and only the BACKING pass can move: the entry has no
+# real literal, so it must fail.
+# Mutation: drop the regex branch in scan_source -> the phantom string swallows
+# the comment, the comment backs the entry, exit 0, red.
+run_entry_case "regex: an apostrophe in a regex does not turn a comment into a literal" 1 \
+  "$YAML_EGRESS" "apps/svc/src/files.ts" \
+  "const re = /[^']/;
+// baseUrl: https://files.allowed-vendor.com
+export const FILES_BASE_URL = process.env.FILES_BASE_URL;"
+
+# ...and the same file WITHOUT the regex already failed, which is what makes
+# the row above a regression test rather than a restatement of WARP-2452.
+run_entry_case "regex: the same comment-only entry fails with no regex present" 1 \
+  "$YAML_EGRESS" "apps/svc/src/files.ts" \
+  '// baseUrl: https://files.allowed-vendor.com
+export const FILES_BASE_URL = process.env.FILES_BASE_URL;'
+
+# No over-skipping: the literal must end at the closing `/`, not at the end of
+# the line, or every host sharing a line with a regex goes invisible.
+# Mutation: skip to the end of the line instead of the closing `/` -> the host
+# after it is never seen, exit 0, red.
+run_case_grep "regex: a host later on the same line is still found" 1 \
+  "apps/svc/src/beacon.ts" \
+  'const cleaned = raw.replace(/[^a-z'"'"']/g, ""); const HOST = "api.evil-corp.io";' \
+  "api.evil-corp.io"
+
+# The other direction — a regex is CODE, so its characters are still yielded
+# and still back an entry. Skipping them the way a comment is skipped would
+# make `/files.allowed-vendor.com/` stop counting as the code that names the
+# host.
+# Mutation: skip regex contents instead of yielding them -> the entry loses its
+# only backing, exit 1, red.
+run_entry_case "regex: a host inside a regex still backs an entry" 0 \
+  "$YAML_EGRESS" "apps/svc/src/files.ts" \
+  'export const FILES_RE = /files.allowed-vendor.com/;'
+
+# A `/` the heuristic must DECLINE. `[` puts it in expression position, so the
+# regex branch really is entered here — and a JS regex cannot span lines, so
+# with no closing `/` before the newline it has to give up. Otherwise one stray
+# slash blinds comment stripping for the rest of the file, which is the very
+# failure this ticket fixes, reintroduced from the other side.
+#
+# `width / height` does NOT exercise this: a division follows a value, so it is
+# never in expression position and the branch is never entered. (Caught by
+# mutation R4, which left that version green.)
+# Mutation: return the end of the file instead of None at the newline -> the
+# comment below is swallowed, backs the entry, exit 0, red.
+run_entry_case "regex: an unterminated slash does not swallow the comment below it" 1 \
+  "$YAML_EGRESS" "apps/svc/src/files.ts" \
+  'const broken = [ /a ];
+// baseUrl: https://files.allowed-vendor.com
+export const FILES_BASE_URL = process.env.FILES_BASE_URL;'
+
+# JSX closing tags are the shape most likely to be mistaken for a regex, and a
+# `.tsx` file full of them would go dark. `<` is deliberately absent from
+# REGEX_POSITION_CHARS; this row is what says so.
+#
+# TWO closing tags with the host between them, on one line — the ordinary shape
+# of a JSX row. One tag alone pins nothing: with no second `/` before the
+# newline the scan declines anyway, so the row stays green either way. (Caught
+# by mutation R5, which left that version green.)
+# Mutation: add "<" to REGEX_POSITION_CHARS -> `/b>{"..."}</li` is eaten as a
+# regex literal and the host between the tags is never extracted, exit 0, red.
+run_case_grep "regex: JSX closing tags are not regex literals" 1 \
+  "apps/svc/src/panel.tsx" \
+  'export const Row = <li><b>host</b>{"api.evil-corp.io"}</li>;' \
+  "api.evil-corp.io"
+
 echo
 echo "egress-scan tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
