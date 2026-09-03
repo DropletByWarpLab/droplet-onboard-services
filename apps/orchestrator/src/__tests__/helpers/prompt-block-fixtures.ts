@@ -150,6 +150,39 @@ const SIGNATURES = {
 
 export type ComposerBlock = keyof typeof SIGNATURES;
 
+/**
+ * One `degradeToFit` drop, as `routes/llm.ts:1838` reports it.
+ *
+ * The route's warn sink is handed the estimator's own event object
+ * (`context-budget.service.ts:105-109`) and spreads it into the second
+ * `console.warn` argument, so this IS the structured signal — not a parse of
+ * the log line. `estimatedTokens` is the estimate AFTER this drop; a run that
+ * drops both blocks reports two of these, business first.
+ */
+export interface ContextBudgetDegradation {
+  block: string;
+  estimatedTokens: number;
+  thresholdTokens: number;
+  conversationId: string | null;
+  role: string | null;
+}
+
+function asDegradation(payload: unknown): ContextBudgetDegradation | null {
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  // Structural, not textual: the degradation warn is the only one in the route
+  // whose payload carries this triple, so the selector cannot rot when the log
+  // prefix is reworded.
+  if (
+    typeof p.block !== "string" ||
+    typeof p.estimatedTokens !== "number" ||
+    typeof p.thresholdTokens !== "number"
+  ) {
+    return null;
+  }
+  return p as unknown as ContextBudgetDegradation;
+}
+
 export interface ComposerFailOpenGuard {
   /**
    * Declare — from INSIDE a test body — that this one case wants the named
@@ -162,6 +195,17 @@ export interface ComposerFailOpenGuard {
    * guarded again.
    */
   expectFailOpen(...blocks: ComposerBlock[]): void;
+  /**
+   * WARP-2655 — the context-budget drops the CURRENT test's turns emitted so
+   * far, in drop order, read off the same `console.warn` spy the guard already
+   * owns.
+   *
+   * Read through the guard rather than a second `vi.spyOn(console, "warn")` in
+   * the calling file: a nested spy on an already-spied method is one
+   * `mockRestore()` away from silently disarming the guard for the rest of the
+   * file. One spy, two readers.
+   */
+  degradations(): ContextBudgetDegradation[];
 }
 
 /**
@@ -215,5 +259,9 @@ export function guardComposerFailOpen(): ComposerFailOpenGuard {
     expectFailOpen: (...blocks: ComposerBlock[]) => {
       for (const block of blocks) allowed.add(block);
     },
+    degradations: () =>
+      (warnSpy?.mock.calls ?? [])
+        .map((args) => asDegradation(args[1]))
+        .filter((d): d is ContextBudgetDegradation => d !== null),
   };
 }
