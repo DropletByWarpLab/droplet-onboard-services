@@ -270,6 +270,15 @@ describe("the destination guard is the ENTIRE control (WARP-2314)", () => {
     ).toThrow(UnsafeShopifyBaseUrlError);
     expect(SHOPIFY_ALLOWED_HOST_PATTERN.test(`${SHOP_DOMAIN}.evil.test`)).toBe(false);
     expect(SHOPIFY_ALLOWED_HOST_PATTERN.test(SHOP_DOMAIN)).toBe(true);
+
+    // The shapes that separate an ANCHORED pattern from an `endsWith` check:
+    // each of these really does end with the suffix, and each is a different
+    // origin wearing it. Mutation: unanchor the pattern, or rebuild it without
+    // `escapeRegExpLiteral` so the dots match any character → red.
+    for (const host of ["evil.example.myshopify.com", "a.b.myshopify.com", "xmyshopifyxcom"]) {
+      expect(SHOPIFY_ALLOWED_HOST_PATTERN.test(host), host).toBe(false);
+    }
+    expect("evil.example.myshopify.com".endsWith(SHOPIFY_SHOP_DOMAIN_SUFFIX)).toBe(true);
   });
 
   it("refuses another merchant's store, http, userinfo and a non-443 port", () => {
@@ -797,6 +806,14 @@ describe("protected customer data is detected, not absorbed (WARP-2338)", () => 
     // `every` → a Grow-plan store is told its plan is wrong.
     expect(detectProtectedDataRedaction([{ ...CUSTOMER_NODE, lastName: null }])).toBe(false);
     expect(detectProtectedDataRedaction([])).toBe(false);
+    // `every`, not `some`, and THIS is the case that separates them: a page
+    // where one buyer is anonymous and the rest are not is a store with one
+    // anonymous buyer. Mutation: swap `every` for `some` → red, and a
+    // Grow-plan merchant with a single blank record is told their plan is
+    // wrong.
+    expect(
+      detectProtectedDataRedaction([{ email: null, firstName: null, lastName: null }, CUSTOMER_NODE]),
+    ).toBe(false);
     expect(
       detectProtectedDataRedaction([{ email: null, firstName: null, lastName: "" }]),
     ).toBe(true);
