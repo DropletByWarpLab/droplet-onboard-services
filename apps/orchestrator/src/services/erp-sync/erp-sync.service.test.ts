@@ -893,6 +893,28 @@ describe("registerCursors", () => {
     expect(entities.sort()).toEqual(["company", "contact", "deal", "engagement", "ticket"]);
   });
 
+  // WARP-2650 — the same filter, for the fourth track.
+  it("registers NOTHING for an mcp track — it serves no dataset at all", async () => {
+    // An MCP connection is CONNECTED the moment the credential lands
+    // (`statusAfterCredentialUpdate`), so it is a live row this loop sees on
+    // the very first tick after a customer connects Atlassian.
+    //
+    // The filter used to be `track !== "cloud"`, which sent every non-cloud
+    // track down `openToUndeclaredTracks` — so this row would have collected an
+    // `invoice` and a `bill` cursor, each failing its first tick with
+    // `DatasetNotServedError`, parked FAILED, and folded by `foldSyncState`
+    // into "this connection's sync is failing" forever. That is WARP-2533's
+    // defect, reintroduced by a new track rather than by a new entity.
+    //
+    // Mutation: restore `track !== "cloud"` in `entityServedBy` → two cursors
+    //           → red.
+    const h = harness({
+      connections: [connectionRow({ provider: "atlassian", secretRef: null })],
+    });
+    await runnerFor(h).registerCursors();
+    expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
+  });
+
   it("registers invoice ONLY for stripe — its descriptor serves no bill", async () => {
     const h = harness({
       connections: [connectionRow({ provider: "stripe", secretRef: null })],
