@@ -40,7 +40,7 @@ import {
 import { createErpService, type ErpUser } from "../services/erp.service.js";
 import { ErpError } from "../services/erp-error.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
-import { EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
+import { EAGLESOFT_API_PROVIDER, EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
 import type { ConnectorLevel } from "../services/access-catalog.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -439,6 +439,69 @@ export function createErpRouter(prisma: PrismaClient): Router {
   router.get("/erp/patient/:id", canRead, async (req, res, next) => {
     try {
       res.json(await svc.getPatient(req.params.id, erpUser(req)));
+    } catch (err) {
+      if (!handleErpError(res, err)) next(err);
+    }
+  });
+
+  /**
+   * WARP-2567 (ADR-044) — the practice block on a customer record.
+   *
+   * 🔴 Why this lives HERE, on the ERP router, and not as a section of
+   * `GET /api/crm/companies/:id/record`:
+   *
+   * The CRM is business-shared. `family` — the front desk — reaches
+   * /customers and the record page, and must. Eaglesoft patients are PHI,
+   * gated in exactly one place: `canRead` below, which resolves an
+   * Eaglesoft-keyed connector grant ON TOP of the role. Adding one more field
+   * to a response the CRM's own gate has already cleared is precisely how a
+   * patient would end up on a page the front desk can open, and
+   * `customer-record.service.test.ts` pins that route's exact key set so the
+   * attempt is a red build rather than a quiet widening.
+   *
+   * It uses the SAME `canRead` instance as `/erp/patient/:id` — deliberately
+   * the same reference, not an equivalent one. A second implementation of a
+   * PHI check is a second thing to keep correct, and the two would drift on
+   * the day one of them was updated.
+   *
+   * The response distinguishes "no linked patient" from "not permitted"; the
+   * PAGE does not, and must not. A lock icon announces that a patient record
+   * exists, which is itself the disclosure.
+   */
+  router.get("/erp/practice/by-company/:companyId", canRead, async (req, res, next) => {
+    try {
+      const links = await prisma.partyLink.findMany({
+        where: {
+          companyId: req.params.companyId,
+          isArchived: false,
+          // 🔴 Only ERP providers. A customer routinely carries links to
+          // Stripe, HubSpot and the practice system at once, and handing a
+          // Stripe customer id to the dental connector would at best 404 and
+          // at worst read a patient whose chart number happens to collide.
+          externalSystem: { in: [EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER] },
+        },
+        select: { id: true, externalSystem: true, externalId: true },
+        orderBy: { createdAt: "asc" },
+      });
+
+      if (links.length === 0) {
+        res.json({ patients: [], linked: false });
+        return;
+      }
+
+      // Read through the EXISTING patient read, so the connector, the drift
+      // lock, the degraded-status handling and the minimum-necessary field
+      // set all come along unchanged rather than being re-implemented.
+      const user = erpUser(req);
+      const patients = await Promise.all(
+        links.map(async (l) => ({
+          linkId: l.id,
+          externalSystem: l.externalSystem,
+          externalId: l.externalId,
+          patient: await svc.getPatient(l.externalId, user),
+        })),
+      );
+      res.json({ patients, linked: true });
     } catch (err) {
       if (!handleErpError(res, err)) next(err);
     }

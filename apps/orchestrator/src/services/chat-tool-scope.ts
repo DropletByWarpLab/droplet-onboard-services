@@ -103,6 +103,11 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   // turn the schema budget. Excluded to keep the full-pool tripwire in
   // base-prompt-budget.test.ts green as the registry grew past it.
   "crm_move_deal_stage",
+  // WARP-2581 — money. Reachable over /api/money and MCP; kept out of the
+  // chat pool because base-prompt-budget.test.ts sits 59 characters under
+  // its 60,000 tripwire, and that assertion is the wire payload of the
+  // TOOL_SELECTION_MODE=off rollback path. WARP-2547 owns the re-baseline.
+  "money_list_open_documents",
   // erp vertical suite (external MCP / dedicated UI)
   "erp_get_schedule_today",
   "erp_find_patient",

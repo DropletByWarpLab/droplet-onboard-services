@@ -40,11 +40,12 @@ describe("the Business group (WARP-2558)", () => {
     expect(labels.indexOf("Operations")).toBe(labels.indexOf("Business") + 1);
   });
 
-  it("holds Planning, Customers, Projects and Practice, in that order", () => {
+  it("holds Planning, Customers, Projects, Money and Practice, in that order", () => {
     expect(businessItems().map((i) => i.href)).toEqual([
       "/business",
       "/customers",
       "/projects",
+      "/money",
       "/practice",
     ]);
   });
@@ -66,6 +67,15 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     expect(visible.map((i) => i.href)).toEqual(["/business", "/projects", "/practice"]);
   });
 
+  it("shows Money alone on a books-on, CRM-off, Projects-off box", () => {
+    // WARP-2581 — /money is module-gated like Customers and Projects, so it
+    // disappears entirely on a box that keeps its books elsewhere. The two
+    // role-gated entries stand either side of it regardless, which is the
+    // whole point of the split.
+    const visible = visibleItems(businessItems(), "owner", openCapabilities, only("money"));
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/money", "/practice"]);
+  });
+
   it("keeps Practice with every module off — it is role-gated, not module-gated", () => {
     // WARP-2560 — there is no `erp` module, and this is the assertion that
     // stops one being invented by accident. Tagging Practice with somebody
@@ -83,6 +93,22 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
       only("crm", "projects"),
     );
     expect(visible.map((i) => i.href)).toEqual(["/business", "/customers", "/projects", "/practice"]);
+  });
+
+  it("shows the whole group when every module gate is on", () => {
+    const visible = visibleItems(
+      businessItems(),
+      "owner",
+      openCapabilities,
+      only("crm", "projects", "money"),
+    );
+    expect(visible.map((i) => i.href)).toEqual([
+      "/business",
+      "/customers",
+      "/projects",
+      "/money",
+      "/practice",
+    ]);
   });
 });
 
@@ -169,6 +195,10 @@ describe("route ownership (WARP-2558)", () => {
   it("leaves /projects with the projects module", () => {
     expect(moduleForPath("/projects")?.moduleId).toBe("projects");
   });
+
+  it("gives /money to the money module, so a box without books blocks it honestly", () => {
+    expect(moduleForPath("/money")?.moduleId).toBe("money");
+  });
 });
 
 describe("the mobile tab cap is not reopened (WARP-290)", () => {
@@ -179,5 +209,6 @@ describe("the mobile tab cap is not reopened (WARP-290)", () => {
   it("does not promote a Business route into the bar", () => {
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/customers");
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/projects");
+    expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/money");
   });
 });

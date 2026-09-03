@@ -1306,7 +1306,9 @@ export type AccessModuleId =
   | "managed_switch"
   | "team_chat"
   | "contacts"
-  | "crm";
+  | "crm"
+  /** WARP-2581 — invoices and bills landed from a cloud ledger. */
+  | "money";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;

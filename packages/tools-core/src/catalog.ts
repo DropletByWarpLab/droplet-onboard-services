@@ -45,6 +45,10 @@ export type ToolDomain =
   // toggle gates the domain.
   | "crm"
   | "erp"
+  // WARP-2581 — money at rest: invoices and bills landed from a connected
+  // ledger. Slug matches the `money` ModuleId so the module toggle gates the
+  // domain, exactly as `crm` and `team_chat` do.
+  | "money"
   // WARP-2497 — the connected SaaS accounts (Stripe / HubSpot / Mailchimp).
   // Its own domain rather than a slot under `erp`: `erp` is the on-prem
   // practice-management connector, and the dashboard gates the two
@@ -208,6 +212,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "crm_log_activity",
     "crm_move_deal_stage",
   ],
+  // WARP-2581 — money at rest. Excluded from the chat pool (see
+  // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
+  // so it is MCP- and API-reachable and never advertised on a chat turn.
+  money: ["money_list_open_documents"],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
@@ -409,6 +417,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_find_patient: "Look up a patient in your practice software",
   erp_get_ar_summary: "See what patients still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
+  // Money (invoices and bills landed from a connected ledger)
+  money_list_open_documents: "See what you are owed and what you owe, from your accounting systems",
   // Cloud connectors (Stripe / HubSpot / Mailchimp)
   cloud_query_dataset:
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",

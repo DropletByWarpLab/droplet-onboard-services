@@ -182,6 +182,8 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
   // three vendors and all ten datasets; the dataset arg picks the provider.
   "cloud_query_dataset",
+  // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
+  "money_list_open_documents",
 ];
 
 describe("TOOLS registry", () => {
