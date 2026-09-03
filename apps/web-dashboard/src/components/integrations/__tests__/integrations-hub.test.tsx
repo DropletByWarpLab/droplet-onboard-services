@@ -310,13 +310,13 @@ describe("hub dispatch", () => {
    * regression test that is vacuously green because the shipped data cannot
    * make the defect observable.
    *
-   * Stripe, HubSpot and Mailchimp are `available` in the SHIPPED registry, so
+   * Stripe, HubSpot, Mailchimp and Shopify are `available` in the SHIPPED registry, so
    * this version needs no fixture at all. Mutation: reinstate
    * `if (e.meta.id === "eaglesoft")` on `connectConnector` and all three go
    * red against production data.
    */
   it("dispatches Connect for the three shipped SaaS vendors", async () => {
-    for (const name of ["Stripe", "HubSpot", "Mailchimp"]) {
+    for (const name of ["Stripe", "HubSpot", "Mailchimp", "Shopify"]) {
       vi.mocked(fetchIntegrations).mockResolvedValue([]);
       push.mockReset();
       const { container, unmount } = renderHub();
@@ -597,6 +597,8 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      // WARP-2296 — Shopify, same story: one descriptor, one tile.
+      "Shopify",
     ]);
   });
 
@@ -629,6 +631,7 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      "Shopify",
       "Generic Export",
       "M365",
     ]);
@@ -653,10 +656,10 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Seven catalog tiles (four original + the three WARP-2214 vendors) absorb
+    // Eight catalog tiles (four original + the four WARP-2214 vendors) absorb
     // four of the rows; the two the catalog knows nothing about each get their
     // own.
-    expect(tiles(container)).toHaveLength(9);
+    expect(tiles(container)).toHaveLength(10);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -665,6 +668,7 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      "Shopify",
       "M365",
       "Something Nobody Wrote A Tile For",
     ]) {
