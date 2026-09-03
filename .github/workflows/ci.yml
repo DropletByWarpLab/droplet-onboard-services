@@ -485,13 +485,21 @@ jobs:
         run: npm run -w @droplet/erp-connector build
 
       # WARP-2606: ship-check's `tsc-full` phase 4 — the pass that type-checks
-      # each workspace's `tsconfig.test.json` — has no CI runner. `packages/
-      # tools-core` is the only workspace that ships one today, so phase 4 IS
-      # this one command, and `stage` carried 8 errors in it (a TS1470
-      # `import.meta` under CommonJS, plus 7 TS2339 reads of `.data` through the
-      # unnarrowed `ToolResult` union) while every other check was green:
-      # `vitest` strips types with esbuild and the package's own
-      # `tsconfig.json` excludes `__tests__/`, so nothing in CI looked.
+      # each workspace's `tsconfig.test.json` — has no CI runner (ship-check
+      # runs in CI as parse + self-test only; `tsc-full` does not). `packages/
+      # tools-core` was the only workspace that shipped one when this step was
+      # written, and `stage` carried 8 errors in it (a TS1470 `import.meta`
+      # under CommonJS, plus 7 TS2339 reads of `.data` through the unnarrowed
+      # `ToolResult` union) while every other check was green: `vitest` strips
+      # types with esbuild and the package's own `tsconfig.json` excludes
+      # `__tests__/`, so nothing in CI looked.
+      #
+      # WARP-2515 (#1943) then added a `tsconfig.test.json` to four more
+      # workspaces — shared-types, fips-selftest, mcp-server, erp-connector —
+      # WITHOUT adding a runner for any of them, so phase 4 is no longer this
+      # one command and those four are back in the state tools-core was in.
+      # WARP-2639 wires `packages/shared-types` (the step just below this one);
+      # the other three are unwired and want a ticket.
       #
       # A step on THIS leg rather than a new `tsc-full` job or a new
       # `ci-summary` leg, deliberately, per docs/ci-cost-budget.md: the leg is
@@ -513,6 +521,27 @@ jobs:
       - name: Typecheck @droplet/tools-core tests (tsconfig.test.json)
         if: matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/tools-core typecheck:tests
+
+      # WARP-2639: the same hole for `packages/shared-types`. Its own
+      # `tsconfig.json` excludes `src/**/*.test.ts` (its tests live INSIDE
+      # `src/`, unlike the other workspaces'), so every type-level assertion in
+      # them — an `expectTypeOf`, a deliberately-wrong assignment — asserted
+      # nothing, in a green suite, forever. #1943 shipped the
+      # `tsconfig.test.json` and the `typecheck:tests` script that close it and
+      # wired NEITHER into CI.
+      #
+      # On the ORCHESTRATOR leg, not the tools-core one: `packages/
+      # shared-types/**` is in this leg's detect filter (and the dashboard's)
+      # and is NOT in `tools-core-mcp-server`'s, so a shared-types-only PR runs
+      # this leg and would skip that one. Same reasoning as the step above
+      # otherwise — an existing leg that has already installed and built,
+      # reported through `check_leg node`, no new job and no new required-check
+      # name (docs/ci-cost-budget.md). Marginal cost is one `tsc` over 3 test
+      # files: 0.8 s measured locally, budget 5 s on a runner, well inside the
+      # noise floor.
+      - name: Typecheck @droplet/shared-types tests (tsconfig.test.json)
+        if: matrix.suite == 'orchestrator'
+        run: npm run -w @droplet/shared-types typecheck:tests
 
       - name: Test @droplet/tools-core
         if: matrix.suite == 'tools-core-mcp-server'

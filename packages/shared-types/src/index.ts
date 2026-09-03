@@ -1,5 +1,6 @@
 export * from "./anchor";
 export * from "./box-name";
+export * from "./integration-status";
 export * from "./meeting-link";
 export * from "./money";
 export * from "./upload";
