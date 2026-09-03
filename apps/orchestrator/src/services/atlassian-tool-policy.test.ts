@@ -18,7 +18,9 @@ import {
   ATLASSIAN_V1_READ_TOOLS,
   CONFLUENCE_UPDATE_TOOL,
   classifyAtlassianCall,
+  classifyAtlassianRow,
   createAtlassianRemoteCallPolicy,
+  v1ReadToolsOf,
   type AtlassianAuthMode,
 } from "./atlassian-tool-policy.js";
 import { namespacedToolName, DENY_ALL_REMOTE_TOOLS } from "./mcp-multiplexer.service.js";
@@ -88,6 +90,45 @@ describe("the table itself", () => {
       if (row.grade === "read") continue;
       expect(ATLASSIAN_V1_READ_TOOLS.has(row.name)).toBe(false);
     }
+  });
+
+  /**
+   * The two assertions above are BOTH vacuous on today's table: no shipped row
+   * is `v1: "allowed"` with a non-read grade, so dropping the `grade === "read"`
+   * condition from the derivation produces the identical set and neither test
+   * notices. A mutation proved it — it survived until these two were added.
+   *
+   * The case that needs pinning is the one a future EDIT introduces, so both
+   * layers are exercised against a row the table does not contain.
+   */
+  describe("a write row mis-marked as allowed is still refused, twice over", () => {
+    const misMarked = {
+      name: "createJiraIssue",
+      product: "jira",
+      grade: "write",
+      v1: "allowed",
+      note: "synthetic fixture — a field edited by mistake",
+    } as const;
+
+    it("layer 1 — the derivation drops it, because grade is checked too", () => {
+      expect(v1ReadToolsOf([misMarked]).has("createJiraIssue")).toBe(false);
+    });
+
+    it("layer 2 — dispatch refuses it as a write, whatever v1 says", () => {
+      expect(
+        classifyAtlassianRow(misMarked, "atlassian__createJiraIssue", API_TOKEN),
+      ).toMatchObject({ kind: "deny", code: ATLASSIAN_DENY_CODES.writeBlocked });
+    });
+
+    it("the derivation still admits a genuine read row, so it is not just refusing everything", () => {
+      const genuine = {
+        name: "getJiraIssue",
+        product: "jira",
+        grade: "read",
+        v1: "allowed",
+      } as const;
+      expect(v1ReadToolsOf([genuine]).has("getJiraIssue")).toBe(true);
+    });
   });
 });
 
