@@ -34,6 +34,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { providerDescriptor } from "@droplet/shared-types";
 import { REMOTE_MCP_SESSION_STATES, BRIDGE_ERROR_CODES } from "./mcp-bridge.client.js";
 import { ATLASSIAN_REMOTE_SERVER_ID } from "./remote-mcp-servers.js";
 import { ATLASSIAN_SERVER_ID } from "./atlassian-tool-policy.js";
@@ -152,18 +153,39 @@ describe("wire-contract drift gate (the duplication §5 forces)", () => {
     expect([...BRIDGE_ERROR_CODES]).toEqual(bridge);
   });
 
-  it("the Atlassian server id agrees across all THREE declarations", () => {
+  it("the Atlassian server id agrees across all FOUR declarations", () => {
     // `services/mcp-bridge/src/atlassian.ts` (the wire path segment),
-    // `remote-mcp-servers.ts` (what this process attaches) and
-    // `atlassian-tool-policy.ts` (the classification table's scope). Three
-    // copies exist because the bridge may not be imported here and the policy
-    // table is orchestrator-owned by ADR-043 §2; this is what stops them
+    // `remote-mcp-servers.ts` (what this process attaches),
+    // `atlassian-tool-policy.ts` (the classification table's scope) and — since
+    // WARP-2650 — the provider descriptor's `mcpServerId`, which is what the
+    // connect flow's row will be keyed on. Four copies exist because the bridge
+    // may not be imported by the orchestrator (ADR-043 §5) NOR by
+    // `@droplet/shared-types`, which is bundled into the Next.js dashboard; the
+    // policy table is orchestrator-owned by ADR-043 §2. This is what stops them
     // drifting silently into an empty tool list.
+    //
+    // The descriptor's copy is the one that matters most for a fresh box: a
+    // divergence there means the operator connects an account under one id and
+    // the gate looks for a row under another, which reads as "no account
+    // connected" with a perfectly good credential sitting in the database.
     const bridgeSource = read(BRIDGE_SRC, "atlassian.ts");
     const match = /export const ATLASSIAN_SERVER_ID = "([a-z0-9-]+)";/.exec(bridgeSource);
     expect(match, "ATLASSIAN_SERVER_ID literal not found in the bridge").not.toBeNull();
     expect(ATLASSIAN_REMOTE_SERVER_ID).toBe(match![1]);
     expect(ATLASSIAN_SERVER_ID).toBe(match![1]);
+
+    const descriptor = providerDescriptor(match![1]);
+    expect(descriptor, `no provider descriptor for "${match![1]}"`).toBeDefined();
+    expect(descriptor?.track).toBe("mcp");
+    // Narrowed rather than cast: only the `mcp` arm carries `mcpServerId`, so
+    // this assertion cannot survive the track being changed out from under it.
+    expect(descriptor?.track === "mcp" && descriptor.mcpServerId).toBe(match![1]);
+    // And the id the gate reads is the PROVIDER key on the row, which the
+    // credential route writes from `descriptor.id`. Asserting both is not
+    // ceremony: `mcpServerId` and `id` are free to differ in the type, and a
+    // vendor whose bridge id differs from its provider key is exactly how a
+    // future track would break this.
+    expect(descriptor?.id).toBe(match![1]);
   });
 
   it("every path this client calls is a route the bridge serves", () => {

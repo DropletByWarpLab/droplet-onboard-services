@@ -454,9 +454,26 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
    * The two halves of the old comment were really two different claims, and
    * only one of them generalised. The flag is where they now live apart.
    */
+  /*
+   * WARP-2650 — the split is "does this track DECLARE its served set", not
+   * "is it cloud". A `cloud` track declares `datasets` and an `mcp` track
+   * declares the empty tuple, and both are statements the descriptor makes
+   * about itself; a `lan` track's served set is runtime-computed and a
+   * descriptor-less provider has said nothing at all, so those two are the ones
+   * the ENTITY decides for.
+   *
+   * Reading `track !== "cloud"` would have sent every CONNECTED Atlassian row
+   * down the `openToUndeclaredTracks` path and handed it a cursor for every
+   * accounting entity — each failing its first tick with
+   * `DatasetNotServedError`, parked FAILED, and folded into "this connection's
+   * sync is failing" forever. That is WARP-2533's defect exactly, reintroduced
+   * by a fourth track rather than by a new entity.
+   */
   function entityServedBy(provider: string, spec: ErpSyncEntity): boolean {
     const descriptor = providerDescriptor(provider);
-    if (!descriptor || descriptor.track !== "cloud") return spec.openToUndeclaredTracks;
+    if (!descriptor || descriptor.track === "lan" || descriptor.track === "catalog") {
+      return spec.openToUndeclaredTracks;
+    }
     return (descriptor.datasets as readonly string[]).includes(spec.entity);
   }
 
