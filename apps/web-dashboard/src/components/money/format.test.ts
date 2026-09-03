@@ -1,9 +1,11 @@
 /**
- * WARP-2581 — the money surface's two rules that are easy to break silently.
+ * WARP-2581 — the money surface's two rules that are easy to break silently,
+ * plus the guard that keeps a third date formatter from growing back.
  */
 import { describe, expect, it } from "vitest";
 
-import { formatDate, formatFigure, relativeAge, statusClassFor } from "./format";
+import * as moneyFormat from "./format";
+import { formatFigure, statusClassFor } from "./format";
 
 describe("formatFigure", () => {
   it("groups the integer part and leaves the fraction exactly as sent", () => {
@@ -53,28 +55,16 @@ describe("statusClassFor", () => {
   });
 });
 
-describe("relativeAge", () => {
-  it("speaks in the unit a person would", () => {
-    expect(relativeAge(30_000)).toBe("just now");
-    expect(relativeAge(4 * 60_000)).toBe("4 min ago");
-    expect(relativeAge(3 * 3_600_000)).toBe("3 hours ago");
-    expect(relativeAge(1 * 3_600_000)).toBe("1 hour ago");
-    expect(relativeAge(50 * 3_600_000)).toBe("2 days ago");
-  });
-
-  it("never claims the future", () => {
-    expect(relativeAge(-5000)).toBe("just now");
-    expect(relativeAge(Number.NaN)).toBe("just now");
-  });
-});
-
-describe("formatDate", () => {
-  it("renders an em-dash when the vendor gave no date", () => {
-    expect(formatDate(null)).toBe("—");
-    expect(formatDate("last tuesday")).toBe("—");
-  });
-
-  it("renders a real date", () => {
-    expect(formatDate("2026-09-10T00:00:00.000Z")).toMatch(/2026/);
+describe("what this module deliberately does NOT own", () => {
+  it("🔴 has no date or time-ago formatter of its own", () => {
+    // `lib/erp-format.ts` owns both, for every surface that reads from a
+    // connected system. The copies that used to live here had already drifted:
+    // money's `formatDate` never inherited the calendar-date correction, so a
+    // due date rendered a day early on any box behind UTC. This assertion is
+    // what stops the fourth copy.
+    const owned = Object.keys(moneyFormat).filter((name) =>
+      /date|ago|relative|elapsed|since/i.test(name),
+    );
+    expect(owned).toEqual([]);
   });
 });

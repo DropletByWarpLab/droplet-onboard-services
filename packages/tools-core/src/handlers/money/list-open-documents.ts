@@ -18,7 +18,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { callOrch } from "../pm/pm-orch.js";
-import { crmError } from "../crm/crm-orch.js";
+import { moneyError } from "./money-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -68,6 +68,23 @@ interface WireDocument {
   lastReadAt: string;
 }
 
+/**
+ * When this box last read ANY of these documents.
+ *
+ * A timestamp the box cannot parse is dropped rather than guessed at: the only
+ * freshness claim this surface may make is a true one, and `null` ("I do not
+ * know when I last read") is a claim it is always entitled to.
+ */
+function newestRead(documents: readonly WireDocument[]): string | null {
+  let newest: number | null = null;
+  for (const doc of documents) {
+    const ms = Date.parse(doc.lastReadAt);
+    if (Number.isNaN(ms)) continue;
+    if (newest === null || ms > newest) newest = ms;
+  }
+  return newest === null ? null : new Date(newest).toISOString();
+}
+
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const query = new URLSearchParams();
   if (args.direction === "owed_to_us") query.set("kind", "receivable");
@@ -106,11 +123,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           "Balances are what remains unpaid, not the invoiced total. Figures from " +
           "different ledgers are not comparable and must not be added. This is what " +
           "the box last read, not necessarily what the vendor holds now.",
-        last_read: wire.documents[0]?.lastReadAt ?? null,
+        // 🔴 The NEWEST read across these rows, never `documents[0]`.
+        // `/api/money/documents` orders by `dueAt asc, externalId asc`, so the
+        // first row is the soonest-DUE one and its read time is arbitrary —
+        // reporting it understates how recently the box read, which is the one
+        // claim this whole surface is built to make precisely.
+        last_read: newestRead(wire.documents),
       },
     };
   } catch (err) {
-    return crmError(err);
+    return moneyError(err);
   }
 }
 

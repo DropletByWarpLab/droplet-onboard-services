@@ -17,44 +17,30 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(null),
 }));
 
+import {
+  fakeDocument,
+  fakeErpDocumentTable,
+  type FakeDocumentInput,
+} from "./helpers/fake-erp-documents.js";
 import { createMoneyRouter } from "../routes/money.js";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 
-function dec(value: string) {
-  return { toString: () => value, isZero: () => Number.parseFloat(value) === 0 };
-}
-
-function row(over: Record<string, unknown> = {}) {
-  return {
-    id: "doc-1",
-    kind: "RECEIVABLE",
-    externalId: "INV-1001",
-    externalSystem: "quickbooks-online",
-    connectionId: "conn-1",
-    issuedAt: new Date("2026-08-01T00:00:00Z"),
+/** The route tests want an already-overdue document; the fixture's is not. */
+function row(over: FakeDocumentInput = {}): FakeDocumentInput {
+  return fakeDocument({
     dueAt: new Date("2026-08-15T00:00:00Z"),
-    counterpartyExternalId: "cust-7",
-    counterpartyName: "Northgate Dental",
-    companyId: null,
-    amount: dec("4210.55"),
-    balance: dec("1200.00"),
-    currency: null,
-    status: "Open",
-    vendorUpdatedAt: null,
     lastReadAt: new Date("2026-09-01T11:30:00Z"),
     ...over,
-  };
+  });
 }
 
-let rows: ReturnType<typeof row>[];
-let findMany: ReturnType<typeof vi.fn>;
+let rows: FakeDocumentInput[];
+let erpDocument: ReturnType<typeof fakeErpDocumentTable>;
 
 function app(role: "owner" | "admin" | "family" | "guest" | null = "owner") {
-  findMany = vi.fn(async (args: { where?: { kind?: string } }) =>
-    args?.where?.kind === undefined ? rows : rows.filter((r) => r.kind === args.where?.kind),
-  );
-  const prisma = { erpDocument: { findMany } };
+  erpDocument = fakeErpDocumentTable(rows);
+  const prisma = { erpDocument };
   const server = express();
   server.use((req: Request, _res: Response, next: NextFunction) => {
     if (role !== null) {
@@ -77,7 +63,7 @@ describe("GET /api/money", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.receivable.ledgers).toEqual([
-      expect.objectContaining({ connectionId: "conn-1", balance: "1200.00", documentCount: 1 }),
+      expect.objectContaining({ connectionId: "conn-1", balance: "1200", documentCount: 1 }),
     ]);
   });
 
@@ -116,7 +102,11 @@ describe("GET /api/money/documents", () => {
     expect(res.body.documents[0]).toMatchObject({
       externalId: "INV-1001",
       amount: "4210.55",
-      balance: "1200.00",
+      // `NUMERIC(20,6)` holding 1200.00 comes back as a Decimal whose
+      // `toString()` is "1200" — trailing zeros are scale, not value. The
+      // figure is exact either way, and the SURFACE decides how to present
+      // it; what is pinned here is that it never becomes a number.
+      balance: "1200",
       isOverdue: true,
     });
     expect(typeof res.body.documents[0].amount).toBe("string");
@@ -138,7 +128,12 @@ describe("GET /api/money/documents", () => {
     rows = [row(), row({ id: "doc-2", kind: "PAYABLE", externalId: "BILL-9" })];
     const res = await request(app("owner")).get("/api/money/documents?kind=sideways");
     expect(res.body.documents).toHaveLength(2);
-    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+    expect(erpDocument.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // No `kind` narrowing at all — the open predicate is the only filter.
+        where: { OR: [{ balance: null }, { balance: { not: 0 } }] },
+      }),
+    );
   });
 
   it("filters to overdue when asked", async () => {
