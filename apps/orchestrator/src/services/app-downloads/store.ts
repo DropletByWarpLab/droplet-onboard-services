@@ -157,16 +157,17 @@ async function hashFile(
 }
 
 /**
- * The store. One instance per process (see `app-downloads.singleton.ts`),
- * holding only the memoised catalog — no connections, no timers.
+ * The store. One instance per process, holding only the memoised catalog —
+ * no connections, no timers.
  */
 export class AppDownloadsStore {
   private readonly dir: string;
   private readonly requireSignature: boolean;
   private readonly publicKeyPath?: string;
   private readonly cosignBin?: string;
-  /** Memoised catalog load. The image is read-only; re-reading per
-   *  request would be pure overhead. Digests are NOT memoised. */
+  /** Memoised catalog load — SUCCESSES ONLY. Re-reading a good catalog per
+   *  request would be pure overhead. Failures are deliberately not cached;
+   *  see `loadCatalog`. Digests are NOT memoised either. */
   private cached: LoadCatalogResult | null = null;
 
   constructor(opts: AppDownloadsOptions) {
@@ -176,9 +177,8 @@ export class AppDownloadsStore {
     this.cosignBin = opts.cosignBin;
   }
 
-  /** Drop the memoised catalog. Tests use this; production never needs
-   *  it, because the staging directory cannot change under a running
-   *  container. */
+  /** Drop the memoised catalog. Tests use this. Production rarely needs it
+   *  now that failures are not cached, but it stays as the explicit hook. */
   invalidate(): void {
     this.cached = null;
   }
@@ -192,7 +192,16 @@ export class AppDownloadsStore {
   async loadCatalog(): Promise<LoadCatalogResult> {
     if (this.cached) return this.cached;
     const result = await this.loadCatalogUncached();
-    this.cached = result;
+    // Memoise SUCCESS ONLY. Caching the failure made an operator's stage
+    // invisible: the mount is read-only from inside the container but the
+    // HOST side is writable, so `stage.sh` really does put a catalog there
+    // under a running orchestrator — and the process would go on answering
+    // `catalog_missing` until someone restarted it, which is indistinguish-
+    // able from the stage having failed. `invalidate()` has no production
+    // caller, so a restart was the only cure. The cost of not caching is one
+    // ENOENT per request on a box with nothing staged; the cost of caching it
+    // was a green audit next to an empty page.
+    if (result.ok) this.cached = result;
     return result;
   }
 

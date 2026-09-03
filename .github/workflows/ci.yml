@@ -176,6 +176,12 @@ jobs:
               # wrong `primary` is served faithfully and is still wrong.
               - "scripts/app-downloads/**"
               - "tests/app-downloads-stage.test.sh"
+              - "tests/app-downloads-audit.test.sh"
+              # The declaration half. data/app-downloads/EXPECTED states what a
+              # release must carry; without this line, a change to EXPECTED or
+              # to the tracked contract files merges with ZERO test signal —
+              # which is how the original gap survived.
+              - "data/app-downloads/**"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -554,6 +560,19 @@ jobs:
       - name: App-download staging script
         if: matrix.suite == 'orchestrator'
         run: bash tests/app-downloads-stage.test.sh
+
+      # WARP-2666: the declaration half. `/downloads` being empty answers
+      # HTTP 200, so it is green to /api/health and to every other gate — the
+      # page a customer opens to install the app has been blank on every box
+      # that has ever shipped and nothing said so. This suite pins the
+      # auditor's exit contract (notably that "could not look" never collapses
+      # into "fine"), reconciles data/app-downloads/EXPECTED against the
+      # generator's platform list in BOTH directions, and mutation-tests each
+      # of those assertions. A platform added without an EXPECTED row fails
+      # here rather than going silently unaudited.
+      - name: App-download release declaration (EXPECTED + audit)
+        if: matrix.suite == 'orchestrator'
+        run: bash tests/app-downloads-audit.test.sh
 
       # WARP-1984: the SSH toggle's host half. The orchestrator's vitest guard
       # reads these artefacts as TEXT (it can prove `iptables` never appears);
