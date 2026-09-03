@@ -54,7 +54,6 @@ legacy-token app/files/page.tsx
 legacy-token app/global-error.tsx
 legacy-token app/globals.css
 legacy-token app/help/page.tsx
-legacy-token app/integrations/eaglesoft/page.tsx
 legacy-token app/integrations/page.tsx
 legacy-token app/knowledge/BrainMemoryTab.tsx
 legacy-token app/knowledge/RecentlyIndexedTab.tsx
