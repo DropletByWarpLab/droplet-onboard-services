@@ -181,7 +181,11 @@ describe("roster extensions", () => {
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "By role" }));
     // Group headers render with counts.
-    const financeGroup = screen.getByTestId("roster-group-Finance");
+    // The roles list loads on its own chain (listAccessRoles → setAccessRoles),
+    // independent of the roster fetch awaited above, so the Finance group
+    // header is awaited rather than assumed to have committed by the time the
+    // filter click flushes.
+    const financeGroup = await screen.findByTestId("roster-group-Finance");
     expect(within(financeGroup).getByText("Priya Nair")).toBeInTheDocument();
     const guestGroup = screen.getByTestId("roster-group-Guest");
     expect(within(guestGroup).getByText("Sam Ortega")).toBeInTheDocument();

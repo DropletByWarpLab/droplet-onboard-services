@@ -99,9 +99,14 @@ const DIRECT_PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
   opendental: [],
 };
 
-/** Tiles that have a detail surface today. */
+/** Tiles that have a detail surface today.
+ *
+ *  WARP-2560 (ADR-044) — Eaglesoft's detail surface is `/practice`, in the
+ *  Business group. The hub tile still opens it from here; only the address
+ *  changed. The old route redirects, so a stale cached bundle pointing at
+ *  `/integrations/eaglesoft` still lands somewhere real. */
 const DETAIL_ROUTES: Readonly<Record<string, string>> = {
-  eaglesoft: "/integrations/eaglesoft",
+  eaglesoft: "/practice",
 };
 
 const COMING_SOON_REASON = "Available in a future update.";
