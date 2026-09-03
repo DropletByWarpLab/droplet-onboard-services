@@ -111,8 +111,12 @@ export default function ChatPage() {
   const [bizProfile, setBizProfile] = useState<
     (BusinessProfileView & { workspaceType?: string }) | null
   >(null);
+  // Returns the in-flight fetch so a caller that is about to navigate can
+  // await it — starting the interview and pushing before the new state has
+  // landed re-paints the intro card inside the session the click just
+  // created (the "click Start, get the Start card again" flash).
   const refreshBizProfile = useCallback(() => {
-    fetchBusinessProfile()
+    return fetchBusinessProfile()
       .then((p) => setBizProfile(p))
       .catch(() => setBizProfile(null));
   }, []);
@@ -406,7 +410,13 @@ export default function ChatPage() {
   const handleInterviewStart = useCallback(async () => {
     try {
       const r = await startBusinessOnboarding();
-      refreshBizProfile();
+      // Awaited, not fired-and-forgotten: `router.push` to `/chat?c=…` is a
+      // same-route query change, so this component never unmounts and keeps
+      // whatever `bizProfile` it already had. Pushing first left the stale
+      // `not_started` on screen for the frames before the fetch landed, and
+      // `not_started` + an empty transcript is exactly the intro card — so
+      // the user's own click painted the Start card a second time.
+      await refreshBizProfile();
       router.push(`/chat?c=${encodeURIComponent(r.conversationId)}`);
     } catch {
       refreshBizProfile(); // 409 = another admin moved it — re-sync.
@@ -844,7 +854,17 @@ export default function ChatPage() {
                 />
               </div>
             )}
+          {/* The generic chat empty state — "Ask Droplet anything" plus four
+              off-topic suggestion prompts. It must never paint inside the
+              interview session: that surface is the walkthrough, and an empty
+              frame of it (the beat before the transcript loads, or a
+              self-healed session) reading "Ask Droplet anything · Dim the
+              living-room lights" is precisely the "it dropped me back into a
+              chat" report. Keyed off `interviewConversation` — the whole
+              lifecycle, like the message shaping below — so a finished
+              interview reopened after its history is gone stays quiet too. */}
           {messages.length === 0 &&
+            !interviewConversation &&
             !(
               isPrivileged &&
               isBusinessBox &&
