@@ -241,6 +241,45 @@ describe("connection state honesty", () => {
   });
 
   /**
+   * WARP-2623 — a capability-limited row is a WORKING connection.
+   *
+   * The four capability codes (Mailchimp's `CAPABILITY_MISSING`, HubSpot's
+   * `CAPABILITY_NOT_AVAILABLE`, Shopify's `SCOPE_MISSING` and
+   * `PROTECTED_CUSTOMER_DATA_DENIED`) all persisted as `ERROR`, so a Basic-plan
+   * Shopify store reading orders, products and inventory perfectly rendered
+   * here as "Can't connect — check the vendor's settings". This is the page an
+   * owner lands on to REPAIR a connection, and there was nothing on it to
+   * repair: the credential is valid and stored.
+   */
+  it("renders a capability-limited row as connected, with no reconnect prompt", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...BILLING, state: "CAPABILITY_LIMITED" as const },
+      CRM,
+    ]);
+    render(<SaasCredentialsSection />);
+
+    // Mutation: delete the CAPABILITY_LIMITED row from `STATE_COPY` → `tsc`
+    // red (the Record is total) AND this red at runtime, because
+    // `STATE_COPY[view.state]` is `undefined` and `.label` throws.
+    const line = await screen.findByText(/Connected · limited/);
+    expect(line).toBeInTheDocument();
+
+    // The remediation names where the fix actually is. Mutation: drop the
+    // second half of the label → red, and the owner is told a dataset is
+    // missing with nowhere to go about it.
+    expect(line.textContent).toMatch(/plan or permission change/i);
+
+    // NO reconnect affordance — the whole point. A new key changes nothing,
+    // and both of the neighbouring states' copy sends the admin after one.
+    // Mutation: reuse NEEDS_RECONNECT's or ERROR's copy here → red.
+    const card = screen.getByTestId(`provider-${BILLING.provider}`);
+    expect(card.textContent).not.toMatch(/Credential rejected/);
+    expect(card.textContent).not.toMatch(/replace it/);
+    expect(card.textContent).not.toMatch(/Can't connect/);
+  });
+
+  /**
    * WARP-2483 — the same two disconnected states the hub tile shows.
    *
    * ADR-041 §2 promises that disconnecting removes the key. `DISABLED` alone
@@ -434,6 +473,7 @@ describe("hub and credentials page agree about the credential", () => {
     "NOT_CONFIGURED",
     "PROVISIONING",
     "CONNECTED",
+    "CAPABILITY_LIMITED",
     "DEGRADED",
     "DRIFT_LOCKED",
     "NEEDS_RECONNECT",
@@ -455,6 +495,8 @@ describe("hub and credentials page agree about the credential", () => {
     NOT_CONFIGURED: "PROVISIONING",
     PROVISIONING: "PROVISIONING",
     CONNECTED: "CONNECTED",
+    // WARP-2623 — folded straight through, like ERROR and NEEDS_RECONNECT.
+    CAPABILITY_LIMITED: "CAPABILITY_LIMITED",
     DEGRADED: "DEGRADED",
     DRIFT_LOCKED: "DRIFT_LOCKED",
     NEEDS_RECONNECT: "NEEDS_RECONNECT",

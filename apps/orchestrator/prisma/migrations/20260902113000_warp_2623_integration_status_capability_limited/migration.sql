@@ -1,0 +1,23 @@
+-- WARP-2623 — add CAPABILITY_LIMITED to IntegrationStatus.
+--
+-- The persisted enum had no member for "the connection works and ONE dataset
+-- is refused", so `cloud-connection-state.ts` mapped every capability code
+-- (CAPABILITY_MISSING, CAPABILITY_NOT_AVAILABLE, SCOPE_MISSING,
+-- PROTECTED_CUSTOMER_DATA_DENIED) onto ERROR. A Basic-plan Shopify store that
+-- reads orders, products and inventory perfectly, and a Mailchimp account on a
+-- plan without one resource, both rendered as "Can't connect" — sending the
+-- owner to repair a credential that is fine while hiding the plan or scope
+-- change that would actually fix it.
+--
+-- POSITIONED, not appended. `prisma migrate diff --from-migrations
+-- --to-schema-datamodel` compares enum member ORDER, so a bare ADD VALUE
+-- reports drift against a datamodel that declares the member between CONNECTED
+-- and DEGRADED. Same reason WARP-2458's migration carries `BEFORE 'ERROR'`.
+--
+-- THIS STATEMENT IS ALONE IN THIS FILE ON PURPOSE.
+-- Prisma Migrate wraps a multi-statement migration file in a transaction, and
+-- a transaction may not USE a value added by an `ALTER TYPE ... ADD VALUE` in
+-- that same transaction. A second statement here would look correct in review
+-- and fail at apply time on a real database. Anything else this change needs
+-- goes in its own migration file.
+ALTER TYPE "IntegrationStatus" ADD VALUE 'CAPABILITY_LIMITED' BEFORE 'DEGRADED';

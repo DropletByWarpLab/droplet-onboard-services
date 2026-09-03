@@ -14,6 +14,10 @@ export type IntegrationStatus =
   | "NOT_CONFIGURED"
   | "PROVISIONING"
   | "CONNECTED"
+  // WARP-2623 — connected, with ONE dataset refused by the vendor's plan or
+  // the app's scope grant. Not ERROR: the credential is fine and the rest of
+  // the connection reads.
+  | "CAPABILITY_LIMITED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   | "NEEDS_RECONNECT"

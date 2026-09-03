@@ -71,6 +71,7 @@ import {
 } from "../erp-provider.js";
 import {
   claimDueErpCursors,
+  POLLABLE_CONNECTION_STATUSES,
   releaseErpCursorFailure,
   releaseErpCursorSuccess,
   upsertErpCursor,
@@ -541,8 +542,11 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
      * serves). Idempotent, and never resets an existing cursor's watermark.
      */
     async registerCursors() {
+      // WARP-2623 — the claim's own list, not a third copy of it. A status the
+      // scheduler polls but never registers a cursor for is a connection that
+      // silently syncs nothing.
       const live = await prisma.integrationConnection.findMany({
-        where: { status: { in: ["CONNECTED", "DEGRADED"] } },
+        where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
         select: { id: true, provider: true, status: true },
       });
       for (const conn of live) {
@@ -583,7 +587,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       let deferred = 0;
 
       const live = await prisma.integrationConnection.findMany({
-        where: { status: { in: ["CONNECTED", "DEGRADED"] } },
+        where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
         select: { id: true, provider: true, status: true },
       });
 

@@ -8197,6 +8197,12 @@ export type SaasConnectionState =
   | "PROVISIONING"
   | "CONNECTED"
   | "NEEDS_RECONNECT"
+  // WARP-2623 — the box's `CAPABILITY_LIMITED`, folded straight through by
+  // `saasConnectionState`. Mirrored here for the same reason `ERROR` was: a
+  // member the box can send and this union lacks makes `STATE_COPY[view.state]`
+  // `undefined` and takes the credentials page down on the very row it exists
+  // to explain.
+  | "CAPABILITY_LIMITED"
   | "ERROR"
   | "DEGRADED"
   | "DRIFT_LOCKED"

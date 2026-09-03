@@ -56,6 +56,8 @@ const STATUS_MEMBERS: Record<IntegrationStatusName, true> = {
   NOT_CONFIGURED: true,
   PROVISIONING: true,
   CONNECTED: true,
+  // WARP-2623 — the ninth member.
+  CAPABILITY_LIMITED: true,
   DEGRADED: true,
   DRIFT_LOCKED: true,
   NEEDS_RECONNECT: true,
@@ -179,5 +181,58 @@ describe("the NEEDS_RECONNECT migration (WARP-2458)", () => {
     expect(sql).toMatch(
       /ALTER TYPE "IntegrationStatus" ADD VALUE 'NEEDS_RECONNECT' BEFORE 'ERROR';/,
     );
+  });
+
+  /**
+   * WARP-2623 — the same three properties for CAPABILITY_LIMITED.
+   *
+   * Written as its own block rather than folded into the WARP-2458 one because
+   * each migration is a separate file with its own single statement, and a
+   * shared assertion over "the migration" would have to pick one of them.
+   */
+  describe("the CAPABILITY_LIMITED migration (WARP-2623)", () => {
+    const dirsFor = () =>
+      readdirSync(migrationsDir).filter((d) => d.includes("capability_limited"));
+
+    it("ships exactly one migration adding CAPABILITY_LIMITED", () => {
+      expect(dirsFor()).toHaveLength(1);
+    });
+
+    it("keeps the ALTER TYPE … ADD VALUE alone in its file", () => {
+      // Mutation: add a second statement to the WARP-2623 migration → red.
+      const statements = statementsIn(
+        readFileSync(join(migrationsDir, dirsFor()[0], "migration.sql"), "utf8"),
+      );
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toMatch(/^ALTER TYPE .* ADD VALUE/i);
+    });
+
+    it("pins the new value between CONNECTED and DEGRADED", () => {
+      // The datamodel declares it there, and `migrate diff` compares order.
+      // Mutation: drop `BEFORE 'DEGRADED'` → the value appends, the datamodel
+      // and the database disagree about position, and drift is reported on a
+      // schema that is otherwise correct.
+      const sql = readFileSync(join(migrationsDir, dirsFor()[0], "migration.sql"), "utf8");
+      expect(sql).toMatch(
+        /ALTER TYPE "IntegrationStatus" ADD VALUE 'CAPABILITY_LIMITED' BEFORE 'DEGRADED';/,
+      );
+    });
+
+    it("sorts after the migration that adds the value it positions against", () => {
+      // `BEFORE 'DEGRADED'` only resolves once `IntegrationStatus` exists, and
+      // Prisma applies migrations in directory-name order. Deliberately NOT
+      // "is the newest migration in the tree" — that assertion would go red on
+      // the next unrelated migration anyone adds.
+      const creating = readdirSync(migrationsDir)
+        .filter((d) => /^\d{14}_/.test(d))
+        .sort()
+        .find((d) =>
+          readFileSync(join(migrationsDir, d, "migration.sql"), "utf8").includes(
+            'CREATE TYPE "IntegrationStatus"',
+          ),
+        );
+      expect(creating, "no migration creates IntegrationStatus").toBeDefined();
+      expect(dirsFor()[0] > creating!).toBe(true);
+    });
   });
 });

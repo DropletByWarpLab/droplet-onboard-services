@@ -48,6 +48,18 @@ export function ConnectorCard({
     (status === null || status === "NOT_CONFIGURED");
 
   const isConnected = status === "CONNECTED";
+  /**
+   * WARP-2623 — connected, with one dataset refused.
+   *
+   * It sits with the connected tiles and NOT with the errored ones, because
+   * every other branch below offers the owner a credential: "Retry" re-runs
+   * the probe against a key that is fine, and "Connect" runs the setup wizard
+   * and stores a SECOND credential beside the working one. The fix is a plan
+   * or a scope grant in the vendor's console, so the only action this tile can
+   * honestly offer is the detail surface — which is also where Disconnect
+   * lives, and disconnecting stays available exactly as it is for CONNECTED.
+   */
+  const capabilityLimited = status === "CAPABILITY_LIMITED";
   const needsAttention = status === "DEGRADED" || status === "DRIFT_LOCKED";
   const errored = status === "ERROR";
   const pending = status === "PROVISIONING";
@@ -74,10 +86,10 @@ export function ConnectorCard({
   // Connected and needs-attention tiles go to the detail surface; everything
   // else runs the setup flow. Whichever it is, the tile knows whether that
   // action can actually happen.
-  const usesOpen = isConnected || needsAttention || credentialRetained;
+  const usesOpen = isConnected || capabilityLimited || needsAttention || credentialRetained;
   const action = usesOpen ? entry.open : entry.connect;
   const handler = usesOpen ? onOpen : onConnect;
-  const label = isConnected
+  const label = isConnected || capabilityLimited
     ? "Open"
     : needsAttention
       ? "Fix connection"

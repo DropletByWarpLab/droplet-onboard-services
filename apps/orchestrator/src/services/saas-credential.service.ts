@@ -73,6 +73,9 @@ export type IntegrationStatusName =
   | "NOT_CONFIGURED"
   | "PROVISIONING"
   | "CONNECTED"
+  // WARP-2623 — usable, with ONE dataset refused by the vendor's plan or the
+  // app's scope grant.
+  | "CAPABILITY_LIMITED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   // WARP-2458 — the persisted enum finally carries what `SaasConnectionState`
@@ -105,6 +108,12 @@ export type SaasConnectionState =
   | "PROVISIONING"
   | "CONNECTED"
   | "NEEDS_RECONNECT"
+  // WARP-2623 — the persisted `CAPABILITY_LIMITED`, passed straight through
+  // rather than folded into ERROR. The configurator is the page an owner lands
+  // on to repair a connection, and this is the state where there is nothing on
+  // it to repair: the credential is valid and stored, and the missing dataset
+  // is a plan or scope decision in the vendor's own console.
+  | "CAPABILITY_LIMITED"
   // WARP-2458 — present since NEEDS_RECONNECT stopped being inferred from it.
   // Terminal in the sense the enum's docstring means: reconnecting will not
   // fix it, so the view must be able to say so rather than folding it into an
@@ -305,6 +314,8 @@ export function saasConnectionState(
       return "CONNECTED";
     case "NEEDS_RECONNECT":
       return "NEEDS_RECONNECT";
+    case "CAPABILITY_LIMITED":
+      return "CAPABILITY_LIMITED";
     case "ERROR":
       return "ERROR";
     case "DEGRADED":

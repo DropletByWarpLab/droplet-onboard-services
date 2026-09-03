@@ -116,12 +116,15 @@ export async function fetchActivityRange(
 // before that the hub list carried no timestamp at all and the only way to
 // get one was the provider-specific /api/integrations/eaglesoft route.
 
-/** The eight explicit lifecycle states. A provider with no row reports
+/** The nine explicit lifecycle states. A provider with no row reports
  *  NOT_CONFIGURED — it is never absent-meaning-off. */
 export type IntegrationStatusName =
   | "NOT_CONFIGURED"
   | "PROVISIONING"
   | "CONNECTED"
+  // WARP-2623 — connected, with ONE dataset refused by the vendor's plan or
+  // scope grant.
+  | "CAPABILITY_LIMITED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   | "NEEDS_RECONNECT"

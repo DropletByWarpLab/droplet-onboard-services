@@ -73,6 +73,11 @@ export type IntegrationStatusName =
   | "NOT_CONFIGURED"
   | "PROVISIONING"
   | "CONNECTED"
+  // WARP-2623 — the connection works and ONE dataset is refused by the
+  // vendor's plan or scope grant. Distinct from ERROR because a new credential
+  // fixes nothing, and distinct from CONNECTED because the owner is owed the
+  // fact that a dataset is missing.
+  | "CAPABILITY_LIMITED"
   | "DEGRADED"
   | "DRIFT_LOCKED"
   // WARP-2458 — the eighth member. ADR-041 §5 names it mandatory; a revoked

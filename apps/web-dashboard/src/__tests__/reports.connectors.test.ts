@@ -22,6 +22,7 @@ const ALL: IntegrationStatusName[] = [
   "NOT_CONFIGURED",
   "PROVISIONING",
   "CONNECTED",
+  "CAPABILITY_LIMITED",
   "DEGRADED",
   "DRIFT_LOCKED",
   "NEEDS_RECONNECT",
@@ -31,18 +32,18 @@ const ALL: IntegrationStatusName[] = [
 
 const NOW = new Date("2026-08-14T09:41:00.000Z");
 
-describe("PILL — all eight statuses stay distinct", () => {
+describe("PILL — all nine statuses stay distinct", () => {
   it("covers every status", () => {
     for (const s of ALL) expect(PILL[s]).toBeDefined();
-    // WARP-2458 added the eighth. Mutation: add a member to the union and
-    // not to PILL → red, because `Record<IntegrationStatusName, …>` and this
-    // count disagree.
-    expect(Object.keys(PILL)).toHaveLength(8);
+    // WARP-2458 added the eighth, WARP-2623 the ninth. Mutation: add a member
+    // to the union and not to PILL → red, because `Record<IntegrationStatusName,
+    // …>` and this count disagree.
+    expect(Object.keys(PILL)).toHaveLength(9);
   });
 
   it("gives each status its own label — none collapsed into another", () => {
     const labels = ALL.map((s) => PILL[s].label);
-    expect(new Set(labels).size).toBe(8);
+    expect(new Set(labels).size).toBe(9);
   });
 
   it("uses the brief's exact copy", () => {
@@ -56,6 +57,10 @@ describe("PILL — all eight statuses stay distinct", () => {
     // Names the ACTION, not the symptom: the one thing the owner can do
     // about a revoked credential is go and paste a new one.
     expect(PILL.NEEDS_RECONNECT.label).toBe("Paste a new key");
+    // WARP-2623 — the connection WORKS. Mutation: reuse "Can't connect" here
+    // → red, and a syncing Basic-plan store is drawn as a broken one.
+    expect(PILL.CAPABILITY_LIMITED.label).toBe("Connected · limited");
+    expect(PILL.CAPABILITY_LIMITED.tone).not.toBe("bad");
   });
 
   it("pairs every pill with an icon — status is never colour alone", () => {
@@ -84,6 +89,15 @@ describe("statusWeight — problems first", () => {
     // A throttle clears itself; a revoked credential waits for a person. The
     // one that needs a human sorts first. Mutation: swap the two weights → red.
     expect(statusWeight("NEEDS_RECONNECT")).toBeLessThan(statusWeight("DEGRADED"));
+  });
+
+  it("sorts CAPABILITY_LIMITED below the problems and above CONNECTED", () => {
+    // WARP-2623 — it is not a problem (nothing is broken and no retry helps),
+    // but it is the one healthy state still carrying a fact the owner has not
+    // seen. Mutation: give it CONNECTED's weight → the second assertion goes
+    // red and a limited connector hides among the fully healthy ones.
+    expect(statusWeight("DEGRADED")).toBeLessThan(statusWeight("CAPABILITY_LIMITED"));
+    expect(statusWeight("CAPABILITY_LIMITED")).toBeLessThan(statusWeight("CONNECTED"));
   });
 
   it("sorts an unknown status WITH the problems, not last", () => {

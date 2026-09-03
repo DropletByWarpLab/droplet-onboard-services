@@ -117,11 +117,15 @@ State is **always an explicit enum column**, never derived from a row's absence 
 
 ```
 NOT_CONFIGURED → PROVISIONING → CONNECTED
+                              ↘ CAPABILITY_LIMITED (works; ONE dataset refused by the vendor's plan or the app's scopes)
                               ↘ DEGRADED (can't reach the server; last-synced shown, labelled stale)
                               ↘ DRIFT_LOCKED (schema changed after an upgrade → writes frozen)
+                              ↘ NEEDS_RECONNECT (the stored credential was revoked or rotated → the owner pastes a new one)
                               ↘ ERROR (unexpected failure)
 DISABLED (turned off)
 ```
+
+`CAPABILITY_LIMITED` (WARP-2623) and `NEEDS_RECONNECT` (WARP-2458) are the two members this diagram used to fold into `ERROR`, and both distinctions are the product. `NEEDS_RECONNECT` says a new credential fixes it; `CAPABILITY_LIMITED` says the credential is fine and the fix is a plan or scope change in the vendor's own console — sync keeps running through it, because withholding one dataset is not a reason to stop reading the others.
 
 A connect attempt that can't reach the external system lands in **`PROVISIONING`**, never a fake `CONNECTED`. This is honest degradation — the dashboard shows "connecting / not connected", which is the truth.
 
