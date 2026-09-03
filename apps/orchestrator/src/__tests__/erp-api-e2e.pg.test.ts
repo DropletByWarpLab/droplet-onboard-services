@@ -33,13 +33,21 @@ vi.unmock("@prisma/client");
 // @ts-expect-error -- plain ESM JS harness, outside any tsconfig rootDir.
 import { startMockEaglesoftApi } from "../../../../services/erp-connector/harness/eaglesoft-api/mock-server.mjs";
 // @ts-expect-error -- see above.
-import { opensslAvailable } from "../../../../services/erp-connector/harness/eaglesoft-api/certs.mjs";
+import { liveBoxSkipReason, announceLiveBoxSkip } from "../../../../services/erp-connector/harness/eaglesoft-api/preflight.mjs";
 
-const RUN =
+const PG_LANE =
   process.env.RUN_PG_INTEGRATION === "1" &&
   typeof process.env.DATABASE_URL === "string" &&
-  process.env.DATABASE_URL.length > 0 &&
-  opensslAvailable();
+  process.env.DATABASE_URL.length > 0;
+
+/** Same live-box prerequisites as the other two harness suites — the `openssl`
+ *  CLI, and a Node whose built-in fetch takes the CA-trusting undici dispatcher
+ *  (WARP-2611) — on top of this lane's own database gate. Only probed inside the
+ *  pg lane, so the DB-less run neither pays for it nor reports a second reason
+ *  for a suite it was already skipping. */
+const LIVE_BOX_SKIP_REASON: string | null = PG_LANE ? liveBoxSkipReason() : null;
+
+const RUN = PG_LANE && LIVE_BOX_SKIP_REASON === null;
 
 /**
  * Boot an Express app on a real loopback port and return a fetch-based client.
@@ -73,6 +81,8 @@ async function serve(app: any) {
     close: () => new Promise<void>((res) => server.close(() => res())),
   };
 }
+
+announceLiveBoxSkip("ERP REST track — HTTP → Postgres → live Eaglesoft box", LIVE_BOX_SKIP_REASON);
 
 describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft box", () => {
   let prisma: any;
