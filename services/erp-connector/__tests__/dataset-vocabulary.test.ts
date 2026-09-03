@@ -473,7 +473,13 @@ describe("an unrecognized dataset name is refused, never admitted", () => {
 
       const snapshot = await scanDropDirectory(root, profiles, {
         ...DEFAULT_SCAN_LIMITS,
-        now: () => Date.UTC(2026, 7, 19, 12, 0, 0),
+        // A NUMBER, not a thunk. `ScanLimits.now` is `number` (scan.ts:110) and
+        // is consumed arithmetically as `limits.now - info.mtimeMs`; the two
+        // `now: () => …` overrides elsewhere in this file are correct because
+        // they go to `ExportDropConnector`'s `now?: () => number` instead.
+        // Passing the function here made that subtraction `NaN`, so the
+        // quiet-period comparison was silently always false.
+        now: Date.UTC(2026, 7, 19, 12, 0, 0),
       });
       const payouts = snapshot.datasets.get("payout");
       expect(payouts, "the payout dataset was not scanned").toBeDefined();
