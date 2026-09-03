@@ -3,15 +3,24 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 /**
  * WARP-2497 — the ONE cloud-connector read tool.
  *
- * The connected SaaS accounts (Stripe, HubSpot, Mailchimp) expose ~10 record
- * shapes between them. A tool per vendor — let alone per dataset — would add
- * ten `{type,function:{…}}` blocks to every completion request, and the
+ * The connected SaaS accounts (Stripe, HubSpot, Mailchimp, Shopify) expose ~13
+ * record shapes between them. A tool per vendor — let alone per dataset — would
+ * add thirteen `{type,function:{…}}` blocks to every completion request, and the
  * full-registry serialization canary already sits within 3 KB of its 100 KB
  * ceiling. So the vendor is NOT a tool axis and not an argument either: the
  * dataset name determines the provider (`charge`/`invoice` ⇒ Stripe,
  * `contact`…`engagement` ⇒ HubSpot, `campaign`/`audience_member`/
- * `ecommerce_order` ⇒ Mailchimp), and the orchestrator route owns that
- * mapping. One tool, one route, one small schema.
+ * `ecommerce_order` ⇒ Mailchimp, `order`/`product`/`customer` ⇒ Shopify), and
+ * the orchestrator route owns that mapping. One tool, one route, one small
+ * schema.
+ *
+ * WARP-2354 is the proof that this generalises: adding Shopify's three datasets
+ * cost three lines here and three in `CLOUD_DATASET_READS`, and no new tool.
+ * Note `ecommerce_order` (Mailchimp's marketing-attribution shadow) and `order`
+ * (Shopify's order of record) are DIFFERENT datasets on purpose — the first has
+ * no tax, refund or fulfilment column, so revenue arithmetic must not be
+ * attempted on it. Collapsing them here would route a revenue question to
+ * whichever vendor won the name.
  *
  * Exported so the orchestrator's cross-package drift test can assert the
  * route's dataset vocabulary and this enum are the same list — the two sides
@@ -28,6 +37,9 @@ export const CLOUD_QUERY_DATASETS = [
   "campaign",
   "audience_member",
   "ecommerce_order",
+  "order",
+  "product",
+  "customer",
 ] as const;
 
 const DATASET_SET: ReadonlySet<string> = new Set(CLOUD_QUERY_DATASETS);
@@ -105,9 +117,17 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "cloud_query_dataset",
+  // The vendor list that used to sit in this sentence is GONE, and its removal
+  // is the point rather than a saving. Adding Shopify's three datasets took the
+  // full chat pool to 60,023 chars against `base-prompt-budget.test.ts`'s
+  // 60,000 tripwire, and that file's instruction for exactly this moment is
+  // "trim the schema" — never raise the ceiling, which only relocates the
+  // cliff. Naming the vendors here duplicated the `enum` the model is already
+  // shown, cost ~38 chars, and grew with every vendor: a description that lists
+  // its providers is a description that cannot survive the fifth one.
   description:
-    "Read business records from the connected cloud accounts (Stripe, HubSpot, Mailchimp) " +
-    "by dataset name. Read-only; the dataset picks the provider.",
+    "Read business records from the connected cloud accounts by dataset name. " +
+    "Read-only; the dataset picks the provider.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

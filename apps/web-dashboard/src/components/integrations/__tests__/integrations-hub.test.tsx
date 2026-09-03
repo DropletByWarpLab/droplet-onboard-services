@@ -31,9 +31,30 @@ import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
 import type { IntegrationConnection, IntegrationStatus } from "@/lib/erp-types";
 
-vi.mock("@/lib/api.erp", () => ({
-  fetchIntegrations: vi.fn(),
+/**
+ * WARP-2518 — the tile now carries a Disconnect control, and that control
+ * mirrors the route's `requireRole("owner","admin")` gate by reading `useAuth`.
+ * The hub itself still names no role; the gate lives in the control, which is
+ * what stops a fourth surface forgetting it.
+ *
+ * A mutable role rather than a fixed one, so the gate is a thing tests can
+ * exercise instead of a thing they merely satisfy.
+ */
+const { session, disconnectProviderMock } = vi.hoisted(() => ({
+  // A holder, not a bare `let`: the mock factory is hoisted above every
+  // top-level binding, so it has to close over an object it can read later.
+  session: { role: "owner" as string | undefined },
+  disconnectProviderMock: vi.fn(),
 }));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: session.role ? { id: "u-1", role: session.role } : null }),
+}));
+
+vi.mock("@/lib/api.erp", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api.erp")>();
+  return { ...actual, fetchIntegrations: vi.fn(), disconnectProvider: disconnectProviderMock };
+});
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -165,6 +186,8 @@ function readSource(relative: string): string {
 
 beforeEach(() => {
   push.mockReset();
+  session.role = "owner";
+  disconnectProviderMock.mockReset().mockResolvedValue({});
   vi.mocked(fetchIntegrations).mockReset();
 });
 
@@ -172,6 +195,42 @@ afterEach(() => {
   vi.mocked(fetchIntegrations).mockReset();
   extraDescriptors.length = 0;
 });
+
+/** The tile's Disconnect trigger, or null when it does not offer one. */
+function disconnectButton(card: HTMLElement): HTMLElement | null {
+  return within(card).queryByRole("button", { name: /^Disconnect / });
+}
+
+/**
+ * The tile's buttons MINUS the WARP-2518 disconnect control.
+ *
+ * The dispatch tests are about the tile's own action, and a tile can now carry
+ * a second, destructive button. Filtering by label rather than by DOM position
+ * keeps those tests asserting what they always asserted; a bare
+ * `getByRole("button")` would now fail for a reason that has nothing to do
+ * with dispatch.
+ *
+ * `.trim()`: the control's label is an icon plus text, so `textContent` carries
+ * the whitespace between them and an anchored match would never fire.
+ */
+function primaryButtons(card: HTMLElement): HTMLElement[] {
+  return within(card)
+    .queryAllByRole("button")
+    .filter((b) => !/^(Disconnect |Keep connected$)/.test((b.textContent ?? "").trim()));
+}
+
+/** The tile's single primary action; throws if the tile has none or many. */
+function primaryButton(card: HTMLElement): HTMLElement {
+  const primary = primaryButtons(card);
+  if (primary.length !== 1) {
+    throw new Error(
+      `expected exactly one primary action, found ${primary.length}: ${primary
+        .map((b) => b.textContent)
+        .join(" | ")}`,
+    );
+  }
+  return primary[0];
+}
 
 // ---------------------------------------------------------------------------
 // (a) Dispatch — WARP-2324
@@ -217,7 +276,7 @@ describe("hub dispatch", () => {
       await waitFor(() => expect(renderedNames(container)).toContain(name));
 
       const card = tile(container, name);
-      const button = within(card).queryByRole("button");
+      const button = primaryButtons(card)[0] ?? null;
 
       if (!button || (button as HTMLButtonElement).disabled) {
         // No live affordance is fine — but only if the tile says why, in
@@ -251,20 +310,20 @@ describe("hub dispatch", () => {
    * regression test that is vacuously green because the shipped data cannot
    * make the defect observable.
    *
-   * Stripe, HubSpot and Mailchimp are `available` in the SHIPPED registry, so
+   * Stripe, HubSpot, Mailchimp and Shopify are `available` in the SHIPPED registry, so
    * this version needs no fixture at all. Mutation: reinstate
    * `if (e.meta.id === "eaglesoft")` on `connectConnector` and all three go
    * red against production data.
    */
   it("dispatches Connect for the three shipped SaaS vendors", async () => {
-    for (const name of ["Stripe", "HubSpot", "Mailchimp"]) {
+    for (const name of ["Stripe", "HubSpot", "Mailchimp", "Shopify"]) {
       vi.mocked(fetchIntegrations).mockResolvedValue([]);
       push.mockReset();
       const { container, unmount } = renderHub();
       await waitFor(() => expect(renderedNames(container)).toContain(name));
 
       const card = tile(container, name);
-      const button = within(card).getByRole("button");
+      const button = primaryButton(card);
       expect((button as HTMLButtonElement).disabled, `${name}'s action is disabled`).toBe(false);
 
       fireEvent.click(button);
@@ -310,7 +369,7 @@ describe("hub dispatch", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
 
-    fireEvent.click(within(tile(container, "Acme PMS")).getByRole("button"));
+    fireEvent.click(primaryButton(tile(container, "Acme PMS")));
     expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
   });
 
@@ -366,7 +425,7 @@ describe("hub dispatch", () => {
       ),
     ).toBeTruthy();
 
-    const button = within(card).getByRole("button");
+    const button = primaryButton(card);
     expect(button.textContent).toContain("Remove credential");
     fireEvent.click(button);
     expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
@@ -414,7 +473,7 @@ describe("hub dispatch", () => {
   it("a connected provider with no detail view says so instead of doing nothing", async () => {
     vi.mocked(fetchIntegrations).mockResolvedValue([conn("quickbooks-online", "CONNECTED")]);
     renderHub();
-    const row = await screen.findByRole("button", { name: /QuickBooks/ });
+    const row = await screen.findByRole("button", { name: /^QuickBooks/ });
 
     fireEvent.click(row);
     expect(push).not.toHaveBeenCalled();
@@ -461,7 +520,8 @@ describe("status merge on the provider key the backend emits", () => {
     expect(within(tile(container, "QuickBooks")).queryByText("Not connected")).toBeNull();
     // …and it reaches the Connected strip, which is what the owner actually
     // looks at first.
-    expect(screen.getByRole("button", { name: /QuickBooks/ })).toBeTruthy();
+    // `^`: the Connected-strip row, not the tile's "Disconnect QuickBooks".
+    expect(screen.getByRole("button", { name: /^QuickBooks/ })).toBeTruthy();
   });
 
   /**
@@ -537,6 +597,8 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      // WARP-2296 — Shopify, same story: one descriptor, one tile.
+      "Shopify",
     ]);
   });
 
@@ -569,6 +631,7 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      "Shopify",
       "Generic Export",
       "M365",
     ]);
@@ -593,10 +656,10 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Seven catalog tiles (four original + the three WARP-2214 vendors) absorb
+    // Eight catalog tiles (four original + the four WARP-2214 vendors) absorb
     // four of the rows; the two the catalog knows nothing about each get their
     // own.
-    expect(tiles(container)).toHaveLength(9);
+    expect(tiles(container)).toHaveLength(10);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -605,6 +668,7 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      "Shopify",
       "M365",
       "Something Nobody Wrote A Tile For",
     ]) {
@@ -918,5 +982,188 @@ describe("a disconnected tile says whether the credential was actually removed",
     expect(text).toContain("Turned off");
     expect(text).not.toContain("credential removed");
     expect(text).not.toContain("credential still stored");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2518 — Disconnect on the hub tile
+// ---------------------------------------------------------------------------
+
+/**
+ * The defect: the only Disconnect control in the product lived inside
+ * `ManageSheet`, reached from the practice surface's connected hero. That is a
+ * surface exactly one provider has. Every cloud connection an owner made
+ * through this hub could be created here and removed only by calling the API,
+ * which makes ADR-041 §2's "disconnecting purges the stored tokens" a promise
+ * with no button behind it.
+ *
+ * These run against the SHIPPED registry wherever they can, and against a
+ * fixture descriptor only where a second vendor is what makes the defect
+ * observable — the wave-1 trap this file's header already records.
+ */
+describe("a connected tile can be disconnected from the hub", () => {
+  async function hubWith(rows: IntegrationConnection[]) {
+    extraDescriptors.push(ACME);
+    vi.mocked(fetchIntegrations).mockResolvedValue(rows);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+    return container;
+  }
+
+  /**
+   * The headline. Against `origin/stage` the tile has no Disconnect at all.
+   *
+   * Mutation: drop the `<DisconnectControl>` block from `ConnectorCard` → red
+   * here, which IS the shipped defect.
+   */
+  it("offers Disconnect on a connected tile", async () => {
+    const container = await hubWith([conn("acme-pms", "CONNECTED")]);
+    expect(disconnectButton(tile(container, "Acme PMS"))).not.toBeNull();
+  });
+
+  /**
+   * The provider posted is the key the BOX reported, not the catalog id.
+   *
+   * This is the WARP-2291 join defect wearing a destructive hat: `quickbooks`
+   * and `quickbooks-online` differ, and a disconnect addressed to the catalog
+   * id would 404 while the tile showing the live row sat there looking
+   * actionable. The shipped registry makes this observable with no fixture.
+   *
+   * Mutation: pass `meta.id` instead of `reported.provider` → red, because the
+   * call carries `quickbooks` for a `quickbooks-online` row.
+   */
+  it("posts the provider key the box reported, not the catalog id", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([conn("quickbooks-online", "CONNECTED")]);
+    const { container } = renderHub();
+    await screen.findByText("QuickBooks");
+
+    fireEvent.click(disconnectButton(tile(container, "QuickBooks"))!);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    await waitFor(() => expect(disconnectProviderMock).toHaveBeenCalledTimes(1));
+    expect(disconnectProviderMock).toHaveBeenCalledWith("quickbooks-online");
+  });
+
+  /**
+   * The confirmation is a step, not a courtesy: the first click must not purge
+   * anything.
+   *
+   * Mutation: call `disconnectProvider` straight from the trigger's `onClick`
+   * → red, because a single click on a red link then destroys a credential.
+   */
+  it("purges nothing until the confirmation is accepted", async () => {
+    const container = await hubWith([conn("acme-pms", "CONNECTED")]);
+
+    fireEvent.click(disconnectButton(tile(container, "Acme PMS"))!);
+    expect(disconnectProviderMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("disconnect-confirm").textContent).toContain(
+      "removes the stored credential",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep connected" }));
+    expect(disconnectProviderMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The result reaches the owner in the EXISTING words, via a re-read — the
+   * hub asserts nothing about the disconnect itself.
+   *
+   * Mutation: drop `onDisconnected` from the hub page's `<ConnectorCard>` →
+   * red, because the tile then keeps rendering "Connected" after a purge the
+   * box confirmed.
+   */
+  it("re-reads after a confirmed disconnect, so the purge line appears", async () => {
+    extraDescriptors.push(ACME);
+    vi.mocked(fetchIntegrations).mockResolvedValueOnce([conn("acme-pms", "CONNECTED")]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
+
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("acme-pms", "DISABLED", { credentialsPurged: true }),
+    ]);
+    fireEvent.click(disconnectButton(tile(container, "Acme PMS"))!);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    await waitFor(() =>
+      expect(tile(container, "Acme PMS").textContent).toContain(
+        "Disconnected · credential removed",
+      ),
+    );
+  });
+
+  /**
+   * A failed disconnect is SAID, never swallowed (WARP-2519's rule, applied to
+   * the new surface by construction). The message is built from the typed
+   * code, so nothing the server echoed can reach the DOM (rule 19).
+   *
+   * Mutation: replace the control's `catch` body with `{}` → red, because the
+   * tile then shows nothing at all and the owner believes the key is gone.
+   */
+  it("says so when the box refuses, and names no response body", async () => {
+    const container = await hubWith([conn("acme-pms", "CONNECTED")]);
+    const err = Object.assign(new Error("secret-bearing detail"), {
+      code: "FORBIDDEN",
+      status: 403,
+      body: { token: "sk_live_should_never_render" },
+    });
+    disconnectProviderMock.mockRejectedValueOnce(err);
+
+    fireEvent.click(disconnectButton(tile(container, "Acme PMS"))!);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't disconnect Acme PMS (FORBIDDEN)");
+    expect(container.textContent).not.toContain("sk_live_should_never_render");
+    expect(container.textContent).not.toContain("secret-bearing detail");
+  });
+
+  /**
+   * Not offered where there is nothing to disconnect, and not offered where
+   * the box just said the key is already gone — that second one would
+   * contradict the line rendered directly above it.
+   *
+   * Mutation: make `disconnectable` a bare `reported !== null` → red on both,
+   * because a never-configured tile then offers to purge nothing.
+   */
+  it("is absent for NOT_CONFIGURED and for an already-purged DISABLED", async () => {
+    const container = await hubWith([
+      conn("acme-pms", "NOT_CONFIGURED"),
+      conn("quickbooks-online", "DISABLED", { credentialsPurged: true }),
+    ]);
+    expect(disconnectButton(tile(container, "Acme PMS"))).toBeNull();
+    expect(disconnectButton(tile(container, "QuickBooks"))).toBeNull();
+  });
+
+  /**
+   * …but it IS offered for the state whose remedy was previously reachable
+   * only through `ManageSheet`: disconnected, credential still stored. The
+   * tile's own "Remove credential" action routes to a detail surface that a
+   * cloud provider does not have, so without this the owner is told the key is
+   * still there and given nowhere to finish the job.
+   *
+   * Mutation: exclude every DISABLED row from `disconnectable` → red.
+   */
+  it("is offered when the credential is still stored", async () => {
+    const container = await hubWith([
+      conn("acme-pms", "DISABLED", { credentialsPurged: false }),
+    ]);
+    expect(disconnectButton(tile(container, "Acme PMS"))).not.toBeNull();
+  });
+
+  /**
+   * The RBAC mirror. `POST /api/integrations/:provider/disconnect` is
+   * `requireRole("owner","admin")`, so a `family` session must not be shown a
+   * button whose only possible outcome is a 403 — the live-button-that-cannot-
+   * act failure `ConnectorCard`'s own docstring forbids.
+   *
+   * Mutation: delete the `isAdmin` gate in `DisconnectControl` → red.
+   */
+  it("is hidden from a non-admin", async () => {
+    session.role = "family";
+    const container = await hubWith([conn("acme-pms", "CONNECTED")]);
+    expect(disconnectButton(tile(container, "Acme PMS"))).toBeNull();
+    // …and the tile's own action is untouched, so the gate hides one control
+    // rather than breaking the card.
+    expect(primaryButton(tile(container, "Acme PMS")).textContent).toContain("Open");
   });
 });

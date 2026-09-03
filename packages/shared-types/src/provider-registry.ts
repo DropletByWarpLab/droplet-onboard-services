@@ -538,6 +538,120 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 6,
     },
   },
+  {
+    id: "shopify",
+    displayName: "Shopify",
+    category: "Commerce",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "shopDomain",
+        label: "Store domain",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // NOT secret, and stored separately from the credentials on purpose
+        // (ADR-042 §5: "non-secret connection facts … go in `providerConfig`,
+        // never in the encrypted blob and never re-derived per request").
+        // Keeping it here means answering "where does this connection dial?"
+        // never requires decrypting a credential — which matters more on this
+        // track than anywhere else, because the store domain IS the host for
+        // both the API and the token endpoint.
+        //
+        // `SHOPIFY_SHOP_NAME_PATTERN` with the suffix appended. The suffix is
+        // mandatory in the FORM even though the connector accepts a bare
+        // handle: a merchant typing a custom domain they pointed at the store
+        // is the mistake this field exists to catch, and Shopify authenticates
+        // only on the myshopify one.
+        pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.myshopify\\.com$",
+        // The help text names the SUFFIX and never a sampled store: a
+        // "your-store.myshopify.com" example here is a bare hostname in a
+        // string literal, which `egress-gate` reads as an unregistered
+        // destination and denies — correctly, since the dynamic entry
+        // registers no hosts. The example belongs in the setup guide, which
+        // the scanner does not read.
+        help:
+          "Your store's .myshopify.com address, not a custom domain you point at the store. " +
+          "Shopify authenticates on this one.",
+      },
+      {
+        name: "clientId",
+        label: "Client ID",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `SHOPIFY_CLIENT_CREDENTIAL_PATTERN`. The NEGATIVE half is the
+        // boundary rejection ADR-042 §4 requires: a `shpat_` admin-created
+        // token is refused before it is ever stored, because Shopify removed
+        // the flow that minted it on 2026-01-01 and it cannot be re-created if
+        // it stops working. The positive half is deliberately loose — Shopify
+        // publishes no format guarantee, and a false rejection here blocks a
+        // paying customer's onboarding for no security gain.
+        //
+        // Marked `secret` although a client id is not, strictly, a secret: it
+        // is half of a credential PAIR that authenticates on its own, so it is
+        // sealed with the other half rather than left in `providerConfig`
+        // where a read view would render it.
+        pattern: "^(?!shp(at|ca|pa|ss)_)\\S+$",
+        help:
+          "From your own Dev Dashboard app at shopify.dev, in the same Shopify organization " +
+          "as the store. An old shpat_ token is not this — that flow was removed in 2026.",
+      },
+      {
+        name: "clientSecret",
+        label: "Client secret",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // The only vendor in WARP-2214 whose paste includes a client secret —
+        // the MERCHANT's secret, for the MERCHANT's app, on the MERCHANT's box
+        // (ADR-042 §2). Compatible with §3 precisely because Warp Lab minted
+        // none of it, and Shopify's own rule that the app and the store share
+        // an organization is what makes it unmistakably theirs.
+        pattern: "^(?!shp(at|ca|pa|ss)_)\\S+$",
+        help: "Shown once when the app is created. Treat it like a password.",
+      },
+    ],
+    // EMPTY, and not because this track stays on the LAN — it emphatically does
+    // not. Every request goes to `<store>.myshopify.com`, THE TOKEN MINT
+    // INCLUDED: Shopify's client-credentials grant posts to the store's own
+    // host, so unlike QuickBooks Online there is no separate OAuth host to
+    // register and no static name for the egress scanner to find.
+    // `dynamicEgress` below is what says so.
+    egressHosts: [],
+    dynamicEgress: {
+      configKey: "IntegrationConnection.providerConfig.shopDomain",
+      registryId: "shopify-admin-api",
+    },
+    // Mirrors `SHOPIFY_DATASETS`. These three names were RESERVED for Shopify
+    // when the vocabulary was widened (WARP-2280) and the columns were compared
+    // before this list was written — `ecommerce_order` is deliberately NOT here
+    // (it is Mailchimp's attribution shadow, with no tax, refund or fulfilment
+    // column) and neither is `contact` (a CRM person, not a storefront buyer).
+    datasets: ["order", "product", "customer"],
+    // No `rateLimit`: Shopify's GraphQL Admin API meters by QUERY COST against
+    // a refilling leaky bucket, not by a call ceiling over a period, so a
+    // monthly number invented here would be a guess wearing a policy's clothes
+    // — the same reason Dentrix Ascend and Mailchimp have none. The connector
+    // derives its backoff from the `throttleStatus` the vendor returns.
+    catalog: {
+      id: "shopify",
+      name: "Shopify",
+      category: "Commerce",
+      description: "Orders, catalogue and inventory read straight from your store — never a write.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
+      // customer creates this credential in a vendor console we do not control,
+      // so shipping the card without the click-path is shipping an unusable
+      // connector. Served from `docs/integrations/shopify.md`, bundled at build
+      // so the link works with no internet.
+      setupGuideHref: "/help/integrations/shopify",
+      order: 7,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**
