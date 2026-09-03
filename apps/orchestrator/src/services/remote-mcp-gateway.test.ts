@@ -16,9 +16,12 @@ import {
   type RemoteMcpGateDecision,
 } from "./remote-mcp-gateway.service.js";
 
-const recordActivity = vi.fn(async () => null);
+/** Typed with its one parameter so the row-shape assertions below can read it
+ *  — `vi.fn(async () => …)` infers an empty tuple and `calls[0][0]` is `never`
+ *  (a `tsc` error vitest itself would never have shown). */
+const recordActivity = vi.fn(async (_params: Record<string, unknown>) => null);
 vi.mock("./activity.singleton.js", () => ({
-  recordActivity: (...args: unknown[]) => recordActivity(...(args as [])),
+  recordActivity: (params: Record<string, unknown>) => recordActivity(params),
   getActivitySigner: () => null,
 }));
 
