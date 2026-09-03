@@ -158,14 +158,24 @@ apply_fips_mode() {
 _rewrite_database_url_sslmode() {
   local target="$1"
   local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
-  local stage="${env_file}.upsert.$$"
+  # WARP-2621 / WARP-232: once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Staging beside the link and renaming onto
+  # it would REPLACE the link with a plain file on the unencrypted boot disk —
+  # and the stage sibling would itself be a full-secrets copy landing there.
+  # Resolve the link and write THROUGH it, exactly as _upsert_env_kv does.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+  local stage="${env_target}.upsert.$$"
   [ -f "$env_file" ] || return 0
   grep -qE '^DATABASE_URL=.*sslmode=' "$env_file" || return 0
-  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  rm -f "${env_target}".upsert.* 2>/dev/null || true
   ( umask 077; sed -E "s|^(DATABASE_URL=.*[?\&]sslmode=)[A-Za-z-]+|\1${target}|" \
       "$env_file" > "$stage" )
   chmod 600 "$stage"
-  mv "$stage" "$env_file"
+  mv "$stage" "$env_target"
 }
 
 # WARP-595: core keys that EVERY .env our heredoc has ever written contains
@@ -241,6 +251,19 @@ generate_env() {
   local env_file="$REPO_ROOT/.env"
   local force_regen=false
 
+  # WARP-232 (finding 2) / WARP-2621: once relocate_secrets_to_data has run,
+  # $env_file is a SYMLINK onto the encrypted /data. Every writer below stages
+  # beside the link's REAL target and renames onto it, so the regenerated (or
+  # restored) secrets stay inside the LUKS boundary and the symlink survives —
+  # never replace the link with a plain file on the unencrypted root. Resolved
+  # ONCE here rather than at the heredoc write: the torn-.env restore leg just
+  # below is a writer too, and it used to run before this resolution existed.
+  local env_write_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_write_target" ] || env_write_target="$env_file"
+  fi
+
   # --- WARP-595: recover a torn .env from an interrupted previous run ---
   # Interruption scenario closed: a power cut / SSH drop mid-heredoc left a
   # truncated .env; the old behaviour saw ".env already exists", skipped
@@ -263,11 +286,11 @@ generate_env() {
       # died BEFORE its chmod) and `cp` preserves that mode — force 600 so the
       # kept copy's leading secrets block is never world-readable.
       chmod 600 "$torn_copy"
-      local restore_tmp="$env_file.tmp.$$"
+      local restore_tmp="$env_write_target.tmp.$$"
       rm -f "$restore_tmp"
       cp "$newest_backup" "$restore_tmp"
       chmod 600 "$restore_tmp"
-      mv "$restore_tmp" "$env_file"
+      mv "$restore_tmp" "$env_write_target"
       log_success "Restored .env from $newest_backup (torn copy quarantined at $torn_copy until this run completes)"
       log_info "  migrate_env will backfill any keys added since that backup"
       log_divider
@@ -536,16 +559,9 @@ generate_env() {
   # the new complete file, never a prefix. The temp file is created empty and
   # chmod'd 600 BEFORE any secret is written into it.
   #
-  # WARP-232 (finding 2): on a --regenerate-env re-run AFTER secrets have been
-  # relocated onto the encrypted /data, $env_file is a SYMLINK. Stage beside and
-  # rename onto the link's REAL target so the regenerated secrets stay inside the
-  # LUKS boundary and the symlink survives — never replace the link with a plain
-  # file on the unencrypted root.
-  local env_write_target="$env_file"
-  if [ -L "$env_file" ]; then
-    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
-    [ -n "$env_write_target" ] || env_write_target="$env_file"
-  fi
+  # WARP-232 (finding 2): $env_write_target is the link's REAL target, resolved
+  # once at the top of this function — stage beside it and rename onto it so the
+  # regenerated secrets stay inside the LUKS boundary and the symlink survives.
   local env_tmp="$env_write_target.tmp.$$"
   rm -f "$env_write_target".tmp.* 2>/dev/null || true
   : > "$env_tmp"
@@ -937,6 +953,17 @@ migrate_env() {
   local env_file="$REPO_ROOT/.env"
   [ -f "$env_file" ] || return 0
 
+  # WARP-2621 / WARP-232: once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Stage beside the link's REAL target and
+  # rename onto it — renaming onto the LINK would replace it with a plain file
+  # on the unencrypted boot disk, and the .env.migrate.* stage (a full copy of
+  # every secret) would have been written there too.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+
   local backed_up=false
   local appended_count=0
   local appended_keys=""
@@ -947,8 +974,8 @@ migrate_env() {
   # matched the `^KEY=` existence check on the next run and the mangled value
   # was kept forever. With the stage + rename, the live .env is either the
   # pre-migration file or the fully-migrated file, never something in between.
-  local stage="$env_file.migrate.$$"
-  rm -f "$env_file".migrate.* 2>/dev/null || true
+  local stage="$env_target.migrate.$$"
+  rm -f "$env_target".migrate.* 2>/dev/null || true
   cp "$env_file" "$stage"
   chmod 600 "$stage"
 
@@ -1226,7 +1253,7 @@ migrate_env() {
   fi
 
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
-    mv "$stage" "$env_file"
+    mv "$stage" "$env_target"
   else
     rm -f "$stage"
   fi
