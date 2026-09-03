@@ -491,34 +491,93 @@ jobs:
         run: npm run -w @droplet/erp-connector build
 
       # WARP-2606: ship-check's `tsc-full` phase 4 — the pass that type-checks
-      # each workspace's `tsconfig.test.json` — has no CI runner. `packages/
-      # tools-core` is the only workspace that ships one today, so phase 4 IS
-      # this one command, and `stage` carried 8 errors in it (a TS1470
-      # `import.meta` under CommonJS, plus 7 TS2339 reads of `.data` through the
-      # unnarrowed `ToolResult` union) while every other check was green:
-      # `vitest` strips types with esbuild and the package's own
+      # each workspace's `tsconfig.test.json` — has no CI runner (the
+      # `shipcheck` job runs the script's parse + self-test only, never
+      # `tsc-full`). `packages/tools-core` was the only workspace that shipped
+      # one when this step was written, and `stage` carried 8 errors in it (a
+      # TS1470 `import.meta` under CommonJS, plus 7 TS2339 reads of `.data`
+      # through the unnarrowed `ToolResult` union) while every other check was
+      # green: `vitest` strips types with esbuild and the package's own
       # `tsconfig.json` excludes `__tests__/`, so nothing in CI looked.
       #
-      # A step on THIS leg rather than a new `tsc-full` job or a new
-      # `ci-summary` leg, deliberately, per docs/ci-cost-budget.md: the leg is
-      # already gated on the `packages/tools-core/**` detect filter, already
-      # reported through `check_leg node`, and has already installed, generated
-      # Prisma and built the workspace dists this command needs. Marginal cost
-      # is one `tsc` over 137 test files: 1.9 s measured locally, budget 10 s on
-      # a runner. 10 of the last 100 commits on `stage` touch
-      # `packages/tools-core/**`, so at ~30 such PR runs/month this is well
-      # under 10 runner-min/month — inside the docs/ci-cost-budget.md noise
-      # floor, no callout threshold approached. A separate `tsc-full` job would
-      # repeat checkout + `npm ci` + `prisma generate` + four workspace builds
-      # for the same seconds of signal (~4 min/run, ~120 min/month) AND would
-      # need a new required-check name added to branch protection by hand. No
-      # new job names, no new `pull_request:` workflow.
+      # WARP-2515 (#1943) then added a `tsconfig.test.json` + `typecheck:tests`
+      # to four more workspaces and wired a runner for NONE of them, so phase 4
+      # is no longer this one command. WARP-2644 gives each of them a runner on
+      # a leg the `detect` filters ALREADY fire for when that workspace changes,
+      # placed after that leg's existing leaf builds. The mapping, which is the
+      # thing to keep true when a workspace joins or a filter moves:
+      #
+      #   workspace              | leg                   | detect filter that fires it
+      #   -----------------------|-----------------------|----------------------------
+      #   packages/tools-core    | tools-core-mcp-server | packages/tools-core/**
+      #   packages/fips-selftest | tools-core-mcp-server | packages/fips-selftest/**
+      #   services/mcp-server    | tools-core-mcp-server | services/mcp-server/**
+      #   packages/shared-types  | orchestrator          | packages/shared-types/**
+      #   services/erp-connector | erp-connector         | services/erp-connector/**
+      #
+      # No workspace ships a `tsconfig.test.json` that is absent from that
+      # table; `apps/orchestrator` and `apps/web-dashboard` have none (their
+      # tests are already inside the `tsc --noEmit` those legs run). The root
+      # `tests/` and `schemas/__tests__/` trees have no tsconfig at all and are
+      # therefore out of phase 4 entirely — that is WARP-2618, not this.
+      #
+      # Steps on EXISTING legs rather than a new `tsc-full` job or a new
+      # `ci-summary` leg, deliberately, per docs/ci-cost-budget.md: each leg is
+      # already gated on the right detect filter, already reported through
+      # `check_leg node`, and has already installed, generated Prisma and built
+      # the workspace dists these commands need. Marginal cost, measured
+      # locally: tools-core 1.7 s, fips-selftest 0.6 s, mcp-server 1.4 s
+      # (tools-core-mcp-server leg, +3.7 s); shared-types 0.7 s (orchestrator
+      # leg); erp-connector 1.0 s (erp-connector leg). Budget ~2.5x on a runner.
+      # Of the last 100 commits on `stage`, 25 touch a path in the
+      # tools-core-mcp-server filter and 11 touch `services/erp-connector/**`;
+      # at the current ~590 PRs/month that is ~148 + ~65 runs, so worst case
+      # ~25 + ~6 runner-min/month — inside the docs/ci-cost-budget.md noise
+      # floor (and in practice ~0 billed, since Actions rounds a JOB to the
+      # minute and these seconds rarely cross a boundary). No callout threshold
+      # is approached: the >2k min/mo callout is ~60x this.
+      #
+      # The alternative shapes, and why not: a `scripts/test/ship-check.sh
+      # tsc-full` step would re-run phases 1-3 (prisma generate + four builds +
+      # seven whole-workspace `tsc`) to reach phase 4, ~4 min/run — and the
+      # script has no phase selector, so it would also need one. A separate
+      # `tsc-full` job would repeat checkout + `npm ci` + `prisma generate` +
+      # the workspace builds for the same seconds of signal (~4 min/run, ~120
+      # min/month) AND would need a new required-check name added to branch
+      # protection by hand. No new job names, no new `pull_request:` workflow.
       #
       # Runs BEFORE the vitest run: a type error should be reported as itself,
       # not as whatever the suite happens to do with it.
       - name: Typecheck @droplet/tools-core tests (tsconfig.test.json)
         if: matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/tools-core typecheck:tests
+
+      # WARP-2644: the other two workspaces the tools-core-mcp-server filter
+      # already fires for. Same leg, same reason, same ordering rule (before
+      # the vitest runs below). fips-selftest is built by the step above for
+      # every suite but web-dashboard, and mcp-server by the tools-core /
+      # mcp-server build steps, so both resolve their `@droplet/*` imports.
+      - name: Typecheck @droplet/fips-selftest tests (tsconfig.test.json)
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/fips-selftest typecheck:tests
+
+      - name: Typecheck @droplet/mcp-server tests (tsconfig.test.json)
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/mcp-server typecheck:tests
+
+      # WARP-2644 / WARP-2639: shared-types is reached by the ORCHESTRATOR
+      # filter, not the one above — `packages/shared-types/**` is listed under
+      # `orchestrator:` and `web-dashboard:`, never under
+      # `tools-core-mcp-server:` — so a shared-types-only PR runs this leg and
+      # not that one. Its tests live INSIDE `src/` and its own `tsconfig.json`
+      # excludes `src/**/*.test.ts`, so every type-level assertion in them
+      # asserted nothing in a green suite.
+      #
+      # PR #1968 (WARP-2639) adds this identical step; whichever of the two
+      # lands second should drop its copy rather than keep both.
+      - name: Typecheck @droplet/shared-types tests (tsconfig.test.json)
+        if: matrix.suite == 'orchestrator'
+        run: npm run -w @droplet/shared-types typecheck:tests
 
       - name: Test @droplet/tools-core
         if: matrix.suite == 'tools-core-mcp-server'
@@ -672,6 +731,17 @@ jobs:
       - name: Build @droplet/erp-connector
         if: matrix.suite == 'erp-connector'
         run: npm run -w @droplet/erp-connector build
+
+      # WARP-2644: this leg is the one the `services/erp-connector/**` detect
+      # filter fires, and the build above is what its 23 test files need — they
+      # import the package by its own name (`@droplet/erp-connector`), which
+      # resolves through `types: dist/index.d.ts`. Verified standalone: with
+      # every OTHER workspace's dist removed, this command still passes here,
+      # so the step does not smuggle in a dependency the leg does not build.
+      # See the mapping table on the tools-core typecheck step above.
+      - name: Typecheck @droplet/erp-connector tests (tsconfig.test.json)
+        if: matrix.suite == 'erp-connector'
+        run: npm run -w @droplet/erp-connector typecheck:tests
 
       - name: Test @droplet/erp-connector
         if: matrix.suite == 'erp-connector'
