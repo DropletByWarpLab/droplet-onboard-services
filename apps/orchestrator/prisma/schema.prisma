@@ -5845,11 +5845,14 @@ model PartyLink {
   ///     portal B's object `123` are different records that collide under a
   ///     `(externalSystem, externalId)` unique. The second portal's link is
   ///     refused as "already linked" to someone else's customer.
-  ///   • WARP-2461's purge walker keys on `connectionId`, and its mutation
-  ///     test proves that scoping a purge by PROVIDER instead destroys the
-  ///     sibling connection's data. A link table with no `connectionId` cannot
-  ///     be purged correctly at all — disconnecting one portal would take the
-  ///     other's links with it.
+  ///   • WARP-2461's purge walker is NOT WRITTEN YET, and this column is what
+  ///     will let it be written correctly: it must key on `connectionId`,
+  ///     because scoping a purge by PROVIDER would destroy the sibling
+  ///     connection's data. A link table with no `connectionId` could not be
+  ///     purged correctly at all — disconnecting one portal would take the
+  ///     other's links with it. Whoever writes that walker should pin this
+  ///     with a mutation test, the way `crm-activity-cascade.pg.test.ts`
+  ///     already pins the cascade it will have to reckon with.
   ///
   /// `Restrict`, not `Cascade`: a connection row is never deleted (disconnect
   /// flips it to DISABLED and purges its secrets in place), so this can only
@@ -5887,15 +5890,33 @@ model PartyLink {
   createdById String?
   createdAt   DateTime @default(now())
 
-  /// One upstream record maps to at most one party. Two links to the same
-  /// record — even from different parties — is a contradiction, not a second
-  /// opinion, and surfaces as a 409 rather than as two answers.
+  /// 🔴 One LIVE upstream claim per record — and the unique that enforces it
+  /// is NOT on this model. It is a PARTIAL index and Prisma has no datamodel
+  /// syntax for one, so it lives in
+  /// `20260903010000_warp_2562_party_link_archive_scope`:
+  ///
+  ///     CREATE UNIQUE INDEX "PartyLink_connectionId_externalId_active_key"
+  ///       ON "PartyLink" ("connectionId", "externalId")
+  ///       WHERE "isArchived" = false;
+  ///
+  /// Two LIVE links to the same record — even from different parties — is a
+  /// contradiction, not a second opinion, and surfaces as a 409. Two ARCHIVED
+  /// ones are a history: an archived row is the record that a claim was
+  /// WITHDRAWN, and an index that kept asserting over withdrawn rows made
+  /// archiving a trap. It held the record forever, so the correct party could
+  /// never be linked and the only recovery restored the wrong link.
   ///
   /// Scoped by CONNECTION, not by provider: "the same record" means the same
   /// id in the same portal. Under the old `(externalSystem, externalId)` key a
   /// second HubSpot portal's object `123` was a contradiction with the first
   /// portal's object `123`, which is two different customers.
-  @@unique([connectionId, externalId])
+  ///
+  /// Consequence worth knowing before you re-add `@@unique` here: without a
+  /// compound unique on the model there is no
+  /// `partyLink.findUnique({ where: { connectionId_externalId } })`, and that
+  /// is the point. That call cannot mention `isArchived`, so it cannot ask the
+  /// question the index now answers. `party-link.service.ts` uses `findFirst`
+  /// with an explicit `isArchived: false`.
   @@index([contactId])
   @@index([companyId])
   /// The purge walker's index (WARP-2461): "everything this connection landed".

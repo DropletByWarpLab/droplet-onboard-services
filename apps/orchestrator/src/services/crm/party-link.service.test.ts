@@ -39,11 +39,20 @@ function okPrisma(over: Record<string, unknown> = {}) {
     contact: { findFirst: vi.fn().mockResolvedValue({ id: "c1" }) },
     crmCompany: { findUnique: vi.fn().mockResolvedValue({ id: "co1" }) },
     // WARP-2562 — the provider is READ from the connection, never taken from
-    // the caller, so every happy path needs one to exist.
+    // the caller, so every happy path needs one to exist. `status` is read
+    // too: a link may only be made against a connection a live fetch can go
+    // through (WARP-2562 review).
     integrationConnection: {
-      findUnique: vi.fn().mockResolvedValue({ id: "conn-eagle", provider: "eaglesoft-api" }),
+      findUnique: vi
+        .fn()
+        .mockResolvedValue({ id: "conn-eagle", provider: "eaglesoft-api", status: "CONNECTED" }),
     },
     partyLink: {
+      // The clash probe is `findFirst` with an explicit `isArchived: false` —
+      // there is no compound unique to `findUnique` on any more, because the
+      // index is partial. `findUnique` here serves `archivePartyLink`, which
+      // loads the row by id.
+      findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([ROW]),
       create: vi.fn().mockResolvedValue(ROW),
@@ -174,7 +183,8 @@ describe("one upstream record, one party", () => {
     const prisma = okPrisma({
       contact: { findFirst: vi.fn().mockResolvedValue({ id: "c1" }) },
       partyLink: {
-        findUnique: vi.fn().mockResolvedValue({ id: "already" }),
+        findFirst: vi.fn().mockResolvedValue({ id: "already" }),
+        findUnique: vi.fn().mockResolvedValue(null),
         create: vi.fn(),
       },
     });
@@ -205,13 +215,13 @@ describe("listing and unlinking", () => {
     expect(findMany.mock.calls[1][0].where.isArchived).toBeUndefined();
   });
 
-  /** `okPrisma()`'s findUnique answers the CREATE path's uniqueness probe with
-   *  null; archive uses the same method to LOAD the row, so it needs its own
-   *  stub. */
+  /** Archive LOADS the row by id with `findUnique`, so it needs its own stub;
+   *  `findFirst` stays clear because the un-archive collision check uses it. */
   const archivable = () =>
     okPrisma({
       partyLink: {
         findUnique: vi.fn().mockResolvedValue(ROW),
+        findFirst: vi.fn().mockResolvedValue(null),
         update: vi.fn().mockResolvedValue(ROW),
       },
     });
@@ -248,21 +258,22 @@ describe("listing and unlinking", () => {
  *      the second portal's object `123` collides with the first portal's
  *      object `123` — two unrelated customers, and the second is refused as
  *      "already linked" to somebody else's party, permanently.
- *   2. WARP-2461's purge walker keys on `connectionId`, and its own mutation
- *      test proves that scoping a purge by provider destroys the sibling
- *      connection's data. A link table with no `connectionId` cannot be purged
- *      correctly at all.
+ *   2. WARP-2461's purge walker is NOT WRITTEN YET. When it is, it will have
+ *      to key on `connectionId`: scoping a purge by provider would destroy
+ *      the sibling connection's data, and a link table with no
+ *      `connectionId` could not be purged correctly at all. That is a
+ *      mutation test for whoever writes the walker to add —
+ *      `crm-activity-cascade.pg.test.ts` is the model, and states its own
+ *      future-work framing correctly.
  */
 describe("WARP-2562 — links are scoped to a connection", () => {
   /** Two connections on ONE provider — the shape the old key could not model. */
   function twoPortals(clashOn: { connectionId: string; externalId: string } | null) {
     const create = vi.fn().mockResolvedValue(ROW);
-    type ClashLookup = {
-      where: { connectionId_externalId?: { connectionId: string; externalId: string } };
-    };
-    const findUnique = vi.fn().mockImplementation(async (args: ClashLookup) => {
-      const where = args.where.connectionId_externalId;
-      if (!clashOn || !where) return null;
+    type ClashLookup = { where: { connectionId?: string; externalId?: string } };
+    const findFirst = vi.fn().mockImplementation(async (args: ClashLookup) => {
+      const where = args.where;
+      if (!clashOn) return null;
       return where.connectionId === clashOn.connectionId && where.externalId === clashOn.externalId
         ? { id: "existing" }
         : null;
@@ -275,11 +286,11 @@ describe("WARP-2562 — links are scoped to a connection", () => {
           findUnique: vi.fn().mockImplementation(async (args: { where: { id: string } }) => {
             const id = args.where.id;
             return id === "conn-north" || id === "conn-south"
-              ? { id, provider: "hubspot" }
+              ? { id, provider: "hubspot", status: "CONNECTED" }
               : null;
           }),
         },
-        partyLink: { findUnique, create, findMany: vi.fn(), update: vi.fn() },
+        partyLink: { findFirst, findUnique: vi.fn(), create, findMany: vi.fn(), update: vi.fn() },
       } as never,
       create,
     };

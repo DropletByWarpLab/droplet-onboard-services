@@ -17,7 +17,7 @@
  * happened to say something similar".
  */
 import { describe, it, expect, vi } from "vitest";
-import express, { type Express } from "express";
+import express from "express";
 import request from "supertest";
 
 import { createCrmRouter } from "./crm.js";
@@ -28,8 +28,8 @@ import { createCrmRouter } from "./crm.js";
  * refine is absent, the service reaches this and the test fails loudly instead
  * of on a status-code technicality.
  */
-function makeApp(): { app: Express; contactLookup: ReturnType<typeof vi.fn> } {
-  const contactLookup = vi.fn(async () => {
+function makeApp() {
+  const contactLookup = vi.fn(async (): Promise<unknown> => {
     throw new Error("the service must not be reached for a malformed query");
   });
   const prisma = {
