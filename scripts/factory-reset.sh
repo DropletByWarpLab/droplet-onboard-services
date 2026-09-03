@@ -40,6 +40,87 @@
 # metal, but it does not overwrite the platters. A box moving from one customer
 # to another needs a separate full-overwrite pass.
 #
+# WARP-2629 (the live secrets on /data are factory state too): since the
+# WARP-232 relocation the real .env is /data/droplet/env/.env and the audit /
+# doc-KEK keys are /data/droplet/secrets/, with symlinks left in the repo. This
+# script removed the SYMLINKS — so on a relocated box every generated secret
+# survived the reset, and storage-wipe.sh never covered /data (it owns bulk
+# drives under /mnt/droplet only). On a 2-year LEASE that means a returned or
+# re-provisioned rack still carried the previous tenant's keys. Phase 4 now
+# overwrite-then-unlinks them through scripts/lib/secrets-wipe.sh.
+#
+#   Wipe, not re-key — and why. The ticket offered two shapes: (1) shred the
+#   live secrets, (2) re-key the LUKS /data volume. This is (1): the minimal
+#   change that closes the leak now, on a volume that is already encrypted.
+#   (2) is the stronger hardening and is deliberately NOT done here — erasing
+#   the keyslots makes EVERY byte unrecoverable, including anything a future
+#   writer forgets to add to the wipe list (a list rots; a destroyed key does
+#   not). It costs a re-format + re-provision of /data and a TPM re-seal, which
+#   turns a reset into something that cannot run unattended and still leave a
+#   bootable box, so it is an operator decision rather than a default. The
+#   destroy-the-key path already exists for decommissioning:
+#   scripts/host/droplet-crypto-shred.sh + docs/security/crypto-shred.md.
+#
+# WARP-2638 (a) verify the wipe, (b) decide the receipt, (c) settle /data/docker.
+#
+# (a) POST-WIPE GATE. WARP-2629's wipe reported SECW_FAILED_COUNT and carried
+#   on, so a file it could not remove was a warning nobody re-read. Phase 2 has
+#   never worked that way — _remaining_owned_volumes re-enumerates from Docker
+#   and ABORTS while an owned volume survives. Phase 4 now ends with the
+#   equivalent: secw_verify_wipe re-scans the resolved .env, its five
+#   snapshot/staging classes, everything under the resolved secrets dir and the
+#   link-side .env* / data/secrets classes, and exits 1 naming the survivors
+#   (PATHS ONLY — rule 19). It re-reads the DISK rather than the wipe's own
+#   counters, needs no Docker and no root, and is idempotent.
+#
+# (b) DURABLE RECEIPT OF A RESET — ROMAIN'S DECISION, PENDING. Today the only
+#   record of what a reset destroyed is the log_success transcript, and that
+#   transcript lands in .data/setup.log (scripts/lib/logging.sh:20) which THIS
+#   PHASE removes further down. The three shapes, none implemented:
+#     1. A marker file outside the purge scope, e.g.
+#        /var/lib/droplet/last-reset.json — timestamp, per-class counts, script
+#        version, and its own sha256. It would survive as-is: the reset removes
+#        only /var/lib/droplet/backups (DEVICE_BACKUP_DIR below), and
+#        /var/lib/droplet/tpm/provisioned.json already survives on purpose
+#        (WARP-980 — the device stays registered). Costs one new persisted file
+#        and a rule that nobody may widen the backups rm to the parent.
+#     2. An audit-chain entry written BEFORE teardown. It does not survive:
+#        the chain is HMAC-signed ActivityRow rows in Postgres
+#        (scripts/lib/secrets.sh:1316-1320) and the reset removes both halves —
+#        `pgdata` is in Phase 2's VOLUMES list and the signing key is shredded
+#        by secw_wipe_live_secrets. `ops-audit` (docker-compose.yml:3423,
+#        mounted at /var/log/ops-console) is in that list too. The chain dies
+#        with the DB by design: WARP-456 treats a reset as an ERA BOUNDARY —
+#        new key, new genesis row. An off-box sink is the only durable variant,
+#        and the only one that exists is fleet-agent telemetry, which is
+#        double-gated OFF by default.
+#     3. Deliberately nothing. A receipt on a returned box is itself
+#        information about the previous tenant, and a factory-new box carrying
+#        a file about the previous owner's reset is new state a reset exists to
+#        remove.
+#   Not an agent's call — it is a product decision about what a returned lease
+#   unit may carry. Written up in docs/security/crypto-shred.md.
+#
+# (c) /data/docker. droplet-luks-provision.sh:370 puts Docker's data-root on the
+#   encrypted /data, and droplet-verify-encryption.sh:47 audits it as one of the
+#   three encrypted data paths — so the reset's Docker phases ARE its /data
+#   coverage. What survives, established from the compose + script definitions:
+#     - named volumes (Postgres, Nextcloud, brain-memory, NVR — the customer
+#       data): REMOVED, and hard-gated. Phase 1 `down -v`, Phase 2's explicit
+#       list + prune, then _remaining_owned_volumes which exits 1 on a survivor.
+#     - container stdout under <data-root>/containers/<id>/: removed WITH the
+#       container. That was the only cover, and it was thin — the `down` is
+#       `|| true` and nothing re-checked, while docker-compose.yml's x-logging
+#       anchor RETAINS 3 x 10 MB per service of stdout that carries usernames,
+#       file paths and document titles. Phase 2 now sweeps leftover containers
+#       by compose-project label and verifies, same shape as the volume gate.
+#     - build cache: reclaimed on EVERY reset (`docker builder prune -af`).
+#     - image layers: survive unless --purge-images, and are NOT customer data —
+#       the root .dockerignore excludes .env, .env.*, docker/secrets and
+#       docker/certs from every root-context build.
+#   Nothing under /data/docker is hand-unlinked: Docker owns that tree, and
+#   removing the object (volume, container) is what removes its bytes.
+#
 # WARP-980 (AMENDS ADR-023 reset behavior — reset ≠ deregister): a factory-reset
 # now RELEASES the box's HQ name + revokes its cert but KEEPS the device
 # REGISTERED and trusted (its durable TPM key stays authoritative), so the box
@@ -106,7 +187,8 @@ Options:
 What gets deleted:
   - All Docker volumes (database, files, AI keys, Matter fabric state)
   - The Docker build cache (always reclaimed — largest rebuildable consumer)
-  - Generated secrets (.env)
+  - Generated secrets: the LIVE .env and data/secrets on the encrypted /data
+    (not just the repo symlinks), overwritten before they are unlinked
   - TLS certificates
   - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
@@ -147,6 +229,10 @@ done
 source "$SCRIPT_DIR/lib/logging.sh"
 # WARP-1988 — bulk-storage discovery + erase (see the header).
 source "$SCRIPT_DIR/lib/storage-wipe.sh"
+# WARP-2629 — overwrite-then-unlink of the LIVE secrets on the encrypted /data
+# (see the header). Needs no Docker: the wipe runs even on a box whose daemon
+# is dead.
+source "$SCRIPT_DIR/lib/secrets-wipe.sh"
 
 # --- Sanity check ---
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
@@ -506,12 +592,23 @@ log_divider
 
 log_step 2 5 "Removing Docker volumes"
 
+# The Docker data-root. On the appliance it is NOT /var/lib/docker:
+# scripts/host/droplet-luks-provision.sh:370 writes {"data-root": "/data/docker"}
+# so every named volume, container log and image layer lands on the encrypted
+# /data LV (scripts/host/droplet-verify-encryption.sh:47 audits that path).
+# WARP-2638: the WARP-234 sweep below hardcoded /var/lib/docker, so on exactly
+# the boxes it was written for it never matched a single mount. Derive it.
+DOCKER_DATA_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
+
 # WARP-234: a bind-mounted *.config.php inside a named volume (nextcloud
 # redis-TLS config) leaves a STALE bind-mount after `down -v` that Docker
 # does not clean up, so `docker volume rm droplet_nextcloud-data` fails
 # with "device or resource busy" and the reset aborts. Lazy-umount any
 # lingering submounts under our droplet_ volumes before the removal loop.
-for _stale in $(awk '$2 ~ /\/var\/lib\/docker\/volumes\/droplet_.*\/_data\// {print $2}' /proc/mounts 2>/dev/null); do
+for _stale in $(awk -v pfx="$DOCKER_DATA_ROOT/volumes/droplet_" \
+                    'index($2, pfx) == 1 && index($2, "/_data/") > 0 {print $2}' \
+                    /proc/mounts 2>/dev/null); do
   sudo umount -l "$_stale" 2>/dev/null || true
 done
 
@@ -588,6 +685,47 @@ for prefix in "${OWNED_PREFIXES[@]}"; do
     fi
   done
 done
+
+# --- Containers: their stdout logs live under the data-root (WARP-2638) ------
+# Phase 1's `down --remove-orphans` normally removes this project's containers,
+# and removing a container removes <data-root>/containers/<id>/ with it — the
+# json-file log included. But that `down` is wrapped in `|| true` (a brick-safe
+# reflash can leave it half-done) and, unlike volumes, nothing re-checked
+# afterwards. The logs are not incidental: docker/docker-compose.yml:61-66 caps
+# every long-running service at 3 x 10 MB of RETAINED stdout, and orchestrator /
+# nextcloud / gateway stdout carries usernames, file paths and document titles.
+# On the appliance that sits under /data/docker — encrypted, but still the
+# previous tenant's, and /data survives a reset.
+#
+# Scope is the SAME OWNED_PREFIXES as the volumes, by compose-project label, so
+# the sibling droplet-local-LLM project (`docker`) is never swept — the exact
+# guard tests/factory-reset-purge-scope.test.sh exists to keep.
+#
+# Docker owns that directory: remove the CONTAINER and let the daemon unlink its
+# log. Never `rm` under the data-root by hand — that corrupts daemon state.
+_remaining_owned_containers() {
+  local prefix
+  {
+    for prefix in "${OWNED_PREFIXES[@]}"; do
+      docker ps -aq --filter "label=com.docker.compose.project=$prefix" 2>/dev/null || true
+    done
+  } | grep -vE '^$' || true
+}
+stale_containers="$(_remaining_owned_containers)"
+if [ -n "$stale_containers" ]; then
+  log_warn "Container(s) survived the compose teardown — removing (their logs sit under $DOCKER_DATA_ROOT):"
+  printf '%s\n' "$stale_containers" | while IFS= read -r c; do
+    [ -n "$c" ] && docker rm -f "$c" >/dev/null 2>&1 || true
+  done
+  stale_containers="$(_remaining_owned_containers)"
+  if [ -n "$stale_containers" ]; then
+    log_error "$(printf '%s\n' "$stale_containers" | grep -c .) container(s) could not be removed."
+    log_error "Their retained stdout under $DOCKER_DATA_ROOT/containers still carries this owner's activity."
+    log_error "Try: docker rm -f <id>, then re-run the reset."
+    exit 1
+  fi
+  log_success "Removed containers left behind by the compose teardown (and their retained stdout)"
+fi
 
 # Remove every owned volume that exists. A failure here is NOT swallowed as
 # success — the authoritative `docker volume ls` gate below turns any surviving
@@ -765,8 +903,45 @@ log_divider
 
 log_step 4 5 "Cleaning generated files"
 
-# .env (device secrets)
-if [ -f "$REPO_ROOT/.env" ]; then
+# WARP-2621 / WARP-2624: once relocate_secrets_to_data has run, $REPO_ROOT/.env
+# is a SYMLINK and secrets.sh writes its backup / torn / staging copies beside
+# the link's REAL target inside the encrypted /data. Resolve BEFORE the rm
+# below unlinks the symlink and the target becomes unreachable from here.
+_env_reset_target="$REPO_ROOT/.env"
+if [ -L "$_env_reset_target" ]; then
+  _env_reset_target="$(readlink -f "$_env_reset_target" 2>/dev/null || readlink "$_env_reset_target")"
+  [ -n "$_env_reset_target" ] || _env_reset_target="$REPO_ROOT/.env"
+fi
+# WARP-2629: data/secrets is relocated the same way and needs the same resolve
+# before the rm further down unlinks its symlink. Same shape as the block above
+# on a different path — WARP-2630 collapses both (and the five copies in
+# secrets.sh) into one shared helper.
+_secrets_reset_target="$REPO_ROOT/data/secrets"
+if [ -L "$_secrets_reset_target" ]; then
+  _secrets_reset_target="$(readlink -f "$_secrets_reset_target" 2>/dev/null || readlink "$_secrets_reset_target")"
+  [ -n "$_secrets_reset_target" ] || _secrets_reset_target="$REPO_ROOT/data/secrets"
+fi
+
+# WARP-2629 — wipe the LIVE secrets THROUGH the symlinks, before the unlinks
+# below make the targets unreachable from here. Removing the link alone left
+# DEVICE_SECRET_KEY, the audit signing key and doc-kek.key sitting on /data
+# after a "factory reset"; on a 2-year lease that is the previous tenant's
+# keys shipped with the box. Ordering is the whole fix: this MUST stay above
+# both of the unlinks further down.
+secw_wipe_live_secrets "$_env_reset_target" "$_secrets_reset_target"
+# The reset's record of what it destroyed: paths and COUNTS only, never a
+# value (rule 19). Emitted even when nothing was found, so a reset transcript
+# always states the /data secrets were considered rather than staying silent.
+log_success "Wiped live secrets on $(dirname "$_env_reset_target") + $_secrets_reset_target (env=$SECW_WIPED_ENV snapshots=$SECW_WIPED_SNAPSHOTS secrets=$SECW_WIPED_SECRETS)"
+if [ "$SECW_FAILED_COUNT" -gt 0 ]; then
+  log_error "$SECW_FAILED_COUNT secret file(s) could NOT be removed — the box still carries them."
+  log_error "Do not hand this box on. Run scripts/host/droplet-crypto-shred.sh (docs/security/crypto-shred.md)."
+fi
+
+# .env (device secrets). `-L` matters: the wipe above shredded the target, so a
+# relocated box's .env is now a DANGLING symlink and `-f` alone would leave it
+# behind pointing into /data.
+if [ -f "$REPO_ROOT/.env" ] || [ -L "$REPO_ROOT/.env" ]; then
   rm -f "$REPO_ROOT/.env"
   log_success "Removed .env (device secrets)"
 fi
@@ -776,12 +951,25 @@ fi
 # (.env.tmp.*, .env.migrate.*, .env.upsert.*) carry the SAME device secrets
 # as .env itself — a factory reset must not leak the prior owner's
 # credentials through them.
+# Both directions are swept (WARP-2624): the resolved-target copies secrets.sh
+# writes today, AND the link-side copies a box upgraded mid-life still carries.
+# On a box whose .env is a plain file the two glob sets are identical and the
+# `[ -f "$f" ]` guard makes the second pass a no-op.
 for f in "$REPO_ROOT"/.env.bak.* \
          "$REPO_ROOT"/.env.torn.* \
          "$REPO_ROOT"/.env.tmp.* \
          "$REPO_ROOT"/.env.migrate.* \
-         "$REPO_ROOT"/.env.upsert.*; do
-  [ -f "$f" ] && rm -f "$f" && log_success "Removed $(basename "$f")"
+         "$REPO_ROOT"/.env.upsert.* \
+         "$_env_reset_target".bak.* \
+         "$_env_reset_target".torn.* \
+         "$_env_reset_target".tmp.* \
+         "$_env_reset_target".migrate.* \
+         "$_env_reset_target".upsert.*; do
+  # WARP-2629: overwrite before unlinking here too. The resolved-target side is
+  # already gone by now (secw_wipe_live_secrets above), so what this loop still
+  # finds is the LINK-side legacy copies — i.e. the ones on the UNENCRYPTED
+  # boot disk, where an overwrite is worth the most.
+  [ -f "$f" ] && secw_shred_file "$f" && log_success "Removed $(basename "$f")"
 done
 
 # Accumulated device-backup tarballs (WARP-570 / the daily droplet-backup
@@ -831,7 +1019,11 @@ fi
 # eras. The orchestrator's sync_audit_signing_key (scripts/lib/secrets.sh)
 # re-generates the file on next setup.sh run; the empty ActivityRow table
 # then writes its first row as the new chain's genesis.
-if [ -d "$REPO_ROOT/data/secrets" ]; then
+# WARP-2629: the KEY FILES are already shredded (secw_wipe_live_secrets, above)
+# — on a relocated box this `rm -rf` only ever removed the symlink, which is
+# exactly how the audit key survived a reset. `-L` so a link whose target the
+# wipe left empty is still removed rather than left dangling into /data.
+if [ -d "$REPO_ROOT/data/secrets" ] || [ -L "$REPO_ROOT/data/secrets" ]; then
   rm -rf "$REPO_ROOT/data/secrets"
   log_success "Removed data/secrets/ (audit signing key — era boundary)"
 fi
@@ -1020,6 +1212,33 @@ if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
   sudo rm -f /var/log/droplet-device-bridge.log 2>/dev/null || true
   log_success "Removed device-bridge state, env, and logs"
 fi
+
+# --- Authoritative gate: the secrets wipe left NOTHING behind (WARP-2638) ----
+# Phase 2 already refuses to finish while an owned Docker volume survives
+# (_remaining_owned_volumes). The secrets wipe had no equivalent: it reported
+# SECW_FAILED_COUNT and carried on, so a file it could not remove was a warning
+# in a transcript nobody reads. The failure mode is handing a leased rack back
+# with the previous tenant's DEVICE_SECRET_KEY still on it, so it now gets the
+# same treatment — re-scan, and refuse to report a clean reset.
+#
+# WHY HERE, at the END of Phase 4, and not straight after secw_wipe_live_secrets:
+#   - the link-side .env.* classes and data/secrets are purged further DOWN
+#     Phase 4, so a gate placed next to the wipe could not check them;
+#   - every remaining cleanup above (device-bridge state, /etc/droplet/ap-psk,
+#     the host executors) should still run before the reset gives up. Aborting
+#     earlier would leave MORE behind, not less.
+# It re-enumerates the filesystem rather than reading the wipe's own counters,
+# needs no Docker and no root, and prints PATHS ONLY — never a value (rule 19).
+if ! secw_verify_wipe "$_env_reset_target" "$_secrets_reset_target" "$REPO_ROOT"; then
+  log_error "$SECW_LEFTOVER_COUNT secret-bearing path(s) SURVIVED the wipe:"
+  printf '%s\n' "$SECW_LEFTOVER_PATHS" | while IFS= read -r _leftover; do
+    [ -n "$_leftover" ] && log_error "  - $_leftover"
+  done
+  log_error "Refusing to report a clean reset — this box still carries device secrets."
+  log_error "Do not hand it on. Run scripts/host/droplet-crypto-shred.sh (docs/security/crypto-shred.md)."
+  exit 1
+fi
+log_success "Verified: no .env, snapshot or secrets-dir file remains on $(dirname "$_env_reset_target"), $_secrets_reset_target or $REPO_ROOT"
 
 log_divider
 
