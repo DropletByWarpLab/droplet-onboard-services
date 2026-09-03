@@ -11,25 +11,31 @@
  *   1. The `openssl` CLI, because the harness mints its throwaway private CA
  *      with it (Node has no X.509 signing API). See `certs.mjs`.
  *
- *   2. A Node whose BUILT-IN `fetch` accepts a dispatcher from the `undici`
- *      package this repo installs. The connector trusts the box's private CA by
- *      passing `dispatcher: new Agent({ connect: { ca } })` (built in
- *      `erp-provider.ts:dispatcherForCa`) to `globalThis.fetch`
- *      (`api-auth.ts:resolveFetch`) — certificate verification stays ON, which
- *      is the entire point. That only works while the built-in undici and the
- *      installed one agree on the dispatcher handler interface. They do on Node
- *      20 — the version this repo pins in `.nvmrc`, in `engines.node`, and in
- *      every workflow's `setup-node` — and they do NOT on Node >= 22, where the
- *      built-in moved to undici v7's handler API and rejects an undici@6
- *      `Agent` outright with `UND_ERR_INVALID_ARG: invalid onError method`.
- *      Every request then fails as a bare "fetch failed", which reads exactly
- *      like an unreachable box.
+ *   2. A runtime that can carry a request through a dispatcher from the
+ *      `undici` package this repo installs. The connector trusts the box's
+ *      private CA by passing `dispatcher: new Agent({ connect: { ca } })`
+ *      (built in `erp-provider.ts:dispatcherForCa`) into `apiRequest` —
+ *      certificate verification stays ON, which is the entire point.
+ *
+ *      WARP-2626 — this used to be a Node-major question, and it no longer is.
+ *      The connector passed that Agent to `globalThis.fetch`, which is the
+ *      runtime's OWN bundled undici: Node 20 (the repo pin) bundles undici 6
+ *      and accepted it, Node >= 22 bundles undici 7 and rejected it with
+ *      `UND_ERR_INVALID_ARG: invalid onError method` before a byte was sent, so
+ *      every request failed as a bare "fetch failed" that read exactly like an
+ *      unreachable box. `api-auth.ts:resolveFetch` now routes any
+ *      dispatcher-carrying request through the npm undici's own `fetch` — the
+ *      only fetch that honours an Agent that undici minted — so the live suites
+ *      run on any Node major. This probe therefore drives the SAME pairing the
+ *      connector does; driving the built-in fetch here would skip the suites on
+ *      a runtime that can run them perfectly well.
  *
  * The second probe is a real request, not a version comparison: it asks the
  * running runtime the actual question, so it stays correct when Node 20 goes
- * away, when undici is bumped, or when a future Node re-aligns the interface.
- * It runs in a child process (`preflight-probe.mjs`) only because the answer
- * has to be synchronous — see that file.
+ * away, when undici is bumped, and — the case it now exists for — if the
+ * connector is ever "simplified" back onto the built-in fetch. It runs in a
+ * child process (`preflight-probe.mjs`) only because the answer has to be
+ * synchronous — see that file.
  *
  * CI runs Node 20 and has openssl, so both gates are open there and nothing is
  * hidden — each suite additionally ASSERTS that, so losing the coverage on a
@@ -55,7 +61,8 @@ function installedUndiciVersion() {
 }
 
 /**
- * Will `globalThis.fetch` accept a dispatcher from the installed `undici`?
+ * Can this runtime carry a request through the installed `undici`'s dispatcher,
+ * using the same fetch the connector pairs it with (WARP-2626)?
  *
  * A probe that cannot run at all is reported as SUPPORTED on purpose: this gate
  * exists to replace a confusing red with an explained skip, never to hide one.
@@ -79,9 +86,11 @@ export function undiciDispatcherSupported() {
   return {
     ok: false,
     reason:
-      `Node ${process.version}'s built-in fetch rejects the installed undici@${installedUndiciVersion()} ` +
-      `dispatcher (${probed?.detail ?? "unknown error"}) — the CA-trusting one this suite needs. ` +
-      `Run on Node ${PINNED_NODE_MAJOR}, which is what .nvmrc, engines.node and CI pin.`,
+      `on Node ${process.version}, a request through the installed undici@${installedUndiciVersion()}'s ` +
+      `own fetch + dispatcher fails (${probed?.detail ?? "unknown error"}) — that is the CA-trusting ` +
+      `path this suite needs (api-auth.ts:resolveFetch). This is NOT the old Node-major mismatch, ` +
+      `which WARP-2626 fixed: check that the connector still pairs a dispatcher with undici's own ` +
+      `fetch, then that undici itself works. Node ${PINNED_NODE_MAJOR} is what .nvmrc, engines.node and CI pin.`,
   };
 }
 
