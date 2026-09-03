@@ -248,18 +248,35 @@ Each subcommand can be invoked individually (`./scripts/test/ship-check.sh shell
 
 A case whose prerequisite is absent (no `node_modules`, no `shellcheck`, no
 reachable docker daemon) reports **SKIP**, and a SKIP is **not** a pass — the
-suite exits non-zero unless the caller names the cases allowed to skip:
+suite exits non-zero unless the caller names the cases allowed to skip, **by
+skip id**:
 
 ```bash
-SHIPCHECK_ALLOW_SKIP='tsc-full catches WARP-329 fixture regression' ./scripts/test/ship-check.test.sh
+SHIPCHECK_ALLOW_SKIP='tsc-full-warp329-fixture' ./scripts/test/ship-check.test.sh
 SHIPCHECK_ALLOW_SKIP=all ./scripts/test/ship-check.test.sh   # tolerate any skip on this host
 ```
+
+Every SKIP line and the summary print the id to use. Ids are declared beside
+each case's `_run_test` registration at the foot of the suite; they are a wire
+contract with `SHIPCHECK_ALLOW_SKIP` in `.github/workflows/ci.yml`, so a case's
+display name can be reworded freely but its id changes only on purpose
+(WARP-2645 — keying on the prose name meant a rewording silently un-allowed
+that case's skip).
 
 WARP-2637: before this, every SKIP returned 0 and was counted in `N/N passed`,
 so CI's `shipcheck` job — which does no `npm ci` — reported green while both
 `tsc-full` cases had never run, and the WARP-329 fixture guard sat vacuous for
 weeks. The two cases CI cannot run are named in `.github/workflows/ci.yml`; the
 skipped names are also written to the GitHub job summary.
+
+**Every failure assertion names what it expects the gate to catch** (WARP-2645).
+A case does not merely require the gate under test to exit non-zero — it
+requires the gate's output to match the specific diagnostic its planted
+mutation produces (the mutated file and line, the ShellCheck code, the npm
+`Missing script`, the shim's "unhandled docker subcommand"). A gate that goes
+red for an unrelated reason — daemon stopped, `.env` absent, a tree that was
+never bootstrapped — therefore reds the case instead of satisfying it. The bare
+`rc != 0` form is gone; see `_assert_check_fails_matching`.
 
 ---
 

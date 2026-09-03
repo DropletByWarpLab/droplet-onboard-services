@@ -49,6 +49,7 @@ FAILED=0
 SKIPPED=0
 FAILED_NAMES=()
 SKIPPED_NAMES=()
+SKIPPED_IDS=()
 
 # Exit code a test body returns to mean "prerequisite absent, did not run".
 # 77 is the autotools convention. Before WARP-2637 a skipping body returned 0
@@ -59,7 +60,13 @@ SKIPPED_NAMES=()
 _SKIP_RC=77
 
 _pass() { PASSED=$((PASSED + 1)); printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; }
-_skip() { SKIPPED=$((SKIPPED + 1)); SKIPPED_NAMES+=("$1"); printf "  ${_YELLOW}SKIP${_RESET}  %s\n" "$1"; }
+# $1 = stable skip id, $2 = display name.
+_skip() {
+  SKIPPED=$((SKIPPED + 1))
+  SKIPPED_IDS+=("$1")
+  SKIPPED_NAMES+=("$2")
+  printf "  ${_YELLOW}SKIP${_RESET}  %s  ${_YELLOW}(skip-id: %s)${_RESET}\n" "$2" "$1"
+}
 _fail() {
   FAILED=$((FAILED + 1)); FAILED_NAMES+=("$1")
   printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"
@@ -69,43 +76,59 @@ _fail() {
   fi
 }
 
+# _run_test <skip-id> <display name> <fn> [args…]
+#
+# WARP-2645 — the skip id, not the display name, is what SHIPCHECK_ALLOW_SKIP
+# matches. The display name is prose: it gets reworded whenever the case's
+# rationale sharpens, and every rewording used to silently un-allow that
+# case's skip in `.github/workflows/ci.yml` — the same wire-contract hazard as
+# renaming a required check (root CLAUDE.md §9.3). The id is a short slug that
+# is only ever changed deliberately, and changing it is a visible two-file edit
+# because ci.yml stops matching.
 _run_test() {
-  local name="$1"; shift
+  local id="$1" name="$2"; shift 2
   local rc=0
   TOTAL=$((TOTAL + 1))
   printf "\n${_BOLD}→ %s${_RESET}\n" "$name"
   "$@" || rc=$?
   case "$rc" in
     0)            _pass "$name" ;;
-    "$_SKIP_RC")  _skip "$name" ;;
+    "$_SKIP_RC")  _skip "$id" "$name" ;;
     *)            _fail "$name" ;;
   esac
 }
 
-# Convenience: assert ship-check.sh CHECK_NAME exits non-zero when REPO_ROOT
-# points at the synthetic worktree. Returns 0 on the expected fail, 1 on
-# unexpected pass. Stderr/stdout is captured into the named buffer var so
-# the calling test can inspect it.
-_assert_check_fails() {
-  local synthetic_root="$1" check_name="$2"
-  local output rc
-  output="$(REPO_ROOT="$synthetic_root" bash "$SHIP_CHECK" "$check_name" 2>&1)"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    printf "    expected exit != 0, got 0\n" >&2
-    printf '%s\n' "$output" | sed 's/^/    | /' >&2
-    return 1
-  fi
-  return 0
-}
-
-# Like _assert_check_fails, but ALSO requires the failure output to match
-# REGEX. Without it a case goes green whenever the check is red for any reason
-# at all — including reasons that have nothing to do with the regression it
-# planted — so a mutation that has quietly stopped discriminating can still be
-# masked by an unrelated red. WARP-2637.
+# _assert_check_fails_matching <root> <check> <ERE> [<ERE>…]
+#
+# Assert that ship-check.sh CHECK_NAME exits non-zero when REPO_ROOT points at
+# the given worktree, AND that its output matches EVERY pattern given. Returns
+# 0 on the expected, correctly-attributed fail; 1 otherwise.
+#
+# WARP-2637 introduced this; WARP-2645 made it the only form the suite uses and
+# gave it more than one pattern. The bare "rc != 0" assertion it replaces
+# treats ANY red as proof the planted mutation was caught, so a case survives
+# its own mutation going vacuous (the WARP-329 guard did, for weeks) and an
+# environmental failure — docker daemon down, a missing .env, an absent
+# node_modules, a path that does not exist — satisfies a self-test whose whole
+# job is to prove one specific gate works. Both were observed live:
+# `compose-config` fails identically whether the planted YAML break is present
+# or the daemon is simply stopped, and the docker-build-smoke shim case never
+# reached its plant at all on a 2 GiB colima VM (setup.sh's preflight rejects
+# the container first) while still reporting PASS.
+#
+# Several gates print the offending FILE and the DIAGNOSTIC on different lines
+# — shellcheck's `In …/local-dns.sh line 2:` / `^---^ SC2168 (error): …` is the
+# common shape — and grep is line-oriented, so pinning both needs two patterns.
+# Every pattern must match somewhere in the output; each is checked
+# independently.
 _assert_check_fails_matching() {
-  local synthetic_root="$1" check_name="$2" pattern="$3"
+  local synthetic_root="$1" check_name="$2"
+  shift 2
+  if [ "$#" -eq 0 ]; then
+    printf "    _assert_check_fails_matching called with no pattern\n" >&2
+    return 1
+  fi
+
   local output rc
   output="$(REPO_ROOT="$synthetic_root" bash "$SHIP_CHECK" "$check_name" 2>&1)"
   rc=$?
@@ -114,12 +137,16 @@ _assert_check_fails_matching() {
     printf '%s\n' "$output" | sed 's/^/    | /' >&2
     return 1
   fi
-  if ! printf '%s\n' "$output" | grep -Eq -- "$pattern"; then
-    printf "    %s failed, but NOT for the planted reason\n" "$check_name" >&2
-    printf "    expected the output to match /%s/\n" "$pattern" >&2
-    printf '%s\n' "$output" | sed 's/^/    | /' >&2
-    return 1
-  fi
+
+  local pattern
+  for pattern in "$@"; do
+    if ! printf '%s\n' "$output" | grep -Eq -- "$pattern"; then
+      printf "    %s failed, but NOT for the planted reason\n" "$check_name" >&2
+      printf "    expected the output to match /%s/\n" "$pattern" >&2
+      printf '%s\n' "$output" | sed 's/^/    | /' >&2
+      return 1
+    fi
+  done
   return 0
 }
 
@@ -225,7 +252,7 @@ _isolated_index_end() {
 # declares `toolCalls Json?` / `toolCallId String?` (schema.prisma), so
 # requiring them in the mock was the defect, not the fix. Dropping an optional
 # field is not a type error, so tsc-full passed on the mutated tree and the case
-# failed its own `_assert_check_fails`. Do not "fix" this by making the mock
+# failed its own assertion. Do not "fix" this by making the mock
 # strict again — that reintroduces the very tsc error the mock was corrected to
 # avoid.
 #
@@ -354,8 +381,15 @@ test_compose_config_catches_yaml_breakage() {
     return 1
   fi
 
-  # 3. compose-config should now FAIL.
-  _assert_check_fails "$REPO_ROOT_REAL" compose-config
+  # 3. compose-config should now FAIL, and it must fail on the YAML PARSE,
+  #    naming the file we broke. This gate is the one where a bare "it went
+  #    red" assertion is most obviously wrong: a stopped docker daemon
+  #    (WARP-2646) and an absent `.env` both take the exact same FAIL branch,
+  #    so the pre-WARP-2645 form was green on a machine where compose-config
+  #    could not evaluate the mutation at all.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" compose-config \
+    'rejected docker/docker-compose\.yml' \
+    "could not find expected ':'"
 }
 
 # =============================================================================
@@ -420,8 +454,12 @@ test_frigate_env_scan_catches_unresolved_substitution() {
     return 1
   fi
 
-  # 3. frigate-env-scan should now FAIL.
-  _assert_check_fails "$REPO_ROOT_REAL" frigate-env-scan
+  # 3. frigate-env-scan should now FAIL, naming the config file, the line and
+  #    the exact variable the planted block references. The check's remediation
+  #    text mentions scripts/lib/secrets.sh and .env.example unconditionally,
+  #    so the pattern deliberately pins the FINDING line, not the advice.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" frigate-env-scan \
+    'docker/frigate/config\.yml:[0-9]+: unresolved \{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD\}'
 }
 
 # =============================================================================
@@ -486,8 +524,13 @@ test_shellcheck_catches_local_outside_function() {
     return 1
   fi
 
-  # 3. shellcheck should now FAIL.
-  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+  # 3. shellcheck should now FAIL — on SC2168, in the file we mutated.
+  #    ShellCheck prints the file on one line and the code on the next, hence
+  #    two patterns. `shellcheck not on PATH` and `no target scripts found`
+  #    are the other two ways this gate goes red; neither matches.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" shellcheck \
+    'scripts/lib/local-dns\.sh line [0-9]+:' \
+    "SC2168 \\(error\\): 'local' is only valid in functions"
 }
 
 # =============================================================================
@@ -566,8 +609,47 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
   fi
 
   # docker-build-smoke should now FAIL because the shim refuses
-  # `docker buildx ls` (exit 1 from the default case).
-  _assert_check_fails "$REPO_ROOT_REAL" docker-build-smoke
+  # `docker buildx ls` (exit 1 from the default case) — and the shim says so
+  # in as many words, which is the only evidence that the plant was reached.
+  #
+  # WARP-2645. This case cannot use _assert_check_fails_matching directly,
+  # because "the container failed before it ever got to the plant" is a THIRD
+  # outcome and it must not be scored as a failure of the shim. Measured on
+  # this repo's dev Mac on 2026-09-02: colima's default 2 GiB VM leaves the
+  # container reporting 1 GB, setup.sh's preflight aborts at
+  # `Memory: 1 GB — need at least 2 GB` in phase 1/7, and the injected
+  # `docker buildx ls` in phase 2 is never executed. The pre-WARP-2645
+  # assertion took that exit 1 as proof the shim is fail-closed and printed
+  # PASS — a five-minute container run that asserted nothing. Verified by
+  # running the gate on the UNMUTATED tree: byte-identical failure.
+  #
+  # So: shim diagnostic present -> the shim held (pass). Gate exited 0 -> the
+  # shim is fail-open, which is the regression (fail). Gate failed without the
+  # diagnostic -> the smoke never reached the plant, which is a SKIP, loud and
+  # allow-listed like any other, not a green.
+  local output rc
+  output="$(REPO_ROOT="$REPO_ROOT_REAL" bash "$SHIP_CHECK" docker-build-smoke 2>&1)" \
+    && rc=0 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    printf "    docker-build-smoke PASSED with an un-allowlisted 'docker buildx'\n" >&2
+    printf "    injected into setup.sh — the shim's default case is fail-OPEN.\n" >&2
+    printf '%s\n' "$output" | tail -40 | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  if printf '%s\n' "$output" \
+     | grep -Eq "ship-check docker shim: unhandled docker subcommand 'buildx'"; then
+    return 0
+  fi
+
+  printf "    ${_YELLOW}SKIP${_RESET}  setup.sh failed inside the smoke container BEFORE reaching\n"
+  printf "          the injected 'docker buildx ls' — the shim's allowlist was never\n"
+  printf "          exercised, so this run proves nothing either way. The tail below\n"
+  printf "          says why; on this Mac it is usually colima's VM memory (setup.sh\n"
+  printf "          preflight needs 2 GB inside the container).\n"
+  printf '%s\n' "$output" | tail -20 | sed 's/^/          | /' >&2
+  return "$_SKIP_RC"
 }
 
 # =============================================================================
@@ -654,8 +736,14 @@ test_shellcheck_catches_new_sc2034_violation() {
     return 1
   fi
 
-  # 3. shellcheck should now FAIL because the global SC2034 exclude is gone.
-  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+  # 3. shellcheck should now FAIL because the global SC2034 exclude is gone —
+  #    and specifically on SC2034 for the variable this case planted. Matching
+  #    the code alone would be satisfied by the OTHER shellcheck case's
+  #    leftover mutation if a RETURN trap ever failed to fire, so the variable
+  #    name is part of the pattern.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" shellcheck \
+    'scripts/lib/local-dns\.sh line [0-9]+:' \
+    'SC2034 \(warning\): WARP_486_TEST_UNUSED appears unused'
 }
 
 # =============================================================================
@@ -739,8 +827,13 @@ test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
 
   # 3. shellcheck should now FAIL — proving both that the gate lints itself
   #    and that a directive-shaped comment is a hard error, not a silent
-  #    truncation of the lint.
-  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+  #    truncation of the lint. Naming ship-check.sh in the pattern is what
+  #    proves the FIRST half: a red raised anywhere else in scripts/lib would
+  #    otherwise satisfy a case whose whole point is that the gate reads its
+  #    own source.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" shellcheck \
+    'scripts/test/ship-check\.sh line [0-9]+:' \
+    "SC1073 \\(error\\): Couldn't parse this shellcheck directive"
 }
 
 # =============================================================================
@@ -771,9 +864,11 @@ test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
 #
 # This case asserts the TWO PROPERTIES SEPARATELY, because the bug moved only
 # one of them: the exit code was always correct, it was the OUTPUT that
-# vanished. A test that only checked `rc != 0` (as _assert_check_fails does)
-# passed happily throughout the entire defect — which is why neither of the
-# two existing shellcheck cases ever caught it.
+# vanished. A test that only checked `rc != 0` — which is what every failure
+# assertion in this suite did until WARP-2645 — passed happily throughout the
+# entire defect, which is why neither of the two existing shellcheck cases ever
+# caught it. This case is where the "name what you expect" rule came from; the
+# rest of the suite was brought up to it later.
 #
 #   1. non-zero exit          — was ALREADY true before the fix
 #   2. finding text on stdout — was FALSE before the fix
@@ -931,8 +1026,13 @@ test_exec_bits_catches_chmod_stripped() {
     return 1
   fi
 
-  # 3. exec-bits should now FAIL.
-  _assert_check_fails "$REPO_ROOT_REAL" exec-bits
+  # 3. exec-bits should now FAIL, naming THIS path and the mode it read.
+  #    The gate's other red branch — "required script(s) missing or untracked"
+  #    — is what an unreadable or empty GIT_INDEX_FILE produces, and it lists
+  #    every allowlisted path including this one, so the mode text is the part
+  #    that distinguishes a caught mutation from a broken index copy.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" exec-bits \
+    'scripts/test/ship-check\.sh: mode 100644 \(expected 100755\)'
 }
 
 # =============================================================================
@@ -1004,8 +1104,13 @@ test_exec_bits_catches_chmod_stripped_openwrt() {
   fi
 
   # 3. exec-bits should now FAIL — proves the path-keyed allowlist sees
-  #    the openwrt sub-tree, not just top-level scripts/.
-  _assert_check_fails "$REPO_ROOT_REAL" exec-bits
+  #    the openwrt sub-tree, not just top-level scripts/. Naming the openwrt
+  #    path is the entire point of this case existing separately from the
+  #    WARP-487 one: a bare "it went red" is satisfied by the top-level entry
+  #    the sibling case already covers, which would leave the cross-subtree
+  #    claim unproven.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" exec-bits \
+    'openwrt/scripts/upgrade-router\.sh: mode 100644 \(expected 100755\)'
 }
 
 # =============================================================================
@@ -1085,8 +1190,15 @@ test_tsc_full_uses_workspace_pinned_prisma() {
     return 1
   fi
 
-  # 3. tsc-full should now FAIL.
-  _assert_check_fails "$REPO_ROOT_REAL" tsc-full
+  # 3. tsc-full should now FAIL — in phase 1, on the missing script, because
+  #    the implementation calls it BY NAME. That is the whole claim: the
+  #    pre-WARP-492 `npx prisma generate` would not have noticed this edit, so
+  #    the assertion has to name the npm diagnostic and not merely observe
+  #    that tsc-full is red. It is otherwise red for a long list of reasons
+  #    that have nothing to do with prisma pinning — any type error in any of
+  #    the nine swept workspaces, or a tree that was never bootstrapped.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" tsc-full \
+    'Missing script: "db:generate"'
 }
 
 # =============================================================================
@@ -1152,7 +1264,12 @@ test_stale_repo_names_catches_inference_engine_reintro() {
 
   # 3. stale-repo-names should now FAIL — the surface walk + grep should
   #    catch the injected `inference-engine` token against the allowlist.
-  _assert_check_fails "$REPO_ROOT_REAL" stale-repo-names
+  #    Pin the FINDING line (`README.md:<n>: …`), not the token: the gate's
+  #    remediation block prints `inference-engine → droplet-local-LLM` on
+  #    every failure, so a token-only pattern would match a red raised by
+  #    some entirely different surface.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" stale-repo-names \
+    '^ *README\.md:[0-9]+:.*WARP-494 test mutation.*inference-engine'
 }
 
 # =============================================================================
@@ -1217,8 +1334,12 @@ test_lifecycle_naming_catches_new_poc_token() {
   fi
 
   # 3. lifecycle-naming should now FAIL — the new poc token is beyond the
-  #    grandfather allowlist.
-  _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
+  #    grandfather allowlist. Pin the finding line: the gate's remediation
+  #    text spells out `profiles: ["poc"] → profiles: ["single-box"]` on
+  #    EVERY failure, so a bare `poc` pattern would also be satisfied by the
+  #    structural `dev` violation the next case plants.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" lifecycle-naming \
+    '^ *docker/docker-compose\.yml:[0-9]+:.*profiles: \["poc"\]'
 }
 
 # =============================================================================
@@ -1288,7 +1409,13 @@ test_lifecycle_naming_structural_and_grandfather() {
   #    token at all, so ONLY the structural scan can catch it.
   printf '  profiles: ["dev"]\n' >> "$compose"
 
-  _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
+  # The pattern must name `["dev"]` specifically. Step 2 left a
+  # `droplet-poc-host-net` line in the file, so if the Tier 1 grandfather
+  # strip ever broke, the gate would go red on THAT — and a bare "it failed"
+  # assertion would read the grandfather regression as proof the structural
+  # scan works, which is exactly backwards.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" lifecycle-naming \
+    '^ *docker/docker-compose\.yml:[0-9]+:.*profiles: \["dev"\]'
 }
 
 # =============================================================================
@@ -1377,7 +1504,14 @@ set -euo pipefail
 echo "TODO: Implement Pi image build (pi-gen)"
 STUB
 
-  _assert_check_fails "$synth" image-pipeline
+  # The check has SIX other red branches over the same synthetic tree —
+  # missing pipeline files, invalid schema JSON, a manifest that does not
+  # validate, a schema that rejects a well-formed entry, lint findings, and a
+  # missing linter. A copy step that silently dropped a file would take one of
+  # them and satisfy a bare rc-only assertion while proving nothing about the
+  # stub. Name the stub verdict.
+  _assert_check_fails_matching "$synth" image-pipeline \
+    'scripts/build-image\.sh is still the TODO stub'
 }
 
 # =============================================================================
@@ -1439,7 +1573,12 @@ test_tls_invariants_catches_deregister_regression() {
   local stripped
   stripped="$(grep -v 'tls-release' "$synth/scripts/factory-reset.sh")"
   printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
-  if ! _assert_check_fails "$synth" tls-invariants; then
+  # The `grep -v` above strips EVERY line containing the token, so it can
+  # easily take neighbouring wiring with it. tls-invariants has six distinct
+  # FAIL verdicts over these four files; without naming the one we planted,
+  # collateral damage from the strip reads as a pass.
+  if ! _assert_check_fails_matching "$synth" tls-invariants \
+       'does not wire the DEFAULT tls-release CLI'; then
     printf "    expected tls-invariants to FAIL after dropping the tls-release CLI\n" >&2
     return 1
   fi
@@ -1449,7 +1588,8 @@ test_tls_invariants_catches_deregister_regression() {
   cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
   stripped="$(grep -v 'tls-deregister' "$synth/scripts/factory-reset.sh")"
   printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
-  if ! _assert_check_fails "$synth" tls-invariants; then
+  if ! _assert_check_fails_matching "$synth" tls-invariants \
+       'does not wire the --decommission tls-deregister CLI'; then
     printf "    expected tls-invariants to FAIL after dropping the tls-deregister CLI\n" >&2
     return 1
   fi
@@ -1462,7 +1602,12 @@ test_tls_invariants_catches_deregister_regression() {
 # deployed HQ Worker 422s. tls-invariants must catch this.
 curl -sS -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration?device_id=${DEV}" || true
 BODYLESS
-  if ! _assert_check_fails "$synth" tls-invariants; then
+  # This one is the sharpest of the three: the appended block restores the CLI
+  # wiring, so the ONLY verdict that may fire is the bodyless-curl one. If the
+  # gate instead reported a missing CLI, the restore failed and the case would
+  # be measuring nothing.
+  if ! _assert_check_fails_matching "$synth" tls-invariants \
+       'still uses a bodyless curl to /api/issuance/registration'; then
     printf "    expected tls-invariants to FAIL after re-introducing a bodyless curl\n" >&2
     return 1
   fi
@@ -1727,63 +1872,88 @@ else
   _INDEX_CLEAN_AT_START=false
 fi
 
-_run_test "tsc-full catches WARP-329 fixture regression" \
+# Each case is registered as: <skip-id> <display name> <function>.
+#
+# WARP-2645 — the skip id is a WIRE CONTRACT with `.github/workflows/ci.yml`
+# (`SHIPCHECK_ALLOW_SKIP` on the `ship-check / parse + self-test` job). Reword
+# a display name freely; changing an id is a deliberate two-file edit. Ids are
+# lowercase-hyphenated, prefixed with the gate they exercise, and never reused.
+_run_test "tsc-full-warp329-fixture" \
+  "tsc-full catches WARP-329 fixture regression" \
   test_tsc_full_catches_fixture_regression
 
-_run_test "tsc-full uses workspace-pinned prisma (WARP-492)" \
+_run_test "tsc-full-prisma-pin" \
+  "tsc-full uses workspace-pinned prisma (WARP-492)" \
   test_tsc_full_uses_workspace_pinned_prisma
 
-_run_test "compose-config catches YAML breakage in docker-compose.yml" \
+_run_test "compose-config-yaml-breakage" \
+  "compose-config catches YAML breakage in docker-compose.yml" \
   test_compose_config_catches_yaml_breakage
 
-_run_test "frigate-env-scan catches unresolved {VAR} substitution" \
+_run_test "frigate-env-scan-unresolved-var" \
+  "frigate-env-scan catches unresolved {VAR} substitution" \
   test_frigate_env_scan_catches_unresolved_substitution
 
-_run_test "shellcheck catches local-outside-function in scripts/lib" \
+_run_test "shellcheck-local-outside-function" \
+  "shellcheck catches local-outside-function in scripts/lib" \
   test_shellcheck_catches_local_outside_function
 
-_run_test "shellcheck catches new SC2034 violation in scripts/lib (WARP-486)" \
+_run_test "shellcheck-sc2034" \
+  "shellcheck catches new SC2034 violation in scripts/lib (WARP-486)" \
   test_shellcheck_catches_new_sc2034_violation
 
-_run_test "shellcheck lints the gate itself and catches a directive-shaped comment (WARP-2477)" \
+_run_test "shellcheck-lints-the-gate" \
+  "shellcheck lints the gate itself and catches a directive-shaped comment (WARP-2477)" \
   test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment
 
-_run_test "shellcheck check reports its findings, not just a non-zero exit (WARP-2492)" \
+_run_test "shellcheck-reports-findings" \
+  "shellcheck check reports its findings, not just a non-zero exit (WARP-2492)" \
   test_shellcheck_reports_findings_not_just_exit_code
 
-_run_test "docker-build-smoke shim rejects unknown docker subcommand" \
+_run_test "docker-build-smoke-shim-allowlist" \
+  "docker-build-smoke shim rejects unknown docker subcommand" \
   test_docker_build_smoke_shim_rejects_unknown_subcommand
 
-_run_test "exec-bits catches chmod-stripped tracked script" \
+_run_test "exec-bits-chmod-stripped" \
+  "exec-bits catches chmod-stripped tracked script" \
   test_exec_bits_catches_chmod_stripped
 
-_run_test "exec-bits catches chmod-stripped tracked script in openwrt/scripts/" \
+_run_test "exec-bits-chmod-stripped-openwrt" \
+  "exec-bits catches chmod-stripped tracked script in openwrt/scripts/" \
   test_exec_bits_catches_chmod_stripped_openwrt
 
-_run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)" \
+_run_test "stale-repo-names-inference-engine" \
+  "stale-repo-names catches inference-engine re-introduction (WARP-494)" \
   test_stale_repo_names_catches_inference_engine_reintro
 
-_run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
+_run_test "lifecycle-naming-poc-token" \
+  "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
   test_lifecycle_naming_catches_new_poc_token
 
-_run_test "lifecycle-naming catches structural dev/test framing and honours the grandfather (WARP-2478)" \
+_run_test "lifecycle-naming-structural" \
+  "lifecycle-naming catches structural dev/test framing and honours the grandfather (WARP-2478)" \
   test_lifecycle_naming_structural_and_grandfather
 
-_run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
+_run_test "image-pipeline-stubbed-builder" \
+  "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
 
-_run_test "tls-invariants catches a factory-reset HQ-deregister regression (ADR-023 PR-3)" \
+_run_test "tls-invariants-deregister" \
+  "tls-invariants catches a factory-reset HQ-deregister regression (ADR-023 PR-3)" \
   test_tls_invariants_catches_deregister_regression
 
-_run_test "bash version floor reports COULD NOT RUN with its own exit code (WARP-2449)" \
+_run_test "bash-version-floor" \
+  "bash version floor reports COULD NOT RUN with its own exit code (WARP-2449)" \
   test_bash_version_guard_reports_could_not_run
 
-_run_test "ship-check.sh is runnable on stock macOS bash 3.2 (WARP-2449)" \
+_run_test "bash-3-2-runnable" \
+  "ship-check.sh is runnable on stock macOS bash 3.2 (WARP-2449)" \
   test_ship_check_is_runnable_on_bash_3_2
 
 # MUST stay last: it asserts every case above gave the caller's index back
 # untouched (WARP-2479).
-_run_test "suite leaves the caller's git index untouched (WARP-2479)" \
+_run_test "harness-index-untouched" \
+  "suite leaves the caller's git index untouched (WARP-2479)" \
   test_harness_leaves_caller_index_untouched
 
 rm -f "$_INDEX_SNAPSHOT_AT_START"
@@ -1805,8 +1975,11 @@ if [ "$FAILED" -gt 0 ]; then
 fi
 if [ "$SKIPPED" -gt 0 ]; then
   printf "  Skipped (did NOT run — the SKIP line above each says why):\n"
-  for n in "${SKIPPED_NAMES[@]}"; do
-    printf "    - %s\n" "$n"
+  _i=0
+  while [ "$_i" -lt "$SKIPPED" ]; do
+    printf "    - %s\n" "${SKIPPED_NAMES[$_i]}"
+    printf "      skip-id: %s\n" "${SKIPPED_IDS[$_i]}"
+    _i=$((_i + 1))
   done
 fi
 printf "  ──────────────────────────────────\n\n"
@@ -1826,7 +1999,11 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     fi
     if [ "$SKIPPED" -gt 0 ]; then
       printf 'Skipped — these cases did NOT run here (allowed by `SHIPCHECK_ALLOW_SKIP` in the job):\n\n'
-      for n in "${SKIPPED_NAMES[@]}"; do printf -- '- %s\n' "$n"; done
+      _i=0
+      while [ "$_i" -lt "$SKIPPED" ]; do
+        printf -- '- %s — `%s`\n' "${SKIPPED_NAMES[$_i]}" "${SKIPPED_IDS[$_i]}"
+        _i=$((_i + 1))
+      done
       printf '\n'
     fi
   } >> "$GITHUB_STEP_SUMMARY"
@@ -1844,24 +2021,35 @@ fi
 # the suite. Naming them individually rather than blanket-allowing is the point:
 # CI can keep skipping the two cases that need a resolved `node_modules` while a
 # NEW hole still turns the job red instead of inflating the pass count.
+#
+# WARP-2645 — it matches on the SKIP ID, not the display name. The names are
+# prose and get reworded; every rewording silently un-allowed that case's skip
+# in ci.yml, which is the same class of hazard as renaming a required check
+# (root CLAUDE.md §9.3). Failure was safe-but-confusing — the job went red
+# naming a case nobody had touched. Ids live beside each `_run_test`
+# registration and change only on purpose.
 if [ "$SKIPPED" -gt 0 ]; then
   _allow="${SHIPCHECK_ALLOW_SKIP:-}"
   if [ "$_allow" != "all" ]; then
     _unexpected=0
-    for n in "${SKIPPED_NAMES[@]}"; do
+    _i=0
+    while [ "$_i" -lt "$SKIPPED" ]; do
+      _id="${SKIPPED_IDS[$_i]}"
       case ",$_allow," in
-        *",$n,"*) ;;
+        *",$_id,"*) ;;
         *)
-          printf "  ${_RED}SKIP NOT ALLOWED${_RESET}  %s\n" "$n" >&2
+          printf "  ${_RED}SKIP NOT ALLOWED${_RESET}  %s  (skip-id: %s)\n" \
+            "${SKIPPED_NAMES[$_i]}" "$_id" >&2
           _unexpected=$((_unexpected + 1))
           ;;
       esac
+      _i=$((_i + 1))
     done
     if [ "$_unexpected" -gt 0 ]; then
       printf "\n  %d case(s) skipped that SHIPCHECK_ALLOW_SKIP does not name.\n" "$_unexpected" >&2
       printf "  Install the missing prerequisite (each SKIP line above says which),\n" >&2
-      printf "  or re-run naming them:\n" >&2
-      printf "      SHIPCHECK_ALLOW_SKIP='<case name>[,<case name>…]' bash %s\n" \
+      printf "  or re-run naming them BY SKIP ID:\n" >&2
+      printf "      SHIPCHECK_ALLOW_SKIP='<skip-id>[,<skip-id>…]' bash %s\n" \
         "scripts/test/ship-check.test.sh" >&2
       printf "  or SHIPCHECK_ALLOW_SKIP=all to tolerate any skip on this host.\n" >&2
       exit 1
