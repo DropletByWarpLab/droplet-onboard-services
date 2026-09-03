@@ -428,15 +428,15 @@ entries:
     # scan never reads — the ADR that PROPOSED this host was keeping the entry
     # green. Repointed at the sync-engine files the Graph client will live in.
     # The ADR remains the authorising document; it is just not evidence of use.
-    code_refs: [apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
-    no_code_literal: >-
-      Registered ahead of its caller: the WARP-2118 sync engine has no HTTP
-      client yet, so nothing in apps/ or services/ names this host —
-      @microsoft/microsoft-graph-client is not a dependency, and the only
-      occurrences in the repo are .test.ts fixtures, which are out of the
-      scanner's scope. Self-pruning: the moment WARP-2118 lands a
-      graph.microsoft.com literal in a code_refs file, the gate fails on
-      this entry until this declaration is deleted. (WARP-2468 / WARP-2118)
+    #
+    # WARP-2118: the client now EXISTS, and this entry is backed by real code
+    # for the first time. `graph-client.ts` carries the host as a whole-string
+    # literal (GRAPH_API_BASE_URL) precisely so the scanner extracts it, so the
+    # `no_code_literal` declaration that stood here has been deleted — which is
+    # exactly the self-pruning that declaration prescribed for this moment.
+    # It is metadata only: `driveItem: get content` answers 302 to a per-tenant
+    # preauthenticated download host, and nothing here follows that redirect.
+    code_refs: [apps/orchestrator/src/services/m365/graph-client.ts, apps/orchestrator/src/services/m365/graph-resources.ts, apps/orchestrator/src/services/m365/m365-sync.service.ts, apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
 
   - id: m365-entra-login
     kind: egress

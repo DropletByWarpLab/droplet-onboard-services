@@ -106,7 +106,9 @@ describe("GraphClient.getPage — the guard runs before any I/O", () => {
 
 describe("GraphClient.getPage — a successful page", () => {
   it("returns items, links and the raw body, and sends the documented headers", async () => {
-    const fetchImpl = vi.fn(async () =>
+    // Typed with the real FetchLike signature so `mock.calls[0][1]` is the
+    // init object rather than a zero-length tuple.
+    const fetchImpl = vi.fn(async (_input: string, _init?: Record<string, unknown>) =>
       jsonResponse({
         value: [{ id: "1" }, { id: "2" }],
         "@odata.deltaLink": `${GRAPH_API_BASE_URL}/me/mailFolders/x/messages/delta?$deltatoken=next`,
@@ -120,7 +122,7 @@ describe("GraphClient.getPage — a successful page", () => {
     expect(page.links.deltaLink).toContain("$deltatoken=next");
     expect(page.links.nextLink).toBeNull();
 
-    const init = fetchImpl.mock.calls[0]?.[1] as Record<string, unknown>;
+    const init = fetchImpl.mock.calls[0][1] as Record<string, unknown>;
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer tok");
     // Microsoft asks integrators to identify themselves; it is also what lets a

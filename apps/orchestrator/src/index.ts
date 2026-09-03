@@ -111,6 +111,23 @@ import {
   getActivityRecorder,
 } from "./services/activity.singleton.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
+import {
+  discoverResources,
+  runSyncTick,
+  type M365SyncDeps,
+} from "./services/m365/m365-sync.service.js";
+import { GraphClient } from "./services/m365/graph-client.js";
+import { initialUrlFor } from "./services/m365/graph-resources.js";
+import { createEntraClient, isM365Configured } from "./services/m365/entra-client.js";
+
+/**
+ * Product version for the Graph `User-Agent` Microsoft asks integrators to
+ * send. Duplicated from `services/analytics/index.ts`'s
+ * `ORCHESTRATOR_FW_VERSION` and carrying the same caveat it does: a single
+ * canonical runtime version source does not exist yet, and when one lands both
+ * should read it.
+ */
+const ORCHESTRATOR_M365_UA_VERSION = "0.1.0";
 import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
@@ -1281,6 +1298,77 @@ async function main() {
         }
       },
     });
+  }
+
+  // WARP-2118 (ADR-041) — the Microsoft 365 delta sync tick.
+  //
+  // This is the caller WARP-2115 shipped without. Every decision it makes
+  // already existed and was already tested — `sync-policy.ts` classifies the
+  // failure, `delta-cursor.service.ts` moves the cursor, `m365-auth.service.ts`
+  // resolves the grant — and none of them had anything calling them in
+  // sequence, so no mailbox was ever read.
+  //
+  // Gated on `isM365Configured()`: with no client id there is no app to
+  // authenticate against, and a tick that runs anyway would mark every cursor
+  // failed on a box that simply does not offer the feature.
+  //
+  // Discovery runs BEFORE the tick, every time, and that ordering is
+  // load-bearing rather than tidy: mail delta is per-folder, so a folder
+  // created since the last tick has no cursor and its mail is invisible until
+  // discovery registers one. `upsertCursor` touches nothing on an existing row,
+  // so re-running it is free.
+  //
+  // `lockKey` for the same reason as the ERP legs: without it a multi-instance
+  // box double-polls Microsoft and spends the tenant's throttling budget twice.
+  if (isM365Configured()) {
+    const m365Deps: M365SyncDeps = {
+      prisma: prisma as never,
+      client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
+      entra: createEntraClient(),
+      initialUrlFor,
+    };
+
+    // Read at BOOT, never at module import — `docker restart` does not re-read
+    // `env_file`, so a schedule frozen at import ignores an operator's change.
+    const m365TickMs = Number(process.env.DROPLET_M365_SYNC_TICK_MS ?? 5 * 60 * 1000);
+
+    cronRuntime.scheduleInterval(
+      jitteredPeriodMs(m365TickMs, `${config.DROPLET_DEVICE_ID}:m365`),
+      async () => {
+        // Only CONNECTED grants. A NEEDS_RECONNECT row has a dead refresh
+        // token, and enumerating it every tick would hammer Entra to produce
+        // the same failure the person already has to act on.
+        const connected = (await prisma.m365Connection.findMany({
+          where: { state: "CONNECTED" },
+          select: { userId: true },
+        })) as Array<{ userId: string }>;
+
+        for (const { userId } of connected) {
+          const found = await discoverResources(m365Deps, userId);
+          if (found.skipped.length > 0) {
+            // A licence gap or a declined scope, not a crash — but silence here
+            // would look identical to "that workload has no data".
+            logger.info(
+              { skipped: found.skipped, registered: found.registered },
+              "m365 discovery skipped workloads",
+            );
+          }
+        }
+
+        const out = await runSyncTick(m365Deps);
+        if (out.cursorsClaimed > 0) {
+          logger.info(
+            {
+              cursorsClaimed: out.cursorsClaimed,
+              cursorsCompleted: out.cursorsCompleted,
+              itemsSeen: out.itemsSeen,
+            },
+            "m365 delta sync tick",
+          );
+        }
+      },
+      { lockKey: "droplet:m365-delta-sync" },
+    );
   }
 
   // Start Express on top of a raw http.Server so we can attach the
