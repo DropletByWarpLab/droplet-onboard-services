@@ -103,6 +103,12 @@ const ACME: ProviderDescriptor = {
   providerKeys: ["acme-pms", "acme-pms-export"],
   connect: { kind: "wizard", catalogId: "acme-pms" },
   open: { kind: "route", href: "/integrations/acme-pms" },
+  // WARP-2568 — required rather than optional on purpose. A vendor whose
+  // descriptor forgets the noun would silently render somebody else's word for
+  // the people they serve, and the compiler is the only thing that catches it
+  // before a customer does. This fixture is a practice-management system, so
+  // it carries the practice noun.
+  partyNoun: "patient",
 };
 
 const conn = (

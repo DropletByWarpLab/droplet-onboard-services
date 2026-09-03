@@ -27,6 +27,7 @@ import Link from "next/link";
 import { Stethoscope } from "lucide-react";
 
 import { authFetch } from "@/lib/auth";
+import { partyNounForProviderKey } from "@/components/integrations/provider-descriptors";
 
 interface PracticePatient {
   linkId: string;
@@ -69,11 +70,24 @@ export function PracticeBlock({ companyId }: { companyId: string }): JSX.Element
   // Not yet resolved, refused, no connector, or no link: all nothing.
   if (!data || !data.linked || data.patients.length === 0) return null;
 
+  // WARP-2568 — the vertical's own word, resolved from the connector that
+  // actually answered rather than hardcoded. A dental box says "patient"; a
+  // firm running the same surface over a different connector says "client".
+  //
+  // Read from the FIRST answering link, not from a box-wide setting: a box can
+  // carry two connectors, and the noun belongs to the one whose record this
+  // row is. The nav label deliberately does NOT do this — see the rule on
+  // `partyNoun` in provider-descriptors.
+  const noun = partyNounForProviderKey(data.patients[0].externalSystem);
+  const heading = data.patients.length === 1 ? noun : `${noun}s`;
+
   return (
     <section className="pm-surface cr-section">
       <div className="pm-sect">
         <Stethoscope size={14} aria-hidden="true" /> Practice
-        <span className="cr-count">{data.patients.length}</span>
+        <span className="cr-count">
+          {data.patients.length} {heading}
+        </span>
       </div>
       <ul className="cr-list">
         {data.patients.map((p) => (
