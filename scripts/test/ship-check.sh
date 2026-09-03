@@ -149,6 +149,7 @@ ALL_CHECKS=(
   lifecycle-naming
   image-pipeline
   tls-invariants
+  app-downloads
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -227,10 +228,11 @@ EXAMPLES
 
 CHECKS
 
-  tsc-full              Run `npx tsc --noEmit` in every workspace that ships
-                        a Dockerfile (orchestrator, web-dashboard, tools-core,
-                        mcp-server, fips-selftest). Prisma generate runs first
-                        so orchestrator's `@prisma/client` import resolves.
+  tsc-full              Run `npx tsc --noEmit` in every TypeScript workspace
+                        (orchestrator, web-dashboard, tools-core, fips-selftest,
+                        shared-types, mcp-server, erp-connector). Prisma
+                        generate runs first so orchestrator's `@prisma/client`
+                        import resolves.
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
@@ -441,11 +443,14 @@ run_check_tsc_full() {
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
   local ws
+  local checked=0
   local failed_workspaces=()
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
+           packages/shared-types services/mcp-server services/erp-connector; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.json" ]; then
       continue
     fi
+    checked=$((checked + 1))
     if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit 2>&1)"; then
       failed_workspaces+=("$ws")
       printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s\n" "$label" "$ws"
@@ -471,7 +476,8 @@ run_check_tsc_full() {
   # Opt-in by file existence rather than a second hardcoded list, so a
   # workspace joins this pass by adding the config — no edit here required.
   local tested=0
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
+           packages/shared-types services/mcp-server services/erp-connector; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
       continue
     fi
@@ -495,7 +501,7 @@ run_check_tsc_full() {
     return 1
   fi
 
-  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces, %d with tests)\n" "$label" "$tested"
+  printf "  ${_GREEN}PASS${_RESET}  %s (%d workspaces, %d with tests)\n" "$label" "$checked" "$tested"
   _record_result "$label" pass
   return 0
 }
@@ -1754,6 +1760,76 @@ run_check_image_pipeline() {
   return 0
 }
 
+run_check_app_downloads() {
+  # WARP-2666. `/downloads` is where a customer gets the client app for the box
+  # in front of them. Every box that has ever shipped served it empty, and no
+  # gate said so: an empty catalog answers HTTP 200 with available:false, which
+  # is correct for the API and invisible to everything downstream of it.
+  #
+  # ship-check is the pre-ship gate, so this is where "we are about to ship a
+  # box that can give a customer nothing" becomes a sentence someone has to
+  # read. It reports what data/app-downloads/EXPECTED declares versus what is
+  # actually staged; it never fetches or builds anything.
+  local label="app-downloads"
+  local audit="$REPO_ROOT/scripts/app-downloads/audit.sh"
+
+  if [ ! -r "$audit" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s is missing, so nothing can say what this release should carry
+"       "$label" "scripts/app-downloads/audit.sh" >&2
+    _record_result "$label" fail
+    return 1
+  fi
+
+  local out rc=0
+  out="$(bash "$audit" --dir "$REPO_ROOT/data/app-downloads" 2>&1)" || rc=$?
+
+  case "$rc" in
+    0)
+      printf "  ${_GREEN}PASS${_RESET}  %s (every platform EXPECTED declares is staged and verified)
+" "$label"
+      _record_result "$label" pass
+      return 0
+      ;;
+    3)
+      # Declared-and-ticketed absence. A checkout is the normal place for this
+      # to be true (installers are git-ignored and staged on the box), so
+      # failing here would make ship-check permanently red for every developer
+      # and train people to ignore it. Skip — but PRINT the blocked list, so
+      # "nothing to download" is never silent.
+      printf "  ${_YELLOW}SKIP${_RESET}  %s — declared blocked, nothing staged in this checkout:
+" "$label"
+      printf '%s
+' "$out" | sed -n 's/^BLOCKED  */    | blocked: /p'
+      printf "    | These platforms will have NOTHING at /downloads on an image built
+"
+      printf "    | from this tree. scripts/image/build-iso.sh refuses unless you pass
+"
+      printf "    | --allow-blank-downloads.
+"
+      _record_result "$label" skip
+      return 0
+      ;;
+    4)
+      # "Could not look" is not "it is fine" — the exact collapse this work
+      # exists to end. EXIT_CANNOT_RUN is the script's own vocabulary for it.
+      printf "  ${_RED}FAIL${_RESET}  %s — the audit reached NO VERDICT (exit %s: missing EXPECTED, staging root or python3)
+"         "$label" "$EXIT_CANNOT_RUN" >&2
+      printf '%s
+' "$out" | head -10 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+    *)
+      printf "  ${_RED}FAIL${_RESET}  %s — this release does not carry what data/app-downloads/EXPECTED declares
+" "$label" >&2
+      printf '%s
+' "$out" | head -20 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+  esac
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -2002,6 +2078,7 @@ _dispatch_check() {
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
     tls-invariants)       run_check_tls_invariants ;;
+    app-downloads)        run_check_app_downloads ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2

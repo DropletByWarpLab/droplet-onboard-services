@@ -11,6 +11,7 @@
  * (apps/orchestrator/src/services/file-search.service.ts).
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import {
   searchByVector,
@@ -24,7 +25,7 @@ const UUID = "6f0f5a3e-2f4b-4a4e-9d7e-0a1b2c3d4e5f";
 // hnsw.ef_search needs a transaction scope), so the stub hands the callback a
 // tx client whose $queryRawUnsafe is the SAME spy — `raw` sees every SELECT
 // from both arms, and the predicate/bind assertions below stay verbatim.
-function prismaStub(): { client: PrismaClient; raw: ReturnType<typeof vi.fn> } {
+function prismaStub(): { client: PrismaClient; raw: Mock } {
   const raw = vi.fn(async () => [] as unknown[]);
   const client = {
     $queryRawUnsafe: raw,

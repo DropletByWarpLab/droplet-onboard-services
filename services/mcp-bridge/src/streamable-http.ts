@@ -21,6 +21,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import type {
   RemoteMcpConnection,
@@ -69,6 +70,23 @@ const TRANSPORT_RECONNECTION = {
 } as const;
 
 /**
+ * The transport's fetch, with redirects REFUSED.
+ *
+ * `assertSafeMcpUrl` screens the host once, at construction. Node's default
+ * `redirect: "follow"` then lets the screened host hand the request — WITH the
+ * customer's `Authorization` header on it — to any other host by answering
+ * 302, and nothing re-screens the new authority. That turns a one-time
+ * exact-host guard into a suggestion. `"error"` makes the built-in fetch
+ * reject instead of following, so a redirect surfaces as a connect failure the
+ * session classifies rather than as a credential delivered somewhere else.
+ *
+ * Exported so the option can be tested without opening a socket: nothing in
+ * this workspace dials in CI.
+ */
+export const noRedirectFetch: FetchLike = (url, init) =>
+  fetch(url, { ...init, redirect: "error" });
+
+/**
  * Build a live Streamable-HTTP connection to a remote MCP server.
  *
  * `input.url` MUST already have passed `assertSafeMcpUrl` — this factory does
@@ -84,6 +102,9 @@ export const createStreamableHttpConnection = async (
     // the credential closure per connect (see `credentials.ts`), so nothing
     // long-lived holds the material.
     requestInit: { headers: { ...input.headers } },
+    // ADR-043 §6's exact-host guard is registration-time only; this is what
+    // keeps it true for the life of the session. See `noRedirectFetch`.
+    fetch: noRedirectFetch,
     reconnectionOptions: { ...TRANSPORT_RECONNECTION },
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
   });

@@ -123,5 +123,6 @@ export {
 export {
   createStreamableHttpConnection,
   MCP_BRIDGE_CLIENT_INFO,
+  noRedirectFetch,
   type StreamableHttpConnectionOptions,
 } from "./streamable-http.js";

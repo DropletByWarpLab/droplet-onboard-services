@@ -114,6 +114,20 @@ export interface RemoteMcpSessionOptions {
   initialReconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   reconnectDelayGrowthFactor?: number;
+  /**
+   * How long a reconnected session must STAY `ready` before its retry budget
+   * is handed back. Default 60 s.
+   *
+   * Without this the budget resets the instant a `connect()` succeeds, and a
+   * server that accepts the connection and immediately drops it never spends
+   * a single attempt — the delay never grows past the floor and the box dials
+   * a vendor once a second forever, while `health()` keeps reporting `ready`
+   * with zero failures because each cycle passes through it. The budget is
+   * there to make a persistent failure visible; a reset on `connect()` alone
+   * measures the wrong thing (that a socket opened) instead of the thing that
+   * matters (that it stayed open).
+   */
+  reconnectStabilityWindowMs?: number;
   /** Injected so tests drive retries deterministically and nothing sleeps. */
   scheduleRetry?: (delayMs: number, run: () => void) => void;
   /** Injected clock, for the same reason. */
@@ -150,6 +164,7 @@ const DEFAULTS = {
   initialReconnectDelayMs: 1_000,
   maxReconnectDelayMs: 30_000,
   reconnectDelayGrowthFactor: 2,
+  reconnectStabilityWindowMs: 60_000,
 };
 
 function defaultScheduleRetry(delayMs: number, run: () => void): void {
@@ -188,6 +203,7 @@ export class RemoteMcpSession {
   readonly #initialReconnectDelayMs: number;
   readonly #maxReconnectDelayMs: number;
   readonly #reconnectDelayGrowthFactor: number;
+  readonly #reconnectStabilityWindowMs: number;
 
   constructor(opts: RemoteMcpSessionOptions) {
     this.serverId = opts.serverId;
@@ -204,6 +220,8 @@ export class RemoteMcpSession {
       opts.maxReconnectDelayMs ?? DEFAULTS.maxReconnectDelayMs;
     this.#reconnectDelayGrowthFactor =
       opts.reconnectDelayGrowthFactor ?? DEFAULTS.reconnectDelayGrowthFactor;
+    this.#reconnectStabilityWindowMs =
+      opts.reconnectStabilityWindowMs ?? DEFAULTS.reconnectStabilityWindowMs;
     // WARP-2651: seed the drift baseline, but do NOT seed `#catalog` — the
     // names are what drift is computed from, while `#catalog` is what this
     // session actually served and `health().toolCount` reports. Claiming a tool
@@ -261,6 +279,12 @@ export class RemoteMcpSession {
       // afterwards would not be a kill switch.
       return this.health();
     }
+    // A CALLER-driven open is a fresh decision to dial, so it gets a fresh
+    // budget. The scheduled retry is not — it runs from `reconnecting`, and
+    // handing it a fresh budget is exactly the unbounded loop this counter
+    // exists to stop. The budget comes back in `#onTransportClosed`, and only
+    // for a session that stayed `ready` past the stability window.
+    if (this.#state !== "reconnecting") this.#reconnectAttempts = 0;
     this.#state = "connecting";
     try {
       const connection = await this.#connect({
@@ -268,16 +292,32 @@ export class RemoteMcpSession {
         url: this.url,
         headers: this.#credential.headers(),
       });
+      // Read through the public getter: assigning `#state = "connecting"`
+      // above narrows the private field for the rest of this function, and
+      // TypeScript does not model the fact that an `await` can widen it again.
+      if (this.state === "closed") {
+        // `close()` landed while this connect was in flight. Assigning now
+        // would leave a live transport CARRYING THE CREDENTIAL attached to a
+        // session the caller has already torn down, with nothing holding a
+        // reference to close it later — ADR-043 §4's kill switch would not
+        // hold, and the socket would leak. Close what we just opened and stay
+        // closed.
+        await connection.close().catch(() => undefined);
+        return this.health();
+      }
       connection.onClosed((err) => this.#onTransportClosed(err));
       this.#connection = connection;
       this.#state = "ready";
       this.#reason = null;
       this.#consecutiveFailures = 0;
-      this.#reconnectAttempts = 0;
       this.#lastReadyAt = this.#now();
     } catch (err) {
       this.#consecutiveFailures += 1;
       this.#connection = null;
+      // Same race, other arm: a failed connect must not move a session the
+      // caller closed back out of `closed`, which would make `connect()`
+      // dialable again.
+      if (this.state === "closed") return this.health();
       const { state, reason } = classifyRemoteMcpError(err);
       this.#state = state;
       this.#reason = reason;
@@ -393,10 +433,23 @@ export class RemoteMcpSession {
    * credential and a protocol mismatch are not fixed by dialling again, and
    * re-dialling them would be an unauthenticated request loop against a
    * vendor.
+   *
+   * The retry budget is handed back HERE rather than on a successful
+   * `connect()`, and only when the session held `ready` for
+   * {@link RemoteMcpSessionOptions.reconnectStabilityWindowMs}. A server that
+   * accepts and immediately drops therefore spends the budget and settles on
+   * `unreachable`/`retries_exhausted`, instead of dialling forever at the
+   * backoff floor while `health()` reports `ready` with zero failures.
    */
   #onTransportClosed(err?: unknown): void {
     if (this.#state === "closed") return;
     this.#connection = null;
+    if (
+      this.#lastReadyAt !== null &&
+      this.#now() - this.#lastReadyAt >= this.#reconnectStabilityWindowMs
+    ) {
+      this.#reconnectAttempts = 0;
+    }
     const { state, reason } =
       err === undefined
         ? ({ state: "unreachable", reason: "endpoint_unreachable" } as const)

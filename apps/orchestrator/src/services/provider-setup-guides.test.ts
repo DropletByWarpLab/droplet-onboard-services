@@ -28,11 +28,13 @@
  *    no moment of use to link from and requiring a guide would mean writing one
  *    for a connector nobody can reach. Those descriptors are correctly absent
  *    from `CLOUD_PROVIDERS`.
- *  • `shopify` and `xero` guides are on this branch with no descriptor, because
- *    the guides were written from vendor research ahead of the connectors
- *    (WARP-2296 / #1945 and WARP-2383). That is the SAME defect class as the
- *    Atlassian one — a readable guide for an unconnectable integration — but it
- *    is a state somebody chose, and the fix is another PR's, not a test's.
+ *  • The `xero` guide is on this branch with no descriptor, because the guide
+ *    was written from vendor research ahead of the connector (WARP-2383). That
+ *    is the SAME defect class as the Atlassian one — a readable guide for an
+ *    unconnectable integration — but it is a state somebody chose, and the fix
+ *    is another PR's, not a test's. `shopify` was here too until WARP-2296 /
+ *    #1945 landed its descriptor on `stage`; the third test below is what
+ *    forced this entry out at the merge.
  *
  * So the invariant is directional plus one EXPLICIT, named exception list.
  * {@link GUIDE_AHEAD_OF_DESCRIPTOR} is the list, it carries the ticket that
@@ -80,7 +82,6 @@ const SCRIPT = join(repoRoot(), "scripts", "check-setup-guides.sh");
  * reviewable decision, which is exactly what `atlassian` never got.
  */
 const GUIDE_AHEAD_OF_DESCRIPTOR: Readonly<Record<string, string>> = Object.freeze({
-  shopify: "WARP-2296 — connector + descriptor in PR #1945",
   xero: "WARP-2383 — connector + descriptor in flight",
 });
 

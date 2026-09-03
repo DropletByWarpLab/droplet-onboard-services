@@ -988,3 +988,138 @@ describe("ADR-041 §4 boundary", () => {
     expect(cache.createMany).not.toHaveBeenCalled();
   });
 });
+
+describe("WARP-2549 — the landing seam", () => {
+  const CONTACT_ROWS = [
+    {
+      contact_id: "p-1",
+      created_at: "2026-08-26T00:00:00Z",
+      updated_at: "2026-08-26T00:00:00Z",
+      first_name: "Ada",
+      last_name: "Lovelace",
+      email: "ada@example.test",
+    },
+  ];
+
+  function contactHarness(read?: () => Promise<unknown[]>) {
+    return harness({
+      cursors: [cursorRow({ entity: "contact" })],
+      read: read ?? (async () => CONTACT_ROWS),
+    });
+  }
+
+  it("hands a landable page to the seam, with the connection that read it", async () => {
+    const h = contactHarness();
+    const land = vi.fn(async () => ({
+      entity: "contact",
+      landed: 1,
+      skipped: 0,
+      reason: null,
+    }));
+
+    await runnerFor(h, { land }).runIncrementalTick();
+
+    expect(land).toHaveBeenCalledTimes(1);
+    expect(land).toHaveBeenCalledWith({
+      connection: { id: "conn-1", provider: "quickbooks-online" },
+      entity: "contact",
+      rows: CONTACT_ROWS,
+      now: NOW,
+    });
+  });
+
+  it("does not reach the seam at all for a dataset that lands nowhere", async () => {
+    // A support ticket has no CRM home and is not a ledger document, so the
+    // tick must not even open the transaction for it. (`invoice` DOES land
+    // since WARP-2581 — it becomes an `ErpDocument`.)
+    const h = harness({
+      cursors: [cursorRow({ entity: "ticket" })],
+      read: async () => [
+        { ticket_id: "t-1", created_at: "2026-08-26T00:00:00Z", subject: "Broken chair" },
+      ],
+    });
+    const land = vi.fn();
+
+    await runnerFor(h, { land }).runIncrementalTick();
+
+    expect(land).not.toHaveBeenCalled();
+    // The page still advanced its own watermark — landing is what was skipped,
+    // not the sync.
+    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-26T00:00:00Z");
+  });
+
+  it("hands an invoice page to the seam — money lands too (WARP-2581)", async () => {
+    const h = harness();
+    const land = vi.fn(async () => ({
+      entity: "invoice",
+      landed: 2,
+      skipped: 0,
+      reason: null,
+    }));
+
+    await runnerFor(h, { land }).runIncrementalTick();
+
+    expect(land).toHaveBeenCalledWith(
+      expect.objectContaining({ entity: "invoice", rows: INVOICE_ROWS }),
+    );
+  });
+
+  it("lands BEFORE the watermark moves", async () => {
+    // The ordering IS the durability guarantee: a watermark that advanced
+    // first would mean a crash in the landing loses those rows forever,
+    // because the next tick asks the vendor for rows after the mark.
+    const h = contactHarness();
+    let watermarkAtLandingTime: unknown = "never called";
+    const land = vi.fn(async () => {
+      watermarkAtLandingTime = h.prisma.__cursor("cur-1").watermark;
+      return { entity: "contact", landed: 1, skipped: 0, reason: null };
+    });
+
+    await runnerFor(h, { land }).runIncrementalTick();
+
+    expect(watermarkAtLandingTime).toBe("2026-08-15T00:00:00Z");
+    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-26T00:00:00Z");
+  });
+
+  it("a landing failure parks the cursor and leaves the watermark where it was", async () => {
+    const h = contactHarness();
+    const land = vi.fn(async () => {
+      throw new Error("check constraint violated");
+    });
+
+    const outcome = await runnerFor(h, { land }).runIncrementalTick();
+
+    expect(outcome.failed).toBe(1);
+    // Unmoved: the next tick re-reads the same page, and re-landing is
+    // idempotent on `(connectionId, externalId)`.
+    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-15T00:00:00Z");
+    expect(h.prisma.__cursor("cur-1").state).not.toBe("IDLE");
+  });
+
+  it("reports what it landed as COUNTS, never as content", async () => {
+    const h = contactHarness();
+    const land = vi.fn(async () => ({
+      entity: "contact",
+      landed: 1,
+      skipped: 2,
+      reason: "unidentified" as const,
+    }));
+
+    await runnerFor(h, { land }).runIncrementalTick();
+
+    const audit = h.recorder.record.mock.calls
+      .map((call: any[]) => call[0])
+      .find((row: any) => row?.what === "Connector synced");
+    expect(audit.refs).toMatchObject({
+      landed: 1,
+      landSkipped: 2,
+      landSkipReason: "unidentified",
+    });
+    // Rule 19 — an audit row is exportable and append-only. No names, no
+    // addresses, no ids from the vendor payload may appear in it.
+    const scope = JSON.stringify(audit.refs);
+    expect(scope).not.toContain("ada@example.test");
+    expect(scope).not.toContain("Lovelace");
+    expect(scope).not.toContain("p-1");
+  });
+});

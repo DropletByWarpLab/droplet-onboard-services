@@ -5,6 +5,7 @@
 // modals so the two halves of this page are one surface.
 
 import { useId, useState, type JSX } from "react";
+import Link from "next/link";
 
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
@@ -339,9 +340,23 @@ export function RecordDrawer({
           <h2 id={titleId} style={{ margin: 0, fontSize: 17, fontWeight: 600 }}>
             {title}
           </h2>
-          <button className="pm-btn ghost sm" type="button" onClick={onClose} aria-label="Close">
-            <PmIcon name="x" size={14} />
-          </button>
+          <div className="pm-row" style={{ gap: 8 }}>
+            {/* WARP-2563 — the way into the full record.
+                The drawer stays what it is: a quick look and a place to log a
+                note without losing your place in the list. The record page is
+                the other question — people, projects, the timeline and the
+                upstreams this customer is linked to — and it needs a page.
+                Deals and contacts have no record page, so the link is only
+                offered where it leads somewhere. */}
+            {subject.type === "COMPANY" && (
+              <Link className="pm-btn ghost sm" href={`/customers/${subject.id}`}>
+                <PmIcon name="board" size={14} /> Full record
+              </Link>
+            )}
+            <button className="pm-btn ghost sm" type="button" onClick={onClose} aria-label="Close">
+              <PmIcon name="x" size={14} />
+            </button>
+          </div>
         </div>
 
         {!readOnly && (

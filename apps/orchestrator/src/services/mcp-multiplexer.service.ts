@@ -160,6 +160,13 @@ export const DENY_ALL_REMOTE_TOOLS: RemoteCallPolicy = ({ namespacedName }) => (
     "Do not retry; answer without it.",
 });
 
+/**
+ * How many refusals {@link McpToolMultiplexer.rejections} keeps. A ring, not a
+ * log: this is an operator surface for "what was refused just now", and the
+ * durable record is the audit trail, not a process-lifetime array.
+ */
+export const MAX_RETAINED_REJECTIONS = 100;
+
 export interface McpToolMultiplexerOptions {
   /**
    * WARP-2418 — the operator allowlist. Returns `true` only for a server the
@@ -225,8 +232,11 @@ export class McpToolMultiplexer implements McpClientPort {
     return [...this.#remotes.keys()].sort();
   }
 
-  /** Every refusal since construction, newest last. Read by the operator
-   *  surface; never a silent drop. */
+  /** The most recent refusals, newest last, capped at
+   *  {@link MAX_RETAINED_REJECTIONS}. Read by the operator surface; a refusal
+   *  is never a silent drop, and every one is logged at the moment it happens
+   *  ({@link McpToolMultiplexer.rejections} is the recent window, not the
+   *  record). */
   rejections(): readonly RemoteRejection[] {
     return this.#rejections;
   }
@@ -451,6 +461,16 @@ export class McpToolMultiplexer implements McpClientPort {
 
   #reject(rejection: RemoteRejection): RemoteRejection {
     this.#rejections.push(rejection);
+    // Bounded, because this array is append-only and its writers are not.
+    // `listTools()` runs per agent turn and per request, and a remote that is
+    // unreachable or whose tools cannot be namespaced pushes an entry EVERY
+    // time — so a vendor outage or a disconnected account would grow it for
+    // the life of the process, and `syncRemoteCatalog` copies the whole thing
+    // on every sync. Oldest go first: the newest refusals are the ones an
+    // operator is looking at.
+    if (this.#rejections.length > MAX_RETAINED_REJECTIONS) {
+      this.#rejections.splice(0, this.#rejections.length - MAX_RETAINED_REJECTIONS);
+    }
     logger.warn(
       { code: rejection.code, serverId: rejection.serverId, tool: rejection.toolName },
       "remote_mcp_rejected",
