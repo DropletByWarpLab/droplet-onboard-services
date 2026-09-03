@@ -235,6 +235,15 @@ export default function SettingsPage() {
               (Run business setup / Re-run onboarding). Renders nothing for
               roles whose GET view carries no onboardingState. */}
           <BusinessProfileCard />
+
+          {/* WARP-1906 — premade buildings + conference rooms offered as
+              suggestions in the event form's Location field. Workspace-scoped
+              data (fetchWorkspaceLocations) and headless like the card above,
+              so it belongs to this group too; it was stranded under "AI
+              providers" by the same accident. Self-gates to owner/admin on
+              the same `user.role` expression PersonalityCard uses, and
+              renders nothing for lesser roles. */}
+          <LocationsCard />
         </PersonalityCard>
 
         {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
@@ -555,11 +564,6 @@ export default function SettingsPage() {
             />
           </div>
         </div>
-
-        {/* WARP-1906 — premade buildings + conference rooms offered as
-            suggestions in the event form's Location field. Self-gates to
-            owner/admin internally and renders nothing for lesser roles. */}
-        <LocationsCard />
 
         {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
             device actions (reformat/remake storage AND factory reset). The

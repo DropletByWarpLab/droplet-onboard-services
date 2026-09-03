@@ -38,8 +38,9 @@ import { buildGreeting, PRESET_TILES } from "@/lib/persona-preview";
  * same <section>, passed as `children` — that is the only way a headless
  * card (one with no <Sect> of its own) can land under this group's heading
  * with intra-group spacing instead of the 40px mb-10 gap that separates
- * groups. Children ride the same owner/admin gate: Settings is an admin
- * surface (§6.3), and every card in this group is owner/admin-only anyway.
+ * groups. The locations card (WARP-1906) rides in the same way, third.
+ * Children ride the same owner/admin gate: Settings is an admin surface
+ * (§6.3), and every card in this group is owner/admin-only anyway.
  *
  * Copy is VERBATIM from the design brief §9 — sentence case, no emoji, no
  * exclamation marks. Indigo shell tokens only (.card / .btn primary / shell
@@ -361,10 +362,13 @@ export function PersonalityCard({ children }: { children?: ReactNode }) {
         )}
       </div>
 
-      {/* Design brief §6 Card 2 — the business profile card renders here, in
-          this group's <section>, so the two Workspace cards sit 12px apart
-          like every other intra-group pair rather than 40px apart. */}
-      {children ? <div className="mt-3">{children}</div> : null}
+      {/* The rest of the Workspace group renders here, in this group's
+          <section>, so its cards sit 12px apart like every other intra-group
+          pair rather than the 40px `mb-10` that separates groups. Both of the
+          cards passed in (business profile §6 Card 2, locations) are headless
+          — they carry their own `type-headline` but no <Sect> — so this is
+          the only place they can land under a heading. */}
+      {children ? <div className="mt-3 space-y-3">{children}</div> : null}
     </section>
   );
 }
