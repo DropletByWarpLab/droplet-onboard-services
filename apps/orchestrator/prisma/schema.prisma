@@ -4775,7 +4775,15 @@ model Department {
   name            String                 @unique // display + groupfolder mount_point
   slug            String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
   parentId        String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
-  parent          Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
+  /// WARP-2634: `onDelete: Restrict` is declared explicitly to match what
+  /// 20260711000000_warp_1255_departments actually created. Prisma's implicit
+  /// default for an optional relation is SetNull, so leaving it off made the
+  /// datamodel promise a behaviour no migrated box has ever had. Nothing
+  /// row-deletes a Department today — `DELETE /api/departments/:id` archives
+  /// (sets `archivedAt`) — so this declaration changes no behaviour; it stops
+  /// the datamodel lying. Whether RESTRICT or SetNull is the RIGHT product
+  /// behaviour for deleting a parent department is a separate product call.
+  parent          Department?            @relation("DeptHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
   teams           Department[]           @relation("DeptHierarchy")
   description     String?
   kind            DepartmentKind         @default(DEPARTMENT)
@@ -4801,6 +4809,11 @@ model Department {
   inviteGrants    UserInviteDepartment[]
 
   @@index([state])
+  /// WARP-2634: declared to match `Department_parentId_idx`, which
+  /// 20260711000000_warp_1255_departments has always created. Postgres does
+  /// not auto-index FK columns and the reconciler reads teams by parentId, so
+  /// the index is doing real work — the datamodel was the side that was wrong.
+  @@index([parentId])
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
