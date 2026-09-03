@@ -17,12 +17,38 @@
  * concurrency ceiling and the three guards that close upstream defects #213,
  * #221 and #171.
  *
- * WHAT IS STILL NOT HERE: an HTTP listener, a Dockerfile and compose wiring.
- * ADR-043 §5 requires them before the ORCHESTRATOR can hold a session, so
- * nothing in `apps/orchestrator` constructs one today — see the gap note in
- * WARP-2316's PR body. The session core, the Atlassian profile and the
- * classification table are all reachable and tested without them.
+ * WHAT WARP-2627 ADDED: the HTTP surface (`http-api.ts` + `server.ts`), the
+ * closed server-id registry (`session-profiles.ts`) that finally composes the
+ * SDK transport with the Atlassian profile, the bearer (`http-auth.ts`), a
+ * Dockerfile and a profile-gated compose service. ADR-043 §5 required all of
+ * that before `apps/orchestrator` could construct a session, which is why
+ * nothing did until now.
+ *
+ * WHAT IS STILL NOT HERE: persistence of any kind. Sessions live in memory for
+ * the life of the container, deliberately — ADR-043 §4's kill switch tears
+ * sessions down, and a component that could restore one from disk would not be
+ * torn down by it.
  */
+export {
+  BridgeSessionStore,
+  handleBridgeRequest,
+  type BridgeApiOptions,
+  type BridgeCallBody,
+  type BridgeErrorBody,
+  type BridgeErrorCode,
+  type BridgeRequest,
+  type BridgeResponse,
+  type BridgeStateBody,
+  type BridgeToolsBody,
+} from "./http-api.js";
+export { AUTH_EXEMPT_PATHS, checkBridgeBearer, type BridgeAuthVerdict } from "./http-auth.js";
+export { createBridgeServer, main, type BridgeServerOptions } from "./server.js";
+export {
+  knownServerIds,
+  SESSION_FACTORIES,
+  type OpenSessionInput,
+  type SessionFactory,
+} from "./session-profiles.js";
 export {
   ATLASSIAN_ALLOWED_MCP_HOSTS,
   ATLASSIAN_CLOUD_ID_ARG,
