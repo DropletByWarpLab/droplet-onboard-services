@@ -534,6 +534,12 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      // WARP-2659 — the MCP-track card, appended after the catalog cards. It
+      // has NO `catalog` block and no `ConnectorId` literal: it is derived
+      // from the descriptor's track by `hubCardFor`, which is why it lands
+      // last rather than at a `catalog.order`. Mutation: delete the `case
+      // "mcp"` arm → `tsc` red; delete the descriptor → red here.
+      "Atlassian (Jira & Confluence)",
     ]);
   });
 
@@ -566,6 +572,12 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      // WARP-2659 — the MCP-track card, appended after the catalog cards. It
+      // has NO `catalog` block and no `ConnectorId` literal: it is derived
+      // from the descriptor's track by `hubCardFor`, which is why it lands
+      // last rather than at a `catalog.order`. Mutation: delete the `case
+      // "mcp"` arm → `tsc` red; delete the descriptor → red here.
+      "Atlassian (Jira & Confluence)",
       "Generic Export",
       "M365",
     ]);
@@ -592,8 +604,9 @@ describe("entries are the union of the catalog and the response", () => {
 
     // Seven catalog tiles (four original + the three WARP-2214 vendors) absorb
     // four of the rows; the two the catalog knows nothing about each get their
-    // own.
-    expect(tiles(container)).toHaveLength(9);
+    // own. WARP-2659 adds the MCP-track tile, which this fixture reports no
+    // row for — it renders from the registry regardless, which is the point.
+    expect(tiles(container)).toHaveLength(10);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -602,6 +615,7 @@ describe("entries are the union of the catalog and the response", () => {
       "Stripe",
       "HubSpot",
       "Mailchimp",
+      "Atlassian (Jira & Confluence)",
       "M365",
       "Something Nobody Wrote A Tile For",
     ]) {
