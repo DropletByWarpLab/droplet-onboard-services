@@ -117,9 +117,17 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "cloud_query_dataset",
+  // The vendor list that used to sit in this sentence is GONE, and its removal
+  // is the point rather than a saving. Adding Shopify's three datasets took the
+  // full chat pool to 60,023 chars against `base-prompt-budget.test.ts`'s
+  // 60,000 tripwire, and that file's instruction for exactly this moment is
+  // "trim the schema" — never raise the ceiling, which only relocates the
+  // cliff. Naming the vendors here duplicated the `enum` the model is already
+  // shown, cost ~38 chars, and grew with every vendor: a description that lists
+  // its providers is a description that cannot survive the fifth one.
   description:
-    "Read business records from the connected cloud accounts (Stripe, HubSpot, Mailchimp, " +
-    "Shopify) by dataset name. Read-only; the dataset picks the provider.",
+    "Read business records from the connected cloud accounts by dataset name. " +
+    "Read-only; the dataset picks the provider.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

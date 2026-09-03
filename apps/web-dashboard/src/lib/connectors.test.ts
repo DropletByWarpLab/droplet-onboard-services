@@ -99,6 +99,15 @@ const CATALOG_WARP_2214 = [
     availability: "available",
     setupGuideHref: "/help/integrations/mailchimp",
   },
+  {
+    // WARP-2296 — the fourth SaaS card, at catalog.order 7.
+    id: "shopify",
+    name: "Shopify",
+    category: "Commerce",
+    description: "Orders, catalogue and inventory read straight from your store — never a write.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/shopify",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -111,7 +120,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     expect(CONNECTORS.slice(0, CATALOG_BEFORE.length)).toEqual(CATALOG_BEFORE);
   });
 
-  it("appends the three WARP-2214 vendors, in hub order", () => {
+  it("appends the WARP-2214 vendors, in hub order", () => {
     // Mutation: change a `catalog.order` so a SaaS card lands among the
     // practice cards → red.
     expect(CONNECTORS.slice(CATALOG_BEFORE.length)).toEqual(CATALOG_WARP_2214);
@@ -119,7 +128,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
 
   it("keeps every id inside the ConnectorId union the rest of the hub uses", () => {
     // This is what makes the `as ConnectorId` cast in connectors.ts safe. A
-    // descriptor introducing a fifth card id goes red here instead of rendering
+    // descriptor introducing an unlisted card id goes red here instead of rendering
     // a card `useIntegrations` cannot key status onto.
     expect(CONNECTORS.map((c) => c.id).sort()).toEqual([
       "dentrix",
@@ -128,6 +137,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "mailchimp",
       "opendental",
       "quickbooks",
+      "shopify",
       "stripe",
     ]);
   });
