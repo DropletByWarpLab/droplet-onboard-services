@@ -1003,11 +1003,18 @@ jobs:
 
       # The self-test's compose-config case shells out to `docker compose
       # config`, which resolves the merged tree's `env_file: ../.env`
-      # directives and fails if that file is absent. .env is .gitignored, so
-      # a fresh checkout never has one. Seed it from the tracked example, or
-      # the self-test goes red on the runner for a reason that has nothing to
-      # do with the change under test. (compose-config itself still reads
-      # .env.example for values — see run_check_compose_config.)
+      # directives and cannot merge the tree if that file is absent. .env is
+      # .gitignored, so a fresh checkout never has one. Seed it from the
+      # tracked example. (compose-config itself still reads .env.example for
+      # values — see run_check_compose_config.)
+      #
+      # WARP-2646 — the gate now SKIPs rather than FAILs for this, so dropping
+      # this step no longer reds the job with a bogus "rejected
+      # docker-compose.yml". It reds it at the skip gate instead, naming
+      # `compose-config-yaml-breakage` as an un-allowed skip: still red, and
+      # now for the true reason. The skip id is deliberately NOT added to
+      # SHIPCHECK_ALLOW_SKIP below — a runner that cannot evaluate the compose
+      # file must be a failure, not a quiet pass.
       - name: Seed .env for the compose-config case
         run: cp .env.example .env
 
