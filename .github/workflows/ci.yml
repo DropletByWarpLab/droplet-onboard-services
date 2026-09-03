@@ -138,6 +138,13 @@ jobs:
               - "packages/tools-core/**"
               - "packages/fips-selftest/**"
               - "services/mcp-server/**"
+              # WARP-2398: the OUTBOUND MCP session component (ADR-043 §5).
+              # Attached to this existing leg rather than given one of its own
+              # ON PURPOSE (docs/ci-cost-budget.md): a new leg is a new job on
+              # every main push, while a build+test STEP in an already-running
+              # job is ~10s of an existing minute. The filter addition is a
+              # brand-new path, so no PR that ran zero legs before now runs
+              # one — delta ≈ 0.
               - "apps/orchestrator/prisma/**"
             orchestrator:
               - "apps/orchestrator/**"
@@ -491,6 +498,16 @@ jobs:
       - name: Test @droplet/mcp-server
         if: matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/mcp-server test
+
+      # WARP-2398 — the outbound half. `build` matters as much as `test`
+      # here: vitest never typechecks, and this workspace is the one place
+      # that constructs an MCP client transport, so a signature break against
+      # the pinned SDK would otherwise reach `stage` green.
+      - name: Build + test @droplet/mcp-bridge
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: |
+          npm run -w @droplet/mcp-bridge build
+          npm run -w @droplet/mcp-bridge test
 
       # WARP-537's update-agent verify suite (#787, on main) execs the real
       # cosign binary over golden fixtures — mirrors orchestrator-tests.yml /

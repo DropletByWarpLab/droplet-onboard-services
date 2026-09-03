@@ -37,9 +37,9 @@ import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type {
   McpCallContext,
-  McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
+import type { McpClientPort } from "./mcp-client.port.js";
 import {
   parseToolResultPayload,
   toolResultPayloadValue,
@@ -135,7 +135,16 @@ export interface CitationDeps {
 export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
 
 export interface AgentDeps {
-  mcp: McpClientService;
+  /**
+   * WARP-2391 — the PORT, not the stdio supervisor. The loop needs
+   * `listTools` / `callTool` / `isStarted` and nothing else; typing it as
+   * `McpClientService` meant it also depended on a child process, a
+   * `StdioClientTransport` and a `start()`/`stop()` lifecycle it never
+   * touches. Production passes the multiplexer
+   * (`mcp-client.singleton.ts`), which is the local child plus N remote
+   * servers behind the same three members.
+   */
+  mcp: McpClientPort;
   /**
    * WARP-2469 — turns an interceptor challenge into something a human
    * can approve, and an approval into the token the re-issued call

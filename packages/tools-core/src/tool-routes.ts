@@ -72,6 +72,18 @@
  * Paths carry `:param` segments (e.g. `/api/cameras/events/:eventId`); the
  * cross-check matches path SHAPE (segment count + literal segments), so the
  * exact param name here is documentation, not load-bearing.
+ *
+ * ## Runtime-registered tools have no row here, on purpose (WARP-2418)
+ *
+ * A tool advertised by a remote MCP server (ADR-043) dials no orchestrator
+ * route of ours, so there is nothing for the admission suite to prove and a
+ * row would be a fiction the cross-check would then have to be taught to
+ * skip. The completeness gate is keyed off `registry.ts`, which such a tool
+ * is never in, so this needs no exemption — it needs only to be said, since
+ * "the manifest is complete" and "the manifest covers every tool the model
+ * can name" stopped being the same sentence the moment a catalog could
+ * arrive over a socket. Those tools live in
+ * `apps/orchestrator/src/services/runtime-tool-registry.service.ts`.
  */
 
 export type ToolClient = "orchestrator" | "nextcloud" | "none";

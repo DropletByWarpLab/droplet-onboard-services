@@ -1018,6 +1018,22 @@ const envSchema = z.object({
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
 
+  // REMOTE_MCP_SERVER_ALLOWLIST — WARP-2418 / ADR-043. Comma-separated ids of
+  // the OUTBOUND MCP servers an operator has enabled on this box (e.g.
+  // "atlassian"). EMPTY BY DEFAULT and empty means "no remote server may
+  // attach", so a box that has never been configured advertises nothing
+  // remote and can dial nothing remote.
+  //
+  // Empty is not merely the safe default, it is the only correct one today:
+  // ADR-043's Consequences record that the full LOCAL registry already
+  // exceeds the shipping context window, so an unopted-in remote catalog
+  // would degrade every turn (per-turn selection, WARP-2348, is what gates
+  // that). It is also NOT the owner's kill switch — that is the `remote_mcp`
+  // OffLanChannelKey in ADR-043 §4, which is a schema change and a separate
+  // ticket. This variable says which servers MAY exist; the channel says
+  // whether any session may run.
+  REMOTE_MCP_SERVER_ALLOWLIST: z.string().default(""),
+
   // SERVICE_TOKEN_EMAIL — WARP-465. Bearer the email-indexer service
   // presents on POST /api/email/_ingest/* and PATCH
   // /api/email/_ingest/drafts/:id. authMiddleware's matchServiceToken
