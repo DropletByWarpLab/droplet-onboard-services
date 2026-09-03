@@ -15,6 +15,17 @@
  * today (they all read `allowed_tools` / `toolAccessScope`, which selection
  * does not touch); the pin is what keeps that a checkable claim instead of an
  * accident.
+ *
+ * WARP-2631 — that last sentence is now out of date, deliberately. The final
+ * describe block below covers the OTHER narrowing: `TOOL_SELECTION_MODE` and
+ * the WARP-1921 cross-turn continuity read the route performs at
+ * `routes/llm.ts:1320`. Both were invisible here because the
+ * `ChatPersistenceService` double had no `getConversationToolNames` — the call
+ * threw `TypeError` synchronously and the deliberate fail-open try/catch
+ * swallowed it, so every turn in this file behaved as a first turn. The double
+ * now has the method (and a controllable `ensureConversation`, since the route
+ * only reads continuity once a conversation row exists), and two cases pull
+ * the two levers.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -77,15 +88,36 @@ vi.mock("../services/query-enhancement.service.js", () => ({
 vi.mock("../services/file-citation.service.js", () => ({
   createFileCitationService: vi.fn().mockReturnValue({ enqueue: vi.fn() }),
 }));
+// WARP-2631 — the persistence double, now with the two knobs continuity needs.
+//
+// `sessionId` defaults to `null`, which reproduces the previous
+// `ensureConversation: () => null` byte-for-byte: the route's local
+// `conversationId` stays null (`routes/llm.ts:1176`) and the continuity branch
+// is skipped on its own guard. Every pre-existing case below therefore runs
+// exactly as it did. Only the WARP-2631 cases set it.
+//
+// `getConversationToolNames` is the method that was MISSING. Its absence was
+// not inert: `routes/llm.ts:1320` calls it on every non-`off` turn with a
+// conversation, and a missing method throws `TypeError` synchronously — caught
+// by the fail-open try/catch, so the suite went green while advertising
+// `priorToolNames: []` on every turn. A double that omits a method the route
+// calls does not test the fail-open; it tests nothing and hides the input.
+const persistence = vi.hoisted(() => ({
+  sessionId: null as string | null,
+  getConversationToolNames: vi.fn<(id: string, userId: string) => Promise<string[]>>(),
+}));
 vi.mock("../services/chat-persistence.service.js", () => ({
   ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue(null),
+    ensureConversation: vi.fn(async () =>
+      persistence.sessionId ? { id: persistence.sessionId } : null,
+    ),
     createTurnRows: vi.fn().mockResolvedValue(null),
     finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
     updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
     listConversationsForUser: vi.fn().mockResolvedValue([]),
     getConversationForUser: vi.fn().mockResolvedValue(null),
     deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    getConversationToolNames: persistence.getConversationToolNames,
   })),
 }));
 const mockRunAgent = vi.fn();
@@ -99,6 +131,10 @@ vi.mock("../services/effective-access.service.js", () => ({
 
 import { createLlmRouter } from "../routes/llm.js";
 import type { ToolAccessScope } from "../services/tool-access.service.js";
+import {
+  effectiveAdvertisedToolNames,
+  type SelectionMessage,
+} from "../services/tool-selection.service.js";
 
 const REGISTRY = [
   { name: "list_files" },
@@ -148,7 +184,34 @@ const agentRequest = () =>
   mockRunAgent.mock.calls.at(-1)![1] as {
     allowed_tools?: string[];
     toolAccessScope?: ToolAccessScope | null;
+    // WARP-2631 — the two selection inputs the route derives and ships.
+    tool_selection_mode?: "off" | "domains";
+    prior_tool_names?: string[];
+    messages?: SelectionMessage[];
   };
+
+/**
+ * WARP-2631 — the tool names the agent loop will advertise, given exactly what
+ * the route shipped.
+ *
+ * The route does NOT serialize the tool array; `llm-agent.service.ts` does,
+ * from the four inputs asserted above (`tool_selection_mode`,
+ * `prior_tool_names`, `messages`, `allowed_tools`). So the honest route-level
+ * statement is "given this request, the loop advertises X" — computed through
+ * `effectiveAdvertisedToolNames`, which is the SAME function the loop calls and
+ * which `tool-selection.parity.test.ts` pins as agreeing with the route's own
+ * budget estimate. Re-implementing the rule here instead would assert a copy of
+ * it rather than the shipped one.
+ */
+const advertisedFromAgentRequest = (pool: string[]): Set<string> => {
+  const req = agentRequest();
+  return effectiveAdvertisedToolNames({
+    mode: req.tool_selection_mode!,
+    messages: req.messages ?? [],
+    priorToolNames: req.prior_tool_names,
+    pool: req.allowed_tools ?? pool,
+  });
+};
 
 const chat = (app: express.Express, body: Record<string, unknown> = {}) =>
   request(app)
@@ -157,6 +220,9 @@ const chat = (app: express.Express, body: Record<string, unknown> = {}) =>
 
 beforeEach(() => {
   h.config.TOOL_SELECTION_MODE = "domains";
+  persistence.sessionId = null;
+  persistence.getConversationToolNames.mockReset();
+  persistence.getConversationToolNames.mockResolvedValue([]);
   mockRunAgent.mockReset();
   mockRunAgent.mockResolvedValue({
     message: { role: "assistant", content: "ok" },
@@ -228,5 +294,128 @@ describe("/api/llm/chat — §3 tool scope wiring", () => {
     });
     expect(res.status).toBe(200);
     expect(agentRequest().allowed_tools).toEqual([]);
+  });
+});
+
+/**
+ * WARP-2631 — the OTHER narrowing on the same turn: relevance-based tool
+ * advertisement (§3 of the agent-budgets spec), and specifically its
+ * cross-turn input.
+ *
+ * `getConversationToolNames` had unit coverage
+ * (`chat-persistence.continuity.test.ts`) and the selector had unit coverage
+ * (`tool-selection.service.test.ts`), but nothing exercised the REQUEST PATH
+ * that joins them — the leg where the route decides whether to read continuity
+ * at all, whom to read it for, and what to hand the loop. That leg is
+ * `routes/llm.ts:1317-1332`, and it is guarded twice: once on the mode, once on
+ * `conversationId && userId`.
+ *
+ * The scenario is the one WARP-1921 was filed for: turn 1 called a camera tool,
+ * turn 2 says something with no camera word in it. Without continuity the
+ * second turn advertises the floor only, the model cannot see the camera tool
+ * it just used, and the WARP-642 self-heal burns an iteration recovering.
+ */
+const CONVO_ID = "3f5c1c56-3b0a-4d9e-9a1b-5f2c8d7e6a40";
+
+/** Read-only, one per domain, none of them in `CORE_TOOL_NAMES`:
+ *  `search_content` is the floor, `list_cameras` is the domain continuity
+ *  should re-admit, `list_smart_home_devices` is the out-of-domain control
+ *  that must stay out. */
+const POOL = ["search_content", "list_cameras", "list_smart_home_devices"];
+
+describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
+  beforeEach(() => {
+    persistence.sessionId = CONVO_ID;
+    resolveEffectiveAccessMock.mockResolvedValue({
+      tier: "admin",
+      toolDomains: ["cameras", "smart-home", "files"],
+      locks: false,
+    });
+  });
+
+  it("reads the prior turn's tool names for THIS user and ships them to the loop", async () => {
+    persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
+    const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
+      conversationId: CONVO_ID,
+      // No camera word anywhere — the only route to the cameras domain on
+      // this turn is the prior turn's trace.
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    // Scoped to the authenticated user, not the body's claim: a guessed
+    // conversation id from another household member reveals nothing.
+    expect(persistence.getConversationToolNames).toHaveBeenCalledWith(
+      CONVO_ID,
+      "sam",
+    );
+    expect(agentRequest().prior_tool_names).toEqual(["list_cameras"]);
+  });
+
+  it("keeps an out-of-domain tool from an earlier turn in the advertised pool", async () => {
+    persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
+    const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
+      conversationId: CONVO_ID,
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    const advertised = advertisedFromAgentRequest(POOL);
+    // The floor is unconditional.
+    expect(advertised.has("search_content")).toBe(true);
+    // Continuity — the whole point. Red when `routes/llm.ts:1320` is removed.
+    expect(advertised.has("list_cameras")).toBe(true);
+    // …and continuity admits the prior turn's DOMAIN, not the whole pool:
+    // smart-home was never touched and stays out.
+    expect(advertised.has("list_smart_home_devices")).toBe(false);
+  });
+
+  it("advertises the floor only when the conversation has no prior tool calls", async () => {
+    // The control for the case above: same turn, same pool, empty trace.
+    persistence.getConversationToolNames.mockResolvedValue([]);
+    const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
+      conversationId: CONVO_ID,
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    expect([...advertisedFromAgentRequest(POOL)]).toEqual(["search_content"]);
+  });
+
+  it("skips the continuity read entirely and advertises the whole pool under `off`", async () => {
+    // The assertion this file lacked (WARP-2619 reported the gap): a verdict
+    // that changes with `TOOL_SELECTION_MODE`. `off` is not a subtle variant —
+    // it takes the route's guard at `routes/llm.ts:1318` (no persistence read
+    // at all, so no continuity to have) and the selector's short-circuit (the
+    // pool ships whole, out-of-domain tools included).
+    h.config.TOOL_SELECTION_MODE = "off";
+    persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
+    const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
+      conversationId: CONVO_ID,
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    expect(persistence.getConversationToolNames).not.toHaveBeenCalled();
+    expect(agentRequest().prior_tool_names).toEqual([]);
+    const advertised = advertisedFromAgentRequest(POOL);
+    expect(advertised.has("list_smart_home_devices")).toBe(true);
+    expect(advertised.size).toBe(POOL.length);
+  });
+
+  it("still answers the turn when the persistence layer cannot supply continuity", async () => {
+    // The fail-open at `routes/llm.ts:1324` is deliberate and load-bearing:
+    // continuity is an optimisation, and a 500 on every chat turn is a
+    // spectacular way for one to fail. Now that the double HAS the method,
+    // this is a real rejection rather than the accidental `TypeError` that
+    // used to make every case in this file take this path.
+    persistence.getConversationToolNames.mockRejectedValue(new Error("db down"));
+    const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
+      conversationId: CONVO_ID,
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    expect(agentRequest().prior_tool_names).toEqual([]);
   });
 });
