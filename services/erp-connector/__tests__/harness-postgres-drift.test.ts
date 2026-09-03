@@ -26,15 +26,14 @@
  * testing the CURRENT code, which is the part that was silently rotting.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { buildSchemaMap, type IntrospectedTable } from "../src/schema-map.js";
 import { READ_QUERIES } from "../src/read-queries.js";
 import { FORBIDDEN_WRITE_TABLES, WRITE_COMMANDS } from "../src/write-commands.js";
+import { readPackageFile } from "./helpers/test-paths.js";
 
-const HARNESS = join(dirname(fileURLToPath(import.meta.url)), "..", "harness");
-const read = (p: string) => readFileSync(join(HARNESS, p), "utf8");
+// Anchored to this test file, not the runner's cwd, through the one helper
+// this package's roots live in (WARP-2654).
+const read = (p: string) => readPackageFile("harness", p);
 
 const SCHEMA_SQL = read("init/01-schema.sql");
 const PROVISION_SQL = read("init/03-provision.sql");
