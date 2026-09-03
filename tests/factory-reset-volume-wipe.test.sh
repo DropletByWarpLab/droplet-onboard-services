@@ -163,7 +163,19 @@ echo "--- The Docker data-root is derived, and container logs are swept ---"
 # mount on exactly the boxes it exists for. (The bare `/var/lib/docker` FALLBACK
 # default below is fine and asserted separately; what must not come back is a
 # hardcoded path INTO the store.)
-if printf '%s\n' "$CODE" | grep -qF '/var/lib/docker/'; then
+#
+# `tr -d '\\'` first: the original was an awk REGEX, where every slash is
+# backslash-escaped (`\/var\/lib\/docker\/`). A plain -F grep for the path does
+# not match that form, so re-introducing the exact old line slipped through —
+# caught in mutation testing, which is the only reason this normalisation is here.
+#
+# And `$(... | grep -F ...)` captured into a variable rather than the `grep -qF`
+# this file uses everywhere else: `-q` exits on the FIRST match, `tr` then dies
+# of SIGPIPE (141), and `set -o pipefail` at the top of this file turns the
+# whole pipeline non-zero — so the assertion reads "no match" precisely when
+# there IS one. Only pipelines with an external command before the grep are
+# affected, which is why the other assertions here are fine.
+if [ -n "$(printf '%s\n' "$CODE" | tr -d '\\' | grep -F '/var/lib/docker/' || true)" ]; then
   fail "a path into /var/lib/docker is still hardcoded — the appliance data-root is /data/docker"
 else
   pass "no hardcoded path into /var/lib/docker (the data-root is derived)"
