@@ -23,13 +23,12 @@
  * runs, only the module boundary (`fetchIntegrations`) is stubbed. No database,
  * mock or otherwise (team rule).
  */
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
 import type { IntegrationConnection, IntegrationStatus } from "@/lib/erp-types";
+import { readPackageFile } from "@/__tests__/helpers/test-paths";
 
 vi.mock("@/lib/api.erp", () => ({
   fetchIntegrations: vi.fn(),
@@ -137,24 +136,6 @@ function renderedNames(container: HTMLElement): string[] {
   return tiles(container).map(
     (t) => t.querySelector(".type-headline")?.textContent ?? "?",
   );
-}
-
-/**
- * Read a dashboard source file. `import.meta.url` is not a `file:` URL under
- * vite's transform, so resolve from the package root instead and fail loudly
- * if the walk misses — a source assertion that silently reads the wrong file
- * would pass forever.
- */
-function readSource(relative: string): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    const candidate = resolve(dir, relative);
-    if (existsSync(candidate)) return readFileSync(candidate, "utf8");
-    dir = resolve(dir, "..");
-  }
-  const fromRepoRoot = resolve(process.cwd(), "apps/web-dashboard", relative);
-  if (existsSync(fromRepoRoot)) return readFileSync(fromRepoRoot, "utf8");
-  throw new Error(`could not locate ${relative} from ${process.cwd()}`);
 }
 
 beforeEach(() => {
@@ -424,8 +405,12 @@ describe("hub dispatch", () => {
    * to either file → red.
    */
   it("neither the hub page nor the hook names a provider id", () => {
-    const page = readSource("src/app/integrations/page.tsx");
-    const hook = readSource("src/lib/hooks/useIntegrations.ts");
+    // WARP-2632 — `readPackageFile` is anchored to the owning file, not to
+    // `process.cwd()`. The walk-up this replaced did not fail on a wrong cwd,
+    // it climbed until *something* matched, so a runner started outside the
+    // package scraped whatever tree it landed in.
+    const page = readPackageFile("src/app/integrations/page.tsx");
+    const hook = readPackageFile("src/lib/hooks/useIntegrations.ts");
     for (const id of ["eaglesoft", "dentrix", "quickbooks", "opendental"]) {
       expect(page, `page.tsx names "${id}"`).not.toContain(`"${id}"`);
       expect(hook, `useIntegrations.ts names "${id}"`).not.toContain(`"${id}"`);

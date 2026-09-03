@@ -15,20 +15,18 @@
  * runner was started from inside it; `vitest run --root apps/web-dashboard`
  * from the repo root leaves cwd at the repo root (`--root` does not chdir) and
  * the read became `<repo>/src/app/globals.css` → ENOENT before a single
- * assertion ran. `fileURLToPath`, NOT `new URL(import.meta.url).pathname`,
- * which yields a `C:\C:\…` ENOENT on Windows — the same pattern the
- * pre-existing a11y source-scrape suites use.
+ * assertion ran.
+ *
+ * WARP-2632 — that anchoring now comes from the shared
+ * `__tests__/helpers/test-paths` helper, which every path-reading suite in
+ * this package uses, so there is one place that knows where the package and
+ * the repo are (and one place carrying the `fileURLToPath`-not-`new URL`
+ * Windows caveat).
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readPackageFile } from "@/__tests__/helpers/test-paths";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const css = readFileSync(
-  resolve(here, "../../app/globals.css"),
-  "utf8",
-);
+const css = readPackageFile("src/app/globals.css");
 
 /** Pull the first px value out of a `clamp(MIN, …)` declaration. */
 function clampMinPx(decl: string): number {

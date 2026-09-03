@@ -14,8 +14,8 @@
  *     from the static output with no test noticing.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync } from "node:fs";
+import { readRepoFile, repoPath } from "@/__tests__/helpers/test-paths";
 import {
   providerDescriptors,
   registerProviderDescriptor,
@@ -34,21 +34,15 @@ import {
 } from "./integration-guides";
 import { generateStaticParams } from "@/app/help/integrations/[provider]/page";
 
-/** The repo root, from wherever vitest was launched. Fails loudly rather than
- *  walking off the top — a path assertion that silently reads the wrong tree
- *  passes forever. */
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    if (existsSync(resolve(dir, "docs/integrations"))) return dir;
-    dir = resolve(dir, "..");
-  }
-  throw new Error(`could not locate the repo root from ${process.cwd()}`);
-}
-
-/** The repo's `docs/integrations`. */
+/** The repo's `docs/integrations`.
+ *
+ *  WARP-2632 — resolved from THIS FILE's location via `REPO_ROOT`, not by
+ *  walking up from `process.cwd()`. The walk did not fail on a wrong cwd, it
+ *  climbed until something matched: from a directory that merely contains a
+ *  `docs/integrations/`, this gate compared the shipped bundle against that
+ *  directory and reported on a tree it had never read. */
 function docsDir(): string {
-  return resolve(repoRoot(), "docs/integrations");
+  return repoPath("docs/integrations");
 }
 
 /** Slugs the ROUTE will prerender — read through the page's own
@@ -279,10 +273,7 @@ describe("page furniture", () => {
    * moved goes red against the fixture.
    */
   it("agrees with the shell checker's slugify, case for case", () => {
-    const tsv = readFileSync(
-      resolve(repoRoot(), "scripts/fixtures/heading-slug-cases.tsv"),
-      "utf8",
-    );
+    const tsv = readRepoFile("scripts/fixtures/heading-slug-cases.tsv");
     const cases = tsv
       .split("\n")
       .filter((line) => line.trim() !== "" && !line.startsWith("#"))
