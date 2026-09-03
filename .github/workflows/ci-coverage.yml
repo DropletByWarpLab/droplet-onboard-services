@@ -7,20 +7,34 @@ name: ci-coverage
 # ENFORCED since 2026-07-11 (WARP-970). Baseline at enforcement time:
 # `bash scripts/check-ci-coverage.sh` green over 14 services/* with a
 # Dockerfile + 2 apps/* with a package.json, with exactly one exemption
-# (services/oled-display — hardware-only, see .github/ci-coverage-exempt).
-# The threshold is structural 100%: every audited directory needs a
-# `<name>-tests.yml` workflow whose `paths:` filter covers it, a recognised
-# test command, and a real test suite. The audit job below ("ci-coverage")
-# is meant to be a required status check on main — if it is red, the PR
-# does not merge.
+# (services/oled-display — then believed hardware-only).
+#
+# WARP-2685 RETIRED THAT EXEMPTION, and .github/ci-coverage-exempt now holds
+# no entries at all. The exemption had been false since WARP-1640/1641 —
+# oled-display-panel-tests.yml runs the service's whole tests/ directory on
+# every PR touching it — and survived only because this gate resolved
+# workflows by FILENAME, expecting `oled-display-tests.yml`. The gate now
+# matches on a workflow's actual trigger `paths:` filter, so the audit is
+# green over all 18 services + 2 apps with nothing exempted.
+#
+# The threshold is structural 100%: every audited directory needs a workflow
+# whose `paths:` filter covers it, a recognised test command, and a real test
+# suite. If the audit job below ("ci-coverage") is red, fix the coverage — but
+# note it is NOT one of the required contexts (those are ci-summary,
+# egress-gate and the WARP-title lint; see docs/ci-required-checks.md).
 #
 # To add a new service:
 #   1. Ship a `services/<name>/tests/` directory with at least one test.
 #   2. Add `.github/workflows/<name>-tests.yml` that runs pytest (or vitest /
-#      jest / npm test).
+#      jest / npm test). The `<name>-tests.yml` convention is still the fast
+#      path and still how a reader finds a service's suite — an off-convention
+#      name is accepted, not encouraged.
 #   3. Point its `paths:` filter at `services/<name>/**`.
 #
 # Exemptions (rare): add the path one per line to `.github/ci-coverage-exempt`.
+# Before you do, check the service really has NO workflow — not merely no
+# workflow named `<name>-tests.yml`. That mistake cost two months of a
+# 850-test suite being documented as uncovered.
 
 on:
   pull_request:
