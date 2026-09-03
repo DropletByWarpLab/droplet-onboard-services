@@ -345,3 +345,234 @@ describe("WARP-2562 — links are scoped to a connection", () => {
     ).rejects.toThrow(PARTY_LINK_ERRORS.CONNECTION_NOT_FOUND);
   });
 });
+
+/**
+ * WARP-2562 review — archiving a link must FREE its `(connection, externalId)`
+ * slot.
+ *
+ * The shipped shape held the slot forever. `PartyLink_connectionId_externalId_key`
+ * covered every row regardless of `isArchived`, and the create-time probe used
+ * `findUnique` on that key — which cannot express `isArchived`, because the
+ * key does not contain it. So:
+ *
+ *   link Contact A to record #4471 → archive it as wrong → every later attempt
+ *   to link the CORRECT Contact B to #4471 is a permanent 409.
+ *
+ * The only exposed recovery was to un-archive, which restores the WRONG link.
+ * That makes `archivePartyLink` a trap rather than an undo, and it is why the
+ * unique is now PARTIAL (`WHERE "isArchived" = false`).
+ */
+describe("WARP-2562 review — an archived link does not hold the slot", () => {
+  interface Slot {
+    id: string;
+    connectionId: string;
+    externalId: string;
+    isArchived: boolean;
+  }
+  interface KeyedWhere {
+    where: { connectionId_externalId: { connectionId: string; externalId: string } };
+  }
+  interface FlatWhere {
+    where: { connectionId?: string; externalId?: string; isArchived?: boolean };
+  }
+
+  /**
+   * A party-link double whose two lookup methods behave the way Prisma's do,
+   * because the difference between them IS the defect:
+   *
+   *   · `findUnique` on the compound key matches the PAIR and nothing else. It
+   *     has no way to take `isArchived` — so an archived row answers a
+   *     uniqueness probe as though it were a live claim.
+   *   · `findFirst` applies every predicate it is handed, so it can be asked
+   *     the question actually being asked: is this slot claimed by a link that
+   *     is still LIVE?
+   *
+   * A stub that answered both identically would go green either way, and the
+   * defect would survive the test.
+   */
+  function linkPrisma(rows: Slot[]) {
+    const create = vi.fn().mockResolvedValue(ROW);
+    const update = vi.fn().mockResolvedValue(ROW);
+    const findUnique = vi.fn(async (args: KeyedWhere) => {
+      const key = args.where.connectionId_externalId;
+      if (!key) return null;
+      return (
+        rows.find((r) => r.connectionId === key.connectionId && r.externalId === key.externalId) ??
+        null
+      );
+    });
+    const findFirst = vi.fn(async (args: FlatWhere) => {
+      const w = args.where;
+      return (
+        rows.find(
+          (r) =>
+            (w.connectionId === undefined || r.connectionId === w.connectionId) &&
+            (w.externalId === undefined || r.externalId === w.externalId) &&
+            (w.isArchived === undefined || r.isArchived === w.isArchived),
+        ) ?? null
+      );
+    });
+    return {
+      prisma: {
+        contact: { findFirst: vi.fn().mockResolvedValue({ id: "c1" }) },
+        crmCompany: { findUnique: vi.fn().mockResolvedValue({ id: "co1" }) },
+        integrationConnection: {
+          findUnique: vi
+            .fn()
+            .mockResolvedValue({ id: "conn-eagle", provider: "eaglesoft-api", status: "CONNECTED" }),
+        },
+        partyLink: { findUnique, findFirst, create, update, findMany: vi.fn() },
+      } as never,
+      create,
+      findFirst,
+    };
+  }
+
+  const base = { connectionId: "conn-eagle", externalId: "4471", contactId: "c1" };
+
+  it("lets the CORRECT party claim a record whose wrong link was archived", async () => {
+    // MUTATION: drop the `isArchived: false` filter from the clash check and
+    // this is a 409 forever — the customer becomes unlinkable on the only
+    // party they actually belong to.
+    const { prisma, create } = linkPrisma([
+      { id: "wrong", connectionId: "conn-eagle", externalId: "4471", isArchived: true },
+    ]);
+
+    await createPartyLink(prisma, base, "u1", "u1");
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].data.externalId).toBe("4471");
+  });
+
+  it("still refuses when the existing claim is LIVE", async () => {
+    // The rule the scoping must not lose. One upstream record, one party.
+    const { prisma, create } = linkPrisma([
+      { id: "live", connectionId: "conn-eagle", externalId: "4471", isArchived: false },
+    ]);
+
+    await expect(createPartyLink(prisma, base, "u1", "u1")).rejects.toThrow(
+      PARTY_LINK_ERRORS.ALREADY_LINKED,
+    );
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("asks whether the slot is claimed by a link that is still live", async () => {
+    // Pinned as the QUERY, not only as an outcome: a probe that fetched the
+    // row and filtered in JavaScript afterwards would pass both tests above
+    // and still disagree with the partial index under a race.
+    const { prisma, findFirst } = linkPrisma([]);
+
+    await createPartyLink(prisma, base, "u1", "u1");
+
+    expect(findFirst.mock.calls[0][0].where).toEqual({
+      connectionId: "conn-eagle",
+      externalId: "4471",
+      isArchived: false,
+    });
+  });
+
+  it("refuses to un-archive a link whose slot a live one has since taken", async () => {
+    // The dual of freeing the slot, and a hazard the old always-blocking
+    // unique could not produce: un-archiving is now a write that can collide.
+    // Without this check the partial index raises a bare P2002 at any caller
+    // that is not the route.
+    const { prisma } = linkPrisma([
+      { id: "live", connectionId: "conn-eagle", externalId: "4471", isArchived: false },
+    ]);
+    const partyLink = (prisma as never as { partyLink: { findUnique: ReturnType<typeof vi.fn> } })
+      .partyLink;
+    partyLink.findUnique = vi
+      .fn()
+      .mockResolvedValue({ ...ROW, id: "pl1", isArchived: true, archivedAt: new Date() });
+
+    await expect(archivePartyLink(prisma, "pl1", "u1", false)).rejects.toThrow(
+      PARTY_LINK_ERRORS.ALREADY_LINKED,
+    );
+  });
+});
+
+/**
+ * WARP-2562 review — a link needs a connection that can still be FETCHED from.
+ *
+ * The row is a pointer whose entire value is that its detail is read live
+ * through the connector. `disconnect()` sets `status: "DISABLED"` and purges
+ * `apiCredentialsEnc` and `providerTokensEnc` in the same write, so a link
+ * made against a DISABLED connection points at a record nothing on this box
+ * can read — and the create path selected only `id` and `provider`, so a stale
+ * browser tab could make one.
+ *
+ * The allow-list is explicit and enum-valued, in the shape of
+ * `POLLABLE_CONNECTION_STATUSES` in `erp-sync/cursor.service.ts`, and is
+ * deliberately WIDER than that one: linking is a human act writing a local
+ * row, not a metered vendor call on a schedule.
+ */
+describe("WARP-2562 review — linking against a connection that cannot be read", () => {
+  function withStatus(status: string) {
+    const create = vi.fn().mockResolvedValue(ROW);
+    const findUnique = vi.fn().mockResolvedValue({
+      id: "conn-eagle",
+      provider: "eaglesoft-api",
+      status,
+    });
+    return {
+      prisma: {
+        contact: { findFirst: vi.fn().mockResolvedValue({ id: "c1" }) },
+        crmCompany: { findUnique: vi.fn().mockResolvedValue({ id: "co1" }) },
+        integrationConnection: { findUnique },
+        partyLink: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          findFirst: vi.fn().mockResolvedValue(null),
+          create,
+          findMany: vi.fn(),
+          update: vi.fn(),
+        },
+      } as never,
+      create,
+      connectionLookup: findUnique,
+    };
+  }
+
+  const base = { connectionId: "conn-eagle", externalId: "4471", contactId: "c1" };
+
+  it("refuses a DISABLED connection — disconnect purged both credentials", async () => {
+    // MUTATION: drop the status check and this create succeeds, leaving a
+    // pointer whose detail no code on this box can fetch.
+    const { prisma, create } = withStatus("DISABLED");
+
+    await expect(createPartyLink(prisma, base, "u1", "u1")).rejects.toThrow(
+      PARTY_LINK_ERRORS.CONNECTION_NOT_ACTIVE,
+    );
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each(["NOT_CONFIGURED", "PROVISIONING", "NEEDS_RECONNECT", "ERROR", "DISABLED"])(
+    "refuses %s, which holds no credential a fetch could spend",
+    async (status) => {
+      const { prisma } = withStatus(status);
+      await expect(createPartyLink(prisma, base, "u1", "u1")).rejects.toThrow(
+        PARTY_LINK_ERRORS.CONNECTION_NOT_ACTIVE,
+      );
+    },
+  );
+
+  it.each(["CONNECTED", "DEGRADED", "DRIFT_LOCKED"])(
+    "allows %s, which still holds a working credential",
+    async (status) => {
+      // DEGRADED is an explicitly transient sync failure, and DRIFT_LOCKED
+      // freezes WRITES only — a party link is a local row and its detail is a
+      // READ. Refusing either would block linking for a state the owner has
+      // nothing to do about.
+      const { prisma, create } = withStatus(status);
+      await createPartyLink(prisma, base, "u1", "u1");
+      expect(create).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("reads the status COLUMN rather than inferring it from a missing credential", async () => {
+    // WARP-884 shape: state comes from the enum column, never from which
+    // flavour of null a reader happens to be holding.
+    const { prisma, connectionLookup } = withStatus("CONNECTED");
+    await createPartyLink(prisma, base, "u1", "u1");
+    expect(connectionLookup.mock.calls[0][0].select).toMatchObject({ status: true });
+  });
+});
