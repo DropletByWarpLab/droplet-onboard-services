@@ -5,15 +5,34 @@
  * it at dispatch).
  *
  * Route harness mirrors llm-chat.interview.test.ts.
+ *
+ * WARP-2619 — `TOOL_SELECTION_MODE` is PINNED in the config mock below (the
+ * WARP-2608 pattern). Note the name collision: the narrowing this file is
+ * about is the §3 RBAC one, NOT the relevance-based advertisement that
+ * variable controls — and the two run on the same turn, which is precisely
+ * why the mode has to be stated rather than left to whatever `undefined`
+ * happens to mean. No assertion below discriminates between the two modes
+ * today (they all read `allowed_tools` / `toolAccessScope`, which selection
+ * does not touch); the pin is what keeps that a checkable claim instead of an
+ * accident.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
+// WARP-2619 — `TOOL_SELECTION_MODE` was ABSENT here, and absence is not
+// neutral: `selectAdvertisedTools` short-circuits to "advertise the whole
+// pool" on `mode === "off"` ONLY, so the `undefined` this mock supplied fell
+// through to the narrowing branch and the suite exercised `domains` by
+// accident. Boxes ship `domains` (`apps/orchestrator/src/config.ts`), so the
+// pin states outright what the turns here run under, and a future flip of the
+// config default cannot silently change what this file measures. Typed as the
+// union, not the literal, so a case can assign the rollback value.
 const h = vi.hoisted(() => ({
   config: {
     AUTH_ENABLED: false,
     OLLAMA_CONTEXT_LENGTH: 16384,
+    TOOL_SELECTION_MODE: "domains" as "off" | "domains",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
@@ -137,6 +156,7 @@ const chat = (app: express.Express, body: Record<string, unknown> = {}) =>
     .send({ model: "m1", messages: [{ role: "user", content: "hi" }], ...body });
 
 beforeEach(() => {
+  h.config.TOOL_SELECTION_MODE = "domains";
   mockRunAgent.mockReset();
   mockRunAgent.mockResolvedValue({
     message: { role: "assistant", content: "ok" },

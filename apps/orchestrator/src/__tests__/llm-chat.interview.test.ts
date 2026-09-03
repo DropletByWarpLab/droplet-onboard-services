@@ -13,15 +13,34 @@
  *   - an overlay-probe failure fail-opens to a normal chat turn.
  *
  * Mirrors llm-chat.business-block.test.ts's route harness.
+ *
+ * WARP-2619 — `TOOL_SELECTION_MODE` is PINNED in the config mock below, the
+ * same omission WARP-2608 fixed next door. It is an input to this file's
+ * subject rather than background: what survives `degradeToFit` depends on the
+ * tool-schema estimate, and that estimate is sized through
+ * `effectiveAdvertisedToolNames({ mode: config.TOOL_SELECTION_MODE, … })`.
+ * Measured today, no assertion here changes verdict between the two modes —
+ * interview turns are spared because the overlay pins a write-free tool list,
+ * which shrinks the pool before the estimate is taken. That is a property of
+ * the current fixtures, not a guarantee, which is exactly why the mode is
+ * stated rather than inherited from an absent key.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 
+// WARP-2619 — an absent `TOOL_SELECTION_MODE` here was not neutral:
+// `selectAdvertisedTools` short-circuits to the whole pool on `mode === "off"`
+// ONLY, so `undefined` fell through to the narrowing branch and this suite
+// measured `domains` by accident — and would have gone on doing so if
+// `config.ts`'s default were flipped back. Boxes ship `domains`
+// (`apps/orchestrator/src/config.ts`), so that is what is pinned. Typed as the
+// union, not the literal, so a case can assign the `off` rollback.
 const h = vi.hoisted(() => ({
   config: {
     AUTH_ENABLED: false,
     OLLAMA_CONTEXT_LENGTH: 16384,
+    TOOL_SELECTION_MODE: "domains" as "off" | "domains",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
@@ -199,6 +218,7 @@ async function chat(
 
 beforeEach(() => {
   h.config.OLLAMA_CONTEXT_LENGTH = 16384;
+  h.config.TOOL_SELECTION_MODE = "domains";
   mockRunAgent.mockReset();
   mockRunAgent.mockResolvedValue({
     message: { role: "assistant", content: "ok" },
@@ -221,6 +241,18 @@ describe("interview conductor overlay (WARP-1121 §9.3)", () => {
     expect(res.status).toBe(200);
     const sys = systemPromptText();
     expect(sys).toContain(INTERVIEW_CONDUCTOR_BLOCK);
+    // WARP-2619 — assert the business block is PRESENT before comparing
+    // positions. `indexOf` returns -1 when it is absent and -1 is less than
+    // any real index, so the ordering assertion below is satisfied by the
+    // block having been dropped entirely — it cannot distinguish "business
+    // came first" from "there was no business block". `degradeToFit` drops
+    // that block whenever the estimate exceeds the window, so the vacuous
+    // case is reachable, not hypothetical: the sibling cases in this file
+    // that hit the full tool pool (no interview overlay to pin a write-free
+    // list) already log a `business` degradation on this same shipped 16,384
+    // window. Interview turns are spared today only because the overlay
+    // shrinks the pool first.
+    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
     // Conductor comes AFTER the base prompt (identity/persona/business).
     expect(sys.indexOf(BUSINESS_BLOCK_DELIMITER_OPEN)).toBeLessThan(
       sys.indexOf("--- onboarding interview (conductor) ---"),
