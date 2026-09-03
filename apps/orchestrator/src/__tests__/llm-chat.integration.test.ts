@@ -102,6 +102,18 @@ function sseText(res: { body?: unknown; text?: string }): string {
   return typeof res.body === "string" ? res.body : (res.text ?? "");
 }
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  withPromptBlockDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — the shared in-memory double from src/__tests__/setup.ts has no
+// `assistantPersona`, `businessProfile` or `workspace` model, so both block
+// composers threw on every turn here and the route's fail-open swallowed it.
+guardComposerFailOpen();
+
 type SseFrame = { event: string; data: Record<string, unknown> };
 
 // Parse an SSE response body into a sequence of {event, data} frames.
@@ -157,8 +169,52 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       get: (target, prop) =>
         prop === "user" ? userStub : Reflect.get(target, prop),
     });
-    app = createApp(prismaForApp);
+    // WARP-2652 — and the three delegates the two prompt-block composers
+    // need, which the shared double has no model for at all.
+    app = createApp(withPromptBlockDelegates(prismaForApp));
   }, 30_000);
+
+  /** WARP-2652 — the outbound gateway payload's system message. The route
+   *  hands the assembled prompt to the agent loop, which serializes it into
+   *  the ai-gateway request; capturing it there is the honest read of what a
+   *  turn in this suite actually sends. */
+  function captureSystemPrompt(): () => string {
+    let sys = "";
+    mockChat.mockImplementationOnce(
+      async (req: { messages?: { role: string; content: unknown }[] }) => {
+        const first = req.messages?.[0];
+        sys = first && typeof first.content === "string" ? first.content : "";
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { role: "assistant", content: "ok" } }],
+          }),
+        };
+      },
+    );
+    return () => sys;
+  }
+
+  // WARP-2652 — the fixture floor. Not a test of the persona or business
+  // feature (llm-chat.persona-block.test.ts / llm-chat.business-block.test.ts
+  // own those); it is the statement that the turns measured in the rest of
+  // this file run against the prompt the product assembles, blocks included.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const systemPrompt = captureSystemPrompt();
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .set("x-test-role", "admin")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      });
+
+    expect(res.status).toBe(200);
+    expect(systemPrompt()).toContain(PERSONA_BLOCK_PREFIX);
+    expect(systemPrompt()).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
 
   it("non-streaming returns AgentResult shape (assistant message + trace)", async () => {
     mockChat.mockResolvedValueOnce({

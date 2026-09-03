@@ -174,45 +174,14 @@ import {
 // a copy of it.
 import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
 import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
-
-/** The persona singleton at its SCHEMA DEFAULTS (`prisma/schema.prisma:314-325`
- *  — warm_friendly / balanced / first names / no custom instructions). This is
- *  exactly the row `getPersona` create-on-first-read materialises, so the block
- *  composed from it is the one a box that has never touched the persona
- *  settings actually sends. Matches llm-chat.interview.test.ts's row. */
-const PERSONA_ROW = {
-  id: "singleton",
-  preset: "warm_friendly",
-  verbosity: "balanced",
-  useFirstNames: true,
-  customInstructions: "",
-  updatedBy: null,
-  updatedAt: new Date("2026-09-02T00:00:00Z"),
-};
-
-/** A COMPLETED business profile — the state the business block exists for. A
- *  fresh (`not_started`, all-empty) profile composes to "" by design, which
- *  would leave the block absent for a legitimate reason and make the presence
- *  assertion below untrue rather than merely unenforced. Short, obviously-fake
- *  values: the point is that the block renders, not what it says. */
-const BUSINESS_PROFILE_ROW = {
-  id: "singleton",
-  onboardingState: "completed",
-  interviewChatId: null,
-  summary: "A fixture business.",
-  whatWeDo: "Fixture work.",
-  customers: "Fixture customers.",
-  teamShape: "Two fixtures.",
-  toolsUsed: "Fixture tools.",
-  typicalDay: "Fixture days.",
-  goals: "Fixture goals.",
-  lastSource: "onboarding",
-  reviewNudgeState: "none",
-  reviewDueAt: null,
-  reviewDismissedAt: null,
-  updatedBy: null,
-  updatedAt: new Date("2026-09-02T00:00:00Z"),
-};
+// WARP-2652 — the two shipped row shapes (schema-default persona, completed
+// business profile) and the guard, both promoted out of this file so the other
+// fifteen chat-route suites do not carry a copy each. Rationale for each row's
+// exact value lives in the helper's header.
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
 
 const REGISTRY = [
   { name: "list_files" },
@@ -232,23 +201,15 @@ function createPrismaMock(accessRoleId: string | null) {
             : { toolGrants: [{ domain: "files", level: "use" }] },
       })),
     },
-    workspace: { findUnique: vi.fn(async () => ({ id: 1, type: "BUSINESS" })) },
-    // WARP-2642 — these two returned `null` from `findUnique` and `undefined`
-    // from `create`, which is not "no block": `getBusinessProfile` /
-    // `getPersona` create-on-first-read and hand whatever `create` returned
-    // straight to the composer, so `undefined.summary` / `undefined.preset`
-    // threw on every turn and the route's fail-open ate it. `findUnique` now
-    // returns the row (the seeded-box path); `create` returns the same row so
-    // the create-on-first-read path cannot silently reintroduce `undefined`.
-    businessProfile: {
-      findUnique: vi.fn(async () => BUSINESS_PROFILE_ROW),
-      create: vi.fn(async () => BUSINESS_PROFILE_ROW),
-    },
-    assistantPersona: {
-      findUnique: vi.fn(async () => PERSONA_ROW),
-      create: vi.fn(async () => PERSONA_ROW),
-      upsert: vi.fn(),
-    },
+    // WARP-2642 — these three returned `null` from `findUnique` and
+    // `undefined` from `create` (or were absent entirely), which is not "no
+    // block": `getBusinessProfile` / `getPersona` create-on-first-read and hand
+    // whatever `create` returned straight to the composer, so
+    // `undefined.summary` / `undefined.preset` threw on every turn and the
+    // route's fail-open ate it. WARP-2652 moved the rows into the shared
+    // helper; `create` returns the same row as `findUnique` there, so the
+    // create-on-first-read path cannot silently reintroduce `undefined`.
+    ...promptBlockPrismaDelegates(),
     memoryFact: { findMany: vi.fn(async () => []) },
     brainMemoryItem: { findMany: vi.fn(async () => []) },
     fileContentChunk: { findMany: vi.fn(async () => []) },
@@ -321,39 +282,20 @@ const chat = (app: express.Express, body: Record<string, unknown> = {}) =>
 
 /**
  * WARP-2642 — the fail-opens around block composition, made audible.
+ * WARP-2652 — and now shared: the `afterEach` spy that was written inline here
+ * is `guardComposerFailOpen()` in `helpers/prompt-block-fixtures.ts`, used by
+ * all sixteen chat-route suites. Its header carries the full rationale (why a
+ * spy and not vitest's config-level `onConsoleLog`, and why it is scoped to the
+ * two composer signatures rather than "any warn" — the continuity fail-open
+ * next door uses `console.error`, which the WARP-2631 rejection case exercises
+ * deliberately).
  *
- * `routes/llm.ts` wraps each block composer in a try/catch that `console.warn`s
- * and continues. That is correct for production — a persona read failure must
- * not cost the user their answer — but under a test double it converts "the
- * fixture is wrong" into a silent, green run. This suite has no case that
- * WANTS either composer to throw, so any such warn here is a broken fixture,
- * and an `afterEach` is what turns it red for every case in the file including
- * ones not yet written.
- *
- * Scoped to the two composer signatures on purpose, not "any warn": the route
- * warns legitimately elsewhere (context-budget degradation, draft adoption),
- * and the continuity fail-open next door uses `console.error`, which the
- * WARP-2631 rejection case exercises deliberately.
- *
- * Not vitest's `onConsoleLog`: that hook is config-level only, so using it
- * would impose the guard on all 632 orchestrator files — and 15 of them are
- * red under it today (see the PR body). A spy is the per-file equivalent, and
- * `vi.spyOn` without `mockImplementation` still calls through, so the stderr
- * stays visible while it is also being asserted on.
+ * This suite has no case that WANTS either composer to throw, so it declares no
+ * opt-out and every case is guarded, including ones not yet written.
  */
-const FAIL_OPEN_SIGNATURES = ["persona load failed", "business-profile load failed"];
-let warnSpy: ReturnType<typeof vi.spyOn>;
-
-afterEach(() => {
-  const swallowed = warnSpy.mock.calls
-    .map((args) => String(args[0]))
-    .filter((first) => FAIL_OPEN_SIGNATURES.some((sig) => first.includes(sig)));
-  warnSpy.mockRestore();
-  expect(swallowed).toEqual([]);
-});
+guardComposerFailOpen();
 
 beforeEach(() => {
-  warnSpy = vi.spyOn(console, "warn");
   h.config.TOOL_SELECTION_MODE = "domains";
   persistence.sessionId = null;
   persistence.getConversationToolNames.mockReset();

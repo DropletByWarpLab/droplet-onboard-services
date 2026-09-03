@@ -104,6 +104,17 @@ vi.mock("../services/llm-agent.service.js", () => ({
 
 import { createLlmRouter } from "../routes/llm.js";
 import type { ChatMessage } from "../types/index.js";
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — see the helper's header. Note the per-item budget case below
+// bounds the ATTACHMENT system message, not the base prompt, so the two
+// blocks this restores do not move that number.
+guardComposerFailOpen();
 
 const USERNAME = "test";
 // WARP-493: brain-memory rows are keyed by the local User.id UUID.
@@ -127,6 +138,8 @@ interface MockChunk {
 
 function createPrismaMock(items: MockBrainItem[], chunks: MockChunk[]) {
   return {
+    // WARP-2652 — persona + business + workspace, absent here until now.
+    ...promptBlockPrismaDelegates(),
     // Base-prompt injection (covered in llm-chat.base-prompt.test.ts)
     // queries memory facts on every non-"none" turn — return none here.
     memoryFact: {
@@ -205,6 +218,23 @@ beforeEach(() => {
 });
 
 describe("POST /api/llm/chat — attachment context injection", () => {
+  // WARP-2652 — the fixture floor. The base prompt (message 0) is a DIFFERENT
+  // message from the attachment context this file is about, and it is the one
+  // that was silently missing both blocks.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const app = buildApp(createPrismaMock([], []));
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({ model: "m1", messages: [{ role: "user", content: "hi" }] });
+
+    expect(res.status).toBe(200);
+    const sys = agentMessages()[0]!;
+    expect(sys.role).toBe("system");
+    expect(sys.content).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sys.content).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
+
   it("injects a system message with filename + extracted text for a ready attachment", async () => {
     const prisma = createPrismaMock(
       [
