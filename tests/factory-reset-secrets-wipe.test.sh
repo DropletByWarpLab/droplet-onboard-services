@@ -101,6 +101,41 @@ else
   fail "--help does not mention the live /data secrets"
 fi
 
+# WARP-2638 — the post-wipe gate. The volume phase re-enumerates and refuses to
+# finish while an owned volume survives; the secrets wipe only warned. Same
+# treatment now, and the ORDERING matters twice over: the gate has to run after
+# the link-side .env.* purge and after the data/secrets rm (otherwise it reds on
+# files the reset is about to remove), and it has to run after the device-bridge
+# cleanup (aborting earlier would leave MORE on the box, not less).
+if printf '%s\n' "$CODE_NUM" | grep -qE '^[0-9]+:if ! secw_verify_wipe '; then
+  pass "factory-reset gates on secw_verify_wipe"
+else
+  fail "factory-reset never verifies the wipe — a survivor is only a warning"
+fi
+
+GATE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -E '^[0-9]+:if ! secw_verify_wipe ' | head -n 1 | cut -d: -f1 || true)"
+LINK_PURGE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -F '"$_env_reset_target".upsert.*; do' | head -n 1 | cut -d: -f1 || true)"
+BRIDGE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -F '/var/log/droplet-device-bridge.log' | head -n 1 | cut -d: -f1 || true)"
+if [ -n "$GATE_LINE" ] && [ -n "$SECRETS_RM_LINE" ] && [ -n "$LINK_PURGE_LINE" ] \
+   && [ "$GATE_LINE" -gt "$SECRETS_RM_LINE" ] && [ "$GATE_LINE" -gt "$LINK_PURGE_LINE" ]; then
+  pass "the gate runs AFTER the link-side purge and the data/secrets rm"
+else
+  fail "the gate runs too early (gate=$GATE_LINE link-purge=$LINK_PURGE_LINE secrets-rm=$SECRETS_RM_LINE) — it would red on files the reset still removes"
+fi
+if [ -n "$GATE_LINE" ] && [ -n "$BRIDGE_LINE" ] && [ "$GATE_LINE" -gt "$BRIDGE_LINE" ]; then
+  pass "the gate runs AFTER the device-bridge cleanup (aborting earlier leaves more behind)"
+else
+  fail "the gate precedes the device-bridge cleanup (gate=$GATE_LINE bridge=$BRIDGE_LINE)"
+fi
+
+# A gate that does not abort is a log line. The volume gate exits 1; so does this.
+if [ -n "$GATE_LINE" ] \
+   && sed -n "${GATE_LINE},$((GATE_LINE + 12))p" "$RESET" | grep -qE '^[[:space:]]*exit 1$'; then
+  pass "the gate ABORTS the reset (exit 1) rather than warning"
+else
+  fail "the gate does not exit non-zero — a surviving secret would still report a clean reset"
+fi
+
 # --- Fixture ----------------------------------------------------------------
 # A box shaped like a relocated one: the repo holds SYMLINKS, the real files
 # live under a fake /data mount.
@@ -310,6 +345,130 @@ echo "--- Phase 5: a plain (non-relocated) .env still works, and the repo is not
   [ "$m1" = "755" ] && [ "$m2" = "700" ]
 ) && pass "repo-side paths are never re-created or chmodded (the checkout is untouched)" \
   || fail "the re-create step chmodded a path inside the repo checkout"
+
+# --- Phase 6: the post-wipe verification gate (WARP-2638) -------------------
+echo ""
+echo "--- Phase 6: the gate re-scans the disk and reds on whatever survived ---"
+
+# What factory-reset.sh does to the LINK side after the wipe (the .env unlink,
+# the repo-side .env.* glob purge, the data/secrets rm). The drills below run it
+# so the gate sees the state the gate is actually placed in — a fixture that
+# skips it still holds a DANGLING <repo>/.env and every gate call would red on
+# it, which would make the per-class assertions meaningless.
+emulate_reset_link_purge() {
+  rm -f "$TMP/repo/.env" 2>/dev/null || true
+  rm -f "$TMP"/repo/.env.bak.* "$TMP"/repo/.env.torn.* "$TMP"/repo/.env.tmp.* \
+        "$TMP"/repo/.env.migrate.* "$TMP"/repo/.env.upsert.* 2>/dev/null || true
+  rm -rf "$TMP/repo/data/secrets" 2>/dev/null || true
+}
+
+full_wipe() {
+  secw_wipe_live_secrets "$(resolve_env_target "$TMP/repo/.env")" \
+                         "$(resolve_env_target "$TMP/repo/data/secrets")" >/dev/null 2>&1
+  emulate_reset_link_purge
+}
+
+( make_fixture
+  full_wipe
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"
+  rc=$?
+  [ "$rc" = "0" ] && [ "$SECW_LEFTOVER_COUNT" = "0" ] && [ -z "$SECW_LEFTOVER_PATHS" ]
+) && pass "a complete wipe passes the gate (exit 0, nothing named)" \
+  || fail "the gate reds on a tree the wipe fully cleaned"
+
+# Idempotence, end to end: the gate stays clean on a second pass, so a second
+# factory reset is still a no-op that exits 0.
+( make_fixture
+  full_wipe
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo" || exit 1
+  secw_wipe_live_secrets "$ENV_TARGET" "$SECRETS_TARGET" >/dev/null 2>&1
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"
+) && pass "a second wipe + gate is still clean (the reset stays idempotent)" \
+  || fail "the gate reds on a second run — the reset is no longer idempotent"
+
+# One drill per class the wipe owns. Planting the file back is EXACTLY the
+# observable state a wipe that skipped that class would leave, and the gate must
+# name that path and only that path.
+#
+# $2 is RELATIVE to the fixture root, because $TMP only exists inside the
+# subshell that builds the fixture. $3 is how many paths the gate should name —
+# 1 for every class except a nested secrets file, where the subdirectory it sits
+# in is a leftover too (the wipe unlinks stray dirs, so a non-empty container is
+# itself the finding).
+gate_names_only() {
+  local label="$1" rel="$2" want="${3:-1}"
+  ( make_fixture
+    full_wipe
+    planted="$TMP/$rel"
+    mkdir -p "$(dirname "$planted")"
+    printf '%s\n' "$FIXTURE_SECRET" > "$planted"
+    if secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"; then
+      exit 1   # gate stayed green with a secret on the box
+    fi
+    [ "$SECW_LEFTOVER_COUNT" = "$want" ] \
+      && printf '%s' "$SECW_LEFTOVER_PATHS" | grep -qxF "$planted"
+  ) && pass "gate reds naming exactly the leftover: $label" \
+    || fail "the gate missed (or mis-named) a surviving $label"
+}
+
+gate_names_only "live .env on /data"                "data/droplet/env/.env"
+gate_names_only "snapshot sibling beside it"        "data/droplet/env/.env.bak.1756800000"
+gate_names_only "file under the secrets dir"        "data/droplet/secrets/audit.key"
+gate_names_only "nested file under the secrets dir" "data/droplet/secrets/nested/extra.key" 2
+gate_names_only "link-side copy on the boot disk"   "repo/.env.torn.1756800001"
+
+# A dangling symlink is not a regular file — the `-L` arm is what catches the
+# <repo>/.env left pointing into /data after its target was shredded.
+( make_fixture
+  secw_wipe_live_secrets "$(resolve_env_target "$TMP/repo/.env")" \
+                         "$(resolve_env_target "$TMP/repo/data/secrets")" >/dev/null 2>&1
+  # deliberately NOT running emulate_reset_link_purge: this is the state where
+  # the reset forgot the unlink.
+  if secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"; then exit 1; fi
+  printf '%s' "$SECW_LEFTOVER_PATHS" | grep -qxF "$TMP/repo/.env"
+) && pass "a dangling <repo>/.env symlink is caught (-L, not just -f)" \
+  || fail "the gate misses a dangling symlink left pointing into /data"
+
+# The gate must re-scan the DISK. A gate that trusted the wipe's own counters
+# would agree with the wiper by construction and prove nothing: here the
+# counters say a clean 0 failures while a secret is still on the box.
+( make_fixture
+  full_wipe
+  printf '%s\n' "$FIXTURE_SECRET" > "$ENV_TARGET"
+  [ "$SECW_FAILED_COUNT" = "0" ] || exit 1     # the wiper thinks all is well
+  if secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"; then exit 1; fi
+  [ "$SECW_LEFTOVER_COUNT" = "1" ]
+) && pass "the gate re-scans the filesystem, not the wipe's own counters" \
+  || fail "the gate is derived from SECW_FAILED_COUNT — it cannot catch a missed class"
+
+# Rule 19 again, on the gate's own output: it names paths, never values.
+GATE_OUT="$(
+  make_fixture >/dev/null 2>&1
+  full_wipe
+  printf '%s\n' "$FIXTURE_SECRET" > "$ENV_TARGET"
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo" 2>&1 || true
+  printf '%s\n' "$SECW_LEFTOVER_PATHS"
+)"
+if printf '%s' "$GATE_OUT" | grep -qF 'FAKE-fixture-warp2629'; then
+  fail "the gate leaked a fixture secret VALUE while naming a leftover (rule 19)"
+else
+  pass "the gate names paths only, never a value (rule 19)"
+fi
+
+# The gate is part of the Docker-free path: it must work on a box whose daemon
+# is down, which is exactly the box a factory reset runs on.
+( make_fixture
+  cat > "$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "Cannot connect to the Docker daemon" >&2
+exit 1
+STUB
+  chmod +x "$TMP/bin/docker"
+  PATH="$TMP/bin:$PATH"; export PATH; hash -r
+  full_wipe
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"
+) && pass "the gate runs with the Docker daemon down" \
+  || fail "the gate does not complete when docker fails"
 
 # =============================================================================
 # Results

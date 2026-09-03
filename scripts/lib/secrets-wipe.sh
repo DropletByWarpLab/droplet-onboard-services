@@ -66,6 +66,27 @@
 # already exists for decommissioning: `scripts/host/droplet-crypto-shred.sh`
 # and `docs/security/crypto-shred.md`.
 #
+# THE POST-WIPE GATE (WARP-2638)
+#
+# `secw_wipe_live_secrets` reports what it could not remove and carries on, so
+# a survivor was a warning the transcript scrolled past. The volume phase does
+# not work that way: `_remaining_owned_volumes` re-enumerates from Docker and
+# REFUSES to finish while an owned volume is still there. Given the failure
+# mode here — hand a leased rack back carrying the previous tenant's
+# `DEVICE_SECRET_KEY` — the secrets wipe now gets the same treatment.
+#
+# `secw_verify_wipe` re-lists every class the wipe owns (the resolved `.env`,
+# its five snapshot/staging classes, everything under the resolved secrets dir,
+# and the link-side `.env*` / `data/secrets` classes on the boot disk) and
+# reports the survivors in SECW_LEFTOVER_PATHS. It re-scans the filesystem
+# rather than trusting the counters the wipe itself set — a gate that reads the
+# wiper's own bookkeeping only proves the wiper is self-consistent.
+#
+# PATHS ONLY, never contents (rule 19): the whole point of the line is that an
+# operator learns a secret survived, and printing it would defeat the change.
+# It needs no Docker and no root, so it runs on the box a reset actually runs
+# on — a box whose daemon is down.
+#
 # Test seams (mirroring `SW_*` in `storage-wipe.sh`): SECW_SUDO, SECW_OWNER,
 # SECW_DIR_MODE, SECW_REPO_ROOT. `tests/factory-reset-secrets-wipe.test.sh`
 # drills the whole path against a fixture tree with no Docker and no root.
@@ -86,6 +107,10 @@ SECW_WIPED_SNAPSHOTS=0
 SECW_WIPED_SECRETS=0
 SECW_WIPED_COUNT=0
 SECW_FAILED_COUNT=0
+
+# Set by secw_verify_wipe. Paths only — never contents (rule 19).
+SECW_LEFTOVER_PATHS=""
+SECW_LEFTOVER_COUNT=0
 
 _secw_warn() { printf '  ! %s\n' "$*" >&2; }
 
@@ -217,4 +242,82 @@ secw_wipe_live_secrets() {
   _secw_recreate_dir "$_secrets_dir"
 
   return 0
+}
+
+# _secw_record_leftover <path> — append one survivor, de-duplicated. On a
+# non-relocated box the resolved target and the link-side path are the SAME
+# file, so both passes below would otherwise name it twice.
+_secw_record_leftover() {
+  case $'\n'"$SECW_LEFTOVER_PATHS"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  SECW_LEFTOVER_PATHS="${SECW_LEFTOVER_PATHS}${SECW_LEFTOVER_PATHS:+$'\n'}$1"
+  SECW_LEFTOVER_COUNT=$(( SECW_LEFTOVER_COUNT + 1 ))
+}
+
+# secw_verify_wipe <env-target> <secrets-dir> [<repo-root>]
+#
+# The post-wipe gate (WARP-2638). Re-enumerates the filesystem — it does NOT
+# read the counters secw_wipe_live_secrets set, because a gate built on the
+# wiper's own bookkeeping only ever proves the wiper agrees with itself.
+#
+# Returns 0 when every class is empty, 1 otherwise, with the survivors in
+# SECW_LEFTOVER_PATHS (one per line) and SECW_LEFTOVER_COUNT. Never prints or
+# returns a file's contents (rule 19).
+#
+# Call it AFTER the reset has purged the link side too, not straight after the
+# wipe: the `<repo>/.env.*` classes and `<repo>/data/secrets` are removed by
+# factory-reset.sh further down Phase 4, and this checks those as well.
+secw_verify_wipe() {
+  local _env_target="$1" _secrets_dir="$2" _repo="${3:-$SECW_REPO_ROOT}"
+  local _f
+
+  SECW_LEFTOVER_PATHS=""
+  SECW_LEFTOVER_COUNT=0
+
+  # (1)+(2) the resolved .env and every snapshot / staging sibling beside it.
+  # An unmatched glob stays literal (no nullglob), and `-e` on the literal is
+  # false — so an empty class contributes nothing.
+  for _f in "$_env_target" \
+            "$_env_target".bak.* \
+            "$_env_target".torn.* \
+            "$_env_target".tmp.* \
+            "$_env_target".migrate.* \
+            "$_env_target".upsert.*; do
+    if [ -e "$_f" ] || [ -L "$_f" ]; then
+      _secw_record_leftover "$_f"
+    fi
+  done
+
+  # (3) the resolved secrets dir. It is left PRESENT and EMPTY on a relocated
+  # box, so the assertion is on its contents, not on the container itself.
+  if [ -d "$_secrets_dir" ]; then
+    while IFS= read -r _f; do
+      [ -n "$_f" ] || continue
+      _secw_record_leftover "$_f"
+    done < <(find "$_secrets_dir" -mindepth 1 2>/dev/null || true)
+  elif [ -e "$_secrets_dir" ] || [ -L "$_secrets_dir" ]; then
+    # Not a directory but still there: a stray file, or a symlink the reset
+    # left dangling into /data.
+    _secw_record_leftover "$_secrets_dir"
+  fi
+
+  # (4) the link side, on the UNENCRYPTED boot disk. On a relocated box these
+  # are the legacy copies a mid-life upgrade left behind plus the symlinks
+  # themselves; on a plain box they are the same files as (1)-(3).
+  if [ -n "$_repo" ]; then
+    for _f in "$_repo/.env" \
+              "$_repo"/.env.bak.* \
+              "$_repo"/.env.torn.* \
+              "$_repo"/.env.tmp.* \
+              "$_repo"/.env.migrate.* \
+              "$_repo"/.env.upsert.* \
+              "$_repo/data/secrets"; do
+      if [ -e "$_f" ] || [ -L "$_f" ]; then
+        _secw_record_leftover "$_f"
+      fi
+    done
+  fi
+
+  [ "$SECW_LEFTOVER_COUNT" -eq 0 ]
 }

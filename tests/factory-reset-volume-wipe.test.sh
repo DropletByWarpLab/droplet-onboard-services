@@ -153,6 +153,60 @@ else
   pass "no dead 'filedata' entry in the wipe list"
 fi
 
+# --- WARP-2638: the data-root is /data/docker on the appliance ---------------
+echo ""
+echo "--- The Docker data-root is derived, and container logs are swept ---"
+
+# scripts/host/droplet-luks-provision.sh:370 writes {"data-root": "/data/docker"},
+# so on a provisioned box NOTHING lives under /var/lib/docker. The WARP-234
+# stale-submount sweep hardcoded that path and therefore never matched a single
+# mount on exactly the boxes it exists for. (The bare `/var/lib/docker` FALLBACK
+# default below is fine and asserted separately; what must not come back is a
+# hardcoded path INTO the store.)
+if printf '%s\n' "$CODE" | grep -qF '/var/lib/docker/'; then
+  fail "a path into /var/lib/docker is still hardcoded — the appliance data-root is /data/docker"
+else
+  pass "no hardcoded path into /var/lib/docker (the data-root is derived)"
+fi
+
+if printf '%s\n' "$CODE" | grep -qE 'DOCKER_DATA_ROOT=.*DockerRootDir'; then
+  pass "the data-root is read from 'docker info --format {{.DockerRootDir}}'"
+else
+  fail "the data-root is not derived from the daemon"
+fi
+
+if printf '%s\n' "$CODE" | grep -qF 'DOCKER_DATA_ROOT:-/var/lib/docker'; then
+  pass "the data-root falls back to /var/lib/docker when the daemon cannot answer"
+else
+  fail "no fallback data-root — the sweep would build a path starting with '/volumes/'"
+fi
+
+# A container's stdout lives at <data-root>/containers/<id>/<id>-json.log, and
+# docker/docker-compose.yml's x-logging anchor RETAINS 3 x 10 MB of it per
+# service. `down --remove-orphans` normally takes it with the container, but
+# that `down` is `|| true` and nothing re-checked. Volumes get a verify gate;
+# containers now do too.
+if printf '%s\n' "$CODE" | grep -qF 'com.docker.compose.project='; then
+  pass "leftover containers are swept by compose-project label"
+else
+  fail "nothing sweeps containers the compose teardown left behind (their retained stdout survives)"
+fi
+
+if printf '%s\n' "$CODE" | grep -qF '_remaining_owned_containers'; then
+  pass "a verify gate re-enumerates surviving containers (same shape as the volume gate)"
+else
+  fail "there is no container verify gate — a swallowed 'down' is invisible again"
+fi
+
+# The scope guard that makes the sweep safe: the sibling droplet-local-LLM
+# project is literally named `docker`, so the label filter must only ever be fed
+# OWNED_PREFIXES — never a literal project name.
+if printf '%s\n' "$CODE" | grep -F 'com.docker.compose.project=' | grep -qF '$prefix'; then
+  pass "the container sweep is scoped to OWNED_PREFIXES (the sibling 'docker' project is safe)"
+else
+  fail "the container sweep is not scoped through OWNED_PREFIXES"
+fi
+
 # =============================================================================
 # Results
 # =============================================================================
