@@ -246,6 +246,21 @@ Each subcommand can be invoked individually (`./scripts/test/ship-check.sh shell
 ./scripts/test/ship-check.test.sh
 ```
 
+A case whose prerequisite is absent (no `node_modules`, no `shellcheck`, no
+reachable docker daemon) reports **SKIP**, and a SKIP is **not** a pass — the
+suite exits non-zero unless the caller names the cases allowed to skip:
+
+```bash
+SHIPCHECK_ALLOW_SKIP='tsc-full catches WARP-329 fixture regression' ./scripts/test/ship-check.test.sh
+SHIPCHECK_ALLOW_SKIP=all ./scripts/test/ship-check.test.sh   # tolerate any skip on this host
+```
+
+WARP-2637: before this, every SKIP returned 0 and was counted in `N/N passed`,
+so CI's `shipcheck` job — which does no `npm ci` — reported green while both
+`tsc-full` cases had never run, and the WARP-329 fixture guard sat vacuous for
+weeks. The two cases CI cannot run are named in `.github/workflows/ci.yml`; the
+skipped names are also written to the GitHub job summary.
+
 ---
 
 ## Docker group note

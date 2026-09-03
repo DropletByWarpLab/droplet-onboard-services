@@ -46,9 +46,20 @@ fi
 TOTAL=0
 PASSED=0
 FAILED=0
+SKIPPED=0
 FAILED_NAMES=()
+SKIPPED_NAMES=()
+
+# Exit code a test body returns to mean "prerequisite absent, did not run".
+# 77 is the autotools convention. Before WARP-2637 a skipping body returned 0
+# and was counted as a PASS, so `Results: N/N passed` was reported by a run in
+# which the case never executed — which is exactly how the WARP-329 guard
+# stayed vacuous in CI for weeks (the `shipcheck` job does no `npm ci`, so both
+# node_modules-gated cases skipped and the job went green).
+_SKIP_RC=77
 
 _pass() { PASSED=$((PASSED + 1)); printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; }
+_skip() { SKIPPED=$((SKIPPED + 1)); SKIPPED_NAMES+=("$1"); printf "  ${_YELLOW}SKIP${_RESET}  %s\n" "$1"; }
 _fail() {
   FAILED=$((FAILED + 1)); FAILED_NAMES+=("$1")
   printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"
@@ -60,13 +71,15 @@ _fail() {
 
 _run_test() {
   local name="$1"; shift
+  local rc=0
   TOTAL=$((TOTAL + 1))
   printf "\n${_BOLD}→ %s${_RESET}\n" "$name"
-  if "$@"; then
-    _pass "$name"
-  else
-    _fail "$name"
-  fi
+  "$@" || rc=$?
+  case "$rc" in
+    0)            _pass "$name" ;;
+    "$_SKIP_RC")  _skip "$name" ;;
+    *)            _fail "$name" ;;
+  esac
 }
 
 # Convenience: assert ship-check.sh CHECK_NAME exits non-zero when REPO_ROOT
@@ -80,6 +93,30 @@ _assert_check_fails() {
   rc=$?
   if [ "$rc" -eq 0 ]; then
     printf "    expected exit != 0, got 0\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+  return 0
+}
+
+# Like _assert_check_fails, but ALSO requires the failure output to match
+# REGEX. Without it a case goes green whenever the check is red for any reason
+# at all — including reasons that have nothing to do with the regression it
+# planted — so a mutation that has quietly stopped discriminating can still be
+# masked by an unrelated red. WARP-2637.
+_assert_check_fails_matching() {
+  local synthetic_root="$1" check_name="$2" pattern="$3"
+  local output rc
+  output="$(REPO_ROOT="$synthetic_root" bash "$SHIP_CHECK" "$check_name" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf "    expected exit != 0, got 0\n" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$output" | grep -Eq -- "$pattern"; then
+    printf "    %s failed, but NOT for the planted reason\n" "$check_name" >&2
+    printf "    expected the output to match /%s/\n" "$pattern" >&2
     printf '%s\n' "$output" | sed 's/^/    | /' >&2
     return 1
   fi
@@ -165,7 +202,7 @@ _isolated_index_end() {
 }
 
 # =============================================================================
-# Test: tsc-full catches WARP-329 class (test fixture missing required fields)
+# Test: tsc-full catches the WARP-329 class (a type error inside a test file)
 # =============================================================================
 #
 # Original bug: 5 fixtures in chat-persistence.service.test.ts dropped
@@ -175,17 +212,38 @@ _isolated_index_end() {
 # orchestrator Dockerfile caught it as TS2322 and failed the entire build,
 # wedging the factory-reset at phase 5/7.
 #
-# Synthetic regression: remove `toolCalls: null` from the canonical "no tool
-# call" fixture in the real test file inside a temp clone, then re-run.
-# tsc-full should fail.
+# What this case pins is therefore NOT "toolCalls must be present in a
+# fixture". It is that `tsc-full` type-checks TEST FILES AT ALL — phase 3's
+# `include: ["src/**/*"]` sweep plus phase 4's `tsconfig.test.json` pass — so a
+# type error confined to a fixture reds a developer's gate before it reds the
+# container build. `vitest` cannot close that hole: esbuild strips types
+# without checking them.
+#
+# WARP-2637 — the original mutation stopped discriminating and this case was
+# red on `stage` for weeks. `chat-persistence.service.test.ts` made `toolCalls`
+# and `toolCallId` OPTIONAL on `MockMessage`, which is CORRECT: the Prisma model
+# declares `toolCalls Json?` / `toolCallId String?` (schema.prisma), so
+# requiring them in the mock was the defect, not the fix. Dropping an optional
+# field is not a type error, so tsc-full passed on the mutated tree and the case
+# failed its own `_assert_check_fails`. Do not "fix" this by making the mock
+# strict again — that reintroduces the very tsc error the mock was corrected to
+# avoid.
+#
+# The mutation now assigns a NUMBER to `content`, which is `String` (required,
+# non-nullable) in the Prisma model and `content: string` on `MockMessage`.
+# A wrong-typed value cannot be neutralised by making some field optional —
+# the exact drift that neutered the previous mutation — and it reproduces the
+# original TS2322. The failure is additionally required to NAME the fixture
+# file, so the case cannot go green because tsc-full was red for an unrelated
+# reason.
 #
 # This test requires `npm` and a previously-installed `node_modules` in the
 # real REPO_ROOT (so we can copy the resolved dependency tree into the
 # synthetic worktree). On hosts without node_modules it SKIPs gracefully.
 test_tsc_full_catches_fixture_regression() {
   if [ ! -d "$REPO_ROOT_REAL/node_modules" ]; then
-    printf "    ${_YELLOW}SKIP${_RESET}  REPO_ROOT_REAL has no node_modules — install first\n"
-    return 0
+    printf "    ${_YELLOW}SKIP${_RESET}  REPO_ROOT_REAL has no node_modules — run npm ci && npm run bootstrap\n"
+    return "$_SKIP_RC"
   fi
 
   # We test in-place: mutate the fixture in the real worktree, run the check,
@@ -213,15 +271,29 @@ test_tsc_full_catches_fixture_regression() {
   # shellcheck disable=SC2064  # capture path values at trap-set time
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$fixture_rel') 2>/dev/null || true" RETURN EXIT
 
+  # 0. The mutation target must still exist. If the fixture is ever
+  #    restructured so no `content: "…"` literal remains, say so LOUDLY rather
+  #    than planting a no-op and reporting a green gate — that silent failure
+  #    mode is WARP-2637 itself.
+  if ! grep -q '^[[:space:]]*content: "' "$fixture"; then
+    printf '    no `content: "…"` line left in %s — mutation target gone;\n' "$fixture_rel" >&2
+    printf '    repoint this case at another required, non-nullable field\n' >&2
+    return 1
+  fi
+
   # 1. Sanity: tsc-full PASSES on the unmutated tree.
   if ! _assert_check_passes "$REPO_ROOT_REAL" tsc-full; then
     printf "    baseline tsc-full failed against unmodified real repo\n" >&2
     return 1
   fi
 
-  # 2. Apply regression — drop the first `toolCalls: null,` line. Mirrors
-  #    PR #261's exact reverse.
-  awk 'BEGIN{done=0} /toolCalls: null,/ && !done {done=1; next} {print}' \
+  # 2. Apply regression — give the first fixture's `content` a number.
+  #    `content` is `String` (required, non-nullable) in the Prisma model, so
+  #    unlike the pre-WARP-2637 `toolCalls: null,` drop this cannot be silenced
+  #    by a field being made optional. Same TS2322 the original bug produced.
+  awk 'BEGIN{done=0}
+       /^[[:space:]]*content: "/ && !done { done=1; sub(/content: .*/, "content: 42,") }
+       {print}' \
        "$fixture" > "$fixture.tmp" && mv "$fixture.tmp" "$fixture"
 
   if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$fixture_rel" 2>/dev/null); then
@@ -229,8 +301,9 @@ test_tsc_full_catches_fixture_regression() {
     return 1
   fi
 
-  # 3. tsc-full should now FAIL.
-  _assert_check_fails "$REPO_ROOT_REAL" tsc-full
+  # 3. tsc-full should now FAIL, and it must fail BECAUSE OF THE FIXTURE.
+  _assert_check_fails_matching "$REPO_ROOT_REAL" tsc-full \
+    'chat-persistence\.service\.test\.ts'
 }
 
 # =============================================================================
@@ -247,7 +320,7 @@ test_tsc_full_catches_fixture_regression() {
 test_compose_config_catches_yaml_breakage() {
   if ! command -v docker >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   local compose_rel="docker/docker-compose.yml"
@@ -376,7 +449,7 @@ test_frigate_env_scan_catches_unresolved_substitution() {
 test_shellcheck_catches_local_outside_function() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   local target_rel="scripts/lib/local-dns.sh"
@@ -450,11 +523,11 @@ test_shellcheck_catches_local_outside_function() {
 test_docker_build_smoke_shim_rejects_unknown_subcommand() {
   if ! command -v docker >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
-    return 0
+    return "$_SKIP_RC"
   fi
   if ! docker info >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  docker daemon not reachable\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   local target_rel="scripts/setup.sh"
@@ -536,7 +609,7 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
 test_shellcheck_catches_new_sc2034_violation() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   local target_rel="scripts/lib/local-dns.sh"
@@ -623,7 +696,7 @@ test_shellcheck_catches_new_sc2034_violation() {
 test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   local target_rel="scripts/test/ship-check.sh"
@@ -714,7 +787,7 @@ test_shellcheck_lints_the_gate_and_catches_directive_shaped_comment() {
 test_shellcheck_reports_findings_not_just_exit_code() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   local plant_rel="scripts/lib/zzz-warp-2492-fixture.sh"
@@ -971,8 +1044,8 @@ test_exec_bits_catches_chmod_stripped_openwrt() {
 # them. On hosts without node_modules the test SKIPs gracefully.
 test_tsc_full_uses_workspace_pinned_prisma() {
   if [ ! -d "$REPO_ROOT_REAL/node_modules" ]; then
-    printf "    ${_YELLOW}SKIP${_RESET}  REPO_ROOT_REAL has no node_modules — install first\n"
-    return 0
+    printf "    ${_YELLOW}SKIP${_RESET}  REPO_ROOT_REAL has no node_modules — run npm ci && npm run bootstrap\n"
+    return "$_SKIP_RC"
   fi
 
   local pkg_rel="apps/orchestrator/package.json"
@@ -1241,11 +1314,11 @@ test_lifecycle_naming_structural_and_grandfather() {
 test_image_pipeline_catches_stubbed_build_image() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
-    return 0
+    return "$_SKIP_RC"
   fi
   if ! command -v python3 >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  python3 not on PATH — required for manifest schema validation\n"
-    return 0
+    return "$_SKIP_RC"
   fi
 
   # Required source files must exist in the real tree (they land across the
@@ -1717,6 +1790,9 @@ rm -f "$_INDEX_SNAPSHOT_AT_START"
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
+if [ "$SKIPPED" -gt 0 ]; then
+  printf "  ${_YELLOW}(%d skipped)${_RESET}" "$SKIPPED"
+fi
 if [ "$FAILED" -gt 0 ]; then
   printf "  ${_RED}(%d failed)${_RESET}" "$FAILED"
 fi
@@ -1727,6 +1803,70 @@ if [ "$FAILED" -gt 0 ]; then
     printf "    - %s\n" "$n"
   done
 fi
+if [ "$SKIPPED" -gt 0 ]; then
+  printf "  Skipped (did NOT run — the SKIP line above each says why):\n"
+  for n in "${SKIPPED_NAMES[@]}"; do
+    printf "    - %s\n" "$n"
+  done
+fi
 printf "  ──────────────────────────────────\n\n"
 
-exit "$FAILED"
+# WARP-2637 — put the skip list where the CI job is actually read. The log is
+# scrolled past; the job summary is the page a reviewer lands on. Costs nothing:
+# GITHUB_STEP_SUMMARY is only set on a runner.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    printf '### ship-check self-test\n\n'
+    printf '%d/%d passed · %d skipped · %d failed\n\n' \
+      "$PASSED" "$TOTAL" "$SKIPPED" "$FAILED"
+    if [ "$FAILED" -gt 0 ]; then
+      printf 'Failed:\n\n'
+      for n in "${FAILED_NAMES[@]}"; do printf -- '- %s\n' "$n"; done
+      printf '\n'
+    fi
+    if [ "$SKIPPED" -gt 0 ]; then
+      printf 'Skipped — these cases did NOT run here (allowed by `SHIPCHECK_ALLOW_SKIP` in the job):\n\n'
+      for n in "${SKIPPED_NAMES[@]}"; do printf -- '- %s\n' "$n"; done
+      printf '\n'
+    fi
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
+
+if [ "$FAILED" -gt 0 ]; then
+  exit "$FAILED"
+fi
+
+# WARP-2637 — a SKIP is not a pass, so it must be admitted in writing.
+#
+# SHIPCHECK_ALLOW_SKIP names the cases that are allowed not to run, comma
+# separated (`all` tolerates any skip — for a dev machine that deliberately has
+# no docker/shellcheck). Anything skipping that the caller did NOT name fails
+# the suite. Naming them individually rather than blanket-allowing is the point:
+# CI can keep skipping the two cases that need a resolved `node_modules` while a
+# NEW hole still turns the job red instead of inflating the pass count.
+if [ "$SKIPPED" -gt 0 ]; then
+  _allow="${SHIPCHECK_ALLOW_SKIP:-}"
+  if [ "$_allow" != "all" ]; then
+    _unexpected=0
+    for n in "${SKIPPED_NAMES[@]}"; do
+      case ",$_allow," in
+        *",$n,"*) ;;
+        *)
+          printf "  ${_RED}SKIP NOT ALLOWED${_RESET}  %s\n" "$n" >&2
+          _unexpected=$((_unexpected + 1))
+          ;;
+      esac
+    done
+    if [ "$_unexpected" -gt 0 ]; then
+      printf "\n  %d case(s) skipped that SHIPCHECK_ALLOW_SKIP does not name.\n" "$_unexpected" >&2
+      printf "  Install the missing prerequisite (each SKIP line above says which),\n" >&2
+      printf "  or re-run naming them:\n" >&2
+      printf "      SHIPCHECK_ALLOW_SKIP='<case name>[,<case name>…]' bash %s\n" \
+        "scripts/test/ship-check.test.sh" >&2
+      printf "  or SHIPCHECK_ALLOW_SKIP=all to tolerate any skip on this host.\n" >&2
+      exit 1
+    fi
+  fi
+fi
+
+exit 0

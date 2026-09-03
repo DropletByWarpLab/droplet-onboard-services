@@ -1011,7 +1011,27 @@ jobs:
       - name: Seed .env for the compose-config case
         run: cp .env.example .env
 
+      # WARP-2637 — a SKIP is no longer folded into the pass count, and the
+      # suite refuses to exit 0 on a skip the caller has not named.
+      #
+      # This job deliberately does NOT `npm ci`. Installing the monorepo plus
+      # `npm run bootstrap` plus the FOUR `tsc-full` sweeps the two
+      # node_modules-gated cases perform (each runs the check twice: clean
+      # baseline, then mutated) is minutes of metered time per run, on a job
+      # whose remit is parse + self-test — see docs/ci-cost-budget.md and
+      # WARP-2455's out-of-scope list. So those two cases cannot run here, and
+      # they are named explicitly rather than blanket-allowed: any OTHER case
+      # that starts skipping on the runner now fails this job instead of
+      # quietly inflating "N/N passed", which is exactly how the WARP-329
+      # fixture guard stayed vacuous. The names are also written to the job
+      # summary by the script, so the hole is visible without reading the log.
+      #
+      # The trade this leaves standing: the WARP-329 and WARP-492 cases are
+      # developer-machine gates only. Running them in CI is a spend decision,
+      # not an oversight.
       - name: Run the ship-check self-test
+        env:
+          SHIPCHECK_ALLOW_SKIP: "tsc-full catches WARP-329 fixture regression,tsc-full uses workspace-pinned prisma (WARP-492)"
         run: bash scripts/test/ship-check.test.sh
 
 
