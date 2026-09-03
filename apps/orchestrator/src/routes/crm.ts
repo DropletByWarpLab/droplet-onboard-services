@@ -114,6 +114,15 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case crm.CRM_ERRORS.DUPLICATE_LINK:
       res.status(409).json({ error: msg });
       return true;
+    case crm.CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD:
+    case crm.CRM_ERRORS.DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD:
+      // Same shape routes/contacts.ts already returns for a synced contact:
+      // a 409 whose body names the action that DOES work, rather than a bare
+      // refusal the dashboard can only render as "no". `remediation` is a
+      // stable token, not prose — the client holds the id it just tried to
+      // delete, so it can build the archive call itself.
+      res.status(409).json({ error: msg, remediation: "archive" });
+      return true;
     default:
       return false;
   }
