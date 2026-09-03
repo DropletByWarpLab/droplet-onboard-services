@@ -76,6 +76,11 @@
 #   4  the harness itself COULD NOT RUN (interpreter too old). Deliberately
 #      distinct from 1 so no caller can read "never executed" as "executed
 #      and passed" -- see the bash version floor below (WARP-2449).
+#  77  every check that ran passed, but at least one SKIPPED -- it could not
+#      evaluate its subject for an environmental reason it names on the SKIP
+#      line. Same "did not run is not a pass" principle as 4, and the same
+#      autotools convention scripts/test/ship-check.test.sh already uses for
+#      a skipping case (WARP-2646).
 #
 # WARP-482, WARP-487, WARP-494.
 # =============================================================================
@@ -96,6 +101,11 @@ set -euo pipefail
 # you introduce a dependency on a newer bash, raise MIN_BASH_MAJOR/MIN_BASH_MINOR
 # in the SAME commit -- never leave the floor lying about what the script needs.
 EXIT_CANNOT_RUN=4
+# WARP-2646 -- "ran, everything that ran passed, but something could not be
+# evaluated here". 77 is the autotools skip convention and is already what a
+# skipping case returns in scripts/test/ship-check.test.sh (WARP-2637), so the
+# gate and its harness now speak the same code for the same idea.
+EXIT_SKIPPED=77
 MIN_BASH_MAJOR=3
 MIN_BASH_MINOR=2
 _bash_major="${BASH_VERSINFO[0]:-0}"
@@ -249,6 +259,13 @@ CHECKS
                         docker/docker-compose.yml using .env.example (falls
                         back to .env). Catches YAML breakage, missing
                         required env var refs, and malformed service defs.
+                        SKIPs (exit 77, never a pass) when it could not
+                        evaluate the tree at all: no .env at the repo root —
+                        compose resolves the merged tree's `env_file: ../.env`
+                        regardless of --env-file, and .env is .gitignored, so
+                        a fresh worktree has none — or a Docker client that
+                        cannot reach its daemon. FAILs only when compose
+                        actually rejects the file it names. WARP-2646.
 
   frigate-env-scan      Parse docker/frigate/config.yml for every {VAR}
                         substitution outside comments and assert each one
@@ -533,17 +550,67 @@ run_check_compose_config() {
 
   local out
   if ! out="$(docker compose -f "$compose" --env-file "$env_file" config --quiet 2>&1)"; then
-    # WARP-2645: same command-substitution defect as the branch above, and
-    # here it was actively harmful — reporting that the merged tree was
-    # rejected ran a SECOND, argument-less `docker compose config` in the
-    # caller's cwd, whose "no configuration file provided: not found" landed
-    # on the operator's terminal one line ABOVE the real diagnostic.
+    # WARP-2646 — a non-zero exit here is NOT yet evidence of a bad compose
+    # file. Two environmental causes reach this same branch, and until they
+    # are separated out a perfectly good tree reads as a broken one (which is
+    # also what let the self-test's YAML-break case pass on a machine where
+    # the gate could not evaluate the mutation at all — WARP-2645).
     #
-    # The message also has to NAME the file it rejected. Every environmental
-    # way this branch can be reached — daemon down, missing .env, docker
-    # missing at exec time — produces the same banner otherwise, which is
-    # what let a self-test assert "compose-config failed" and call that proof
-    # the planted YAML break was caught.
+    # Both are matched with `case`, not grep: no subprocess, no pipefail
+    # SIGPIPE hazard, and `*` spans newlines so a multi-line `out` matches.
+
+    # (1) No `.env` at the repo root. .env is .gitignored and written by
+    #     setup.sh, so a fresh clone or a new git worktree has none — but
+    #     `docker/docker-compose.yml` still declares `env_file: ../.env` and
+    #     compose resolves it while merging, independently of --env-file.
+    #     Confirmed two ways before skipping: compose named the file, AND the
+    #     file really is absent. CI seeds one (.github/workflows/ci.yml,
+    #     "Seed .env for the compose-config case").
+    case "$out" in
+      *"env file "*"/.env not found"*)
+        if [ ! -f "$REPO_ROOT/.env" ]; then
+          printf '  %sSKIP%s  %s — no .env in this worktree, so the merged tree cannot be resolved\n' \
+            "$_YELLOW" "$_RESET" "$label"
+          printf "    | %s declares \`env_file: ../.env\`; compose resolves that\n" \
+            "${compose#"$REPO_ROOT"/}" >&2
+          printf "    | while merging, whatever --env-file says.\n" >&2
+          printf "    | Fix: run ./scripts/setup.sh, or \`cp .env.example .env\`.\n" >&2
+          _record_result "$label" skip
+          return "$EXIT_SKIPPED"
+        fi
+        ;;
+    esac
+
+    # (2) The daemon is unreachable in a way compose surfaces. NOTE the guard
+    #     is deliberately here and not a `docker info` preflight like
+    #     docker-build-smoke's: `docker compose config` is a CLIENT-SIDE
+    #     merge and does not need a daemon. Measured on docker 29.5.2 /
+    #     compose v2 (2026-09-02): with DOCKER_HOST pointed at a dead socket,
+    #     and with `docker info` shimmed to fail, this check still runs and
+    #     still PASSES. A preflight would therefore skip a check that can run
+    #     — a gate made vacuous for a reason that was never true. This branch
+    #     only fires when compose ITSELF says it could not reach the daemon.
+    case "$out" in
+      *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*|*"docker daemon is not running"*)
+        printf '  %sSKIP%s  %s — Docker daemon not reachable (colima / Docker Desktop stopped?)\n' \
+          "$_YELLOW" "$_RESET" "$label"
+        printf '%s\n' "$out" | sed 's/^/    | /' >&2
+        printf "    | \`docker compose config\` does not normally need the daemon;\n" >&2
+        printf "    | this client could not reach it at all, so nothing was validated.\n" >&2
+        _record_result "$label" skip
+        return "$EXIT_SKIPPED"
+        ;;
+    esac
+
+    # WARP-2645: the backticks that used to be in this message were inside a
+    # double-quoted printf, and here that was actively harmful — reporting
+    # that the merged tree was rejected ran a SECOND, argument-less
+    # `docker compose config` in the caller's cwd, whose "no configuration
+    # file provided: not found" landed on the operator's terminal one line
+    # ABOVE the real diagnostic.
+    #
+    # The message also NAMES the file it rejected, so a real rejection is
+    # distinguishable from the environmental routes handled above.
     printf '  %sFAIL%s  %s — "docker compose config" rejected %s\n' \
       "$_RED" "$_RESET" "$label" "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
@@ -2026,7 +2093,14 @@ _dispatch_check() {
   esac
 }
 
-# Render the summary block. Exit code = number of FAIL results (capped at 1).
+# Render the summary block. Exit 1 if anything FAILED; else EXIT_SKIPPED (77)
+# if anything SKIPPED; else 0.
+#
+# WARP-2646 — a skip used to be invisible in the exit code, so `ship-check.sh
+# compose-config && git push` treated "could not evaluate the compose file at
+# all" as "the compose file is fine". That is the same false green WARP-2637
+# removed from the self-test, one level down. A failure still outranks a skip:
+# exit 1 is the louder signal and must not be masked.
 _summarize() {
   local pass=0 fail=0 skip=0 result i
   printf "\n"
@@ -2057,6 +2131,16 @@ _summarize() {
       fi
     done
     return 1
+  fi
+  if [ "$skip" -gt 0 ]; then
+    printf "${_YELLOW}SKIPPED${_RESET} checks (did NOT run — the SKIP line above each says why):\n" >&2
+    for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+      if [ "${CHECK_RESULT_VALUES[$i]}" = "skip" ]; then
+        printf "  - %s\n" "${CHECK_RESULT_NAMES[$i]}" >&2
+      fi
+    done
+    printf "Exit code %s means SKIPPED, not passed.\n" "$EXIT_SKIPPED" >&2
+    return "$EXIT_SKIPPED"
   fi
   return 0
 }
