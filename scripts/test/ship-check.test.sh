@@ -757,6 +757,51 @@ test_shellcheck_catches_local_outside_function() {
 # the unmutated-baseline pass (it's already exercised by
 # `bash scripts/test/ship-check.sh --full`) to keep this test at one
 # container run, not two.
+# =============================================================================
+# Test: docker-build-smoke SKIPS (does not fail) when the daemon is unreachable
+# =============================================================================
+#
+# WARP-2646's sweep half. This check genuinely cannot run without a daemon — it
+# starts an Ubuntu container — so a stopped colima says nothing whatever about
+# setup.sh, and reporting it as a FAIL made a developer's machine state look
+# like a defect in the installer.
+#
+# Costs no container time: the guard returns before `docker run`, which is also
+# why this case can afford to exist next to the five-minute one below.
+test_docker_build_smoke_skips_when_daemon_unreachable() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return "$_SKIP_RC"
+  fi
+
+  local shim_dir
+  shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-check-infoshim.XXXXXX")" || {
+    printf "    could not create the shim directory\n" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$shim_dir'" RETURN EXIT
+
+  # Only `docker info` fails — the faithful shape of a stopped daemon with the
+  # CLI still installed. Nothing else is delegated because nothing else should
+  # be reached: if the guard ever stops returning early, the shim's fail-closed
+  # default makes that loud rather than starting a real container.
+  cat > "$shim_dir/docker" <<'SHIM'
+#!/usr/bin/env bash
+echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+exit 1
+SHIM
+  chmod 755 "$shim_dir/docker"
+
+  local saved_path="$PATH" rc
+  PATH="$shim_dir:$PATH"
+  _assert_check_skips_matching "$REPO_ROOT_REAL" docker-build-smoke \
+    'SKIP.*docker-build-smoke.*daemon not reachable, so nothing was smoke-tested' \
+    && rc=0 || rc=$?
+  PATH="$saved_path"
+  return "$rc"
+}
+
 test_docker_build_smoke_shim_rejects_unknown_subcommand() {
   if ! command -v docker >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
@@ -2111,6 +2156,10 @@ _run_test "shellcheck-lints-the-gate" \
 _run_test "shellcheck-reports-findings" \
   "shellcheck check reports its findings, not just a non-zero exit (WARP-2492)" \
   test_shellcheck_reports_findings_not_just_exit_code
+
+_run_test "docker-build-smoke-skips-without-daemon" \
+  "docker-build-smoke skips with a reason when the daemon is unreachable (WARP-2646)" \
+  test_docker_build_smoke_skips_when_daemon_unreachable
 
 _run_test "docker-build-smoke-shim-allowlist" \
   "docker-build-smoke shim rejects unknown docker subcommand" \
