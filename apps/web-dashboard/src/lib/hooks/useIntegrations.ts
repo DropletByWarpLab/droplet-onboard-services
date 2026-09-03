@@ -42,6 +42,9 @@ export interface HubEntry {
   connect: ConnectAction;
   /** What the tile's "open" / "fix connection" action does — never nothing. */
   open: ConnectAction;
+  /** Whether this provider syncs on a schedule (WARP-2659) — false for an MCP
+   *  track, whose Connected row must not claim a sync it never performs. */
+  syncs: boolean;
 }
 
 /** A hub entry the box has actually reported a connection row for. */
@@ -105,6 +108,7 @@ function entryFor(
     state,
     connect: descriptor.connect,
     open: descriptor.open,
+    syncs: descriptor.syncs,
   };
 }
 

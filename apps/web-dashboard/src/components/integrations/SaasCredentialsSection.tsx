@@ -5,6 +5,7 @@ import { AlertCircle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import { useAuth } from "@/lib/auth";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
+import { credentialExpiryCopy, type ExpiryCopy } from "@/lib/credential-expiry";
 import {
   fetchSaasCredentials,
   saveSaasCredential,
@@ -142,43 +143,18 @@ function secretPlaceholder(field: SaasCredentialField): string {
 /**
  * WARP-2650 — the expiry line, for a credential with a hard stop.
  *
- * Returns null for the two states that have nothing to say: a provider with no
- * expiry concept (the field is absent or `null`) and a date comfortably in the
- * future. `EXPIRY_UNKNOWN` is NOT one of those — a stored credential with no
- * recorded date means no warning can ever fire, and the owner is the only one
- * who can fix that, so it gets a line.
- *
  * Deliberately separate from `stateCopyFor`: `state` answers "does this
  * connection work" and the expiry answers "for how much longer". A token twelve
  * days from a hard stop is genuinely CONNECTED and genuinely needs action, and
  * one field cannot say both without lying about one of them.
+ *
+ * WARP-2659 moved the wording itself into `lib/credential-expiry.ts` when the
+ * hub tile became a second reader of the same verdict. This stays as the view's
+ * accessor — the field it reaches for is the only vendor-neutral thing left
+ * here — so the two surfaces cannot end up phrasing one credential two ways.
  */
-export function expiryCopyFor(
-  view: SaasCredentialView,
-): { label: string; tone: "warn" | "idle" } | null {
-  const expiry = view.credentialExpiry;
-  if (!expiry) return null;
-  const days = expiry.daysRemaining;
-  switch (expiry.status) {
-    case "VALID":
-      return null;
-    case "EXPIRY_UNKNOWN":
-      return {
-        label:
-          "No expiry date recorded — Droplet can't warn you before this credential stops working.",
-        tone: "idle",
-      };
-    case "EXPIRING_SOON":
-      return {
-        label: `Expires in ${days} day${days === 1 ? "" : "s"} — create a replacement and paste it in.`,
-        tone: "warn",
-      };
-    case "EXPIRED":
-      return {
-        label: `Expired ${Math.abs(days ?? 0)} day${Math.abs(days ?? 0) === 1 ? "" : "s"} ago — every call is being refused.`,
-        tone: "warn",
-      };
-  }
+export function expiryCopyFor(view: SaasCredentialView): ExpiryCopy | null {
+  return credentialExpiryCopy(view.credentialExpiry);
 }
 
 function ProviderForm({

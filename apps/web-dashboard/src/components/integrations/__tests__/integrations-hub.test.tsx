@@ -103,6 +103,9 @@ const ACME: ProviderDescriptor = {
   providerKeys: ["acme-pms", "acme-pms-export"],
   connect: { kind: "wizard", catalogId: "acme-pms" },
   open: { kind: "route", href: "/integrations/acme-pms" },
+  // A LAN-database vendor, so it syncs on a schedule like every catalog card
+  // (WARP-2659); its Connected row keeps the "synced …" clause.
+  syncs: true,
 };
 
 const conn = (

@@ -101,7 +101,13 @@ export default function IntegrationsPage() {
                     <span className="rt">
                       <span className="nm">{e.meta.name}</span>
                       <span className="sub">
-                        Connected · synced {syncedAgo(conn.lastSyncedAt)} ·{" "}
+                        {/* WARP-2659 — the sync clause is dropped for a track
+                            that does not sync. `syncedAgo(undefined)` is the
+                            string "never", so a connected MCP provider would
+                            otherwise read "Connected · synced never" and send
+                            the owner looking for a broken sync that does not
+                            exist on this track. */}
+                        Connected ·{e.syncs ? ` synced ${syncedAgo(conn.lastSyncedAt)} ·` : ""}{" "}
                         {mode === "writes-enabled" ? "writes enabled" : mode === "writes-paused" ? "writes paused" : "read-only"}
                       </span>
                     </span>

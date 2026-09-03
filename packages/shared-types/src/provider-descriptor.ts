@@ -634,6 +634,25 @@ export type McpProviderDescriptor = Omit<ProviderDescriptorBase, "datasets"> & {
   readonly mcpServerId: string;
   readonly datasets: readonly [];
   /**
+   * WARP-2659 — the hub card's one line: what connecting this does.
+   *
+   * REQUIRED, and it lives here for the same reason {@link setupGuideHref}
+   * does: `catalog` is closed off on this arm, so the property every other
+   * card reads (`ProviderCatalogMeta.description`) has no home on an MCP
+   * track. The dashboard derives the card from the TRACK instead
+   * (`lib/connectors.ts` `hubCardFor`), and this is the only field of a card
+   * that cannot be computed from what the descriptor already declares —
+   * `displayName` is the name, `category` is the category, and
+   * `setupGuideHrefFor` is the guide.
+   *
+   * Required rather than optional so the next MCP provider is refused by
+   * `tsc` until somebody writes the sentence a customer reads on the tile.
+   * The alternative — a generic per-track sentence in the dashboard — would
+   * put vendor copy in the app that `descriptorForReportedProvider`'s own
+   * docstring says must not invent any.
+   */
+  readonly description: string;
+  /**
    * Where the customer reads how to produce this credential. REQUIRED, not
    * optional, for the same reason {@link CloudProviderCatalogMeta} makes it
    * required for an `available` cloud card: the credential is minted in a
@@ -646,15 +665,22 @@ export type McpProviderDescriptor = Omit<ProviderDescriptorBase, "datasets"> & {
    */
   readonly setupGuideHref: string;
   /**
-   * An MCP track puts NO card on the Integrations hub, and `never` says so at
-   * the declaration site rather than leaving it to be discovered.
+   * An MCP track declares NO `catalog` block, and `never` says so at the
+   * declaration site rather than leaving it to be discovered.
    *
-   * The hub's card ids are a closed union in the dashboard (`ConnectorId`), and
-   * a card's connect flow is the ERP wizard — which probes a transport, offers
-   * read scopes and starts a dataset sync, none of which exists here. The
-   * connect surface for this track is the descriptor-driven credential
-   * configurator at `/integrations/credentials`. Giving the track a tile is a
-   * design change with its own blast radius; recorded as a gap on WARP-2650.
+   * WARP-2650 wrote this as "an MCP track puts no card on the hub", and
+   * WARP-2659 changed that half: Atlassian DOES have a tile now. What has not
+   * changed — and is what `never` actually protects — is that the tile is not
+   * a CATALOG-BLOCK card. Those carry a {@link ProviderCatalogMeta.id} from
+   * the dashboard's closed `ConnectorId` union and a connect flow that is the
+   * ERP wizard: it probes a transport, offers read scopes and starts a dataset
+   * sync, none of which exists on this track. Declaring `catalog` here would
+   * put an MCP provider into that vocabulary and hand it that wizard.
+   *
+   * The tile is derived from the TRACK instead (`lib/connectors.ts`
+   * `hubCardFor`), keyed on the descriptor id, and both its actions route to
+   * the credential configurator at `/integrations/credentials`. So a future
+   * MCP provider gets a card for free and needs no new `ConnectorId` literal.
    */
   readonly catalog?: never;
 };

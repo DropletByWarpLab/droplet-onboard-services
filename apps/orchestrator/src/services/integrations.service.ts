@@ -42,7 +42,16 @@ import {
   integrationStatusForHealthFailure,
   statusAfterHealthProbe,
 } from "./cloud-connection-state.js";
-import { providerDescriptor } from "@droplet/shared-types";
+import {
+  providerDescriptor,
+  // WARP-2659 — the hub renders an MCP track's expiry warning off the same
+  // verdict `/integrations/credentials` shows, so one credential cannot be
+  // described two ways on two pages.
+  credentialExpiryVerdict,
+  mcpProviderIds,
+  parseProviderConfigWith,
+  type CredentialExpiryVerdict,
+} from "@droplet/shared-types";
 import {
   connectorForProvider,
   encodeApiCredentials,
@@ -151,6 +160,28 @@ export interface IntegrationSummary {
    * `false`, never omitted, for an unconfigured provider: nothing was purged.
    */
   credentialsPurged: boolean;
+
+  /**
+   * WARP-2659 — the credential's expiry verdict, or `null` for a provider that
+   * declares no {@link CredentialExpiryPolicy}.
+   *
+   * The same read `/api/integrations/credentials` already returns
+   * (`saas-credential.service.ts`), moved onto the hub row so the tile and the
+   * configurator cannot disagree about the same credential. That is the WARP-2489
+   * rule applied to a second field: the box owns the derivation, both surfaces
+   * render it, and neither computes its own.
+   *
+   * It has to live BESIDE `status`, never inside it. `IntegrationStatus` has no
+   * EXPIRING_SOON member — WARP-2353 modelled the window read-time only — and a
+   * token twelve days from a hard stop is genuinely CONNECTED *and* genuinely
+   * needs action. Folding one into the other would have to lie about one of them.
+   *
+   * Generic, not Atlassian-specific: `credentialExpiryVerdict` returns
+   * `undefined` for a descriptor declaring no policy, so every Stripe, HubSpot
+   * and Eaglesoft row carries an explicit `null` rather than a warning state it
+   * can never leave.
+   */
+  credentialExpiry: CredentialExpiryVerdict | null;
 }
 
 /** The five `ErpSyncState` members, mirrored for the API surface. */
@@ -409,6 +440,30 @@ export function credentialsPurgedFor(row: {
   return row.status === "DISABLED" && !row.apiCredentialsEnc && !row.providerTokensEnc;
 }
 
+/**
+ * WARP-2659 — this connection's credential-expiry verdict, or `null`.
+ *
+ * The same two reads `buildCredentialView` makes, in the same order: parse the
+ * stored config against the descriptor, then classify. Kept as one exported
+ * function for the reason `credentialsPurgedFor` is: the hub tile and the
+ * credential configurator must render one derivation, not two that agree today.
+ *
+ * `null` for an absent row is a stated fact, not a shortcut — a provider that
+ * was never configured has no credential, so there is nothing to expire. It is
+ * NOT `EXPIRY_UNKNOWN`, which means "a credential IS stored and no date was
+ * recorded" and carries its own remedy.
+ */
+export function credentialExpiryFor(
+  provider: string,
+  providerConfig: unknown,
+  now: Date,
+): CredentialExpiryVerdict | null {
+  const descriptor = providerDescriptor(provider);
+  if (!descriptor) return null;
+  const config = parseProviderConfigWith(descriptor, providerConfig) ?? undefined;
+  return credentialExpiryVerdict(descriptor, config, now) ?? null;
+}
+
 export function createIntegrationsService(
   prisma: IntegrationsPrisma,
   deps: IntegrationsServiceDeps = {},
@@ -493,6 +548,8 @@ export function createIntegrationsService(
         // Nothing was ever stored, so nothing was purged. Explicit `false`,
         // never an omitted key — absence must not read as "unknown".
         credentialsPurged: false,
+        // No row means no credential, so there is nothing to expire.
+        credentialExpiry: null,
       };
     }
     const lastSynced = row.lastHealthyAt ? row.lastHealthyAt.toISOString() : null;
@@ -514,6 +571,7 @@ export function createIntegrationsService(
       syncState: sync.syncState,
       needsReconnect: sync.needsReconnect,
       credentialsPurged: credentialsPurgedFor(row),
+      credentialExpiry: credentialExpiryFor(row.provider, row.providerConfig, new Date()),
     };
   }
 
@@ -548,11 +606,26 @@ export function createIntegrationsService(
       }
       // The framework knows about Eaglesoft even before it is configured, so
       // the hub always lists it (explicit NOT_CONFIGURED when no row exists).
+      //
+      // WARP-2659 adds every MCP track for the same reason, and it is the half
+      // that makes the new hub card honest. The card is derived from the
+      // descriptor registry, so it renders whether or not a row exists — and
+      // the ONLY way it can say "not connected" is for the box to say so. The
+      // dashboard must not fill that in from a `Map` miss: `buildHubEntries`
+      // keeps `absent` (the box mentioned nothing) distinct from a reported
+      // NOT_CONFIGURED precisely because synthesizing the latter from the
+      // former is the WARP-2291 defect, and `integrations-hub.test.tsx` pins
+      // the distinction. So the status comes from here, explicitly, exactly as
+      // Eaglesoft's does.
       const providers = new Set<string>([
         EAGLESOFT_PROVIDER,
         EAGLESOFT_API_PROVIDER,
+        ...mcpProviderIds(),
         ...rows.map((r) => r.provider),
       ]);
+      // One clock for the whole listing: two rows classified microseconds
+      // apart must not land on different sides of a day boundary.
+      const now = new Date();
       return Array.from(providers).map((provider) => {
         const row = byProvider.get(provider);
         const sync = foldSyncState(row ? (cursorsByConnection.get(row.id) ?? []) : []);
@@ -570,6 +643,11 @@ export function createIntegrationsService(
           syncState: sync.syncState,
           needsReconnect: sync.needsReconnect,
           credentialsPurged: row ? credentialsPurgedFor(row) : false,
+          // Explicit null for a provider with no row — nothing is stored, so
+          // nothing can expire. Same treatment as `credentialsPurged` above.
+          credentialExpiry: row
+            ? credentialExpiryFor(provider, row.providerConfig, now)
+            : null,
         };
       });
     },

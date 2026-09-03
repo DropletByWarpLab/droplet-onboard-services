@@ -552,6 +552,12 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     displayName: "Atlassian (Jira & Confluence)",
     category: "Project management",
     track: "mcp",
+    // WARP-2659 — the hub tile's one line. Says what the track actually does
+    // (the model calls Atlassian's own tools, on request) rather than
+    // promising the dataset reads every other card offers, because this track
+    // has none: nothing is copied onto the box and nothing syncs.
+    description:
+      "Ask about Jira issues and Confluence pages — Droplet calls Atlassian directly, nothing is copied onto the box.",
     // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
     // source by `adr-043-boundary.test.ts`, which now checks four declarations.
     mcpServerId: "atlassian",
