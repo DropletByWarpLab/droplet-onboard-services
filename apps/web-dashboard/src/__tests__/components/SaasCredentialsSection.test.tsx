@@ -620,3 +620,146 @@ describe("the Status union", () => {
     expect(await screen.findByText(/Couldn’t load the connector list/)).toBeInTheDocument();
   });
 });
+
+// ===========================================================================
+// WARP-2650 — the guide link and the expiry line
+// ===========================================================================
+
+/**
+ * An MCP-track view, as the orchestrator now sends one.
+ *
+ * Structurally it is just another descriptor-driven provider — which IS the
+ * claim: no vendor branch, no track branch, no dataset picker. The only two new
+ * fields are the ones an `mcp` track was the first to need, and both are
+ * OPTIONAL on the wire so a box that predates them renders as before.
+ */
+const MCP_VIEW: SaasCredentialView = {
+  provider: "fixture-mcp",
+  displayName: "Fixture Workspace",
+  category: "Project management",
+  state: "CONNECTED",
+  hasCredentials: true,
+  configured: true,
+  fields: [
+    {
+      name: "email",
+      label: "Account email",
+      type: "string",
+      required: true,
+      secret: false,
+      storage: "providerConfig",
+      help: null,
+      pattern: null,
+      hasValue: null,
+    },
+    {
+      name: "apiToken",
+      label: "API token",
+      type: "string",
+      required: true,
+      secret: true,
+      storage: "encrypted",
+      help: null,
+      pattern: null,
+      hasValue: true,
+    },
+  ],
+  values: { email: "ops@vendor.example" },
+  updatedAt: null,
+  setupGuideHref: "/help/integrations/fixture-mcp",
+  credentialExpiry: { status: "VALID", daysRemaining: 200 },
+};
+
+describe("the setup guide link", () => {
+  it("renders the click-path at the moment the value is being asked for", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([MCP_VIEW]);
+    render(<SaasCredentialsSection />);
+
+    const link = await screen.findByTestId("guide-fixture-mcp");
+    expect(link).toHaveAttribute("href", "/help/integrations/fixture-mcp");
+  });
+
+  it("renders no link at all for a provider that declares none", async () => {
+    // Not an empty href, not a dead link. `BILLING` carries no guide.
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+    expect(screen.queryByTestId("guide-fixture-billing")).not.toBeInTheDocument();
+  });
+
+  it("renders no dataset picker — an mcp track serves none", async () => {
+    // The credential page has never had one, and this pins that it stays that
+    // way for the track whose `datasets` is empty by construction.
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([MCP_VIEW]);
+    render(<SaasCredentialsSection />);
+    const card = await screen.findByTestId("provider-fixture-mcp");
+    // The only inputs are the descriptor's two credential fields.
+    expect(card.querySelectorAll("input")).toHaveLength(2);
+    expect(card.querySelectorAll("select")).toHaveLength(0);
+  });
+});
+
+describe("the credential expiry line", () => {
+  it("says nothing while the credential is comfortably valid", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([MCP_VIEW]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-mcp");
+    expect(screen.queryByTestId("expiry-fixture-mcp")).not.toBeInTheDocument();
+  });
+
+  it("warns inside the window WITHOUT contradicting the connection state", async () => {
+    // The distinction the two fields exist for: a token twelve days from a hard
+    // stop is genuinely CONNECTED and genuinely needs action, and one field
+    // cannot say both. Mutation: fold the expiry into `state` → the "Connected"
+    // assertion goes red.
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...MCP_VIEW, credentialExpiry: { status: "EXPIRING_SOON", daysRemaining: 12 } },
+    ]);
+    render(<SaasCredentialsSection />);
+
+    expect(await screen.findByTestId("expiry-fixture-mcp")).toHaveTextContent(
+      /Expires in 12 days/,
+    );
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+  });
+
+  it("says an EXPIRY_UNKNOWN credential cannot be warned about", async () => {
+    // "No date recorded" is its own state, not an optimistic default: the owner
+    // is the only one who can fix it, and they need telling.
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...MCP_VIEW, credentialExpiry: { status: "EXPIRY_UNKNOWN", daysRemaining: null } },
+    ]);
+    render(<SaasCredentialsSection />);
+
+    expect(await screen.findByTestId("expiry-fixture-mcp")).toHaveTextContent(
+      /No expiry date recorded/,
+    );
+  });
+
+  it("says an expired credential is being refused", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...MCP_VIEW, credentialExpiry: { status: "EXPIRED", daysRemaining: -3 } },
+    ]);
+    render(<SaasCredentialsSection />);
+
+    expect(await screen.findByTestId("expiry-fixture-mcp")).toHaveTextContent(
+      /Expired 3 days ago/,
+    );
+  });
+
+  it("says nothing for a provider with no expiry concept at all", async () => {
+    // `null`/absent is "this credential cannot expire" — a different answer
+    // from EXPIRY_UNKNOWN. Collapsing them would put every Stripe connection in
+    // a warning state it can never leave.
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+    expect(screen.queryByTestId("expiry-fixture-billing")).not.toBeInTheDocument();
+  });
+});

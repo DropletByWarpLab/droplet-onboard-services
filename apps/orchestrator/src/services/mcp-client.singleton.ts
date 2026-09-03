@@ -20,10 +20,20 @@
  */
 import path from "node:path";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 import { createAtlassianRemoteCallPolicy } from "./atlassian-tool-policy.js";
+import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { McpClientService } from "./mcp-client.service.js";
 import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.service.js";
-import { parseRemoteMcpAllowlist } from "./remote-mcp-servers.js";
+import {
+  ATLASSIAN_REMOTE_SERVER_ID,
+  attachAtlassianRemote,
+  parseRemoteMcpAllowlist,
+  type AttachAtlassianDeps,
+  type RemoteAttachResult,
+} from "./remote-mcp-servers.js";
+
+const logger = createLogger("mcp-client-singleton");
 
 const SERVER_BIN =
   process.env.MCP_SERVER_BIN ??
@@ -110,4 +120,38 @@ export async function stopMcp(): Promise<void> {
   if (!started) return;
   await localClient.stop();
   started = false;
+}
+
+/**
+ * WARP-2627 — attach the outbound Atlassian session, if this box is entitled.
+ *
+ * Called once from `index.ts` after the stdio child is up. On the SHIPPING
+ * default — `REMOTE_MCP_SERVER_ALLOWLIST` empty — this returns
+ * `not_allowlisted` having touched no network and constructed no client, so the
+ * boot path is byte-identical to before this PR on every unconfigured box.
+ *
+ * The socket lives in `services/mcp-bridge` (ADR-043 §5); what is constructed
+ * here is an HTTP client for it, wrapped by the gate → audit front.
+ */
+export async function ensureRemoteMcpAttached(
+  prisma: AttachAtlassianDeps["prisma"],
+): Promise<RemoteAttachResult> {
+  const result = await attachAtlassianRemote({
+    mux: mcpClient,
+    prisma,
+    allowlist: remoteAllowlist,
+    createClient: () =>
+      new McpBridgeClient({
+        baseUrl: config.MCP_BRIDGE_URL,
+        serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN,
+        serverId: ATLASSIAN_REMOTE_SERVER_ID,
+      }),
+  });
+  if (result.attached) {
+    logger.info(
+      { serverId: result.serverId, tools: result.sync.registered.length },
+      "remote_mcp_attached",
+    );
+  }
+  return result;
 }
