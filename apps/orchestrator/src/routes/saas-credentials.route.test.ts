@@ -17,7 +17,6 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import express, { type Request, type Response, type NextFunction } from "express";
 
@@ -50,6 +49,7 @@ import {
   sealSaasCredentials,
   type SaasConnectionRow,
 } from "../services/saas-credential.service.js";
+import { readPackageFile } from "../__tests__/helpers/test-paths.js";
 
 const TEST_KEY = Buffer.alloc(32, 3).toString("base64");
 const ROW_ID = "conn_route_fixture_1";
@@ -491,10 +491,8 @@ describe("the row casts stay narrow enough to keep the structural check", () => 
    * `saas-credentials.ts` → red here, green under `tsc`.
    */
   it("never launders a Prisma result through `unknown` on the way to a row", () => {
-    const source = readFileSync(
-      path.resolve(process.cwd(), "src/routes/saas-credentials.ts"),
-      "utf-8",
-    );
+    // Anchored to this test file, not the runner's cwd (WARP-2654).
+    const source = readPackageFile("src/routes/saas-credentials.ts");
 
     expect(source).toContain("as SaasConnectionRow");
     // The whole point: a double cast would let a `select` that drops

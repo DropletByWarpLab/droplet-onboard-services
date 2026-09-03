@@ -35,6 +35,7 @@ import { createFileCitationService } from "../services/file-citation.service.js"
 import { createFilesRouter } from "../routes/files.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { FileEntryInfo } from "../types/index.js";
+import { repoPath, packagePath } from "./helpers/test-paths.js";
 
 /**
  * A real directory listing, typed as the orchestrator's own `FileEntryInfo` —
@@ -232,29 +233,13 @@ describe("WARP-473 — extractCitedFilePaths", () => {
 // nothing but this canary stops the two from drifting. If it reds, read
 // `toolResultToContent` and update BOTH the fixture and
 // `services/tool-result-payload.ts` — do not just relax the assertion.
-function locateMcpServerSource(): string {
-  // CJS-safe (this package builds to CommonJS — `import.meta` is a tsc
-  // error here). Same candidates idiom as network-tool-paths.contract.test.ts
-  // so it works from apps/orchestrator or the repo root.
-  const candidates = [
-    resolve(process.cwd(), "../../services/mcp-server/src/server.ts"),
-    resolve(process.cwd(), "services/mcp-server/src/server.ts"),
-  ];
-  for (const p of candidates) {
-    try {
-      readFileSync(p, "utf8");
-      return p;
-    } catch {
-      // try next candidate
-    }
-  }
-  throw new Error(
-    `Could not locate services/mcp-server/src/server.ts from ${process.cwd()}`,
-  );
-}
+// Anchored to this test file, not to the runner's cwd (WARP-2654): the old
+// candidate list took the first entry that existed, so a cwd inside a second
+// checkout of this repo made it read that tree's mcp-server instead.
+const MCP_SERVER_SOURCE = repoPath("services/mcp-server/src/server.ts");
 
 describe("WARP-1604 — mcp-server ↔ extractor payload contract", () => {
-  const source = readFileSync(locateMcpServerSource(), "utf8").replace(/\s+/g, "");
+  const source = readFileSync(MCP_SERVER_SOURCE, "utf8").replace(/\s+/g, "");
 
   it("still UNWRAPS the envelope on success (JSON.stringify(result.data))", () => {
     expect(source).toContain("JSON.stringify(result.data)");
@@ -291,28 +276,12 @@ describe("WARP-1604 — mcp-server ↔ extractor payload contract", () => {
 // shape that the extractor does not read means zero FileCitation rows for the
 // highest-frequency file tool in the agent loop, silently, which is exactly
 // the failure this PR exists to fix.
-function locateFilesRouteSource(): string {
-  // Same candidates idiom as locateMcpServerSource above — works whether the
-  // runner's cwd is apps/orchestrator or the repo root.
-  const candidates = [
-    resolve(process.cwd(), "src/routes/files.ts"),
-    resolve(process.cwd(), "apps/orchestrator/src/routes/files.ts"),
-  ];
-  for (const p of candidates) {
-    try {
-      readFileSync(p, "utf8");
-      return p;
-    } catch {
-      // try next candidate
-    }
-  }
-  throw new Error(
-    `Could not locate apps/orchestrator/src/routes/files.ts from ${process.cwd()}`,
-  );
-}
+// Anchored to this test file, the same way MCP_SERVER_SOURCE above is
+// (WARP-2654).
+const FILES_ROUTE_SOURCE = packagePath("src/routes/files.ts");
 
 describe("WARP-1604 — the listing route still answers with a BARE array", () => {
-  const routeSource = readFileSync(locateFilesRouteSource(), "utf8").replace(
+  const routeSource = readFileSync(FILES_ROUTE_SOURCE, "utf8").replace(
     /\s+/g,
     "",
   );

@@ -11,24 +11,11 @@
  * fail is the repo's most-repeated review finding.
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { PRISMA_DIR } from "./helpers/test-paths.js";
 
-function findPrismaDir(): string {
-  const candidates = [
-    join(process.cwd(), "prisma"),
-    join(process.cwd(), "apps", "orchestrator", "prisma"),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, "schema.prisma"))) return resolve(candidate);
-  }
-  throw new Error(
-    `Could not locate prisma/schema.prisma from ${process.cwd()} — tried ${candidates.join(", ")}`,
-  );
-}
-
-const PRISMA_DIR = findPrismaDir();
 const schema = readFileSync(join(PRISMA_DIR, "schema.prisma"), "utf8");
 const MIGRATIONS_DIR = join(PRISMA_DIR, "migrations");
 

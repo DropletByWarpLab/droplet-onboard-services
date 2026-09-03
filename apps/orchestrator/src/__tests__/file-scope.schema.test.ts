@@ -16,12 +16,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-
-const SCHEMA_PATH = path.resolve(
-  process.cwd(),
-  "prisma",
-  "schema.prisma",
-);
+import { MIGRATIONS_DIR, SCHEMA_PATH } from "./helpers/test-paths.js";
 
 function readSchema(): string {
   return readFileSync(SCHEMA_PATH, "utf-8");
@@ -57,10 +52,8 @@ describe("WARP-455 schema: File.scope", () => {
 });
 
 describe("WARP-455 migration: File backfill idempotency", () => {
-  const MIGRATION_PATH = path.resolve(
-    process.cwd(),
-    "prisma",
-    "migrations",
+  const MIGRATION_PATH = path.join(
+    MIGRATIONS_DIR,
     "20260525130200_warp_455_file_scope",
     "migration.sql",
   );

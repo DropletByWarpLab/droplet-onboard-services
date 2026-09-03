@@ -135,6 +135,7 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/routes/network-firewall.routes.ts` | This route confirms Tier 2/3 operations itself. If your tool calls it, the ROUTE owns the prompt: declare `confirmationOwner: "route"` rather than letting the interceptor add a second one. |
 | `apps/orchestrator/src/routes/network-phone-home.routes.ts` | Same ownership as the firewall routes — the confirmation lives here, so a pass-through tool must not re-ask. |
 | `apps/orchestrator/src/services/erp.service.ts` | `CLOUD_DATASET_READ_ROLES` and the dataset dispatch the cloud e2e gate drives. The service re-checks the role after MCP admission by design — do not "simplify" the double check away to make a tool test pass. |
+| `apps/orchestrator/src/__tests__/helpers/test-paths.ts` | Test-only path resolution. `apps/orchestrator/src/services/tool-selection.parity.test.ts` reads the route and the agent loop as SOURCE, and resolves both through this helper (WARP-2654) rather than from the runner's cwd — resolved from cwd it threw at import from the repo root and the gate reported "no tests", so all 23 of its assertions ran zero times. Nothing about a new tool goes in here; it is listed because the gate reads it. |
 
 <!-- add-llm-tool:sites:end -->
 
