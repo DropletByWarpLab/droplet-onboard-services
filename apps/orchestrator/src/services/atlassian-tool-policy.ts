@@ -338,11 +338,33 @@ export const ATLASSIAN_TOOL_INDEX: ReadonlyMap<string, AtlassianToolClassificati
  * *"Read-only invocation of tools an operator has explicitly demoted to read
  * status under §2 may ship before those land. Writes may not."*
  */
-export const ATLASSIAN_V1_READ_TOOLS: ReadonlySet<string> = new Set(
-  ATLASSIAN_TOOL_CLASSIFICATIONS.filter((t) => t.v1 === "allowed" && t.grade === "read").map(
-    (t) => t.name,
-  ),
+export const ATLASSIAN_V1_READ_TOOLS: ReadonlySet<string> = v1ReadToolsOf(
+  ATLASSIAN_TOOL_CLASSIFICATIONS,
 );
+
+/**
+ * Derive the v1 read list from a set of rows.
+ *
+ * Exported as a FUNCTION, not only as the const above, because the two
+ * conditions it ANDs are indistinguishable on today's table — no shipped row
+ * is `v1: "allowed"` with a non-read grade, so a mutation dropping either
+ * condition produces the identical set and stays green. (It did: mutation N5
+ * survived the first pass of `atlassian-tool-policy.test.ts` for exactly that
+ * reason.) A test can feed this a mis-marked write row and prove the grade
+ * check is load-bearing; it cannot do that to a frozen const.
+ *
+ * Both conditions are required, and they mean different things: `v1` is the
+ * disposition an operator recorded, `grade` is what the tool DOES. A row
+ * marked `allowed` by mistake must still not become callable because someone
+ * edited one field.
+ */
+export function v1ReadToolsOf(
+  rows: readonly AtlassianToolClassification[],
+): ReadonlySet<string> {
+  return new Set(
+    rows.filter((t) => t.v1 === "allowed" && t.grade === "read").map((t) => t.name),
+  );
+}
 
 /** Refusal codes. Machine-readable; callers switch on these, never on prose. */
 export const ATLASSIAN_DENY_CODES = {
@@ -416,7 +438,24 @@ export function classifyAtlassianCall(
   namespacedName: string,
   authMode: AtlassianAuthMode,
 ): RemoteCallDecision {
-  const row = ATLASSIAN_TOOL_INDEX.get(wireName);
+  return classifyAtlassianRow(ATLASSIAN_TOOL_INDEX.get(wireName), namespacedName, authMode);
+}
+
+/**
+ * The decision for ONE row (or for no row at all).
+ *
+ * Split out from {@link classifyAtlassianCall} so a test can hand it a row the
+ * shipped table does not contain — specifically a write row mis-marked
+ * `v1: "allowed"`. That case cannot occur on today's table, which is precisely
+ * why it needs asserting: it is the one a future edit would introduce, and the
+ * grade check below is the second of two independent layers that refuse it
+ * (the first being {@link v1ReadToolsOf}).
+ */
+export function classifyAtlassianRow(
+  row: AtlassianToolClassification | undefined,
+  namespacedName: string,
+  authMode: AtlassianAuthMode,
+): RemoteCallDecision {
   if (!row) {
     return {
       kind: "deny",
