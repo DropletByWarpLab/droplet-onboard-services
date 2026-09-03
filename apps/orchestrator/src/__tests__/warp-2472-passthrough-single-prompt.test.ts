@@ -248,7 +248,11 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // are gated by the flag alone (the interceptor enforces it generically),
     // and neither is a pass-through — the roster below is unchanged, which is
     // the distinction this count exists to keep visible.
-    expect(confirming).toHaveLength(40);
+    //
+    // 42 as of WARP-2664: `organize_files` and `delete_files`. Flag-gated by
+    // the interceptor, no `confirmed` boolean in either schema (so only a
+    // human-minted token gets through), and neither is a pass-through.
+    expect(confirming).toHaveLength(42);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
