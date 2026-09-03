@@ -383,6 +383,9 @@ CHECKS
                         WARP-456 (missing audit-key mount) and WARP-229
                         (missing FIPS opt-out env) because those manifest at
                         boot, not at build.
+                        SKIPs (exit 77) when the Docker daemon is unreachable
+                        — there is no container to smoke-test, so a stopped
+                        daemon says nothing about setup.sh. WARP-2646.
 
 WHY THIS SCRIPT EXISTS
 
@@ -1880,12 +1883,19 @@ run_check_docker_build_smoke() {
     _record_result "$label" fail
     return 1
   fi
+  # WARP-2646 — SKIP, not FAIL. Unlike compose-config, this check genuinely
+  # cannot run without a daemon (it starts an Ubuntu container), so a stopped
+  # daemon says nothing whatever about setup.sh. The line the two gates now
+  # hold in common: a missing TOOL is a FAIL, because the operator installs it
+  # once and the gate is meaningful thereafter (the same reason the shellcheck
+  # check fails rather than skips); a tool that is present but whose SUBJECT
+  # cannot be evaluated here is a SKIP, named and carrying exit 77.
   if ! docker info >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker daemon not reachable\n" "$label"
-    printf "    | On macOS: start Docker Desktop.\n" >&2
+    printf "  ${_YELLOW}SKIP${_RESET}  %s — docker daemon not reachable, so nothing was smoke-tested\n" "$label"
+    printf "    | On macOS: start Docker Desktop, or \`colima start\`.\n" >&2
     printf "    | On Linux: ensure /var/run/docker.sock is accessible.\n" >&2
-    _record_result "$label" fail
-    return 1
+    _record_result "$label" skip
+    return "$EXIT_SKIPPED"
   fi
 
   local image="ubuntu:24.04"
