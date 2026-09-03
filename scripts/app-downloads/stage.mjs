@@ -258,8 +258,15 @@ async function main() {
   execFileSync(process.execPath, [gen, "--dir", root], { stdio: "inherit" });
   execFileSync(process.execPath, [gen, "--dir", root, "--check"], { stdio: "inherit" });
 
+  // WARP-2666 changed what is true here. The store used to memoise catalog
+  // FAILURES, so a stage under a running orchestrator stayed invisible until
+  // someone restarted the container — which is why this line used to say a
+  // restart was required. Failures are no longer cached, so a first stage onto
+  // a blank box IS picked up live. A restart is still the honest advice when
+  // REPLACING an already-served catalog, because a successful read is still
+  // memoised for the life of the process.
   process.stdout.write(
-    "stage: done — the orchestrator memoises the catalog, so restart it before this reaches /downloads\n",
+    "stage: done — a first stage is picked up live; RESTART the orchestrator if it was already serving a catalog\n",
   );
 }
 

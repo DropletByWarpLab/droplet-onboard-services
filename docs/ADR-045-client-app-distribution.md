@@ -87,10 +87,27 @@ is a box which was supposed to have something and does not.
 
 ## Consequences
 
-- A reimaged box always starts blank (installers are git-ignored; the ISO
-  carries no repo payload), so **re-staging is part of commissioning**. They do
-  survive a factory reset — `factory-reset.sh` touches only `data/secrets`,
-  `.data`, `docker/certs`, `docker/secrets` and `.env`.
+- **The ISO carries the payload.** `build-iso.sh` maps the staged directory to
+  `/droplet/app-downloads` and an autoinstall late-command copies it into the
+  cloned checkout, so a box flashed from an ISO built on a staged tree comes up
+  non-blank. Git still never delivers an installer — a clone or an OTA deploy
+  brings none — so the two remaining ways in are the ISO and an operator.
+
+  That copy step is **bare**, not `curtin in-target`: every other late-command
+  is chrooted into `/target`, where `/cdrom` does not exist, and converting it
+  "for consistency" would copy nothing forever. `catalog.json` is generated on
+  the **builder**, because the autoinstall package list has no node and no
+  python3. It is also the only *guarded* late-command in the file: the clone is
+  deliberately fatal because a box without the platform is useless, but a box
+  without client installers has an honest empty page the audit reports, and
+  aborting an otherwise good install over it is the wrong trade.
+  `tests/image-payload.test.sh` reconciles the two halves in both directions.
+
+- A reimage from an ISO built with `--allow-blank-downloads` (or from any
+  pre-WARP-2666 ISO) still starts blank, so **re-staging stays part of
+  commissioning** — `audit.sh` is what tells you which case you got. Staged
+  installers survive a factory reset: `factory-reset.sh` touches only
+  `data/secrets`, `.data`, `docker/certs`, `docker/secrets` and `.env`.
 - No `storeUrl` ships in `platforms.example.json`. The README tells operators to
   copy that file verbatim, so a placeholder there ships a customer a dead
   button — strictly worse than the honest empty state. The two that used to

@@ -123,6 +123,47 @@ autoinstall:
         done
         test -d /home/droplet/edge-platform/.git || { echo "FATAL: droplet platform clone failed during autoinstall; aborting so this surfaces now, not as a crash-looping first boot." >&2; exit 1; }
       '
+    # WARP-2666: carry the client installers off the ISO into the checkout.
+    #
+    # This is the step that makes a SHIPPED box's /downloads page non-blank.
+    # The clone above cannot bring them: data/app-downloads is git-ignored
+    # (the binaries are built in droplet-windows / droplet-android, not here),
+    # so every box that has ever shipped booted with an empty "Get the app"
+    # page. build-iso.sh bakes the staged directory onto the ISO at
+    # /droplet/app-downloads; this copies it into the freshly cloned tree.
+    #
+    # DELIBERATELY NOT `curtin in-target`. Every other late-command here is
+    # chrooted into /target, where /cdrom does not exist — the ISO is mounted
+    # in the INSTALLER environment, not in the target. So this one runs bare
+    # and writes through to /target/... . Converting it to in-target for
+    # consistency would silently copy nothing.
+    #
+    # `catalog.json` is baked by the builder, never generated here: the
+    # package list above is git/curl/ca-certificates/openssl/efibootmgr plus
+    # three libtss2 — there is no node and no python3 on this system, and the
+    # orchestrator image that stage.sh borrows node from does not exist yet.
+    #
+    # GUARDED, unlike its neighbours. The clone is deliberately fatal because
+    # a box without the platform is useless; a box without client installers
+    # is a box with an honest empty page, which the audit reports and an
+    # operator can fix with one command. Aborting an otherwise good install
+    # over it would be the wrong trade, so every failure path here is
+    # swallowed and left to `scripts/app-downloads/audit.sh` to report.
+    - |
+      set +e
+      _src=/cdrom/droplet/app-downloads
+      _dst=/target/home/droplet/edge-platform/data/app-downloads
+      if [ -d "$_src" ] && [ -d "$_dst" ]; then
+        cp -a "$_src"/. "$_dst"/ 2>/dev/null \
+          && echo "droplet: staged client apps copied from the install media" \
+          || echo "droplet: WARNING client-app payload copy failed; /downloads will be empty until an operator runs scripts/app-downloads/stage.sh" >&2
+      else
+        echo "droplet: no client-app payload on this media; /downloads will be empty until an operator stages one" >&2
+      fi
+      true
+    # Runs AFTER the payload copy so the chown covers the copied files too —
+    # cp -a off the ISO preserves root ownership, and the orchestrator's bind
+    # mount would otherwise hand the operator a tree they cannot re-stage.
     - curtin in-target --target=/target -- chown -R droplet:droplet /home/droplet/edge-platform
     # Install a oneshot systemd unit that runs setup.sh --single-box --systemd
     # on the FIRST real boot, then disables itself. setup.sh is the single

@@ -424,8 +424,11 @@ services:
       # binds below exist specifically to avoid.
       - ../docker:${DROPLET_HOST_ROOT:-/opt/droplet}/docker:rw
       # Client-app installers (Windows/Android/iOS) the box hands to a
-      # browser at /downloads. NOT delivered by the image: the installers
-      # are git-ignored and the box clones this repo, so an operator puts
+      # browser at /downloads. Never delivered by GIT: the installers are
+      # git-ignored, so a plain clone or an OTA deploy brings none. They
+      # arrive either baked onto the appliance ISO (WARP-2666: build-iso.sh
+      # maps this directory to /droplet/app-downloads and an autoinstall
+      # late-command copies it into the checkout) or because an operator puts
       # them here with scripts/app-downloads/stage.sh and the directory is
       # empty until they do. Read-only:
       # the orchestrator only ever hashes and streams these, never writes

@@ -1,0 +1,96 @@
+name: image-tests
+
+# WARP-663 wrote tests/image-pipeline.test.sh AND its workflow, but the token
+# used to push it lacked the `workflow` OAuth scope, so the workflow survived
+# only as docs/image-pipeline-tests.workflow.yml.txt — a YAML file with a .txt
+# extension that GitHub has never looked at. The suite has therefore NEVER RUN
+# in CI: 51 assertions about the appliance image, every one of them dead. This
+# workflow is that file, finally pushed.
+#
+# WARP-2666 adds the second suite. The ISO client-app payload is a two-part
+# contract — scripts/image/build-iso.sh bakes data/app-downloads onto the ISO,
+# and scripts/image/autoinstall/user-data copies it off /cdrom into the cloned
+# checkout — and NOTHING else notices when the halves drift apart. Not a build,
+# not a boot, not another test. The only thing that would notice is a customer
+# opening "Get the app" on a shipped box, which is exactly the feedback loop
+# that let /downloads ship empty on every box ever built.
+#
+# The job name `image-tests` is a branch-protection contract — extend the
+# steps, never rename the job.
+#
+# Everything here is static: greps, YAML parses, tmpdirs, openssl. No docker,
+# no xorriso, no real ISO build, no network. The real build + flash remains the
+# documented manual acceptance gate in docs/IMAGE_PIPELINE.md.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/image/**"
+      - "scripts/build-image.sh"
+      - "scripts/droplet-image"
+      - "scripts/lib/image.sh"
+      # WARP-2666: the payload half. A change to what is staged, or to the
+      # declaration of what a release must carry, changes what the ISO bakes.
+      - "data/app-downloads/**"
+      - "scripts/app-downloads/**"
+      - "tests/image-pipeline.test.sh"
+      - "tests/image-payload.test.sh"
+      - ".github/workflows/image-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/image/**"
+      - "scripts/build-image.sh"
+      - "scripts/droplet-image"
+      - "scripts/lib/image.sh"
+      - "data/app-downloads/**"
+      - "scripts/app-downloads/**"
+      - "tests/image-pipeline.test.sh"
+      - "tests/image-payload.test.sh"
+      - ".github/workflows/image-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: image-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-tests:
+    runs-on: ubuntu-latest
+    # Static checks only; a hung test must fail fast rather than burn a runner.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install PyYAML
+        # Both suites parse the autoinstall seed with yaml.safe_load. Without
+        # it the parse assertions would raise and be scored as a FAILING test
+        # rather than a missing dependency — which is the honest direction to
+        # fail, but a confusing one to debug.
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: shellcheck the image pipeline scripts
+        # warning severity to match ship-check's bar; no global excludes —
+        # waivers live inline per scripts/test/ship-check.sh convention.
+        run: |
+          shellcheck --severity=warning --external-sources \
+            scripts/image/build-iso.sh \
+            scripts/build-image.sh \
+            scripts/droplet-image \
+            scripts/lib/image.sh
+
+      - name: Run image-pipeline tests
+        # 51 assertions covering the CLI, the manifest schema + sign/verify
+        # round-trip, the flash refusals, and the autoinstall seed's
+        # invariants. Green since WARP-663 and never once observed by CI.
+        run: bash tests/image-pipeline.test.sh
+
+      - name: Run ISO client-app payload reconciliation
+        # WARP-2666. Pins the xorriso -map destination against the path the
+        # autoinstall late-command reads, in BOTH directions, and pins the two
+        # properties that make the copy work at all: that it runs BARE rather
+        # than under `curtin in-target` (which chroots into /target, where
+        # /cdrom does not exist, so a "consistency" refactor would silently
+        # copy nothing forever), and that it is guarded so a missing payload
+        # can never abort an otherwise good install.
+        run: bash tests/image-payload.test.sh

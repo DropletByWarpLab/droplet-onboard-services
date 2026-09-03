@@ -145,6 +145,23 @@ printf '{"android":{"version":"1.0","storeUrl":"https://play.google.com/apps/int
 node "$GEN" --dir "$R" >/dev/null 2>&1
 expect_rc "a real-looking store listing satisfies 'store'" 0 "$R"
 
+# A `blocked` row whose directory has files in it. The declaration has gone
+# stale in the GOOD direction, and without this nothing notices: the page would
+# start serving the app while every gate kept saying "deliberately blocked",
+# and the build would keep demanding --allow-blank-downloads for a platform
+# that is no longer blank.
+R="$WORK/blocked-but-staged"; mkdir -p "$R/windows"
+printf 'windows blocked WARP-1 no tag cut yet\n' > "$R/EXPECTED"
+printf 'MZ someone staged this anyway' > "$R/windows/Droplet_9.9.9_x64-setup.exe"
+expect_rc "a blocked platform with files staged is a real gap" 1 "$R"
+expect_out "the report says the declaration is stale, and how to fix it" '^UNDECLARED +windows .*flip the row'
+
+# ...and the same row with an EMPTY directory is still just blocked. An empty
+# platform dir is what `stage.sh --unstage` and a plain mkdir leave behind, so
+# treating its mere existence as "staged" would make the check cry wolf.
+rm -f "$R/windows/Droplet_9.9.9_x64-setup.exe"
+expect_rc "an EMPTY platform directory is still just blocked" 3 "$R"
+
 # A malformed catalog must not read as "nothing staged".
 R="$WORK/malformed"; mkdir -p "$R"
 printf 'windows installer WARP-1 must ship\n' > "$R/EXPECTED"

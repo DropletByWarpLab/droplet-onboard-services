@@ -230,8 +230,11 @@ else
   fail "stage.sh has a syntax error"
 fi
 
-# The restart is not optional bookkeeping: store.ts memoises the catalog for
-# the life of the process, so a stage without it is invisible at /downloads.
+# The restart is not optional bookkeeping: store.ts memoises a SUCCESSFUL
+# catalog read for the life of the process, so re-staging over a catalog the
+# box is already serving leaves it handing out the previous build.
+# (WARP-2666 stopped it memoising FAILURES, so a first stage onto a blank box
+# is now picked up live — but that does not make this guard optional.)
 # Match the ACTUAL command, not the word. A bare `grep -q "restart"` matched
 # RESTART=1, --no-restart, "restarting", and this comment block itself — so
 # deleting the real `docker restart "$CID"` left the guard green. A guard that

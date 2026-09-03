@@ -51,10 +51,17 @@ On a box, from the repo root:
 ```
 
 That copies it in, records the version, regenerates `catalog.json`,
-restarts the orchestrator (which memoises the catalog and would otherwise
-keep serving the old one), and proves the running container sees the
+restarts the orchestrator, and proves the running container sees the
 result. `--verify-only` re-runs just the last check; `--dry-run` prints
 what it would do.
+
+Be precise about why the restart is there, because it is only half
+required (WARP-2666). The store memoises a **successful** catalog read for
+the life of the process, so **replacing** a catalog the box is already
+serving needs the restart or it keeps handing out the old build. It no
+longer memoises **failures**, so the *first* stage onto a box that had
+nothing is picked up live. If you skip the restart, skip it knowing which
+of those two you are doing.
 
 Off-box — an image build, or a staging root you are assembling by hand —
 skip the wrapper and drive the engine directly:
@@ -101,10 +108,18 @@ a box ends up serving last release's installer:
   and runs no `git clean`. It never touches this directory. (Verify
   before trusting this line: `grep -c app-downloads scripts/factory-reset.sh`
   → 0.)
-- **A reimage — does NOT survive.** The installer is not in the repo and
-  is not in the ISO, and first boot clones a fresh checkout. Re-stage
-  after a reimage; commissioning a reimaged box without re-staging is how
-  a customer gets the empty page.
+- **A reimage — survives IF the ISO carried a payload.** This changed in
+  WARP-2666. The installer is still not in the repo, but `build-iso.sh`
+  now bakes whatever is staged here onto the ISO at
+  `/droplet/app-downloads`, and an autoinstall late-command copies it into
+  the freshly cloned checkout. So a box flashed from an ISO built on a
+  staged tree comes up with `/downloads` already populated — which is the
+  whole point.
+
+  It does **not** survive a reimage from an ISO built with
+  `--allow-blank-downloads`, or from any ISO built before that change.
+  After a reimage, `bash scripts/app-downloads/audit.sh` is the thing that
+  tells you which of the two you got. Do not assume; ask it.
 
 ## What EXPECTED is for
 

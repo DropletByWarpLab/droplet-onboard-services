@@ -29,11 +29,12 @@
 #   MISSING       <platform>  declared but not staged / no usable asset
 #   STALE         <platform>  staged bytes disagree with the catalog
 #   BLOCKED       <platform>  deliberately not shipping, ticket named
+#   UNDECLARED    <platform>  staged, but EXPECTED still says blocked
 #   UNVERIFIABLE  <platform>  declared, staged, but could not be checked
 #
 # EXIT CONTRACT — copied deliberately from `droplet-host-units audit`:
 #   0  everything EXPECTED declares is satisfied (no blocked rows)
-#   1  a real gap: something declared is MISSING, STALE or UNVERIFIABLE
+#   1  a real gap: MISSING, STALE, UNDECLARED or UNVERIFIABLE
 #   3  clean, but N platforms are `blocked` — each named with its ticket
 #   4  COULD NOT LOOK — no EXPECTED, no staging root, no hasher.
 #
@@ -137,7 +138,7 @@ PY
 }
 
 # --- reconcile ---------------------------------------------------------------
-n_missing=0; n_stale=0; n_blocked=0; n_unverifiable=0; n_ok=0; n_rows=0
+n_missing=0; n_stale=0; n_blocked=0; n_unverifiable=0; n_ok=0; n_rows=0; n_undeclared=0
 blocked_names=""
 
 while read -r platform policy ticket rest || [ -n "${platform:-}" ]; do
@@ -155,6 +156,17 @@ while read -r platform policy ticket rest || [ -n "${platform:-}" ]; do
       if [ -z "${ticket:-}" ] || [ "$ticket" = "-" ] || [ -z "${rest:-}" ]; then
         note "audit: EXPECTED row '$platform blocked' needs BOTH a ticket and a note — no verdict"
         exit 4
+      fi
+      # The declaration can go stale in the GOOD direction too. If an operator
+      # stages an installer for a platform still marked `blocked`, nothing else
+      # notices: the page starts serving it, every gate keeps reporting
+      # "deliberately blocked", and EXPECTED quietly stops describing reality —
+      # so the row never gets flipped and the build keeps needing
+      # --allow-blank-downloads for a platform that is no longer blank.
+      if [ -d "$AUD_DIR/$platform" ] && [ -n "$(ls -A "$AUD_DIR/$platform" 2>/dev/null)" ]; then
+        n_undeclared=$((n_undeclared + 1))
+        say "UNDECLARED    $platform  files are staged but EXPECTED still says blocked ($ticket) — flip the row to 'installer' or clear the directory"
+        continue
       fi
       n_blocked=$((n_blocked + 1))
       blocked_names="$blocked_names $platform($ticket)"
@@ -272,9 +284,9 @@ if [ "$n_rows" = 0 ]; then
 fi
 
 # --- verdict -----------------------------------------------------------------
-if [ $((n_missing + n_stale + n_unverifiable)) -gt 0 ]; then
+if [ $((n_missing + n_stale + n_unverifiable + n_undeclared)) -gt 0 ]; then
   say ""
-  say "audit: $n_missing missing, $n_stale stale, $n_unverifiable unverifiable — this release does not carry what EXPECTED declares"
+  say "audit: $n_missing missing, $n_stale stale, $n_unverifiable unverifiable, $n_undeclared undeclared — EXPECTED and this staging root disagree"
   exit 1
 fi
 

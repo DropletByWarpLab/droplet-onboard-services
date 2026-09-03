@@ -66,6 +66,10 @@ OUTPUT_DIR="${REPO_ROOT}/output"
 WORK_DIR="${BUILD_DIR}/.build"                                       # transient
 AUTOINSTALL_DIR="${BUILD_DIR}/autoinstall"
 GRUB_CFG="${BUILD_DIR}/grub-autoinstall.cfg"
+# WARP-2666: the client-app payload carried onto the ISO. Whatever the step-0
+# pre-flight audited is exactly what gets baked in — same directory, so the
+# gate and the payload can never describe different bytes.
+APP_DOWNLOADS_DIR="${REPO_ROOT}/data/app-downloads"
 
 # ---------------------------------------------------------------------------
 # Flags: --shape (default single-box), --version (default package.json version)
@@ -142,7 +146,7 @@ if [ ! -r "$AUDIT_SH" ]; then
 fi
 audit_rc=0
 # `set -e` would abort on the non-zero exits this pre-flight is here to READ.
-bash "$AUDIT_SH" --dir "${REPO_ROOT}/data/app-downloads" || audit_rc=$?
+bash "$AUDIT_SH" --dir "$APP_DOWNLOADS_DIR" || audit_rc=$?
 case "$audit_rc" in
   0)
     echo "  OK: every platform EXPECTED declares is staged and verified."
@@ -257,11 +261,12 @@ echo ""
 echo "[4/5] Injecting the autoinstall seed (dockerized xorriso, boot replay)..."
 
 # MSYS_NO_PATHCONV stops Git-Bash from rewriting the container-side mount
-# targets (/work, /seed, /out, …) into Windows paths. No-op on a Linux host.
+# targets (/work, /seed, /payload, /out, …) into Windows paths. No-op on Linux.
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${WORK_DIR}:/work" \
   -v "${AUTOINSTALL_DIR}:/seed:ro" \
   -v "${GRUB_CFG}:/grub-autoinstall.cfg:ro" \
+  -v "${APP_DOWNLOADS_DIR}:/payload:ro" \
   -v "${OUTPUT_DIR}:/out" \
   -e "UBUNTU_ISO=${UBUNTU_ISO}" \
   -e "OUT_ISO_NAME=$(basename "$OUT_ISO")" \
@@ -278,8 +283,16 @@ MSYS_NO_PATHCONV=1 docker run --rm \
     volid="DROPLET_${DROPLET_VERSION//./_}"
 
     # In-place modify: replay the upstream boot setup, add the nocloud seed at
-    # /server/, and replace the GRUB menu (-overwrite on lets the map replace
-    # the existing grub.cfg). No extract, no fragile boot-image reconstruction.
+    # /server/, replace the GRUB menu (-overwrite on lets the map replace the
+    # existing grub.cfg), and carry the staged client installers at
+    # /droplet/app-downloads. No extract, no boot-image reconstruction.
+    #
+    # WARP-2666: the payload map is what makes a SHIPPED box non-blank. Bytes
+    # on the ISO are not enough on their own — data/app-downloads is
+    # git-ignored and the box gets its code from a fresh `git clone`, so
+    # autoinstall/user-data carries a matching late-command that copies this
+    # directory out of /cdrom into the cloned checkout. The two change
+    # together, and tests/image-payload.test.sh reconciles them.
     xorriso \
       -indev "/work/${UBUNTU_ISO}" \
       -outdev "/out/${OUT_ISO_NAME}" \
@@ -290,6 +303,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
       -map /seed/user-data /server/user-data \
       -map /seed/meta-data /server/meta-data \
       -map /grub-autoinstall.cfg /boot/grub/grub.cfg \
+      -map /payload /droplet/app-downloads \
       -commit -end
     echo "repack complete: /out/${OUT_ISO_NAME}"
   '

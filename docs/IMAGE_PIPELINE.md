@@ -225,10 +225,15 @@ hardware — this is the documented manual acceptance gate, NOT a CI step:
    an empty page, and nothing — CI, `/api/health`, the watchdog — said so,
    because "no apps staged" answers HTTP 200.
 
-   ⚠ Installers do **not** survive a reimage: they are git-ignored and the
-   ISO carries no repo payload, so a freshly flashed box starts blank and
-   must be re-staged (`./scripts/app-downloads/stage.sh`). They *do* survive
-   a factory reset.
+   ⚠ Whether a reimage keeps them depends on how the ISO was built. Since
+   WARP-2666 `build-iso.sh` bakes the staged directory onto the ISO and an
+   autoinstall late-command copies it into the checkout, so a box flashed
+   from an ISO built on a staged tree comes up populated. An ISO built with
+   `--allow-blank-downloads` — or any ISO built before that change — comes
+   up blank and must be re-staged (`./scripts/app-downloads/stage.sh`). Run
+   `bash scripts/app-downloads/audit.sh` on the booted box rather than
+   assuming which one you have. Staged installers survive a factory reset
+   either way.
 
 Sign-off on these three is required before the **first** publish.
 
@@ -254,12 +259,23 @@ curl -s https://releases.ubuntu.com/24.04/SHA256SUMS | grep live-server-amd64.is
 | Regression (the check catches a stubbed build-image.sh) | `bash scripts/test/ship-check.test.sh` | anywhere |
 | Real ISO build + flash + boot | manual | **Linux host + hardware** |
 
-CI runs the first three via `.github/workflows/image-pipeline-tests.yml`
-(`workflow_dispatch`-only, matching the repo's other manual-only workflows).
+CI runs the first three via
+[`.github/workflows/image-tests.yml`](../.github/workflows/image-tests.yml),
+on every PR that touches `scripts/image/**`, `scripts/app-downloads/**`,
+`data/app-downloads/**` or the suites themselves. It also runs
+`tests/image-payload.test.sh`, which reconciles the ISO client-app payload's
+two halves (WARP-2666).
 
-> **Note (WARP-663 handoff):** the Dev push token lacked the GitHub `workflow`
-> OAuth scope, so the workflow file could not be pushed from the Dev branch. Its
-> exact content is staged at
-> [`docs/image-pipeline-tests.workflow.yml.txt`](image-pipeline-tests.workflow.yml.txt);
-> the Manager (with a `workflow`-scoped token) moves it to
-> `.github/workflows/image-pipeline-tests.yml` when opening the PR.
+> **Resolved (WARP-2666).** The WARP-663 handoff note that used to sit here
+> said the Dev push token lacked the GitHub `workflow` OAuth scope, so the
+> workflow could not be pushed and its content was parked at
+> `docs/image-pipeline-tests.workflow.yml.txt` for someone else to move. Nobody
+> did — for months, `tests/image-pipeline.test.sh` and its 51 assertions **ran
+> in no workflow at all**, which is a strictly worse state than not having the
+> tests, because the repo read as covered. The workflow now exists and the
+> parked `.txt` is deleted so it cannot be mistaken for pending work again.
+>
+> Known local quirk: on a Windows control host one assertion (`user-data is
+> valid YAML`) fails spuriously, because `python3` from the Microsoft Store
+> cannot open an MSYS-style `/c/...` path. The file is valid; run the suite on
+> Linux, or trust CI, before chasing it.

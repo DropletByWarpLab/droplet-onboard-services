@@ -12,11 +12,16 @@
 #      image, which is already on the box. No download, no new dependency,
 #      nothing that needs the internet: an air-gapped box can stage.
 #
-#   2. THE ORCHESTRATOR MEMOISES THE CATALOG. `store.ts` reads catalog.json
-#      once per process, deliberately — the staging dir is a read-only mount
-#      that "cannot change under a running container". Staging changes it
-#      anyway, so without a restart the new installer is on disk and invisible
-#      at /downloads, which looks exactly like the staging having failed.
+#   2. THE ORCHESTRATOR MEMOISES A GOOD CATALOG. `store.ts` reads catalog.json
+#      once per process on SUCCESS — the staging dir is a read-only mount that
+#      "cannot change under a running container", and staging changes it
+#      anyway. So REPLACING a catalog the box is already serving needs the
+#      restart, or it keeps handing out the previous build.
+#
+#      Since WARP-2666 it no longer memoises FAILURES, so the FIRST stage onto
+#      a box that had nothing IS picked up live. That used to be the dangerous
+#      case: the installer sat on disk, invisible at /downloads, looking
+#      exactly like the staging having failed.
 #
 #   3. THE MOUNT IS THE THING THAT MATTERS. Writing the host directory proves
 #      nothing about what the container sees. The verify step reads
