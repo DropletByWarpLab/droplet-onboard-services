@@ -16,6 +16,10 @@
  *   - a profile/workspace read failure fail-opens to no business block.
  *
  * Mirrors llm-chat.persona-block.test.ts's route harness.
+ *
+ * WARP-2608 — `TOOL_SELECTION_MODE` is PINNED in the config mock below, because
+ * it is what decides how much of the tool pool the budget assertions here are
+ * measured against; the last describe block is meaningless without it.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -23,10 +27,29 @@ import express, { type Request, type Response, type NextFunction } from "express
 
 // Mutable so a single test can force a tiny context window; a stable object
 // reference means llm.ts reading `config.OLLAMA_CONTEXT_LENGTH` sees mutations.
+//
+// WARP-2608 — `TOOL_SELECTION_MODE` was ABSENT from this mock, and an absent
+// key here is not neutral. `routes/llm.ts` charges the context budget for the
+// tool schemas this turn will actually advertise, derived through
+// `effectiveAdvertisedToolNames({ mode: config.TOOL_SELECTION_MODE, … })`, and
+// `selectAdvertisedTools` short-circuits to "the whole pool" on
+// `mode === "off"` ONLY. Anything else — `"domains"`, or the `undefined` this
+// mock was supplying — falls through to the narrowing branch. So the suite was
+// exercising `domains` behaviour by accident, and would have kept doing so if
+// `config.ts`'s default were flipped back to `off`: the value it measures had
+// no connection to the value boxes ship.
+//
+// Boxes ship `domains` (`apps/orchestrator/src/config.ts` —
+// `z.enum(["off","domains"]).default("domains")`), so `domains` is what the
+// default here states outright. The `off` rollback path is a real, supported
+// configuration, so it keeps one explicit case of its own below rather than
+// being reachable only by omission. Typed as the union, not the literal, so a
+// test can assign the other value.
 const h = vi.hoisted(() => ({
   config: {
     AUTH_ENABLED: false,
     OLLAMA_CONTEXT_LENGTH: 16384,
+    TOOL_SELECTION_MODE: "domains" as "off" | "domains",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
@@ -193,6 +216,7 @@ async function chat(app: express.Express) {
 
 beforeEach(() => {
   h.config.OLLAMA_CONTEXT_LENGTH = 16384;
+  h.config.TOOL_SELECTION_MODE = "domains";
   mockRunAgent.mockReset();
   mockRunAgent.mockResolvedValue({
     message: { role: "assistant", content: "ok" },
@@ -278,5 +302,44 @@ describe("POST /api/llm/chat — business block resilience + budget", () => {
     expect(sys).toContain("You are Droplet"); // identity never dropped
     expect(sys).not.toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
     for (const s of RESTRICTED_FIELD_SENTINELS) expect(sys).not.toContain(s);
+  });
+
+  it("the legacy TOOL_SELECTION_MODE=off path charges the WHOLE pool, and that costs the business block", async () => {
+    // WARP-2608 — `off` is a supported rollback (`docs/ENVIRONMENT.md` calls it
+    // the kill switch), so it gets a case rather than being what the suite
+    // silently measured. It is asserted COMPARATIVELY: the same request, the
+    // same SHIPPED 16,384-token window, the same profile — only the mode
+    // differs. Nothing here is a hardcoded token count, so the assertion
+    // survives the pool changing size; what it pins is that the mode is what
+    // decides.
+    //
+    // Measured on this fixture: `domains` charges ~2.3K tokens of tool schemas
+    // and everything fits, while `off` charges the full chat pool and the
+    // estimate reaches ~15,939 against the ~15,360 ceiling — so `degradeToFit`
+    // drops the business block (and then the persona block) on an ordinary
+    // turn. That is the WARP-2552 finding restated as a test: the cost of the
+    // rollback is not neutral, and it is not visible anywhere else.
+    //
+    // Goes red if `off` ever starts narrowing the pool (it would then behave
+    // like `domains` and keep the block), or if the estimate stops being fed
+    // the advertised set at all.
+    const app = buildApp(createPrismaMock({ workspaceType: "BUSINESS" }));
+
+    h.config.TOOL_SELECTION_MODE = "domains";
+    expect((await chat(app)).status).toBe(200);
+    const shipped = systemPromptText();
+
+    h.config.TOOL_SELECTION_MODE = "off";
+    expect((await chat(app)).status).toBe(200);
+    const legacy = systemPromptText();
+
+    expect(shipped).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    expect(legacy).not.toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    // Identity + tool guidance are never-dropped parts under either mode — so
+    // the difference above is the estimator, not a broken prompt assembly.
+    for (const sys of [shipped, legacy]) {
+      expect(sys).toContain("You are Droplet");
+      expect(sys).toContain("Tool guidance:");
+    }
   });
 });

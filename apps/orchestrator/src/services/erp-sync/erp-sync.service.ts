@@ -29,12 +29,18 @@
  *
  * ## The boundary this module does NOT cross
  *
- * It moves CURSORS and WATERMARKS. It persists no synced record anywhere.
- * `ErpEntityCache` still has zero writers after this story, and must: ADR-041
- * §4 forbids becoming its first writer until WARP-2028 lands the encryption
- * that model's schema already promises. `secretRef` is likewise never written
- * here. A sweep that cached what it enumerated would be the single easiest way
- * to breach that, which is why the sweep diffs in memory and keeps counts.
+ * It moves CURSORS and WATERMARKS, and — since WARP-2549 — hands a page of
+ * canonical rows to `land.ts`, which writes `company`, `contact` and `deal`
+ * into the CRM tables a human already types into.
+ *
+ * `ErpEntityCache` still has ZERO writers, and must: ADR-041 §4 forbids
+ * becoming its first writer until WARP-2028 lands the encryption that model's
+ * schema already promises. The amended §4 is about inheriting an UNKEPT
+ * PROMISE, not about persistence as such — `CrmCompany` makes no such claim.
+ * PHI datasets (`patient`, `appointment`, `account`) land nowhere at all.
+ * `secretRef` is likewise never written here. A sweep that cached what it
+ * enumerated would still be the single easiest way to breach that, which is
+ * why the sweep diffs in memory and keeps counts.
  *
  * ## Budget
  *
@@ -91,6 +97,13 @@ import {
   type ErpDriftReport,
   type ErpEntityDrift,
 } from "./reconcile.js";
+import {
+  landCanonicalRows,
+  landsOnBox,
+  type LandOutcome,
+  type LandingConnection,
+  type LandingDb,
+} from "./land.js";
 import { redactSyncText } from "./redact.js";
 
 const logger = createLogger("erp-sync");
@@ -123,6 +136,20 @@ export interface ErpSyncPrisma extends ErpCursorPrisma, ErpDriftPrisma {
   };
 }
 
+/**
+ * WARP-2549 — how a page of rows reaches the CRM.
+ *
+ * A seam rather than a direct call because landing must run in a transaction,
+ * and the mocked prisma objects the tick tests build have no `$transaction`.
+ * Production passes the real client and gets `defaultLand` below.
+ */
+export type LandFn = (args: {
+  connection: LandingConnection;
+  entity: string;
+  rows: readonly unknown[];
+  now: Date;
+}) => Promise<LandOutcome | null>;
+
 /** A budget shaped like `CallBudget`, so tests can inject a spent one. */
 export interface SyncCallBudget {
   assertHeadroom(): void;
@@ -136,6 +163,13 @@ export interface ErpSyncDeps {
   connectorFor?: (conn: SyncConnectionRow) => Connector;
   /** Test seam. Production shares the connectors' per-connection budget. */
   budgetFor?: (conn: SyncConnectionRow) => SyncCallBudget;
+  /**
+   * Test seam. Production lands through `land.ts` inside one transaction.
+   * Returns `null` when this build has no landing path at all — which is only
+   * true of a mocked client, and is why the tick test that matters injects
+   * this rather than relying on the default.
+   */
+  land?: LandFn;
   now?: () => Date;
   tickLimit?: number;
   /**
@@ -291,6 +325,20 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
   const connectorFor = deps.connectorFor ?? defaultConnectorFor;
   const budgetFor = deps.budgetFor ?? defaultBudgetFor;
   const tickLimit = deps.tickLimit ?? DEFAULT_TICK_LIMIT;
+
+  /**
+   * Land inside ONE transaction, so a page of rows is either all on the box or
+   * none of it is. The caller advances the watermark only after this resolves —
+   * see `runOneCursor`.
+   */
+  const defaultLand: LandFn = async (args) => {
+    const client = prisma as unknown as {
+      $transaction?: <T>(fn: (tx: LandingDb) => Promise<T>) => Promise<T>;
+    };
+    if (typeof client.$transaction !== "function") return null;
+    return client.$transaction((tx) => landCanonicalRows(tx, args));
+  };
+  const land = deps.land ?? defaultLand;
   const sweepIntervalMs = deps.sweepIntervalMs ?? 24 * 60 * 60 * 1000;
   const deviceId = deps.deviceId;
 
@@ -429,6 +477,28 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       // to null and re-enumerate the whole account on the next tick.
       const next = highWaterMark(records) ?? cursor.watermark;
 
+      // WARP-2549 — land BEFORE the watermark moves, and never after.
+      //
+      // The watermark is a promise that everything up to it has been dealt
+      // with. Advancing it first and landing second means a crash, a rollback
+      // or a constraint violation in between loses those rows permanently: the
+      // next tick asks the vendor for rows AFTER the mark and never sees them
+      // again. Landing first costs a re-read of one page in that same crash —
+      // and the re-read is harmless, because `(connectionId, externalId)`
+      // reconciles a row that is already here.
+      //
+      // A landing failure therefore falls into the catch below and parks the
+      // cursor as a sync failure, which is the honest report: the vendor was
+      // read, and this box did not keep what it read.
+      const landing = landsOnBox(cursor.entity)
+        ? await land({
+            connection: { id: conn.id, provider: conn.provider },
+            entity: cursor.entity,
+            rows,
+            now: at,
+          })
+        : null;
+
       await releaseErpCursorSuccess(prisma, cursor.id, next, at);
       await advanceLastHealthy(conn.id, at);
       await audit("Connector synced", true, {
@@ -437,6 +507,11 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
         entity: cursor.entity,
         recordCount: records.length,
         watermarkAdvanced: next !== cursor.watermark,
+        // Counts only. An audit row is exportable and append-only, which makes
+        // it the worst possible second home for customer content (rule 19).
+        landed: landing?.landed ?? 0,
+        landSkipped: landing?.skipped ?? 0,
+        landSkipReason: landing?.reason ?? null,
       });
       return "IDLE";
     } catch (err) {

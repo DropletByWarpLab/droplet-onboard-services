@@ -3,7 +3,7 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 /**
  * WARP-2497 — the ONE cloud-connector read tool.
  *
- * The connected SaaS accounts expose ~11 record shapes between them. A tool per
+ * The connected SaaS accounts expose ~14 record shapes between them. A tool per
  * vendor — let alone per dataset — would add a `{type,function:{…}}` block per
  * vendor to every completion request, and the full-registry serialization
  * canary already sits within 3 KB of its 100 KB ceiling. So the vendor is NOT a
@@ -14,9 +14,19 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
  * Which is also why the description below names no vendor. It used to list
  * "(Stripe, HubSpot, Mailchimp)", which put the vendor back on the tool's face
  * after this docstring had just argued it off — and made every new connector a
- * mandatory edit to a string that ships inside the context window. WARP-2383
- * added the fourth vendor and the fifth dataset-to-provider mapping without
- * touching either.
+ * mandatory edit to a string that ships inside the context window. WARP-2296
+ * (Shopify) and WARP-2383 (Xero) added the fourth and fifth vendors, and four
+ * new dataset-to-provider mappings, without touching either.
+ *
+ * WARP-2354 is the proof that this generalises: adding Shopify's three datasets
+ * cost three lines here and three in `CLOUD_DATASET_READS`, and no new tool;
+ * Xero then cost one. Note `ecommerce_order` (Mailchimp's marketing-attribution
+ * shadow) and `order` (Shopify's order of record) are DIFFERENT datasets on
+ * purpose — the first has no tax, refund or fulfilment column, so revenue
+ * arithmetic must not be attempted on it. Collapsing them here would route a
+ * revenue question to whichever vendor won the name. `invoice` and `bill` are
+ * separated for the same reason pointed the other way: money owed TO the
+ * business and money owed BY it.
  *
  * Exported so the orchestrator's cross-package drift test can assert the
  * route's dataset vocabulary and this enum are the same list — the two sides
@@ -38,6 +48,9 @@ export const CLOUD_QUERY_DATASETS = [
   "campaign",
   "audience_member",
   "ecommerce_order",
+  "order",
+  "product",
+  "customer",
 ] as const;
 
 const DATASET_SET: ReadonlySet<string> = new Set(CLOUD_QUERY_DATASETS);
@@ -115,6 +128,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "cloud_query_dataset",
+  // The vendor list that used to sit in this sentence is GONE, and its removal
+  // is the point rather than a saving. Adding Shopify's three datasets took the
+  // full chat pool to 60,023 chars against `base-prompt-budget.test.ts`'s
+  // 60,000 tripwire, and that file's instruction for exactly this moment is
+  // "trim the schema" — never raise the ceiling, which only relocates the
+  // cliff. Naming the vendors here duplicated the `enum` the model is already
+  // shown, cost ~38 chars, and grew with every vendor: a description that lists
+  // its providers is a description that cannot survive the fifth one.
   description:
     "Read business records from the connected cloud accounts by dataset name. " +
     "Read-only; the dataset picks the provider.",

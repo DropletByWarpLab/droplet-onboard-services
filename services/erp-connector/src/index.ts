@@ -473,6 +473,73 @@ export {
   type MailchimpStatus,
 } from "./mailchimp/connector.js";
 
+// WARP-2296 — Shopify: the storefront commerce track. GraphQL Admin API only,
+// on client credentials the MERCHANT mints in their own Dev Dashboard app
+// (admin-created custom apps and their `shpat_` tokens were removed on
+// 2026-01-01). The store host is assembled at runtime from the connection's own
+// `<store>.myshopify.com` domain — the token endpoint included — so
+// `assertSafeShopifyBaseUrl` is the enforcement, not defence in depth, and
+// there is no fixed Shopify OAuth host to register. Two vendor gates are
+// detected rather than absorbed: protected customer data (Grow plan) comes back
+// as HTTP 200 with blanked fields, and the 60-day order wall comes back as a
+// shorter list.
+export {
+  ShopifyConnector,
+  InvalidShopifyCredentialError,
+  ShopifyBulkOperationError,
+  ShopifyOrderHistoryWallError,
+  ShopifyProtectedDataDeniedError,
+  ShopifyReauthorizationRequiredError,
+  ShopifyScopeMissingError,
+  ShopifyThrottledError,
+  ShopifyTimeoutError,
+  UnsafeShopifyBaseUrlError,
+  assertReadOnlyShopifyDocument,
+  assertSafeShopifyBaseUrl,
+  assertShopifyClientCredential,
+  assertShopifyShopDomain,
+  blockedShopifyCredentialResolver,
+  detectProtectedDataRedaction,
+  shopifyAllowedApiHosts,
+  shopifyBaseUrlFor,
+  throttleWaitMs as shopifyThrottleWaitMs,
+  SHOPIFY_ACCESS_TOKEN_HEADER,
+  SHOPIFY_ALLOWED_HOST_PATTERN,
+  SHOPIFY_ALLOWED_MUTATIONS,
+  SHOPIFY_API_VERSION,
+  SHOPIFY_CLIENT_CREDENTIAL_PATTERN,
+  SHOPIFY_DATASETS,
+  SHOPIFY_DATASET_SCOPES,
+  SHOPIFY_GRAPHQL_PATH,
+  SHOPIFY_GROW_PLAN_REMEDIATION,
+  SHOPIFY_LEGACY_ADMIN_TOKEN_PATTERN,
+  SHOPIFY_MAX_PAGES,
+  SHOPIFY_MAX_PAGE_SIZE,
+  SHOPIFY_MAX_THROTTLE_RETRIES,
+  SHOPIFY_ORDER_HISTORY_REMEDIATION,
+  SHOPIFY_ORDER_HISTORY_SCOPE,
+  SHOPIFY_ORDER_HISTORY_WALL_DAYS,
+  SHOPIFY_PROTECTED_CUSTOMER_FIELDS,
+  SHOPIFY_PROTECTED_DATA_PLAN,
+  SHOPIFY_PROVIDER,
+  SHOPIFY_REQUEST_TIMEOUT_MS,
+  SHOPIFY_SHOP_DOMAIN_SUFFIX,
+  SHOPIFY_SHOP_NAME_PATTERN,
+  SHOPIFY_TOKEN_LIFETIME_SECONDS,
+  SHOPIFY_TOKEN_PATH,
+  SHOPIFY_TOKEN_REFRESH_SKEW_MS,
+  SHOPIFY_TRACK_REMEDIATION,
+  type ShopifyBulkExportRef,
+  type ShopifyConnectionState,
+  type ShopifyConnectorConfig,
+  type ShopifyConnectorDeps,
+  type ShopifyCredentialRejection,
+  type ShopifyCredentialResolver,
+  type ShopifyOrderHistoryAccess,
+  type ShopifyProtectedDataProbe,
+  type ShopifyStatus,
+} from "./shopify/connector.js";
+
 // WARP-2383 — Xero: the second accounting cloud track. Read-through over a
 // customer-created **Custom Connection** (client id + secret, a MODIFIED
 // client-credentials grant that reaches exactly one organisation, 30-minute

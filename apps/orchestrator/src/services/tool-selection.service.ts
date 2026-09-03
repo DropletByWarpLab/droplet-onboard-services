@@ -356,12 +356,26 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // inventing an outage. Dropping the words would trade an honest refusal
   // for a hallucinated one.
   //
+  // WARP-2296 adds the commerce half. Same bias, same trade, one new judgement:
+  //   • `shopify`, `storefront`, `skus?`, `restock`, `(low|out of|in) stock`
+  //     and `inventory` are unambiguous and nothing else claims them.
+  //   • `orders?` is claimed as the PLURAL only. Bare `order` matches "in order
+  //     to" and "order of magnitude", which are ordinary English on turns that
+  //     want nothing from a storefront — the same reason WARP-2556 unclaimed
+  //     `won`/`win`/`lost`. "Which orders shipped last week" and "recent
+  //     orders" are the sentences this exists to answer and both are plural.
+  //   • `products?` is NOT claimed. It is the word a person uses about their
+  //     own business in almost any sentence ("what products do we make"), the
+  //     `business` domain owns that shape, and `catalogue`/`inventory`/`stock`
+  //     already reach the same dataset from the questions that actually want
+  //     it.
+  //
   // WARP-2383 added `xero` and `suppliers?`/`vendors?`. The bill words were
   // ALREADY claimed here and had nothing to answer them — no cloud track
   // served the `bill` dataset — so "what do we owe?" selected this reader and
   // met an enum with no way to ask. The Xero track serves it, and the enum
   // now carries it; the words did not change, the answer did.
-  { pattern: /\b(stripe|hubspot|mailchimp|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
+  { pattern: /\b(stripe|hubspot|mailchimp|shopify|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.

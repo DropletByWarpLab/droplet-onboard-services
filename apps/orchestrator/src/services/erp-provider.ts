@@ -60,6 +60,10 @@ import {
   MAILCHIMP_PROVIDER,
   HUBSPOT_TRACK_REMEDIATION,
   MAILCHIMP_TRACK_REMEDIATION,
+  // WARP-2296 — the fourth WARP-2214 SaaS track.
+  ShopifyConnector,
+  SHOPIFY_PROVIDER,
+  SHOPIFY_TRACK_REMEDIATION,
   // WARP-2383 — the Xero accounting track.
   XeroConnector,
   XERO_PROVIDER,
@@ -842,6 +846,41 @@ registerConnectorFactory(MAILCHIMP_PROVIDER, ({ selector: sel, config: cfg }) =>
       baseUrl: providerConfigString(cfg, "baseUrl"),
     },
     { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
+
+registerConnectorFactory(SHOPIFY_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const shopDomain = providerConfigString(cfg, "shopDomain");
+  // The store domain SELECTS THE HOST — for the API *and* for the token mint,
+  // because Shopify's client-credentials grant posts to the store's own origin
+  // rather than to a central OAuth host. Without it there is no destination at
+  // all, and guessing one would mean assembling a URL whose first label is the
+  // string "undefined". Read from `providerConfig`, never derived from the
+  // credentials, so answering "where does this dial?" never decrypts a secret.
+  //
+  // Refused HERE rather than inside the connector, for the QuickBooks reason:
+  // the row is known to be unconfigured at this point, and a
+  // ConnectorBlockedError degrades to ERP_NOT_CONNECTED like every other
+  // absent-material path instead of surfacing as a fault.
+  if (!shopDomain) {
+    throw new ConnectorBlockedError(
+      "construct (no Shopify store domain configured)",
+      SHOPIFY_TRACK_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new ShopifyConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      shopDomain,
+      connectionId: sel.connectionId ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+    },
+    // Both halves of the pair come through the SAME generic seam, named by
+    // descriptor field name and nothing else. `resolveCredential` is left
+    // undefined when nothing is sealed, so the connector keeps
+    // `blockedShopifyCredentialResolver` and says what is missing.
+    { resolveCredential: resolve ? (field) => resolve(field) : undefined },
   );
 });
 

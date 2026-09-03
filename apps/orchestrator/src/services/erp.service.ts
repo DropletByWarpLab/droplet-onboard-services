@@ -266,15 +266,15 @@ function reasonForConnectorError(err: unknown, phase: string): string {
  * assistant can read from a cloud account is this list, not "whatever the
  * registry happens to contain after the next connector lands".
  *
- * ## Why these ten
+ * ## Why these fourteen
  *
- * They are exactly the datasets the four shipped cloud tracks declare in
+ * They are exactly the datasets the five shipped cloud tracks declare in
  * `servesDatasets` (Stripe `invoice`/`charge`, HubSpot's five, Mailchimp's
- * three, Xero's `invoice`/`bill`/`contact`). Two of Xero's three were already
- * here — which is the registry doing its job: `cloudRowForDataset` resolves a
- * dataset to whichever CONNECTED provider declares it, so a fourth vendor
- * needed one new key rather than a vendor arm. The practice-management
- * datasets are deliberately ABSENT: those are
+ * three, Shopify's three, Xero's `invoice`/`bill`/`contact`). Two of Xero's
+ * three were already here — which is the registry doing its job:
+ * `cloudRowForDataset` resolves a dataset to whichever CONNECTED provider
+ * declares it, so a fifth vendor needed one new key rather than a vendor arm.
+ * The practice-management datasets are deliberately ABSENT: those are
  * PHI, they are reached through the dedicated `/erp/*` routes under
  * `erpConnectorReadGate`'s O-2 grant machinery, and routing them through a
  * chat tool would move a PHI decision into a keyword regex.
@@ -304,6 +304,15 @@ export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
   campaign: "get_campaign_performance",
   audience_member: "get_audience_members",
   ecommerce_order: "get_ecommerce_orders",
+  // commerce — Shopify (WARP-2354). The resolution of that subtask is that
+  // there is nothing per-vendor to add: `cloud_query_dataset` picks the
+  // provider from the DATASET, so a fourth vendor becomes reachable by naming
+  // its datasets here and in the tool's enum. No `shopify_*` read tool exists
+  // and none should — the full-registry serialization canary is within 3 KB of
+  // its 100 KB ceiling, and three more tool schemas would spend it.
+  order: "get_recent_orders",
+  product: "get_low_stock_products",
+  customer: "find_customer",
 };
 
 /** The result of a cloud dataset read. `connected` and `reason` carry the same

@@ -89,11 +89,27 @@ A `PartyLink` row is written only when a human links a customer or accepts a hig
 
 **What this ADR does not settle.** Whether `family` sees `/customers` on a dental box — the front desk needs the party list but not the pipeline, which suggests per-section role gating inside the record. And whether `/practice` takes a fixed label or a per-connector `partyNoun`; per-connector is right long-term and is a descriptor field, decided before the ERP surface moves.
 
+## Slices, as built
+
+- [WARP-2558](https://warp-lab.atlassian.net/browse/WARP-2558) — the `Business` group, `/customers`, the dropped `requires` edge.
+- [WARP-2560](https://warp-lab.atlassian.net/browse/WARP-2560) — the ERP data surface promoted to `/practice`; Integrations keeps the hub and credentials.
+- [WARP-2561](https://warp-lab.atlassian.net/browse/WARP-2561) — `/business` Planning, role-gated per the `/reports` precedent.
+- [WARP-2562](https://warp-lab.atlassian.net/browse/WARP-2562) — `PartyLink` + `PmProject.companyId`.
+- [WARP-2563](https://warp-lab.atlassian.net/browse/WARP-2563) — the customer record page.
+- [WARP-2567](https://warp-lab.atlassian.net/browse/WARP-2567) — the PHI-gated practice block.
+- [WARP-2568](https://warp-lab.atlassian.net/browse/WARP-2568) — `partyNoun` on the connector descriptor.
+
+### Three things this ADR sketched that were NOT built, and why
+
+1. **No `business` module.** Slice 3 was to add a registry entry for `/business`. It does not: a `ModuleId` value costs a Prisma enum migration plus six mirrored sites, and it would buy the page exactly the gate `nav-config.ts` warns against on `/reports` — *"a module gate here would hide the whole page because one of its ten tiles is off."* `/business` is role-gated, like its precedent.
+2. **No `CrmActivity.partyLinkId`.** Called here "the fifth reference on a model built to reference rather than copy", it has no writer and no reader until the landing seam ([WARP-2549](https://warp-lab.atlassian.net/browse/WARP-2549)). A column with zero application references is precisely what this ADR criticises `ErpEntityCache` for, so it lands with its writer.
+3. **No "unassigned work" Planning tile.** §6 claimed the `noassignee` saved view was "already computed". It is computed client-side over ONE open project's items, and `PmSummary` carries no unassigned count. The tile needs a server aggregate, not a composition.
+
+**And one rule the ADR implied that slice 7 had to state outright:** `partyNoun` never reaches a nav label. A nav entry driven off connector state renames itself when a connector connects — the `shellLabel` bug of §Context item 2, one axis over. A test asserts no nav label equals any descriptor's noun.
+
 ## Follow-ups
 
-- WARP-2558 — slice 1: the `Business` group, `/customers`, the dropped edge.
-- Slice 2 — promote the ERP data surface to `/practice`; Integrations keeps the hub and credentials.
-- Slice 3 — `/business` Planning tiles, each degrading on its own, role-gated rather than module-gated (the `/reports` precedent).
-- Slice 4 — `PartyLink`, `PmProject.companyId`, `CrmActivity.partyLinkId`.
-- Slices 5–7 — the customer record page, its PHI-gated practice block, and `partyNoun` on the connector descriptor.
 - [WARP-2549](https://warp-lab.atlassian.net/browse/WARP-2549) — the connector→CRM landing seam. `PartyLink` is the table its matches land in; the two must be designed against each other, not in sequence.
+- `unassigned` on `GET /api/pm/summary`, which makes the missing Planning tile four lines.
+- `CrmActivity.partyLinkId`, with WARP-2549.
+- A per-box override for `partyNoun`, once there is a settings surface for an owner to say so.

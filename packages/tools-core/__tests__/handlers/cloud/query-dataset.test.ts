@@ -195,7 +195,7 @@ describe("cloud_query_dataset (WARP-2497)", () => {
     }
   });
 
-  it("exports the eleven dataset names the schema advertises, in one list", async () => {
+  it("exports the fourteen dataset names the schema advertises, in one list", async () => {
     const schema = cloudQueryDataset.inputSchema as {
       properties: { dataset: { enum: readonly string[] } };
       required: string[];
@@ -224,6 +224,14 @@ describe("cloud_query_dataset (WARP-2497)", () => {
       "campaign",
       "audience_member",
       "ecommerce_order",
+      // WARP-2296 — Shopify. `order` and `ecommerce_order` are BOTH here on
+      // purpose: the first is a storefront order of record with a tax split
+      // and a refund column, the second is Mailchimp's marketing-attribution
+      // shadow with neither. Collapsing them would route a revenue question to
+      // whichever vendor won the name.
+      "order",
+      "product",
+      "customer",
     ]);
     // Mutation: drop `additionalProperties: false` → an unknown arg reaches
     // the route as a query param nobody validated.

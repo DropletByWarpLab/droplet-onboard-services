@@ -72,10 +72,17 @@ GRUB_CFG="${BUILD_DIR}/grub-autoinstall.cfg"
 # ---------------------------------------------------------------------------
 SHAPE="single-box"
 VERSION=""
+ALLOW_BLANK_DOWNLOADS=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --shape)   SHAPE="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    # WARP-2666. Build an image whose /downloads page will be empty for one or
+    # more platforms. Requires that every such platform is declared `blocked`
+    # WITH a ticket in data/app-downloads/EXPECTED — this flag waives a
+    # DECLARED gap, never an undeclared one. The flag and the full blocked list
+    # are echoed into the build log so the decision is on the record.
+    --allow-blank-downloads) ALLOW_BLANK_DOWNLOADS=true; shift ;;
     *) echo "build-iso: unexpected argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -114,6 +121,73 @@ for tool in docker curl openssl; do
     exit 1
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Step 0: client-app pre-flight (WARP-2666)
+# ---------------------------------------------------------------------------
+# Every appliance ISO ever built shipped a /downloads page with nothing on it.
+# Nothing caught it because an empty catalog is a legitimate, HTTP-200 state:
+# there is no failing signal to notice, only a missing success. This is the
+# last moment a human can still decide, so the builder asks before it repacks
+# 3 GB.
+#
+# Placed BEFORE the ISO download deliberately: refusing after a multi-gigabyte
+# fetch teaches people to pass the override reflexively.
+echo "[0/5] Client-app pre-flight (data/app-downloads/EXPECTED)..."
+AUDIT_SH="${REPO_ROOT}/scripts/app-downloads/audit.sh"
+if [ ! -r "$AUDIT_SH" ]; then
+  echo "ERROR: $AUDIT_SH is missing — cannot tell what this release should carry." >&2
+  echo "       Refusing to build rather than guessing. (WARP-2666)" >&2
+  exit 1
+fi
+audit_rc=0
+# `set -e` would abort on the non-zero exits this pre-flight is here to READ.
+bash "$AUDIT_SH" --dir "${REPO_ROOT}/data/app-downloads" || audit_rc=$?
+case "$audit_rc" in
+  0)
+    echo "  OK: every platform EXPECTED declares is staged and verified."
+    ;;
+  3)
+    if [ "$ALLOW_BLANK_DOWNLOADS" = true ]; then
+      echo ""
+      echo "  ***************************************************************"
+      echo "  * BUILDING WITH --allow-blank-downloads                        *"
+      echo "  * The platforms listed above are declared blocked and will     *"
+      echo "  * have NOTHING to download on this image. A customer opening   *"
+      echo "  * 'Get the app' gets no app for them.                          *"
+      echo "  ***************************************************************"
+      echo ""
+    else
+      echo "" >&2
+      echo "ERROR: this image would ship a /downloads page with nothing on it" >&2
+      echo "       for the platforms listed above." >&2
+      echo "" >&2
+      echo "       Stage the installers first:" >&2
+      echo "         ./scripts/app-downloads/stage.sh <installer> [...]" >&2
+      echo "" >&2
+      echo "       Or, if shipping without them is the decision, say so:" >&2
+      echo "         $0 --allow-blank-downloads" >&2
+      echo "" >&2
+      exit 1
+    fi
+    ;;
+  4)
+    echo "ERROR: the client-app audit reached NO VERDICT (exit 4)." >&2
+    echo "       'I could not check' is not 'it is fine' — fix the audit input" >&2
+    echo "       (EXPECTED, the staging root, or python3) and re-run." >&2
+    echo "       --allow-blank-downloads does NOT waive this: it waives a" >&2
+    echo "       DECLARED gap, and there is no declaration to read." >&2
+    exit 1
+    ;;
+  *)
+    echo "ERROR: client-app audit reports this release does not carry what" >&2
+    echo "       data/app-downloads/EXPECTED declares (exit $audit_rc)." >&2
+    echo "       A declared installer is missing or its bytes no longer match" >&2
+    echo "       the catalog. --allow-blank-downloads does NOT waive this." >&2
+    exit 1
+    ;;
+esac
+echo ""
 
 # Validate the autoinstall overlay exists (mirrors openwrt/build.sh step 2).
 REQUIRED_OVERLAY=(

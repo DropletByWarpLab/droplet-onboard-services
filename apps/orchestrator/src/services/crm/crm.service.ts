@@ -42,6 +42,13 @@ export const CRM_ERRORS = {
   /// An amount with no currency, or a currency with no amount.
   AMOUNT_NEEDS_CURRENCY: "amount_needs_currency",
   DUPLICATE_LINK: "duplicate_link",
+  /// The row belongs to a sync source, so deleting it is a delete that
+  /// silently un-deletes — the next incremental tick re-creates it from the
+  /// vendor, and the cascade has already taken the owner's LOCAL activity with
+  /// it. Mirrors CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD (WARP-2554); the route
+  /// answers both with a 409 that names `archive` as the action that works.
+  COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD: "company_is_external_archive_instead",
+  DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD: "deal_is_external_archive_instead",
   /// WARP-2577 — the five nullable FK columns this service used to write
   /// without checking. Each names the column the caller got wrong, which is
   /// the whole reason they are separate codes and not one `not_found`.
@@ -692,6 +699,17 @@ export async function updateCompany(
 export async function deleteCompany(prisma: PrismaClient, id: string): Promise<void> {
   const existing = await prisma.crmCompany.findUnique({ where: { id } });
   if (!existing) throw new Error(CRM_ERRORS.COMPANY_NOT_FOUND);
+  // WARP-2554 closed this for contacts; companies and deals carry the same
+  // `origin`/`isArchived`/`archivedAt` columns and are landed by the same
+  // connectors, so they need the same refusal. Deleting a synced row is a
+  // delete that silently un-deletes: the next incremental tick re-creates it
+  // from the vendor, and on the way out the cascade takes every CrmActivity
+  // on it — including the owner's own LOCAL notes, per the schema's cascade
+  // warning. The sanctioned removal path is the disconnect purge, which
+  // archives rather than deletes exactly so those notes survive.
+  if (existing.origin === "EXTERNAL") {
+    throw new Error(CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD);
+  }
   // Deals survive with `companyId = NULL` (SetNull in the schema): losing the
   // account record must not lose the record of the money.
   await prisma.crmCompany.delete({ where: { id } });
@@ -846,10 +864,20 @@ export async function listDeals(
     const cutoff = new Date(Date.now() - opts.idleDays * 24 * 60 * 60 * 1000);
     // "Idle" is about the last INTERACTION, so it reads the timeline. A deal
     // with no activity at all is idle by its creation date, which is why the
-    // OR arm exists — `none` rather than treating absence as "recently active".
+    // first arm exists — `none` rather than treating absence as "recently
+    // active".
+    //
+    // 🔴 The second arm MUST carry `some: {}`. Prisma compiles `every` to
+    // `NOT EXISTS (… AND NOT cond)`, which is vacuously TRUE when the relation
+    // is empty — so without the guard a deal created five minutes ago with no
+    // activity yet matches `idle_days=90` through this arm, and the first
+    // arm's `createdAt` test never gets to reject it. `some: {}` restricts
+    // this arm to deals that actually HAVE a timeline; the empty case is arm
+    // one's business and is judged on age, which is the whole point of the
+    // split.
     where.OR = [
       { activities: { none: {} }, createdAt: { lt: cutoff } },
-      { activities: { every: { occurredAt: { lt: cutoff } } } },
+      { activities: { some: {}, every: { occurredAt: { lt: cutoff } } } },
     ];
   }
 
@@ -1132,8 +1160,17 @@ async function applyStageMove(
 }
 
 export async function deleteDeal(prisma: PrismaClient, id: string): Promise<void> {
-  const existing = await prisma.crmDeal.findUnique({ where: { id }, select: { id: true } });
+  const existing = await prisma.crmDeal.findUnique({
+    where: { id },
+    // `origin` joins the selection because the refusal below reads it. Same
+    // reasoning as deleteCompany: a synced deal deleted here comes straight
+    // back on the next tick, minus the activity the cascade took with it.
+    select: { id: true, origin: true },
+  });
   if (!existing) throw new Error(CRM_ERRORS.DEAL_NOT_FOUND);
+  if (existing.origin === "EXTERNAL") {
+    throw new Error(CRM_ERRORS.DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD);
+  }
   await prisma.crmDeal.delete({ where: { id } });
 }
 
