@@ -104,9 +104,13 @@ describe("an MCP track is always listed, so the hub never infers its state", () 
    * The load-bearing one.
    *
    * Mutation: drop `...mcpProviderIds()` from `list()`'s provider set → the
-   * provider is missing from the payload → the hub tile falls back to `absent`
-   * and renders no status pill at all → red here and in
-   * `mcp-hub-card.test.tsx`'s NOT_CONFIGURED case.
+   * provider is missing from the payload → 2 failed here.
+   *
+   * This suite is the ONLY gate on that. `mcp-hub-card.test.tsx` stubs
+   * `fetchIntegrations` and hands the hub a row directly, so it renders the
+   * NOT_CONFIGURED pill no matter what `list()` does — it proves the tile can
+   * say "not connected", never that the box ever says it. The product defect
+   * lives in the join between the two, so it has to be caught here.
    */
   it("reports NOT_CONFIGURED explicitly when no row exists", async () => {
     const listing = await serviceWith([]).list();
