@@ -118,21 +118,37 @@ function pageInfoOf(outcome: RemoteToolCallOutcome): PageInfoLike | null {
 }
 
 /**
- * Recognise a page object, at the top level or one level down under a
- * `pageInfo` key. Deliberately shallow: an unbounded walk would start finding
+ * Recognise a page object, whether its fields sit at the top level or one
+ * level down under `pageInfo` — or, as #221's own payload does, SPLIT across
+ * both (`remainingCount` beside `pageInfo`, `hasNextPage` inside it).
+ *
+ * The split case is why this merges rather than picking a level: reading only
+ * the level where `remainingCount` happened to be would have made an honestly
+ * paginating page (`hasNextPage: true` nested) look like the defect.
+ *
+ * Deliberately ONE level deep. An unbounded walk would start finding
  * `remainingCount` on nested objects that are not the page being returned.
  */
 function asPageInfo(value: unknown): PageInfoLike | null {
   if (typeof value !== "object" || value === null) return null;
   const rec = value as Record<string, unknown>;
-  if (hasPageFields(rec)) return rec as PageInfoLike;
-  const nested = rec.pageInfo;
-  if (typeof nested === "object" && nested !== null && hasPageFields(nested as Record<string, unknown>)) {
-    // `nodes` sits beside `pageInfo`, not inside it, in the connection shape
+  const nestedRaw = rec.pageInfo;
+  const nested: Record<string, unknown> =
+    typeof nestedRaw === "object" && nestedRaw !== null
+      ? (nestedRaw as Record<string, unknown>)
+      : {};
+  // `pageInfo` wins for the fields it declares: it is the page's own record of
+  // itself, and the outer object may be carrying an unrelated same-named key.
+  const merged = { ...rec, ...nested };
+  if (!hasPageFields(merged)) return null;
+  return {
+    hasNextPage: merged.hasNextPage,
+    endCursor: merged.endCursor,
+    remainingCount: merged.remainingCount,
+    // `nodes` sits BESIDE `pageInfo`, not inside it, in the connection shape
     // Atlassian's GraphQL-derived tools return.
-    return { ...(nested as Record<string, unknown>), nodes: rec.nodes } as PageInfoLike;
-  }
-  return null;
+    nodes: rec.nodes ?? nested.nodes,
+  };
 }
 
 function hasPageFields(rec: Record<string, unknown>): boolean {
