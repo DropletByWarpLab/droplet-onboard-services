@@ -275,7 +275,17 @@ jobs:
         # key, tamper detection, schema rejection, and the four `flash`
         # pre-flight refusals under DROPLET_IMAGE_DRY_RUN=1. No real block
         # device, no root.
-        run: bash tests/image-pipeline.test.sh
+        run: |
+          set -eu
+          # One assertion parses the autoinstall user-data as YAML. The runner's
+          # system python3 ships PyYAML; install it if a future image drops it,
+          # rather than letting a missing dependency be reported as a broken
+          # manifest. No-op (and no cost) in the expected case. egress-gate.yml
+          # needs the explicit `pip install pyyaml` because setup-python@v7 puts
+          # a tool-cache interpreter in front; this lane uses the system one.
+          python3 -c 'import yaml' 2>/dev/null \
+            || sudo apt-get install -y -qq python3-yaml
+          bash tests/image-pipeline.test.sh
 
       - name: Run single-box OpenWrt readiness tests
         # WARP-826: provision_single_box_openwrt must poll a REAL readiness
