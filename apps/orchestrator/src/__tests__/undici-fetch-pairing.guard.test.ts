@@ -55,6 +55,20 @@ const PERFORMS_FETCH = /\b(?:undiciFetch|fetchImpl|doFetch|fetch)\s*\(/;
 const IMPORTS_UNDICI_FETCH =
   /import\s*\{[^}]*\bfetch\b[^}]*\}\s*from\s*["']undici["']/;
 
+/**
+ * The LOCAL name undici's fetch is bound to: `fetch as undiciFetch` →
+ * "undiciFetch"; a plain `fetch` → "fetch". Null when there is no such import.
+ */
+function undiciFetchBinding(code: string): string | null {
+  const imp = /import\s*\{([^}]*)\}\s*from\s*["']undici["']/.exec(code);
+  if (!imp) return null;
+  for (const clause of imp[1]!.split(",")) {
+    const m = /^\s*fetch(?:\s+as\s+(\w+))?\s*$/.exec(clause);
+    if (m) return m[1] ?? "fetch";
+  }
+  return null;
+}
+
 /** Declarations that merely NAME a dispatcher type/param — not an init literal. */
 const TYPE_ONLY_DISPATCHER = /dispatcher\s*:\s*(?:Dispatcher|StepDispatcher|unknown|\w*Dispatcher)\b/;
 
@@ -162,6 +176,34 @@ describe("undici dispatcher/fetch pairing (WARP-2626)", () => {
             `Add: import { fetch as undiciFetch } from "undici" — and use it. (WARP-2626)`,
         )
         .join("\n\n"),
+    ).toEqual([]);
+  });
+
+  /*
+   * Found by mutation-checking this guard: deleting the dispatcher branch in
+   * `api-auth.ts:resolveFetch` — the whole WARP-2626 fix — left the now-unused
+   * `import { fetch as undiciFetch } from "undici"` behind, so the import check
+   * above stayed GREEN while the runtime test and the live-box suite went red.
+   * An import proves nothing on its own; the binding has to be USED.
+   */
+  it("actually USES undici's fetch, rather than merely importing it", () => {
+    const unused = pairing.filter(({ file }) => {
+      const code = readCode(file);
+      const binding = undiciFetchBinding(code);
+      if (!binding) return false; // already reported by the import check above
+      // Every reference to the binding, minus the one in the import clause.
+      const refs = code.match(new RegExp(`\\b${binding}\\b`, "g")) ?? [];
+      return refs.length < 2;
+    });
+
+    expect(
+      unused.map((u) => u.file),
+      `These modules import undici's fetch but never call it, while still ` +
+        `putting a dispatcher into a fetch init — so the dispatcher is reaching ` +
+        `the runtime's built-in fetch after all. That is the WARP-2626 defect ` +
+        `with its fix's import left behind as camouflage: it throws ` +
+        `UND_ERR_INVALID_ARG on Node >= 22 and degrades every call to a bare ` +
+        `"fetch failed" that reads as an unreachable box.`,
     ).toEqual([]);
   });
 
